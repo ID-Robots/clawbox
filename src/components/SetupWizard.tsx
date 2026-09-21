@@ -12,6 +12,7 @@ import TelegramStep from "./TelegramStep";
 import StatusMessage from "./StatusMessage";
 import ReconnectingOverlay from "./ReconnectingOverlay";
 import { useT, I18nProvider, LANGUAGES, type Locale } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import { cachedEdition, resolveEdition } from "@/lib/client-harness";
 
@@ -49,7 +50,17 @@ function applyStatusData(
     else window.location.href = "/";
     return;
   }
-  if (data.telegram_configured) {
+  // `telegram_configured` used to mean "the owner finished the wizard's Telegram
+  // step" — the flag came from a value only that step's route writes. It now
+  // means "some harness on this box holds a bot", which a restore with the
+  // harness's home intact answers `true` before the wizard has been through a
+  // single screen. Ending the wizard on it alone therefore skipped the AI-model
+  // step and marked setup complete on a box whose agent cannot answer, so the
+  // short-circuit is gated on every step that has to come first (`resumeStep`
+  // reaches 5 only with `ai_model_configured`, or with the wizard's own
+  // persisted progress). That was always true of the boxes beta could produce,
+  // so no working flow changes.
+  if (data.telegram_configured && resumeStep >= 5) {
     setCurrentStep(6);
     beginCompletion();
     return;
@@ -316,9 +327,9 @@ function SetupCompletionOverlay({
                 <Image
                   src="/clawbox-crab.png"
                   alt="ClawBox"
-                  width={100}
-                  height={100}
-                  className="h-[100px] w-[100px] object-contain"
+                  width={52}
+                  height={52}
+                  className="h-[52px] w-[52px] object-contain"
                   priority
                 />
               </div>
@@ -385,6 +396,7 @@ interface SetupWizardProps {
 
 function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   const { t, locale, setLocale } = useT();
+  const tr = useTr();
   // Hold a live reference to t so the completion effect can translate without
   // re-running (and re-POSTing) on every locale change.
   const tRef = useRef(t);
@@ -623,7 +635,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="spinner" role="status" aria-label="Loading" />
+        <div className="spinner" role="status" aria-label={t("loading")} />
       </div>
     );
   }
@@ -680,7 +692,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               <button
                 type="button"
                 onClick={() => { setShowHelp((v) => !v); setShowPower(false); setShowLang(false); }}
-                aria-label="Need help?"
+                aria-label={t("wizard.needHelp")}
                 aria-expanded={showHelp}
                 className="setup-icon-btn"
               >
@@ -696,7 +708,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               <button
                 type="button"
                 onClick={() => { setShowPower((v) => !v); setShowHelp(false); setShowLang(false); }}
-                aria-label="Power options"
+                aria-label={t("wizard.powerOptions")}
                 aria-expanded={showPower}
                 className="setup-icon-btn"
               >
@@ -735,8 +747,11 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
 
       {/* Top-anchored, not centred: the steps range from ~430px to ~700px
           tall, so a centred card slides its own H1 up and down on every
-          advance. Anchored, all five screens share one horizon. */}
-      <main className="setup-main">
+          advance. Anchored, all five screens share one horizon.
+
+          The welcome screen is the one exception; the why lives with the rule,
+          at `.setup-main[data-welcome]` in globals.css. */}
+      <main className="setup-main" data-welcome={currentStep === 1 ? "" : undefined}>
         <div className="w-full flex flex-col items-center">
         {completionStarted ? (
           <SetupCompletionOverlay
@@ -770,13 +785,13 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               <UpdateStep onNext={() => goToStep(3)} />
             )}
             {currentStep === 3 && (
-              <CredentialsStep onNext={() => goToStep(4)} />
+              <CredentialsStep onNext={() => goToStep(4)} hermes={isHermesEdition} />
             )}
             {currentStep === 4 && (
               <AIModelsStep
                 providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "llamacpp"]}
                 defaultProviderId="clawai"
-                title="Connect AI Provider"
+                title={tr("settings.aiConnectTitle", "Connect AI Provider")}
                 description={t("ai.description")}
                 onNext={() => goToStep(5)}
               />

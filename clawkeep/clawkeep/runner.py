@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import api, crypto, openclaw, passphrase, s3, state, token
+from . import agent, api, crypto, openclaw, passphrase, s3, state, token
 from .api import ApiError
 from .config import Config
 
@@ -36,7 +36,7 @@ EXIT_AUTH_REVOKED = 3
 EXIT_TIER = 4
 EXIT_SERVER = 5
 EXIT_NETWORK = 6
-EXIT_OPENCLAW = 7   # `openclaw backup create` failed
+EXIT_OPENCLAW = 7   # building the archive failed (either edition's backend)
 EXIT_UPLOAD = 8     # S3 PUT failed
 EXIT_NEED_PASSPHRASE = 9  # encryption is mandatory but no passphrase set on device
 EXIT_ENCRYPTION_FAILED = 10  # openssl enc returned non-zero (corrupt openssl, disk full, …)
@@ -50,6 +50,41 @@ STEP_ARCHIVING = "archiving"
 STEP_ENCRYPTING = "encrypting"
 STEP_UPLOADING = "uploading"
 STEP_CHECKING_STATS = "checking-stats"
+
+ARCHIVE_RACE_ATTEMPTS = 3
+ARCHIVE_RACE_DELAYS = (1.0, 3.0)
+
+
+def _create_archive_with_race_retry(cfg: Config, staging: Path) -> openclaw.Archive:
+    """Retry OpenClaw's transient session-file race without hiding real errors.
+
+    Active sessions rotate ``.jsonl``/``.trajectory.jsonl`` files while the
+    backup tar walk is running. OpenClaw currently reports that as ENOENT.
+    A fresh walk is safe; configuration, permission, disk and timeout errors
+    must still fail immediately.
+    """
+    for attempt in range(ARCHIVE_RACE_ATTEMPTS):
+        try:
+            return agent.create_archive(cfg, output_dir=staging)
+        except agent.ARCHIVE_ERRORS as exc:
+            message = str(exc).lower()
+            transient = "enoent" in message and (
+                ".jsonl" in message or ".jsonl.lock" in message
+            )
+            if not transient or attempt + 1 >= ARCHIVE_RACE_ATTEMPTS:
+                raise
+            delay = ARCHIVE_RACE_DELAYS[attempt]
+            log.warning(
+                "session file changed during archive walk; retrying archive "
+                "(%d/%d) in %.0fs: %s",
+                attempt + 1,
+                ARCHIVE_RACE_ATTEMPTS,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+
+    raise AssertionError("archive retry loop exhausted")
 
 
 def _heartbeat_safe(server: str, token: str, **kwargs: object) -> bool:
@@ -258,17 +293,16 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
     try:
         _stamp_step(st, STEP_ARCHIVING)
         try:
-            archive = openclaw.create_archive(
-                cfg.openclaw.binary,
-                output_dir=staging,
-                include_workspace=cfg.openclaw.include_workspace,
-                only_config=cfg.openclaw.only_config,
-                verify=cfg.openclaw.verify,
-            )
-        except openclaw.OpenclawError as e:
-            log.error("openclaw backup create failed: %s", e)
+            # WHICH backend builds the archive is the device's edition's
+            # business, not this function's: OpenClaw shells out to
+            # `openclaw backup create`, Hermes packs `~/.hermes` itself. Both
+            # return the same `Archive`, so everything below is identical.
+            archive = _create_archive_with_race_retry(cfg, staging)
+        except agent.ARCHIVE_ERRORS as e:
+            which = agent.device_agent()
+            log.error("%s backup create failed: %s", which, e)
             ok = _heartbeat_safe(
-                cfg.server, token, status="error", error=f"openclaw: {e}"[:500],
+                cfg.server, token, status="error", error=f"{which}: {e}"[:500],
             )
             _stamp_heartbeat(st, ok, "error")
             state.save(st)

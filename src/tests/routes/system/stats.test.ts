@@ -13,7 +13,10 @@ const mockFs = vi.mocked(fs);
 const mockExecSync = vi.mocked(execSync);
 
 describe("GET /setup-api/system/stats", () => {
-  let systemStatsGet: () => Promise<Response>;
+  let systemStatsGet: (request?: Request) => Promise<Response>;
+
+  /** A request carrying a query string, for the opt-out below. */
+  const ask = (query: string) => new Request(`http://localhost/setup-api/system/stats?${query}`);
 
   beforeEach(async () => {
     vi.resetModules();
@@ -39,16 +42,25 @@ describe("GET /setup-api/system/stats", () => {
       }],
     });
 
-    // Mock fs.readFileSync for /proc files
-    let readCount = 0;
+    // Mock fs.readFileSync for /proc files.
+    //
+    // /proc/stat carries the aggregate line AND one line per core, and its
+    // counters advance on every read — so a second request always has
+    // something to diff against whatever the first one sampled, without the
+    // fixture having to know how many times one request reads the file.
+    let jiffies = 0;
     mockFs.readFileSync.mockImplementation((path: fs.PathOrFileDescriptor) => {
       const pathStr = path.toString();
       if (pathStr === "/proc/stat") {
-        readCount++;
-        if (readCount === 1) {
-          return "cpu  100 50 100 800 10 5 5 0 0 0\n";
-        }
-        return "cpu  110 55 110 810 12 6 6 0 0 0\n";
+        const user = 100 + 50 * jiffies;
+        const idle = 800 + 50 * jiffies;
+        jiffies += 1;
+        return [
+          `cpu  ${user * 4} 50 100 ${idle * 4} 10 5 5 0 0 0`,
+          ...[0, 1, 2, 3].map((n) => `cpu${n} ${user} 0 0 ${idle} 0 0 0 0 0 0`),
+          "intr 12345",
+          "",
+        ].join("\n");
       }
       if (pathStr === "/proc/net/dev") {
         return `Inter-|   Receive                                                |  Transmit
@@ -140,6 +152,38 @@ SwapFree:        1500000 kB`;
     expect(Array.isArray(body.processes)).toBe(true);
   });
 
+  it("sends no per-core row on the first call of the process, then one figure per core", async () => {
+    // HL-1: every restart of the web server makes the next stats call the first
+    // of a new process, with no previous /proc/stat sample to diff against. The
+    // payload used to carry a zero for each core, so Settings → System drew six
+    // idle bars beside a CPU tile reading 19% off the load average — seen on the
+    // box 23 minutes after a restart, on the first stats call since it.
+    const first = await (await systemStatsGet()).json();
+    expect(first.cpu.perCore).toEqual([]);
+
+    // One entry per `cpuN` line of the mocked /proc/stat, in range, once there
+    // are two samples to diff.
+    const second = await (await systemStatsGet()).json();
+    expect(second.cpu.perCore).toHaveLength(4);
+    for (const core of second.cpu.perCore) {
+      expect(core).toBeGreaterThanOrEqual(0);
+      expect(core).toBeLessThanOrEqual(100);
+    }
+  });
+
+  it("returns the busiest processes by MEMORY as well as by CPU", async () => {
+    // Both matter on this box and for different reasons: CPU is what a slow
+    // desktop looks like, and memory is what an OOM-killed update looks like on
+    // 7.4 GB shared with a language model.
+    const res = await systemStatsGet();
+    const body = await res.json();
+
+    expect(Array.isArray(body.processesByMemory)).toBe(true);
+    // Whatever the box answered, the memory list is ordered by memory.
+    const mems = (body.processesByMemory as { mem: number }[]).map((p) => p.mem);
+    expect([...mems].sort((a, b) => b - a)).toEqual(mems);
+  });
+
   it("returns load averages in cpu object", async () => {
     const res = await systemStatsGet();
     const body = await res.json();
@@ -179,6 +223,20 @@ SwapFree:        1500000 kB`;
     expect(body.cpu).toBeDefined();
   });
 
+  it("responds without the 200 ms per-request sleep (TASK-456)", async () => {
+    // The route used to read /proc/stat, `await` a 200 ms timer, then read it
+    // again — a hard ~209 ms floor on every response, measured live on the box
+    // (5 authenticated requests, 208-211 ms), for an endpoint the System app
+    // and Settings > System poll every 3 s. src/lib/cpu-usage.ts diffs against
+    // a cached snapshot instead. Three sequential requests could not finish in
+    // under 600 ms on the old implementation.
+    const startedAt = Date.now();
+    await systemStatsGet();
+    await systemStatsGet();
+    await systemStatsGet();
+    expect(Date.now() - startedAt).toBeLessThan(150);
+  });
+
   it("handles df command failure gracefully", async () => {
     mockExecSync.mockImplementation((cmd: string) => {
       if (cmd.startsWith("df")) {
@@ -195,5 +253,63 @@ SwapFree:        1500000 kB`;
 
     expect(res.status).toBe(200);
     expect(body.storage).toEqual([]);
+  });
+
+  /**
+   * `?processes=0` / `?perCore=0` — what Settings → System sends while those
+   * blocks are collapsed, so a panel nobody has opened is not computed on the
+   * box. `ps aux` is 91% of this route's cost and it was being spawned every
+   * three seconds for a table that was not on screen.
+   */
+  describe("the collapsed-panel opt-out", () => {
+    it("spawns no ps and omits both process keys when asked not to", async () => {
+      mockExecSync.mockClear();
+      const body = await (await systemStatsGet(ask("processes=0"))).json();
+
+      // ABSENT, not empty: this route already uses `processes: []` to mean "we
+      // ran ps and the box is idle", and "not asked for" is a different fact.
+      expect(body).not.toHaveProperty("processes");
+      expect(body).not.toHaveProperty("processesByMemory");
+      // The point of the parameter — the shell is never spawned.
+      expect(mockExecSync.mock.calls.filter(([cmd]) => String(cmd).startsWith("ps"))).toHaveLength(0);
+      // Everything else still answers.
+      expect(body.cpu).toBeDefined();
+      expect(body.memory).toBeDefined();
+    });
+
+    it("omits the per-core row when asked not to, and keeps the aggregate", async () => {
+      const body = await (await systemStatsGet(ask("perCore=0"))).json();
+
+      expect(body.cpu).not.toHaveProperty("perCore");
+      // The aggregate CPU figure is a different reading and is always drawn.
+      expect(typeof body.cpu.usage).toBe("number");
+      expect(body.processes).toBeInstanceOf(Array);
+    });
+
+    it("drops both when both are declined", async () => {
+      const body = await (await systemStatsGet(ask("processes=0&perCore=0"))).json();
+
+      expect(body).not.toHaveProperty("processes");
+      expect(body.cpu).not.toHaveProperty("perCore");
+      expect(body.overview).toBeDefined();
+      expect(body.storage).toBeInstanceOf(Array);
+    });
+
+    it("sends everything for any other value, and for a caller with no URL at all", async () => {
+      // OPT-OUT: only the exact string "0" declines. Every existing reader —
+      // the System app, About, the MCP tools — asks for no parameters and must
+      // keep the payload it has always had, and a handler invoked without a
+      // Request must answer rather than 500.
+      const explicit = await (await systemStatsGet(ask("processes=1&perCore=1"))).json();
+      expect(explicit.processes).toBeInstanceOf(Array);
+      expect(explicit.cpu.perCore).toBeInstanceOf(Array);
+
+      const nonsense = await (await systemStatsGet(ask("processes=no"))).json();
+      expect(nonsense.processes).toBeInstanceOf(Array);
+
+      const bare = await systemStatsGet();
+      expect(bare.status).toBe(200);
+      expect((await bare.json()).processes).toBeInstanceOf(Array);
+    });
   });
 });

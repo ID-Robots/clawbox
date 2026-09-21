@@ -1,6 +1,9 @@
 import fs from "fs";
 import path from "path";
 import { describe, expect, it } from "vitest";
+import type { McpContext } from "../../../mcp/lib/context";
+import { BROWSER_GUIDE, registerOrientationTools } from "../../../mcp/tools/orientation";
+import { captureRegistrar } from "../helpers/mcp-registrar";
 
 /**
  * Agents kept reaching for `ui_open_app("browser")` when asked to browse the
@@ -110,5 +113,51 @@ describe("Hermes provisioning retires the built-in browser toolset", () => {
     // at every web-server boot, so an unguarded non-zero exit would stop it.
     // Being the `if` condition is what makes the failure non-fatal.
     expect(disableLine).toMatch(/^\s*if\b/);
+  });
+});
+
+/**
+ * The other half of the same question: WHOSE SCREEN the browser tools drive.
+ *
+ * The route drives the desktop's own Chromium while the Coding Agent's
+ * real-browser setting is on, and an invisible one when the owner switched it
+ * off — so "you can drive a real browser, the user can watch" is true only
+ * half the time. `clawbox_context` is where an agent learns what the two mean
+ * and who decides, since the browser replies can only name the one that
+ * answered a particular call.
+ */
+describe("clawbox_context on whose screen the browser is", () => {
+  const context = (): McpContext => ({
+    edition: "openclaw",
+    install: "openclaw",
+    appHarness: "openclaw",
+    profile: "full",
+    capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
+    providers: [],
+    emailCanRead: false,
+    codingAgent: false,
+    canGenerateImages: true,
+  });
+
+  it("says a run drives the screen the owner can watch", () => {
+    // The guide is wrapped prose, so every phrase is matched across a line break.
+    expect(BROWSER_GUIDE).toMatch(/own\s+screen/i);
+    expect(BROWSER_GUIDE).toMatch(/owner\s+can\s+watch/i);
+  });
+
+  it("names the setting that turns it off and what happens then", () => {
+    expect(BROWSER_GUIDE).toMatch(/Coding\s+Agent's\s+settings/);
+    expect(BROWSER_GUIDE).toMatch(/invisible\s+browser/i);
+    // Absent means on, so the guide must not read as "off unless you enable it".
+    expect(BROWSER_GUIDE).toMatch(/on\s+unless\s+they\s+said\s+otherwise/i);
+  });
+
+  it("is served by the tool, not just exported", async () => {
+    const h = captureRegistrar("openclaw");
+    registerOrientationTools(h.reg, context());
+    const out = await h.call("clawbox_context");
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toContain("## The browser you drive");
   });
 });

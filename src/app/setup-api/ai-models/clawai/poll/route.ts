@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { POST as configureAiModelsPost } from "@/app/setup-api/ai-models/configure/route";
 import { getActiveHarness } from "@/lib/harness";
+import { humanizeApiError } from "@/lib/api-error-message";
 import { ClawaiApplyError, applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
+import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import {
   type ClawAiConnectSession,
   clearClawAiSession,
@@ -15,7 +17,7 @@ export const dynamic = "force-dynamic";
 
 const CLAWBOX_AI_DEVICE_POLL_URL =
   process.env.CLAWBOX_AI_DEVICE_POLL_URL?.trim()
-  || "https://openclawhardware.dev/api/clawbox-ai/device-poll";
+  || "https://clawbox.com/api/clawbox-ai/device-poll";
 
 // Max time a session may sit in `configuring` before the poll route gives up
 // on the background configure and surfaces a retryable error. A gateway
@@ -58,15 +60,25 @@ function formatUserFacingError(message: string) {
   return normalized || "ClawBox AI authorisation failed.";
 }
 
-async function readErrorBody(response: Response): Promise<string> {
-  const text = await response.text().catch(() => "");
-  if (!text) return "";
-  try {
-    const parsed = JSON.parse(text) as { error?: string; message?: string };
-    return parsed.error || parsed.message || text;
-  } catch {
-    return text;
-  }
+/**
+ * BOTH halves of a failed response, because they have different readers.
+ *
+ * `sentence` is for the owner: the message out of the body, or `""` when there
+ * is not one. The three callers all have a fallback of their own, and every one
+ * of them is a better thing to show than a serialized body — this route put
+ * `{"error":"Credential migration failed. …"}` on the setup wizard, braces and
+ * all, by treating a body as a message.
+ *
+ * `raw` is for the operator, and it is the reason this returns a pair rather
+ * than the sentence alone. The log line is the only window into why a sign-in
+ * failed on a box nobody can reach, and a body whose shape `humanizeApiError`
+ * does not recognise reduces to `""` — which would have left `Token save
+ * failed 502` and nothing else in the journal. The wizard gets the sentence;
+ * the journal keeps what actually arrived.
+ */
+async function readErrorBody(response: Response): Promise<{ raw: string; sentence: string }> {
+  const raw = await response.text().catch(() => "");
+  return { raw, sentence: humanizeApiError(raw, "") };
 }
 
 // Run the configure pipeline server-side AFTER acknowledging the poll
@@ -87,8 +99,27 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
     // device, so the OpenClaw path below is untouched.
     if ((await getActiveHarness()) === "hermes") {
       const uiTier = normalizeClawaiUiTier(session.tier) ?? "flash";
+      // THE PLAN, asked here as well, because this is the primary link path on
+      // this edition and nothing else on it holds a portal answer. The OpenClaw
+      // branch below reaches `/setup-api/ai-models/configure`, which records
+      // the plan itself; without this the two editions' own device-code flows
+      // would disagree, and a Hermes box would finish the link with no plan on
+      // record — so no withdrawal would be reachable at all until a BROWSER
+      // happened to poll `/setup-api/ai-models/status` (TASK-744).
+      //
+      // ONE cold round trip, bounded at `PORTAL_FETCH_TIMEOUT_MS` (4 s) — the
+      // cache is keyed by token and the box has never held this one — against a
+      // finaliser the UI gives three minutes. It cannot fail the pairing:
+      // `fetchPortalTier` reports every failure as `unreachable` rather than
+      // throwing. The wizard's next status poll then lands on the entry this
+      // call warmed.
+      const lookup = await fetchPortalTier(accessToken).catch(() => null);
       try {
-        await applyClawaiToHermes(accessToken, uiTierToDeviceTier(uiTier));
+        await applyClawaiToHermes(accessToken, uiTierToDeviceTier(uiTier), {
+          // Absent unless the portal ANSWERED — an unreachable lookup or a
+          // probe that threw retires the plan rather than recording a guess.
+          portalPlan: lookup?.source === "portal" ? { verdict: lookup.planVerdict } : undefined,
+        });
       } catch (err) {
         // Only our own message is safe to store/show — a raw spawn failure can
         // carry the hermes binary path.
@@ -100,6 +131,9 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
         ...session,
         status: "complete",
         error: null,
+        // Hermes applies the credential itself, with no configure route and no
+        // session sweep behind it, so there is nothing here that can warn.
+        warning: null,
         completedAt: Date.now(),
       });
       return;
@@ -118,17 +152,38 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
     }));
 
     if (!configureResponse.ok) {
-      const configureBody = await configureResponse.text().catch(() => "");
-      const userFacing = formatUserFacingError(configureBody || "Failed to save ClawBox AI token.");
-      console.error("[clawai/poll] Token save failed", configureResponse.status, configureBody.slice(0, 200));
+      // `readErrorBody`, NOT `.text()`. This one line is how the configure
+      // route's JSON body reached the wizard verbatim: the sign-in's own
+      // rollback message is a perfectly good sentence, and it was shown
+      // wrapped in the object it travelled in.
+      const configureBody = await readErrorBody(configureResponse);
+      const userFacing = formatUserFacingError(configureBody.sentence || "Failed to save ClawBox AI token.");
+      // The RAW body in the journal, deliberately: the owner is spared the
+      // braces, the operator diagnosing this box is not spared the evidence.
+      console.error("[clawai/poll] Token save failed", configureResponse.status, configureBody.raw.slice(0, 200));
       await writeClawAiSession({ ...session, status: "error", error: userFacing });
       return;
+    }
+
+    // The BODY of a successful configure, not just `response.ok`: a save can
+    // land and still not have done all of it — the session sweep this sign-in
+    // defers past the gateway restart is exactly that — and reading only the
+    // status dropped the one sentence that says so on the primary sign-in path
+    // of these boxes. Best effort: an unreadable body is a save that landed,
+    // never an error, so it costs the warning and nothing else.
+    let warning: string | null = null;
+    try {
+      const configured = await configureResponse.json() as { warning?: unknown };
+      if (typeof configured.warning === "string" && configured.warning.trim()) warning = configured.warning;
+    } catch (err) {
+      console.warn("[clawai/poll] Could not read the configure answer's warning:", err instanceof Error ? err.message : err);
     }
 
     await writeClawAiSession({
       ...session,
       status: "complete",
       error: null,
+      warning,
       completedAt: Date.now(),
     });
   } catch (err) {
@@ -148,7 +203,10 @@ export async function POST() {
   // UI sees the resolved state on its very next poll tick after a long
   // outage / browser sleep / disconnected fetch.
   if (session.status === "complete") {
-    return NextResponse.json({ status: "complete" });
+    // The warning rides beside the status, the way `error` does, so the panel
+    // that renders it (`showSuccessAndContinue` → `saveWarning`) gets the same
+    // sentence the pasted-key and provider-OAuth paths already show.
+    return NextResponse.json({ status: "complete", ...(session.warning ? { warning: session.warning } : {}) });
   }
   if (session.status === "error" && session.error) {
     return NextResponse.json({ status: "error", error: session.error });
@@ -209,7 +267,7 @@ export async function POST() {
   // instead of stalling on the device-code page.
   const terminal = TERMINAL_PORTAL_ERRORS.find((e) => e.httpStatus === upstreamRes.status);
   if (terminal) {
-    const errCode = (await readErrorBody(upstreamRes)).trim().toLowerCase();
+    const errCode = (await readErrorBody(upstreamRes)).sentence.trim().toLowerCase();
     if (errCode === terminal.code) {
       await writeClawAiSession({ ...session, status: "error", error: terminal.message });
       return NextResponse.json({ status: "error", error: terminal.message }, { status: terminal.httpStatus });
@@ -223,11 +281,11 @@ export async function POST() {
   if (!upstreamRes.ok) {
     const errText = await readErrorBody(upstreamRes);
     if (upstreamRes.status === 410 || upstreamRes.status === 400) {
-      const userFacing = formatUserFacingError(errText || "ClawBox AI session is no longer valid.");
+      const userFacing = formatUserFacingError(errText.sentence || "ClawBox AI session is no longer valid.");
       await writeClawAiSession({ ...session, status: "error", error: userFacing });
       return NextResponse.json({ status: "error", error: userFacing }, { status: 410 });
     }
-    console.warn("[clawai/poll] Upstream poll failed", upstreamRes.status, errText.slice(0, 200));
+    console.warn("[clawai/poll] Upstream poll failed", upstreamRes.status, errText.raw.slice(0, 200));
     // 5xx — don't burn the session; let the UI retry.
     return NextResponse.json({ status: "pending" });
   }

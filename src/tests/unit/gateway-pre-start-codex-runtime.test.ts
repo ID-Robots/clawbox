@@ -1,8 +1,23 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+import { inspectAllJson, repairHelpers } from "@/tests/helpers/gateway-pre-start";
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 // `agents.defaults.models["codex/*"].agentRuntime = {"id":"codex"}` is what
 // routes a codex turn through the Codex app-server harness. WITHOUT it core
@@ -17,6 +32,7 @@ import path from "node:path";
 // shipped script so that deletion can never come back for codex models.
 
 const SCRIPT = path.resolve(process.cwd(), "scripts/gateway-pre-start.sh");
+const SCRIPT_SOURCE = readFileSync(SCRIPT, "utf-8");
 const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
 
 /** Pull the agentRuntime policy block out of the .sh verbatim. */
@@ -30,7 +46,86 @@ function extractPolicy(): string {
 
 const POLICY = hasPython3 ? extractPolicy() : "";
 
+/**
+ * Pull the auth-profile helpers the policy block calls out of the .sh verbatim.
+ * The policy asks them which OpenAI credentials the box holds, and running a
+ * hand-written stand-in here would test a copy of the rule, not the rule.
+ */
+function extractProfileHelpers(): string {
+  const start = SCRIPT_SOURCE.indexOf("def _auth_profiles():");
+  const end = SCRIPT_SOURCE.indexOf("def _openai_gpt_to_codex(", start);
+  if (start < 0 || end < 0) throw new Error("auth profile helpers not found");
+  return SCRIPT_SOURCE.slice(start, end);
+}
+
+const PROFILE_HELPERS = hasPython3 ? extractProfileHelpers() : "";
+
+/** Pull the configured/runtime Codex demand probe out of the shell heredoc. */
+function extractNeedsProbe(): string {
+  const startMarker = 'NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<\'PY\'\n';
+  const start = SCRIPT_SOURCE.indexOf(startMarker);
+  const end = SCRIPT_SOURCE.indexOf('\nPY\n)"', start);
+  if (start < 0 || end < 0) throw new Error("Codex demand probe not found");
+  return SCRIPT_SOURCE.slice(start + startMarker.length, end);
+}
+
+const NEEDS_PROBE = hasPython3 ? extractNeedsProbe() : "";
+
+/** Pull the enabled-plugin consent probe out of the shell heredoc verbatim. */
+function extractEnabledProbe(): string {
+  const startMarker = 'CODEX_PLUGIN_ENABLED="$(python3 - "$OPENCLAW_CONFIG" <<\'PY\'\n';
+  const start = SCRIPT_SOURCE.indexOf(startMarker);
+  const end = SCRIPT_SOURCE.indexOf('\nPY\n)"', start);
+  if (start < 0 || end < 0) throw new Error("Codex enabled-plugin probe not found");
+  return SCRIPT_SOURCE.slice(start + startMarker.length, end);
+}
+
+const ENABLED_PROBE = hasPython3 ? extractEnabledProbe() : "";
+
+/** Pull the cross-layout plugin-root resolver out of the script verbatim. */
+function extractPluginResolver(): string {
+  const start = SCRIPT_SOURCE.indexOf(
+    'CODEX_PLUGIN_DIR="$OPENCLAW_HOME_DIR/npm/node_modules/@openclaw/codex"',
+  );
+  const end = SCRIPT_SOURCE.indexOf('NEEDS_CODEX_PLUGIN="$(python3', start);
+  if (start < 0 || end < 0) throw new Error("Codex plugin resolver not found");
+  return SCRIPT_SOURCE.slice(start, end);
+}
+
+const PLUGIN_RESOLVER = extractPluginResolver();
+
+/** Pull the package-health/repair/consent command flow out verbatim. */
+const MANAGED_CONSENT_MARKER = "# \u2500\u2500 Capability consent for the OTHER ClawBox-managed plugins";
+
+function extractPluginFlow(): string {
+  const start = SCRIPT_SOURCE.indexOf('CODEX_SHOULD_LOAD="$NEEDS_CODEX_PLUGIN"');
+  // Ends where the block for the OTHER managed plugins begins: that one has its
+  // own extraction and its own harness below, and it reads openclaw.json, which
+  // this fragment's environment does not set.
+  const end = SCRIPT_SOURCE.indexOf(MANAGED_CONSENT_MARKER, start);
+  if (start < 0 || end < 0) throw new Error("Codex plugin command flow not found");
+  return SCRIPT_SOURCE.slice(start, end);
+}
+
+/** The boot-path consent pass for deepseek / discord / whatsapp / our own plugin. */
+function extractManagedConsentFlow(): string {
+  const start = SCRIPT_SOURCE.indexOf(MANAGED_CONSENT_MARKER);
+  const end = SCRIPT_SOURCE.indexOf("# Codex reads its ChatGPT session", start);
+  if (start < 0 || end < 0) throw new Error("Managed-plugin consent flow not found");
+  return SCRIPT_SOURCE.slice(start, end);
+}
+
+const REPAIR_HELPERS = repairHelpers();
+const PLUGIN_FLOW = `${REPAIR_HELPERS}\n${extractPluginFlow()}`;
+const MANAGED_CONSENT_FLOW = `${REPAIR_HELPERS}\n${extractManagedConsentFlow()}`;
+
 let dir: string;
+
+interface ModelSettings {
+  agentRuntime?: { id?: string };
+  params?: unknown;
+  [key: string]: unknown;
+}
 
 beforeEach(() => {
   dir = mkdtempSync(path.join(tmpdir(), "codex-runtime-policy-"));
@@ -41,7 +136,10 @@ afterEach(() => {
 });
 
 /** Run the extracted policy against a config and return the resulting models map. */
-function applyPolicy(config: Record<string, any>): Record<string, any> {
+function applyPolicy(
+  config: Record<string, unknown>,
+  openclawV2 = false,
+): Record<string, ModelSettings> {
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(config));
   const program = [
@@ -50,15 +148,568 @@ function applyPolicy(config: Record<string, any>): Record<string, any> {
     "changed = False",
     "agents_defaults = cfg.setdefault('agents', {}).setdefault('defaults', {})",
     "model_defaults = agents_defaults.setdefault('model', {})",
+    PROFILE_HELPERS,
+    `_clawbox_v2_codex = ${openclawV2 ? "True" : "False"}`,
     POLICY,
     "print(json.dumps(agents_defaults.get('models') or {}))",
   ].join("\n");
   return JSON.parse(
     execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim(),
+  ) as Record<string, ModelSettings>;
+}
+
+/** Run the exact shell-embedded probe that decides whether consent is needed. */
+function probeCodexEnabled(config: Record<string, unknown>): string {
+  const file = path.join(dir, "enabled-config.json");
+  writeFileSync(file, JSON.stringify(config));
+  return execFileSync("python3", ["-c", ENABLED_PROBE, file], { encoding: "utf-8" }).trim();
+}
+
+/** Run the exact probe that decides whether Codex must be repaired/enabled. */
+function probeNeedsCodex(config: Record<string, unknown>): string {
+  const file = path.join(dir, "needs-config.json");
+  writeFileSync(file, JSON.stringify(config));
+  return execFileSync("python3", ["-c", NEEDS_PROBE, file], { encoding: "utf-8" }).trim();
+}
+
+interface PluginFlowOptions {
+  v2: boolean;
+  needsCodex: boolean;
+  enabledByConfig: boolean;
+  installedVersion?: string;
+  peerHealthy?: boolean;
+  layout?: "flat-managed" | "project-managed" | "registry";
+  registryDependenciesOk?: boolean;
+  /**
+   * Exit code for `plugins enable codex --accept-capabilities`.
+   *
+   * 124/137 are the kill at the deadline — the one failure that says nothing
+   * about whether the consent was written.
+   */
+  consentExit?: number;
+  /**
+   * What that failing `plugins enable` says on stderr.
+   *
+   * TASK-785: the repair row carries the core's own refusal, and nothing else
+   * on the box can tell a locked registry from a missing payload.
+   */
+  consentMessage?: string;
+  /**
+   * `plugins inspect --all --json` stdout; omitted = the CLI cannot answer.
+   *
+   * The consent answer is the `diagnostics` array. `status`/`activated` are the
+   * config's own `enabled` bit under another name and cannot carry it. Built
+   * with `inspectAllJson`, because an answer that never NAMES codex — or names
+   * it without an install record — is the core saying nothing about it.
+   */
+  inspectJson?: string;
+}
+
+/** Execute the shipped shell command flow against a fake OpenClaw binary. */
+function runPluginFlow(options: PluginFlowOptions): string[] {
+  return runPluginFlowFull(options).argv;
+}
+
+/**
+ * The same run, with everything it said and everything it recorded.
+ *
+ * The consent arm now has a third outcome that is defined by what it does NOT
+ * do — no switch-off, no marker — so a case for it has to see the marker file
+ * and stderr, not only the argv log.
+ */
+function runPluginFlowFull(options: PluginFlowOptions): {
+  argv: string[];
+  stdout: string;
+  stderr: string;
+  marker: Record<string, { stage?: string; disabled?: boolean; reason?: string; spec?: string }>;
+} {
+  const pluginDir = path.join(dir, "plugin", "node_modules", "@openclaw", "codex");
+  if (options.installedVersion) {
+    mkdirSync(pluginDir, { recursive: true });
+    writeFileSync(
+      path.join(pluginDir, "package.json"),
+      JSON.stringify({ version: options.installedVersion }),
+    );
+  }
+  if (options.peerHealthy) {
+    const peerDir = path.join(pluginDir, "node_modules", "openclaw");
+    mkdirSync(peerDir, { recursive: true });
+    writeFileSync(path.join(peerDir, "package.json"), JSON.stringify({ version: "2026.8.1" }));
+  }
+
+  const log = path.join(dir, "openclaw-commands.log");
+  const fakeOpenClaw = path.join(dir, "openclaw");
+  writeFileSync(
+    fakeOpenClaw,
+    [
+      "#!/usr/bin/env bash",
+      'printf \'%s\\n\' "$*" >> "$CODEX_TEST_LOG"',
+      ...(options.consentExit
+        ? [
+          `if [ "$2" = "enable" ]; then `
+          + (options.consentMessage ? `echo '${options.consentMessage}' >&2; ` : "")
+          + `exit ${options.consentExit}; fi`,
+        ]
+        : []),
+      'if [ "$2" = "inspect" ]; then',
+      ...(options.inspectJson
+        ? [`  printf '%s' '${options.inspectJson}'; exit 0`]
+        : ["  exit 1"]),
+      "fi",
+    ].join("\n"),
   );
+  chmodSync(fakeOpenClaw, 0o755);
+
+  const result = spawnSync("bash", ["-c", `set -euo pipefail\n${PLUGIN_FLOW}`], {
+    encoding: "utf-8",
+    env: {
+      ...process.env,
+      // The prepended repair helpers write `$CLAWBOX_ROOT/data/plugin-repair.json`:
+      // this case's own directory, so the marker cannot leak into another one
+      // through the run-wide root `vitest.config.ts` sets.
+      CLAWBOX_ROOT: dir,
+      CLAWBOX_OPENCLAW_V2: options.v2 ? "1" : "0",
+      NEEDS_CODEX_PLUGIN: options.needsCodex ? "1" : "0",
+      CODEX_PLUGIN_ENABLED: options.enabledByConfig ? "1" : "0",
+      CODEX_PLUGIN_DIR: pluginDir,
+      CODEX_PLUGIN_LAYOUT: options.layout ?? "project-managed",
+      CODEX_REGISTRY_DEPS_OK: options.registryDependenciesOk ? "1" : "0",
+      OPENCLAW_TARGET: "2026.8.1",
+      OPENCLAW_BIN: fakeOpenClaw,
+      CODEX_TEST_LOG: log,
+    },
+    stdio: "pipe",
+  });
+  if (result.status !== 0) throw new Error(`plugin flow exited ${result.status}: ${result.stderr}`);
+
+  let marker: Record<string, { stage?: string; disabled?: boolean; reason?: string; spec?: string }> = {};
+  try {
+    marker = JSON.parse(readFileSync(path.join(dir, "data", "plugin-repair.json"), "utf-8"));
+  } catch {
+    /* no marker was written */
+  }
+  return {
+    argv: existsSync(log)
+      ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean)
+      : [],
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    marker,
+  };
+}
+
+/**
+ * Run the boot-path consent pass for the managed plugins that are NOT codex.
+ *
+ * TASK-603. The codex arm above has consented its one plugin on every boot
+ * since OpenClaw 2 introduced declared-capability consent; the gateway refuses
+ * readiness for any enabled plugin in that state, and ClawBox installs four
+ * more. The 2026-09-01 outage was `discord`, and a reboot — the owner's first
+ * move on a box that will not come up — changed nothing.
+ */
+function runManagedConsentFlow(options: {
+  v2?: boolean;
+  entries?: Record<string, unknown>;
+  writeConfig?: boolean;
+}): string[] {
+  const config = path.join(dir, "managed-consent.json");
+  if (options.writeConfig !== false) {
+    writeFileSync(config, JSON.stringify({ plugins: { entries: options.entries ?? {} } }));
+  }
+
+  const log = path.join(dir, "managed-consent.log");
+  const fakeOpenClaw = path.join(dir, "openclaw-managed");
+  writeFileSync(fakeOpenClaw, '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$CODEX_TEST_LOG"\n');
+  chmodSync(fakeOpenClaw, 0o755);
+
+  execFileSync("bash", ["-c", `set -euo pipefail\n${MANAGED_CONSENT_FLOW}`], {
+    env: {
+      ...process.env,
+      // The prepended repair helpers write `$CLAWBOX_ROOT/data/plugin-repair.json`:
+      // this case's own directory, so the marker cannot leak into another one
+      // through the run-wide root `vitest.config.ts` sets.
+      CLAWBOX_ROOT: dir,
+      CLAWBOX_OPENCLAW_V2: options.v2 === false ? "0" : "1",
+      OPENCLAW_CONFIG: config,
+      OPENCLAW_BIN: fakeOpenClaw,
+      CODEX_TEST_LOG: log,
+    },
+    stdio: "pipe",
+  });
+
+  return existsSync(log)
+    ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean)
+    : [];
+}
+
+describe("gateway-pre-start.sh managed-plugin capability consent", () => {
+  it("consents every managed plugin openclaw.json says to load", () => {
+    expect(runManagedConsentFlow({
+      entries: {
+        deepseek: { enabled: true },
+        discord: { enabled: true },
+        whatsapp: { enabled: true },
+        "clawbox-email-directives": { enabled: true },
+      },
+    })).toEqual([
+      "plugins inspect --all --json",
+      "plugins enable deepseek --accept-capabilities",
+      "plugins enable discord --accept-capabilities",
+      "plugins enable whatsapp --accept-capabilities",
+      "plugins enable clawbox-email-directives --accept-capabilities",
+    ]);
+  });
+
+  it("never switches a plugin ON — only entries already enabled are consented", () => {
+    // `plugins enable` writes `plugins.entries.<id>.enabled = true`, so a boot
+    // script that ran it over an absent or disabled entry would be turning a
+    // channel on behind the owner. Consent is for what the box already loads.
+    expect(runManagedConsentFlow({
+      entries: { discord: { enabled: false }, whatsapp: {} },
+    })).toEqual([]);
+  });
+
+  it("leaves a plugin ClawBox does not manage alone", () => {
+    expect(runManagedConsentFlow({ entries: { weatherbot: { enabled: true } } })).toEqual([]);
+  });
+
+  it("recognises the plugin under the alias the registry may have keyed it as", () => {
+    // `ensureChannelPlugin` enables the plugin under the id `plugins list`
+    // reports, which can be `openclaw-discord` or `@openclaw/discord`. Matching
+    // the literal key would skip an enabled alias and leave the gateway
+    // blocked on the very consent refusal this block exists to clear — and the
+    // CLI has to be given the configured key back, because that is the name
+    // the registry answers to.
+    expect(runManagedConsentFlow({
+      entries: {
+        "openclaw-discord": { enabled: true },
+        "@openclaw/whatsapp": { enabled: true },
+      },
+    })).toEqual([
+      "plugins inspect --all --json",
+      "plugins enable openclaw-discord --accept-capabilities",
+      "plugins enable @openclaw/whatsapp --accept-capabilities",
+    ]);
+  });
+
+  it("respects a disabled ALIAS as it respects a disabled canonical entry", () => {
+    expect(runManagedConsentFlow({ entries: { "openclaw-discord": { enabled: false } } }))
+      .toEqual([]);
+  });
+
+  it("does nothing on OpenClaw 1, which has no capability consent", () => {
+    expect(runManagedConsentFlow({ v2: false, entries: { discord: { enabled: true } } }))
+      .toEqual([]);
+  });
+
+  it("survives a missing or unparseable config rather than failing the pre-start", () => {
+    // This is a blocking ExecStartPre under `set -euo pipefail`: a throw here
+    // is a box with no gateway, which is strictly worse than an unconsented
+    // plugin the journal will name.
+    expect(runManagedConsentFlow({ writeConfig: false })).toEqual([]);
+  });
+});
+
+/** Resolve a plugin exposed only through OpenClaw's own global registry. */
+function resolveRegistryOnlyPlugin(): string {
+  const openclawHome = path.join(dir, "openclaw-home");
+  const registryRoot = path.join(dir, "global-plugins", "codex");
+  mkdirSync(registryRoot, { recursive: true });
+  writeFileSync(path.join(registryRoot, "package.json"), JSON.stringify({ version: "2026.8.1" }));
+
+  const fakeOpenClaw = path.join(dir, "registry-openclaw");
+  const registryJson = JSON.stringify({
+    plugins: [{
+      id: "codex",
+      rootDir: registryRoot,
+      source: path.join(registryRoot, "dist", "index.js"),
+      dependencyStatus: { requiredInstalled: true },
+      // The one row key 2026.9.3 adds, in its measured shape (an object, not a
+      // string), so this fixture is the payload the pinned core prints.
+      trust: { reason: "record-missing", registryPath: "/var/lib/clawbox/openclaw/state/openclaw.sqlite", origin: "global" },
+    }],
+  });
+  writeFileSync(
+    fakeOpenClaw,
+    `#!/usr/bin/env bash\nprintf '%s\\n' '${registryJson}'\n`,
+  );
+  chmodSync(fakeOpenClaw, 0o755);
+
+  return execFileSync(
+    "bash",
+    ["-c", `set -euo pipefail\n${PLUGIN_RESOLVER}\nprintf '%s|%s|%s\\n' "$CODEX_PLUGIN_LAYOUT" "$CODEX_PLUGIN_DIR" "$CODEX_REGISTRY_DEPS_OK"`],
+    {
+      env: {
+        ...process.env,
+        OPENCLAW_HOME_DIR: openclawHome,
+        OPENCLAW_BIN: fakeOpenClaw,
+        CLAWBOX_OPENCLAW_V2: "1",
+      },
+      encoding: "utf-8",
+    },
+  ).trim();
 }
 
 describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
+  it("accepts declared capabilities when repairing the Codex plugin", () => {
+    expect(SCRIPT_SOURCE).toContain('if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then');
+    expect(SCRIPT_SOURCE).toContain('CODEX_CAPABILITY_ARGS=(--accept-capabilities)');
+    expect(SCRIPT_SOURCE).toContain(
+      'plugins install "$CODEX_SPEC" --force "${CODEX_CAPABILITY_ARGS[@]}"',
+    );
+  });
+
+  it("accepts declared capabilities when the migrated plugin needs no reinstall", () => {
+    const healthyV2Branch =
+      'elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]';
+    expect(SCRIPT_SOURCE).toContain(healthyV2Branch);
+    expect(SCRIPT_SOURCE).toContain('CODEX_PLUGIN_ENABLED="$(python3 - "$OPENCLAW_CONFIG"');
+    expect(SCRIPT_SOURCE).toContain(
+      'if [ "$CODEX_SHOULD_LOAD" = "1" ]; then',
+    );
+    expect(SCRIPT_SOURCE).toContain(
+      'plugins enable codex --accept-capabilities',
+    );
+    expect(SCRIPT_SOURCE.indexOf('plugins enable codex --accept-capabilities'))
+      .toBeGreaterThan(SCRIPT_SOURCE.indexOf(healthyV2Branch));
+  });
+
+  it("treats an installed Codex plugin as enabled by default unless explicitly disabled", () => {
+    expect(probeCodexEnabled({
+      agents: { defaults: { model: { primary: "openai/gpt-5.6-sol" } } },
+      plugins: { entries: { codex: { enabled: true } } },
+    })).toBe("1");
+    expect(probeCodexEnabled({
+      agents: { defaults: { model: { primary: "openai/gpt-5.6-sol" } } },
+      plugins: { entries: {} },
+    })).toBe("1");
+    expect(probeCodexEnabled({})).toBe("1");
+    expect(probeCodexEnabled({ plugins: { entries: { codex: { enabled: false } } } })).toBe("0");
+  });
+
+  it("resolves a historical Codex package that only OpenClaw's registry can see", () => {
+    expect(resolveRegistryOnlyPlugin()).toBe(
+      `registry|${path.join(dir, "global-plugins", "codex")}|1`,
+    );
+  });
+
+  it("detects OpenClaw v2's migrated OpenAI model with a Codex agent runtime", () => {
+    const migratedConfig = {
+      agents: {
+        defaults: {
+          model: { primary: "openai/gpt-5.6-sol" },
+          models: {
+            "openai/gpt-5.6-sol": { agentRuntime: { id: "codex" } },
+          },
+        },
+      },
+      plugins: { entries: { codex: { enabled: false } } },
+    };
+    const normalizedModels = applyPolicy(migratedConfig, true);
+    const normalizedConfig = {
+      ...migratedConfig,
+      agents: {
+        defaults: {
+          ...migratedConfig.agents.defaults,
+          models: normalizedModels,
+        },
+      },
+    };
+
+    expect(normalizedModels["openai/gpt-5.6-sol"].agentRuntime).toEqual({ id: "codex" });
+    expect(probeNeedsCodex(normalizedConfig)).toBe("1");
+    expect(probeCodexEnabled(normalizedConfig)).toBe("0");
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: probeNeedsCodex(normalizedConfig) === "1",
+      enabledByConfig: probeCodexEnabled(normalizedConfig) === "1",
+      installedVersion: "2026.8.1",
+      peerHealthy: true,
+    })).toEqual(["plugins inspect --all --json", "plugins enable codex --accept-capabilities"]);
+  });
+
+  it("repairs a stale default-enabled v2 plugin at the pinned version", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: false,
+      enabledByConfig: true,
+      installedVersion: "2026.7.0",
+      peerHealthy: true,
+    })).toEqual([
+      "plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities",
+    ]);
+  });
+
+  it("repairs a broken peer dependency before consenting a default-enabled plugin", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: false,
+      enabledByConfig: true,
+      installedVersion: "2026.8.1",
+      peerHealthy: false,
+    })).toEqual([
+      "plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities",
+    ]);
+  });
+
+  it("does not apply the managed nested-peer heuristic to a registry plugin", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: true,
+      enabledByConfig: false,
+      installedVersion: "2026.8.1",
+      peerHealthy: false,
+      layout: "registry",
+      registryDependenciesOk: true,
+    })).toEqual(["plugins inspect --all --json", "plugins enable codex --accept-capabilities"]);
+  });
+
+  it("trusts parent-resolved registry dependencies for a project-managed plugin", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: true,
+      enabledByConfig: false,
+      installedVersion: "2026.8.1",
+      peerHealthy: false,
+      layout: "project-managed",
+      registryDependenciesOk: true,
+    })).toEqual(["plugins inspect --all --json", "plugins enable codex --accept-capabilities"]);
+  });
+
+  it("consents a healthy default-enabled v2 plugin without reinstalling it", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: false,
+      enabledByConfig: true,
+      installedVersion: "2026.8.1",
+      peerHealthy: true,
+    })).toEqual(["plugins inspect --all --json", "plugins enable codex --accept-capabilities"]);
+  });
+
+  // ── The consent verb killed at its deadline (TASK-606 follow-up) ─────────
+  //
+  // The codex twin of the managed loop's cases in
+  // gateway-pre-start-managed-plugin-payload.test.ts. Same verb, same ceiling,
+  // same sibling defect: every non-zero exit was read as a refusal, so a kill
+  // at the deadline switched Codex off over a consent that may well have been
+  // written — `plugins enable` records it and only then loads the gateway SDK.
+  const CONSENTED = { v2: true, needsCodex: false, enabledByConfig: true,
+    installedVersion: "2026.8.1", peerHealthy: true } as const;
+
+  it.each([124, 137])("keeps Codex on when the core positively reports the consent (exit %i)", (code) => {
+    // Named, adjudicated (it carries its install record), and no consent
+    // diagnostic: the one shape that means the consent is recorded.
+    const { argv, stdout, marker } = runPluginFlowFull({
+      ...CONSENTED,
+      consentExit: code,
+      inspectJson: inspectAllJson([{ id: "codex" }]),
+    });
+    expect(argv).toEqual(["plugins inspect --all --json"]);
+    expect(stdout).toContain("Codex runtime plugin capabilities accepted/current");
+    expect(stdout).not.toContain("booting without Codex");
+    expect(marker).toEqual({});
+  });
+
+  it("does not read silence about Codex as Codex's consent", () => {
+    // `collectPluginCapabilityConsentDiagnostics` never walks a plugin its
+    // installed index does not list, which is what a core generation bump
+    // leaves behind — so an answer that does not mention codex is the core
+    // having nothing to say, not the core reporting a recorded consent.
+    const { stdout, marker } = runPluginFlowFull({
+      ...CONSENTED,
+      consentExit: 124,
+      inspectJson: inspectAllJson([{ id: "discord" }]),
+    });
+    expect(stdout).not.toContain("Codex runtime plugin capabilities accepted/current");
+    expect(stdout).toContain("booting without Codex");
+    expect(marker.codex?.stage).toBe("consent");
+  });
+
+  it("leaves Codex exactly as it is when the core keeps no consent record for it", () => {
+    // Named and loading, but with no install record the core can never emit a
+    // consent diagnostic for it — so it can never refuse readiness for consent
+    // either. Switching it off would be a false failure and calling it
+    // accepted/current a false success; say so and change nothing.
+    const { argv, stdout, marker } = runPluginFlowFull({
+      ...CONSENTED,
+      consentExit: 124,
+      inspectJson: inspectAllJson([{ id: "codex", installed: false }]),
+    });
+    expect(stdout).not.toContain("Codex runtime plugin capabilities accepted/current");
+    expect(stdout).not.toContain("booting without Codex");
+    expect(stdout).toContain("Codex runtime plugin capabilities are still unknown");
+    expect(argv.some((line) => line.startsWith("config set"))).toBe(false);
+    expect(marker).toEqual({});
+  });
+
+  it("still boots without Codex when a killed verb had NOT recorded the consent", () => {
+    const { stdout, marker } = runPluginFlowFull({
+      ...CONSENTED,
+      consentExit: 124,
+      inspectJson: inspectAllJson([{ id: "codex", consentRequired: true }]),
+    });
+    expect(stdout).toContain("booting without Codex");
+    expect(marker.codex?.stage).toBe("consent");
+  });
+
+  it("records the core's own refusal and the pinned spec on the consent row", () => {
+    // TASK-785, the sibling of the managed-plugin loop's row. A row that said
+    // only "its capabilities could not be accepted" stood on a box for three
+    // days over a transient failure, and nothing on the device could say which
+    // failure it had been. The spec goes on a consent row too, so the row can
+    // be re-filed as the install its own "Plugin not found" would imply — and
+    // never as the bare `codex` alias, which resolves @latest.
+    const { marker } = runPluginFlowFull({
+      ...CONSENTED,
+      consentExit: 1,
+      consentMessage: "Error: capability consent refused: registry snapshot is locked",
+    });
+    expect(marker.codex?.stage).toBe("consent");
+    expect(marker.codex?.reason).toMatch(/capabilities could not be accepted/i);
+    expect(marker.codex?.reason).toContain("registry snapshot is locked");
+    expect(marker.codex?.reason).toContain("exited 1");
+    expect(marker.codex?.spec).toBe("@openclaw/codex@2026.8.1");
+  });
+
+  it("still boots without Codex when the core cannot be asked at all", () => {
+    // Never leaves an unresolved plugin enabled: readiness refusal burns
+    // StartLimitBurst=20 and the unit is then FAILED, not retried.
+    const { stdout, marker } = runPluginFlowFull({ ...CONSENTED, consentExit: 137 });
+    expect(stdout).toContain("booting without Codex");
+    expect(marker.codex?.stage).toBe("consent");
+  });
+
+  it("still boots without Codex when the core actually refused the consent", () => {
+    const { argv, stdout, marker } = runPluginFlowFull({ ...CONSENTED, consentExit: 1 });
+    expect(stdout).toContain("booting without Codex");
+    // The marker is what Settings renders the Retry from. The switch-off half
+    // needs an openclaw.json this fragment's environment does not set, and is
+    // pinned in gateway-pre-start-managed-plugin-payload.test.ts.
+    expect(marker.codex?.stage).toBe("consent");
+    // Failed preflight inspection does not bypass the real refusal.
+    expect(argv.filter((line) => line.startsWith("plugins inspect"))).toEqual(["plugins inspect --all --json"]);
+  });
+
+  it("leaves an explicitly disabled unused plugin alone", () => {
+    expect(runPluginFlow({
+      v2: true,
+      needsCodex: false,
+      enabledByConfig: false,
+      installedVersion: "2026.8.1",
+      peerHealthy: true,
+    })).toEqual([]);
+  });
+
+  it("repairs a v1 plugin without passing the v2 capability flag", () => {
+    expect(runPluginFlow({
+      v2: false,
+      needsCodex: true,
+      enabledByConfig: false,
+      installedVersion: "2026.8.1",
+      peerHealthy: false,
+    })).toEqual(["plugins install @openclaw/codex@2026.8.1 --force"]);
+  });
+
   it("sets agentRuntime on the configured codex primary", () => {
     const models = applyPolicy({
       agents: { defaults: { model: { primary: "codex/gpt-5.5", fallbacks: [] } } },
@@ -133,5 +784,128 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
       agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
     });
     expect(models).toEqual({});
+  });
+});
+
+// OpenClaw 2 references the ChatGPT subscription as `openai/<id>` and keeps
+// the Codex runtime on that entry. The boot seed above only ever recognised
+// the retired `codex/` namespace, so on the core ClawBox pins it repaired
+// nothing — and the arm is what keeps a ChatGPT turn off the browser endpoint
+// Cloudflare challenges.
+describe.runIf(hasPython3)("the boot seed on OpenClaw 2", () => {
+  const CHATGPT_ONLY = {
+    auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+    agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+  };
+
+  it("seeds the runtime arm for an openai/<id> primary on a ChatGPT box", () => {
+    const models = applyPolicy(structuredClone(CHATGPT_ONLY), true);
+    expect(models["openai/gpt-5.5"]).toEqual({ agentRuntime: { id: "codex" } });
+  });
+
+  it("seeds it for the fallbacks too", () => {
+    const models = applyPolicy({
+      ...structuredClone(CHATGPT_ONLY),
+      agents: {
+        defaults: {
+          model: { primary: "openai/gpt-5.5", fallbacks: ["openai/gpt-5.4", "deepseek/deepseek-v4-flash"] },
+        },
+      },
+    }, true);
+    expect(models["openai/gpt-5.4"]).toEqual({ agentRuntime: { id: "codex" } });
+    expect(models["deepseek/deepseek-v4-flash"]).toBeUndefined();
+  });
+
+  it("leaves an openai/<id> alone on a box that also holds an API key", () => {
+    // Ambiguous at boot: the same reference is the API-key route there, and
+    // arming it would push those turns through the Codex app-server with no
+    // ChatGPT account behind them. The chat route decides that one, from the
+    // row the owner picked.
+    const models = applyPolicy({
+      auth: {
+        profiles: {
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
+          "openai:default": { provider: "openai", mode: "api_key" },
+        },
+      },
+      agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+    }, true);
+    expect(models["openai/gpt-5.5"]).toBeUndefined();
+  });
+
+  it("leaves an openai/<id> alone on a box with no ChatGPT sign-in at all", () => {
+    const models = applyPolicy({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+    }, true);
+    expect(models["openai/gpt-5.5"]).toBeUndefined();
+  });
+
+  it("does not widen the seed on OpenClaw 1, where openai/<id> is a keyed route", () => {
+    const models = applyPolicy(structuredClone(CHATGPT_ONLY), false);
+    expect(models["openai/gpt-5.5"]).toBeUndefined();
+  });
+});
+
+// The `openai-codex/` -> `codex/` boot migration writes a namespace OpenClaw 2
+// refuses. Its sibling — the `openai/<gpt>` -> `codex/<gpt>` rewrite — is
+// v1-gated for exactly that reason; this one was not, so a v2 box ran a
+// `config set` the core rejected on every boot and printed a WARN pointing at
+// a retired namespace.
+describe("the openai-codex primary migration", () => {
+  it("runs only on OpenClaw 1", () => {
+    const start = SCRIPT_SOURCE.indexOf(
+      "# One-time config migration for devices updating from OpenClaw <=2026.5.x:",
+    );
+    expect(start).toBeGreaterThan(-1);
+    const block = SCRIPT_SOURCE.slice(start, SCRIPT_SOURCE.indexOf("LEGACY_CODEX_PRIMARY=", start));
+    expect(block).toContain('if [ "$CLAWBOX_OPENCLAW_V2" != "1" ]; then');
+  });
+});
+
+// The arm had exactly one remover on the whole box and it was v1-gated, so on
+// the core ClawBox pins nothing ever cleared it. The recovery that matters is
+// the box whose ChatGPT sign-in is gone while the arm stayed: there is no
+// account for it to route to, and every turn on that model dies on the
+// Cloudflare-challenged browser endpoint.
+describe.runIf(hasPython3)("the boot disarm on OpenClaw 2", () => {
+  const ARMED = {
+    agents: {
+      defaults: {
+        model: { primary: "openai/gpt-5.5" },
+        models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+      },
+    },
+  };
+
+  it("strips a codex arm on a box with no ChatGPT sign-in at all", () => {
+    const models = applyPolicy({
+      ...structuredClone(ARMED),
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+    }, true);
+    expect(models["openai/gpt-5.5"]?.agentRuntime).toBeUndefined();
+  });
+
+  it("leaves it while a sign-in exists — the routes own that one", () => {
+    // Ambiguous at boot on a dual-credential box, and the chat and configure
+    // routes now write AND clear it from the row the owner picked.
+    const models = applyPolicy({
+      ...structuredClone(ARMED),
+      auth: {
+        profiles: {
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
+          "openai:default": { provider: "openai", mode: "api_key" },
+        },
+      },
+    }, true);
+    expect(models["openai/gpt-5.5"]?.agentRuntime).toEqual({ id: "codex" });
+  });
+
+  it("re-seeds rather than strips on a subscription-only box", () => {
+    const models = applyPolicy({
+      ...structuredClone(ARMED),
+      auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+    }, true);
+    expect(models["openai/gpt-5.5"]?.agentRuntime).toEqual({ id: "codex" });
   });
 });

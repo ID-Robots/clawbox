@@ -8,8 +8,11 @@
 
 import fs from "fs/promises";
 import path from "path";
+import { isProxyablePort } from "./clawbox-manifest";
 import { DATA_DIR } from "./config-store";
 import { registerWebappInPreferences } from "./webapp-registry";
+import { ensureWebappIcon, htmlHint, safeAppId } from "./webapp-icon";
+import { WEBAPP_KV_CLIENT_SNIPPET } from "./webapp-sandbox";
 
 // ── Paths ──
 
@@ -20,6 +23,9 @@ export const WEBAPPS_DIR = path.join(DATA_DIR, "webapps");
 
 /** Shared app/project ID validation — alphanumeric, hyphens, underscores, 1-64 chars. */
 export const APP_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+/** The same rule spelled as an alphabet and a length, for safeProjectId. */
+const PROJECT_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+const MAX_PROJECT_ID_CHARS = 64;
 const MAX_FILE_SIZE = 512 * 1024; // 512 KB per file
 const MAX_PROJECT_FILES = 200;
 
@@ -101,12 +107,29 @@ function assertProjectName(name: unknown): string {
   return trimmed;
 }
 
-/** Resolve a file path inside a project directory, preventing traversal. */
+/**
+ * Resolve a file path inside a project directory, preventing traversal.
+ *
+ * The project half comes from `projectDir()` — the id rebuilt from the
+ * alphabet — rather than a second `path.join(PROJECTS_DIR, projectId)` of its
+ * own: a local constant of the same name shadowed that function here, so the
+ * one root in this module that still joined the caller's string was the one
+ * every `code_file_*` write and delete resolves against.
+ *
+ * ONE TERM AT A TIME, for the reason `src/app/setup-api/files/route.ts` states
+ * over its own copy of this shape: `!resolved.startsWith(dir + path.sep) &&
+ * resolved !== dir` leaves the code below reachable through the second term
+ * without the prefix test having decided anything, so the containment check
+ * governs nothing that follows — which is why every fs call downstream of this
+ * helper stayed on the `js/path-injection` list (alert #529 and its siblings).
+ * The project root answers with `projectDir`'s own string, which is the value
+ * `resolved` holds in that branch; the accepted set does not move.
+ */
 function safePath(projectId: string, filePath: string): string {
-  if (!validateProjectId(projectId)) throw new ValidationError("Invalid project ID");
-  const projectDir = path.join(PROJECTS_DIR, projectId);
-  const resolved = path.resolve(projectDir, filePath);
-  if (!resolved.startsWith(projectDir + path.sep) && resolved !== projectDir) {
+  const dir = projectDir(projectId);
+  const resolved = path.resolve(dir, filePath);
+  if (resolved === dir) return dir;
+  if (!resolved.startsWith(dir + path.sep)) {
     throw new ValidationError("Path traversal denied");
   }
   return resolved;
@@ -122,14 +145,75 @@ function assertMutableTarget(projectId: string, absPath: string): void {
   if (path.basename(absPath) === "project.json") {
     throw new ValidationError("Cannot modify project.json");
   }
-  if (absPath === path.join(PROJECTS_DIR, projectId)) {
+  if (absPath === projectDir(projectId)) {
     throw new ValidationError("Refusing to target the project root");
   }
 }
 
+/**
+ * The project id an on-disk path may be joined from, or null.
+ *
+ * validateProjectId's rule, applied the way webapp-icon's safeAppId applies
+ * it: rather than testing the id and then joining the ORIGINAL string, the
+ * value that reaches `path.join` is assembled one character at a time out of
+ * the alphabet — whatever the caller sent, the path is made of these
+ * characters and no more than this many of them. A `.test()` guard leaves the
+ * caller's string in play, and a static analyser rightly keeps flagging every
+ * path built from it. Its own copy because this module owns the id rule
+ * (APP_ID_RE) and must not lean on the icon module for its directories.
+ */
+function safeProjectId(projectId: unknown): string | null {
+  if (typeof projectId !== "string" || projectId.length < 1 || projectId.length > MAX_PROJECT_ID_CHARS) {
+    return null;
+  }
+  let safe = "";
+  for (const ch of projectId) {
+    const at = PROJECT_ID_ALPHABET.indexOf(ch);
+    if (at < 0) return null;
+    safe += PROJECT_ID_ALPHABET[at];
+  }
+  return safe;
+}
+
+/**
+ * The directory every project path is joined under — the scaffold initProject
+ * writes, including the workflow it now ships, starts here — built from the
+ * rebuilt id (safeProjectId), not the one that passed the test.
+ */
 function projectDir(projectId: string): string {
-  if (!validateProjectId(projectId)) throw new ValidationError("Invalid project ID");
-  return path.join(PROJECTS_DIR, projectId);
+  const id = safeProjectId(projectId);
+  if (!id) throw new ValidationError("Invalid project ID");
+  return path.join(PROJECTS_DIR, id);
+}
+
+/**
+ * The directory a DEPLOYED webapp lives in — `projectDir`'s sibling, and built
+ * the same way, from the rebuilt id rather than the caller's string. Both roots
+ * take an id from the same doors (`webapp_create`, `webapp_update`,
+ * `code_project_build`, the webapps route), so leaving one of them joining the
+ * raw string would have left the whole rule resting on whichever caller tested
+ * it last. Exported because the webapps route serves files out of this folder
+ * and must get its spelling from here rather than joining `WEBAPPS_DIR` again.
+ */
+export function webappPath(appId: string): string {
+  const id = safeProjectId(appId);
+  if (!id) throw new ValidationError("Invalid app ID");
+  return path.join(WEBAPPS_DIR, id);
+}
+
+/**
+ * The ABSOLUTE on-device directory a project's source files live in.
+ *
+ * Exported because the agent edits those files with its harness's own file
+ * tools, and those resolve a relative path against the HARNESS's working
+ * directory, not the web tier's. On a Hermes device the two differ
+ * (/home/clawbox vs /home/clawbox/clawbox), so handing out
+ * "data/code-projects/<id>/" made every read miss and every write land in a
+ * parallel tree that nothing ever builds. Only an absolute path is portable
+ * between the two processes.
+ */
+export function projectPath(projectId: string): string {
+  return projectDir(projectId);
 }
 
 function metaPath(projectId: string): string {
@@ -164,8 +248,46 @@ export async function initProject(
   };
   await fs.writeFile(metaPath(projectId), JSON.stringify(meta, null, 2), "utf-8");
 
+  // A check for the pull-request flow to wait on.
+  //
+  // The auto-PR switch (src/lib/coding-pr.ts) refuses to merge a pull request
+  // that has NO checks — "every check passed" is trivially true of zero checks,
+  // and merging on that would merge everything on sight. So a project scaffolded
+  // here ships one real check: without it the flow would open pull requests that
+  // can never satisfy their own guardrail, and the harness self-test could never
+  // exercise the PR -> merge path it exists to prove.
+  //
+  // Deliberately trivial and dependency-free: it asserts the entry point exists
+  // and is not empty, which is exactly the property a scaffold can promise.
+  await fs.mkdir(path.join(dir, ".github", "workflows"), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, ".github", "workflows", "check.yml"),
+    `name: check
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - "clawbox/**"
+
+jobs:
+  entry-point:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: index.html exists and is not empty
+        run: |
+          test -s index.html
+          echo "index.html is $(wc -c < index.html) bytes"
+`,
+    "utf-8",
+  );
+
   const template = opts?.template || "app";
 
+  // Both scaffolds carry the KV bridge (src/lib/webapp-sandbox.ts): the built
+  // app runs in a sandboxed frame with no ClawBox session, so this is the one
+  // way it can persist anything, and the field guide tells the agent to call
+  // window.clawboxKv as if it were already there.
   if (template === "blank") {
     await fs.writeFile(
       path.join(dir, "index.html"),
@@ -175,6 +297,7 @@ export async function initProject(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escapeHtml(projectName)}</title>
+  ${WEBAPP_KV_CLIENT_SNIPPET}
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
@@ -196,6 +319,7 @@ export async function initProject(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escapeHtml(projectName)}</title>
+  ${WEBAPP_KV_CLIENT_SNIPPET}
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -414,46 +538,30 @@ export async function deleteFile(projectId: string, filePath: string): Promise<v
 
 // ── Search ──
 
+// Plain-text only. A `regex` option used to compile the caller's pattern and
+// run `re.test` synchronously per line, and no length cap bounds that: the
+// cost of "(a+)+$" is exponential in the LINE, so a 30-character line held
+// the box's one event loop — the desktop, every /setup-api route, the
+// gateway proxy and the terminal's WebSocket — for minutes, and a line the
+// caller had just written with `file-write` for hours. Nothing on the device
+// sent it (no UI, no MCP tool; the CLI posts a plain pattern) and the agent
+// already has a killable `grep` under a deadline, so the branch went rather
+// than gained a worker. The route answers `regex_unsupported` for a body
+// that still asks, so an old script gets a refusal and not a quiet change of
+// meaning.
 export async function searchFiles(
   projectId: string,
   pattern: string,
-  opts?: { regex?: boolean; caseSensitive?: boolean; maxResults?: number }
+  opts?: { caseSensitive?: boolean; maxResults?: number }
 ): Promise<SearchMatch[]> {
   const dir = projectDir(projectId);
   const files = await getAllTextFiles(dir);
   const results: SearchMatch[] = [];
   const max = opts?.maxResults || 100;
 
-  let matcher: (line: string) => boolean;
-  if (opts?.regex) {
-    // Cap the pattern length to limit worst-case backtracking a caller can set
-    // up (JS has no native regex timeout; a pattern like "(a+)+$" over a long
-    // line backtracks exponentially and would block the single-threaded event
-    // loop). Combined with the per-line slice below this bounds the work.
-    if (pattern.length > 200) {
-      throw new ValidationError("Regex pattern too long (max 200 chars)");
-    }
-    // No global flag: only test() is used, and the 'g' flag makes test()
-    // stateful (persisting lastIndex), which silently skips alternating matches.
-    const flags = opts.caseSensitive ? "" : "i";
-    // Flagged by CodeQL js/regex-injection: the pattern is a search FILTER, not
-    // a guard. It decides no path, permission or sanitisation outcome — only
-    // which lines of this device's own project files come back to the caller
-    // that asked. /setup-api/code sits behind the session / MCP-bearer gate.
-    let re: RegExp;
-    try {
-      re = new RegExp(pattern, flags);
-    } catch {
-      throw new ValidationError(`Invalid regex pattern: ${pattern}`);
-    }
-    // Bound each test to a slice so a pathological pattern against a very long
-    // line (files can be up to 512 KB) can't hang the process.
-    matcher = (line) => re.test(line.length > 2000 ? line.slice(0, 2000) : line);
-  } else {
-    const needle = opts?.caseSensitive ? pattern : pattern.toLowerCase();
-    matcher = (line) =>
-      (opts?.caseSensitive ? line : line.toLowerCase()).includes(needle);
-  }
+  const needle = opts?.caseSensitive ? pattern : pattern.toLowerCase();
+  const matcher = (line: string) =>
+    (opts?.caseSensitive ? line : line.toLowerCase()).includes(needle);
 
   outer: for (const file of files) {
     const relPath = path.relative(dir, file);
@@ -542,13 +650,25 @@ export async function buildProject(
   // rebuild only refreshes index.html — re-running deployWebapp would clobber
   // the saved icon and re-surface an app the user intentionally hid.
   const alreadyDeployed = await fs
-    .stat(path.join(WEBAPPS_DIR, projectId, "meta.json"))
+    .stat(path.join(webappPath(projectId), "meta.json"))
     .then(() => true)
     .catch(() => false);
   if (alreadyDeployed) {
     await writeWebappIndex(projectId, html);
+    // A rebuild of an app that still has no icon — its first build may have
+    // happened before the box was linked to ClawBox AI — gets the same
+    // after-the-reply generation a create does. `ensureWebappIcon` answers
+    // 'kept' from one stat when the icon has since appeared, so this costs a
+    // meta.json read and nothing more on every other rebuild.
+    if (await deployedWithoutIcon(projectId)) {
+      void ensureWebappIcon(projectId, {
+        name,
+        color,
+        description: meta.description || htmlHint(html),
+      }).catch(() => {});
+    }
   } else {
-    await deployWebapp(projectId, html, { name, color });
+    await deployWebapp(projectId, html, { name, color, description: meta.description });
   }
 
   const url = `/setup-api/webapps?app=${projectId}`;
@@ -562,9 +682,59 @@ export async function buildProject(
  * rebuild can't wipe the saved icon or re-surface an app the user hid.
  */
 export async function writeWebappIndex(appId: string, html: string): Promise<void> {
-  const dir = path.join(WEBAPPS_DIR, appId);
+  const dir = webappPath(appId);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(path.join(dir, "index.html"), html, "utf-8");
+}
+
+// ── Legacy host:port stubs ───────────────────────────────────────────────────
+//
+// Before `/apps/<id>/` existed (src/lib/app-proxy.ts), an app with a server of
+// its own was put on the desktop as a one-file stub that sent the frame to
+// `location.hostname:<port>`. Those stubs are still on disk on every box that
+// shipped, and when their server is not running the window is whatever the
+// browser makes of ERR_CONNECTION_REFUSED — an empty white rectangle, with
+// nothing anywhere to say the app is simply not started. The webapps route
+// recognises such a stub before it serves it; these two are what it needs.
+
+/** The largest document still plausibly a redirect stub rather than an app. */
+export const LEGACY_STUB_MAX_BYTES = 4096;
+/** How a stub sends the frame somewhere else. */
+const LEGACY_REDIRECT_RE = /location\s*\.\s*(?:replace|assign|href)|http-equiv\s*=\s*["']?refresh/i;
+
+/**
+ * The port a legacy host:port redirect stub points at, or null when this
+ * document is not one.
+ *
+ * Deliberately narrow — a document is only a stub when it is TINY, names
+ * `location.hostname`, redirects, and carries a port a local server could
+ * actually have. A one-file app that happens to read its own hostname must
+ * never be mistaken for one, because being mistaken means it is not served.
+ */
+export function legacyRedirectPort(html: string): number | null {
+  if (html.length > LEGACY_STUB_MAX_BYTES) return null;
+  if (!/location\s*\.\s*hostname/.test(html)) return null;
+  if (!LEGACY_REDIRECT_RE.test(html)) return null;
+  for (const match of html.matchAll(/:(\d{4,5})(?!\d)/g)) {
+    const port = Number(match[1]);
+    if (isProxyablePort(port)) return port;
+  }
+  return null;
+}
+
+/**
+ * The page shown in place of a legacy stub whose server is not there.
+ *
+ * `detail` is the box's own sentence about the port — the same one
+ * `/apps/<id>/` answers a 502 with — so the two surfaces cannot say different
+ * things about the same silence. Framed with an opaque origin, so it is plain
+ * HTML with no script and no link back into the desktop.
+ */
+export function serverAppDownHtml(name: string, detail: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(name)}</title><style>` +
+    "body{background:#1a1a2e;color:#e0e0e0;font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;padding:24px;box-sizing:border-box}" +
+    "main{max-width:34rem;text-align:center}h1{font-size:1.05rem;font-weight:600;margin:0 0 .6rem}p{margin:0;font-size:.9rem;line-height:1.6;color:#b9b9c6}" +
+    `</style></head><body><main><h1>${escapeHtml(name)}</h1><p>${escapeHtml(detail)}</p></main></body></html>`;
 }
 
 /**
@@ -581,22 +751,44 @@ export async function writeWebappIndex(appId: string, html: string): Promise<voi
 export async function deployWebapp(
   appId: string,
   html: string,
-  meta: { name: string; color?: string; icon?: string },
+  meta: { name: string; color?: string; icon?: string; description?: string },
 ): Promise<void> {
   // Same rule and same reason as initProject: the name reaches meta.json and
   // the desktop label, so bound it before any of that is written.
   const name = assertProjectName(meta.name);
   await writeWebappIndex(appId, html);
   await fs.writeFile(
-    path.join(WEBAPPS_DIR, appId, "meta.json"),
+    path.join(webappPath(appId), "meta.json"),
     JSON.stringify({ name, color: meta.color || "#f97316", icon: meta.icon || "" }),
     "utf-8",
   );
+  // The icon is drawn inside `registerWebappInPreferences`, for every app that
+  // reaches the desktop rather than only the ones built from HTML here — hence
+  // the description: it is the icon prompt's only clue about what the app does,
+  // and `htmlHint` is the best one available on this path. An app that supplied
+  // an icon of its own is left alone there.
   await registerWebappInPreferences(appId, name, {
     color: meta.color,
     iconUrl: meta.icon,
     webappUrl: `/setup-api/webapps?app=${appId}`,
+    description: meta.description || htmlHint(html),
   });
+}
+
+/** Is this deployed app's meta.json still without an icon of its own? */
+async function deployedWithoutIcon(appId: string): Promise<boolean> {
+  // The id passed the door already; the path is still joined from the rebuilt
+  // copy, so this read stands on its own the way ensureWebappIcon's do.
+  const id = safeAppId(appId);
+  if (!id) return false;
+  try {
+    const raw = await fs.readFile(path.join(WEBAPPS_DIR, id, "meta.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { icon?: unknown };
+    return !parsed.icon;
+  } catch {
+    // Unreadable metadata is not a reason to spend a generation on it.
+    return false;
+  }
 }
 
 // ── Helpers ──

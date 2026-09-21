@@ -15,24 +15,38 @@ import { DATA_DIR } from "./config-store";
 // Two shapes of rule: named credential stores elsewhere in the home directory
 // are listed below, and the ClawBox data directory is covered by containment.
 
-const PROTECTED_DIR_RES: RegExp[] = [
-  /(^|\/)\.ssh(\/|$)/,
-  /(^|\/)\.openclaw(\/|$)/,
+/**
+ * Credential stores in the home directory, as folder names relative to it.
+ * Exported so the coding agent (src/lib/coding-agent.ts) denies exactly these
+ * folders to Claude Code's own file tools — one list, so a store added here
+ * can never be silently left open there.
+ */
+export const PROTECTED_HOME_DIRS: readonly string[] = [
+  ".ssh",
+  ".openclaw",
   // Hermes edition: ~/.hermes holds config.yaml (the ClawBox AI billing token,
   // the dashboard signing secret and its scrypt password hash), .env (provider
   // keys) and auth.json (OAuth tokens) — the Hermes equivalent of ~/.openclaw.
-  /(^|\/)\.hermes(\/|$)/,
-  /(^|\/)\.codex(\/|$)/,
+  ".hermes",
+  ".codex",
   // ClawKeep keeps its portal token and the device's backup-encryption
   // passphrase in ~/.clawkeep. Its API route is already classed as sensitive
   // in middleware.ts; this is the same rule applied to the store behind it.
-  /(^|\/)\.clawkeep(\/|$)/,
-  /(^|\/)\.gnupg(\/|$)/,
-  /(^|\/)\.aws(\/|$)/,
-  /(^|\/)\.kube(\/|$)/,
-  /(^|\/)\.docker(\/|$)/,
-  /(^|\/)\.config\/(gcloud|gh|rclone)(\/|$)/,
+  ".clawkeep",
+  ".gnupg",
+  ".aws",
+  ".kube",
+  ".docker",
+  ".config/gcloud",
+  ".config/gh",
+  ".config/rclone",
 ];
+
+// Each folder matched as a whole path segment (or segments), anywhere in the
+// path — the same shape the hand-written patterns had.
+const PROTECTED_DIR_RES: RegExp[] = PROTECTED_HOME_DIRS.map(
+  (dir) => new RegExp(`(^|\\/)${dir.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}(\\/|$)`),
+);
 
 // Credential files matched by basename anywhere under the browse root — common
 // on a dev box (git/npm/pip/postgres tokens). Blocking the whole file is fine:
@@ -78,12 +92,43 @@ const PROTECTED_FILE_RES: RegExp[] = [
 // file — may only import modules whose whole graph is relative paths and node
 // builtins. Read the import rule at the top of mcp/lib/guard.ts before changing
 // this: an import here breaks the MCP server at startup, not at build time.
-const DATA_DIR_PUBLIC_SUBTREES = new Set([
+
+/**
+ * The per-run evidence folders coding-agent runs write into. Owned HERE (the
+ * alias-free end of the import graph) and imported by coding-agent-artifacts,
+ * the module that builds paths from it — one owner, no mirrored literal.
+ */
+export const CODING_AGENT_ARTIFACTS_SUBTREE = "coding-agent-artifacts";
+
+/**
+ * Where a coding-agent run finds the files it was GIVEN to work from — the
+ * pictures the assistant generated for the task, an attachment that arrived in
+ * chat, anything the owner dropped in by hand.
+ *
+ * Owned here for the reason the artifacts subtree above is: this is the
+ * alias-free end of the import graph, and the list just below is the one thing
+ * that decides what under data/ a run may open at all.
+ *
+ * It exists because the assistant writes its generated media into its OWN
+ * state directory (`~/.openclaw/media`), which sits inside a credential store
+ * this box denies to every run, wholesale and on purpose — the same folder
+ * holds openclaw.json, the provider keys and every session transcript. So an
+ * asset made FOR a coding task could not be read BY it, and a run either drew
+ * it again or gave up. The box copies the named assets out into this tree
+ * instead (src/lib/coding-run-inputs.ts), which is safe by construction:
+ * nothing is opened that was not deliberately put here.
+ */
+export const CODING_AGENT_INPUTS_SUBTREE = "coding-agent-inputs";
+
+export const DATA_DIR_PUBLIC_SUBTREES = new Set([
   "webapps",       // built desktop webapps, also served by the webapps route
   "icons",         // installed-app icons, also served by the icon route
   "catalog-cache", // cached copies of the providers' public model catalogues
   "code-projects", // the code assistant's project sources
   "llamacpp",      // local-model runtime: downloaded weights, pid file, log
+  "embed",         // memory-search embedder runtime: its GGUF and log (embed-server.ts)
+  CODING_AGENT_ARTIFACTS_SUBTREE,
+  CODING_AGENT_INPUTS_SUBTREE,
 ]);
 
 // DATA_DIR is already absolute and normalised (config-store builds it with
@@ -114,29 +159,199 @@ function isProtectedDataDirPath(abs: string): boolean {
   return !DATA_DIR_PUBLIC_SUBTREES.has(top);
 }
 
+/**
+ * The separator the patterns above are written in.
+ *
+ * Every rule in this file spells its separator `/`, so on Windows — where a
+ * resolved path arrives with backslashes — the name-shaped half of this guard
+ * matched nothing at all and `~/.ssh` was not protected. The appliance is Linux
+ * and never took that branch, but the tests run on developer machines, and a
+ * security rule that quietly no-ops on the platform it is TESTED on is a rule
+ * nobody is really testing.
+ *
+ * Rewritten only where the separator actually differs: on POSIX a backslash is
+ * a legal character in a filename, and normalising there would invent matches
+ * rather than find them. (`isProtectedDataDirPath` needs none of this — it
+ * compares with `path.sep` throughout.)
+ */
+const toPatternPath: (abs: string) => string =
+  path.sep === "/" ? (abs) => abs : (abs) => abs.replace(/\\/g, "/");
+
 function isProtected(abs: string): boolean {
   if (isProtectedDataDirPath(abs)) return true;
-  if (PROTECTED_FILE_RES.some((re) => re.test(abs))) return true;
-  return PROTECTED_DIR_RES.some((re) => re.test(abs));
+  const p = toPatternPath(abs);
+  if (PROTECTED_FILE_RES.some((re) => re.test(p))) return true;
+  return PROTECTED_DIR_RES.some((re) => re.test(p));
+}
+
+/**
+ * The tree the box lets an authenticated session browse: the customer's home
+ * directory, and also the agent's own working directory — on the appliance they
+ * are the same place.
+ *
+ * Lives beside the guard rather than in the routes because the root and the
+ * rule that carves secrets out of it are one decision, and it was written out
+ * three times before this: both Files API routes and, now, the adoption of a
+ * picture the agent wrote outside its image cache. A root defined in one file
+ * and guarded in another is how a fourth caller ends up browsing a tree nobody
+ * remembered to protect.
+ */
+export function filesBrowseRoot(): string {
+  return process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
+}
+
+/**
+ * How many links `canonicalPath` will step through before calling the path a
+ * loop. Linux itself gives up at 40 (its own ELOOP threshold), so a path the
+ * kernel would open never hits this; only a cycle does.
+ */
+const MAX_LINK_HOPS = 40;
+
+/**
+ * The path with every symlink resolved, for a path that need not exist yet.
+ *
+ * `realpathSync` refuses a path whose leaf is missing, so the earlier guard
+ * fell back to resolving the PARENT and re-joining the basename — and stopped
+ * there. A path two or more segments past the last existing directory
+ * (`~/link/newdir/x`, with `~/link -> ~/.ssh`) failed both resolves and was
+ * judged by its typed spelling, which names no store at all. This walks up
+ * `dirname` until something resolves and re-joins what it walked past, so the
+ * verdict is about where the write would actually LAND.
+ *
+ * A DANGLING link is followed too, not re-joined as a name. `realpathSync`
+ * refuses `~/proj/keys.txt -> ~/.ssh/authorized_keys` while the target is
+ * absent exactly as it refuses a missing file, and answering the link's own
+ * spelling there judged the write as landing in `~/proj` — where nothing
+ * lands: `open(2)` follows the link and CREATES `~/.ssh/authorized_keys`. So a
+ * component that fails to resolve is `lstat`ed, and a link among them is
+ * read and the walk carried on from its target, relative targets resolved
+ * against the link's own directory the way the kernel does. Null only when
+ * nothing on the way up resolves or the links form a cycle, which a resolver
+ * cannot say anything about.
+ */
+export function canonicalPath(abs: string): string | null {
+  let dir = abs;
+  const rest: string[] = [];
+  let hops = 0;
+  for (;;) {
+    try {
+      const real = fs.realpathSync(dir);
+      return rest.length ? path.join(real, ...rest) : real;
+    } catch {
+      const target = danglingLinkTarget(dir);
+      if (target !== null) {
+        if (++hops > MAX_LINK_HOPS) return null;
+        dir = target;
+        continue;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) return null;
+      rest.unshift(path.basename(dir));
+      dir = parent;
+    }
+  }
+}
+
+/**
+ * Where a link points, resolved against its own directory, when `p` IS a link
+ * (the only way a path that exists can fail `realpathSync`, short of EACCES).
+ * Null for anything else — a missing name, an ordinary file, a directory this
+ * user cannot look at — so the caller walks up the way it always did.
+ */
+function danglingLinkTarget(p: string): string | null {
+  // Resolved and prefix-checked before the two reads, the shape CodeQL's
+  // path-injection query recognises as a sanitiser (js/path-injection,
+  // alerts 520/521). The root is `/` on purpose: this resolver's job is to
+  // find where ANY path the caller names really leads — the containment
+  // verdict is the caller's, on the canonical answer — and lstat/readlink read
+  // a name's metadata, never a file's bytes.
+  const abs = path.resolve(p);
+  if (!abs.startsWith(path.sep)) return null;
+  try {
+    if (!fs.lstatSync(abs).isSymbolicLink()) return null;
+    return path.resolve(path.dirname(abs), fs.readlinkSync(abs));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The inventory alone, applied to a path the CALLER has already resolved —
+ * no realpath here. For a caller that already paid one resolve for its own
+ * rules (mcp/lib/guard.ts judges device nodes and dotenv files on the same
+ * canonical path) and runs once per entry of a 20k-entry listing, a second
+ * lstat walk per entry is the whole cost of the guard again.
+ */
+export function isProtectedResolvedPath(abs: string): boolean {
+  return isProtected(abs);
 }
 
 /**
  * True if `abs` — or, after resolving symlinks, its real target — is a protected
  * secret store. Callers should treat a `true` result as "not found / forbidden".
+ *
+ * This answers "may this be READ, LISTED or WRITTEN", and DATA_DIR itself
+ * answers false to it on purpose (see the note above `DATA_DIR_PUBLIC_SUBTREES`).
+ * Whether a directory may be MOVED or REMOVED is `isProtectedContainer`'s
+ * question, and the two do not agree about the data directory.
  */
 export function isProtectedFilePath(abs: string): boolean {
   if (isProtected(abs)) return true;
-  try {
-    const real = fs.realpathSync(abs);
-    return real !== abs && isProtected(real);
-  } catch {
-    // Path (or leaf) doesn't exist yet, e.g. an upload target — resolve the
-    // parent so a symlinked ancestor can't smuggle a write into a secret dir.
-    try {
-      const real = path.join(fs.realpathSync(path.dirname(abs)), path.basename(abs));
-      return real !== abs && isProtected(real);
-    } catch {
-      return false;
-    }
-  }
+  // The path (or its leaf) may not exist yet, e.g. an upload target — the
+  // resolve then lands on the nearest existing ancestor, so a symlinked
+  // ancestor cannot smuggle a write into a secret dir however deep the new
+  // path goes below it.
+  const real = canonicalPath(abs);
+  return real !== null && real !== abs && isProtected(real);
+}
+
+/**
+ * Whether `abs`, as typed or once its links are resolved, is a directory that
+ * HOLDS a protected store: the ClawBox data directory or any ancestor of it
+ * (the checkout, the home), any ancestor of a credential store named in
+ * `PROTECTED_HOME_DIRS` (so `~/.config` for `.config/gh`), or the browse root
+ * itself.
+ *
+ * A different question from `isProtectedFilePath`. That one keeps DATA_DIR
+ * openable so the Files app can list it and show the public subtrees; this one
+ * says the same directory may not be renamed or recursively deleted — a rename
+ * takes every store inside it out from under the containment rule (`data` →
+ * `data-copy`, then `data-copy/config.json` is nobody's business), and a delete
+ * removes the box's whole state in one request. Only mutation callers ask it;
+ * `safePath`, the listing and the download must not, or `data/` would vanish
+ * from the desktop — the regression the note above warns about.
+ *
+ * Judged on the path as typed AND on `canonicalPath(abs)`, because `~/link ->
+ * ~/clawbox` then `link/data` names the real directory without spelling it.
+ */
+export function isProtectedContainer(abs: string): boolean {
+  if (holdsProtectedStore(abs)) return true;
+  const real = canonicalPath(abs);
+  return real !== null && real !== abs && holdsProtectedStore(real);
+}
+
+function holdsProtectedStore(abs: string): boolean {
+  const root = path.resolve(filesBrowseRoot());
+  if (abs === root) return true;
+  // isInside(child, parent): is DATA_DIR at or under `abs` — i.e. `abs` IS the
+  // data directory or an ancestor of it.
+  if (isInside(DATA_DIR, abs)) return true;
+  // Only the stores rooted at the browse root: a single-segment store carries
+  // its name wherever it is moved and stays protected by name, so the ancestor
+  // rule matters for the two-segment `.config/*` entries, whose classification
+  // is lost when `.config` is renamed. A `.config/gh` nested somewhere else
+  // (`~/projects/x/.config/gh`) is not covered — gh reads only `~/.config` or
+  // `$XDG_CONFIG_HOME`, and the residual is data loss, not disclosure.
+  return PROTECTED_HOME_DIRS.some((dir) => isInside(path.join(root, dir), abs));
+}
+
+/**
+ * Path containment: is `child` at or under `parent`? (`parent` itself counts.)
+ * The one fence every run-scoped file check uses — the runner's working-folder
+ * rule, the browser route's file:// scope, the vision route's evidence scope —
+ * so they cannot disagree on an edge case.
+ */
+export function isInside(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }

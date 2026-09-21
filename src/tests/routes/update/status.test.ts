@@ -6,14 +6,67 @@ vi.mock("@/lib/updater", () => ({
   isUpdateCompleted: vi.fn(),
   checkContinuation: vi.fn(),
   getVersionInfo: vi.fn(),
+  isInterruptedVerdict: vi.fn(),
 }));
 
-import { getUpdateState, isUpdateCompleted, checkContinuation, getVersionInfo } from "@/lib/updater";
+vi.mock("@/lib/build-identity", () => ({
+  collectBuildIdentity: vi.fn(),
+}));
 
+import {
+  getUpdateState,
+  isUpdateCompleted,
+  checkContinuation,
+  getVersionInfo,
+  isInterruptedVerdict,
+} from "@/lib/updater";
+import { collectBuildIdentity } from "@/lib/build-identity";
+// The real sentence, from the client-safe module the updater re-exports it
+// from: a hand-copied duplicate would let this fixture go on passing while the
+// gate it is meant to describe stopped matching.
+import { INTERRUPTED_MESSAGE } from "@/lib/update-constants";
+
+const mockCollectBuildIdentity = vi.mocked(collectBuildIdentity);
 const mockGetUpdateState = vi.mocked(getUpdateState);
 const mockIsUpdateCompleted = vi.mocked(isUpdateCompleted);
 const mockCheckContinuation = vi.mocked(checkContinuation);
 const mockGetVersionInfo = vi.mocked(getVersionInfo);
+const mockIsInterruptedVerdict = vi.mocked(isInterruptedVerdict);
+
+
+/**
+ * TASK-447 round 2, defect 1: this route synthesised "completed" — which the
+ * System Update app renders as a green tick and "You're up to date" — on a box
+ * whose build-identity was simultaneously telling the owner to run Update.
+ * Versions cannot see it: package.json does not change commit-to-commit.
+ */
+const NO_DRIFT = {
+  buildVsCheckout: "match" as const,
+  buildIsCheckout: "match" as const,
+  checkoutVsPin: "match" as const,
+  detected: false,
+  reasons: [],
+  codes: [] as never[],
+};
+
+const DRIFTED = {
+  buildVsCheckout: "drift" as const,
+  buildIsCheckout: "drift" as const,
+  checkoutVsPin: "drift" as const,
+  detected: true,
+  reasons: ["This box is running a build made from 1dc29ef but the code on disk is d285cfd — run Update to realign."],
+  codes: ["build-from-other-commit" as const],
+};
+
+function buildIdentity(drift: typeof NO_DRIFT | typeof DRIFTED) {
+  return {
+    build: null,
+    deployedBuildId: null,
+    checkout: { commit: null, shortCommit: null, branch: null, dirty: false, committedAt: null },
+    pin: { branch: "beta", source: "pin-file" as const, commit: null, pinned: true },
+    drift,
+  };
+}
 
 describe("GET /setup-api/update/status", () => {
   let updateStatusGet: () => Promise<Response>;
@@ -36,10 +89,13 @@ describe("GET /setup-api/update/status", () => {
     mockGetUpdateState.mockReturnValue(defaultState);
     mockIsUpdateCompleted.mockResolvedValue(false);
     mockCheckContinuation.mockResolvedValue(false);
+    mockIsInterruptedVerdict.mockReturnValue(false);
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "1.0.0", target: "1.1.0" },
       openclaw: { current: "0.5.0", target: "0.5.1" },
+      edition: "openclaw", remote: { reachable: true },
     });
+    mockCollectBuildIdentity.mockResolvedValue(buildIdentity(NO_DRIFT));
 
     const mod = await import("@/app/setup-api/update/status/route");
     updateStatusGet = mod.GET;
@@ -64,6 +120,7 @@ describe("GET /setup-api/update/status", () => {
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "1.1.0", target: null, updateAvailable: false },
       openclaw: { current: "0.5.1", target: null, updateAvailable: false },
+      edition: "openclaw", remote: { reachable: true },
     });
 
     const res = await updateStatusGet();
@@ -80,6 +137,7 @@ describe("GET /setup-api/update/status", () => {
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "1.0.0", target: "1.1.0", updateAvailable: true },
       openclaw: { current: "0.5.1", target: null, updateAvailable: false },
+      edition: "openclaw", remote: { reachable: true },
     });
 
     const res = await updateStatusGet();
@@ -167,5 +225,130 @@ describe("GET /setup-api/update/status", () => {
 
     expect(res.status).toBe(500);
     expect(body.error).toBe("Status check failed");
+  });
+
+  describe("drift outranks the completion flag", () => {
+    beforeEach(() => {
+      // The box the hardware pass produced: no version delta at all.
+      mockIsUpdateCompleted.mockResolvedValue(true);
+      mockGetVersionInfo.mockResolvedValue({
+        clawbox: { current: "3.9.0", target: null, updateAvailable: false },
+        openclaw: { current: "2026.7.1-2", target: null, updateAvailable: false },
+        edition: "hermes", remote: { reachable: true },
+      });
+    });
+
+    it("refuses to report 'completed' while the box is not running its own code", async () => {
+      mockCollectBuildIdentity.mockResolvedValue(buildIdentity(DRIFTED));
+
+      const body = await (await updateStatusGet()).json();
+
+      expect(body.phase).toBe("idle");
+      expect(body.steps.every((s: { status: string }) => s.status === "completed")).toBe(false);
+    });
+
+    it("says WHY, so the surface rendering it can offer the update with a reason", async () => {
+      mockCollectBuildIdentity.mockResolvedValue(buildIdentity(DRIFTED));
+
+      const body = await (await updateStatusGet()).json();
+
+      expect(body.drift.detected).toBe(true);
+      expect(body.drift.codes).toContain("build-from-other-commit");
+    });
+
+    it("still reports 'completed' on a healthy box", async () => {
+      mockCollectBuildIdentity.mockResolvedValue(buildIdentity(NO_DRIFT));
+
+      const body = await (await updateStatusGet()).json();
+
+      expect(body.phase).toBe("completed");
+    });
+
+    it("does not fail the route when the drift read itself fails", async () => {
+      // It shells out to git; a device that cannot answer must still get status.
+      mockCollectBuildIdentity.mockRejectedValue(new Error("git: not a repository"));
+
+      const res = await updateStatusGet();
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).phase).toBe("completed");
+    });
+  });
+
+  /**
+   * TASK-731 follow-up. The interruption verdict lives in the web server's
+   * memory as well as on disk, and the process that decided it is not
+   * necessarily the process that ran the update — so this route latched a
+   * `failed` it could never revisit: the gate below was `phase === "idle"`, and
+   * a state that had already gone `failed` never asked the updater anything
+   * again. On the Hermes box that meant "Update failed", every step pending,
+   * over an update that finished 71 seconds later.
+   */
+  describe("a remembered interruption is re-judged, not latched", () => {
+    const interrupted = {
+      phase: "failed" as const,
+      steps: defaultState.steps.map((s) => ({ ...s, status: "pending" as const })),
+      currentStepIndex: -1,
+      error: INTERRUPTED_MESSAGE,
+    };
+
+    it("reports the completion that overtook it", async () => {
+      mockIsInterruptedVerdict.mockReturnValue(true);
+      // The updater voids the record and resets its state; this route has to
+      // ask it, and then read the answer rather than the state it came in with.
+      mockGetUpdateState
+        .mockReturnValueOnce(interrupted)
+        .mockReturnValue(defaultState);
+      mockIsUpdateCompleted.mockResolvedValue(true);
+      mockGetVersionInfo.mockResolvedValue({
+        clawbox: { current: "3.9.0", target: null, updateAvailable: false },
+        openclaw: { current: "2026.7.1-2", target: null, updateAvailable: false },
+        edition: "hermes", remote: { reachable: true },
+      });
+
+      const body = await (await updateStatusGet()).json();
+
+      expect(mockCheckContinuation).toHaveBeenCalled();
+      expect(body.phase).toBe("completed");
+      expect(body.steps.every((s: { status: string }) => s.status === "completed")).toBe(true);
+    });
+
+    it("keeps reporting an interruption the box still has evidence for", async () => {
+      mockIsInterruptedVerdict.mockReturnValue(true);
+      mockGetUpdateState.mockReturnValue(interrupted);
+
+      const body = await (await updateStatusGet()).json();
+
+      expect(body.phase).toBe("failed");
+      expect(body.error).toMatch(/interrupted before it could finish/);
+    });
+
+    it("leaves a failure that is not that verdict alone", async () => {
+      // A rebuild that failed is a different finding with its own cause, and
+      // nothing about the markers may re-open it.
+      mockIsInterruptedVerdict.mockReturnValue(false);
+      mockGetUpdateState.mockReturnValue({
+        ...interrupted,
+        error: "The device restarted without producing a new build",
+      });
+
+      const body = await (await updateStatusGet()).json();
+
+      expect(mockCheckContinuation).not.toHaveBeenCalled();
+      expect(body.error).toMatch(/without producing a new build/);
+    });
+
+    it("returns a verdict reached during this poll, not one poll later", async () => {
+      // checkContinuation can DECIDE the failure — that is where the marker is
+      // read. Returning the idle state it was called with hid a real failure
+      // for a whole polling interval.
+      mockGetUpdateState
+        .mockReturnValueOnce(defaultState)
+        .mockReturnValue(interrupted);
+
+      const body = await (await updateStatusGet()).json();
+
+      expect(body.phase).toBe("failed");
+    });
   });
 });

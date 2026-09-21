@@ -22,10 +22,14 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
-    # Protected by exact branch-type main/beta deployment policies. A PR
-    # merge ref cannot enter this environment, even if its YAML names it.
-    # Populate from owned credentials and remove repo-scoped copies only
-    # after both main and beta consumers are wired and verified.
+    # Where the AI/App credentials live. The job names the protected
+    # Environment `clawreview` (deployment branches: beta + main only —
+    # created by the owner under Settings → Environments). On
+    # pull_request_target the run's ref is the BASE branch, so legitimate
+    # reviews pass the policy; a same-repo pull_request workflow that tried
+    # to name this Environment would evaluate the PR merge ref
+    # (refs/pull/<n>/merge) and be refused before a step starts. The Environment is the fence — nothing
+    # in this file is, because a pull_request run does not read this file.
     environment: clawreview
     # Job-scoped so future jobs don't inherit write access.
     permissions:
@@ -49,7 +53,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Install Claude backend
         # Two transports, one wins at runtime (script picks by env):

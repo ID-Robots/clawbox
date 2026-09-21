@@ -23,7 +23,7 @@ function buildStatus(overrides: ClawKeepStatusOverrides = {}) {
   return {
     paired: overrides.paired ?? false,
     configured: overrides.configured ?? false,
-    server: "https://openclawhardware.dev",
+    server: "https://clawbox.com",
     lastBackupAtMs: overrides.lastBackupAtMs ?? 0,
     lastHeartbeatAtMs: 0,
     lastHeartbeatStatus: "idle",
@@ -87,7 +87,7 @@ test("pair-start renders the challenge card and Cancel returns to pair card", as
   await page.route("**/setup-api/clawkeep/pair/start", (route) =>
     fulfillJson(route, {
       user_code: "ABCD-1234",
-      verification_url: "https://openclawhardware.dev/clawkeep/pair",
+      verification_url: "https://clawbox.com/clawkeep/pair",
       interval: 5,
       code_length: 9,
     }),
@@ -156,12 +156,30 @@ test("restore modal opens, fetches snapshots, and Esc dismisses it", async ({ pa
   // render branch.
   const modal = page.getByRole("dialog");
   await expect(modal).toBeVisible();
-  // Three buttons inside the modal (one per snapshot, plus close).
-  expect(await modal.getByRole("button").count()).toBeGreaterThan(2);
+  // Three buttons inside the modal (one per snapshot, plus close). Polled,
+  // not read once: the snapshot list arrives from a fetch the modal starts
+  // on mount, and a count taken before it lands is the close button alone.
+  await expect.poll(() => modal.getByRole("button").count()).toBeGreaterThan(2);
 
-  // Esc closes the modal — covers the keydown useEffect cleanup path.
+  // The picker traps keyboard navigation, not just the pointer. A global
+  // listener models the open chat's Escape handler behind the modal.
+  await page.evaluate(() => {
+    (window as Window & { restoreEscapeLeaks?: number }).restoreEscapeLeaks = 0;
+    window.addEventListener("keydown", (event) => {
+      const state = window as Window & { restoreEscapeLeaks?: number };
+      if (event.key === "Escape") state.restoreEscapeLeaks = (state.restoreEscapeLeaks ?? 0) + 1;
+    });
+  });
+  const close = modal.getByRole("button", { name: "Close", exact: true });
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(modal.getByRole("button").last()).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(close).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(modal).not.toBeVisible();
+  expect(await page.evaluate(() => (window as Window & { restoreEscapeLeaks?: number }).restoreEscapeLeaks)).toBe(0);
+  await expect(clawkeep.getByRole("button", { name: "Restore from snapshot" })).toBeFocused();
 });
 
 test("unpair flow opens the confirm dialog and Esc dismisses it without unpairing", async ({ page }) => {
@@ -185,9 +203,10 @@ test("unpair flow opens the confirm dialog and Esc dismisses it without unpairin
   });
 
   const clawkeep = await openClawkeep(page);
-  // Unpair sits at the very bottom of the paired dashboard, where the taskbar
-  // overlaps it — a positional click lands on the shelf instead. Dispatch the
-  // click straight to the element (no hit-testing) so its onClick fires.
+  // Unpair lives in the window's header row now (it used to sit at the very
+  // bottom of the dashboard, under the taskbar). The click is still dispatched
+  // straight to the element rather than by position, so a toast or the shelf
+  // overlapping the window cannot swallow it.
   const unpairButton = clawkeep.getByRole("button", { name: "Unpair" });
   await expect(unpairButton).toBeVisible();
   await unpairButton.dispatchEvent("click");
@@ -305,13 +324,23 @@ test("restore modal: clicking a snapshot opens the confirm dialog", async ({ pag
 
   // Confirm dialog stacks on top of the restore modal — covers the
   // ConfirmDialog render branch with the "restore" copy variant
-  // (different from the unpair variant exercised earlier).
-  const confirmDialogs = page.getByRole("dialog");
-  expect(await confirmDialogs.count()).toBeGreaterThanOrEqual(2);
+  // (different from the unpair variant exercised earlier). The confirm
+  // dialog makes everything behind it inert and aria-hidden while it is
+  // open (useModalDialog), so the restore modal underneath is still on
+  // screen but no longer in the accessibility tree: count dialogs with
+  // hidden ones included, and check the one on top is the live one.
+  const confirmDialogs = page.getByRole("dialog", { includeHidden: true });
+  await expect(confirmDialogs).toHaveCount(2);
+  const confirm = page.getByRole("dialog");
+  await expect(confirm).toHaveCount(1);
+  await expect(confirm.getByText(/restore/i).first()).toBeVisible();
   await page.keyboard.press("Escape");
+  // Escape closes only the confirm dialog; the restore modal is live again.
+  await expect(page.getByRole("dialog")).toHaveCount(1);
 });
 
 test("paired-without-encryption opens the passphrase setup modal on backup", async ({ page }) => {
+  await page.setViewportSize({ width: 1271, height: 594 });
   await setupDesktop(page);
 
   await page.route("**/setup-api/clawkeep", (route) =>
@@ -329,14 +358,15 @@ test("paired-without-encryption opens the passphrase setup modal on backup", asy
   const clawkeep = await openClawkeep(page);
   await clawkeep.getByRole("button", { name: "Protect my OpenClaw" }).click();
 
-  // SetPassphraseModal mounts and renders two password inputs plus an
-  // acknowledge checkbox. We fill the password fields to cover their
-  // onChange handlers + the mismatch-error render branch — but stop
-  // short of the submit click (the checkbox locator timed out cross-
-  // browser, likely because the modal's z-[100000] overlay confuses
-  // visibility heuristics in headless chromium).
-  const passwordInputs = clawkeep.locator('input[type="password"]');
+  // The dialog is portalled above the desktop, not trapped in its app window.
+  const dialog = page.getByRole("dialog", { name: "Set your backup passphrase" });
+  const passwordInputs = dialog.locator('input[type="password"]');
   await expect(passwordInputs.first()).toBeVisible();
   await passwordInputs.nth(0).fill("strong-passphrase-1234");
   await passwordInputs.nth(1).fill("strong-passphrase-1234");
+  await dialog.getByRole("checkbox").check();
+  await expect(dialog.getByRole("button", { name: "Save passphrase" })).toBeEnabled();
+  // A real pointer click must reach the controls above the desktop taskbar.
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
 });

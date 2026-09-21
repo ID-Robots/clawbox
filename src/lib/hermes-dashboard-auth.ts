@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import { envPort } from "@/lib/port-probe";
 
 // Server-side helper to call the Hermes dashboard's own API (127.0.0.2:9119)
 // from a ClawBox setup-api route, authenticated the same way the reverse proxy
@@ -11,9 +12,31 @@ import path from "path";
 // the Host header to that authority automatically, satisfying the dashboard's
 // DNS-rebind guard.
 
-const DASH_HOST = process.env.HERMES_DASH_HOST || "127.0.0.2";
-const DASH_PORT = process.env.HERMES_PORT || "9119";
-const DASH_ORIGIN = `http://${DASH_HOST}:${DASH_PORT}`;
+/**
+ * The systemd unit that RUNS the dashboard this module talks to.
+ *
+ * Exported and named once because two unrelated callers spell it — a ClawKeep
+ * restore, which has to bounce it so the restored `state.db` is the one served,
+ * and the image refresh, which has to bounce it so a newly installed backend is
+ * discovered. A rename that reached only one of them would be a feature that
+ * half works, silently.
+ */
+export const HERMES_DASHBOARD_UNIT = "clawbox-hermes-dashboard.service";
+
+/**
+ * The socket the dashboard listens on — `config/clawbox-hermes-dashboard.service`
+ * spells the same host and port in its ExecStart. Exported for the same reason
+ * as the unit name above: `hermes-dashboard-control` has to probe it to know
+ * whether a bounce actually brought the dashboard back, and a second copy of
+ * "127.0.0.2:9119" is a rename waiting to half-land.
+ */
+export const DASHBOARD_HOST = process.env.HERMES_DASH_HOST || "127.0.0.2";
+// Validated, not merely coerced: a non-numeric HERMES_PORT would make this NaN
+// and every consumer below would build `http://127.0.0.2:NaN`, and an
+// out-of-range one (`70000`, `-1`, `1.5`) is worse — truthy, so it survives a
+// bare `||`, and then rejected by Node at the socket. See envPort.
+export const DASHBOARD_PORT = envPort(process.env.HERMES_PORT, 9119);
+const DASH_ORIGIN = `http://${DASHBOARD_HOST}:${DASHBOARD_PORT}`;
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const USERNAME = process.env.HERMES_DASH_USERNAME || "clawbox";
 
@@ -75,16 +98,59 @@ async function loginWithBackoff(): Promise<string | null> {
   return cookie;
 }
 
-// Fetch a dashboard API path with a valid session, re-logging in once on 401.
-export async function dashboardFetch(apiPath: string, init?: RequestInit): Promise<Response> {
+/**
+ * A single-use ticket for a dashboard WebSocket upgrade, or null.
+ *
+ * A browser cannot put an Authorization header on a WebSocket handshake, so the
+ * dashboard mints a 30-second single-use ticket for the authenticated session
+ * and takes it as `?ticket=` on the upgrade. Server-side callers are in the same
+ * position for a different reason — the socket is opened by a library that
+ * speaks the handshake itself — so they use the same door the SPA does.
+ *
+ * Minted per connection, never cached: the store consumes it on first use, so a
+ * kept copy is worth nothing to a second connection and everything to a leak.
+ */
+export async function dashboardWsTicket(signal?: AbortSignal): Promise<string | null> {
+  const res = await dashboardFetch("/api/auth/ws-ticket", { method: "POST", ...(signal ? { signal } : {}) }).catch(
+    () => null,
+  );
+  if (!res || !res.ok) return null;
+  const body = (await res.json().catch(() => null)) as { ticket?: unknown } | null;
+  return typeof body?.ticket === "string" && body.ticket ? body.ticket : null;
+}
+
+/** Where the dashboard's WebSocket endpoints live, for a caller that opens one. */
+export const DASHBOARD_WS_ORIGIN = `ws://${DASHBOARD_HOST}:${DASHBOARD_PORT}`;
+
+/**
+ * Fetch a dashboard API path with a valid session, re-logging in once on 401.
+ *
+ * `timeoutMs` overrides the module default for the one kind of call that is
+ * legitimately slow: synthesising speech. Every other endpoint here answers
+ * from memory or a database and has no business taking seconds, so the tight
+ * default stays the default — a caller has to ask for the longer rope and say
+ * why. (`/api/audio/speak` reaches a cloud voice, or a local engine paying a
+ * cold start, and 8 s would abort a request that was going to succeed and
+ * report it as a dead dashboard.)
+ */
+export async function dashboardFetch(
+  apiPath: string,
+  init?: RequestInit & { timeoutMs?: number },
+): Promise<Response> {
   if (!cachedCookie) cachedCookie = await loginWithBackoff();
+  const deadline = init?.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const attempt = () =>
     fetch(`${DASH_ORIGIN}${apiPath}`, {
       ...init,
       redirect: REDIRECT_POLICY,
-      // Callers that don't bring their own deadline still get one — no request
-      // from this module may be able to hang indefinitely.
-      signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      // No request from this module may be able to hang indefinitely — and a
+      // caller that brings its own signal used to REPLACE that guarantee
+      // rather than add to it, so the one call that forwards a signal
+      // (`dashboardWsTicket`) was the one call with no deadline at all. Both
+      // now apply: whichever fires first ends the request.
+      signal: init?.signal
+        ? AbortSignal.any([init.signal, AbortSignal.timeout(deadline)])
+        : AbortSignal.timeout(deadline),
       headers: { ...(init?.headers || {}), cookie: cachedCookie || "" },
     });
   let res = await attempt();

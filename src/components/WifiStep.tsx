@@ -270,9 +270,9 @@ export default function WifiStep({ onNext }: WifiStepProps) {
           <Image
             src="/clawbox-crab.png"
             alt="ClawBox"
-            width={120}
-            height={120}
-            className="w-20 h-20 sm:w-[120px] sm:h-[120px] object-contain animate-welcome-powerup"
+            width={62}
+            height={62}
+            className="w-[41px] h-[41px] sm:w-[62px] sm:h-[62px] object-contain animate-welcome-powerup"
             priority
           />
           <h1 className="text-xl sm:text-2xl font-bold font-display text-center">
@@ -462,7 +462,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                   />
                   <button
                     type="button" onClick={() => setShowPassword((v) => !v)}
-                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    aria-label={showPassword ? t("login.hidePassword") : t("login.showPassword")}
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5"
                   >
                     <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{showPassword ? "visibility_off" : "visibility"}</span>

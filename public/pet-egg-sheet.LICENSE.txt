@@ -1,0 +1,52 @@
+pet-egg-sheet.png
+=================
+
+Bundled third-party asset. Retained here to satisfy the MIT licence's
+requirement that the copyright notice ship with the copied material.
+
+Source
+------
+File:    apps/desktop/src/components/pet/pet-egg-sheet.png
+Project: NousResearch/hermes-agent (the Hermes agent)
+Upstream commit that introduced it:
+         743985bf1 "feat(pets): Pokedex generate UI - overlay, animated egg,
+         hatch FX, manage"
+sha256:  9630e59d8836ac8cc8720ceff14d0f4b90fb0a04976e65dca5be0242e1e870c3
+         (copied byte-for-byte; unmodified)
+
+Licence
+-------
+MIT License
+
+Copyright (c) 2025 Nous Research
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Original art credit
+-------------------
+Upstream's own source comment (apps/desktop/src/components/pet/
+pixel-egg-sprite.tsx) credits the artwork as the iamcrog "bouncing hatching
+egg" 12-frame sheet.
+
+Sheet geometry
+--------------
+32x384 px, RGBA. 12 stacked cells of 32x32.
+Frames 0-8 are the intact egg (two alternating squash/stretch poses).
+Frames 9-11 are the crack/hatch burst.
+ClawBox uses frames 0-5 only, so the placeholder egg never shows a crack.

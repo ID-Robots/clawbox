@@ -6,6 +6,12 @@ vi.mock("@/lib/llamacpp", () => ({
   getLlamaCppBaseUrl: vi.fn(() => "http://127.0.0.1:8080/v1"),
 }));
 
+vi.mock("@/lib/embed-server", () => ({
+  getEmbedBaseUrl: vi.fn(() => "http://127.0.0.1:8081/v1"),
+  getEmbedRootUrl: vi.fn(() => "http://127.0.0.1:8081"),
+  getEmbedBatch: vi.fn(() => 1024),
+}));
+
 vi.mock("@/lib/local-ai-runtime", () => ({
   beginLocalAiUse: vi.fn(),
   endLocalAiUse: vi.fn(),
@@ -19,8 +25,9 @@ vi.mock("@/lib/local-ai-token", () => ({
     if (!header) return false;
     const m = header.match(/^Bearer\s+(.+)$/i);
     if (!m) return false;
-    const t = m[1].trim();
-    return t === VALID_TOKEN || t === "llamacpp-local" || t === "ollama-local";
+    // Only the per-install token. The legacy sentinels are exercised against
+    // the real verifier in src/tests/unit/local-ai-token.test.ts.
+    return m[1].trim() === VALID_TOKEN;
   }),
 }));
 
@@ -122,30 +129,11 @@ describe("local AI proxy routes", () => {
     expect(mockBeginLocalAiUse).not.toHaveBeenCalled();
   });
 
-  it("accepts the legacy llamacpp-local sentinel for backward compat", async () => {
-    const mockFetch = vi.fn().mockResolvedValue(new Response("{}", {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    }));
-    vi.stubGlobal("fetch", mockFetch);
-
-    const mod = await import("@/app/setup-api/local-ai/llamacpp/v1/[...path]/route");
-    const response = await mod.GET(
-      new Request("http://localhost/setup-api/local-ai/llamacpp/v1/models", {
-        headers: { Authorization: "Bearer llamacpp-local" },
-      }),
-      { params: Promise.resolve({ path: ["models"] }) },
-    );
-
-    expect(response.status).toBe(200);
-    expect(mockFetch).toHaveBeenCalled();
-  });
-
-  it("accepts the legacy ollama-local sentinel for backward compat", async () => {
-    const mockFetch = vi.fn().mockResolvedValue(new Response("{}", {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    }));
+  it("refuses a public legacy sentinel the verifier does not vouch for", async () => {
+    // The proxy is session-exempt in middleware and reachable on 0.0.0.0:80,
+    // so the bearer check is the ONLY gate: a string anyone can read in the
+    // source must never pass it on its own.
+    const mockFetch = vi.fn();
     vi.stubGlobal("fetch", mockFetch);
 
     const mod = await import("@/app/setup-api/local-ai/ollama/[...path]/route");
@@ -156,7 +144,265 @@ describe("local AI proxy routes", () => {
       { params: Promise.resolve({ path: ["api", "tags"] }) },
     );
 
-    expect(response.status).toBe(200);
-    expect(mockFetch).toHaveBeenCalled();
+    expect(response.status).toBe(401);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockEnsureLocalAiReady).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * TASK-457 (a), the backend half. The picker change stops a level Ollama
+ * refuses from being OFFERED; this stops one that arrives anyway — a stale
+ * client, a direct API caller, or "Thinking on" (`max`) against a model that
+ * simply cannot think — from failing the turn.
+ *
+ * Measured on the box (Ollama 0.32.15, qwen2.5:0.5b, capabilities
+ * ["completion","tools"]): every reasoning_effort but `none` → HTTP 400
+ * "does not support thinking"; no field at all → HTTP 200.
+ */
+describe("ollama chat-completions reasoning rewrite", () => {
+  const CHAT_PATH = ["v1", "chat", "completions"];
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockEnsureLocalAiReady.mockResolvedValue();
+    const { _resetOllamaCapabilityCacheForTests } = await import("@/lib/ollama-capabilities");
+    _resetOllamaCapabilityCacheForTests();
+  });
+
+  /** fetch stub answering /api/show with `capabilities` and everything else 200. */
+  function stubOllama(capabilities: string[] | null) {
+    const calls: { url: string; body: string }[] = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const body = typeof init?.body === "string" ? init.body : "";
+      calls.push({ url, body });
+      if (url.endsWith("/api/show")) {
+        if (capabilities === null) return new Response("nope", { status: 500 });
+        return new Response(JSON.stringify({ capabilities }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return calls;
+  }
+
+  async function chat(body: unknown) {
+    const mod = await import("@/app/setup-api/local-ai/ollama/[...path]/route");
+    return mod.POST(
+      new Request("http://localhost/setup-api/local-ai/ollama/v1/chat/completions", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      }),
+      { params: Promise.resolve({ path: CHAT_PATH }) },
+    );
+  }
+
+  const upstreamBody = (calls: { url: string; body: string }[]) =>
+    JSON.parse(calls.find((c) => c.url.endsWith("/chat/completions"))!.body);
+
+  it("drops reasoning_effort for a model that cannot think", async () => {
+    const calls = stubOllama(["completion", "tools"]);
+
+    const res = await chat({ model: "qwen2.5:3b", messages: [], reasoning_effort: "max" });
+
+    expect(res.status).toBe(200);
+    const sent = upstreamBody(calls);
+    expect(sent).not.toHaveProperty("reasoning_effort");
+    expect(sent.model).toBe("qwen2.5:3b");
+  });
+
+  it("folds the OFF end onto ollama's own word for a model that can think", async () => {
+    const calls = stubOllama(["completion", "tools", "thinking"]);
+
+    const res = await chat({ model: "gpt-oss:20b", messages: [], reasoning_effort: "minimal" });
+
+    expect(res.status).toBe(200);
+    expect(upstreamBody(calls).reasoning_effort).toBe("none");
+  });
+
+  it("keeps a thinking level for a model that can think", async () => {
+    const calls = stubOllama(["completion", "thinking"]);
+
+    await chat({ model: "gpt-oss:20b", messages: [], reasoning_effort: "max" });
+
+    expect(upstreamBody(calls).reasoning_effort).toBe("max");
+  });
+
+  it("forwards the body untouched when the capability probe fails", async () => {
+    const calls = stubOllama(null);
+
+    await chat({ model: "qwen2.5:3b", messages: [], reasoning_effort: "max" });
+
+    expect(upstreamBody(calls).reasoning_effort).toBe("max");
+  });
+
+  it("does not probe at all when the body asks for no reasoning", async () => {
+    const calls = stubOllama(["completion", "tools"]);
+
+    await chat({ model: "qwen2.5:3b", messages: [] });
+
+    expect(calls.some((c) => c.url.endsWith("/api/show"))).toBe(false);
+  });
+
+  it("caches the probe across turns", async () => {
+    const calls = stubOllama(["completion", "tools"]);
+
+    await chat({ model: "qwen2.5:3b", messages: [], reasoning_effort: "max" });
+    await chat({ model: "qwen2.5:3b", messages: [], reasoning_effort: "high" });
+
+    expect(calls.filter((c) => c.url.endsWith("/api/show"))).toHaveLength(1);
+  });
+
+  it("leaves a non-chat ollama path streaming, untouched", async () => {
+    const calls = stubOllama(["completion", "tools"]);
+
+    const mod = await import("@/app/setup-api/local-ai/ollama/[...path]/route");
+    await mod.POST(
+      new Request("http://localhost/setup-api/local-ai/ollama/api/chat", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ model: "qwen2.5:3b", reasoning_effort: "max" }),
+      }),
+      { params: Promise.resolve({ path: ["api", "chat"] }) },
+    );
+
+    expect(calls.some((c) => c.url.endsWith("/api/show"))).toBe(false);
+  });
+});
+
+/**
+ * The memory embedder's proxy: OpenClaw's `memory.search.remote` points here.
+ * It is the wake path (ensureLocalAiReady before every request) and the place
+ * the qwen3 query instruction — which OpenClaw's ollama adapter used to add
+ * and its openai-compatible adapter does not — is restored for queries.
+ */
+describe("the memory embedder proxy", () => {
+  const QUERY_PREFIX = "Instruct: Given a user query, retrieve relevant memory notes and documents\nQuery:";
+
+  /** Answers the embedder: /tokenize counts characters, /embeddings echoes. */
+  function stubEmbedder() {
+    const calls: { url: string; body: unknown }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        const body = init.body ? JSON.parse(String(init.body)) : null;
+        calls.push({ url, body });
+        if (url.endsWith("/tokenize")) {
+          return new Response(JSON.stringify({ tokens: Array.from(String(body.content), (_, i) => i) }), { status: 200 });
+        }
+        if (url.endsWith("/detokenize")) {
+          return new Response(JSON.stringify({ content: "x".repeat(body.tokens.length) }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ data: [{ embedding: [0.1], index: 0 }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    return calls;
+  }
+
+  // The route is mounted at /embed/v1/[...path], so `path` never carries the
+  // version segment — same as the llamacpp cases above.
+  async function embeddings(body: unknown, path = ["embeddings"]) {
+    const mod = await import("@/app/setup-api/local-ai/embed/v1/[...path]/route");
+    return await mod.POST(
+      new Request(`http://localhost/setup-api/local-ai/embed/v1/${path.join("/")}`, {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      }),
+      { params: Promise.resolve({ path }) },
+    );
+  }
+
+  it("wakes the embedder, prefixes a query and strips input_type before forwarding", async () => {
+    const calls = stubEmbedder();
+
+    const res = await embeddings({ model: "qwen3-embedding-0.6b", input: ["tunnel link"], input_type: "query" });
+
+    expect(res.status).toBe(200);
+    expect(mockEnsureLocalAiReady).toHaveBeenCalledWith("embed");
+    expect(mockBeginLocalAiUse).toHaveBeenCalledWith("embed");
+    const upstream = calls.find((c) => c.url === "http://127.0.0.1:8081/v1/embeddings");
+    expect(upstream?.body).toEqual({ model: "qwen3-embedding-0.6b", input: [`${QUERY_PREFIX}tunnel link`] });
+    // Short inputs never cost a tokenizer round trip.
+    expect(calls.some((c) => c.url.endsWith("/tokenize"))).toBe(false);
+  });
+
+  it("passes documents through bare — the index side of an asymmetric model", async () => {
+    const calls = stubEmbedder();
+
+    await embeddings({ model: "m", input: ["ping"], input_type: "document" });
+
+    const upstream = calls.find((c) => c.url === "http://127.0.0.1:8081/v1/embeddings");
+    expect(upstream?.body).toEqual({ model: "m", input: ["ping"] });
+  });
+
+  it("trims an input that would overflow the batch instead of letting the server refuse it", async () => {
+    const calls = stubEmbedder();
+    // 1,200 characters tokenizes (in the stub) to 1,200 tokens: over 1024 - 8.
+    const long = "y".repeat(1200);
+
+    await embeddings({ model: "m", input: [long, "fine"], input_type: "document" });
+
+    const upstream = calls.find((c) => c.url === "http://127.0.0.1:8081/v1/embeddings");
+    const sent = upstream?.body as { input: string[] };
+    expect(sent.input[0]).toHaveLength(1024 - 8);
+    expect(sent.input[1]).toBe("fine");
+    expect(calls.filter((c) => c.url.endsWith("/tokenize"))).toHaveLength(1);
+  });
+
+  it("refuses an oversized embeddings body rather than forwarding it unprefixed", async () => {
+    stubEmbedder();
+    const mod = await import("@/app/setup-api/local-ai/embed/v1/[...path]/route");
+    const res = await mod.POST(
+      new Request("http://localhost/setup-api/local-ai/embed/v1/embeddings", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json", "Content-Length": String(50 * 1024 * 1024) }),
+        body: "{}",
+      }),
+      { params: Promise.resolve({ path: ["embeddings"] }) },
+    );
+    expect(res.status).toBe(413);
+    expect(mockEndLocalAiUse).toHaveBeenCalledWith("embed");
+  });
+
+  it("leaves a non-embeddings path streaming, untouched", async () => {
+    const calls = stubEmbedder();
+    const mod = await import("@/app/setup-api/local-ai/embed/v1/[...path]/route");
+    await mod.GET(
+      new Request("http://localhost/setup-api/local-ai/embed/v1/models", { headers: authHeaders() }),
+      { params: Promise.resolve({ path: ["models"] }) },
+    );
+    expect(calls[0].url).toBe("http://127.0.0.1:8081/v1/models");
+  });
+
+  it("answers 502 when the embedder cannot be woken, so OpenClaw falls back to keyword search", async () => {
+    stubEmbedder();
+    mockEnsureLocalAiReady.mockRejectedValueOnce(new Error("Not enough free memory to wake the memory embedder"));
+
+    const res = await embeddings({ model: "m", input: ["q"], input_type: "query" });
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "Not enough free memory to wake the memory embedder" });
+  });
+
+  it("requires the service bearer like every other proxy", async () => {
+    stubEmbedder();
+    const mod = await import("@/app/setup-api/local-ai/embed/v1/[...path]/route");
+    const res = await mod.POST(
+      new Request("http://localhost/setup-api/local-ai/embed/v1/embeddings", {
+        method: "POST",
+        body: JSON.stringify({ input: ["q"] }),
+      }),
+      { params: Promise.resolve({ path: ["embeddings"] }) },
+    );
+    expect(res.status).toBe(401);
+    expect(mockEnsureLocalAiReady).not.toHaveBeenCalled();
   });
 });

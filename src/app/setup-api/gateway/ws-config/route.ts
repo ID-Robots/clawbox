@@ -4,9 +4,11 @@ import fs from "fs/promises";
 
 export const dynamic = "force-dynamic";
 
-const OPENCLAW_CONFIG = process.env.OPENCLAW_HOME
-  ? `${process.env.OPENCLAW_HOME}/openclaw.json`
-  : "/home/clawbox/.openclaw/openclaw.json";
+const OPENCLAW_CONFIG = `${
+  process.env.CLAWBOX_OPENCLAW_HOME
+  || process.env.OPENCLAW_HOME
+  || `${process.env.HOME ?? "/home/clawbox"}/.openclaw`
+}/openclaw.json`;
 
 /**
  * Infer the scheme the client used to reach us. Behind Cloudflare Tunnel the

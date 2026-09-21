@@ -1,0 +1,180 @@
+/**
+ * The team's git plumbing against a REAL repository in a temp folder: the
+ * team branch, a worker's worktree and branch, the merge home, a conflict
+ * aborted rather than guessed at, and the worktree's removal.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "child_process";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { addWorkerWorktree, changedFiles, ensureTeamBranch, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+let dir: string;
+const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@x", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@x" } }).trim();
+
+beforeEach(() => {
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), "team-wt-"));
+  git(dir, "init", "-q", "-b", "master");
+  git(dir, "config", "user.email", "t@x");
+  git(dir, "config", "user.name", "t");
+  fs.writeFileSync(path.join(dir, "index.html"), "<h1>Hello</h1>\n");
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "first");
+});
+
+afterEach(() => {
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+describe("a coding team's git plumbing", () => {
+  it("forks the team branch from the checkout, gives a worker a worktree on its own branch, and merges it home", async () => {
+    const team = await ensureTeamBranch(dir, "team-abc");
+    expect(team).toEqual({ ok: true, branch: teamBranchName("team-abc"), base: "master" });
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-abc");
+    // .clawbox/ is kept out of git status without touching the project's .gitignore.
+    expect(fs.readFileSync(path.join(dir, ".git", "info", "exclude"), "utf8")).toContain("/.clawbox/");
+
+    const wt = await addWorkerWorktree(dir, "team-abc", "t1", 1);
+    expect(wt).toMatchObject({ ok: true, path: path.join(dir, ".clawbox", "worktrees", "t1-1"), branch: workerBranchName("team-abc", "t1", 1) });
+    if (!wt.ok) return;
+    expect(git(wt.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-abc-t1-1");
+    fs.writeFileSync(path.join(wt.path, "app.js"), "console.log(1)\n");
+    git(wt.path, "add", "-A");
+    git(wt.path, "commit", "-q", "-m", "Coding agent: wire app.js");
+    expect(await changedFiles(dir, wt.branch)).toEqual(["app.js"]);
+    expect(git(dir, "status", "--porcelain")).toBe("");
+
+    const merged = await mergeWorkerBranch(dir, wt.branch, "Coding team team-abc: t1");
+    expect(merged).toEqual({ ok: true, merged: true });
+    expect(fs.existsSync(path.join(dir, "app.js"))).toBe(true);
+    expect(git(dir, "log", "-1", "--format=%s")).toBe("Coding team team-abc: t1");
+    await removeWorktree(dir, wt.path);
+    expect(fs.existsSync(wt.path)).toBe(false);
+    // The branch stays as history.
+    expect(git(dir, "branch", "--list", "clawbox/team-abc-t1-1")).toContain("t1-1");
+  });
+
+  it("commits what lay uncommitted in the checkout before a merge, so a file the worker also brought does not block it", async () => {
+    const made = await ensureTeamBranch(dir, "team-x");
+    expect(made.ok).toBe(true);
+    const wt = await addWorkerWorktree(dir, "team-x", "t1", 1);
+    if (!wt.ok) throw new Error(wt.detail);
+    // The worker writes its file AND a favicon; meanwhile the box drew the
+    // same favicon into the team's checkout, uncommitted.
+    fs.writeFileSync(path.join(wt.path, "index.html"), "<h1>hi</h1>\n");
+    fs.writeFileSync(path.join(wt.path, "favicon.ico"), "icon-bytes");
+    git(wt.path, "add", "-A");
+    git(wt.path, "commit", "-q", "-m", "worker: index and favicon");
+    fs.writeFileSync(path.join(dir, "favicon.ico"), "icon-bytes");
+    const merged = await mergeWorkerBranch(dir, wt.branch, "merge t1");
+    expect(merged).toEqual({ ok: true, merged: true });
+    expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toBe("<h1>hi</h1>\n");
+    expect(fs.readFileSync(path.join(dir, "favicon.ico"), "utf8")).toBe("icon-bytes");
+    // The stray file went on the team branch in a commit of its own, before the merge.
+    expect(git(dir, "log", "--oneline", "-3")).toMatch(/files present in the checkout before a merge/);
+    expect(git(dir, "status", "--porcelain")).toBe("");
+  });
+
+  it("reports a branch that added nothing, and aborts a conflict instead of guessing", async () => {
+    await ensureTeamBranch(dir, "team-abc");
+    const idle = await addWorkerWorktree(dir, "team-abc", "t1", 1);
+    if (!idle.ok) throw new Error(idle.detail);
+    expect(await mergeWorkerBranch(dir, idle.branch, "m")).toEqual({ ok: true, merged: false });
+    await removeWorktree(dir, idle.path);
+
+    // Two workers change the same line: the second one's merge conflicts.
+    const a = await addWorkerWorktree(dir, "team-abc", "t2", 1);
+    const b = await addWorkerWorktree(dir, "team-abc", "t3", 1);
+    if (!a.ok || !b.ok) throw new Error("worktrees");
+    fs.writeFileSync(path.join(a.path, "index.html"), "<h1>From A</h1>\n");
+    git(a.path, "commit", "-q", "-am", "A");
+    fs.writeFileSync(path.join(b.path, "index.html"), "<h1>From B</h1>\n");
+    git(b.path, "commit", "-q", "-am", "B");
+    expect(await mergeWorkerBranch(dir, a.branch, "A home")).toEqual({ ok: true, merged: true });
+    const clash = await mergeWorkerBranch(dir, b.branch, "B home");
+    expect(clash).toMatchObject({ ok: false, conflict: true });
+    if (clash.ok) return;
+    expect(clash.detail).toMatch(/CONFLICT/);
+    // Aborted: the checkout is clean and still says A.
+    expect(git(dir, "status", "--porcelain")).toBe("");
+    expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toBe("<h1>From A</h1>\n");
+    await removeWorktree(dir, a.path);
+    await removeWorktree(dir, b.path);
+  });
+
+  it("makes the first commit on a repository that has none, so the fork is a fork", async () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), "team-wt-empty-"));
+    try {
+      git(empty, "init", "-q", "-b", "main");
+      git(empty, "config", "user.email", "t@x");
+      git(empty, "config", "user.name", "t");
+      const team = await ensureTeamBranch(empty, "team-x");
+      expect(team).toEqual({ ok: true, branch: "clawbox/team-x", base: "main" });
+      expect(git(empty, "branch", "--list", "main")).toContain("main");
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a folder that is not a repository", async () => {
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), "team-wt-plain-"));
+    try {
+      expect(await ensureTeamBranch(plain, "team-x")).toMatchObject({ ok: false });
+    } finally {
+      fs.rmSync(plain, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * team-6rgz8cyx and team-5oxkp7a9 (2026-09-06): CPython wrote
+ * __pycache__/calc.cpython-310.pyc beside the file each task named. It was
+ * swept in by `git add -A`, and the third alert of the run was git refusing
+ * to merge two workers' copies of it: "Cannot merge binary files". The run
+ * died on the alert ceiling with correct work in hand.
+ */
+describe("generated artifacts", () => {
+  it("keeps a worker's bytecode cache out of git entirely", async () => {
+    const team = await ensureTeamBranch(dir, "team-art");
+    expect(team.ok).toBe(true);
+
+    const exclude = fs.readFileSync(path.join(dir, ".git", "info", "exclude"), "utf8");
+    expect(exclude).toContain("__pycache__/");
+    expect(exclude).toContain("*.py[cod]");
+
+    const wt = await addWorkerWorktree(dir, "team-art", "t1", 1);
+    if (!wt.ok) throw new Error(wt.detail);
+
+    // A worker edits the file its task named; the interpreter leaves a .pyc.
+    fs.writeFileSync(path.join(wt.path, "calc.py"), "def add(a, b):\n    return a + b\n");
+    fs.mkdirSync(path.join(wt.path, "__pycache__"), { recursive: true });
+    fs.writeFileSync(path.join(wt.path, "__pycache__", "calc.cpython-310.pyc"), Buffer.from([0x6f, 0x0d, 0x0d, 0x0a, 0x00, 0xff]));
+
+    git(wt.path, "add", "-A");
+    git(wt.path, "-c", "user.email=t@x", "-c", "user.name=t", "commit", "-q", "-m", "work");
+
+    const inCommit = git(wt.path, "show", "--name-only", "--pretty=format:", "HEAD").split("\n").filter(Boolean);
+    expect(inCommit).toContain("calc.py");
+    expect(inCommit.some((f) => f.includes("__pycache__"))).toBe(false);
+
+    const merged = await mergeWorkerBranch(dir, wt.branch, "bring t1 home");
+    expect(merged).toMatchObject({ ok: true });
+  });
+
+  it("names what is generated and what is merely built on purpose", () => {
+    expect(isGeneratedArtifact("__pycache__/calc.cpython-310.pyc")).toBe(true);
+    expect(isGeneratedArtifact("src/__pycache__/a.pyc")).toBe(true);
+    expect(isGeneratedArtifact("node_modules/x/index.js")).toBe(true);
+    expect(isGeneratedArtifact(".DS_Store")).toBe(true);
+    expect(isGeneratedArtifact("app.tsbuildinfo")).toBe(true);
+    // A task can be asked to produce these, so they stay visible.
+    expect(isGeneratedArtifact("dist/bundle.js")).toBe(false);
+    expect(isGeneratedArtifact("src/calc.py")).toBe(false);
+  });
+});

@@ -1,0 +1,938 @@
+/**
+ * Settings → Local AI (src/components/LocalAiPanel.tsx): one grouped list of
+ * everything on the box, every row with the same four verbs as its own
+ * buttons and the role actions behind a "more" menu.
+ *
+ * Pinned: rows are grouped by what they are for; a row's role (primary /
+ * fallback) comes from the surface that decides it, not from the inventory;
+ * each action posts to the route that owns the change — the panel never
+ * writes routing state of its own; an uninstall is asked about first; and an
+ * engine's extra settings are drawn only while it is installed and enabled.
+ */
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { I18nProvider } from "@/lib/i18n";
+import LocalAiPanel from "@/components/LocalAiPanel";
+import { OPEN_APP_EVENT, PROVIDERS_CHANGED_EVENT } from "@/lib/ui-events";
+
+function model(over: Record<string, unknown>) {
+  return {
+    id: "x", name: "X", kind: "llm", runtime: "llama.cpp", installed: true, enabled: null,
+    running: "idle", diskBytes: null, memoryBytes: null, control: "none", detail: "Installed.",
+    ...over,
+  };
+}
+
+const MODELS = [
+  model({ id: "llamacpp", name: "Gemma 4", kind: "llm", running: "idle", managedBy: "localAi", detail: "Ready. Sleeps until needed." }),
+  model({ id: "kokoro", name: "Kokoro", kind: "tts", runtime: "systemd user service", enabled: true, running: "running", control: "user-unit", detail: "Running as the GPU voice." }),
+  model({ id: "whisper", name: "Whisper", kind: "stt", runtime: "systemd user service", enabled: false, control: "user-unit", detail: "Installed and stopped." }),
+  model({ id: "embedding", name: "Memory embeddings", kind: "embedding", runtime: "ollama", running: "running", managedBy: "clawkeep", detail: "Embedding your memory on the box." }),
+];
+
+let posts: { url: string; body: unknown }[] = [];
+let deletes: string[] = [];
+
+type PostAnswer = (url: string) => Promise<Response> | Response | undefined;
+
+const WHISPER_STATE = {
+  installed: true, running: true, active: "base",
+  sizes: [
+    { id: "tiny", bytes: 78 * 1024 * 1024, cached: false, diskBytes: null },
+    { id: "base", bytes: 150 * 1024 * 1024, cached: true, diskBytes: 150 * 1024 * 1024 },
+  ],
+  freeBytes: 20 * 1024 * 1024 * 1024, reserveBytes: 512 * 1024 * 1024,
+};
+const EMBED_STATUS = { installed: true, binaryAvailable: true, modelAvailable: true, modelBytes: 640 * 1024 * 1024, model: "qwen3-embedding-0.6b", engine: "llama.cpp" };
+
+function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?: string; sttPrimary?: string; sttCloud?: boolean; post?: PostAnswer; del?: PostAnswer; models?: unknown[] } = {}) {
+  posts = [];
+  deletes = [];
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const url = input.toString();
+    if (init?.method === "POST") {
+      posts.push({ url, body: JSON.parse(String(init.body)) });
+      // A test may script the box's answer (a refusal, a slow reply); the
+      // default is a plain success.
+      return (await over.post?.(url)) ?? json({ ok: true });
+    }
+    if (init?.method === "DELETE") {
+      deletes.push(url);
+      return (await over.del?.(url)) ?? json({ ok: true });
+    }
+    if (url.startsWith("/setup-api/local-models")) return json({ models: over.models ?? MODELS, unavailable: [] });
+    if (url.startsWith("/setup-api/providers/status")) {
+      return json({ harness: "openclaw", degraded: false, defaultProvider: over.llmDefault ? "llamacpp" : "clawai", providers: [
+        { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: !over.llmDefault, section: "ai", enabled: true },
+        // `llmWired: false` is a Gemma that is on the disk but wired to nothing.
+        { id: "llamacpp", label: "Gemma 4", state: over.llmWired === false ? "not_configured" : "connected", isDefault: !!over.llmDefault, section: "localAi", enabled: true },
+      ] });
+    }
+    if (url.startsWith("/setup-api/whisper")) return json(WHISPER_STATE);
+    if (url.startsWith("/setup-api/embed/status")) return json(EMBED_STATUS);
+    if (url.startsWith("/setup-api/tts")) {
+      return json({ choice: over.ttsChoice ?? "auto", engines: [{ id: "local", configured: true }, { id: "cloud", configured: true }] });
+    }
+    if (url.startsWith("/setup-api/stt")) {
+      const cloud = over.sttCloud ?? true;
+      const primary = over.sttPrimary ?? (cloud ? "cloud" : "local");
+      return json({
+        primary,
+        engines: { cloud: { configured: cloud, label: "c" }, local: { installed: true, label: "l" } },
+        chain: cloud ? ["cloud", "local"] : ["local"],
+      });
+    }
+    if (url.startsWith("/setup-api/local-ai/exclusive")) return json({ enabled: false });
+    return json({ error: "unexpected" }, 404);
+  }));
+}
+
+function renderPanel() {
+  return render(<I18nProvider><LocalAiPanel active edition="openclaw" /></I18nProvider>);
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("LocalAiPanel", () => {
+
+  it("refreshes other provider surfaces only after a successful streamed model activation", async () => {
+    let finish!: () => void;
+    const changed = vi.fn();
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    try {
+      stubFetch({ post: (url) => url === "/setup-api/llamacpp/install"
+        ? new Response(new ReadableStream<Uint8Array>({ start(controller) {
+            const encoder = new TextEncoder();
+            controller.enqueue(encoder.encode(JSON.stringify({ status: "Starting Gemma" }) + "\n"));
+            finish = () => { controller.enqueue(encoder.encode(JSON.stringify({ success: true }) + "\n")); controller.close(); };
+          } }), { headers: { "content-type": "application/x-ndjson" } })
+        : undefined });
+      renderPanel();
+      await screen.findByTestId("local-model-role-llamacpp");
+      fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+      fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-primary"));
+      await screen.findByTestId("local-model-progress-llamacpp");
+      expect(changed).not.toHaveBeenCalled();
+      finish();
+      await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+    } finally { window.removeEventListener(PROVIDERS_CHANGED_EVENT, changed); }
+  });
+
+  it("does not announce a provider change when a model activation stream fails", async () => {
+    const changed = vi.fn();
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    try {
+      stubFetch({ post: (url) => url === "/setup-api/llamacpp/install"
+        ? new Response(JSON.stringify({ error: "Activation failed" }) + "\n", { headers: { "content-type": "application/x-ndjson" } }) : undefined });
+      renderPanel();
+      await screen.findByTestId("local-model-role-llamacpp");
+      fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+      fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-primary"));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Activation failed");
+      expect(changed).not.toHaveBeenCalled();
+    } finally { window.removeEventListener(PROVIDERS_CHANGED_EVENT, changed); }
+  });
+
+  it("refreshes provider surfaces after a saved fallback change even while the gateway restarts", async () => {
+    const changed = vi.fn();
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    try {
+      stubFetch({ llmDefault: true, post: (url) => url === "/setup-api/providers/default"
+        ? new Response(JSON.stringify({ ok: true, warning: "Saved, gateway restarting" }), { headers: { "content-type": "application/json" } }) : undefined });
+      renderPanel();
+      await screen.findByTestId("local-model-role-llamacpp");
+      fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+      fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-fallback"));
+      await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+    } finally { window.removeEventListener(PROVIDERS_CHANGED_EVENT, changed); }
+  });
+
+  it("groups the box's engines by what they are for", async () => {
+    stubFetch();
+    renderPanel();
+    const llm = await screen.findByTestId("local-ai-group-llm");
+    expect(within(llm).getByTestId("local-model-llamacpp")).toBeInTheDocument();
+    // The Ollama row is gone: the memory embedder runs on llama.cpp now.
+    expect(screen.queryByTestId("local-model-ollama")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("local-ai-group-tts")).getByTestId("local-model-kokoro")).toBeInTheDocument();
+    expect(within(screen.getByTestId("local-ai-group-stt")).getByTestId("local-model-whisper")).toBeInTheDocument();
+    expect(within(screen.getByTestId("local-ai-group-embedding")).getByTestId("local-model-embedding")).toBeInTheDocument();
+  });
+
+  it("reads each row's role from the surface that decides it", async () => {
+    stubFetch({ llmDefault: false, ttsChoice: "local", sttPrimary: "cloud" });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => {
+      expect(screen.getByTestId("local-model-role-llamacpp")).toHaveTextContent(/fallback/i);
+      expect(screen.getByTestId("local-model-role-kokoro")).toHaveTextContent(/primary/i);
+      expect(screen.getByTestId("local-model-role-whisper")).toHaveTextContent(/fallback/i);
+    });
+  });
+
+  it("offers the right actions in the menu and posts them to the route that owns the change", async () => {
+    stubFetch({ llmDefault: false, ttsChoice: "auto", sttPrimary: "cloud" });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-llamacpp")).toBeInTheDocument());
+
+    // Gemma is the fallback: making it primary goes through the install route with activate.
+    fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+    fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-primary"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/llamacpp/install", body: { scope: "local", activate: true } }));
+
+    // A stopped Whisper can be enabled (its unit) and made the primary transcriber.
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
+    expect(await screen.findByTestId("local-model-action-whisper-enable")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("local-model-action-whisper-primary"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/stt", body: { primary: "local" } }));
+
+    // Kokoro is the fallback voice: the menu offers to make it primary, through the tts route.
+    fireEvent.click(screen.getByTestId("local-model-menu-kokoro"));
+    fireEvent.click(await screen.findByTestId("local-model-action-kokoro-primary"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "select", choice: "local" } }));
+  });
+
+  /**
+   * TASK-860. "Use as fallback" hands transcription back to the automatic
+   * ClawBox AI default, and on a box with no subscription that default is the
+   * engine on the box — the same one the row already is. Offered there, the
+   * action changes nothing and the row goes on reading "primary" after it, so
+   * the row offers it only once there is a cloud to fall back to.
+   */
+  it("does not offer the on-box transcriber as a fallback when there is no cloud to fall back to", async () => {
+    stubFetch({ sttCloud: false });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-whisper")).toHaveTextContent(/primary/i));
+
+    // The row's own verbs are untouched — Enable and Uninstall are still there,
+    // and it is the role action alone that is gone with nothing to put behind
+    // the "more" button.
+    expect(screen.getByTestId("local-model-action-whisper-enable")).toBeInTheDocument();
+    expect(screen.getByTestId("local-model-action-whisper-uninstall")).toBeInTheDocument();
+    expect(screen.queryByTestId("local-model-menu-whisper")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("local-model-action-whisper-fallback")).not.toBeInTheDocument();
+  });
+
+  it("offers it again on a linked box, where the cloud is a real fallback", async () => {
+    stubFetch({ sttPrimary: "local" });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-whisper")).toHaveTextContent(/primary/i));
+
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
+    fireEvent.click(await screen.findByTestId("local-model-action-whisper-fallback"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/stt", body: { primary: "cloud" } }));
+  });
+
+  /**
+   * TASK-608. "Use as fallback" on the on-device row posts
+   * /setup-api/providers/default, which on OpenClaw restarts the gateway. When
+   * the gateway has not bound again inside the route's readiness budget the
+   * change IS written and the route answers `ok` with a `warning`.
+   *
+   * This panel's only feedback channel was the red error box, so that answer
+   * used to paint a failure over a change that went through — and the owner's
+   * next move is to repeat it, paying another restart.
+   */
+  it("shows a gateway that is still coming back as a notice, not as a failed change", async () => {
+    stubFetch({
+      llmDefault: true,
+      post: (url) => (url === "/setup-api/providers/default"
+        ? new Response(JSON.stringify({
+            ok: true,
+            provider: "clawai",
+            model: "deepseek/deepseek-v4-flash",
+            warning: "Saved, but the gateway did not come back — the new model applies once it is serving again.",
+          }), { status: 200, headers: { "content-type": "application/json" } })
+        : undefined),
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-llamacpp")).toHaveTextContent(/primary/i));
+    fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+    fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-fallback"));
+
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/providers/default", body: { provider: "clawai" } }));
+    // waitFor on the TEXT: the region is mounted in every state, so finding the
+    // node proves nothing.
+    await waitFor(() =>
+      expect(screen.getByTestId("local-ai-notice")).toHaveTextContent("the gateway did not come back"));
+    // Back in flow the moment it has something to say — the other half of the
+    // `sr-only` pin below, so neither state can be dropped on its own.
+    expect(screen.getByTestId("local-ai-notice")).not.toHaveClass("sr-only");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  /**
+   * The notice region is mounted in every state so assistive tech is never
+   * asked to catch a node insertion — but its parent is `space-y-4`, whose
+   * `> * + *` rule gives an EMPTY in-flow div a 1 rem margin AND hands the
+   * block after it another. That is a permanent 16 px gap under the intro, on
+   * every visit, in the state the panel is in almost all the time.
+   *
+   * `sr-only` takes it out of flow while keeping the node and its text in the
+   * accessibility tree, which is the only reason it is mounted at all.
+   */
+  it("keeps the empty notice region out of the panel's flow", async () => {
+    stubFetch();
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    const notice = screen.getByTestId("local-ai-notice");
+    expect(notice).toHaveTextContent("");
+    expect(notice).toHaveClass("sr-only");
+  });
+
+  /**
+   * TASK-608, the sibling the round-2 review caught. `/setup-api/stt` answers
+   * with a `warning` and NO `error` key when the transcription engine change
+   * landed but the gateway has not finished restarting. As a 502 that body is
+   * unreachable — `runAction` discards it on `!res.ok` and paints the red
+   * generic "couldn't change that" over a change that went through, sending the
+   * owner to click again and pay a second gateway restart. The route now
+   * answers 200 for that case, so the sentence reaches this panel.
+   */
+  it("shows a transcription change whose gateway is still coming back as a notice", async () => {
+    stubFetch({
+      sttPrimary: "cloud",
+      post: (url) => (url === "/setup-api/stt"
+        ? new Response(JSON.stringify({
+            primary: "local",
+            restarted: false,
+            engines: { cloud: { configured: true, label: "c" }, local: { installed: true, label: "l" } },
+            chain: ["local", "cloud"],
+            warning: "Saved, but the gateway has not finished restarting — channel voice notes switch over once it is serving again.",
+          }), { status: 200, headers: { "content-type": "application/json" } })
+        : undefined),
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-stt");
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
+    fireEvent.click(await screen.findByTestId("local-model-action-whisper-primary"));
+
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/stt", body: { primary: "local" } }));
+    await waitFor(() => expect(screen.getByTestId("local-ai-notice")).toHaveTextContent("has not finished restarting"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("turns Local AI off through its own route, and sends the memory index to Memory Shard", async () => {
+    stubFetch({ llmDefault: true });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-llamacpp")).toHaveTextContent(/primary/i));
+    // Disable is the row's own button, not a menu item.
+    fireEvent.click(screen.getByTestId("local-model-action-llamacpp-disable"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/local-ai", body: { action: "disable" } }));
+    // The embedding row has no menu of its own — its one button opens the app
+    // that owns the index. That is Memory Shard, not ClawKeep: ClawKeep only
+    // keeps a card pointing there, which would be a second hop.
+    expect(screen.queryByTestId("local-model-menu-embedding")).not.toBeInTheDocument();
+    const opened: string[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<{ appId: string }>).detail.appId);
+    window.addEventListener(OPEN_APP_EVENT, onOpen);
+    try {
+      fireEvent.click(screen.getByTestId("local-model-manage-embedding"));
+    } finally {
+      window.removeEventListener(OPEN_APP_EVENT, onOpen);
+    }
+    expect(opened).toEqual(["memory-shard"]);
+  });
+
+  it("clears a refused local-only flip's error once the next flip goes through", async () => {
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    let refuse = true;
+    stubFetch({
+      llmDefault: false,
+      post: (url) => {
+        if (url !== "/setup-api/local-ai/exclusive") return undefined;
+        if (!refuse) return undefined;
+        refuse = false;
+        return json({ error: "The local model is not ready yet." }, 409);
+      },
+    });
+    renderPanel();
+    const sw = await screen.findByTestId("local-ai-local-only");
+    await waitFor(() => expect(sw).toBeEnabled());
+    fireEvent.click(sw);
+    expect(await screen.findByRole("alert")).toHaveTextContent("The local model is not ready yet.");
+    await waitFor(() => expect(sw).toBeEnabled());
+    // The second flip succeeds — the stale refusal must not stay on screen
+    // above a switch that now says the opposite.
+    fireEvent.click(sw);
+    await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  // The banner paints the server's `error` verbatim, which is how "The OpenClaw
+  // CLI is not available on this edition." once reached a Hermes owner. The
+  // config-mutation conflict is the same shape and reads worse: it tells the
+  // owner to re-run a command they have never typed, about a file they do not
+  // know exists. It must not reach this banner in EITHER shape.
+  describe("a local-only flip that lost the config race", () => {
+    /** What the CLI says, verbatim, when it words the refusal for a human. */
+    const CLI_SENTENCE =
+      "The config file changed while this command was writing (config changed since last load), "
+      + "so nothing was changed. Re-run the same command to pick up the new file and try again.";
+    const BUSY_COPY = "The box was saving its settings, so that change did not finish. Try again in a moment.";
+
+    /** Refuse the local-only flip with `body`, and read the banner. */
+    async function flipAndReadBanner(body: unknown, status: number) {
+      const json = (payload: unknown, code: number) =>
+        new Response(JSON.stringify(payload), { status: code, headers: { "content-type": "application/json" } });
+      stubFetch({
+        llmDefault: false,
+        post: (url) => (url === "/setup-api/local-ai/exclusive" ? json(body, status) : undefined),
+      });
+      renderPanel();
+      // The provider loads its catalogue from a dynamic import in an effect,
+      // and the banner's text is resolved ONCE, into state, at click time. So
+      // the click has to happen after the copy is live or `t()` would answer
+      // with the raw key and the assertion would be about the wrong thing.
+      // The intro is the panel's first translated string.
+      await screen.findByText(/AI that runs on this box/);
+      const sw = await screen.findByTestId("local-ai-local-only");
+      await waitFor(() => expect(sw).toBeEnabled());
+      fireEvent.click(sw);
+      return screen.findByRole("alert");
+    }
+
+    it("says it in the box's own words when the route sends the code", async () => {
+      // The route's own English rides along for non-UI readers; the panel must
+      // render the CATALOGUE entry, so the sentence is translated on a box that
+      // is not in English. Asserted by sending the CLI's sentence as `error`:
+      // if the panel relayed the body, the banner would carry it.
+      const alert = await flipAndReadBanner({ error: CLI_SENTENCE, code: "config_busy" }, 409);
+
+      expect(alert).toHaveTextContent(BUSY_COPY);
+      expect(alert.textContent).not.toMatch(/config file|last load|Re-run/i);
+    });
+
+    it("says it even when the answer carries no code at all", async () => {
+      // A server mid-upgrade, or a sibling route that still relays the raw
+      // message. The panel recognises the CLI's own wording, so the hole is
+      // closed on this surface no matter which side of the fix answered.
+      const alert = await flipAndReadBanner({ error: CLI_SENTENCE }, 500);
+
+      expect(alert).toHaveTextContent(BUSY_COPY);
+      expect(alert.textContent).not.toMatch(/config file|last load|Re-run/i);
+    });
+
+    it("still relays a refusal that is not the race", async () => {
+      const alert = await flipAndReadBanner({ error: "The local model is not ready yet." }, 409);
+
+      expect(alert).toHaveTextContent("The local model is not ready yet.");
+      expect(alert.textContent).not.toContain(BUSY_COPY);
+    });
+
+    it("names no switch when a ROW action hits the race", async () => {
+      // The banner is shared by the Local-only switch and the row actions, and
+      // `providers/default` forwards `chat/model`'s config_busy answer
+      // verbatim — so "Use as fallback" reaches this copy on a row that has no
+      // switch on it. The sentence has to be true of both.
+      const json = (payload: unknown, code: number) =>
+        new Response(JSON.stringify(payload), { status: code, headers: { "content-type": "application/json" } });
+      stubFetch({
+        llmDefault: true,
+        post: (url) => (url === "/setup-api/providers/default"
+          // The body `chat/model` answers a conflict with, forwarded as-is.
+          ? json({
+            error: "The box was saving its settings at the same moment, so nothing was changed. Try again in a moment.",
+            code: "config_busy",
+          }, 409)
+          : undefined),
+      });
+      renderPanel();
+      await screen.findByText(/AI that runs on this box/);
+      fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+      fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-fallback"));
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(BUSY_COPY);
+      expect(alert.textContent).not.toMatch(/switch/i);
+    });
+  });
+
+  it("holds still for owners who asked for reduced motion: the skeleton and the busy icon animate motion-safe only", async () => {
+    // Assigned from inside the fetch stub, so TS cannot see it change: a no-op
+    // start rather than `null`, which it would narrow to and refuse to call.
+    let release: () => void = () => {};
+    stubFetch({
+      post: (url) => {
+        if (url !== "/setup-api/stt") return undefined;
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }));
+        });
+      },
+    });
+    renderPanel();
+    // Before the inventory answers: the placeholder cards.
+    const skeleton = screen.getByTestId("local-ai-loading");
+    for (const card of Array.from(skeleton.children)) {
+      expect(card).toHaveClass("motion-safe:animate-pulse");
+      expect(card).not.toHaveClass("animate-pulse");
+    }
+    await screen.findByTestId("local-ai-group-stt");
+    // While an action is in flight: the row's spinner.
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
+    fireEvent.click(await screen.findByTestId("local-model-action-whisper-primary"));
+    const row = screen.getByTestId("local-model-whisper");
+    await waitFor(() => expect(within(row).getByText("progress_activity")).toBeInTheDocument());
+    const spinner = within(row).getByText("progress_activity");
+    expect(spinner).toHaveClass("motion-safe:animate-spin");
+    expect(spinner).not.toHaveClass("animate-spin");
+    release();
+    await waitFor(() => expect(within(row).queryByText("progress_activity")).not.toBeInTheDocument());
+  });
+
+  it("reads the Gemma install route as the stream it is, showing its progress and surfacing its error", async () => {
+    // The route answers 200 and streams NDJSON; a failure is an `error` LINE,
+    // never a status code. Read with res.json() the stream fails to parse and
+    // the failure vanished with it.
+    const body = [
+      JSON.stringify({ status: "Starting preinstalled Gemma 4..." }),
+      JSON.stringify({ error: "llama.cpp exited before becoming ready." }),
+      "",
+    ].join("\n");
+    let release: () => void = () => {};
+    stubFetch({
+      llmDefault: false,
+      post: (url) => {
+        if (url !== "/setup-api/llamacpp/install") return undefined;
+        return new Promise<Response>((resolve) => {
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              const encoder = new TextEncoder();
+              controller.enqueue(encoder.encode(body.slice(0, body.indexOf("\n") + 1)));
+              release = () => {
+                controller.enqueue(encoder.encode(body.slice(body.indexOf("\n") + 1)));
+                controller.close();
+              };
+            },
+          });
+          resolve(new Response(stream, { status: 200, headers: { "content-type": "application/x-ndjson" } }));
+        });
+      },
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-llamacpp")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+    fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-primary"));
+    // The last status line shows on the row while the install runs.
+    expect(await screen.findByTestId("local-model-progress-llamacpp")).toHaveTextContent("Starting preinstalled Gemma 4...");
+    release();
+    expect(await screen.findByRole("alert")).toHaveTextContent("llama.cpp exited before becoming ready.");
+    expect(screen.queryByTestId("local-model-progress-llamacpp")).not.toBeInTheDocument();
+  });
+
+  it("keeps each row's own spinner while two actions are in flight, and holds the poll until both settle", async () => {
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    const releases: Record<string, () => void> = {};
+    stubFetch({
+      post: (url) => {
+        if (url !== "/setup-api/local-models" && url !== "/setup-api/tts") return undefined;
+        return new Promise<Response>((resolve) => {
+          releases[url] = () => resolve(json({ ok: true }));
+        });
+      },
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    const whisper = screen.getByTestId("local-model-whisper");
+    const kokoro = screen.getByTestId("local-model-kokoro");
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
+    fireEvent.click(await screen.findByTestId("local-model-action-whisper-enable"));
+    fireEvent.click(screen.getByTestId("local-model-menu-kokoro"));
+    fireEvent.click(await screen.findByTestId("local-model-action-kokoro-primary"));
+    await waitFor(() => {
+      expect(within(whisper).getByText("progress_activity")).toBeInTheDocument();
+      expect(within(kokoro).getByText("progress_activity")).toBeInTheDocument();
+    });
+    expect(whisper).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByTestId("local-model-menu-whisper")).toHaveAttribute("aria-disabled", "true");
+    const inventoryReads = () => (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .filter((c) => String(c[0]).startsWith("/setup-api/local-models") && (c[1] as RequestInit | undefined)?.method !== "POST").length;
+    const readsBefore = inventoryReads();
+    // The first to settle must not clear the other row, nor let the poll in.
+    releases["/setup-api/tts"]();
+    await waitFor(() => expect(within(kokoro).queryByText("progress_activity")).not.toBeInTheDocument());
+    expect(within(whisper).getByText("progress_activity")).toBeInTheDocument();
+    expect(inventoryReads()).toBe(readsBefore);
+    releases["/setup-api/local-models"]();
+    await waitFor(() => expect(within(whisper).queryByText("progress_activity")).not.toBeInTheDocument());
+    await waitFor(() => expect(inventoryReads()).toBeGreaterThan(readsBefore));
+  });
+
+  it("says so under the skeleton when the first inventory read fails, and recovers on the next", async () => {
+    stubFetch();
+    const stubbed = fetch as unknown as ReturnType<typeof vi.fn>;
+    const answer = stubbed.getMockImplementation() as (input: string | URL, init?: RequestInit) => Promise<Response>;
+    let fail = true;
+    stubbed.mockImplementation(async (input: string | URL, init?: RequestInit) => {
+      if (fail && input.toString().startsWith("/setup-api/local-models")) {
+        return new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } });
+      }
+      return answer(input, init);
+    });
+    // Capture the poll's tick instead of waiting out the real 5 s interval:
+    // the recovery is driven by calling it, so the test costs milliseconds
+    // and cannot flake on a loaded runner. restoreMocks puts the real
+    // setInterval back after the test.
+    const ticks: Array<() => void> = [];
+    vi.spyOn(window, "setInterval").mockImplementation(((handler: TimerHandler) => {
+      ticks.push(handler as () => void);
+      return 0;
+    }) as typeof window.setInterval);
+    renderPanel();
+    const skeleton = screen.getByTestId("local-ai-loading");
+    // waitFor rather than a one-shot assertion: the catalogue loads async, so
+    // the first paint of the alert can still carry the raw key.
+    await waitFor(() => expect(within(skeleton).getByRole("alert")).toHaveTextContent("Could not read what is running on this box."));
+    // The poll keeps trying; the message goes with the skeleton once it lands.
+    fail = false;
+    expect(ticks.length).toBeGreaterThan(0);
+    await act(async () => { for (const tick of ticks) tick(); });
+    await waitFor(() => expect(screen.queryByTestId("local-ai-load-failed")).not.toBeInTheDocument());
+    expect(screen.getByTestId("local-ai-panel")).toBeInTheDocument();
+  });
+
+  it("names engines in the 'could not read' banner the way their rows do", async () => {
+    stubFetch();
+    const stubbed = fetch as unknown as ReturnType<typeof vi.fn>;
+    const answer = stubbed.getMockImplementation() as (input: string | URL, init?: RequestInit) => Promise<Response>;
+    stubbed.mockImplementation(async (input: string | URL, init?: RequestInit) => {
+      if (input.toString().startsWith("/setup-api/local-models") && init?.method !== "POST") {
+        return new Response(JSON.stringify({ models: MODELS.filter((m) => m.kind === "llm"), unavailable: ["kokoro", "whisper", "embeddings"] }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      return answer(input, init);
+    });
+    renderPanel();
+    await waitFor(() => expect(screen.getByTestId("local-ai-unavailable")).toHaveTextContent("Could not read the state of: Kokoro, Whisper, Memory search."));
+  });
+
+  it("is a menu to the keyboard too: focus lands on the first item, the arrows move it, Escape hands it back", async () => {
+    // An enabled Whisper asleep: its menu carries "turn on now" and the role
+    // action — two items, which is what the arrows need.
+    const asleep = MODELS.map((m) => (m.id !== "whisper" ? m : { ...m, enabled: true, running: "on-demand" }));
+    stubFetch({ llmDefault: false, models: asleep });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-stt");
+    const trigger = screen.getByTestId("local-model-menu-whisper");
+    fireEvent.click(trigger);
+    const menu = await screen.findByRole("menu");
+    const items = within(menu).getAllByRole("menuitem");
+    expect(items.length).toBeGreaterThan(1);
+    await waitFor(() => expect(items[0]).toHaveFocus());
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    await waitFor(() => expect(items[1]).toHaveFocus());
+    fireEvent.keyDown(menu, { key: "ArrowUp" });
+    await waitFor(() => expect(items[0]).toHaveFocus());
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
+  });
+
+  it("offers to wake an enabled engine that is asleep, with Disable as the row's own button", async () => {
+    stubFetch();
+    const stubbed = fetch as unknown as ReturnType<typeof vi.fn>;
+    const answer = stubbed.getMockImplementation() as (input: string | URL, init?: RequestInit) => Promise<Response>;
+    // A voice engine's idle standby: the unit is enabled, so the only verb the
+    // menu used to offer was Disable, while the row itself said it was off.
+    const asleep = MODELS.map((m) => m.id !== "whisper" ? m : {
+      ...m, enabled: true, running: "on-demand", detailCode: "whisperOff",
+      detail: "Off. Starts by itself when you speak.",
+    });
+    stubbed.mockImplementation(async (input: string | URL, init?: RequestInit) => {
+      if (input.toString().startsWith("/setup-api/local-models") && init?.method !== "POST") {
+        return new Response(JSON.stringify({ models: asleep, unavailable: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return answer(input, init);
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    const row = screen.getByTestId("local-model-whisper");
+    await waitFor(() => expect(within(row).getByText(/Starts by itself when you speak/)).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.getAttribute("data-testid"))).toEqual([
+      "local-model-action-whisper-turn-on",
+      "local-model-action-whisper-primary",
+    ]);
+    // The standing switch is on the row itself, not in the menu.
+    expect(within(row).getByTestId("local-model-action-whisper-disable")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("local-model-action-whisper-turn-on"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/local-models", body: { id: "whisper", enabled: true } }));
+  });
+
+  it("renders each row's lines from their codes in the owner's language, and keeps the server's English for a code it does not know", async () => {
+    stubFetch();
+    const stubbed = fetch as unknown as ReturnType<typeof vi.fn>;
+    const answer = stubbed.getMockImplementation() as (input: string | URL, init?: RequestInit) => Promise<Response>;
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    const coded = [
+      model({ id: "llamacpp", name: "Gemma 4", kind: "llm", runtimeCode: "answersOnBox", running: "on-demand", managedBy: "localAi", detailCode: "llamacppReady", detail: "Ready. Sleeps until needed to save memory." }),
+      model({ id: "kokoro", name: "Kokoro", kind: "tts", runtimeCode: "voiceOnBox", enabled: true, running: "running", control: "user-unit", detailCode: "kokoroSpeaking", detail: "Speaking from this box." }),
+      model({ id: "whisper", name: "Whisper", kind: "stt", enabled: true, running: "running", control: "user-unit", detailCode: "somethingNewer", detail: "Only the server knows this one." }),
+      model({ id: "embeddings", name: "Memory search", nameCode: "memorySearch", kind: "embedding", runtimeCode: "modelVia", params: { model: "Qwen 3", via: "llama.cpp" }, runtime: "Qwen 3 via llama.cpp", running: "on-demand", managedBy: "clawkeep", detailCode: "embeddingsReady", detail: "Ready. Wakes when you search, then sleeps to save memory." }),
+    ];
+    stubbed.mockImplementation(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/preferences")) return json({ ui_language: "de" });
+      if (url.startsWith("/setup-api/local-models") && init?.method !== "POST") return json({ models: coded, unavailable: [] });
+      return answer(input, init);
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => {
+      expect(within(screen.getByTestId("local-model-kokoro")).getByText("Stimme auf dieser Box")).toBeInTheDocument();
+      expect(within(screen.getByTestId("local-model-embeddings")).getByText("Speichersuche")).toBeInTheDocument();
+      expect(within(screen.getByTestId("local-model-embeddings")).getByText("Qwen 3 über llama.cpp")).toBeInTheDocument();
+      expect(within(screen.getByTestId("local-model-embeddings")).getByText(/Bereit\. Wacht auf, wenn Sie suchen/)).toBeInTheDocument();
+    });
+    // A code this build has no key for must never reach the row as a raw key.
+    expect(within(screen.getByTestId("local-model-whisper")).getByText("Only the server knows this one.")).toBeInTheDocument();
+    expect(screen.queryByText(/localModels\./)).not.toBeInTheDocument();
+  });
+
+  it("navigates to Memory Shard from the standalone page, where no desktop listens for the open-app event", async () => {
+    stubFetch({ llmDefault: true });
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, pathname: "/app/settings", assign });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-embedding");
+    const opened: string[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<{ appId: string }>).detail.appId);
+    window.addEventListener(OPEN_APP_EVENT, onOpen);
+    try {
+      fireEvent.click(screen.getByTestId("local-model-manage-embedding"));
+    } finally {
+      window.removeEventListener(OPEN_APP_EVENT, onOpen);
+    }
+    expect(assign).toHaveBeenCalledWith("/app/memory-shard");
+    expect(opened).toEqual([]);
+  });
+  it("offers to install an absent Kokoro through the voice install route", async () => {
+    const absent = MODELS.map((m) => (m.id === "kokoro" ? { ...m, installed: false, enabled: null, running: "not-installed", control: "none", detail: "Not installed." } : m));
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/x-ndjson" } });
+    stubFetch({ models: absent, post: (url) => (url === "/setup-api/tts/install" ? json({ success: true, status: "The voice on this box is installed." }) : undefined) });
+    renderPanel();
+    await screen.findByTestId("local-model-kokoro");
+    // An absent row has one button and no menu.
+    expect(screen.queryByTestId("local-model-menu-kokoro")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByTestId("local-model-action-kokoro-install"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts/install", body: {} }));
+  });
+
+  it("offers the Kokoro install on the Hermes edition too, beside the Uninstall it already had", async () => {
+    // `step_openclaw_tts --kokoro` registers Hermes' clawbox-local provider,
+    // and the update installs nothing any more: a row with Uninstall and no
+    // Install would strand a Hermes box without its voice.
+    const absent = MODELS.map((m) => (m.id === "kokoro" ? { ...m, installed: false, enabled: null, running: "not-installed", control: "none", detail: "Not installed." } : m));
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/x-ndjson" } });
+    stubFetch({ models: absent, post: (url) => (url === "/setup-api/tts/install" ? json({ success: true, status: "The voice on this box is installed." }) : undefined) });
+    render(<I18nProvider><LocalAiPanel active edition="hermes" /></I18nProvider>);
+    await screen.findByTestId("local-model-kokoro");
+    expect(screen.queryByTestId("local-model-action-kokoro-uninstall")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByTestId("local-model-action-kokoro-install"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts/install", body: {} }));
+  });
+
+  it("says, in amber, when a voice pick settled on the default instead", async () => {
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    stubFetch({ post: (url) => (url === "/setup-api/tts" ? json({ choice: "auto", fallback: { requested: "local", reason: "not_wired" } }) : undefined) });
+    renderPanel();
+    await screen.findByTestId("local-model-kokoro");
+    fireEvent.click(screen.getByTestId("local-model-menu-kokoro"));
+    fireEvent.click(await screen.findByTestId("local-model-action-kokoro-primary"));
+    // waitFor on the TEXT, like its three siblings above: the region is mounted
+    // in every state, so finding the node proves nothing and would let the text
+    // assertion run before the action's fetch chain has settled.
+    await waitFor(() =>
+      expect(screen.getByTestId("local-ai-notice")).toHaveTextContent(/default voice/i));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  /**
+   * The owner's ruling of 2026-09-15: the page is the per-model inventory and
+   * nothing else. The three cards that sat around it — the ClawBox AI cloud
+   * defaults, the Ollama models, the GGUF library — and the footer sentence
+   * are gone, and so are the reads they made on every visit.
+   */
+  it("renders no cloud card, no Ollama card, no GGUF library and no footer", async () => {
+    stubFetch();
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    expect(screen.queryByText(/ClawBox AI cloud/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Ollama models/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("local-ai-gguf-card")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Other llama\.cpp models/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Anything you disable/i)).not.toBeInTheDocument();
+    const reads = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
+    expect(reads.some((u) => u.startsWith("/setup-api/ai/cloud-defaults"))).toBe(false);
+    expect(reads.some((u) => u.startsWith("/setup-api/ollama"))).toBe(false);
+    expect(reads.some((u) => u.startsWith("/setup-api/llamacpp/models"))).toBe(false);
+  });
+
+  it("offers Uninstall on every installed row and Install on every absent one", async () => {
+    stubFetch();
+    const { unmount } = renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    for (const id of ["llamacpp", "kokoro", "whisper", "embedding"]) {
+      expect(screen.getByTestId(`local-model-action-${id}-uninstall`)).toBeInTheDocument();
+      expect(screen.queryByTestId(`local-model-action-${id}-install`)).not.toBeInTheDocument();
+    }
+    // The memory row keeps its pointer to the app that owns the index.
+    expect(screen.getByTestId("local-model-manage-embedding")).toBeInTheDocument();
+    unmount();
+
+    vi.unstubAllGlobals();
+    const absent = MODELS.map((m) => ({ ...m, installed: false, enabled: null, running: "not-installed", control: "none" }));
+    stubFetch({ models: absent });
+    renderPanel();
+    await waitFor(() => expect(screen.getAllByTestId(/local-model-action-.*-install$/)).toHaveLength(4));
+    expect(screen.queryAllByTestId(/local-model-action-.*-uninstall$/)).toHaveLength(0);
+    expect(screen.queryAllByTestId(/local-model-action-.*-(enable|disable)$/)).toHaveLength(0);
+  });
+
+  it("asks before an uninstall, then DELETEs the route that owns the engine and says what came back", async () => {
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    stubFetch({
+      ttsChoice: "local",
+      del: (url) => (url === "/setup-api/tts/install"
+        ? json({ ok: true, freedBytes: 330 * 1024 * 1024, installed: false, fallback: { requested: "local", reason: "not_installed" } })
+        : undefined),
+    });
+    renderPanel();
+    await screen.findByTestId("local-model-kokoro");
+    fireEvent.click(screen.getByTestId("local-model-action-kokoro-uninstall"));
+    // Nothing leaves the box on the first click.
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(/Uninstall Kokoro\?/);
+    expect(deletes).toEqual([]);
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Uninstall$/ }));
+    await waitFor(() => expect(deletes).toEqual(["/setup-api/tts/install"]));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // The disk it gave back, and that the voice pick moved off the engine —
+    // said for what happened, not as "could not be made primary".
+    await waitFor(() => expect(screen.getByTestId("local-ai-notice")).toHaveTextContent("330 MB"));
+    expect(screen.getByTestId("local-ai-notice")).toHaveTextContent(/default voice speaks now/i);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("offers no Uninstall on Gemma while it is the model the box answers with — the menu's Use as fallback comes first", async () => {
+    stubFetch({ llmDefault: true });
+    renderPanel();
+    await screen.findByTestId("local-model-llamacpp");
+    expect(screen.queryByTestId("local-model-action-llamacpp-uninstall")).not.toBeInTheDocument();
+    expect(screen.getByTestId("local-model-action-llamacpp-disable")).toBeInTheDocument();
+  });
+
+  it("cancels an uninstall without touching the box, and warns on Gemma that the next update puts it back", async () => {
+    // Gemma as the fallback: while it is the primary the Uninstall is not offered.
+    stubFetch({ llmDefault: false });
+    renderPanel();
+    await screen.findByTestId("local-model-llamacpp");
+    fireEvent.click(screen.getByTestId("local-model-action-llamacpp-uninstall"));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByTestId("local-ai-uninstall-gemma-note")).toHaveTextContent(/next system update/i);
+    fireEvent.click(within(dialog).getByRole("button", { name: /Cancel/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(deletes).toEqual([]);
+
+    // Kokoro's dialog carries no such line: only Gemma comes back on its own.
+    fireEvent.click(screen.getByTestId("local-model-action-kokoro-uninstall"));
+    expect(within(await screen.findByRole("dialog")).queryByTestId("local-ai-uninstall-gemma-note")).not.toBeInTheDocument();
+  });
+
+  it("routes each engine's uninstall to its own DELETE", async () => {
+    stubFetch();
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    const expected: Record<string, string> = {
+      llamacpp: "/setup-api/llamacpp/models?engine=1",
+      whisper: "/setup-api/whisper?scope=engine",
+      embedding: "/setup-api/embed/install",
+    };
+    for (const [id, url] of Object.entries(expected)) {
+      fireEvent.click(screen.getByTestId(`local-model-action-${id}-uninstall`));
+      const dialog = await screen.findByRole("dialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: /^Uninstall$/ }));
+      await waitFor(() => expect(deletes).toContain(url));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    }
+  });
+
+  it("shows the Whisper size picker only while the engine is installed and enabled", async () => {
+    // MODELS' Whisper is installed but disabled: the picker is settings for
+    // an engine that is switched off, and stays away.
+    stubFetch();
+    const { unmount } = renderPanel();
+    await screen.findByTestId("local-model-whisper");
+    expect(screen.getByTestId("local-model-action-whisper-enable")).toBeInTheDocument();
+    await waitFor(() => expect((fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.some((c) => String(c[0]).startsWith("/setup-api/stt"))).toBe(true));
+    expect(screen.queryByTestId("local-ai-whisper-card")).not.toBeInTheDocument();
+    unmount();
+
+    vi.unstubAllGlobals();
+    const enabled = MODELS.map((m) => (m.id !== "whisper" ? m : { ...m, enabled: true, running: "running" }));
+    stubFetch({ models: enabled });
+    renderPanel();
+    await screen.findByTestId("local-model-action-whisper-disable");
+    expect(await screen.findByTestId("local-ai-whisper-card")).toBeInTheDocument();
+  });
+
+  it("draws the embedder's repair card only under an installed row", async () => {
+    stubFetch();
+    const { unmount } = renderPanel();
+    expect(await screen.findByTestId("local-ai-embed-card")).toBeInTheDocument();
+    // The card keeps the repair and nothing else; removal is the row's.
+    expect(screen.getByTestId("local-ai-embed-download")).toHaveTextContent(/again/i);
+    expect(screen.queryByTestId("local-ai-embed-remove")).not.toBeInTheDocument();
+    unmount();
+
+    vi.unstubAllGlobals();
+    const absent = MODELS.map((m) => (m.id !== "embedding" ? m : { ...m, installed: false, running: "not-installed", detail: "Not installed." }));
+    stubFetch({ models: absent });
+    renderPanel();
+    await screen.findByTestId("local-model-action-embedding-install");
+    expect(screen.queryByTestId("local-ai-embed-card")).not.toBeInTheDocument();
+  });
+
+  it("installs an absent Whisper through the engine form of its route, and the embedder through its own", async () => {
+    const ndjson = (body: unknown) => new Response(JSON.stringify(body) + "\n", { status: 200, headers: { "content-type": "application/x-ndjson" } });
+    const absent = MODELS.map((m) => (m.id === "whisper" || m.id === "embedding"
+      ? { ...m, installed: false, enabled: null, running: "not-installed", control: "none" }
+      : m));
+    stubFetch({ models: absent, post: (url) => (url === "/setup-api/whisper" || url === "/setup-api/embed/install" ? ndjson({ success: true }) : undefined) });
+    renderPanel();
+    fireEvent.click(await screen.findByTestId("local-model-action-whisper-install"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/whisper", body: { action: "install-engine" } }));
+    fireEvent.click(await screen.findByTestId("local-model-action-embedding-install"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/embed/install", body: {} }));
+  });
+
+  it("enables a Gemma that is wired to nothing through the install route, as the fallback", async () => {
+    const ndjson = (body: unknown) => new Response(JSON.stringify(body) + "\n", { status: 200, headers: { "content-type": "application/x-ndjson" } });
+    stubFetch({ llmDefault: false, llmWired: false, post: (url) => (url === "/setup-api/llamacpp/install" ? ndjson({ success: true }) : undefined) });
+    renderPanel();
+    await screen.findByTestId("local-model-llamacpp");
+    // No role yet, so no Disable — and the menu still offers primary.
+    await waitFor(() => expect(screen.getByTestId("local-model-action-llamacpp-enable")).toBeInTheDocument());
+    expect(screen.queryByTestId("local-model-action-llamacpp-disable")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("local-model-action-llamacpp-enable"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/llamacpp/install", body: { scope: "local" } }));
+    fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+    expect(await screen.findByTestId("local-model-action-llamacpp-primary")).toBeInTheDocument();
+  });
+
+});

@@ -39,6 +39,90 @@ export interface HermesSkill {
 
 export type SkillOrigin = 'builtin' | 'hub' | 'local';
 
+/**
+ * Can `hermes skills uninstall` remove a skill with this origin?
+ *
+ * `builtin` shipped with the device, `hub` came from the store, and `local` is a
+ * skill directory that is NEITHER — written by the agent, hand-copied, or left
+ * behind by a failed install rollback or a partial removal. The CLI works off
+ * the hub LOCK, so only `hub` can be removed; the other two need someone to
+ * delete the folder on the device.
+ *
+ * This is one exported rule rather than a comparison repeated per call site
+ * because BOTH surfaces that answer the question read it — the Skills page
+ * (src/components/HermesSkillsStore.tsx) and the agent's skill_list /
+ * skill_uninstall (mcp/tools/skills.ts) — and one device state that gets two
+ * answers is a bug the customer sees as their own page and their assistant
+ * disagreeing. That is exactly what happened: the MCP side had spelled the rule
+ * "not builtin", which put `local` on the removable side.
+ */
+export function isRemovableOrigin(origin?: string): boolean {
+  return origin === 'hub';
+}
+
+/** The three strings an installed skill can be asked for by. */
+export interface SkillRemovalRow {
+  /** The hub lock key — the argument `hermes skills uninstall` resolves. */
+  id: string;
+  /** SKILL.md's `name` — what the customer sees on a card. */
+  name: string;
+  /** The store id it was installed from, when the lock recorded one. */
+  identifier?: string;
+  origin?: string;
+}
+
+export type SkillRemovalMatch<T> =
+  | { kind: 'one'; row: T }
+  /** Two removable skills show the same name and nothing says which was meant. */
+  | { kind: 'ambiguous'; ids: string[] }
+  | { kind: 'none' };
+
+/**
+ * Which installed skill does `wanted` name?
+ *
+ * Exported for the same reason `isRemovableOrigin` is: BOTH surfaces that answer
+ * this question have to answer it the same way. The /uninstall route asks it of
+ * the hub lock plus the disk walk (`resolveUninstallKey`), and the agent's
+ * skill_uninstall asks it of the /installed rows a moment earlier — and a tool
+ * that refuses what the route it defers to resolves is the F-09 symptom in a
+ * narrower device state, not a fix for it.
+ *
+ * The rule, in order:
+ *
+ *   1. An exact LOCK ID on a removable row wins outright. Lock ids are the keys
+ *      of a JSON object, so a hit is unique by construction — it is an answer,
+ *      never a tie, even when another card happens to show that same string.
+ *      Refusing here would leave a skill whose id and display name are both
+ *      `weather` unremovable by any string the agent can pass: `weather` would
+ *      loop the refusal and the other row's id would delete the wrong skill.
+ *   2. Otherwise the store IDENTIFIER and the DISPLAY name, searched TOGETHER
+ *      over removable rows. Neither is unique, and they collide with each other
+ *      — a lock entry installed under a `--name` override can carry `weather` as
+ *      its identifier while a different row shows `weather` on its card — so two
+ *      hits is a refusal. This ends in a delete and nothing in the request says
+ *      which was meant. Searching them in tiers instead would re-create, one
+ *      level down, the silent pick that F-02 was raised for.
+ *
+ * Non-removable rows are deliberately not searched: a builtin cannot be removed
+ * under any name, so the only actionable reading of a string that names both a
+ * builtin's card and a removable skill's card is the removable one. Callers use
+ * the `none` verdict to reach for those rows themselves and word a refusal.
+ */
+export function matchRemovableSkill<T extends SkillRemovalRow>(
+  rows: readonly T[],
+  wanted: string,
+): SkillRemovalMatch<T> {
+  const removable = rows.filter((r) => isRemovableOrigin(r.origin));
+  const byKey = removable.find((r) => r.id === wanted);
+  if (byKey) return { kind: 'one', row: byKey };
+  const rest = removable.filter((r) => r.identifier === wanted || r.name === wanted);
+  if (rest.length > 1) {
+    return { kind: 'ambiguous', ids: rest.map((r) => r.id).sort((a, b) => a.localeCompare(b)) };
+  }
+  if (rest.length === 1) return { kind: 'one', row: rest[0] };
+  return { kind: 'none' };
+}
+
 /** Card payload for the Installed grid — everything comes from disk. */
 export interface InstalledHermesSkill {
   /** Skill name — the lock.json key and the `uninstall` positional argument. */
@@ -157,6 +241,20 @@ export interface HermesSkillDetail {
   bodyTruncated: boolean;
   /** True when a `&docs=1` fetch would add documentation we don't have yet. */
   needsRemoteDocs: boolean;
+  /**
+   * True when NOTHING on this device backed the record: not the installed
+   * skills, not the catalogue, not the bundled `official` files. Phase 1 fills
+   * every field from the catalogue row, so without one the answer is a
+   * placeholder built from the requested id — the name is the id echoed back.
+   *
+   * It is not evidence that the skill does not exist: this device's catalogue is
+   * a snapshot that ClawBox never rebuilds once it exists, and a bare NAME (what
+   * a `related_skills` chip carries) is not a key of it at all. Only Hermes can
+   * refuse an id, which is what phase 2 asks it to do — so this flag is what
+   * turns phase 2's 404 from "the documentation failed" into "there is no such
+   * skill", for the browser and for the agent alike.
+   */
+  catalogMiss?: boolean;
   headings?: { level: 2 | 3; text: string; slug: string }[];
 }
 
@@ -184,6 +282,27 @@ export interface CatalogMeta {
   stale?: boolean;
 }
 
+export interface CatalogFacets {
+  sources: CatalogFacet[];
+  providers: CatalogFacet[];
+  /** builtin+official collapsed to one bucket — see `trustBucket`. */
+  trust: CatalogFacet[];
+  /** Normalised `extra.category`; junk and empty values never appear. */
+  categories: CatalogFacet[];
+}
+
+/**
+ * Where a facet count was measured.
+ *
+ * `catalog` — over every row the query matches, so a count is the number of
+ * skills the filter would actually reach.
+ * `loaded`  — over the rows in THIS answer only. The CLI fallback has no index
+ * to count against, and TASK-452 was full of surfaces that stated a number
+ * confidently and wrongly, so the client says "of the {n} loaded" rather than
+ * presenting a page total as a catalogue total.
+ */
+export type FacetScope = 'catalog' | 'loaded';
+
 export interface BrowseResponse {
   skills: HermesSkill[];
   page: number;
@@ -191,11 +310,152 @@ export interface BrowseResponse {
   total: number;
   totalPages: number;
   hasMore: boolean;
-  facets: { sources: CatalogFacet[]; providers: CatalogFacet[] };
+  facets: CatalogFacets;
+  /**
+   * How many of the `total` matching rows carry a usable category. Only 739 of
+   * the device's 90 605 rows do, so the rail states the coverage instead of
+   * implying that the category buckets add up to the result count.
+   */
+  categoryCoverage: number;
+  facetScope: FacetScope;
   catalog: CatalogMeta;
   /** True when the answer came from the CLI fallback (no paging, top-N only). */
   degraded: boolean;
 }
+
+/**
+ * How long the inspect route lets `hermes skills inspect` run for the phase-2
+ * documentation fetch before it gives up and answers `cli_timeout`.
+ *
+ * 60 s, not the 45 s it used to be. What that fetch actually costs, measured
+ * read-only on a Hermes box on 2026-09-05: 4.7 s for a github row, 11.3 s for a
+ * ClawHub one, 11.9 s for an official one — and SkillDetail.tsx records 9.5-14.6 s
+ * for the same call. The one figure that ever exceeded 45 s is the route's own
+ * older note, "~60 s on a loaded box" for a browse.sh/github row over the
+ * unauthenticated GitHub API, unqualified and not reproduced since. So this cap
+ * is 5-12x the measured cost of every population we can measure, and covers
+ * that older worst case at parity rather than beyond it: a box slower still
+ * gets its fetch killed, which the MCP tool now REPORTS instead of returning an
+ * empty README. It matches the budget the catalog-index builds in
+ * hermes-skill-index.ts already take.
+ */
+export const SKILL_DOCS_CLI_TIMEOUT_MS = 60_000;
+
+/**
+ * What a CLIENT of `inspect?docs=1` must allow, so the route's own answer wins
+ * the race: a budget at or below the cap above aborts first, and the 504 that
+ * names the DOCUMENTATION as the thing that failed never arrives. The MCP tool
+ * allowed the request 30 s against a 45 s cap and therefore never once saw it.
+ *
+ * The margin covers the HTTP round trip and the route's own work, NOT the queue:
+ * runSkillsCli admits two children at a time and that wait is not part of the
+ * CLI's timeout, so a route call can still outlast this. That case is not
+ * papered over — the tool words a client-side timeout as the device not
+ * answering, and claims a source deadline only when the route reports one.
+ */
+export const SKILL_DOCS_CLIENT_TIMEOUT_MS = SKILL_DOCS_CLI_TIMEOUT_MS + 10_000;
+
+/**
+ * Why a skills route's CLI call could not answer. The route's `error` sentence
+ * is English composed on the server, for the log and for a caller with no
+ * locale. The store — and the MCP tool's rules — read the CODE, the way the
+ * install route's own refusals are already read.
+ */
+export const CLI_FAILURE_CODES = ['cli_timeout', 'cli_missing', 'cli_failed', 'cancelled', 'too_large'] as const;
+export type CliFailureCode = (typeof CLI_FAILURE_CODES)[number];
+
+export function isCliFailureCode(value: unknown): value is CliFailureCode {
+  return typeof value === 'string' && (CLI_FAILURE_CODES as readonly string[]).includes(value);
+}
+
+/**
+ * What the BROWSE route can refuse with: every CLI failure, plus the one
+ * refusal the owner caused and can undo. A search the route will not run — it
+ * caps the length and rejects a leading `-`, both of which the search box lets
+ * you type — is a 400, and a 400 carrying no code read as "the catalogue could
+ * not be loaded, retry": the wrong story and a button that cannot help.
+ */
+export const BROWSE_FAILURE_CODES = [
+  ...CLI_FAILURE_CODES,
+  'bad_query',
+  // The rail's own refusals. Both are the owner's to undo — an unticking, not
+  // a retry — and until TASK-658 both arrived code-less and were painted as
+  // "couldn't load the catalogue, retry", whose button resends the same input.
+  'invalid_argument',
+  'too_many_facets',
+] as const;
+export type BrowseFailureCode = (typeof BROWSE_FAILURE_CODES)[number];
+
+export function isBrowseFailureCode(value: unknown): value is BrowseFailureCode {
+  return typeof value === 'string' && (BROWSE_FAILURE_CODES as readonly string[]).includes(value);
+}
+
+/**
+ * Classify a runHermesCli / skills-gate rejection by the message it settled
+ * with — the test the install route applies to its own timeout. The messages
+ * are runHermesCli's ("hermes timed out", "hermes call cancelled", the spawn
+ * failures, the output cap) and the gate's SkillsCliAborted ("Request
+ * cancelled"). Anything unrecognised is a plain failure.
+ */
+export function cliFailureCode(err: unknown): CliFailureCode {
+  const message = err instanceof Error ? err.message : '';
+  if (/timed out/i.test(message)) return 'cli_timeout';
+  if (/not installed/i.test(message)) return 'cli_missing';
+  if (/exceeded the size limit/i.test(message)) return 'too_large';
+  if (/cancelled/i.test(message)) return 'cancelled';
+  return 'cli_failed';
+}
+
+/**
+ * The fixed sentence a skills route answers for a CLI failure — the log's twin
+ * in the response, for a caller with no locale. Never the exception's own
+ * message: the routes' try blocks cover lock and filesystem work as well as
+ * the spawn, and an I/O error names absolute device paths.
+ */
+export const CLI_FAILURE_SENTENCES: Record<CliFailureCode, string> = {
+  cli_timeout: "The device's Hermes command took too long and was stopped.",
+  cli_missing: 'Hermes is not installed on this device.',
+  cli_failed: "The device's Hermes command failed.",
+  cancelled: 'The request was cancelled.',
+  too_large: "The device's answer was too large to use.",
+};
+
+/**
+ * Why a skills route refused the REQUEST — as opposed to why the CLI behind it
+ * could not answer (`CLI_FAILURE_CODES` above).
+ *
+ * These are the refusals the caller can fix, and until TASK-658 every one of
+ * them was a bare English sentence: `{"error":"Invalid sort"}` and nothing
+ * else. The store has no way to read a sentence, so all ten of them landed on
+ * the catalogue's "couldn't load, retry" — the wrong story, and a button whose
+ * only effect is to resend the input that was just rejected.
+ *
+ * `invalid_argument` carries a `field` naming WHICH input, because "something
+ * you sent was wrong" is not a next step. `too_many_facets` is separated from
+ * it deliberately: too many valid values is a different remedy (untick one)
+ * from one invalid value, and the browse route could not tell them apart at
+ * all — `facetParam` returned the same `null` for both.
+ */
+export const REQUEST_REFUSAL_CODES = ['invalid_argument', 'too_many_facets', 'not_found'] as const;
+export type RequestRefusalCode = (typeof REQUEST_REFUSAL_CODES)[number];
+
+/**
+ * The names the routes emit, so a producer cannot spell one differently from
+ * the vocabulary that documents it.
+ */
+export const REQUEST_REFUSAL = {
+  invalidArgument: 'invalid_argument',
+  tooManyFacets: 'too_many_facets',
+  notFound: 'not_found',
+} as const satisfies Record<string, RequestRefusalCode>;
+
+export function isRequestRefusalCode(value: unknown): value is RequestRefusalCode {
+  return typeof value === 'string' && (REQUEST_REFUSAL_CODES as readonly string[]).includes(value);
+}
+
+/** How many values one facet group may carry, and how many may be selected. */
+export const MAX_FACET_VALUES = 24;
+export const MAX_FACET_SELECTION = 12;
 
 // The fixed set of discovery sources Hermes' `--source` flag accepts. `all` is
 // the (default) firehose; the rest narrow to one registry. Anything outside
@@ -376,6 +636,44 @@ export function checkInstallIdentifier(id: string): IdCheck {
   return { ok: true, isUrl: false };
 }
 
+/**
+ * ClawHub's slug shape, as its own resolver defines it
+ * (`tools/skills_hub.py` — `ClawHubSource._SLUG_RE`).
+ */
+const CLAWHUB_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * The identifier `hermes skills install` must be given for a catalog id.
+ *
+ * ClawHub is the ONLY registry in the index whose identifiers carry no source
+ * prefix: all 69 150 of its rows are a bare slug with empty `repo`/`path`,
+ * while official/github/skills.sh/lobehub/browse-sh rows are all prefixed.
+ * `hermes skills install` sends a slash-less argument through
+ * `_resolve_short_name()`, which only accepts an exact match on the catalog
+ * NAME — and a ClawHub row's name is its display name ("QR Code Decode") while
+ * its identifier is the slug ("qrcode-decode"). So it never matched, the CLI
+ * printed a "did you mean…" table, exited 0 having installed nothing, and this
+ * route answered 502 "Skill could not be resolved" for an id that search had
+ * just handed out verbatim — a guaranteed retry loop for the agent and a dead
+ * Install button for three quarters of the store.
+ *
+ * `ClawHubSource._parse_identifier` accepts `clawhub/<slug>`, and the slash
+ * makes the CLI skip short-name resolution and go straight to the adapters.
+ * So a bare slug is sent as `clawhub/<slug>`.
+ *
+ * `source` is the catalog record's source when the index could be read. It is
+ * undefined on a device whose index has not been built yet (the browse route's
+ * degraded CLI path) — a bare slug is still mapped there, because ClawHub is
+ * the only place one can have come from and Hermes' own short-name fallback is
+ * a cross-registry fuzzy match its authors call provenance-unsafe.
+ */
+export function cliInstallIdentifier(id: string, source?: string): string {
+  const v = typeof id === 'string' ? id.trim() : '';
+  if (!v || v.includes('/')) return v;
+  if (source !== undefined && source !== 'clawhub') return v;
+  return CLAWHUB_SLUG_RE.test(v) ? `clawhub/${v}` : v;
+}
+
 // Skill NAME for `uninstall` — a single lock.json key, no slashes.
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -409,6 +707,25 @@ export function isValidQuery(q: string): boolean {
   return !hasControlChar(v);
 }
 
+/**
+ * How deep Browse can page.
+ *
+ * The old cap was 1000. The catalogue holds ~90 200 rows and the endpoint
+ * cheerfully advertised `totalPages: 3760, hasMore: true` at page 1000 — and
+ * then 400ed page 1001, so the infinite-scroll sentinel asked for a page the
+ * server had just promised and got an error. At the UI's page size that made
+ * 73 % of the catalogue unreachable and the last scroll of every deep browse
+ * an error state.
+ *
+ * The catalogue is an in-memory array that is sorted once at load, so an offset
+ * this large costs a slice and nothing else — the cap was never about
+ * performance. It is kept only as a bound on a hostile query string, set above
+ * `ceil(rows / min page size)` for any catalogue this device can hold, and the
+ * response now clamps `totalPages`/`hasMore` to it so the client is never told
+ * about a page it may not ask for.
+ */
+export const MAX_BROWSE_PAGE = 200_000;
+
 export function clampInt(raw: string | null, min: number, max: number, fallback: number): number | null {
   if (raw === null || raw === '') return fallback;
   const n = Number(raw);
@@ -423,4 +740,55 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Split a source URL into a `{ head, tail }` pair for display, where `tail`
+ * holds the part that IDENTIFIES this specific skill.
+ *
+ * WHY this exists: the store paints a skill's "Source" link as the raw URL
+ * under a CSS `truncate` (overflow-ellipsis, end-clipped). Every browse.sh
+ * skill's per-skill URL is real and distinct —
+ *   https://github.com/browserbase/browse.sh/blob/main/skills/seatguru.com/get-seat-map-dog7jd/SKILL.md
+ * — but they share a ~48-char prefix, and the tail that tells one skill from
+ * the next is exactly the half the ellipsis eats. So on screen every skill's
+ * Source read the same `github.com/browserbase/browse.sh/blob/main/skill…`,
+ * which looks like the collection, not the skill (verified on-device: the
+ * catalog holds 440 DISTINCT browse.sh source_urls, so the href was never the
+ * bug — the rendering was). Pinning `tail` and letting only `head` clip keeps
+ * the identifying segment on screen at any width, and the two parts still
+ * concatenate to the exact URL, so nothing is invented or hidden.
+ *
+ * `tail` is the last path segment, or the last TWO when the final one is a
+ * generic in-repo filename (SKILL.md, README, index.*, or any bare `*.md`) that
+ * would identify nothing on its own. A URL with no path (a bare host, a
+ * homepage) has no boilerplate to elide and comes back entirely as `tail`.
+ */
+export function sourceUrlParts(url: string): { head: string; tail: string } {
+  const noScheme = url.replace(/^https?:\/\//i, '');
+  const cut = noScheme.search(/[?#]/);
+  // The path only — a `?query`/`#hash` is not part of the boilerplate to elide,
+  // and rides along on the tail via the offset slice below.
+  const pathPart = cut === -1 ? noScheme : noScheme.slice(0, cut);
+  const segs = pathPart.split('/').filter(Boolean);
+  const host = segs[0] ?? '';
+  const pathSegs = segs.slice(1);
+  // Only a DEEP path carries the shared boilerplate the clip was eating. A bare
+  // host or a shallow `host/a/b` already fits and identifies itself, so it is
+  // returned whole (head empty) rather than split for the sake of it.
+  if (pathSegs.length < 3) return { head: '', tail: noScheme };
+  const GENERIC_FILE = /^(?:skill\.md|readme(?:\.[a-z0-9]+)?|index\.[a-z0-9]+|[a-z0-9._-]+\.md)$/i;
+  const last = pathSegs[pathSegs.length - 1];
+  const tailCount = GENERIC_FILE.test(last) && pathSegs.length >= 2 ? 2 : 1;
+  const tailSegs = pathSegs.slice(pathSegs.length - tailCount);
+  // Split by OFFSET, not by re-joining: the marker is the slash-prefixed tail
+  // segments, and everything from it onward (a trailing slash, the query/hash
+  // suffix) is the tail. `head + tail === noScheme` byte-for-byte for every
+  // input — including a deep URL ending in `/` — because nothing is rebuilt
+  // from the boolean-filtered segments; the original string is only sliced.
+  const marker = `/${tailSegs.join('/')}`;
+  const idx = pathPart.lastIndexOf(marker);
+  const head = noScheme.slice(0, idx + 1);
+  const tail = noScheme.slice(idx + 1);
+  return { head, tail };
 }

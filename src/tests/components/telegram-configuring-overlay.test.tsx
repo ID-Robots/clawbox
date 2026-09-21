@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import TelegramConfiguringOverlay from "@/components/TelegramConfiguringOverlay";
 import { resetHarnessCache } from "@/lib/client-harness";
 
@@ -14,6 +14,24 @@ vi.mock("@/lib/i18n", () => ({
   useT: () => ({ t: (key: string) => key, locale: "en", setLocale: vi.fn() }),
 }));
 
+// The overlay's choreography is real time: 1.5 s + 2.5 s + 2 s of fixed phases
+// before it polls at all, a 2 s poll interval, then 1.5 s in the ready phase —
+// 7.5 s per case, 10 s for the give-up case, ~25 s of sleeping for three cases
+// that assert nothing about wall-clock time. Fake timers (advancing on their
+// own so RTL's waitFor and React's scheduler keep working, as elsewhere in this
+// suite) let each case jump the clock past the whole sequence in one step; the
+// sequence itself, the poll count and the readiness rule are unchanged.
+//
+// The fixed phases, in ms, and the ready phase after a poll succeeds.
+const PHASES_MS = 1_500 + 2_500 + 2_000;
+const READY_PHASE_MS = 1_500;
+
+async function advance(ms: number): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
 function jsonResponse(data: unknown): Response {
   return { ok: true, status: 200, json: async () => data } as Response;
 }
@@ -25,12 +43,13 @@ function called(fetchMock: ReturnType<typeof vi.fn>, path: string): boolean {
 
 describe("TelegramConfiguringOverlay readiness", () => {
   beforeEach(() => {
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     resetHarnessCache();
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
     resetHarnessCache();
   });
 
@@ -50,7 +69,7 @@ describe("TelegramConfiguringOverlay readiness", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<TelegramConfiguringOverlay onDone={onDone} waitFor={Promise.resolve()} />);
+    render(<TelegramConfiguringOverlay onDone={onDone} onTimeout={vi.fn()} waitFor={Promise.resolve()} />);
 
     // The two middle steps name what actually starts on this edition...
     await waitFor(() => {
@@ -61,9 +80,11 @@ describe("TelegramConfiguringOverlay readiness", () => {
     expect(screen.queryByText("telegram.restartingGateway")).not.toBeInTheDocument();
     expect(screen.queryByText("telegram.waitingGateway")).not.toBeInTheDocument();
 
+    // Through the fixed phases, the first (successful) poll and the ready phase.
+    await advance(PHASES_MS + READY_PHASE_MS);
     await waitFor(() => {
       expect(onDone).toHaveBeenCalledTimes(1);
-    }, { timeout: 20_000 });
+    });
 
     expect(called(fetchMock, "/setup-api/gateway/health")).toBe(false);
     expect(called(fetchMock, "/setup-api/telegram/status")).toBe(true);
@@ -72,7 +93,7 @@ describe("TelegramConfiguringOverlay readiness", () => {
     // The label lands in two places at phase 4 — the visible subtitle and the
     // sr-only live region — so count rather than expect a single node.
     expect(screen.queryAllByText("telegram.botReady").length).toBeGreaterThan(0);
-  }, 30_000);
+  });
 
   it("still polls the gateway on an openclaw device", async () => {
     const onDone = vi.fn();
@@ -88,23 +109,25 @@ describe("TelegramConfiguringOverlay readiness", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<TelegramConfiguringOverlay onDone={onDone} waitFor={Promise.resolve()} />);
+    render(<TelegramConfiguringOverlay onDone={onDone} onTimeout={vi.fn()} waitFor={Promise.resolve()} />);
 
     await waitFor(() => {
       expect(screen.getByText("telegram.restartingGateway")).toBeInTheDocument();
     });
     expect(screen.queryByText("telegram.hermesStartingService")).not.toBeInTheDocument();
 
+    await advance(PHASES_MS + READY_PHASE_MS);
     await waitFor(() => {
       expect(onDone).toHaveBeenCalledTimes(1);
-    }, { timeout: 20_000 });
+    });
 
     expect(called(fetchMock, "/setup-api/gateway/health")).toBe(true);
     expect(called(fetchMock, "/setup-api/telegram/status")).toBe(false);
-  }, 30_000);
+  });
 
   it("hands control back without a ready phase when hermes never starts listening", async () => {
     const onDone = vi.fn();
+    const onTimeout = vi.fn();
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/setup-api/harness/active") {
@@ -118,14 +141,21 @@ describe("TelegramConfiguringOverlay readiness", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    // Short budget so the give-up path is reached quickly.
+    // Short budget so the give-up path is reached quickly: two 2 s attempts.
+    const healthTimeoutMs = 4_000;
     render(
-      <TelegramConfiguringOverlay onDone={onDone} waitFor={Promise.resolve()} healthTimeoutMs={4_000} />,
+      <TelegramConfiguringOverlay onDone={onDone} onTimeout={onTimeout} waitFor={Promise.resolve()} healthTimeoutMs={healthTimeoutMs} />,
     );
 
+    // Not there yet: the budget has to run out before the overlay gives up.
+    await advance(PHASES_MS + healthTimeoutMs / 2);
+    expect(onDone).not.toHaveBeenCalled();
+
+    await advance(healthTimeoutMs / 2);
     await waitFor(() => {
-      expect(onDone).toHaveBeenCalledTimes(1);
-    }, { timeout: 20_000 });
+      expect(onTimeout).toHaveBeenCalledTimes(1);
+    });
+    expect(onDone).not.toHaveBeenCalled();
 
     // The parent surfaces its own error — the overlay must not claim success.
     expect(screen.queryAllByText("telegram.botReady")).toHaveLength(0);
@@ -134,5 +164,160 @@ describe("TelegramConfiguringOverlay readiness", () => {
     // outcome. Assert it did ask Hermes and simply never got a listener.
     expect(called(fetchMock, "/setup-api/gateway/health")).toBe(false);
     expect(called(fetchMock, "/setup-api/telegram/status")).toBe(true);
-  }, 30_000);
+  });
+
+  it("reports a failed configure promise instead of leaving an unhandled rejection", async () => {
+    const onDone = vi.fn();
+    const onTimeout = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/setup-api/harness/active") {
+        return jsonResponse({ active: "openclaw", edition: "openclaw" });
+      }
+      if (String(input) === "/setup-api/gateway/health") {
+        return jsonResponse({ available: true, port: 18789 });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <TelegramConfiguringOverlay
+        onDone={onDone}
+        onTimeout={onTimeout}
+        waitFor={Promise.reject(new Error("configure failed"))}
+      />,
+    );
+
+    await advance(PHASES_MS);
+    await waitFor(() => expect(onTimeout).toHaveBeenCalledTimes(1));
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it("reports readiness expiry even when the configure request never settles", async () => {
+    const onDone = vi.fn();
+    const onTimeout = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/setup-api/harness/active") {
+        return jsonResponse({ active: "openclaw", edition: "openclaw" });
+      }
+      if (String(input) === "/setup-api/gateway/health") {
+        return jsonResponse({ available: false, port: 18789 });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pendingConfigure = new Promise<void>(() => {});
+    const healthTimeoutMs = 4_000;
+    render(
+      <TelegramConfiguringOverlay
+        onDone={onDone}
+        onTimeout={onTimeout}
+        waitFor={pendingConfigure}
+        healthTimeoutMs={healthTimeoutMs}
+      />,
+    );
+
+    await advance(PHASES_MS + healthTimeoutMs);
+    await waitFor(() => expect(onTimeout).toHaveBeenCalledTimes(1));
+    expect(onDone).not.toHaveBeenCalled();
+    expect(called(fetchMock, "/setup-api/gateway/health")).toBe(true);
+  });
+
+  it("enforces the readiness deadline when the gateway health request never settles", async () => {
+    const onDone = vi.fn();
+    const onTimeout = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/setup-api/harness/active") {
+        return jsonResponse({ active: "openclaw", edition: "openclaw" });
+      }
+      if (String(input) === "/setup-api/gateway/health") {
+        return new Promise<Response>(() => {});
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const healthTimeoutMs = 4_000;
+    render(
+      <TelegramConfiguringOverlay
+        onDone={onDone}
+        onTimeout={onTimeout}
+        waitFor={Promise.resolve()}
+        healthTimeoutMs={healthTimeoutMs}
+      />,
+    );
+
+    await advance(PHASES_MS + healthTimeoutMs);
+    await waitFor(() => expect(onTimeout).toHaveBeenCalledTimes(1));
+    expect(onDone).not.toHaveBeenCalled();
+    expect(called(fetchMock, "/setup-api/gateway/health")).toBe(true);
+  });
+
+  it("times out when readiness is healthy but the configure request never settles", async () => {
+    const onDone = vi.fn();
+    const onTimeout = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/setup-api/harness/active") {
+        return jsonResponse({ active: "openclaw", edition: "openclaw" });
+      }
+      if (String(input) === "/setup-api/gateway/health") {
+        return jsonResponse({ available: true, port: 18789 });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const healthTimeoutMs = 4_000;
+    render(
+      <TelegramConfiguringOverlay
+        onDone={onDone}
+        onTimeout={onTimeout}
+        waitFor={new Promise<void>(() => {})}
+        healthTimeoutMs={healthTimeoutMs}
+      />,
+    );
+
+    await advance(PHASES_MS + healthTimeoutMs);
+    await waitFor(() => expect(onTimeout).toHaveBeenCalledTimes(1));
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it("keeps one readiness sequence when parent callback identities change", async () => {
+    const firstDone = vi.fn();
+    const latestDone = vi.fn();
+    const configured = Promise.resolve();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "/setup-api/harness/active") {
+        return jsonResponse({ active: "openclaw", edition: "openclaw" });
+      }
+      if (String(input) === "/setup-api/gateway/health") {
+        return jsonResponse({ available: true, port: 18789 });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const view = render(
+      <TelegramConfiguringOverlay
+        onDone={firstDone}
+        onTimeout={vi.fn()}
+        waitFor={configured}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("telegram.restartingGateway")).toBeInTheDocument());
+    await advance(1_500);
+
+    view.rerender(
+      <TelegramConfiguringOverlay
+        onDone={latestDone}
+        onTimeout={vi.fn()}
+        waitFor={configured}
+      />,
+    );
+    await advance(PHASES_MS - 1_500 + READY_PHASE_MS);
+
+    await waitFor(() => expect(latestDone).toHaveBeenCalledTimes(1));
+    expect(firstDone).not.toHaveBeenCalled();
+  });
 });

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 import * as childProcess from "child_process";
 import fs from "fs/promises";
+
+vi.mock("@/lib/root-step-runner", () => ({
+  ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
+  startRootStep: vi.fn(async () => {}),
+}));
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -8,6 +14,7 @@ vi.mock("child_process", () => ({
 
 vi.mock("fs/promises", () => ({
   default: {
+    lstat: vi.fn(),
     readdir: vi.fn(),
     rm: vi.fn(),
     mkdir: vi.fn(),
@@ -29,8 +36,29 @@ vi.mock("@/lib/auth", () => ({
   getSystemUsername: vi.fn(() => "clawbox"),
 }));
 
+vi.mock("@/lib/local-ai-runtime", () => ({
+  getOllamaBaseUrl: vi.fn(() => "http://127.0.0.1:11434"),
+  startOllamaService: vi.fn(async () => {}),
+}));
+
+// The confirmation gate has its own file (`reset-confirmation.test.ts`), which
+// exercises the real one on real timers. Here it is stubbed open: this file is
+// about what the wipe does once it has been allowed to start, and the real gate
+// pads its responses with a timer these fake-timer tests would never advance.
+vi.mock("@/lib/password-reprove", () => ({
+  lockoutBuckets: vi.fn(() => [{ key: "global" }]),
+  checkReproveLockout: vi.fn(async () => null),
+  reproveOwnerPassword: vi.fn(async () => null),
+}));
+
+vi.mock("@/lib/login-rate-limit", () => ({
+  padResponseTime: vi.fn(async () => {}),
+}));
+
 import { resetUpdateState } from "@/lib/updater";
 import { getSystemUsername } from "@/lib/auth";
+import { startOllamaService } from "@/lib/local-ai-runtime";
+import { startRootStep } from "@/lib/root-step-runner";
 
 type ReaddirResult = Awaited<ReturnType<typeof fs.readdir>>;
 
@@ -71,6 +99,7 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
 
 describe("POST /setup-api/setup/reset", () => {
   let resetPost: () => Promise<Response>;
+  let session: SessionFixture;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -90,6 +119,9 @@ describe("POST /setup-api/setup/reset", () => {
       getgid: () => 1000,
     });
 
+    // Everything the wipe is pointed at really is a directory unless a case
+    // says otherwise — that is what the route checks before it reads one.
+    mockFs.lstat.mockResolvedValue({ isDirectory: () => true } as unknown as Awaited<ReturnType<typeof fs.lstat>>);
     mockFs.readdir.mockResolvedValue([]);
     mockFs.rm.mockResolvedValue();
     mockFs.mkdir.mockResolvedValue(undefined);
@@ -102,14 +134,23 @@ describe("POST /setup-api/setup/reset", () => {
       systemctl: { stdout: "", stderr: "" },
     });
 
+    session = installSessionFixture();
     const mod = await import("@/app/setup-api/setup/reset/route");
-    resetPost = mod.POST;
+    // The handler requires a session, the owner's password and the typed word
+    // (TASK-443), so every call in this file carries all three. The gate itself
+    // is covered by `reset-confirmation.test.ts`.
+    resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
+      method: "POST",
+      headers: { Cookie: session.cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "hunter2", confirm: "RESET" }),
+    }));
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    session.cleanup();
   });
 
   it("performs factory reset successfully", async () => {
@@ -195,12 +236,20 @@ describe("POST /setup-api/setup/reset", () => {
     // Local AI exclusive mode routinely leaves Ollama STOPPED, and its models
     // live under /usr/share/ollama — unreachable by the home wipe. The reset
     // must start the service so the API deletes can actually run.
+    //
+    // Through the shared startOllamaService(), not a hand-rolled systemctl call:
+    // that helper is the one place the argv is pinned to the `start
+    // ollama.service` Cmnd_Spec in config/clawbox-sudoers, and it is the only
+    // caller that passes `-n` and keeps the unprivileged dev fallback. The bare
+    // `systemctl start ollama` this used to issue matched no sudoers rule and
+    // worked only through the unscoped polkit grant. TASK-445.
     await resetPost();
 
-    const call = mockExecFile.mock.calls.find(
-      ([cmd, args]) => cmd === "/usr/bin/systemctl" && args?.[0] === "start" && args?.[1] === "ollama",
+    expect(vi.mocked(startOllamaService)).toHaveBeenCalled();
+    const bareCall = mockExecFile.mock.calls.find(
+      ([cmd, args]) => typeof cmd === "string" && cmd.endsWith("systemctl") && args?.includes("ollama"),
     );
-    expect(call).toBeDefined();
+    expect(bareCall, "the reset must not talk to systemd about ollama itself").toBeUndefined();
   });
 
   it("deletes WiFi connections", async () => {
@@ -316,27 +365,18 @@ describe("POST /setup-api/setup/reset", () => {
     expect(chpasswdCall![1]).toBe("clawbox:clawbox\n");
     expect((chpasswdCall![2] as { mode: number }).mode).toBe(0o600);
 
-    // The root systemd service must have been started — without it, the
-    // file we just wrote is just an inert text file.
-    const startCall = mockExecFile.mock.calls.find(
-      ([cmd, args]) =>
-        cmd === "/usr/bin/sudo" &&
-        args?.[0] === "/usr/bin/systemctl" &&
-        args?.[1] === "start" &&
-        args?.[2] === "clawbox-root-update@chpasswd.service",
-    );
-    expect(startCall).toBeDefined();
+    // The root step must have been started — without it, the file we just
+    // wrote is just an inert text file. Through the root-owned launcher now:
+    // the unprivileged systemctl call this replaced only worked because of the
+    // unscoped polkit `manage-units` grant. TASK-539.
+    expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("chpasswd", expect.anything());
   });
 
   it("continues the reset when the password reset fails (non-fatal)", async () => {
     // chpasswd service failure must not strand the user on a half-reset box;
     // the wizard's CredentialsStep on first boot re-prompts and overwrites.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    setupExecFileMock({
-      "systemctl start clawbox-root-update@chpasswd": new Error("polkit denied"),
-      systemctl: { stdout: "", stderr: "" },
-      nmcli: { stdout: "", stderr: "" },
-    });
+    vi.mocked(startRootStep).mockRejectedValueOnce(new Error("not permitted"));
 
     const res = await resetPost();
     const body = await res.json();
@@ -427,11 +467,7 @@ describe("POST /setup-api/setup/reset", () => {
     // writeFile succeeds but the service start fails: the plaintext credential
     // must be unlinked so it isn't left readable on disk.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    setupExecFileMock({
-      "systemctl start clawbox-root-update@chpasswd": new Error("polkit denied"),
-      systemctl: { stdout: "", stderr: "" },
-      nmcli: { stdout: "", stderr: "" },
-    });
+    vi.mocked(startRootStep).mockRejectedValueOnce(new Error("not permitted"));
 
     await resetPost();
     errSpy.mockRestore();
@@ -462,12 +498,18 @@ describe("POST /setup-api/setup/reset", () => {
  */
 describe("POST /setup-api/setup/reset — Hermes agent + offline model survive", () => {
   let resetPost: () => Promise<Response>;
+  let session: SessionFixture;
   const HOME = process.env.HOME || "/home/clawbox";
   const HERMES = `${HOME}/.hermes`;
 
   // What a used Hermes box actually has under ~/.hermes.
   const HERMES_ENTRIES = [
     "hermes-agent",
+    "bin",
+    // Upstream's install-failure marker. It suppresses the tirith download for
+    // 24 h, so a reset that kept it would leave a box that IS online unable to
+    // re-fetch the scanner for another day.
+    ".tirith-install-failed",
     "config.yaml",
     "config.yaml.bak-20260813",
     ".env",
@@ -481,7 +523,15 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     "state.db",
     "projects.db",
   ];
-  const SECRET_ENTRIES = HERMES_ENTRIES.filter((e) => e !== "hermes-agent");
+  // What ~/.hermes/bin holds: the upstream tirith binary, plus a second entry
+  // so the assertion below pins the WHOLE directory rather than one name — a
+  // future narrowing that kept `tirith` and removed its neighbour would
+  // otherwise slip through.
+  const HERMES_BIN_ENTRIES = ["tirith", "future-helper"];
+  // The reset preserves the agent install and the bin/ the scanner lives in.
+  // Everything else under ~/.hermes is previous-owner state and must go.
+  const KEPT_ENTRIES = ["hermes-agent", "bin"];
+  const SECRET_ENTRIES = HERMES_ENTRIES.filter((e) => !KEPT_ENTRIES.includes(e));
 
   const rmTargets = () =>
     mockFs.rm.mock.calls.map(([p]) => p).filter((p): p is string => typeof p === "string");
@@ -498,11 +548,13 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
 
     mockFs.readdir.mockImplementation(((p: string) => {
       if (p === HERMES) return Promise.resolve(HERMES_ENTRIES);
+      if (p === `${HERMES}/bin`) return Promise.resolve(HERMES_BIN_ENTRIES);
       if (p === "/test/data") return Promise.resolve(["config.json", "network.env", "llamacpp", ".session-secret"]);
       // llama-server's runtime scratch sits beside the weights.
       if (p === "/test/data/llamacpp") return Promise.resolve(["models", "server.pid", "server.log"]);
       return Promise.resolve([]);
     }) as unknown as typeof fs.readdir);
+    mockFs.lstat.mockResolvedValue({ isDirectory: () => true } as unknown as Awaited<ReturnType<typeof fs.lstat>>);
     mockFs.rm.mockResolvedValue();
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue();
@@ -511,14 +563,23 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     mockResetUpdateState.mockReturnValue();
     setupExecFileMock({ nmcli: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
 
+    session = installSessionFixture();
     const mod = await import("@/app/setup-api/setup/reset/route");
-    resetPost = mod.POST;
+    // The handler requires a session, the owner's password and the typed word
+    // (TASK-443), so every call in this file carries all three. The gate itself
+    // is covered by `reset-confirmation.test.ts`.
+    resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
+      method: "POST",
+      headers: { Cookie: session.cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "hunter2", confirm: "RESET" }),
+    }));
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    session.cleanup();
   });
 
   it("never removes ~/.hermes/hermes-agent, directly or via its parent", async () => {
@@ -530,6 +591,24 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     // And not by taking the whole directory out from under it — the exact
     // shape of the original defect.
     expect(targets).not.toContain(HERMES);
+  });
+
+  it("never removes ~/.hermes/bin, which holds the pre-exec shell scanner", async () => {
+    // tirith is the ~33 MB upstream binary the agent runs BEFORE every shell
+    // command. It is not owner state — it is an upstream release artefact —
+    // and the agent only re-downloads it from a GitHub release once the box
+    // has internet again. A reset box reboots into AP mode, so wiping it left
+    // the agent executing shell commands with pre-exec scanning off, and
+    // nothing said so.
+    await resetPost();
+    const targets = rmTargets();
+
+    expect(targets).not.toContain(`${HERMES}/bin`);
+    // And not by reaching into it either — the directory is kept whole, so
+    // nothing inside it is enumerated or removed.
+    for (const entry of HERMES_BIN_ENTRIES) {
+      expect(targets, `expected ~/.hermes/bin/${entry} to survive`).not.toContain(`${HERMES}/bin/${entry}`);
+    }
   });
 
   it("still removes every secret-bearing entry under ~/.hermes", async () => {
@@ -563,6 +642,29 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     expect(targets).toContain("/test/data/.session-secret");
     // network.env was already preserved; assert it stayed that way.
     expect(targets).not.toContain("/test/data/network.env");
+  });
+
+  it("wipes the chat transcripts, which hold the customer's own words", async () => {
+    // The most sensitive thing the durable transcript introduced: whatever the
+    // owner typed at the agent, and whatever was in the pictures they attached.
+    // It survives a reset only if somebody ADDS it to the keep-list, which is
+    // the right default — but a resold box handing its next owner the previous
+    // one's conversations is the failure that matters most here, so it is
+    // pinned rather than left to that default holding.
+    mockFs.readdir.mockImplementation(((p: string) => {
+      if (p === "/test/data") {
+        return Promise.resolve(["config.json", "chat-transcripts", "chat-media", "network.env"]);
+      }
+      return Promise.resolve([]);
+    }) as unknown as typeof fs.readdir);
+
+    await resetPost();
+    const targets = rmTargets();
+
+    expect(targets).toContain("/test/data/chat-transcripts");
+    // Staged attachments and generated pictures go with them, for the same
+    // reason and by the same default.
+    expect(targets).toContain("/test/data/chat-media");
   });
 
   it("keeps only the weights inside data/llamacpp — runtime scratch still goes", async () => {
@@ -636,7 +738,252 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     expect(res.status).toBe(500);
     const calls = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[])?.join(" ")}`);
     expect(calls.some((c) => c.includes("connection delete"))).toBe(false);
-    expect(calls.some((c) => c.includes("clawbox-root-update@chpasswd"))).toBe(false);
+    // The password reset goes through the mocked root-step launcher, never
+    // execFile — asserting on the exec transcript here would always pass.
+    expect(vi.mocked(startRootStep)).not.toHaveBeenCalledWith("chpasswd", expect.anything());
     expect(calls.some((c) => c.includes("systemctl reboot"))).toBe(false);
+  });
+});
+
+/**
+ * What the entry-by-entry wipe does when the thing it is pointed at is NOT a
+ * directory.
+ *
+ * `removeDirectoryContents(dir, keep)` is used wherever the reset has to keep
+ * something — ~/.hermes, data/llamacpp, data/embed, Documents/Downloads/Desktop
+ * — and it used to `readdir` `dir` and `rm -rf` the entries without ever asking
+ * what `dir` was. Both halves of that are reachable by a previous owner with a
+ * shell, which is the adversary the whole keep-list is written against (the
+ * Terminal app, or SSH before the key wipe):
+ *
+ *   1. `rm -rf ~/.hermes && ln -s /home/clawbox ~/.hermes` made the next
+ *      owner's factory reset readdir the LINK TARGET and delete every entry in
+ *      it that is not a keep-list name — the ClawBox checkout, the running web
+ *      server, `.bun`, `.local/bin`, the `~/.cache/huggingface` voice models.
+ *      Pressing Factory reset would have cost a reflash.
+ *   2. A plain FILE where a directory is expected made `readdir` raise ENOTDIR,
+ *      which the helper rethrew and `wipeHomeUserState` did not catch — so the
+ *      reset answered 500 AFTER data/, ~/.openclaw, ~/.clawkeep and the home
+ *      paths were gone and BEFORE the password reset, the WiFi clear and the
+ *      reboot. Every retry failed at the same place: the box is unusable and
+ *      un-resettable without a shell.
+ *
+ * One `lstat` closes both, for all four call-site families — but the two cases
+ * do not end the same way, and the difference is the point of these tests. A
+ * plain file hid nothing, so removing it finishes the job and the reset
+ * completes. A SYMLINK hid everything: its target still holds what the wipe was
+ * sent to erase, so the link is removed (never its target) and the path is
+ * REPORTED, which takes the reset down its own abort path — no WiFi clear, no
+ * password reset, no reboot, the owner told what was not erased. A reset that
+ * answered "complete" over a ~/Documents still full of the previous owner's
+ * files, browsable in the Files app, would be the worse defect of the two.
+ */
+describe("POST /setup-api/setup/reset — a non-directory where a directory belongs", () => {
+  let resetPost: () => Promise<Response>;
+  let session: SessionFixture;
+  const HOME = process.env.HOME || "/home/clawbox";
+  const HERMES = `${HOME}/.hermes`;
+
+  const rmTargets = () =>
+    mockFs.rm.mock.calls.map(([p]) => p).filter((p): p is string => typeof p === "string");
+
+  /** Everything a readdir of the LINK TARGET would have offered up for deletion. */
+  const LINK_TARGET_ENTRIES = ["clawbox", ".bun", ".local", ".cache", "Documents"];
+
+  /** lstat that reports every path as a directory except `notADir`. */
+  function lstatExcept(notADir: string, kind: "symlink" | "file") {
+    mockFs.lstat.mockImplementation(((p: string) =>
+      Promise.resolve({
+        isDirectory: () => p !== notADir,
+        isSymbolicLink: () => p === notADir && kind === "symlink",
+      })) as unknown as typeof fs.lstat);
+  }
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ models: [] }),
+    }));
+    vi.stubGlobal("process", { ...process, getuid: () => 1000, getgid: () => 1000 });
+
+    mockFs.lstat.mockResolvedValue({
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+    } as unknown as Awaited<ReturnType<typeof fs.lstat>>);
+    mockFs.readdir.mockResolvedValue([] as unknown as ReaddirResult);
+    mockFs.rm.mockResolvedValue();
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.writeFile.mockResolvedValue();
+    mockFs.chown.mockResolvedValue();
+    mockFs.unlink.mockResolvedValue();
+    mockResetUpdateState.mockReturnValue();
+    setupExecFileMock({ nmcli: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+
+    session = installSessionFixture();
+    const mod = await import("@/app/setup-api/setup/reset/route");
+    resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
+      method: "POST",
+      headers: { Cookie: session.cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "hunter2", confirm: "RESET" }),
+    }));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+    session.cleanup();
+  });
+
+  it("removes a symlink planted at ~/.hermes instead of deleting through it", async () => {
+    lstatExcept(HERMES, "symlink");
+    // What the link points at. If anything readdirs the link, these are what it
+    // hands to `rm -rf`.
+    mockFs.readdir.mockImplementation(((p: string) =>
+      Promise.resolve(p === HERMES ? LINK_TARGET_ENTRIES : [])) as unknown as typeof fs.readdir);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await resetPost();
+    const body = await res.json();
+    const targets = rmTargets();
+    warnSpy.mockRestore();
+
+    // The link itself goes…
+    expect(targets).toContain(HERMES);
+    // …and nothing inside the target it pointed at.
+    for (const entry of LINK_TARGET_ENTRIES) {
+      expect(targets, `factory reset deleted through the ~/.hermes symlink into ${entry}`)
+        .not.toContain(`${HERMES}/${entry}`);
+    }
+    // And the reset does not claim to have erased what is still at the target.
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(body.failures)).toContain(HERMES);
+    expect(JSON.stringify(body.failures)).toContain("symlink");
+  });
+
+  it("leaves the box reachable when it reports a redirected directory", async () => {
+    // The abort path, and why the symlink case takes it: the AP only comes back
+    // on a reboot, so a reset that already cleared the WiFi and reset the login
+    // password without rebooting would strand a WiFi-only box.
+    lstatExcept(HERMES, "symlink");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await resetPost();
+    await vi.advanceTimersByTimeAsync(2_000);
+    warnSpy.mockRestore();
+
+    expect(res.status).toBe(500);
+    const commands = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args ?? []).join(" ")}`);
+    expect(commands.some((c) => c.startsWith("nmcli connection delete"))).toBe(false);
+    expect(commands.some((c) => c.includes("reboot"))).toBe(false);
+    expect(vi.mocked(startRootStep).mock.calls.map(([step]) => step)).not.toContain("chpasswd");
+  });
+
+  it("finishes the reset when a plain file sits where ~/.hermes should be", async () => {
+    lstatExcept(HERMES, "file");
+    // readdir on a file is ENOTDIR — the error that used to abort the whole
+    // reset half-way through, on every retry. Nothing reads it now, and a plain
+    // file hid no directory of owner state, so the reset completes.
+    mockFs.readdir.mockImplementation(((p: string) => {
+      if (p === HERMES) {
+        const err = new Error("ENOTDIR: not a directory") as Error & { code: string };
+        err.code = "ENOTDIR";
+        return Promise.reject(err);
+      }
+      return Promise.resolve([]);
+    }) as unknown as typeof fs.readdir);
+
+    const res = await resetPost();
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(rmTargets()).toContain(HERMES);
+
+    // And it really did get all the way to the end: the reboot is armed only
+    // after the password reset and the WiFi clear.
+    await vi.advanceTimersByTimeAsync(1_000);
+    const reboot = mockExecFile.mock.calls.find(
+      ([cmd, args]) => cmd === "/usr/bin/sudo" && args?.join(" ").includes("reboot"),
+    );
+    expect(reboot, "the reset never reached the reboot").toBeDefined();
+  });
+
+  it("reports a non-directory it cannot remove instead of aborting the whole reset", async () => {
+    // A previous owner had the sudo password, so the thing in the way can be
+    // undeletable: a bind mount over the file (EBUSY), `chattr +i` (EPERM), a
+    // read-only mount. A throw here would land in the handler's outer catch —
+    // the same half-wiped, un-resettable box, one errno over.
+    lstatExcept(HERMES, "file");
+    mockFs.rm.mockImplementation(((p: unknown) =>
+      p === HERMES
+        ? Promise.reject(new Error("EACCES: permission denied"))
+        : Promise.resolve()) as unknown as typeof fs.rm);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await resetPost();
+    const body = await res.json();
+    warnSpy.mockRestore();
+
+    expect(res.status).toBe(500);
+    // Reported through the failure list, with the path — not as a bare
+    // "Factory reset failed" from the outer catch.
+    expect(body.error).toContain("incomplete");
+    expect(JSON.stringify(body.failures)).toContain(HERMES);
+    // …and the rest of the wipe still ran: ~/.ssh went before the report.
+    expect(rmTargets()).toContain(`${HOME}/.ssh`);
+  });
+
+  it("does not readdir the top of data/ through a symlink either", async () => {
+    // Same shape one directory over: DATA_DIR is wiped by a readdir + rm pass
+    // of its own, and a link planted there points the same rm -rf at whatever
+    // it names.
+    lstatExcept("/test/data", "symlink");
+    mockFs.readdir.mockImplementation(((p: string) =>
+      Promise.resolve(p === "/test/data" ? LINK_TARGET_ENTRIES : [])) as unknown as typeof fs.readdir);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await resetPost();
+    const body = await res.json();
+    const targets = rmTargets();
+    warnSpy.mockRestore();
+
+    expect(targets).toContain("/test/data");
+    for (const entry of LINK_TARGET_ENTRIES) {
+      expect(targets, `factory reset deleted through the data/ symlink into ${entry}`)
+        .not.toContain(`/test/data/${entry}`);
+    }
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(body.failures)).toContain("/test/data");
+  });
+
+  /**
+   * The one assumption the whole guard rests on, checked against the real
+   * filesystem rather than a mock: every case above passes `fs.rm` a path and
+   * asserts the STRING, so they would all pass just as happily on a runtime
+   * where `rm -rf <link>` erased the target.
+   */
+  it("fs.rm removes a symlink itself, never what it points at", async () => {
+    const realFs = await vi.importActual<typeof import("fs/promises")>("fs/promises");
+    const os = await vi.importActual<typeof import("os")>("os");
+    const nodePath = await vi.importActual<typeof import("path")>("path");
+    const tmp = await realFs.mkdtemp(nodePath.join(os.tmpdir(), "clawbox-reset-link-"));
+    try {
+      const target = nodePath.join(tmp, "target");
+      await realFs.mkdir(target);
+      await realFs.writeFile(nodePath.join(target, "keepme.txt"), "previous owner\n");
+      const link = nodePath.join(tmp, "link");
+      await realFs.symlink(target, link);
+
+      await realFs.rm(link, { recursive: true, force: true });
+
+      await expect(realFs.lstat(link)).rejects.toThrow();
+      expect((await realFs.readdir(target))).toEqual(["keepme.txt"]);
+    } finally {
+      await realFs.rm(tmp, { recursive: true, force: true });
+    }
   });
 });

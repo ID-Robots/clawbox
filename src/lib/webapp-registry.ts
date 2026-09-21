@@ -1,32 +1,103 @@
 import { getAll } from "@/lib/config-store";
 import { boundPreferenceText } from "@/lib/preference-schema";
 import { setPreferences } from "@/lib/preference-store";
+import { createSerialLock } from "@/lib/serial-lock";
+import { ensureWebappIcon, safeAppId } from "@/lib/webapp-icon";
+
+/**
+ * One registration at a time in this process.
+ *
+ * The read below and the write under it are a read-modify-write over the WHOLE
+ * preference snapshot, and `setPreferences` carries every entry it was handed
+ * back to disk. Two registrations that interleave — a build finishing while a
+ * project's "Add to desktop" lands, both arriving in the same microtask drain
+ * — each read the same base and the second write drops the first: measured,
+ * two concurrent calls for `aaa` and `bbb` left `installed_meta` holding only
+ * `bbb`. The store's own write is atomic (temp file + rename), which protects
+ * the FILE, not the update. Wrapped here rather than in the routes because
+ * this is the single door every writer of `installed_apps`/`installed_meta`
+ * comes through.
+ */
+const withRegistration = createSerialLock();
+
+/**
+ * Names that are not app ids, however well they match the alphabet.
+ *
+ * `safeAppId` rebuilds an id out of `[A-Za-z0-9_-]`, and every character of
+ * `__proto__`, `constructor` and `prototype` is in that set — so the rebuild
+ * that keeps an id out of a PATH does nothing to keep it out of a SLOT on
+ * `Object.prototype`, and this function writes the id as an object key and
+ * reads it back as one.
+ *
+ * The object literal below is not itself the pollution primitive: a COMPUTED
+ * key (`[appId]:`) defines an own property rather than moving the prototype,
+ * unlike the bare `__proto__:` form. The refusal is here because the id does
+ * not stop at this function. It is written into `installed_meta`, read back
+ * by the desktop, and enumerated by the middleware to build the public-webapp
+ * set — and an id that names a slot every object already has would make each
+ * of those readers wrong in its own way. One refusal at the single door every
+ * writer of `installed_apps`/`installed_meta` comes through is cheaper than
+ * three readers that each have to know.
+ */
+const RESERVED_APP_IDS = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
+ * Whether an id names a slot every object already has.
+ *
+ * Exported so the create route can answer 400 — a reserved id is bad INPUT,
+ * and the throw below would otherwise reach that route's generic handler as a
+ * 500. The refusal still lives here as well: `registerServerApp` and
+ * `deployWebapp` also come through this door, and a guard only the HTTP layer
+ * applies is one the other two callers do not have.
+ */
+export function isReservedAppId(id: string): boolean {
+  return RESERVED_APP_IDS.has(id);
+}
 
 interface InstalledMeta {
   name: string;
   color: string;
   iconUrl: string;
   webappUrl: string;
+  launch?: "window";
+  public?: boolean;
 }
 
 /**
  * Durably register a webapp on the desktop by writing the same preference keys
- * the live desktop writes when it consumes a `register_webapp` ui:pending-action
- * (see src/app/page.tsx). That handoff only lands if the desktop happens to be
+ * the live desktop writes when it consumes a `register_webapp` entry from the
+ * owner-notice ring (`ui:pending-actions`, src/lib/pending-actions.ts — see
+ * src/app/page.tsx). That handoff only lands if the desktop happens to be
  * open and polling — so a webapp created while the desktop is closed gets its
  * HTML saved but never reaches the app grid. Persisting here closes that gap:
  * the desktop reads `installed_apps` / `installed_meta` from
  * /setup-api/preferences on mount, so the app shows up on its next load.
  *
  * Idempotent (add-if-missing); also un-hides the app, mirroring the live
- * handler. The ui:pending-action emit stays in place for instant updates on an
+ * handler. The ring push stays in place for instant updates on an
  * already-open desktop — this is the durability backstop.
  */
 export async function registerWebappInPreferences(
   appId: string,
   name: string,
-  opts: { color?: string; iconUrl?: string; webappUrl?: string } = {},
+  opts: {
+    color?: string;
+    iconUrl?: string;
+    webappUrl?: string;
+    /** What the app does, for the icon prompt. */
+    description?: string;
+  } = {},
 ): Promise<void> {
+  // The id is REBUILT from the alphabet and then checked against the reserved
+  // names above, before it is used as a key or carried into a URL. Callers
+  // validate too (the webapps route tests APP_ID_RE), but this is the one door
+  // every writer of the registry comes through, so it is where the answer has
+  // to be the same for all of them.
+  const id = safeAppId(appId);
+  if (id === null || RESERVED_APP_IDS.has(id)) {
+    throw new Error(`Invalid app id: ${appId}`);
+  }
+  await withRegistration(async () => {
   // One read of the config, not three — config-store.get() re-reads and
   // re-parses the whole file on each call, and reading the three keys together
   // also narrows the read-modify-write window.
@@ -39,17 +110,35 @@ export async function registerWebappInPreferences(
   // POST /setup-api/preferences, and the update carries over every entry read
   // above alongside the one being added.
   await setPreferences({
-    "pref:installed_apps": installedApps.includes(appId) ? installedApps : [...installedApps, appId],
+    "pref:installed_apps": installedApps.includes(id) ? installedApps : [...installedApps, id],
     "pref:installed_meta": {
       ...installedMeta,
-      [appId]: {
-        name: boundPreferenceText(name, appId),
+      [id]: {
+        // A rebuild re-registers the app; the owner's launch/public flags on
+        // the previous entry survive it, everything else is the fresh build's.
+        ...(installedMeta[id]?.launch ? { launch: installedMeta[id].launch } : {}),
+        ...(installedMeta[id]?.public ? { public: true } : {}),
+        name: boundPreferenceText(name, id),
         color: opts.color || "#f97316",
         iconUrl: opts.iconUrl || "",
-        webappUrl: opts.webappUrl || `/setup-api/webapps?app=${appId}`,
+        webappUrl: opts.webappUrl || `/setup-api/webapps?app=${encodeURIComponent(id)}`,
       },
     },
     // A freshly (re)created app shouldn't stay hidden.
-    "pref:hidden_installed": hiddenInstalled.filter((id) => id !== appId),
+    "pref:hidden_installed": hiddenInstalled.filter((hidden) => hidden !== id),
   });
+  });
+
+  // Every app that reaches the desktop gets a picture, not just the ones built
+  // out of HTML this box holds: a project the coding agent scaffolds and serves
+  // on a local port registers through here with no icon of its own, and used to
+  // sit on the desktop as a bare coloured tile forever. Drawn by ClawBox AI
+  // AFTER the registration returns — generation takes 5-15 s and nothing should
+  // wait on a picture. `ensureWebappIcon` never rejects and answers 'kept' from
+  // one stat when the icon already exists, so a re-register costs nothing; the
+  // `.catch` is belt and braces against an unhandled rejection.
+  if (!opts.iconUrl) {
+    void ensureWebappIcon(id, { name, color: opts.color, description: opts.description })
+      .catch(() => {});
+  }
 }

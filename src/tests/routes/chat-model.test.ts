@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Mock } from "vitest";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -11,18 +12,71 @@ vi.mock("util", () => ({
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
+  // The owner's explicit model pick is written here after a successful switch
+  // (TASK-713): a picker click is the one place a choice is made.
+  getKnown: vi.fn(async () => ({ value: undefined, known: true })),
+  setMany: vi.fn(),
 }));
 
+const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
+
+// The picker asks the gateway for each model's own reasoning-effort levels
+// (`models.list`) over the in-process socket. Mocked so a suite can hand it the
+// gateway's real answer, and unavailable by default — which is the fallback
+// path every other case here exercises.
+const { gatewayWsCallMock } = vi.hoisted(() => ({ gatewayWsCallMock: vi.fn() }));
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>()),
+  gatewayWsCall: gatewayWsCallMock,
+}));
+
+// The catalogue is told out-of-band when the plugin gate changes the provider
+// set; the real module forks `openclaw models list`.
+vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
+  notifyProviderSetChanged: vi.fn(),
+  refreshInBackground: vi.fn(),
+}));
 vi.mock("@/lib/openclaw-config", () => ({
+  // The picker asks the gateway for each model's own thinking levels; every
+  // case here is a box with none reachable, which is the fallback the local
+  // reasoning table exists for.
+  gatewayIsAbsent: vi.fn(() => true),
   inferConfiguredLocalModel: vi.fn(),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
+  // Strict: the ON half of the plugin gate decides from ABSENCE, and plain
+  // `readConfig` cannot tell an unreadable config from one carrying no flag.
+  readConfigStrict: vi.fn(async () => ({})),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
-  runOpenclawConfigSet: vi.fn(),
+  repairClawboxAiFlashModelPolicy: vi.fn(async () => false),
+  // The route tells "the gateway has not come back" apart from every other
+  // restart failure with `instanceof`, so the mock owes a real class: a plain
+  // `vi.fn()` here would make the check itself throw, and leaving the export
+  // out makes it `instanceof undefined`.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
+  runOpenclawConfigSet: configSetMock,
+  // The route writes the primary in a batch now. Record every assignment of
+  // a batch on `runOpenclawConfigSet` too, the way config-set-calls flattens
+  // both forms for the configure suites: the assertions here are about which
+  // assignments were made, not about how many processes carried them.
+  runOpenclawConfigSetBatch: vi.fn(async (ops: string[][]) => {
+    for (const op of ops) await configSetMock(op);
+  }),
+  // The disarm half of the Codex runtime arm. A batch entry carries only
+  // value/ref/provider — there is no delete — and a null value is refused by
+  // the schema, so removing the key is its own `config unset` spawn.
+  runOpenclawConfigUnset: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn(),
   parseFullyQualifiedModel: vi.fn(),
-  // Plugin gating: chat/model route toggles `plugins.entries.anthropic.enabled`
-  // when switching providers. Stubbed since tests don't assert on it.
+  // Plugin gating: the route switches the plugin the new primary needs ON
+  // before writing `agents.defaults.model.primary` and gates the rest OFF
+  // after it. The ordering suite at the bottom asserts on both halves; every
+  // other test only needs the imports to resolve.
   setProviderPlugins: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -31,9 +85,30 @@ vi.mock("@/lib/sqlite-store", () => ({
   sqliteSet: vi.fn(),
 }));
 
+// TASK-668. The recorded per-provider model counts the catalog route writes
+// after each enumeration. Empty by default — nothing recorded is UNKNOWN, and
+// unknown changes nothing about the list this route serves.
+vi.mock("@/lib/provider-runnable", () => ({
+  readProviderRunnable: vi.fn(async () => new Map<string, string>()),
+}));
+
+// Whether an Ollama-backed local model can chat at all
+// (src/lib/ollama-capabilities.ts). The real module would knock on the box's
+// own port 11434 from the test; its capability-first, name-second rule is
+// pinned in src/tests/unit/ollama-capabilities.test.ts, and the route's part
+// is only to ask and to drop the row on a "no".
+vi.mock("@/lib/ollama-capabilities", () => ({
+  ollamaModelCanChat: vi.fn(async () => true),
+}));
+
 import { getAll } from "@/lib/config-store";
-import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, gatewayIsAbsent, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, repairClawboxAiFlashModelPolicy, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
+import { readProviderRunnable } from "@/lib/provider-runnable";
+import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
+import { getKnown, setMany } from "@/lib/config-store";
+import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
 import { promisify } from "util";
 
 describe("/setup-api/chat/model", () => {
@@ -44,11 +119,24 @@ describe("/setup-api/chat/model", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // `clearAllMocks` keeps implementations and queued answers: the reasoning
+    // tests leave the gateway present and `models.list` configured, and every
+    // test after them would otherwise run against that instead of the
+    // default box with no gateway to ask.
+    vi.mocked(gatewayIsAbsent).mockReturnValue(true);
+    gatewayWsCallMock.mockReset();
+    // Implementations too, not only call history: the Anthropic ordering
+    // suite replaces these two, and nothing restored them for the tests after
+    // it — a ChatGPT case could run against a batch that refuses to forward.
+    vi.mocked(readConfigStrict).mockReset().mockResolvedValue({} as never);
+    vi.mocked(runOpenclawConfigSetBatch).mockReset().mockImplementation(async (ops) => {
+      for (const op of ops) await vi.mocked(runOpenclawConfigSet)(op);
+    });
 
     mockExec = vi.fn().mockResolvedValue({ stdout: "", stderr: "" });
     vi.mocked(promisify).mockReturnValue(mockExec as never);
     vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
-    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
+    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 0 });
     // Mirror real `parseFullyQualifiedModel` from `@/lib/openclaw-config`
     // exactly — trailing-slash rejection matters, a lax mock can mask bugs.
     vi.mocked(parseFullyQualifiedModel).mockImplementation((fq: string) => {
@@ -102,19 +190,17 @@ describe("/setup-api/chat/model", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    // After consolidating ClawBox AI into one provider row (model
-    // variants live in the secondary picker), the active option's id
-    // is the active model id and the row's label is the bare provider
-    // name — Flash/Pro distinction is no longer encoded in the option's
-    // label.
-    expect(body.activeOptionId).toBe("deepseek/deepseek-v4-pro");
+    // Keep the actual primary visible to the caller so it can migrate it,
+    // while the provider row and restore target always name Flash.
+    expect(body.activeModel).toBe("deepseek/deepseek-v4-pro");
+    expect(body.activeOptionId).toBe("deepseek/deepseek-v4-flash");
     expect(body.activeSource).toBe("primary");
     expect(body.activeLabel).toBe("ClawBox AI");
     expect(body.options).toEqual([
       {
-        id: "deepseek/deepseek-v4-pro",
+        id: "deepseek/deepseek-v4-flash",
         label: "ClawBox AI",
-        model: "deepseek/deepseek-v4-pro",
+        model: "deepseek/deepseek-v4-flash",
         provider: "clawai",
         available: true,
         settingsSection: "ai",
@@ -135,7 +221,8 @@ describe("/setup-api/chat/model", () => {
       label: "Gemma 4 Local",
       model: "llamacpp/gemma4-e2b-it-q4_0",
     });
-    expect(sqliteSet).toHaveBeenCalledWith("chat:primary-provider-model", "deepseek/deepseek-v4-pro");
+    expect(body.primary.model).toBe("deepseek/deepseek-v4-flash");
+    expect(sqliteSet).toHaveBeenCalledWith("chat:primary-provider-model", "deepseek/deepseek-v4-flash");
   });
 
   it("lists every configured cloud provider alongside Local AI", async () => {
@@ -184,12 +271,72 @@ describe("/setup-api/chat/model", () => {
     expect(body.options.map((option: { model: string | null }) => option.model)).toEqual([
       "deepseek/deepseek-v4-flash",
       "openai/gpt-5.4",
-      "anthropic/claude-sonnet-4-6",
+      // The row POST /setup-api/providers/default reads for "Make default ->
+      // Anthropic" when the box has no Anthropic model of its own.
+      "anthropic/claude-opus-5",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
   });
 
-  it("switches the active chat model to Local AI and restarts the gateway", async () => {
+  describe("a provider the box can run no model from", () => {
+    /** The three-profile box of the test above: ClawBox AI, OpenAI, Anthropic. */
+    function threeProviderBox(primary: string) {
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+            "openai:default": { provider: "openai", mode: "token" },
+            "anthropic:default": { provider: "anthropic", mode: "token" },
+          },
+        },
+        models: { mode: "replace", providers: {} },
+        agents: { defaults: { model: { primary } } },
+      } as never);
+    }
+
+    it("is not offered, even though its credential is right there", async () => {
+      // Under `models.mode: "replace"` the core answers `openclaw models list
+      // --provider anthropic` with nothing, so every Anthropic row in this
+      // dropdown is a button whose only outcome is a refusal from the gateway.
+      threeProviderBox("deepseek/deepseek-v4-flash");
+      vi.mocked(readProviderRunnable).mockResolvedValue(
+        new Map([["anthropic", "none"], ["openai", "some"]]) as never,
+      );
+
+      const body = await (await GET()).json();
+
+      const labels = body.options.map((option: { label: string }) => option.label);
+      expect(labels).not.toContain("Anthropic Claude");
+      expect(labels).toEqual(expect.arrayContaining(["ClawBox AI", "OpenAI GPT"]));
+    });
+
+    it("keeps the row when the model in question is the one the box is running", async () => {
+      // The header pill names it. A dropdown that omits the active model shows
+      // the customer a model that is in no list.
+      threeProviderBox("anthropic/claude-opus-5");
+      vi.mocked(readProviderRunnable).mockResolvedValue(
+        new Map([["anthropic", "none"]]) as never,
+      );
+
+      const body = await (await GET()).json();
+
+      expect(body.options.map((option: { model: string | null }) => option.model))
+        .toContain("anthropic/claude-opus-5");
+    });
+
+    it("keeps every row when nothing has been recorded", async () => {
+      // The false-failure guard: an empty record is "nobody has asked", and
+      // beta's list is what it must produce.
+      threeProviderBox("deepseek/deepseek-v4-flash");
+
+      const body = await (await GET()).json();
+
+      expect(body.options.map((option: { label: string }) => option.label))
+        .toEqual(expect.arrayContaining(["ClawBox AI", "OpenAI GPT", "Anthropic Claude"]));
+    });
+  });
+
+  it("switches the active chat model to Local AI without restarting the gateway — the switch is live", async () => {
     vi.mocked(readConfig)
       .mockResolvedValueOnce({
         auth: {
@@ -249,9 +396,31 @@ describe("/setup-api/chat/model", () => {
       "agents.defaults.model.primary",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
-    expect(restartGateway).toHaveBeenCalled();
+    // The open sessions are patched live and the gateway hot-applies the new
+    // default itself; a restart here cost ~20 s of "gateway starting" per
+    // switch and every run in flight.
+    expect(restartGateway).not.toHaveBeenCalled();
     expect(body.activeSource).toBe("local");
     expect(body.activeLabel).toBe("Gemma 4 Local");
+  });
+
+  it("never restarts the gateway for a plugin flip — the core hot-applies plugins.entries", async () => {
+    vi.mocked(setProviderPlugins).mockResolvedValueOnce("anthropic" as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.warning).toBeUndefined();
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary",
+      "llamacpp/gemma4-e2b-it-q4_0",
+    ]);
   });
 
   it("does not arm the Codex runtime for a non-Codex model", async () => {
@@ -267,7 +436,7 @@ describe("/setup-api/chat/model", () => {
     expect(armed).toBe(false);
   });
 
-  it("switches back to the stored primary provider model", async () => {
+  it("switches back to Flash from a legacy stored primary provider model", async () => {
     vi.mocked(getAll).mockResolvedValue({
       ai_model_provider: "clawai",
       local_ai_provider: "llamacpp",
@@ -316,10 +485,493 @@ describe("/setup-api/chat/model", () => {
     expect(response.status).toBe(200);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
-      "deepseek/deepseek-chat",
+      "deepseek/deepseek-v4-flash",
     ]);
     expect(body.activeSource).toBe("primary");
     expect(body.activeLabel).toBe("ClawBox AI");
+  });
+
+  it.each([
+    "deepseek/deepseek-v4-pro",
+    "clawai/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
+    "clawai/deepseek-v4-flash",
+  ])("normalizes %s to Flash without sweeping unrelated sessions", async (model) => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, automatic: true }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary", "deepseek/deepseek-v4-flash",
+    ]);
+    expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+    expect(vi.mocked(runOpenclawConfigSet).mock.calls.some(([args]) => args[0].startsWith("models.providers."))).toBe(false);
+  });
+
+  it("restores Flash when the remembered primary was Pro", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    } as never);
+    vi.mocked(sqliteGet).mockResolvedValue("deepseek/deepseek-v4-pro");
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "primary", automatic: true }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary", "deepseek/deepseek-v4-flash",
+    ]);
+    expect(applyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
+      { provider: "deepseek", modelId: "deepseek-v4-flash", source: "user" },
+      { skipUserTagged: false },
+    );
+  });
+
+  it("keeps the session sweep for an explicit ClawBox AI model choice", async () => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-flash" }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(applyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
+      { provider: "deepseek", modelId: "deepseek-v4-flash", source: "user" },
+      { skipUserTagged: false },
+    );
+  });
+
+  /**
+   * The sibling of the configure route's own fix: the sweep does not THROW
+   * when the gateway refuses a session — it counts it into `sessionsSkipped`
+   * and returns — so a `try/catch` around it read an absent exception as a
+   * successful sweep and this route answered with no warning at all over a
+   * chat still pinned to the previous model.
+   */
+  it("says so when the gateway refused the sessions the sweep asked it to re-point", async () => {
+    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValueOnce({ filesUpdated: 0, sessionsUpdated: 0, sessionsSkipped: 1 });
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-flash" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.warning).toMatch(/keeps its previous model/);
+  });
+
+  it("stays quiet when there was no session to re-point", async () => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-flash" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.warning ?? "").not.toMatch(/keeps its previous model/);
+  });
+
+  it("keeps the session sweep when an automatic switch changes provider", async () => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "local", automatic: true }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(applyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
+      { provider: "llamacpp", modelId: "gemma4-e2b-it-q4_0", source: "user" },
+      { skipUserTagged: false },
+    );
+  });
+
+  describe("migrating an explicit former-Pro model policy", () => {
+    const FLASH = "deepseek/deepseek-v4-flash";
+    const PRO = "deepseek/deepseek-v4-pro";
+
+    function withPolicy(primary: string, allow?: string[]) {
+      const config = {
+        auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+        agents: { defaults: {
+          model: { primary },
+          modelPolicy: { allow, deny: ["openai/private-model"] },
+        } },
+      };
+      vi.mocked(readConfig).mockResolvedValue(config);
+      vi.mocked(readConfigStrict).mockResolvedValue(config);
+      return config;
+    }
+
+    async function normalizeFlash() {
+      return POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: FLASH, automatic: true }),
+      }));
+    }
+
+    it.each([PRO, "clawai/deepseek-v4-pro"])("flags an already-Flash primary with only %s explicitly allowed", async (allowedPro) => {
+      withPolicy(FLASH, [allowedPro, "anthropic/claude-opus-5"]);
+
+      const body = await (await GET()).json();
+
+      expect(body.activeModel).toBe(FLASH);
+      expect(body.needsFlashModelMigration).toBe(true);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["absent allowlist", undefined],
+      ["empty allowlist", []],
+      ["another provider only", ["openrouter/deepseek/deepseek-v4-pro"]],
+      ["wildcard only", ["deepseek/*"]],
+      ["Flash already allowed", [PRO, FLASH, "anthropic/*"]],
+    ])("does not broaden a policy with %s", async (_label, allow) => {
+      withPolicy(FLASH, allow);
+
+      expect((await (await GET()).json()).needsFlashModelMigration).toBeUndefined();
+      expect((await normalizeFlash()).status).toBe(200);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+    });
+
+    it("does not flag or rewrite another provider's active model", async () => {
+      const config = withPolicy("openai/gpt-5.4", [PRO]);
+      vi.mocked(readConfig).mockResolvedValue({
+        ...config,
+        auth: { profiles: {
+          ...config.auth.profiles,
+          "openai:default": { provider: "openai", mode: "api_key" },
+        } },
+      });
+
+      expect((await (await GET()).json()).needsFlashModelMigration).toBeUndefined();
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "openai/gpt-5.4", automatic: true }),
+      }));
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(repairClawboxAiFlashModelPolicy).not.toHaveBeenCalled();
+    });
+
+    it("repairs the policy under its own lock before validating the primary switch", async () => {
+      withPolicy(PRO, [PRO]);
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(true);
+
+      expect((await normalizeFlash()).status).toBe(200);
+
+      expect(repairClawboxAiFlashModelPolicy).toHaveBeenCalledExactlyOnceWith();
+      expect(runOpenclawConfigSetBatch).toHaveBeenCalledWith([
+        ["agents.defaults.model.primary", FLASH],
+      ]);
+      expect(vi.mocked(repairClawboxAiFlashModelPolicy).mock.invocationCallOrder[0])
+        .toBeLessThan(vi.mocked(runOpenclawConfigSetBatch).mock.invocationCallOrder[0]);
+      expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+    });
+
+    it("repairs an already-Flash primary and clears the migration flag without a restart", async () => {
+      const config = withPolicy(FLASH, ["anthropic/*", PRO]);
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(true);
+      vi.mocked(readConfig)
+        .mockResolvedValueOnce(config)
+        .mockResolvedValue({
+          ...config,
+          agents: { defaults: {
+            ...config.agents.defaults,
+            modelPolicy: { ...config.agents.defaults.modelPolicy, allow: ["anthropic/*", PRO, FLASH] },
+          } },
+        });
+
+      const response = await normalizeFlash();
+
+      expect(response.status).toBe(200);
+      expect((await response.json()).needsFlashModelMigration).toBeUndefined();
+      expect(repairClawboxAiFlashModelPolicy).toHaveBeenCalledExactlyOnceWith();
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+      expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("reports a policy repair failure without recording a successful choice", async () => {
+      withPolicy(FLASH, [PRO]);
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockRejectedValue(new Error("model policy write failed"));
+
+      const response = await normalizeFlash();
+
+      expect(response.status).toBe(500);
+      await expect(response.json()).resolves.toEqual({ error: "model policy write failed" });
+      expect(setMany).not.toHaveBeenCalled();
+      expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+      expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("clears a stale migration flag when a concurrent writer removed Pro permission", async () => {
+      const config = withPolicy(FLASH, [PRO]);
+      vi.mocked(readConfig)
+        .mockResolvedValueOnce(config)
+        .mockResolvedValue({
+          ...config,
+          agents: { defaults: {
+            ...config.agents.defaults,
+            modelPolicy: { allow: ["anthropic/*"] },
+          } },
+        });
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(false);
+
+      const response = await normalizeFlash();
+
+      expect(response.status).toBe(200);
+      expect((await response.json()).needsFlashModelMigration).toBeUndefined();
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    });
+
+    it("does not overwrite the repaired policy when primary validation fails", async () => {
+      withPolicy(PRO, [PRO]);
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(true);
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error("primary validation failed"));
+
+      const response = await normalizeFlash();
+
+      expect(response.status).toBe(500);
+      expect(repairClawboxAiFlashModelPolicy).toHaveBeenCalledExactlyOnceWith();
+      expect(runOpenclawConfigSet).toHaveBeenCalledExactlyOnceWith(["agents.defaults.model.primary", FLASH]);
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+      expect(setMany).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("remembering that the OWNER chose this model", () => {
+    /**
+     * TASK-713. The ClawBox AI tier badge is a device default, and every pair
+     * and re-pair wrote it over `agents.defaults.model.primary`. What stops it
+     * doing that to a model the owner chose is knowing that they chose one —
+     * and this is the click where that happens.
+     */
+    function boxWithClawaiAndAnthropic() {
+      vi.mocked(getAll).mockResolvedValue({});
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          },
+        },
+        models: { providers: { deepseek: { models: [
+          { id: "deepseek-v4-flash", name: "ClawBox AI Flash" },
+          { id: "deepseek-v4-pro", name: "ClawBox AI Pro" },
+        ] } } },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+      } as never);
+    }
+
+    async function post(body: Record<string, unknown>) {
+      return POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }));
+    }
+
+    it("records Flash when an older client posts the former Pro choice", async () => {
+      boxWithClawaiAndAnthropic();
+
+      expect((await post({ model: "deepseek/deepseek-v4-pro" })).status).toBe(200);
+
+      expect(setMany).toHaveBeenCalledWith({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-flash" },
+      });
+    });
+
+    it("records a re-pick of the model the box already runs", async () => {
+      // Someone deliberately settled on the tier-default model has no other way
+      // to say so, and without this the badge moves them off it the day their
+      // plan changes. The Hermes picker records the same no-op for the same
+      // reason.
+      boxWithClawaiAndAnthropic();
+
+      expect((await post({ model: "deepseek/deepseek-v4-flash" })).status).toBe(200);
+
+      expect(setMany).toHaveBeenCalledWith({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-flash" },
+      });
+    });
+
+    it("retires a ClawBox AI pick the box automatically moved OFF", async () => {
+      // The entitlement guard drops a refused Max model to Flash with
+      // `automatic: true`. Recording that as a choice would pin the box to
+      // Flash; leaving the refused Max pick on record makes the row this card
+      // teaches to honour a pick offer a model every click is refused for, so
+      // it is retired instead (TASK-769).
+      boxWithClawaiAndAnthropic();
+      vi.mocked(getKnown).mockResolvedValue({
+        value: { clawai: "deepseek/deepseek-v4-pro", anthropic: "anthropic/claude-opus-5" },
+        known: true,
+      });
+
+      expect((await post({ model: "deepseek/deepseek-v4-flash", automatic: true })).status).toBe(200);
+
+      expect(setMany).toHaveBeenCalledWith({
+        ai_model_explicit_picks: { anthropic: "anthropic/claude-opus-5" },
+      });
+    });
+
+    it("leaves the pick alone when the automatic switch lands ON it", async () => {
+      boxWithClawaiAndAnthropic();
+      vi.mocked(getKnown).mockResolvedValue({
+        value: { clawai: "deepseek/deepseek-v4-flash" },
+        known: true,
+      });
+
+      expect((await post({ model: "deepseek/deepseek-v4-flash", automatic: true })).status).toBe(200);
+
+      expect(setMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ ai_model_explicit_picks: expect.anything() }),
+      );
+    });
+
+    it("records NOTHING for a switch the box made for itself", async () => {
+      boxWithClawaiAndAnthropic();
+
+      expect((await post({ model: "deepseek/deepseek-v4-pro", automatic: true })).status).toBe(200);
+
+      expect(setMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ ai_model_explicit_picks: expect.anything() }),
+      );
+    });
+
+    it("does not sweep sessions when Flash is already the primary", async () => {
+      boxWithClawaiAndAnthropic();
+
+      expect((await post({ model: "deepseek/deepseek-v4-flash", automatic: true })).status).toBe(200);
+
+      expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("offering Flash regardless of the previous ClawBox AI choice", () => {
+    function boxOnAnthropicAfterPickingMax(store: Record<string, unknown>) {
+      vi.mocked(getAll).mockResolvedValue(store);
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+            "anthropic:default": { provider: "anthropic", mode: "oauth" },
+          },
+        },
+        models: { providers: { deepseek: { models: [
+          { id: "deepseek-v4-flash", name: "ClawBox AI Flash" },
+          { id: "deepseek-v4-pro", name: "ClawBox AI Pro" },
+        ] } } },
+        agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } },
+      } as never);
+    }
+
+    async function clawaiRow() {
+      const body = await (await GET()).json();
+      return body.options.find(
+        (option: { provider: string | null }) => option.provider === "clawai",
+      );
+    }
+
+    it("offers Flash over a remembered Pro pick while another provider is active", async () => {
+      boxOnAnthropicAfterPickingMax({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+      });
+
+      expect(await clawaiRow()).toMatchObject({
+        id: "deepseek/deepseek-v4-flash",
+        model: "deepseek/deepseek-v4-flash",
+        label: "ClawBox AI",
+      });
+    });
+
+    it("offers Flash when the owner never picked a model", async () => {
+      boxOnAnthropicAfterPickingMax({});
+
+      expect(await clawaiRow()).toMatchObject({
+        id: "deepseek/deepseek-v4-flash",
+        model: "deepseek/deepseek-v4-flash",
+      });
+    });
+
+    it("offers Flash on a legacy install that declares no models at all", async () => {
+      vi.mocked(getAll).mockResolvedValue({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+      });
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+            "anthropic:default": { provider: "anthropic", mode: "oauth" },
+          },
+        },
+        models: { mode: "replace", providers: {} },
+        agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } },
+      } as never);
+
+      expect(await clawaiRow()).toMatchObject({
+        model: "deepseek/deepseek-v4-flash",
+      });
+    });
+
+    it("ignores a recorded pick the row no longer offers", async () => {
+      boxOnAnthropicAfterPickingMax({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v3-retired" },
+      });
+
+      expect(await clawaiRow()).toMatchObject({
+        model: "deepseek/deepseek-v4-flash",
+      });
+    });
+
+    it("preserves how other providers resolve their own models", async () => {
+      vi.mocked(getAll).mockResolvedValue({
+        ai_model_explicit_picks: { anthropic: "anthropic/claude-haiku-4.5" },
+      });
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
+        models: { providers: { anthropic: { models: [
+          { id: "claude-opus-5" },
+          { id: "claude-haiku-4.5" },
+        ] } } },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+      } as never);
+
+      const body = await (await GET()).json();
+      const anthropic = body.options.find(
+        (option: { provider: string | null }) => option.provider === "anthropic",
+      );
+      expect(anthropic).toMatchObject({ model: "anthropic/claude-opus-5" });
+    });
+
+    it("offers Flash after another surface records a Pro pick", async () => {
+      boxOnAnthropicAfterPickingMax({});
+      vi.mocked(setMany).mockImplementation(async (patch: Record<string, unknown>) => {
+        vi.mocked(getAll).mockResolvedValue(patch);
+      });
+
+      await recordExplicitModelPick("deepseek/deepseek-v4-pro");
+
+      expect(await clawaiRow()).toMatchObject({ model: "deepseek/deepseek-v4-flash" });
+    });
   });
 
   it("rejects an invalid source", async () => {
@@ -430,6 +1082,10 @@ describe("/setup-api/chat/model", () => {
   });
 
   it("rejects ChatGPT subscription Pro/API-only Codex models before gateway restart", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+    } as never);
     const response = await POST(new Request("http://localhost/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -447,7 +1103,7 @@ describe("/setup-api/chat/model", () => {
     vi.mocked(readConfig).mockResolvedValue({
       auth: {
         profiles: {
-          "codex:default": { provider: "codex", mode: "oauth" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
         },
       },
       agents: {
@@ -476,13 +1132,13 @@ describe("/setup-api/chat/model", () => {
     vi.mocked(readConfig).mockResolvedValue({
       auth: {
         profiles: {
-          "codex:default": { provider: "codex", mode: "oauth" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
         },
       },
       agents: {
         defaults: {
           model: {
-            primary: "codex/gpt-5.4",
+            primary: "openai/gpt-5.4",
           },
         },
       },
@@ -497,17 +1153,23 @@ describe("/setup-api/chat/model", () => {
     expect(response.status).toBe(200);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
-      "codex/gpt-5.5",
+      "openai/gpt-5.5",
+    ]);
+    // ...and it is the ChatGPT account, not an API key, that runs it: the
+    // Codex runtime is armed on the canonical reference.
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      'agents.defaults.models["openai/gpt-5.5"].agentRuntime.id',
+      "codex",
     ]);
     expect(applyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
       {
-        provider: "codex",
+        provider: "openai",
         modelId: "gpt-5.5",
         source: "user",
       },
       { skipUserTagged: false },
     );
-    expect(restartGateway).toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
   });
 
   it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
@@ -516,13 +1178,13 @@ describe("/setup-api/chat/model", () => {
       vi.mocked(readConfig).mockResolvedValue({
         auth: {
           profiles: {
-            "codex:default": { provider: "codex", mode: "oauth" },
+            "openai:chatgpt": { provider: "openai", mode: "oauth" },
           },
         },
         agents: {
           defaults: {
             model: {
-              primary: "codex/gpt-5.4",
+              primary: "openai/gpt-5.4",
             },
           },
         },
@@ -535,11 +1197,13 @@ describe("/setup-api/chat/model", () => {
       }));
 
       expect(response.status).toBe(200);
+      // Posted under the retired `codex/` namespace (a stale tab); written
+      // where OpenClaw 2 resolves it.
       expect(runOpenclawConfigSet).toHaveBeenCalledWith([
         "agents.defaults.model.primary",
-        `codex/${modelId}`,
+        `openai/${modelId}`,
       ]);
-      expect(restartGateway).toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
     },
   );
 
@@ -547,13 +1211,13 @@ describe("/setup-api/chat/model", () => {
     vi.mocked(readConfig).mockResolvedValue({
       auth: {
         profiles: {
-          "codex:default": { provider: "codex", mode: "oauth" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
         },
       },
       agents: {
         defaults: {
           model: {
-            primary: "codex/gpt-5.4",
+            primary: "openai/gpt-5.4",
           },
         },
       },
@@ -568,9 +1232,13 @@ describe("/setup-api/chat/model", () => {
     expect(response.status).toBe(200);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
-      "codex/gpt-5.6-sol",
+      "openai/gpt-5.6-sol",
     ]);
-    expect(restartGateway).toHaveBeenCalled();
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      'agents.defaults.models["openai/gpt-5.6-sol"].agentRuntime.id',
+      "codex",
+    ]);
+    expect(restartGateway).not.toHaveBeenCalled();
   });
 
   it("rejects a non-openrouter model that is not in state.options", async () => {
@@ -582,5 +1250,1185 @@ describe("/setup-api/chat/model", () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: "Selected AI provider is not configured" });
+  });
+
+  it("never represents the OpenAI row by the ClawBox AI image entry", async () => {
+    // Every paired box carries `gpt-image-1-mini` in models.providers.openai
+    // .models[] (the image provider rides the openai plugin), and with an
+    // OpenAI key on the box it was the FIRST configured openai model — so the
+    // dropdown's OpenAI row was `openai/gpt-image-1-mini`, an image model
+    // offered as a chat model that fails on every turn. The row builder now
+    // applies the same allowlist the picker does.
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: {
+        profiles: {
+          "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          "openai:default": { provider: "openai", mode: "api_key" },
+        },
+      },
+      models: {
+        mode: "merge",
+        providers: {
+          deepseek: { models: [{ id: "deepseek-v4-flash", name: "ClawBox AI Flash" }] },
+          openai: {
+            apiKey: "claw_token123",
+            models: [{ id: "gpt-image-1-mini", name: "ClawBox AI Images", baseUrl: "https://clawbox.com/api/ai", api: "openai-completions" }],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai.model).toBe("openai/gpt-5.4");
+    expect(body.options.some((option: { model: string | null }) => option.model?.includes("gpt-image"))).toBe(false);
+  });
+
+  it("drops a remembered primary the picker refuses instead of letting it own the row", async () => {
+    // An older build could write the image entry as the primary; that box
+    // would otherwise show `openai/gpt-image-1-mini` as its OpenAI row
+    // forever, because the remembered active model wins the provider's slot.
+    // This box carries no other openai row, so the assertion below is
+    // satisfied by the hard-coded provider default — the `models[]` filter is
+    // covered by "never represents the OpenAI row…" and by the
+    // configured-rows test directly below.
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "openai" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: {
+        profiles: {
+          "openai:default": { provider: "openai", mode: "api_key" },
+        },
+      },
+      models: {
+        mode: "merge",
+        providers: {
+          openai: { models: [{ id: "gpt-image-1-mini", name: "ClawBox AI Images", baseUrl: "https://clawbox.com/api/ai", api: "openai-completions" }] },
+        },
+      },
+      agents: { defaults: { model: { primary: "openai/gpt-image-1-mini" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai.model).toBe("openai/gpt-5.4");
+    expect(body.activeOptionId).toBeNull();
+  });
+
+  it("builds the OpenAI row from OpenAI's own default, not the drifting store's provider", async () => {
+    // `ai_model_provider` only refreshes at configure-time, so it drifts (#162)
+    // — that is why the provider hint comes from the LIVE primary. Resolving
+    // the MODEL from the stale store while forcing the hint to the live
+    // provider builds a row whose label says OpenAI and whose model belongs to
+    // whatever the store last remembered. POST /setup-api/providers/default
+    // reads `option.model` off this very row and writes it to the primary.
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "clawai" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: {} },
+      models: { mode: "merge", providers: {} },
+      agents: { defaults: { model: { primary: "openai/gpt-image-1-mini" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai?.model).toBe("openai/gpt-5.4");
+  });
+
+  it("never offers a row for the image lane's provider, whatever the box is pinned to", async () => {
+    // A box whose primary was set from OpenClaw's own picker to the litellm
+    // plugin's chat row. `rememberPrimaryOption` must drop it, or the chat
+    // dropdown offers a row whose every turn goes to the image proxy asking
+    // for a model it does not serve — and the header cannot name it.
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "openai" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      models: {
+        mode: "merge",
+        providers: { litellm: { apiKey: "claw_redacted", baseUrl: "https://clawbox.com/api/ai" } },
+      },
+      agents: { defaults: { model: { primary: "litellm/claude-opus-4-6" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    expect(body.options.some((option: { provider: string }) => option.provider === "litellm")).toBe(false);
+    expect(body.options.some((option: { model: string | null }) => option.model?.startsWith("litellm/"))).toBe(false);
+    // The OpenAI credential still gets its own row, resolved from OpenAI's
+    // default rather than left owned by the refused primary.
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai?.model).toBe("openai/gpt-5.4");
+  });
+
+  it("keeps an owner's own openai row that the picker's curation list does not carry", async () => {
+    // The catalog allowlist exists to curate a NOISY UPSTREAM catalog down for
+    // a picker. `models.providers.openai.models[]` is not that catalog — it is
+    // what the owner configured, and this route's own sibling
+    // (`foreignOpenAiRoute`) treats a row there as "the owner's own work".
+    // Filtering it through the curation regex leaves the row represented by a
+    // hard-coded default their endpoint does not serve.
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "openai" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      models: {
+        mode: "merge",
+        providers: {
+          openai: {
+            baseUrl: "https://myproxy.example/v1",
+            models: [{ id: "llama-3.3-70b", name: "Llama 3.3 70B" }],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai?.model).toBe("openai/llama-3.3-70b");
+  });
+
+  it("builds the OpenAI row from the owner's configured rows even when the primary IS the image ref", async () => {
+    // The `models[]` filter lives in branch 2 of the row builder, and branch 1
+    // — "the active model belongs to this provider" — wins whenever the
+    // primary is the image ref, which is exactly the box this guard exists
+    // for. The row was then created much later from the hard-coded
+    // DEFAULT_PROVIDER_MODELS, never from what the owner actually configured:
+    // on a self-hosted openai-compatible endpoint that is an id the endpoint
+    // does not serve, and POST /setup-api/providers/default writes it to the
+    // primary, so the mismatch is a write and not a display bug.
+    vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "openai" });
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      models: {
+        mode: "merge",
+        providers: {
+          openai: {
+            baseUrl: "https://myproxy.example/v1",
+            models: [
+              { id: "gpt-image-1-mini", name: "ClawBox AI Images", baseUrl: "https://clawbox.com/api/ai" },
+              { id: "llama-3.3-70b", name: "Llama 3.3 70B" },
+            ],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "openai/gpt-image-1-mini" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+
+    const openai = body.options.find((option: { provider: string }) => option.provider === "openai");
+    expect(openai?.model).toBe("openai/llama-3.3-70b");
+  });
+
+  // H1 of the 2026-09-17 review. The `openai` → `litellm` image move did not
+  // close the chat-picker exposure, it moved it: the bundled litellm plugin
+  // registers a CHAT provider beside the image one and ships its own catalog
+  // row (`claude-opus-4-6`, 1M context, reasoning — extensions/litellm/onboard.ts
+  // at v2026.9.3), whose bearer is the same `models.providers.litellm.apiKey`
+  // this build writes. `openclaw models list`, the Control UI picker and
+  // Telegram `/model` all offer it; ClawBox's own refusals therefore have to
+  // cover the PROVIDER ID, not just the one image ref, or a model picked over
+  // there reaches `agents.defaults.model.primary` through this route.
+  it("refuses every model on the image provider id, not just the image ref", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+    } as never);
+
+    for (const model of [
+      // The bundled plugin's own static chat row.
+      "litellm/claude-opus-4-6",
+      // Whatever live discovery returned from `<baseUrl>/v1/models`.
+      "litellm/some-discovered-model",
+      // The image ref on the current provider id.
+      "litellm/gpt-image-1-mini",
+    ]) {
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      }));
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toMatch(/not a chat (model|provider)/);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does not widen the refusal to the LEGACY provider id, which is a real chat provider", async () => {
+    // `openai` hosts the image entry on every box provisioned before the move
+    // AND every OpenAI chat model. Refusing it by provider would take the
+    // owner's own GPT models away.
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+    } as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "openai/gpt-5.5" }),
+    }));
+    expect(response.status).not.toBe(400);
+  });
+
+  it("refuses the image entry at the custom-model door, before any write", async () => {
+    // A valid-SHAPED `openai/*` id that every paired box carries in
+    // models.providers.openai.models[]; as the primary it fails every turn.
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+    } as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "openai/gpt-image-1-mini" }),
+    }));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("not a chat model");
+    expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  // M2 of the 2026-09-17 review. ClawBox kept a hand-written table of which
+  // provider offers which reasoning-effort levels, plus a regex for the Claude
+  // models that refuse `off`; the gateway publishes the fact natively, per
+  // MODEL, on every row of `models.list` (`thinkingLevels: [{ id, label }]`,
+  // built by `resolveEffectiveThinkingProfile` at v2026.9.3). With the
+  // in-process socket that read costs milliseconds, which is exactly the
+  // constraint that justified the local table alone.
+  describe("the reasoning levels the gateway itself publishes", () => {
+    const pairedBox = () => {
+      vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "anthropic" });
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "api_key" } } },
+        agents: { defaults: { model: { primary: "anthropic/claude-mythos-preview" } } },
+      } as never);
+    };
+
+    it("stamps the active row with what models.list said", async () => {
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      gatewayWsCallMock.mockResolvedValue({
+        models: [
+          {
+            id: "claude-mythos-preview",
+            provider: "anthropic",
+            thinkingLevels: [
+              { id: "low", label: "Low" },
+              { id: "medium", label: "Medium" },
+              { id: "high", label: "High" },
+            ],
+          },
+          { id: "gpt-5.5", provider: "openai", thinkingLevels: [{ id: "off", label: "Off" }] },
+        ],
+      });
+      pairedBox();
+
+      const body = await (await GET()).json();
+
+      expect(gatewayWsCallMock).toHaveBeenCalledWith("models.list", {}, expect.anything());
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic.thinkingLevels).toEqual(["low", "medium", "high"]);
+      // `off` is not among them, which is the whole point: the chat's safe
+      // start value IS `off` and the gateway refuses it for this model.
+      expect(anthropic.thinkingLevels).not.toContain("off");
+    });
+
+    it("says nothing at all when the gateway could not be asked", async () => {
+      // Absent is NOT "no levels": the header falls back to the local table,
+      // which is a correct answer, and inventing an empty list would take
+      // every effort control away on a box whose gateway was restarting.
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      const { GatewayWsUnavailableError } = await import("@/lib/openclaw-gateway-ws");
+      gatewayWsCallMock.mockRejectedValue(new GatewayWsUnavailableError("gateway connect timed out"));
+      pairedBox();
+
+      const body = await (await GET()).json();
+
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic).toBeDefined();
+      expect(anthropic.thinkingLevels).toBeUndefined();
+    });
+
+    it("never asks a box that runs no gateway", async () => {
+      vi.mocked(gatewayIsAbsent).mockReturnValue(true);
+      pairedBox();
+
+      await GET();
+
+      expect(gatewayWsCallMock).not.toHaveBeenCalled();
+    });
+
+    it("survives a row shape it does not recognise", async () => {
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      gatewayWsCallMock.mockResolvedValue({
+        models: [
+          null,
+          "not a row",
+          { id: "claude-mythos-preview" },
+          { id: "claude-mythos-preview", provider: "anthropic", thinkingLevels: "nope" },
+          { id: "claude-mythos-preview", provider: "anthropic", thinkingLevels: [{ label: "no id" }] },
+        ],
+      });
+      pairedBox();
+
+      const body = await (await GET()).json();
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic.thinkingLevels).toBeUndefined();
+    });
+
+    it("asks the gateway ONCE per switch, for the read the answer is built from", async () => {
+      // POST reads the state twice — once for its routing facts, once fresh
+      // after the write — and the levels are a decoration on the second. A
+      // `models.list` round trip on the first cost the connect and method
+      // deadlines twice per switch on a slow gateway, for a map nothing read.
+      vi.mocked(gatewayIsAbsent).mockReturnValue(false);
+      gatewayWsCallMock.mockResolvedValue({
+        models: [
+          { id: "claude-mythos-preview", provider: "anthropic", thinkingLevels: [{ id: "low", label: "Low" }, { id: "high", label: "High" }] },
+        ],
+      });
+      pairedBox();
+
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "anthropic/claude-mythos-preview" }),
+      }));
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(gatewayWsCallMock.mock.calls.filter((call) => call[0] === "models.list")).toHaveLength(1);
+      // …and that one read is the one the rows are decorated from.
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic.thinkingLevels).toEqual(["low", "high"]);
+    });
+  });
+
+  // The UI sweep of 2026-09-07: the picker offered "Ollama Local" backed by
+  // qwen3-embedding:0.6b — the retired ollama-hosted embedder the llama.cpp
+  // migration left declared under `models.providers.ollama.models`. A pick
+  // would have pointed the chat at a model that cannot generate. The inference
+  // now refuses that one by name; this is the route's own half — asking about
+  // a `local_ai_model` the store names, or a tag with no "embed" in it.
+  describe("an Ollama model that can only embed", () => {
+    const EMBEDDER = "ollama/qwen3-embedding:0.6b";
+    const localPlaceholder = expect.objectContaining({ id: "__setup_local__", available: false, model: null });
+
+    beforeEach(() => {
+      vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "clawai", local_ai_model: null });
+      vi.mocked(inferConfiguredLocalModel).mockReturnValue({ provider: "ollama", model: EMBEDDER });
+    });
+    afterEach(() => {
+      vi.mocked(ollamaModelCanChat).mockResolvedValue(true);
+    });
+
+    it("is not offered as a chat provider", async () => {
+      vi.mocked(ollamaModelCanChat).mockResolvedValue(false);
+
+      const body = await (await GET()).json();
+
+      // Asked by its bare tag, the name Ollama itself knows it by.
+      expect(ollamaModelCanChat).toHaveBeenCalledWith("qwen3-embedding:0.6b");
+      expect(body.options.map((o: { model: string | null }) => o.model)).not.toContain(EMBEDDER);
+      expect(body.options).toContainEqual(localPlaceholder);
+      expect(body.local).toEqual({ available: false, label: null, model: null });
+    });
+
+    it("stays the local row when the check says it can chat", async () => {
+      vi.mocked(ollamaModelCanChat).mockResolvedValue(true);
+
+      const body = await (await GET()).json();
+
+      expect(body.options).toContainEqual(expect.objectContaining({ model: EMBEDDER, label: "Ollama Local", available: true, isLocal: true }));
+    });
+
+    it("is a question for Ollama models only — a llama.cpp model is never asked", async () => {
+      vi.mocked(inferConfiguredLocalModel).mockReturnValue({ provider: "llamacpp", model: "llamacpp/gemma4-e2b-it-q4_0" });
+
+      const body = await (await GET()).json();
+
+      expect(ollamaModelCanChat).not.toHaveBeenCalled();
+      expect(body.options).toContainEqual(expect.objectContaining({ model: "llamacpp/gemma4-e2b-it-q4_0", available: true, isLocal: true }));
+    });
+  });
+
+  describe("the owner's per-provider switch", () => {
+    beforeEach(() => {
+      vi.mocked(getAll).mockResolvedValue({
+        ai_model_provider: "clawai",
+        local_ai_provider: "llamacpp",
+        local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+        ai_disabled_providers: ["anthropic"],
+      });
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+            "anthropic:default": { provider: "anthropic", mode: "token" },
+          },
+        },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+      } as never);
+    });
+
+    it("keeps a switched-off provider in the list, greyed and carrying the reason", async () => {
+      // Not dropped: a row that vanishes reads as "not connected" and sends
+      // the owner to re-enter a key that is fine.
+      const body = await (await GET()).json();
+
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic).toMatchObject({ available: false, disabledByOwner: true });
+      const clawai = body.options.find((option: { provider: string }) => option.provider === "clawai");
+      expect(clawai.available).toBe(true);
+      expect(clawai).not.toHaveProperty("disabledByOwner");
+    });
+
+    it("refuses to switch to a model on a switched-off provider, before any write", async () => {
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "anthropic/claude-sonnet-5" }),
+      }));
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ kind: "provider_disabled", provider: "anthropic" });
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+  });
+
+  // OpenClaw 2 validates a model reference on `config set` against the
+  // captured catalogs of the ENABLED plugins, and an older gate switched the
+  // anthropic plugin off on every switch away from Claude. The switch BACK was
+  // then refused straight to the owner — `Unknown model:
+  // anthropic/claude-sonnet-5` — because this route wrote the primary first
+  // and enabled the plugin after. (2026.7.x answered from the bundled catalog
+  // regardless of plugin state, which is why the order never mattered before
+  // the core upgrade.) The enable now rides in the SAME batch as the primary,
+  // ahead of it: the core applies a batch to one snapshot and validates the
+  // references afterwards, so one spawn does both, and a refused batch leaves
+  // the flag as it was.
+  // A compat provider's configured entry REPLACES the plugin's catalogue —
+  // "configured providers in openclaw.json override the plugin's modelCatalog
+  // entirely" (ai-models/configure) — so `openclaw models list --provider
+  // google` answers exactly this array. Appending a row to it is therefore the
+  // provider's enumeration changing, made by a server-side write, and nothing
+  // was counting it: the plugin gate below answers only about the anthropic
+  // flag, which this write does not touch.
+  describe("registering a compat model the provider did not list", () => {
+    const googleBox = (models: { id: string; name: string }[]) => ({
+      auth: { profiles: { "google:default": { provider: "google", mode: "api_key" } } },
+      models: {
+        mode: "merge",
+        providers: {
+          google: {
+            apiKey: "k",
+            baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+            api: "openai-completions",
+            models,
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+    });
+
+    const pick = (model: string) => POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    }));
+
+    it("counts the change when a row is actually appended", async () => {
+      vi.mocked(readConfig).mockResolvedValue(
+        googleBox([{ id: "gemini-3-flash", name: "gemini-3-flash" }]) as never,
+      );
+
+      const response = await pick("google/gemini-3-pro");
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+        "models.providers.google.models",
+        JSON.stringify([
+          { id: "gemini-3-flash", name: "gemini-3-flash" },
+          { id: "gemini-3-pro", name: "gemini-3-pro" },
+        ]),
+        "--json",
+      ]);
+      expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("google");
+    });
+
+    it("says nothing when the model was already listed", async () => {
+      // Nothing was written, so nothing changed — announcing here would spend
+      // an enumeration on every repeat pick.
+      vi.mocked(readConfig).mockResolvedValue(
+        googleBox([{ id: "gemini-3-pro", name: "gemini-3-pro" }]) as never,
+      );
+
+      const response = await pick("google/gemini-3-pro");
+
+      expect(response.status).toBe(200);
+      expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
+    });
+
+    it("answers the retryable code when the append lost the config race", async () => {
+      // The same passing collision as the primary write, one step earlier. The
+      // 502 below it says "Re-save it in Settings", which is the wrong remedy
+      // here — the provider is fine, another writer simply held the config —
+      // and a 502 gives the client nothing to retry on.
+      vi.mocked(readConfig).mockResolvedValue(
+        googleBox([{ id: "gemini-3-flash", name: "gemini-3-flash" }]) as never,
+      );
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error(
+        "The config file changed while this command was writing (config changed since last load), "
+        + "so nothing was changed. Re-run the same command to pick up the new file and try again.",
+      ));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const response = await pick("google/gemini-3-pro");
+      const body = await response.json();
+      errorSpy.mockRestore();
+
+      expect(response.status).toBe(409);
+      expect(body.code).toBe("config_busy");
+      expect(JSON.stringify(body)).not.toMatch(/config file|last load|Re-run|Re-save/i);
+    });
+
+    it("keeps the re-save remedy for a failure that is not the race", async () => {
+      vi.mocked(readConfig).mockResolvedValue(
+        googleBox([{ id: "gemini-3-flash", name: "gemini-3-flash" }]) as never,
+      );
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error("EACCES: permission denied"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const response = await pick("google/gemini-3-pro");
+      const body = await response.json();
+      errorSpy.mockRestore();
+
+      expect(response.status).toBe(502);
+      expect(body.code).toBeUndefined();
+      expect(body.error).toMatch(/Re-save it in Settings/);
+    });
+  });
+
+  describe("the anthropic plugin around the primary write", () => {
+    const UNKNOWN_MODEL =
+      'Cannot set model reference "anthropic/claude-opus-5" at agents.defaults.model.primary: '
+      + "Unknown model: anthropic/claude-opus-5. Run openclaw models list to list available models.";
+    const ENABLE_OP = ["plugins.entries.anthropic.enabled", "true", "--json"];
+
+    /** Where in vitest's global call sequence the first call `pick` accepts sits. */
+    function orderOf(mock: Mock, pick: (args: unknown[]) => boolean = () => true): number {
+      const index = mock.mock.calls.findIndex((args) => pick(args));
+      expect(index).toBeGreaterThanOrEqual(0);
+      return mock.mock.invocationCallOrder[index];
+    }
+
+    const isPrimaryWrite = (op: string[]) => op[0] === "agents.defaults.model.primary";
+    /** The batch call that carries the primary, as vitest records it: `[ops]`. */
+    const carriesPrimary = (call: unknown[]) => (call[0] as string[][]).some(isPrimaryWrite);
+
+    beforeEach(() => {
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+            "anthropic:default": { provider: "anthropic", mode: "api_key" },
+          },
+        },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+      } as never);
+
+      // The CLI as a 2026.8.1 box answers it: the anthropic plugin is OFF
+      // (an older gate switched it off on the last switch away from Claude)
+      // and a batch carrying an `anthropic/*` primary is refused unless the
+      // same batch switches the plugin on ahead of it. The config the route
+      // reads before the batch says the same, which is what makes the switch
+      // a plugin flip — the one change that still restarts the gateway.
+      vi.mocked(readConfigStrict).mockResolvedValue({
+        plugins: { entries: { anthropic: { enabled: false } } },
+      } as never);
+      vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async (ops) => {
+        const enableIdx = ops.findIndex((op) => op[0] === ENABLE_OP[0] && op[1] === "true");
+        const primaryIdx = ops.findIndex((op) => isPrimaryWrite(op) && String(op[1]).startsWith("anthropic/"));
+        if (primaryIdx >= 0 && !(enableIdx >= 0 && enableIdx < primaryIdx)) throw new Error(UNKNOWN_MODEL);
+        if (ops.length === 1) await vi.mocked(runOpenclawConfigSet)(ops[0]);
+      });
+    });
+
+    it("switches the plugin on in the SAME batch as the Anthropic primary, ahead of it, with no restart", async () => {
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
+      }));
+      const body = await response.json();
+
+      expect(body.error).toBeUndefined();
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSetBatch).toHaveBeenCalledWith([
+        ENABLE_OP,
+        ["agents.defaults.model.primary", "anthropic/claude-opus-5"],
+      ]);
+      // A plugin enabled by the batch loads on the next gateway start, so the
+      // restart that already follows the switch has to stay after it.
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("leaves the plugin and the gateway alone when the batch is refused", async () => {
+      // Atomic: a refused batch changed nothing, so there is nothing to put
+      // back and nothing to restart — the owner gets the refusal, unmasked.
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error(UNKNOWN_MODEL));
+
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
+      }));
+      const body = await response.json();
+
+      // The batch is #589's and the 409 is #584's, and BOTH have to survive the
+      // merge: the plugin enable rides in the batch this wraps, and the owner
+      // still gets the model-unresolvable answer instead of the CLI's sentence.
+      expect(response.status).toBe(409);
+      expect(body.kind).toBe("model_unresolvable");
+      expect(body.error).not.toMatch(/openclaw models list|Cannot set model reference/);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalledWith(expect.arrayContaining([ENABLE_OP[0]]));
+      expect(setProviderPlugins).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    // A plugin that is off enumerates NOTHING, so switching it back on is the
+    // same provider-set change as switching it off — in the other direction,
+    // in this same file, and the catalogue was told about neither. It is also
+    // the change nothing could see: the enable rides in the batch, so by the
+    // time the OFF half re-reads the config the flag is already true and it
+    // correctly reports no flip. Unanswered it is not a one-off staleness
+    // either — an empty enumeration is recorded as a failed refresh whose wait
+    // DOUBLES up to the six-hour interval, so a provider whose plugin has been
+    // off for a while is not re-asked for six hours after the pick that made
+    // it listable.
+    describe("counting the ON half for the catalogue", () => {
+      // The handler's state comes from `readConfig`; the ON half reads the flag
+      // again, STRICTLY, at the last moment before the batch — so both are set
+      // here, and the strict one is what decides the announcement.
+      const pluginOff = (enabled: boolean) => {
+        const config = {
+          auth: {
+            profiles: {
+              "deepseek:default": { provider: "deepseek", mode: "api_key" },
+              "anthropic:default": { provider: "anthropic", mode: "api_key" },
+            },
+          },
+          agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+          plugins: { entries: { anthropic: { enabled } } },
+        };
+        vi.mocked(readConfig).mockResolvedValue(config as never);
+        vi.mocked(readConfigStrict).mockResolvedValue(config as never);
+      };
+
+      it("counts the change when the batch switched the plugin on", async () => {
+        pluginOff(false);
+
+        const response = await POST(new Request("http://localhost/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
+        }));
+
+        expect(response.status).toBe(200);
+        expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
+      });
+
+      it("says nothing when the plugin was already on", async () => {
+        // The enable op is emitted either way — it is what makes the core
+        // validate the reference — so its presence is not a state change.
+        // Announcing one per Claude pick would spend a ~3-minute `openclaw
+        // models list` on a Jetson for a box that did not change.
+        pluginOff(true);
+
+        const response = await POST(new Request("http://localhost/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
+        }));
+
+        expect(response.status).toBe(200);
+        expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
+      });
+
+      it("counts it when the flag could not be read at all", async () => {
+        // The strict read throws on an EACCES or a config caught half-written,
+        // and the batch still lands. Unknown is not "already on": silence would
+        // leave the catalogue on the pre-enable enumeration, whose failed-
+        // refresh wait doubles toward six hours.
+        pluginOff(true);
+        vi.mocked(readConfigStrict).mockRejectedValue(new Error("EACCES"));
+
+        const response = await POST(new Request("http://localhost/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
+        }));
+
+        expect(response.status).toBe(200);
+        expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
+      });
+
+      it("says nothing when the batch was refused", async () => {
+        // Atomic: a refused batch is applied to one snapshot and validated as
+        // a whole, so the flag is exactly where it was. Counting here would be
+        // this route's own false success.
+        pluginOff(false);
+        vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error(UNKNOWN_MODEL));
+
+        const response = await POST(new Request("http://localhost/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
+        }));
+
+        expect(response.status).toBe(409);
+        expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
+      });
+    });
+
+    it("carries the plugin enable inside the try that answers the 409", async () => {
+      // Pins the merge shape itself: one batch, enable ahead of the primary,
+      // and the refusal converted. Taking either side wholesale loses one of
+      // the two — silently, because each side's own tests still pass.
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error(UNKNOWN_MODEL));
+
+      await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "anthropic/claude-opus-5" }),
+      }));
+
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls.at(-1)?.[0] as string[][];
+      expect(batch[0]).toEqual(ENABLE_OP);
+      expect(batch.some((op) => op[0] === "agents.defaults.model.primary")).toBe(true);
+      expect(batch.findIndex((op) => op[0] === ENABLE_OP[0]))
+        .toBeLessThan(batch.findIndex((op) => op[0] === "agents.defaults.model.primary"));
+    });
+
+    it("keeps the OFF half of the gate AFTER the write when the new primary is not Anthropic", async () => {
+      // The gate switches the anthropic plugin off: a flip, so the restart follows it.
+      vi.mocked(setProviderPlugins).mockResolvedValueOnce("anthropic" as never);
+      // The OFF half (off only when nothing on the box could use the plugin)
+      // stays where it was: never before the write, so a plugin whose model IS
+      // the current primary is not switched off under it.
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "llamacpp/gemma4-e2b-it-q4_0" }),
+      }));
+      expect(response.status).toBe(200);
+
+      const writtenAt = orderOf(vi.mocked(runOpenclawConfigSetBatch), carriesPrimary);
+      const gatedAt = orderOf(vi.mocked(setProviderPlugins), (args) => args[0] === "llamacpp");
+      expect(writtenAt).toBeLessThan(gatedAt);
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+  });
+
+  // OpenClaw 2 has no `codex/` model namespace: the ChatGPT subscription is an
+  // OAuth profile of the openai provider and the model is `openai/<id>` with
+  // the Codex runtime armed on it (src/lib/chatgpt-subscription.ts). The
+  // picker used to offer `codex/gpt-5.5` and the write was refused with the
+  // CLI's own sentence; a box signed in before the upgrade holds a
+  // `codex:default` the core never consults.
+  describe("the ChatGPT subscription on OpenClaw 2", () => {
+    const CHATGPT_BOX = {
+      auth: {
+        profiles: {
+          "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    };
+    const LEGACY_BOX = {
+      auth: {
+        profiles: {
+          "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          "codex:default": { provider: "codex", mode: "oauth" },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    };
+    const post = (body: unknown) => POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+
+    it("offers the ChatGPT row as openai/<id>, never in the retired namespace", async () => {
+      vi.mocked(readConfig).mockResolvedValue(CHATGPT_BOX as never);
+
+      const body = await (await GET()).json();
+
+      const row = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(row).toMatchObject({ label: "OpenAI Codex", model: "openai/gpt-5.5", available: true });
+      expect(body.options.some((option: { model: string | null }) => option.model?.startsWith("codex/"))).toBe(false);
+      // No API key on this box, so `openai/*` IS the subscription: no second
+      // "OpenAI GPT" row, and the header pill knows it is on a subscription.
+      expect(body.options.some((option: { provider: string }) => option.provider === "openai")).toBe(false);
+      expect(body.subscriptionProviders).toContain("codex");
+    });
+
+    // A box holding BOTH OpenAI credentials — the ChatGPT sign-in and an API
+    // key — is the state the namespace used to disambiguate for free. Under
+    // `openai/<id>` the reference says nothing, so every one of these
+    // decisions has to come from the ROW the pick was made on.
+    const DUAL_BOX = {
+      auth: {
+        profiles: {
+          "openai:default": { provider: "openai", mode: "api_key" },
+          "openai:chatgpt": { provider: "openai", mode: "oauth" },
+        },
+      },
+      agents: { defaults: { model: { primary: "openai/gpt-5.4" } } },
+    };
+
+    it("keeps the API-key row separate when the box holds both", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
+
+      const body = await (await GET()).json();
+
+      const providers = body.options.map((option: { provider: string }) => option.provider);
+      expect(providers).toContain("openai");
+      expect(providers).toContain("codex");
+      // The API-key row is NOT subscription-routed — its `-pro` tiers work.
+      expect(body.subscriptionProviders).not.toContain("openai");
+      // The ChatGPT row is, whatever else the box holds: a turn on it goes to
+      // the ChatGPT account, which refuses the API-only tiers.
+      expect(body.subscriptionProviders).toContain("codex");
+    });
+
+    it("arms the runtime for a pick made on the ChatGPT row of a dual box", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "codex" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith(["agents.defaults.model.primary", "openai/gpt-5.5"]);
+      // Without this entry the turn leaves the ChatGPT account for
+      // api.openai.com and the box silently spends the API key instead.
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime.id',
+        "codex",
+      ]);
+    });
+
+    // The arm was WRITE-ONLY: two routes added it and the only remover is
+    // gateway-pre-start's v1-gated cleanup, so on the pinned core nothing on
+    // the box cleared it. Harmless while it could only sit on a `codex/<id>`
+    // key no other lane could name — not harmless now that both OpenAI lanes
+    // write `openai/<id>`, because the leftover keeps sending the SAME
+    // reference through the ChatGPT account after the owner picks the API-key
+    // row, and the header pill flips back on the next GET.
+    const ARMED_DUAL_BOX = {
+      ...DUAL_BOX,
+      agents: {
+        defaults: {
+          model: { primary: "openai/gpt-5.4" },
+          models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+        },
+      },
+    };
+
+    it("clears the runtime arm when the same model is picked on the API-key row", async () => {
+      vi.mocked(readConfig).mockResolvedValue(ARMED_DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "openai" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigUnset).toHaveBeenCalledWith(
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime',
+      );
+    });
+
+    it("clears it on the same-model no-op door too", async () => {
+      // Already the primary AND armed: the old repair was one-sided, so this
+      // returned 200 having changed nothing while the turn stayed on the
+      // subscription.
+      const armedNow = {
+        ...DUAL_BOX,
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+          },
+        },
+      };
+      // The disarm changes the file, so the answer's re-read sees it gone —
+      // the request must not report the row it just moved the owner off.
+      vi.mocked(readConfig)
+        .mockResolvedValueOnce(armedNow as never)
+        .mockResolvedValue({
+          ...DUAL_BOX,
+          agents: { defaults: { model: { primary: "openai/gpt-5.5" }, models: {} } },
+        } as never);
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "openai" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigUnset).toHaveBeenCalledWith(
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime',
+      );
+      await expect(response.json()).resolves.toMatchObject({ activeLabel: "OpenAI GPT" });
+    });
+
+    it("says so instead of answering clean when the disarm fails", async () => {
+      // A 200 that looks like a switch, over a box still routing that model to
+      // the ChatGPT account, is the false success this whole finding is about.
+      vi.mocked(readConfig).mockResolvedValue(ARMED_DUAL_BOX as never);
+      vi.mocked(runOpenclawConfigUnset).mockRejectedValue(new Error("config unset failed"));
+
+      const response = await post({ model: "openai/gpt-5.5", provider: "openai" });
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.warning).toMatch(/still routes it through your ChatGPT account/);
+    });
+
+    it("leaves the arm alone when the pick IS the subscription's", async () => {
+      vi.mocked(readConfig).mockResolvedValue(ARMED_DUAL_BOX as never);
+
+      await post({ model: "openai/gpt-5.5", provider: "codex" });
+
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+    });
+
+    it("writes the arm on a config path the CLI can actually parse", async () => {
+      // The CLI's path grammar splits an unquoted segment on `.`, and every
+      // ChatGPT model id carries one, so the dotted form is read as
+      // `models -> "openai/gpt-5" -> "5"` and answers
+      // `Config validation failed: ... Unrecognized key: "5"` — taking the
+      // whole batch, primary included, with it. Bracket-quoted is the form the
+      // CLI itself echoes back. Measured on the pinned 2026.8.1 core.
+      vi.mocked(readConfig).mockResolvedValue(CHATGPT_BOX as never);
+
+      await post({ model: "openai/gpt-5.4-mini" });
+
+      const batch = vi.mocked(runOpenclawConfigSetBatch).mock.calls.at(-1)?.[0] as string[][];
+      const arm = batch.find((op) => op[0].includes("agentRuntime"));
+      expect(arm?.[0]).toBe('agents.defaults.models["openai/gpt-5.4-mini"].agentRuntime.id');
+      expect(arm?.[0]).not.toContain("models.openai/");
+    });
+
+    it("attributes an armed openai/<id> to the ChatGPT row, not the API-key one", async () => {
+      // The pill flipped to "OpenAI GPT" the moment the owner picked ChatGPT,
+      // because the GET could only read the namespace back.
+      vi.mocked(readConfig).mockResolvedValue({
+        ...DUAL_BOX,
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+          },
+        },
+      } as never);
+
+      const body = await (await GET()).json();
+
+      expect(body.activeLabel).toBe("OpenAI Codex");
+      const codexRow = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(codexRow.model).toBe("openai/gpt-5.5");
+      const openaiRow = body.options.find((option: { provider: string }) => option.provider === "openai");
+      expect(openaiRow.model).not.toBe("openai/gpt-5.5");
+    });
+
+    it("refuses an API-only tier picked on the ChatGPT row of a dual box", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5-pro", provider: "codex" });
+
+      expect(response.status).toBe(400);
+      const refusal = await response.json();
+      // Names the lever the owner has NOT pulled. This box HOLDS an API key,
+      // so "switch to API-key mode" would name one they already have; the
+      // actionable step is the other row, which routes this very model.
+      expect(refusal.error).toContain("Pick it on the OpenAI GPT row instead");
+      expect(refusal.error).not.toContain("requires OpenAI API-key mode");
+      // The supported list is built from the catalogue, so the GPT-5.6
+      // generation the allowlist accepts cannot fall out of the sentence.
+      expect(refusal.error).toContain("GPT-5.6 Sol");
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    });
+
+    it("still lets the API-key row run an API-only tier on the same box", async () => {
+      vi.mocked(readConfig).mockResolvedValue(DUAL_BOX as never);
+
+      const response = await post({ model: "openai/gpt-5.5-pro", provider: "openai" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith(["agents.defaults.model.primary", "openai/gpt-5.5-pro"]);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalledWith([
+        'agents.defaults.models["openai/gpt-5.5-pro"].agentRuntime.id',
+        "codex",
+      ]);
+    });
+
+    it("offers a sign-in the core cannot use greyed, with the reason, instead of a pick that fails", async () => {
+      vi.mocked(readConfig).mockResolvedValue(LEGACY_BOX as never);
+
+      const body = await (await GET()).json();
+
+      const row = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(row).toMatchObject({ available: false, reauthRequired: true, model: "openai/gpt-5.5" });
+    });
+
+    it("greys the row even when the primary is still written as codex/<id> — the sign-in cannot run it", async () => {
+      // The active model registers its row available before the profile loop
+      // runs; a box upgraded with `codex/gpt-5.5` as primary AND only the old
+      // sign-in showed an available row with no reason, and the pick then 409ed.
+      vi.mocked(readConfig).mockResolvedValue({
+        ...LEGACY_BOX,
+        agents: { defaults: { model: { primary: "codex/gpt-5.5" } } },
+      } as never);
+
+      const body = await (await GET()).json();
+
+      const row = body.options.find((option: { provider: string }) => option.provider === "codex");
+      expect(row).toMatchObject({ available: false, reauthRequired: true, model: "codex/gpt-5.5" });
+    });
+
+    it("refuses a pick on a sign-in the core cannot use with the next step, before any write", async () => {
+      vi.mocked(readConfig).mockResolvedValue(LEGACY_BOX as never);
+
+      const response = await post({ model: "codex/gpt-5.5" });
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ kind: "chatgpt_reauth_required", provider: "codex" });
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("arms the Codex runtime on a same-model pick when the entry is missing — the only repair short of a reboot", async () => {
+      // A stale tab posts `codex/gpt-5.5`; the primary IS `openai/gpt-5.5`
+      // already, but nothing armed its runtime (an older ClawBox wrote the
+      // primary, or the entry was lost). The remap made this a no-op answer
+      // that left every turn failing.
+      vi.mocked(readConfig).mockResolvedValue({
+        ...CHATGPT_BOX,
+        agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
+      } as never);
+
+      const response = await post({ model: "codex/gpt-5.5" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+        'agents.defaults.models["openai/gpt-5.5"].agentRuntime.id',
+        "codex",
+      ]);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalledWith(expect.arrayContaining(["agents.defaults.model.primary"]));
+    });
+
+    it("leaves an armed same-model pick free of any write", async () => {
+      vi.mocked(readConfig).mockResolvedValue({
+        ...CHATGPT_BOX,
+        agents: {
+          defaults: {
+            model: { primary: "openai/gpt-5.5" },
+            models: { "openai/gpt-5.5": { agentRuntime: { id: "codex" } } },
+          },
+        },
+      } as never);
+
+      const response = await post({ model: "openai/gpt-5.5" });
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("answers a reference the core refuses with the provider and a next step, not the CLI's sentence", async () => {
+      vi.mocked(readConfig).mockResolvedValue(CHATGPT_BOX as never);
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error(
+        'Cannot set model reference "openai/gpt-5.5" at agents.defaults.model.primary: '
+        + "Unknown model: openai/gpt-5.5. Run openclaw models list to list available models.",
+      ));
+
+      const response = await post({ model: "openai/gpt-5.5" });
+      const body = await response.json();
+
+      expect(response.status).toBe(409);
+      expect(body.kind).toBe("model_unresolvable");
+      expect(body.error).not.toMatch(/openclaw models list|Cannot set model reference/);
+      expect(body.error).toMatch(/OpenAI Codex does not list gpt-5.5/);
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("a switch that lost the config-mutation race", () => {
+    // The first screen after setup, reproduced. The desktop paints, the chat
+    // opens and normalizes the ClawBox AI alias through this route, while the
+    // ClawBox AI connect is still restarting the gateway and the timezone
+    // adopter is writing the browser's zone. One `openclaw config set` loses
+    // the content-hash check and the CLI words its refusal for a terminal —
+    // which is what the owner read, in a red bubble, before touching anything.
+    const HUMANIZED_CONFLICT =
+      "The config file changed while this command was writing (config changed since last load), "
+      + "so nothing was changed. Re-run the same command to pick up the new file and try again.";
+
+    async function switchToFlash(): Promise<Response> {
+      return POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "deepseek/deepseek-v4-flash", automatic: true }),
+      }));
+    }
+
+    it("answers a retryable code, and never the CLI's own sentence", async () => {
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error(HUMANIZED_CONFLICT));
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const response = await switchToFlash();
+      const body = await response.json();
+      warnSpy.mockRestore();
+
+      expect(response.status).toBe(409);
+      expect(body.code).toBe("config_busy");
+      // The whole point: not one word of the CLI's refusal leaves the server.
+      expect(JSON.stringify(body)).not.toMatch(/config file|last load|Re-run|openclaw/i);
+      expect(body.error).toMatch(/saving its settings/i);
+      // Nothing was written, so nothing has to be applied.
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("answers the same for the class-named spelling of the conflict", async () => {
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(
+        new Error("ConfigMutationConflictError: config changed since last load"),
+      );
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const response = await switchToFlash();
+      const body = await response.json();
+      warnSpy.mockRestore();
+
+      expect(response.status).toBe(409);
+      expect(body.code).toBe("config_busy");
+      expect(JSON.stringify(body)).not.toMatch(/ConfigMutationConflictError/);
+    });
+
+    it("leaves every other failure reporting itself as before", async () => {
+      // The conflict branch must not swallow a real failure into "try again in
+      // a moment": a switch that can never succeed has to say so.
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error("EACCES: permission denied"));
+
+      const response = await switchToFlash();
+      const body = await response.json();
+
+      expect(response.status).toBe(500);
+      expect(body.code).toBeUndefined();
+      expect(body.error).toBe("EACCES: permission denied");
+    });
   });
 });

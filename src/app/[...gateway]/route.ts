@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAll } from "@/lib/config-store";
-import { redirectToSetup, serveGatewayHTML } from "@/lib/gateway-proxy";
+import { proxyGatewayRequest, redirectToSetup, serveGatewayHTML } from "@/lib/gateway-proxy";
+import { isGatewayStaticPath } from "@/lib/gateway-static";
 import { readEdition } from "@/lib/edition-source";
+import { clawboxNamespaceKind } from "@/lib/clawbox-namespaces";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +16,41 @@ export async function GET(request: NextRequest) {
     if (!config.setup_complete) {
       return redirectToSetup(request);
     }
+    // A path in ClawBox's OWN namespaces — /setup-api and /login-api for its
+    // endpoints, /setup, /login, /portal, /updating and /app for its pages —
+    // that reached this catch-all is a route that does not exist, and the
+    // gateway serves nothing there. The honest answer is 404: proxied, it came
+    // back 502 from a gateway that had never heard of it, and answered as a
+    // NAVIGATION it came back as the Control UI shell with the gateway token
+    // injected into it — somebody else's application, with a credential in it,
+    // over a ClawBox address the owner mistyped (TASK-631).
+    //
+    // ABOVE the Hermes gate on purpose. That gate answers text/plain for every
+    // path, so leaving this below it made `/setup-api/nope` a JSON 404 on
+    // OpenClaw and a text one on Hermes — a shared surface answering two
+    // shapes by edition.
+    //
+    // A path in NOBODY's namespace is refused here too, and that is the one
+    // case this paragraph does not describe on its own: `"unreadable"` means
+    // the percent-decode ran out of passes before it settled, so the box
+    // cannot say whose the path is and does not hand it to the gateway on a
+    // guess. Deny-only, so the cost is a 404 on a spelling no client produces.
+    //
+    // The list and the segment-boundary matching live in
+    // src/lib/clawbox-namespaces.ts, beside the evidence.
+    const owned = clawboxNamespaceKind(request.nextUrl.pathname);
+    if (owned) {
+      // Code asked, so code is answered: the endpoint namespaces get the same
+      // `{ error: "Not found" }` shape the real routes under them use. An
+      // `"unreadable"` path answers as text, because nothing here knows it was
+      // code that asked — that is precisely what could not be decoded.
+      return owned === "api"
+        ? NextResponse.json({ error: "Not found" }, { status: 404 })
+        : new NextResponse("Not found", {
+          status: 404,
+          headers: { "Content-Type": "text/plain" },
+        });
+    }
     // On the Hermes SKU there is no OpenClaw gateway — it is disabled and
     // masked by install.sh — so proxying to 127.0.0.1:18789 is a guaranteed
     // ECONNREFUSED. This route matches EVERY otherwise-unhandled path (it wins
@@ -25,6 +62,38 @@ export async function GET(request: NextRequest) {
         status: 404,
         headers: { "Content-Type": "text/plain" },
       });
+    }
+    // A STATIC path is served as bytes, not as the SPA shell. The Control UI
+    // keeps whole trees outside /assets — /themes/*.css, /fonts/*.css,
+    // /provider-icons, /file-icons, /app-art — and this route answers every
+    // path Next did not match. So `<link href="/fonts/geist.css">` was being
+    // answered 200 text/html with the 19 KB app shell, which is precisely the
+    // "Styles failed to load, so the page may look broken." banner: a
+    // stylesheet that parses as nothing.
+    if (isGatewayStaticPath(request.nextUrl.pathname)) {
+      return proxyGatewayRequest(request);
+    }
+
+    // Only a NAVIGATION gets the SPA shell. This route exists so a deep link
+    // like /chat/main renders the app — but it was answering EVERY unmatched
+    // path that way, including the resources the app then fetches for itself:
+    //   /control-ui-config.json  (twice per page load; JSON.parse fails)
+    //   /__openclaw__/plugin-icon/…, /__openclaw__/catalog-icon/…, and 11 more
+    //   /avatar/<agent>, /avatar/<agent>?meta=1
+    //   /health, /healthz        (an uptime monitor got HTML that parses as nothing)
+    // Every one of those is fetched by script or by an <img>, never navigated
+    // to, so the fetch metadata separates them from a real page load exactly.
+    // `Sec-Fetch-Mode` is sent by every current browser and is the authority
+    // when present: a script `fetch()` that asks for text/html still says
+    // `cors`, and it wants the resource, not the shell. The Accept sniff is
+    // ONLY the fallback for a client that sends no fetch metadata at all (curl
+    // asks for */*, and gets the real resource, which is what a monitor needs).
+    const secFetchMode = request.headers.get("sec-fetch-mode");
+    const navigating = secFetchMode
+      ? secFetchMode === "navigate"
+      : (request.headers.get("accept") ?? "").includes("text/html");
+    if (!navigating) {
+      return proxyGatewayRequest(request);
     }
     return serveGatewayHTML(request);
   } catch (err) {

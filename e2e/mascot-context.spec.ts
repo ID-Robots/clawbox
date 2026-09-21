@@ -19,10 +19,20 @@ test("mascot tap opens the chat popup", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
-  const boxImage = page.locator('img[src="/clawbox-box.png"]').first();
-  await expect(boxImage).toBeVisible();
-  const mascotImg = page.locator('img[src="/clawbox-crab.png"][alt=""]').first();
-  await expect(mascotImg).toBeVisible();
+  // The crab is a SPRITE since 2026-09-17 (the bundled `vibrant-clawd` pack),
+  // so the body is not an <img> any more — but it is still `data-mascot="crab"`,
+  // and it still has to open the chat. The still PNG remains the fail-open body
+  // (an unreachable pets route, a sheet this build could not read), so the tap
+  // target is resolved rather than assumed: a sprite puts the grabbable art on
+  // `[data-mascot-hit]`, the PNG body takes the tap on the shell itself.
+  const mascot = page.locator('[data-mascot="crab"]').first();
+  await expect(mascot).toBeVisible();
+  // Only meaningful once the crab is on screen: Mascot renders null until the
+  // pet status resolves, so asserting absence any earlier passes vacuously.
+  await expect(page.locator('img[src="/clawbox-box.png"]')).toHaveCount(0);
+
+  const hitBox = page.locator('[data-mascot-hit]');
+  const mascotImg = (await hitBox.count()) > 0 ? hitBox.first() : mascot;
 
   const chatPopup = page.getByTestId("chat-popup");
   // Tap the crab with a real pointer, not a synthetic PointerEvent: the handler

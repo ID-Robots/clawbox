@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import Image from "next/image";
 import { useT } from "@/lib/i18n";
+import CrabWaitMark from "./CrabWaitMark";
 
 const BRAND_ORANGE = "#fe6e00";
 
@@ -46,13 +46,16 @@ export default function SystemTray({
     return () => { alive = false; clearInterval(id); };
   }, [isOpen]);
   const [rebootState, setRebootState] = useState<RebootState>(null);
+  const [powerError, setPowerError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const dotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       setClosing(false);
       setConfirmAction(null);
+      setPowerError(null);
     }
   }, [isOpen]);
 
@@ -85,6 +88,8 @@ export default function SystemTray({
         if (res.ok) {
           // Device is back online
           if (pollRef.current) clearInterval(pollRef.current);
+          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
           setRebootState({ phase: "restoring" });
           setTimeout(() => {
             setRebootState(null);
@@ -96,14 +101,22 @@ export default function SystemTray({
       }
     }, 3000);
 
+    reconnectTimeoutRef.current = setTimeout(() => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
+      setRebootState(null);
+      setPowerError(t("tray.powerFailed"));
+    }, 5 * 60 * 1000);
+
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, []);
+  }, [t]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
       if (dotsRef.current) clearInterval(dotsRef.current);
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
     };
   }, []);
 
@@ -124,14 +137,24 @@ export default function SystemTray({
 
     // Show the waiting overlay
     setRebootState({ phase: "waiting", action, dots: 0 });
+    setPowerError(null);
 
     try {
-      await fetch("/setup-api/system/power", {
+      const res = await fetch("/setup-api/system/power", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action }),
       });
-    } catch {}
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(typeof data.error === "string" ? data.error : `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      setRebootState(null);
+      setConfirmAction(null);
+      setPowerError(err instanceof Error && err.message ? err.message : t("tray.powerFailed"));
+      return;
+    }
 
     if (action === "restart") {
       // Wait for the device to go down, then start reconnecting
@@ -161,10 +184,15 @@ export default function SystemTray({
               <span className="material-symbols-rounded text-white/60" style={{ fontSize: 32 }}>power_settings_new</span>
             </div>
           ) : (
-            <div className="relative w-32 h-32 flex items-center justify-center">
-              <div className="absolute inset-0 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
-              <Image src="/clawbox-crab.png" alt="ClawBox" width={96} height={96} className="w-24 h-24 object-contain animate-welcome-powerup" priority />
-            </div>
+            /* The device's own wait mark, and the crab in it is an INLINE data
+               URI. It was `next/image src="/clawbox-crab.png"`, which the
+               browser resolves to a `/_next/image?url=…` request against the
+               very server this screen exists because it is going down — so the
+               one picture on the one screen that is guaranteed to be watched
+               through an outage was a broken-image icon (seen on the box,
+               2026-09-09). Exactly the defect ReconnectStage was fixed for,
+               in the second place it lives. */
+            <CrabWaitMark size={128} />
           )}
 
           {/* Status message */}
@@ -266,13 +294,14 @@ export default function SystemTray({
             <div className="px-4 py-2.5 border-b border-white/10 flex items-center gap-2">
               <span aria-hidden="true" className={`w-2 h-2 rounded-full ${internet.online ? "bg-green-400" : "bg-red-400"}`} />
               <span className="text-xs text-white/70">
-                {internet.online ? `Internet · ${internet.latencyMs ?? "?"} ms` : "No internet"}
+                {internet.online ? t("tray.internet", { ms: internet.latencyMs ?? "?" }) : t("tray.noInternet")}
               </span>
             </div>
           )}
 
           {/* Bottom actions */}
           <div className="p-4 flex flex-col gap-2">
+            {powerError && <p role="alert" className="text-xs text-red-400">{powerError}</p>}
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => handlePower("restart")}

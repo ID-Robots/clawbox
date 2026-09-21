@@ -10,9 +10,9 @@ summary: "ClawBox is pre-configured AI hardware that runs OpenClaw or Hermes Age
 </p>
 
 <Tip>
-  📺 **Hands-on walkthrough** — *"I Tested ClawBox — Is This the Future of Personal AI?"* by Bootable USBs → [watch on YouTube](https://www.youtube.com/watch?v=1cekuQjVikU).
+  📺 **Watch an independent review** — *"I Tested ClawBox — Is This the Future of Personal AI?"* by Bootable USBs → [watch on YouTube](https://www.youtube.com/watch?v=1cekuQjVikU).
 
-  📺 **Watch an independent review** — maker Kevin McAleer breaks down *"What is ClawBox, and who is it for?"* → [watch on YouTube](https://www.youtube.com/live/rOkt0Ev-dQ0).
+  📺 **Hands-on walkthrough (English voice-over)** — *"ClawBox: A Ferramenta que Muda Como Você Trabalha,"* including a manual ClawBox install via `installer.sh` → [watch on YouTube](https://youtu.be/KMDTF7N8uzU).
 
 </Tip>
 
@@ -39,25 +39,26 @@ A small, always-on computer running a self-hosted agent that connects your chat 
 
 You choose which agent your box runs when you order. Both editions are the same NVIDIA Jetson Orin Nano Super hardware at the same price.
 
-| | Runs | Notes |
+| Edition | Runs | Notes |
 |---|---|---|
 | **ClawBox (Connect)** | **OpenClaw** | Optional ClawBox AI plans available |
 | **ClawBox Hermes Edition** | **Hermes Agent** by Nous Research | No ClawBox AI subscription required |
 
-These are separate products at checkout, so your order is identifiable as one or the other through fulfilment, invoicing and support. The edition is set when the device is produced and stays fixed for the life of the install — it is not a setting you flip later. Most of this documentation applies to both editions; pages that are specific to one say so. See [Editions](/editions/overview) for the full comparison.
+These are separate products at checkout, so your order is identifiable as one or the other through fulfilment, invoicing and support. The edition is set when the device is produced; on a box you already own, the **Max** plan can [switch it to the other edition](/editions/switching) from Settings. Most of this documentation applies to both editions; pages that are specific to one say so. See [Editions](/editions/overview) for the full comparison.
 
 **What makes it different?**
 
 - **Owned hardware** — it lives on your desk, drawing as little as 7–15 W.
-- **Multi-channel foundation** — Telegram and web are the managed ClawBox paths; advanced users can add more OpenClaw channels where supported.
-- **Flexible AI** — ClawBox AI out of the box, or connect Claude / GPT / Gemini / OpenRouter / local Ollama.
+- **Multi-channel** — Telegram, Discord, WhatsApp, email and the built-in web chat all set up from Settings; advanced users can add more OpenClaw channels where supported.
+- **Flexible AI** — ClawBox AI out of the box, a Claude / ChatGPT / Gemini subscription you already pay for, your own API key, or models that run on the box.
+- **Your own documents** — [Memory Shard](/guides/memory-shard) indexes your notes and files so the assistant can actually find things in them.
 - **Pre-configured** — no Linux setup, no Docker wrangling. Plug in and go.
 
 ## Two models
 
 <Columns cols={2}>
   <Card title="ClawBox Connect" href="/hardware/clawbox-connect" icon="cube">
-    NVIDIA Jetson Orin Nano · 67 TOPS · always-on assistant. **€549**
+    NVIDIA Jetson Orin Nano · 67 TOPS · always-on assistant. **€749**
   </Card>
   <Card title="ClawBox Workstation" href="/hardware/clawbox-workstation" icon="server">
     NVIDIA DGX Spark · 1 PFLOP · run 200B-param models locally. **€5,499**
@@ -67,6 +68,9 @@ These are separate products at checkout, so your order is identifiable as one or
 ## Going deeper
 
 <Columns cols={2}>
+  <Card title="What's New" href="/whats-new" icon="sparkles">
+    What changed on your box recently, and where to click.
+  </Card>
   <Card title="Editions" href="/editions/overview" icon="layer-group">
     OpenClaw, Hermes or Dual — what each edition is, and what changes with it.
   </Card>

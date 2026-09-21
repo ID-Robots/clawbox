@@ -1,9 +1,25 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect, useLayoutEffect, ReactNode } from "react";
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, ReactNode } from "react";
 import { useT } from "@/lib/i18n";
+import { WINDOW_CHROME, WindowChromeContext, type WindowChrome, type WindowTone } from "@/lib/window-chrome";
 import { createPortal } from "react-dom";
 import * as kv from "@/lib/client-kv";
+import SnapPreviewOverlay from "@/components/SnapPreviewOverlay";
+import {
+  DESKTOP_GAP,
+  MIN_WINDOW_HEIGHT,
+  MIN_WINDOW_WIDTH,
+  clampWindowPosition,
+  fitWindowSize,
+  getSnapRect,
+  getSnapZone,
+  shelfHeight,
+  type SnapZone,
+} from "@/lib/window-snap";
+
+/** Flat fallback for the CSS `calc()` that maximizes a window. */
+const SHELF_HEIGHT = 56;
 
 interface ChromeWindowProps {
   title: string;
@@ -22,6 +38,8 @@ interface ChromeWindowProps {
   onGeometryChange?: (geo: { x: number; y: number; width: number; height: number }) => void;
   minimized?: boolean;
   rightInset?: number;
+  /** Bumped by the desktop when something asks for this window maximized; each new value maximizes. */
+  maximizeSignal?: number;
 }
 
 function getSavedSize(appId: string | undefined, defaultWidth: number, defaultHeight: number) {
@@ -31,52 +49,18 @@ function getSavedSize(appId: string | undefined, defaultWidth: number, defaultHe
   return { width: defaultWidth, height: defaultHeight };
 }
 
-type SnapZone = "left" | "right" | "top" | "top-left" | "top-right" | "bottom-left" | "bottom-right" | null;
-
-const SNAP_THRESHOLD = 12; // pixels from edge to trigger snap
-const SHELF_HEIGHT = 56;
-
-function getSnapZone(clientX: number, clientY: number, rInset = 0): SnapZone {
-  const w = window.innerWidth - rInset;
-  const h = window.innerHeight - SHELF_HEIGHT;
-  const nearLeft = clientX <= SNAP_THRESHOLD;
-  const nearRight = clientX >= w - SNAP_THRESHOLD;
-  const nearTop = clientY <= SNAP_THRESHOLD;
-  const nearBottom = clientY >= h - SNAP_THRESHOLD;
-
-  if (nearTop && nearLeft) return "top-left";
-  if (nearTop && nearRight) return "top-right";
-  if (nearBottom && nearLeft) return "bottom-left";
-  if (nearBottom && nearRight) return "bottom-right";
-  if (nearLeft) return "left";
-  if (nearRight) return "right";
-  if (nearTop) return "top";
-  return null;
-}
-
-function getSnapRect(zone: SnapZone, rInset = 0): { x: number; y: number; width: number; height: number } | null {
-  if (!zone) return null;
-  const w = window.innerWidth - rInset;
-  const h = window.innerHeight - SHELF_HEIGHT;
-  switch (zone) {
-    case "left": return { x: 0, y: 0, width: w / 2, height: h };
-    case "right": return { x: w / 2, y: 0, width: w / 2, height: h };
-    case "top": return { x: 0, y: 0, width: w, height: h };
-    case "top-left": return { x: 0, y: 0, width: w / 2, height: h / 2 };
-    case "top-right": return { x: w / 2, y: 0, width: w / 2, height: h / 2 };
-    case "bottom-left": return { x: 0, y: h / 2, width: w / 2, height: h / 2 };
-    case "bottom-right": return { x: w / 2, y: h / 2, width: w / 2, height: h / 2 };
-    default: return null;
-  }
-}
-
 // Calculate initial centered position within available space
 function getInitialPosition(width: number, height: number, rInset = 0) {
   if (typeof window === "undefined") return { x: 100, y: 50 };
   const maxWidth = window.innerWidth - rInset;
-  const maxHeight = window.innerHeight - SHELF_HEIGHT;
+  const maxHeight = window.innerHeight - shelfHeight();
+  const centredX = Math.max(20, (maxWidth - width) / 2);
   return {
-    x: Math.max(20, (maxWidth - width) / 2),
+    // Beside a docked chat the 20px floor alone could still put the right end
+    // of a strip-wide window — where its controls live — under the panel, so
+    // the window ends DESKTOP_GAP before the chat's edge, the margin a
+    // maximized window keeps there.
+    x: rInset > 0 ? Math.min(centredX, Math.max(DESKTOP_GAP, maxWidth - DESKTOP_GAP - width)) : centredX,
     y: Math.max(20, (maxHeight - height) / 2),
   };
 }
@@ -97,10 +81,26 @@ export default function ChromeWindow({
   onGeometryChange,
   minimized = false,
   rightInset = 0,
+  maximizeSignal,
 }: ChromeWindowProps) {
   const { t } = useT();
-  const [size, setSize] = useState(() => initialSize || getSavedSize(appId, defaultWidth, defaultHeight));
-  const [position, setPosition] = useState(() => initialPosition || getInitialPosition(size.width, size.height, rightInset));
+  // Geometry that arrives from outside — a restored workspace, a size saved on
+  // a bigger screen — is fitted to THIS desktop before it is ever painted: a
+  // window restored with its title bar under the shelf or its controls past the
+  // right edge cannot be reached by hand, and minimize/restore and every reload
+  // put it back in exactly the same place.
+  // A window the desktop places for the FIRST time is fitted to the strip
+  // beside a docked chat as well (see `fitWindowSize`); one restored to a
+  // saved place keeps the size it had there, like every window already open.
+  const [size, setSize] = useState(() => fitWindowSize(
+    initialSize || getSavedSize(appId, defaultWidth, defaultHeight),
+    initialPosition ? 0 : rightInset,
+  ));
+  const [position, setPosition] = useState(() => (
+    initialPosition
+      ? clampWindowPosition({ ...initialPosition, ...size })
+      : getInitialPosition(size.width, size.height, rightInset)
+  ));
   const [maximized, setMaximized] = useState(false);
   const [snapped, setSnapped] = useState<SnapZone>(null);
   const [snapPreview, setSnapPreview] = useState<SnapZone>(null);
@@ -109,6 +109,12 @@ export default function ChromeWindow({
   const [minimizing, setMinimizing] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  // The title bar's slot for the app's own controls, and the face of the
+  // chrome the app asked for (see window-chrome.ts).
+  const [actionsEl, setActionsEl] = useState<HTMLDivElement | null>(null);
+  const [tone, setTone] = useState<WindowTone>("dark");
+  const chrome = useMemo<WindowChrome>(() => ({ actions: actionsEl, active: isActive, tone, setTone }), [actionsEl, isActive, tone]);
+  const palette = WINDOW_CHROME[tone];
   const windowRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef({ isDragging: false, startX: 0, startY: 0, startPosX: 0, startPosY: 0 });
   const resizeRef = useRef<{
@@ -126,8 +132,6 @@ export default function ChromeWindow({
   const currentPosRef = useRef(position);
   const prevMinimizedRef = useRef(minimized);
   const rightInsetRef = useRef(rightInset);
-  const MIN_WIDTH = 300;
-  const MIN_HEIGHT = 200;
 
   useLayoutEffect(() => {
     rightInsetRef.current = rightInset;
@@ -176,7 +180,19 @@ export default function ChromeWindow({
   }, [minimized]);
 
   const handleDragStart = useCallback((e: React.MouseEvent | React.TouchEvent) => {
-    if (maximized) return;
+    // The app's own controls in the bar are buttons, not a grip.
+    if ((e.target as HTMLElement | null)?.closest?.("[data-window-titlebar-actions]")) return;
+    if (maximized) {
+      // No drag from a maximized bar — but a mousedown's other default, moving
+      // focus, is still refused, as the drag path below refuses it: that is
+      // what keeps the keyboard in the window's content when Maximize is
+      // clicked, and the early return here let a click on Restore leave focus
+      // on the button, so a terminal swallowed every keystroke until it was
+      // clicked again (sweep FT-3). Touch is left alone: a cancelled
+      // touchstart cancels the tap it would have become.
+      if (!("touches" in e)) e.preventDefault();
+      return;
+    }
     e.preventDefault();
     const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
     const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
@@ -185,17 +201,21 @@ export default function ChromeWindow({
     if (snapped) {
       const restoreW = prevSizeRef.current.width;
       const restoreH = prevSizeRef.current.height;
-      const newX = clientX - restoreW / 2;
-      const newY = clientY - 18; // center on titlebar
+      // Centred on the cursor, then pulled back onto the desktop: a snapped
+      // window grabbed near the left edge would otherwise be dropped half its
+      // width off-screen if the pointer never moved.
+      const { x: newX, y: newY } = clampWindowPosition(
+        { x: clientX - restoreW / 2, y: clientY - 18, width: restoreW, height: restoreH },
+      );
       setSize({ width: restoreW, height: restoreH });
-      setPosition({ x: newX, y: Math.max(0, newY) });
+      setPosition({ x: newX, y: newY });
       setSnapped(null);
       dragRef.current = {
         isDragging: true,
         startX: clientX,
         startY: clientY,
         startPosX: newX,
-        startPosY: Math.max(0, newY),
+        startPosY: newY,
       };
     } else {
       dragRef.current = {
@@ -247,15 +267,15 @@ export default function ChromeWindow({
         let newX = r.startPosX;
         let newY = r.startPosY;
 
-        if (r.edge.includes("r")) newW = Math.max(MIN_WIDTH, r.startW + dx);
-        if (r.edge.includes("b")) newH = Math.max(MIN_HEIGHT, r.startH + dy);
+        if (r.edge.includes("r")) newW = Math.max(MIN_WINDOW_WIDTH, r.startW + dx);
+        if (r.edge.includes("b")) newH = Math.max(MIN_WINDOW_HEIGHT, r.startH + dy);
         if (r.edge.includes("l")) {
-          const dw = Math.min(dx, r.startW - MIN_WIDTH);
+          const dw = Math.min(dx, r.startW - MIN_WINDOW_WIDTH);
           newW = r.startW - dw;
           newX = r.startPosX + dw;
         }
         if (r.edge.includes("t")) {
-          const dh = Math.min(dy, r.startH - MIN_HEIGHT);
+          const dh = Math.min(dy, r.startH - MIN_WINDOW_HEIGHT);
           newH = r.startH - dh;
           newY = Math.max(0, r.startPosY + dh);
         }
@@ -277,8 +297,16 @@ export default function ChromeWindow({
       if (!dragRef.current.isDragging) return;
       const dx = clientX - dragRef.current.startX;
       const dy = clientY - dragRef.current.startY;
-      const newX = dragRef.current.startPosX + dx;
-      const newY = Math.max(0, dragRef.current.startPosY + dy);
+      // Clamped on every edge, not just the top: dragged down until the title
+      // bar sat under the shelf, a window was unreachable for good — no context
+      // menu offers Close, and minimize/restore and the next reload both put it
+      // straight back. The cursor is still free, so the snap zones below still
+      // fire at the real screen edges.
+      const { x: newX, y: newY } = clampWindowPosition({
+        x: dragRef.current.startPosX + dx,
+        y: dragRef.current.startPosY + dy,
+        ...currentSizeRef.current,
+      });
 
       // Direct DOM update — no React re-render during drag
       if (el) {
@@ -356,11 +384,11 @@ export default function ChromeWindow({
   }, [appId, onGeometryChange]);
 
   const handleClose = useCallback(() => {
-    // Save window size per app
-    if (appId) {
-      const cur = currentSizeRef.current;
-      kv.setJSON(`clawbox-winsize-${appId}`, { width: cur.width, height: cur.height });
-    }
+    // No size write here: the resize-end path saves what the owner chose the
+    // moment they let go, and a close-time write of `currentSizeRef` saved
+    // whatever geometry the window ended in — the strip beside a docked chat
+    // it was fitted to, or a snap after the owner's own resize — as the
+    // app's remembered size (the sweep of 2026-09-07 and its review).
     setClosing(true);
     setTimeout(() => onClose(), 150);
   }, [onClose, appId]);
@@ -380,6 +408,65 @@ export default function ChromeWindow({
     }
   }, [maximized, snapped, size.width, size.height, position.x, position.y]);
 
+  // Asked for maximized from outside (the chat's View lands on a run's page
+  // with the whole desktop for it): each new signal value maximizes once, a
+  // window already maximized stays as it is.
+  const lastMaximizeSignal = useRef(0);
+  useEffect(() => {
+    if (!maximizeSignal || maximizeSignal === lastMaximizeSignal.current) return;
+    lastMaximizeSignal.current = maximizeSignal;
+    if (maximized) return;
+    if (!snapped) {
+      prevSizeRef.current = { width: size.width, height: size.height, x: position.x, y: position.y };
+    }
+    // A request from outside is external state the window synchronises to.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSnapped(null);
+    setMaximized(true);
+  }, [maximizeSignal, maximized, snapped, size.width, size.height, position.x, position.y]);
+
+  // The desktop can change shape under a window: the viewport resizes, or the
+  // chat is docked and then dragged wider. A SNAPPED window keeps the rect it
+  // was given at drop time, so widening the panel by 80px buried its minimize,
+  // maximize and close buttons under the chat; a free window can be left with
+  // its title bar off the smaller desktop, which is the one handle it has. A
+  // MAXIMIZED window needs nothing — its geometry is a CSS calc that already
+  // follows both.
+  useEffect(() => {
+    if (maximized) return;
+    const relayout = () => {
+      if (snapped) {
+        const rect = getSnapRect(snapped, rightInset);
+        if (!rect) return;
+        // The desktop's shape is external state this window synchronises to.
+        setPosition((p) => (p.x === rect.x && p.y === rect.y ? p : { x: rect.x, y: rect.y }));
+        setSize((s) => (s.width === rect.width && s.height === rect.height ? s : { width: rect.width, height: rect.height }));
+        return;
+      }
+      // FIT, then place. `clampWindowPosition` keeps whatever dimensions it is
+      // handed, so a window sized on a bigger display — or restored from
+      // maximized onto a viewport that shrank while it was full-screen — kept
+      // that size and the clamp could only choose which edge hung off: pushed
+      // left, its right-hand controls stayed past the right edge; pinned to the
+      // top, its bottom resize handle stayed under the shelf. Both are the
+      // handles needed to fix it by hand, which is the same trap `fitWindowSize`
+      // was written for at mount.
+      const fitted = fitWindowSize(currentSizeRef.current);
+      // The ref is advanced by hand because `setSize`'s write has not landed
+      // yet: a second resize event arriving before the re-render would read the
+      // size this one just replaced.
+      currentSizeRef.current = fitted;
+      setSize((s) => (s.width === fitted.width && s.height === fitted.height ? s : fitted));
+      setPosition((p) => {
+        const next = clampWindowPosition({ ...p, ...fitted });
+        return next.x === p.x && next.y === p.y ? p : next;
+      });
+    };
+    relayout();
+    window.addEventListener("resize", relayout);
+    return () => window.removeEventListener("resize", relayout);
+  }, [maximized, snapped, rightInset]);
+
   const handleMinimize = useCallback(() => {
     setMinimizing(true);
     setTimeout(() => {
@@ -390,9 +477,18 @@ export default function ChromeWindow({
 
   if (minimized && !restoring) return null;
 
+  // Maximized: the desktop's one gap on every side — beside a docked chat,
+  // between the window and the chat as well, because `rightInset` ends at the
+  // chat's left edge and the chat's own gap is on its far side. Corners kept,
+  // so a full-screen window sits in the desktop the way the chat does.
   const windowStyle = maximized
-    ? { left: 0, top: 0, width: `calc(100% - ${rightInset}px)`, height: `calc(100vh - ${SHELF_HEIGHT}px)` }
-    : { left: position.x, top: position.y, width: size.width, height: size.height };
+    ? {
+      left: DESKTOP_GAP,
+      top: DESKTOP_GAP,
+      width: `calc(100% - ${DESKTOP_GAP * 2 + rightInset}px)`,
+      height: `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px) - ${DESKTOP_GAP * 2}px)`,
+    }
+      : { left: position.x, top: position.y, width: size.width, height: size.height };
 
   return (
     <div
@@ -406,10 +502,8 @@ export default function ChromeWindow({
       style={{
         ...windowStyle,
         zIndex,
-        borderRadius: maximized || snapped ? 0 : 8,
-        boxShadow: isActive
-          ? "0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08)"
-          : "0 4px 20px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.04)",
+        borderRadius: snapped ? 0 : 8,
+        boxShadow: isActive ? palette.shadow : palette.shadowInactive,
         opacity: 1,
         transition: snapped && !isDragging
           ? "left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out, opacity 0.15s, box-shadow 0.15s"
@@ -421,41 +515,45 @@ export default function ChromeWindow({
       <div
         className="flex items-center h-9 px-2 cursor-default select-none shrink-0"
         style={{
-          background: isActive
-            ? "linear-gradient(180deg, #292d36 0%, #242830 100%)"
-            : "#1f2228",
-          borderBottom: "1px solid rgba(255, 255, 255, 0.06)",
-          borderRadius: maximized || snapped ? 0 : "8px 8px 0 0",
+          background: isActive ? palette.titleBar : palette.titleBarInactive,
+          borderBottom: `1px solid ${palette.hairline}`,
+          borderRadius: snapped ? 0 : "8px 8px 0 0",
         }}
         onMouseDown={handleDragStart}
         onTouchStart={handleDragStart}
-        onDoubleClick={handleMaximize}
+        onDoubleClick={(e) => {
+          if ((e.target as HTMLElement | null)?.closest?.("[data-window-titlebar-actions]")) return;
+          handleMaximize();
+        }}
       >
         {/* Left: title */}
         <div className="flex items-center gap-2 min-w-0 flex-1">
-          <span className={`text-xs font-medium truncate ${isActive ? "text-white/80" : "text-white/50"}`}>{title}</span>
+          <span className={`text-xs font-medium truncate ${isActive ? palette.titleClass : palette.titleInactiveClass}`}>{title}</span>
         </div>
+
+        {/* The app's own controls (window-chrome.ts), left of the window's. */}
+        <div ref={setActionsEl} data-window-titlebar-actions="true" className="flex items-center gap-1 ml-2 empty:hidden" />
 
         {/* Right: window controls — ChromeOS circular buttons */}
         <div className="flex items-center gap-1.5 ml-2">
           {/* Minimize */}
           <button
             onClick={handleMinimize}
-            className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
+            className={`w-6 h-6 flex items-center justify-center rounded-full ${palette.controlHoverClass} transition-colors cursor-pointer`}
             title={t("window.minimize")}
             aria-label={t("window.minimize")}
           >
-            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>minimize</span>
+            <span className={`material-symbols-rounded ${palette.controlClass}`} style={{ fontSize: 16 }}>minimize</span>
           </button>
 
           {/* Maximize */}
           <button
             onClick={handleMaximize}
-            className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
+            className={`w-6 h-6 flex items-center justify-center rounded-full ${palette.controlHoverClass} transition-colors cursor-pointer`}
             title={maximized ? t("window.restore") : t("window.maximize")}
             aria-label={maximized ? t("window.restore") : t("window.maximize")}
           >
-            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>{maximized ? "filter_none" : "crop_square"}</span>
+            <span className={`material-symbols-rounded ${palette.controlClass}`} style={{ fontSize: 16 }}>{maximized ? "filter_none" : "crop_square"}</span>
           </button>
 
           {/* Close */}
@@ -465,13 +563,15 @@ export default function ChromeWindow({
             title={t("window.close")}
             aria-label={t("window.close")}
           >
-            <span className="material-symbols-rounded text-white/60 group-hover:text-white" style={{ fontSize: 16 }}>close</span>
+            <span className={`material-symbols-rounded ${palette.controlClass} group-hover:text-white`} style={{ fontSize: 16 }}>close</span>
           </button>
         </div>
       </div>
 
       {/* Content */}
-      <div ref={contentRef} data-chrome-window-content="true" className="flex-1 overflow-hidden bg-[#181c22]">{children}</div>
+      <div ref={contentRef} data-chrome-window-content="true" className="flex-1 overflow-hidden" style={{ background: palette.ground }}>
+        <WindowChromeContext.Provider value={chrome}>{children}</WindowChromeContext.Provider>
+      </div>
 
       {/* Resize handles — hidden when maximized/snapped */}
       {!maximized && !snapped && (
@@ -498,24 +598,3 @@ export default function ChromeWindow({
   );
 }
 
-function SnapPreviewOverlay({ zone, rightInset = 0 }: { zone: SnapZone; rightInset?: number }) {
-  const rect = getSnapRect(zone, rightInset);
-  if (!rect) return null;
-  return (
-    <div
-      style={{
-        position: "fixed",
-        left: rect.x,
-        top: rect.y,
-        width: rect.width,
-        height: rect.height,
-        background: "rgba(59, 130, 246, 0.15)",
-        border: "2px solid rgba(59, 130, 246, 0.5)",
-        borderRadius: 8,
-        zIndex: 99999,
-        pointerEvents: "none",
-        transition: "all 0.15s ease-out",
-      }}
-    />
-  );
-}

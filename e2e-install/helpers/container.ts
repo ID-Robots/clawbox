@@ -163,31 +163,181 @@ export async function waitForHttpReady(timeoutMs = 20 * 60_000): Promise<void> {
   throw new Error(`Container HTTP not ready after ${timeoutMs}ms: ${String(lastError)}`);
 }
 
+/** The systemd unit that runs install.sh on first boot (e2e-install/clawbox-bootstrap.service). */
+export const BOOTSTRAP_UNIT = "clawbox-bootstrap.service";
+/** Removed by the bootstrap unit only after install.sh exited 0 (see its ExecStart). */
+export const INSTALL_MARKER = "/home/clawbox/clawbox/.needs-install";
+export const INSTALL_LOG = "/var/log/clawbox-install.log";
+const INSTALL_POLL_MS = 5_000;
+
+export interface BootstrapUnitState {
+  /** systemd ActiveState: activating | active | failed | inactive | unknown. */
+  activeState: string;
+  /** systemd Result: success | exit-code | timeout | signal | ... | unknown. */
+  result: string;
+}
+
+/**
+ * Parse `systemctl show -p ActiveState -p Result <unit>` output. Property
+ * lines, not `--value`, because the order `--value` prints multiple
+ * properties in is not something we want to depend on across systemd
+ * versions; a missing property reads as "unknown", which is never "failed".
+ */
+export function parseUnitState(stdout: string): BootstrapUnitState {
+  const props = new Map<string, string>();
+  for (const line of stdout.split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) props.set(line.slice(0, eq).trim(), line.slice(eq + 1).trim());
+  }
+  return {
+    activeState: props.get("ActiveState") || "unknown",
+    result: props.get("Result") || "unknown",
+  };
+}
+
+export type InstallVerdict = "done" | "failed" | "wait";
+
+/**
+ * The decision one poll of waitForInstallComplete makes, kept pure so the
+ * unit test can pin it without a container.
+ *
+ * "done" wins over "failed": the marker only disappears after install.sh
+ * exited 0, so a gone marker plus a live server is the success the harness
+ * has always accepted, whatever systemd says in that instant. A failed unit
+ * with the marker still present means install.sh has EXITED non-zero (or
+ * systemd timed it out) and nothing will ever remove the marker — waiting
+ * for the deadline can only add time, never information.
+ */
+export function classifyInstallState(state: {
+  markerGone: boolean;
+  httpReady: boolean;
+  unitFailed: boolean;
+}): InstallVerdict {
+  if (state.markerGone && state.httpReady) return "done";
+  if (state.unitFailed) return "failed";
+  return "wait";
+}
+
+/**
+ * Thrown by waitForInstallComplete the moment the bootstrap unit fails. It
+ * carries the tail of the install log so the cause is in the error Playwright
+ * prints, not only in a dump further down the job log; global-setup.ts knows
+ * this and does not print the log a second time for this error.
+ */
+export class InstallBootstrapFailedError extends Error {
+  readonly unit: BootstrapUnitState;
+  readonly installLogTail: string;
+
+  constructor(unit: BootstrapUnitState, installLogTail: string, elapsedMs: number) {
+    super(
+      `bootstrap failed: ${BOOTSTRAP_UNIT} is ${unit.activeState} (Result=${unit.result}) after ` +
+      `${Math.round(elapsedMs / 1000)}s — install.sh exited, or systemd stopped it (Result=${unit.result}), ` +
+      `without removing ${INSTALL_MARKER}, ` +
+      `so the install cannot complete; giving up now instead of at the deadline.\n` +
+      `Tail of ${INSTALL_LOG}:\n${installLogTail}`,
+    );
+    this.name = "InstallBootstrapFailedError";
+    this.unit = unit;
+    this.installLogTail = installLogTail;
+  }
+}
+
+/** What one poll of the install asks the container; swapped for fakes in the unit test. */
+export interface InstallProbes {
+  markerGone(): Promise<boolean>;
+  httpReady(): Promise<boolean>;
+  bootstrapUnit(): Promise<BootstrapUnitState>;
+  installLogTail(): Promise<string>;
+  sleep(ms: number): Promise<void>;
+  now(): number;
+}
+
+/**
+ * The real probes. Every one of them answers the conservative value when the
+ * container cannot be asked (docker exec failing, HTTP refused): "marker
+ * still there", "HTTP not ready", "unit state unknown". A transient docker
+ * hiccup must keep the loop waiting, never end it either way.
+ */
+export const dockerInstallProbes: InstallProbes = {
+  async markerGone() {
+    try {
+      await dockerExec(["test", "!", "-f", INSTALL_MARKER]);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  async httpReady() {
+    try {
+      const res = await fetch(`${BASE_URL}/setup-api/setup/status`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  },
+  async bootstrapUnit() {
+    try {
+      // `systemctl show` exits 0 whatever the state, so a non-zero exit here
+      // is docker or systemd itself being unreachable — reported as unknown.
+      const stdout = await dockerExec(
+        ["systemctl", "show", "-p", "ActiveState", "-p", "Result", BOOTSTRAP_UNIT],
+        { user: "root", timeoutMs: 15_000 },
+      );
+      return parseUnitState(stdout);
+    } catch {
+      return { activeState: "unknown", result: "unknown" };
+    }
+  },
+  // 500 lines, the same amount the deadline path's dump in global-setup shows:
+  // this tail REPLACES that dump for a bootstrap failure, and the cause of a
+  // failed install.sh is rarely in its last 200 lines.
+  installLogTail: () => readInstallLog(500),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  now: () => Date.now(),
+};
+
 /**
  * Wait for install.sh to finish (marker file removed) AND HTTP to be ready.
  * The bootstrap service removes /home/clawbox/clawbox/.needs-install on
  * success; checking for its absence is more reliable than just probing HTTP
  * because the server technically comes up during the install (after the
  * `step_build` / `step_start_services` steps).
+ *
+ * Every poll also asks systemd whether the bootstrap unit has FAILED, and
+ * gives up at once when it has. Measured on PR #558: the unit exited 1 at
+ * ~3 min and this loop kept polling the marker until its 40-minute deadline,
+ * so the job took 41 minutes to report a failure it could have reported at
+ * minute 3. The deadline stays as the backstop for an installer that hangs
+ * without failing.
  */
-export async function waitForInstallComplete(timeoutMs = 40 * 60_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      await dockerExec(["test", "!", "-f", "/home/clawbox/clawbox/.needs-install"]);
-      await waitForHttpReady(60_000);
-      return;
-    } catch {
-      // not done yet
+export async function waitForInstallComplete(
+  timeoutMs = 40 * 60_000,
+  probes: InstallProbes = dockerInstallProbes,
+): Promise<void> {
+  const started = probes.now();
+  const deadline = started + timeoutMs;
+  for (;;) {
+    const markerGone = await probes.markerGone();
+    // HTTP is only meaningful once the marker is gone; before that a live
+    // server is the installer's own mid-run start, not completion.
+    const httpReady = markerGone ? await probes.httpReady() : false;
+    const unit = await probes.bootstrapUnit();
+    const verdict = classifyInstallState({ markerGone, httpReady, unitFailed: unit.activeState === "failed" });
+    if (verdict === "done") return;
+    if (verdict === "failed") {
+      throw new InstallBootstrapFailedError(unit, await probes.installLogTail(), probes.now() - started);
     }
-    await new Promise((r) => setTimeout(r, 5_000));
+    if (probes.now() >= deadline) break;
+    await probes.sleep(INSTALL_POLL_MS);
   }
-  throw new Error(`install.sh did not finish within ${timeoutMs}ms`);
+  throw new Error(`install.sh did not finish within ${timeoutMs}ms (${BOOTSTRAP_UNIT} never reported failure)`);
 }
 
 export async function readInstallLog(tailLines = 200): Promise<string> {
   try {
-    return await dockerExec(["tail", `-n${tailLines}`, "/var/log/clawbox-install.log"]);
+    return await dockerExec(["tail", `-n${tailLines}`, INSTALL_LOG]);
   } catch {
     return "(install log not available)";
   }

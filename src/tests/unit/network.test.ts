@@ -81,12 +81,29 @@ describe("network", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // doScan() sleeps a real 3 s after `nmcli device wifi rescan` so the driver
+    // has results to list — every scan below paid for it, ten of them, and
+    // the box was never asked anything real. The clock is faked instead and
+    // scan() runs it forward; the settle itself stays the product's.
+    vi.useFakeTimers();
     process.env.CLAWBOX_ROOT = "/tmp/clawbox-test-nonexistent-" + Math.random().toString(36).slice(2);
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
   });
+
+  /**
+   * scanWifi() with the post-rescan settle elapsed on the fake clock. The
+   * execFile mock answers through microtasks, so every timer the scan sets is
+   * already pending by the time the runner looks for one.
+   */
+  async function scan(): ReturnType<typeof network.scanWifi> {
+    const pending = network.scanWifi();
+    await vi.runAllTimersAsync();
+    return pending;
+  }
 
   describe("scanWifi", () => {
     it("returns cached results if fresh", async () => {
@@ -98,13 +115,13 @@ describe("network", () => {
       network = await import("@/lib/network");
 
       // First call populates cache
-      const result1 = await network.scanWifi();
+      const result1 = await scan();
       expect(result1).toHaveLength(1);
       expect(result1[0].ssid).toBe("HomeNet");
 
       // Second call should use cache (no additional exec calls)
       const callCount = mockExecFile.mock.calls.length;
-      const result2 = await network.scanWifi();
+      const result2 = await scan();
       expect(result2).toEqual(result1);
       // Should not have made more calls
       expect(mockExecFile.mock.calls.length).toBe(callCount);
@@ -120,7 +137,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(3);
       expect(result[0]).toEqual({ ssid: "Network1", signal: 85, security: "WPA2", freq: "5180" });
@@ -138,7 +155,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].ssid).toBe("OtherNet");
@@ -154,7 +171,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].signal).toBe(90);
@@ -170,7 +187,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].ssid).toBe("My:Network:Name");
@@ -186,7 +203,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].ssid).toBe("ValidNet");
@@ -202,7 +219,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].ssid).toBe("ValidNet");
@@ -218,7 +235,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].ssid).toBe("GoodNet");
@@ -234,7 +251,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result[0].ssid).toBe("High");
       expect(result[1].ssid).toBe("Mid");
@@ -260,7 +277,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      await network.scanWifi();
+      await scan();
 
       const status = network.getScanStatus();
 
@@ -280,7 +297,7 @@ describe("network", () => {
       network = await import("@/lib/network");
 
       // Populate cache
-      await network.scanWifi();
+      await scan();
 
       const callCount = mockExecFile.mock.calls.length;
 
@@ -319,6 +336,73 @@ describe("network", () => {
       const result = await network.getWifiStatus();
 
       expect(result.error).toBe("WiFi interface not available");
+      expect(result.errorCode).toBe("unavailable");
+    });
+
+    // Found by the device feature sweep: "this machine has no WiFi NIC" and
+    // "nmcli broke" came back as the same sentence, so the route turned both
+    // into an HTTP 500 and nothing downstream could tell absent hardware from a
+    // broken tool. nmcli exits 10 for "the connection, device, or access point
+    // does not exist", and for `device show <iface>` there is only one thing
+    // that can be about. Measured: promisified execFile puts that on
+    // `err.code` as a NUMBER, and a missing binary puts the string "ENOENT"
+    // there — which must stay `unavailable`.
+    it("reports no WiFi hardware when nmcli knows of no wifi device", async () => {
+      const notFound = Object.assign(new Error("Error: Device 'wlP1p1s0' not found."), { code: 10 });
+      setupExecFileMock({
+        "-t -f GENERAL.STATE,GENERAL.CONNECTION": notFound,
+        "-t -f DEVICE,TYPE device status": { stdout: "enp4s0:ethernet\nlo:loopback\n", stderr: "" },
+      });
+
+      network = await import("@/lib/network");
+      const result = await network.getWifiStatus();
+
+      expect(result.errorCode).toBe("no_wifi_device");
+      expect(result.error).toContain("no WiFi hardware");
+    });
+
+    // Exit 10 alone does not mean "no WiFi on this machine": NETWORK_INTERFACE
+    // defaults to the Jetson's name and can be carried onto a board whose NIC is
+    // called something else. Saying "no WiFi hardware" there would hide a
+    // misconfiguration behind a hardware fact nobody can act on.
+    it("reports a misconfigured interface when WiFi devices exist under other names", async () => {
+      const notFound = Object.assign(new Error("Error: Device 'wlP1p1s0' not found."), { code: 10 });
+      setupExecFileMock({
+        "-t -f GENERAL.STATE,GENERAL.CONNECTION": notFound,
+        "-t -f DEVICE,TYPE device status": { stdout: "wlan0:wifi\nwlan1:wifi\nenp4s0:ethernet\n", stderr: "" },
+      });
+
+      network = await import("@/lib/network");
+      const result = await network.getWifiStatus();
+
+      expect(result.errorCode).toBe("interface_mismatch");
+      expect(result.wifiDevices).toBe("wlan0,wlan1");
+      expect(result.error).toContain("wlan0, wlan1");
+    });
+
+    it("falls back to a plain failure when the device probe itself cannot be made", async () => {
+      const notFound = Object.assign(new Error("Error: Device 'wlP1p1s0' not found."), { code: 10 });
+      setupExecFileMock({
+        "-t -f GENERAL.STATE,GENERAL.CONNECTION": notFound,
+        "-t -f DEVICE,TYPE device status": new Error("nmcli went away"),
+      });
+
+      network = await import("@/lib/network");
+      const result = await network.getWifiStatus();
+
+      // Not knowing must fail towards "something here is wrong", never towards a
+      // claim about the hardware.
+      expect(result.errorCode).toBe("unavailable");
+    });
+
+    it("keeps a missing nmcli and a timeout as a real failure", async () => {
+      for (const code of ["ENOENT", "ETIMEDOUT", 1, 2, undefined]) {
+        vi.resetModules();
+        setupExecFileMock({ "nmcli": Object.assign(new Error("nope"), { code }) });
+        network = await import("@/lib/network");
+        const result = await network.getWifiStatus();
+        expect({ code, errorCode: result.errorCode }).toEqual({ code, errorCode: "unavailable" });
+      }
     });
 
     it("handles lines without colon", async () => {

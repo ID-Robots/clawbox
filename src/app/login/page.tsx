@@ -26,12 +26,18 @@ function LoginForm() {
     return () => clearInterval(id);
   }, []);
 
-  // Incomplete setups should always resume on the dedicated setup route.
+  // Incomplete setups resume on the dedicated setup route — but only while the
+  // device has no owner password. Once `password_configured` is set, /setup is
+  // behind the session gate (middleware's WIZARD_PAGE_PREFIX), so bouncing an
+  // unauthenticated browser there just 307s straight back to
+  // /login?redirect=%2Fsetup and the two redirects chase each other forever —
+  // the form never renders and the owner can never log in. Show the form
+  // instead; the post-login redirect lands back on the wizard.
   useEffect(() => {
     fetch("/setup-api/setup/status")
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
-        if (data && !data.setup_complete) {
+        if (data && !data.setup_complete && !data.password_configured) {
           window.location.replace("/setup");
           return;
         }
@@ -99,7 +105,7 @@ function LoginForm() {
   if (!ready) {
     return (
       <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--bg-deep)" }}>
-        <div className="spinner" role="status" aria-label="Loading" />
+        <div className="spinner" role="status" aria-label={t("loading")} />
       </div>
     );
   }
@@ -123,7 +129,7 @@ function LoginForm() {
 
       <div className="w-full max-w-[380px] flex flex-col items-center gap-6">
         <div className="flex flex-col items-center gap-3">
-          <Image src="/clawbox-crab.png" alt="ClawBox" width={96} height={96} className="w-24 h-24 sm:w-[120px] sm:h-[120px] object-contain animate-welcome-powerup" priority />
+          <Image src="/clawbox-crab.png" alt="ClawBox" width={62} height={62} className="w-[50px] h-[50px] sm:w-[62px] sm:h-[62px] object-contain animate-welcome-powerup" priority />
           <h1 className="text-2xl font-bold font-display text-white">ClawBox</h1>
           <p className="text-sm text-white/50 text-center">{t("login.subtitle")}</p>
         </div>

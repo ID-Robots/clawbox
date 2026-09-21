@@ -1,6 +1,21 @@
-import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { describe, it, expect, vi } from "vitest";
+import fs, { readFileSync, readdirSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawnSync, execFileSync } from "node:child_process";
+
+// The staging cases below start a real bash: vitest's 5 s test and 10 s hook
+// defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+/** These cases start a real bash; skip where there is none. */
+let hasBash = true;
+try {
+  execFileSync("/bin/bash", ["-c", "true"], { stdio: "ignore" });
+} catch {
+  hasBash = false;
+}
 
 // These pin the install-time invariants of the single-harness edition lock.
 // Every one of them describes a bug that shipped: a drift guard that hard-exit
@@ -104,10 +119,153 @@ describe("edition persistence (H7 / H9)", () => {
   it("is written to a root-owned file, for all three editions", () => {
     const fn = extractShellFunction("step_edition_lock");
     expect(fn).toContain('install -d -o root -g root -m 0755 /etc/clawbox');
-    expect(fn).toContain('chown root:root "$CLAWBOX_EDITION_FILE"');
+    // Root ownership and the mode now come from `install_root_file` — the same
+    // atomic writer every other root-owned file goes through — rather than a
+    // chown after a truncating redirect.
+    expect(fn).toContain('install_root_file "$_edition_tmp" "$CLAWBOX_EDITION_FILE" 0644');
     // No `case … dual) return 0`: dual used to bake nothing at all, so the
     // premium SKU silently ran as openclaw and could not be provisioned.
     expect(fn).not.toMatch(/case "\$CLAWBOX_EDITION"/);
+  });
+
+  it("is never observable half-written, in either record", () => {
+    // `> file` is open(O_TRUNC) + write + close, and this step runs on EVERY
+    // in-app update while the middleware, `openclawIsAbsent()`, the updater's
+    // own `hasHermesHarness()` and the MCP server are reading the lock: a
+    // reader that lands inside the write gets a zero-length file, which
+    // `readEditionSource()` answers as `{edition: "openclaw", defaulted: true}`
+    // — a Hermes box briefly reporting itself as the flagship SKU. A rename
+    // within a directory cannot be observed half-done, and the repo already
+    // ships that writer (TASK-584).
+    const fn = extractShellFunction("step_edition_lock");
+    expect(fn).not.toMatch(/>\s*"\$CLAWBOX_EDITION_FILE"/);
+    expect(fn).not.toMatch(/>\s*"\$LEGACY_EDITION_DROPIN"/);
+    expect(fn).toContain('install_root_file "$_dropin_tmp" "$LEGACY_EDITION_DROPIN" 0644');
+    // And the writer it uses really is the atomic one.
+    const writer = extractShellFunction("install_root_file");
+    expect(writer).toContain('mv -f "$dst.new" "$dst"');
+  });
+
+  it("a write that did not land fails the step, on the path that swallows it", () => {
+    // `install_root_file` answers 1 when the copy or the rename failed, and the
+    // update path calls this step from an OR-list — for the whole body of which
+    // bash switches errexit OFF. Dropped, the failed write was followed by
+    // successful commands, the step returned the LAST one's status, the
+    // non-fatal warning never printed and the update reported success over a
+    // lock still naming the previous SKU.
+    const fn = extractShellFunction("step_edition_lock");
+    expect(fn).toMatch(/if ! install_root_file "\$_edition_tmp" "\$CLAWBOX_EDITION_FILE" 0644; then/);
+    expect(fn).toMatch(/if ! install_root_file "\$_dropin_tmp" "\$LEGACY_EDITION_DROPIN" 0644; then/);
+  });
+
+  /**
+   * The staging writes, run for real.
+   *
+   * `install_root_file` copies whatever is in the temp and answers 0 for a copy
+   * that worked, so a `printf` that failed after writing a prefix — a full
+   * /tmp is the ordinary way — would be published ATOMICALLY as a truncated
+   * lock, which `readEditionSource()` reads as `{edition: "openclaw",
+   * defaulted: true}`. Errexit is off for this whole function on the update
+   * path, so nothing else catches it.
+   */
+  describe.skipIf(!hasBash)("a staging write that fails", () => {
+    /**
+     * Run the real step with every side effect stubbed and ONE staging step
+     * poisoned: the lock's temp, the drop-in's temp, or the drop-in's own
+     * directory.
+     */
+    function runStep(poison: "lock" | "dropin" | "dropin-dir"): { out: string; rc: string } {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-edition-stage-"));
+      try {
+        const bad = path.join(dir, "no-such-directory", "tmp");
+        const good = path.join(dir, "ok.tmp");
+        const program = [
+          // No `set -e`: post_update calls this step from an OR-list, for whose
+          // whole function body bash switches errexit OFF. That is the path
+          // this case is about.
+          `CLAWBOX_EDITION=hermes`,
+          `CLAWBOX_EDITION_FILE=${JSON.stringify(path.join(dir, "edition.env"))}`,
+          `LEGACY_EDITION_DROPIN=${JSON.stringify(path.join(dir, "edition.conf"))}`,
+          "install() { :; }",
+          `mkdir() { ${poison === "dropin-dir" ? "return 1" : ":"}; }`,
+          "systemctl() { :; }",
+          "step_edition_gateway_state() { echo GATEWAY_STATE; }",
+          "step_edition_foreign_teardown() { echo TEARDOWN; }",
+          'install_root_file() { echo "INSTALL_ROOT_FILE $2"; return 0; }',
+          // The counter lives in a FILE: `$(mktemp)` runs in a subshell, so a
+          // shell variable incremented inside it never reaches the caller and
+          // every call would look like the first.
+          `_c=${JSON.stringify(path.join(dir, "calls"))}`,
+          'printf 0 > "$_c"',
+          `mktemp() { local n; n=$(( $(cat "$_c") + 1 )); printf '%s' "$n" > "$_c"; if [ "$n" = ${poison === "lock" ? "1" : "2"} ]; then echo ${JSON.stringify(bad)}; else echo ${JSON.stringify(good)}; fi; }`,
+          extractShellFunction("step_edition_lock") + "\n}",
+          "if step_edition_lock; then echo RC=0; else echo RC=$?; fi",
+        ].join("\n");
+        const script = path.join(dir, "run.sh");
+        fs.writeFileSync(script, program);
+        const r = spawnSync("/bin/bash", [script], { encoding: "utf-8", timeout: 20_000 });
+        const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+        return { out, rc: /RC=(\d+)/.exec(out)?.[1] ?? "" };
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it("never publishes the lock, and fails the step", () => {
+      const { out, rc } = runStep("lock");
+      expect(rc, out).not.toBe("0");
+      expect(out).toMatch(/could not stage the edition lock/);
+      // The whole point: nothing reached the atomic writer, so no truncated
+      // record was published.
+      expect(out).not.toContain("INSTALL_ROOT_FILE");
+      // And the step stopped: the gateway state must not run over a lock the
+      // box does not have.
+      expect(out).not.toContain("GATEWAY_STATE");
+    });
+
+    it("publishes NEITHER record when the drop-in's own directory cannot be made", () => {
+      // `mkdir -p` is part of staging the second record: made AFTER the lock
+      // was committed, a failure here would leave exactly the split the
+      // ordering above exists to prevent.
+      const { out, rc } = runStep("dropin-dir");
+      expect(rc, out).not.toBe("0");
+      expect(out).toMatch(/could not create the drop-in directory/);
+      expect(out).not.toContain("INSTALL_ROOT_FILE");
+      expect(out).not.toContain("GATEWAY_STATE");
+    });
+
+    it("publishes NEITHER record when the drop-in cannot be staged", () => {
+      // Both records are staged before either is committed, so a staging
+      // failure on the second leaves the box with its previous edition in BOTH
+      // places rather than a new lock beside a stale systemd drop-in — readers
+      // of the two disagreeing about the SKU is the state this step exists to
+      // prevent, and staging is where the ordinary failure lives (a full /tmp).
+      const { out, rc } = runStep("dropin");
+      expect(rc, out).not.toBe("0");
+      expect(out).toMatch(/could not stage the edition drop-in/);
+      expect(out, "nothing may be committed once either staging write failed").not.toContain(
+        "INSTALL_ROOT_FILE",
+      );
+      expect(out).not.toContain("GATEWAY_STATE");
+    });
+  });
+
+  it("the OTHER writer of the same two records is atomic too", () => {
+    // `setup-hermes-edition.sh` writes THE SAME lock and THE SAME drop-in, and
+    // install.sh dispatches it (`step_hermes_edition`, on WEB_ROOT_STEPS) on
+    // every in-app update of a hermes or dual box. A truncating redirect there
+    // leaves the window the step above closed wide open on the two SKUs where
+    // answering "openclaw" is the damaging answer.
+    expect(HERMES_EDITION_SH).not.toMatch(/>\s*"\$EDITION_FILE"/);
+    expect(HERMES_EDITION_SH).not.toMatch(/>\s*"\$EDITION_DROPIN"/);
+    expect(HERMES_EDITION_SH).toContain('write_root_file "$EDITION_FILE" 0644');
+    expect(HERMES_EDITION_SH).toContain('write_root_file "$EDITION_DROPIN" 0644');
+    // Its writer really renames rather than truncating in place…
+    expect(HERMES_EDITION_SH).toMatch(/mv -f "\$tmp" "\$dst"/);
+    // …and a write that did not land is recorded, so the script's own exit
+    // code carries it back to the update.
+    expect(HERMES_EDITION_SH).toMatch(/\|\| fail "could not write the edition lock/);
+    expect(HERMES_EDITION_SH).toMatch(/\|\| fail "could not write the edition drop-in/);
   });
 
   it("clawbox-setup.service loads it AFTER the clawbox-writable .env", () => {

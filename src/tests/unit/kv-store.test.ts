@@ -289,6 +289,40 @@ describe("kv-store", () => {
     });
   });
 
+  describe("a key the object backing the store cannot hold", () => {
+    // The same defect config-store carries, in the store whose keys really are
+    // caller-shaped: `data["__proto__"] = value` reaches Object.prototype's
+    // setter, stores nothing and answers success, and the read then hands back
+    // the PROTOTYPE under a signature that says `string | null`.
+    // `/setup-api/kv` refuses that name at the door — but the notice ring, the
+    // mascot phrases and the uninstall sweep all call the store directly.
+    it("kvSet refuses it instead of reporting a write that never happened", () => {
+      expect(() => kvStore.kvSet("__proto__", "x")).toThrow(TypeError);
+      expect(kvStore.kvGet("__proto__")).toBeNull();
+    });
+
+    it("kvSetMany refuses the whole batch rather than landing half of it", () => {
+      // A COMPUTED key: `{ __proto__: … }` in a literal sets the literal's own
+      // prototype and creates no entry at all.
+      expect(() => kvStore.kvSetMany({ "ui:theme": "dark", ["__proto__"]: "x" })).toThrow(TypeError);
+      expect(kvStore.kvGetAll()).toEqual({});
+    });
+
+    it("drops a __proto__ the FILE already carries, like config-store", async () => {
+      await fs.writeFile(KV_PATH, '{"__proto__":{"polluted":true},"ui:theme":"dark"}', "utf-8");
+      expect(kvStore.kvGet("__proto__")).toBeNull();
+      expect(kvStore.kvGetAll()).toEqual({ "ui:theme": "dark" });
+      kvStore.kvSet("ui:theme", "light");
+      expect(JSON.parse(await fs.readFile(KV_PATH, "utf-8"))).toEqual({ "ui:theme": "light" });
+    });
+
+    it("kvGet answers null for an inherited name, never the prototype", () => {
+      expect(kvStore.kvGet("__proto__")).toBeNull();
+      expect(kvStore.kvGet("constructor")).toBeNull();
+      expect(kvStore.kvGet("toString")).toBeNull();
+    });
+  });
+
   describe("error handling", () => {
     it("returns empty object for corrupt JSON", async () => {
       await fs.writeFile(KV_PATH, "{ invalid json !!!", "utf-8");

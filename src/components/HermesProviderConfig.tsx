@@ -1,12 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import AIProviderIcon from "./AIProviderIcon";
 import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
+import ProviderRadioRow from "./ProviderRadioRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
+import { ConfiguringOverlay, CONFIGURING_STEP_DELAYS, GENERIC_CONFIGURING_STEP_KEYS } from "./ConfiguringOverlay";
+import ProviderConnectionLabel from "./ProviderConnectionLabel";
+import ProviderDefaultHero from "./ProviderDefaultHero";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
+import { useProviderStatus } from "@/hooks/useProviderStatus";
+import { copyToClipboard } from "@/lib/clipboard";
+import { useT } from "@/lib/i18n";
 import { notifyHermesModelState, useHermesModelOptions } from "@/hooks/useHermesModelOptions";
+import { notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import {
   HERMES_PANEL_PROVIDERS,
   CLAWAI_PROVIDER,
@@ -15,15 +22,32 @@ import {
 import {
   CLAWAI_TIER_INFO,
   CLAWAI_TIER_STORAGE_KEY,
-  deviceTierToUiTier,
-  normalizeClawaiUiTier,
+  resolveUiTier,
   uiTierToDeviceTier,
   type ClawaiTier,
 } from "@/lib/clawbox-ai-tiers";
 
-// Hermes-edition AI-provider panel. Mirrors the OpenClaw AI-models UI (provider
-// radio-cards with logos, and the SAME ClawBox AI card — literally the same
-// components, see ClawboxAi*.tsx) but drives Hermes' OWN native switching:
+// The AI Providers section — Hermes edition. ONE section that answers all three
+// provider questions: what is running, what else is connected, and how to
+// change either.
+//
+// IT USED TO BE TWO. A "Connections" chip strip sat above this panel listing
+// every provider's state with a star on the default, and this panel listed the
+// same providers again as radio rows with none of that state on them. Two lists
+// of the same eight vendors, a hand's breadth apart, disagreeing about what
+// they were for — and the strip's star meant "make default" while the panel's
+// radio meant "configure", which is two different verbs on one noun. The owner
+// picked the merge: a HERO card naming the current default (vendor, model,
+// connection) over the radio list everyone already knows, each row now honest
+// about its own connection. The strip is gone; its data hook is what feeds this.
+//
+// The radio therefore carries BOTH verbs, resolved by the row's own state:
+//   • a CONNECTED provider     → becomes the default (POST /providers/default)
+//   • a not-yet-connected one  → opens its sign-in/key flow first, as before
+// which is the honest reading of "pick this one" in each case.
+//
+// Everything below the list is unchanged, and still drives Hermes' OWN native
+// switching:
 //   • model + provider  → POST /setup-api/hermes/models  (hermes config set)
 //   • provider API key  → POST /setup-api/hermes/provider-key (hermes auth add)
 //   • ClawBox AI        → POST /setup-api/hermes/clawai (custom provider through Hermes)
@@ -45,53 +69,146 @@ interface ClawaiState {
 
 type Status = { kind: "ok" | "err"; msg: string } | null;
 
+// One in-flight provider sign-in, driven entirely from this panel through the
+// same-origin /setup-api/hermes/oauth/* routes. The Hermes dashboard's own
+// OAuth page sits behind the :8090 auth proxy, which remote access
+// (clawbox-tunnel on :80, Cloudflare quick tunnel) does not forward — sending
+// the browser there gave tunnel users a blank tab and no credentials.
+type OauthSignin =
+  | { stage: "starting"; providerId: string }
+  | { stage: "pkce"; providerId: string; sessionId: string; authUrl: string; error?: string }
+  | {
+      stage: "device";
+      providerId: string;
+      sessionId: string;
+      userCode: string;
+      verificationUrl: string;
+      pollMs: number;
+      /** Epoch ms; the poll loop's hard deadline, from the session's expires_in. */
+      expiresAt: number;
+    }
+  | { stage: "failed"; providerId: string; message: string };
+
+/** One row of /setup-api/hermes/oauth. `flow: "external"` means the Hermes
+ *  dashboard will not run the login; `cliAvailable` says whether ClawBox can
+ *  drive the provider's own CLI login instead, and `cliFlow` how that reads. */
+interface OauthEntry {
+  loggedIn: boolean;
+  flow: string;
+  docsUrl?: string;
+  cliCommand?: string;
+  cliAvailable?: boolean;
+  cliFlow?: string;
+}
+
+/** Only ever open or render a dashboard-supplied URL if it is plain http(s) —
+ *  anything else (javascript:, data:, a bare token) must not reach window.open
+ *  or an href. */
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 interface Props {
   embedded?: boolean;
   onNext?: () => void;
   testId?: string;
+  /**
+   * The wizard's own heading and intro ("Connect AI Provider" / "Select your
+   * AI provider…"), so step 4 reads the same on both editions. Settings leaves
+   * them unset and keeps this panel's own title.
+   */
+  title?: string;
+  description?: string;
+  /**
+   * Select this provider's row, so a deep-link into Settings lands on the panel
+   * that configures it rather than merely on the section.
+   */
+  requestedProviderId?: string | null;
+  /**
+   * Bumped by the caller on every request. A counter rather than watching the
+   * id, so asking for the SAME provider again re-selects it after the customer
+   * has moved to another row in the meantime.
+   */
+  providerSelectionRequest?: number;
 }
 
-// The OpenClaw AI-models step advances the wizard ~900 ms after a successful
-// configure (AIModelsStep's handleConfiguringDone), which is long enough for the
-// "connected" state to register and short enough not to feel stalled. This panel
-// is the SAME step on a Hermes device, so it advances the same way.
-const AUTO_ADVANCE_DELAY_MS = 900;
+// The OpenClaw AI-models step advances the wizard after a successful configure
+// (AIModelsStep's handleConfiguringDone), long enough for the "connected" state
+// to register and short enough not to feel stalled. This panel is the SAME step
+// on a Hermes device, so it advances the same way — and holds for one second so
+// the cyan "Connected" affirmation (see the wizard overlay below) draws and is
+// read as a deliberate beat rather than a jarring jump to the next step.
+const AUTO_ADVANCE_DELAY_MS = 1000;
+/** The overlay stays up at least this long even when the connect is instant —
+ *  two rows light up (0 s and 2 s) before the DONE beat. */
+const WIZARD_MIN_CONFIGURING_MS = 2500;
+/** How long the "Connected!" beat shows before the wizard advances. */
+const CONFIGURING_DONE_DWELL_MS = 900;
+/** A connect that has not landed by then gives the form back. */
+const CONFIGURING_WATCHDOG_MS = 120_000;
+const LAST_CONFIGURING_PHASE = GENERIC_CONFIGURING_STEP_KEYS.length - 1;
 
-function readStoredUiTier(): ClawaiTier {
-  if (typeof window === "undefined") return "flash";
-  try {
-    return normalizeClawaiUiTier(window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY)) ?? "flash";
-  } catch {
-    return "flash";
-  }
-}
+// The provider registry is shared with the server routes (/setup-api/hermes/*
+// imports it), so it cannot call `t` — but a row's `description` is copy, not
+// data, and this panel is the only place it is rendered. Re-key it here, by
+// slug: a slug may carry a hyphen ("openai-codex") and a catalogue key segment
+// may not. A provider with no entry keeps the registry's own English rather
+// than rendering a raw key.
+const PROVIDER_DESCRIPTION_KEYS: Record<string, string> = {
+  openrouter: "hermesProvider.row.desc.openrouter",
+  anthropic: "hermesProvider.row.desc.anthropic",
+  "openai-codex": "hermesProvider.row.desc.openaiCodex",
+  gemini: "hermesProvider.row.desc.gemini",
+  zai: "hermesProvider.row.desc.zai",
+  "kimi-coding": "hermesProvider.row.desc.kimiCoding",
+  copilot: "hermesProvider.row.desc.copilot",
+  nous: "hermesProvider.row.desc.nous",
+};
 
-/**
- * Which PLAN card to show for a paired device.
- *
- * The device tier cannot represent Free: `uiTierToDeviceTier` maps both "free"
- * and "flash" to the device's "flash" (Free and Pro run the same DeepSeek V4
- * Flash weights), so a stored "flash" means Free OR Pro. Trusting it blindly
- * showed "Pro plan — €9/month" to a Free user, and made this panel disagree
- * with the OpenClaw wizard, which reads the stored UI intent. "pro" (Max) is
- * unambiguous and always wins over local storage.
- */
-function resolveUiTier(hasToken: boolean, tierStored: string | null): ClawaiTier {
-  if (!hasToken) return readStoredUiTier();
-  const device = deviceTierToUiTier(tierStored);
-  if (device !== "flash") return device;
-  return readStoredUiTier() === "free" ? "free" : "flash";
-}
-
-export default function HermesProviderConfig({ embedded, onNext, testId }: Props) {
+export default function HermesProviderConfig({
+  embedded,
+  onNext,
+  testId,
+  title,
+  description,
+  requestedProviderId,
+  providerSelectionRequest = 0,
+}: Props) {
+  const { t } = useT();
   const uid = useId();
+  // Wizard only: the list opens on the one recommended card, the rest a tap
+  // away — the same shape as the OpenClaw step. Settings always shows every
+  // row (this panel is the connection strip there).
+  const [showMoreProviders, setShowMoreProviders] = useState(false);
+  // Progress overlay, the same one the OpenClaw step shows: every connect
+  // (device-code handoff, OAuth sign-in, API key, Save) runs behind it, holds
+  // it for at least WIZARD_MIN_CONFIGURING_MS so the rows are seen to light
+  // up, then shows the DONE beat. The wizard then advances; Settings drops the
+  // overlay and re-reads the strip. Before this the ClawBox AI handoff
+  // surfaced as one muted line and every other connect jumped straight to a
+  // tick — nothing read as "connecting".
+  const [configuring, setConfiguring] = useState<{
+    provider: string;
+    startedAt: number;
+    phase: number;
+    completed: boolean;
+  } | null>(null);
+  const configuringSteps = useMemo(() => GENERIC_CONFIGURING_STEP_KEYS.map((key) => t(key)), [t]);
 
   // Seeded from the DEVICE's configured provider by the mount effect below;
   // "openrouter" is only the pre-resolution placeholder. Under REQ 1's scoping
   // an unseeded panel is actively misleading — it would present OpenRouter's
   // scoped list, with OpenRouter's recommended default preselected, for a
   // device running something else, one Save click away from switching it.
-  const [selectedProvider, setSelectedProvider] = useState<string>("openrouter");
+  // In the wizard the recommended card is the one that opens selected, exactly
+  // like the OpenClaw step; the device seed below still wins once it answers.
+  const [selectedProvider, setSelectedProvider] = useState<string>(embedded ? "openrouter" : CLAWAI_PROVIDER);
   // Set as soon as the user touches a radio. The async device reads below must
   // never yank the selection out from under a click that already happened.
   const userPickedProviderRef = useRef(false);
@@ -119,17 +236,49 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   const onNextRef = useRef(onNext);
   useEffect(() => { onNextRef.current = onNext; }, [onNext]);
 
+  /** Put the overlay up for `provider` (no-op if already up). */
+  const beginConfiguring = useCallback((provider: string) => {
+    setConfiguring((current) => current ?? { provider, startedAt: Date.now(), phase: 0, completed: false });
+  }, []);
+  const abortConfiguring = useCallback(() => setConfiguring(null), []);
+  /** The connect landed: mark it, and make sure the overlay is up to carry the
+   *  DONE beat — then the wizard advances, Settings returns to the panel. */
+  const finishWizardStep = useCallback((provider: string) => {
+    setConfigured(true);
+    beginConfiguring(provider);
+  }, [beginConfiguring]);
+
+  // Once the connect landed, let the overlay run out its minimum, then tick
+  // the last row. Re-armed on every phase tick, but the deadline is absolute.
   useEffect(() => {
-    // Settings embeds this panel with nowhere to advance to; only the wizard
-    // passes an onNext.
-    if (!configured || embedded) return;
+    if (!configured || !configuring || configuring.completed) return;
+    const wait = Math.max(0, WIZARD_MIN_CONFIGURING_MS - (Date.now() - configuring.startedAt));
     const timer = setTimeout(() => {
+      setConfiguring((current) => (current ? { ...current, phase: LAST_CONFIGURING_PHASE, completed: true } : current));
+    }, wait);
+    return () => clearTimeout(timer);
+  }, [configured, configuring]);
+
+  useEffect(() => {
+    // After the DONE beat: the wizard advances (only it passes an onNext);
+    // Settings has nowhere to go, so it drops the overlay, arms itself for the
+    // next connect and asks the strip to re-read — the row a sign-in just
+    // connected still read "Not connected" until the next poll.
+    if (!configured) return;
+    if (configuring && !configuring.completed) return;
+    const timer = setTimeout(() => {
+      if (embedded) {
+        setConfiguring(null);
+        setConfigured(false);
+        notifyProvidersChanged();
+        return;
+      }
       if (advancedRef.current) return;
       advancedRef.current = true;
       onNextRef.current?.();
-    }, AUTO_ADVANCE_DELAY_MS);
+    }, configuring?.completed ? CONFIGURING_DONE_DWELL_MS : AUTO_ADVANCE_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [configured, embedded]);
+  }, [configured, embedded, configuring]);
 
   // Tell every already-open view — the chat popup's provider picker, and this
   // panel's own scoped model list — that the device's providers/model/tier
@@ -142,17 +291,123 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   // login or through Hermes' own OAuth is exactly the case where the user
   // expects to switch straight to it in chat.
   const notifyChatHeader = useCallback(() => {
+    // Both names. The Hermes-specific one because listeners predating the
+    // shared signal still key on it, and the edition-neutral one so a listener
+    // written since — the connection strip, the capability probe — does not
+    // have to know which harness it happens to be mounted on.
     notifyHermesModelState();
+    notifyProvidersChanged();
   }, []);
+
+  // ── Inline provider OAuth ──────────────────────────────────────────────────
+  //
+  // Held in a ref as well so unmount cleanup can abandon the dashboard-side
+  // session without the cleanup effect re-running on every state change.
+  // Mirrored SYNCHRONOUSLY with every write, not from a passive effect: the
+  // "Start over" click reads it inside the event handler, and an effect that
+  // has not flushed yet (a loaded CI runner, a slow tablet) let the handler
+  // see the previous stage and skip the cancel the dashboard was owed.
+  const signinRef = useRef<OauthSignin | null>(null);
+  const [signinState, setSigninState] = useState<OauthSignin | null>(null);
+  const signin = signinState;
+  const setSignin = useCallback((next: OauthSignin | null) => {
+    signinRef.current = next;
+    setSigninState(next);
+  }, []);
+  const [oauthCode, setOauthCode] = useState("");
+  const [oauthBusy, setOauthBusy] = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
+  // Bumped by every reset/unmount so a /start response that lands AFTER the
+  // user moved on (switched rows, hit Start over, left the panel) knows it was
+  // abandoned and hands its session straight back to the dashboard instead of
+  // resurrecting a flow nobody is looking at.
+  const signinGenRef = useRef(0);
+
+  const cancelOauthSession = useCallback((sessionId: string) => {
+    // Best-effort; keepalive lets the request outlive an unmounting page.
+    void fetch("/setup-api/hermes/oauth/cancel", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+      keepalive: true,
+    }).catch(() => {});
+  }, []);
+
+  const resetSignin = useCallback(() => {
+    const s = signinRef.current;
+    signinGenRef.current += 1;
+    if (s && (s.stage === "pkce" || s.stage === "device")) cancelOauthSession(s.sessionId);
+    setSignin(null);
+    setOauthCode("");
+    setCodeCopied(false);
+  }, [cancelOauthSession]);
+
+  useEffect(() => () => {
+    // Panel going away mid-flow: don't leave a half-open session on the
+    // dashboard until its expiry.
+    const s = signinRef.current;
+    signinGenRef.current += 1;
+    if (s && (s.stage === "pkce" || s.stage === "device")) cancelOauthSession(s.sessionId);
+  }, [cancelOauthSession]);
 
   const pickProvider = useCallback((id: string) => {
     userPickedProviderRef.current = true;
     setSelectedProvider(id);
     setPicked("");
     setSaveStatus(null);
-  }, []);
+    // A half-finished sign-in belongs to the row being left.
+    resetSignin();
+  }, [resetSignin]);
+
+  // ── Connection state, for the hero and every row ───────────────────────────
+  //
+  // The same hook the removed connection strip used, unchanged: one call to
+  // /setup-api/providers/status for every provider at once, re-read on the
+  // shared providers-changed signal. Owning it here is what lets one section do
+  // what two used to.
+  const {
+    summary,
+    error: statusError,
+    settingDefault,
+    defaultError,
+    defaultWarning,
+    setDefault,
+  } = useProviderStatus();
+
+  const statusById = useMemo(
+    () => new Map((summary?.providers ?? []).map((row) => [row.id, row])),
+    [summary],
+  );
+  const defaultRow = useMemo(
+    () => summary?.providers.find((row) => row.isDefault) ?? null,
+    [summary],
+  );
+
+  /**
+   * Pick a row.
+   *
+   * A connected provider is one the box could switch to right now, so choosing
+   * it MEANS "make this the default" and is written through immediately — the
+   * hero repaints from the server's answer a moment later, never from an
+   * assumption that the write landed. Anything else can only be chosen in the
+   * aspirational sense: it selects the row and lets the sign-in / API-key
+   * controls below do their work first, exactly as this picker always did.
+   *
+   * Selecting the provider that is ALREADY the default writes nothing — there
+   * is nothing to change, and a POST would still cost the box a config write.
+   */
+  const choose = useCallback((id: string) => {
+    pickProvider(id);
+    // A pick folds the list back to the chosen row, as the OpenClaw step does.
+    setShowMoreProviders(false);
+    const row = statusById.get(id);
+    if (row?.state === "connected" && !row.isDefault) void setDefault(id);
+  }, [pickProvider, statusById, setDefault]);
 
   const isClawaiSelected = selectedProvider === CLAWAI_PROVIDER;
+  // Collapsed = only the selected row is on screen, behind it "Show more
+  // providers…". Never in Settings, where every row's state must stay visible.
+  const listCollapsed = !embedded && !showMoreProviders;
 
   // ClawBox AI — a managed provider that still runs THROUGH Hermes.
   const [clawai, setClawai] = useState<ClawaiState | null>(null);
@@ -167,7 +422,9 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   const [loginBusy, setLoginBusy] = useState(false);
 
   // Hermes native provider-OAuth status (anthropic PKCE, openai-codex device-code, …).
-  const [oauth, setOauth] = useState<Record<string, { loggedIn: boolean; flow: string; docsUrl?: string }>>({});
+  const [oauth, setOauth] = useState<Record<string, OauthEntry>>({});
+  // "Sign in | API key" on a provider that offers both; the tab is per pick.
+  const [authTab, setAuthTab] = useState<"signin" | "key">("signin");
 
   // ClawBox AI has no model dropdown: its model is derived from the tier and
   // must stay a BARE id (a vendor-prefixed slug gets HTTP 400 "Model not
@@ -205,50 +462,173 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     }
   }, [fetchClawai]);
 
-  /** The provider the DEVICE is configured for, from the unscoped GET. */
-  const fetchDeviceProvider = useCallback(async (): Promise<string> => {
+  /**
+   * The pairing the DEVICE is configured for, from the unscoped GET.
+   *
+   * The model half is what the hero names. It cannot come from `scope`, which
+   * is deliberately scoped to the SELECTED row — the moment a customer clicks
+   * another vendor to look at it, `scope.current` stops describing what the box
+   * is running, which is the one thing the hero must never get wrong.
+   */
+  const fetchDevicePairing = useCallback(async (): Promise<{ provider: string; model: string; credentialed: boolean } | null> => {
     try {
       const res = await fetch("/setup-api/hermes/models", { cache: "no-store" });
-      if (!res.ok) return "";
-      const data = (await res.json()) as { provider?: unknown };
-      return typeof data.provider === "string" ? data.provider : "";
+      if (!res.ok) return null;
+      const data = (await res.json()) as {
+        provider?: unknown;
+        current?: unknown;
+        providers?: { id?: unknown; credentialPresent?: unknown; authenticated?: unknown }[];
+      };
+      const provider = typeof data.provider === "string" ? data.provider : "";
+      const row = Array.isArray(data.providers) ? data.providers.find((p) => p?.id === provider) : undefined;
+      return {
+        provider,
+        model: typeof data.current === "string" ? data.current : "",
+        // Whether the harness holds a credential for that provider. Hermes'
+        // built-in default is OpenRouter, so on a box nobody has configured
+        // the pairing still names it — with nothing behind it.
+        credentialed: row?.credentialPresent === true || row?.authenticated === true,
+      };
     } catch {
-      return "";
+      // Null, never a blank pairing. Callers keep the last good answer instead
+      // of blanking the hero'''s model line on a transient failure — the same
+      // rule the status hook already follows, for the same reason.
+      return null;
     }
   }, []);
+
+  /** The model the box's default provider resolves to. "" until we know. */
+  const [deviceModel, setDeviceModel] = useState("");
 
   useEffect(() => {
     let alive = true;
     void (async () => {
-      const [data, deviceProvider] = await Promise.all([fetchClawai(), fetchDeviceProvider()]);
+      const [data, pairing] = await Promise.all([fetchClawai(), fetchDevicePairing()]);
       if (!alive) return;
       if (data) {
         setClawai(data);
         setUiTier(resolveUiTier(data.hasToken, data.tierStored));
         setAppliedUiTier(data.active ? resolveUiTier(data.hasToken, data.tierStored) : null);
       }
+      if (pairing) setDeviceModel(pairing.model);
       // Both reads are async, so a user can already have clicked a row by now —
       // silently bouncing them back would discard their pick and the scoped
       // fetch it started.
       if (userPickedProviderRef.current) return;
       if (data?.active) {
         setSelectedProvider(CLAWAI_PROVIDER);
-      } else if (deviceProvider && HERMES_PANEL_PROVIDERS.some((p) => p.id === deviceProvider)) {
-        setSelectedProvider(deviceProvider);
+      } else if (
+        pairing?.provider
+        && HERMES_PANEL_PROVIDERS.some((p) => p.id === pairing.provider)
+        // Settings shows what the harness is set to, credential or not. The
+        // wizard opens on ClawBox AI unless the pairing is one the owner has
+        // actually connected — the harness's factory default is not a choice.
+        && (embedded || pairing.credentialed)
+      ) {
+        setSelectedProvider(pairing.provider);
       }
     })();
     return () => { alive = false; };
-  }, [fetchClawai, fetchDeviceProvider]);
+  }, [fetchClawai, fetchDevicePairing, embedded]);
+
+  // The hero's model has to keep up with the same signal its provider does, or
+  // choosing a new default would swap the vendor name above a model id that
+  // belongs to the vendor just replaced. Deliberately re-reads only the pairing:
+  // re-running the mount effect would also re-seed the selection, yanking the
+  // row out from under a customer who had moved on.
+  useEffect(() => {
+    let alive = true;
+    const unsubscribe = onProvidersChanged(() => {
+      void fetchDevicePairing().then((pairing) => {
+        if (alive && pairing) setDeviceModel(pairing.model);
+      });
+    });
+    return () => { alive = false; unsubscribe(); };
+  }, [fetchDevicePairing]);
+
+  // ── The hero ───────────────────────────────────────────────────────────────
+
+  /**
+   * The DEVICE PAIRING wins, for every provider including ClawBox AI.
+   *
+   * Caught on the live box: ClawBox AI's own read derives its model from the
+   * stored tier, so a Pro account reported `deepseek-v4-pro` while the pairing
+   * a bare "make default" had just written said `deepseek-v4-flash`. Both are
+   * real values; only one of them is what the box will actually run, and the
+   * hero's whole claim is to name that one. ClawBox AI's report is kept as a
+   * FALLBACK, for the window before the pairing read has landed.
+   */
+  const heroModel = deviceModel
+    || (defaultRow?.id === CLAWAI_PROVIDER ? (clawai?.model ?? "") : "");
+
+  /** True when this panel has a row for the default — see `changeModel`. */
+  const defaultHasRow = defaultRow !== null && (
+    defaultRow.id === CLAWAI_PROVIDER
+    || HERMES_PANEL_PROVIDERS.some((p) => p.id === defaultRow.id)
+  );
+
+  // "Change model" sends the customer to the model UI they already know rather
+  // than growing a second one in the hero. Bumped as a counter, not a boolean,
+  // so pressing it again re-focuses the dropdown after they have clicked away.
+  const [focusModelRequest, setFocusModelRequest] = useState(0);
+  const modelSelectRef = useRef<HTMLSelectElement>(null);
+
+  const changeModel = useCallback(() => {
+    if (!defaultRow) return;
+    if (defaultRow.id !== selectedProvider) pickProvider(defaultRow.id);
+    setFocusModelRequest((n) => n + 1);
+  }, [defaultRow, selectedProvider, pickProvider]);
+
+  useEffect(() => {
+    if (!focusModelRequest) return;
+    // Re-runs as the row switches and its scope lands, because the dropdown
+    // does not exist until both have happened. ClawBox AI has no dropdown at
+    // all — its plan picker is the model UI — so there is simply nothing to
+    // focus, and scrolling the row into view is the whole gesture.
+    const el = modelSelectRef.current;
+    if (!el) return;
+    el.focus();
+    // Optional-called: focusing is the part that must happen, scrolling is the
+    // courtesy, and not every environment this renders in implements it.
+    el.scrollIntoView?.({ block: "nearest" });
+  }, [focusModelRequest, selectedProvider, loading]);
+
+  // A chip in the connection strip was clicked. Treated exactly like a click on
+  // this panel's own radio row — including setting `userPickedProviderRef`, so
+  // the mount seed above (which may still be in flight) cannot bounce the
+  // selection back to the device's current provider a beat later.
+  //
+  // Keyed on the request counter alone: re-running when the id changes as well
+  // would re-apply a stale request after the customer had moved on.
+  useEffect(() => {
+    if (!providerSelectionRequest) return;
+    const requested = requestedProviderId?.trim();
+    if (!requested) return;
+    const known = requested === CLAWAI_PROVIDER
+      || HERMES_PANEL_PROVIDERS.some((p) => p.id === requested);
+    // A provider this panel has no row for cannot be selected in it. Silently
+    // ignored rather than written into state, which would leave the radio group
+    // with nothing checked and the scoped model list asking for a provider the
+    // customer cannot see.
+    if (!known) return;
+    userPickedProviderRef.current = true;
+    setSelectedProvider(requested);
+    // The remembered model belongs to whichever provider was selected before.
+    setPicked("");
+    setAuthTab("signin");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerSelectionRequest]);
 
   const loadOauth = useCallback(async (): Promise<void> => {
     try {
       const res = await fetch("/setup-api/hermes/oauth", { cache: "no-store" });
       if (!res.ok) return;
       const d = (await res.json()) as {
-        providers?: { id: string; loggedIn: boolean; flow: string; docsUrl?: string }[];
+        providers?: ({ id: string } & OauthEntry)[];
       };
-      const map: Record<string, { loggedIn: boolean; flow: string; docsUrl?: string }> = {};
-      for (const p of d.providers ?? []) map[p.id] = { loggedIn: p.loggedIn, flow: p.flow, docsUrl: p.docsUrl };
+      const map: Record<string, OauthEntry> = {};
+      for (const p of d.providers ?? [])
+        map[p.id] = { loggedIn: p.loggedIn, flow: p.flow, docsUrl: p.docsUrl, cliCommand: p.cliCommand, cliAvailable: p.cliAvailable, cliFlow: p.cliFlow };
       setOauth(map);
     } catch {
       /* OAuth affordances just won't show; non-fatal */
@@ -282,6 +662,228 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     return () => window.removeEventListener("focus", onFocus);
   }, [loadOauth, refreshModels, notifyChatHeader]);
 
+  // In the WIZARD, a connected provider is all the step needs: pin it as the
+  // device's pairing with its OWN recommended default model (omit `model` → the
+  // server writes that provider's recommended id) so chat works out of the box,
+  // then let the auto-advance effect carry the wizard forward. Best-effort: the
+  // provider is already connected, so the step is DONE whether or not this
+  // pairing write lands — a slow catalogue must never strand the owner on a step
+  // they have finished. Settings never calls this: there the owner picks a
+  // default deliberately and there is nowhere to advance to.
+  const commitWizardDefault = useCallback(async (providerId: string) => {
+    beginConfiguring(providerId);
+    try {
+      const res = await fetch("/setup-api/hermes/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: providerId }),
+      });
+      if (res.ok) notifyChatHeader();
+    } catch {
+      // Non-fatal — see above. Chat falls back to the provider's own default.
+    }
+    finishWizardStep(providerId);
+  }, [notifyChatHeader, finishWizardStep]);
+
+  // A finished sign-in is a credential appearing server-side — the panel, the
+  // model cache and the chat header all have to re-read, same as the old
+  // return-from-dashboard-tab case. Flip the local flag first so Connected
+  // shows immediately instead of after the status round-trip.
+  const onOauthConnected = useCallback((providerId: string) => {
+    setSignin(null);
+    setOauthCode("");
+    setCodeCopied(false);
+    setOauth((m) => ({ ...m, [providerId]: { ...(m[providerId] ?? { flow: "" }), loggedIn: true } }));
+    void loadOauth();
+    refreshModels();
+    notifyChatHeader();
+    // First-boot: connecting a provider completes the step. Auto-set its
+    // recommended default and advance — no model-picking or Save click required.
+    if (embedded) finishWizardStep(providerId);
+    else void commitWizardDefault(providerId);
+  }, [loadOauth, refreshModels, notifyChatHeader, embedded, commitWizardDefault, finishWizardStep]);
+
+  async function startOauth(providerId: string) {
+    resetSignin();
+    const gen = signinGenRef.current;
+    setSignin({ stage: "starting", providerId });
+    try {
+      const res = await fetch("/setup-api/hermes/oauth/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerId }),
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok) {
+        // The box's own failure codes get the panel's words; the scrubbed
+        // reason, when there is one, rides along as detail.
+        const reason = typeof data.error === "string" && data.error ? data.error : "";
+        const headline = data.code === "cli_missing"
+          ? t("hermesProvider.oauth.cliMissingDesc", { provider: hermesProviderLabel(providerId) })
+          : data.code === "cli_login_failed"
+            ? t("hermesProvider.oauth.startFailed")
+            : "";
+        throw new Error(headline ? (reason ? `${headline} ${reason}` : headline) : reason || `HTTP ${res.status}`);
+      }
+      const sessionId = typeof data.session_id === "string" ? data.session_id : "";
+      if (data.status === "approved") {
+        // A tool that was already signed in: nothing to open, nothing to paste.
+        onOauthConnected(providerId);
+        return;
+      }
+      if (gen !== signinGenRef.current) {
+        // Abandoned mid-start: give the session back instead of leaking it.
+        if (sessionId) cancelOauthSession(sessionId);
+        return;
+      }
+      if (data.flow === "pkce" && sessionId && isHttpUrl(data.auth_url)) {
+        // The provider's consent page ends by SHOWING a code the user copies
+        // back here (Anthropic's redirect_uri is its own console) — nothing
+        // ever redirects back to this origin, which is why the flow survives
+        // any tunnel.
+        window.open(data.auth_url, "_blank", "noopener,noreferrer");
+        setSignin({ stage: "pkce", providerId, sessionId, authUrl: data.auth_url });
+      } else if (data.flow === "device_code" && sessionId) {
+        const interval =
+          typeof data.poll_interval === "number" && data.poll_interval > 0 ? data.poll_interval : 5;
+        const expiresIn =
+          typeof data.expires_in === "number" && data.expires_in > 0 ? data.expires_in : 900;
+        setSignin({
+          stage: "device",
+          providerId,
+          sessionId,
+          userCode: typeof data.user_code === "string" ? data.user_code : "",
+          verificationUrl: isHttpUrl(data.verification_url) ? data.verification_url : "",
+          pollMs: Math.max(3, interval) * 1000,
+          expiresAt: Date.now() + expiresIn * 1000,
+        });
+      } else {
+        throw new Error(t("hermesProvider.oauth.unexpectedResponse"));
+      }
+    } catch (e) {
+      if (gen !== signinGenRef.current) return;
+      setSignin({
+        stage: "failed",
+        providerId,
+        message: e instanceof Error ? e.message : t("hermesProvider.oauth.startFailed"),
+      });
+    }
+  }
+
+  async function submitOauthCode() {
+    const s = signin;
+    if (!s || s.stage !== "pkce") return;
+    const code = oauthCode.trim();
+    if (!code) return;
+    setOauthBusy(true);
+    try {
+      const res = await fetch("/setup-api/hermes/oauth/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerId: s.providerId, sessionId: s.sessionId, code }),
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        const msg =
+          typeof data.message === "string" && data.message
+            ? data.message
+            : data.code === "code_rejected"
+              ? t("hermesProvider.oauth.codeRejected")
+              : typeof data.error === "string" && data.error
+                ? data.error
+                : `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+      onOauthConnected(s.providerId);
+    } catch (e) {
+      // Stay on the paste step: a mistyped code must not force a new session.
+      setSignin({ ...s, error: e instanceof Error ? e.message : t("hermesProvider.oauth.codeRejected") });
+    } finally {
+      setOauthBusy(false);
+    }
+  }
+
+  // Device-code sessions resolve out of band (the user approves on the
+  // provider's site), so poll until a terminal status. Recursive timeout, not
+  // an interval: a slow relay must never stack requests.
+  useEffect(() => {
+    if (!signin || signin.stage !== "device") return;
+    const { providerId, sessionId, pollMs, expiresAt } = signin;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      let terminal = false;
+      // Hard deadline from the session's own expires_in: even if every poll
+      // errors (relay down, dashboard restarting), the loop cannot outlive the
+      // session it is polling for.
+      if (Date.now() >= expiresAt) {
+        setSignin({
+          stage: "failed",
+          providerId,
+          message: t("hermesProvider.oauth.expired"),
+        });
+        return;
+      }
+      try {
+        const res = await fetch(
+          `/setup-api/hermes/oauth/poll?providerId=${encodeURIComponent(providerId)}&sessionId=${encodeURIComponent(sessionId)}`,
+          { cache: "no-store" },
+        );
+        const data = (await res.json().catch(() => ({}))) as {
+          status?: unknown;
+          error_message?: unknown;
+          error?: unknown;
+        };
+        if (!alive) return;
+        const status = typeof data.status === "string" ? data.status : "";
+        // A 4xx is the relay's verdict on THIS session — not found, expired, or
+        // minted for another provider — and it answers with `error`, never
+        // `status`. Reading `status` alone made those bodies indistinguishable
+        // from "keep polling", so a session that was already dead sat behind
+        // "Waiting for approval..." until the deadline above. 5xx stays
+        // transient (the dashboard may be mid-restart) and the deadline still
+        // bounds that case.
+        if (!res.ok && res.status < 500) {
+          terminal = true;
+          setSignin({
+            stage: "failed",
+            providerId,
+            message:
+              typeof data.error === "string" && data.error
+                ? data.error
+                : "Sign-in failed. Try again.",
+          });
+        } else if (status === "approved") {
+          terminal = true;
+          onOauthConnected(providerId);
+        } else if (status === "error" || status === "expired") {
+          terminal = true;
+          setSignin({
+            stage: "failed",
+            providerId,
+            message:
+              typeof data.error_message === "string" && data.error_message
+                ? data.error_message
+                : status === "expired"
+                  ? t("hermesProvider.oauth.expired")
+                  : t("hermesProvider.oauth.failed"),
+          });
+        }
+      } catch {
+        // Transient relay error: keep polling until the session itself expires.
+      }
+      if (alive && !terminal) timer = setTimeout(tick, pollMs);
+    };
+    timer = setTimeout(tick, pollMs);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [signin, onOauthConnected, t]);
+
+  function copyUserCode(code: string) {
+    // copyToClipboard, not navigator.clipboard directly: the device is served
+    // over plain http on the LAN, where the async clipboard API doesn't exist.
+    void copyToClipboard(code).then((ok) => setCodeCopied(ok));
+  }
+
   const changeUiTier = useCallback((tier: ClawaiTier) => {
     setUiTier(tier);
     setClawaiStatus(null);
@@ -299,7 +901,10 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     getTier: () => uiTier,
     onStart: () => setClawaiStatus(null),
     onBusyChange: setLoginBusy,
-    onConfiguring: () => setClawaiStatus({ kind: "ok", msg: "Finishing setup on this device…" }),
+    onConfiguring: () => {
+      setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.finishingSetup") });
+      beginConfiguring(CLAWAI_PROVIDER);
+    },
     onComplete: () => {
       // Only reached on the poll's terminal `complete` status, i.e. after the
       // device finished configuring — never mid-handshake.
@@ -308,14 +913,56 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       // The device-code handoff configures the provider server-side, so this is
       // a successful configure like any other — the chat picker has to hear it.
       notifyChatHeader();
-      setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
-      setConfigured(true);
+      setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.nowActive") });
+      finishWizardStep(CLAWAI_PROVIDER);
     },
-    onError: (msg) => setClawaiStatus({ kind: "err", msg }),
+    onError: (msg) => {
+      abortConfiguring();
+      setClawaiStatus({ kind: "err", msg });
+    },
   });
 
-  // Open the Hermes dashboard's /env page (via the auth-gated proxy on :8090),
-  // where its native OAuth (PKCE / device-code) runs. Same host, dashboard port.
+  // The overlay hides every control, so it must never be the whole screen for
+  // good: a configure that wedges (a `hermes config set` that hangs — the
+  // failure the config cache was written around) used to leave the form
+  // usable behind one muted line. A watchdog drops the overlay with an honest
+  // message, and the owner can cancel earlier by hand.
+  const cancelConfiguring = useCallback(() => {
+    abortConfiguring();
+    login.stop();
+    login.reset();
+    setClawaiStatus({ kind: "err", msg: t("hermesProvider.oauth.expired") });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [abortConfiguring, t]);
+  useEffect(() => {
+    if (!configuring || configured) return;
+    const timer = setTimeout(cancelConfiguring, CONFIGURING_WATCHDOG_MS);
+    return () => clearTimeout(timer);
+  }, [configuring, configured, cancelConfiguring]);
+
+  // Advance the overlay rows on the same schedule as the OpenClaw step. The
+  // last row is only ticked by the poll's terminal `complete`, never by time.
+  const configuringRunning = configuring !== null && !configuring.completed;
+  useEffect(() => {
+    if (!configuringRunning) return;
+    const timers = CONFIGURING_STEP_DELAYS.slice(1, -1).map((delay, index) =>
+      setTimeout(() => {
+        setConfiguring((current) =>
+          current && !current.completed ? { ...current, phase: Math.max(current.phase, index + 1) } : current,
+        );
+      }, delay),
+    );
+    return () => timers.forEach(clearTimeout);
+  }, [configuringRunning]);
+  const configuringProviderName = configuring
+    ? (configuring.provider === CLAWAI_PROVIDER
+      ? "ClawBox AI"
+      : HERMES_PANEL_PROVIDERS.find((p) => p.id === configuring.provider)?.name ?? configuring.provider)
+    : "";
+
+  // ADVANCED FALLBACK ONLY: the Hermes dashboard's /env page via its auth-gated
+  // proxy on :8090. LAN-only — tunnels don't forward that port, which is
+  // exactly why the inline flow above exists; nothing depends on this link.
   // The flag is what the focus listener above keys on: we only re-check (and
   // pay for a live provider re-enumeration) when the user actually went off to
   // sign in, not on every incidental tab switch.
@@ -346,6 +993,16 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
    * field can show them inline.
    */
   async function applyClawaiToken(token: string): Promise<void> {
+    beginConfiguring(CLAWAI_PROVIDER);
+    try {
+      await applyClawaiTokenInner(token);
+    } catch (err) {
+      abortConfiguring();
+      throw err;
+    }
+  }
+
+  async function applyClawaiTokenInner(token: string): Promise<void> {
     const res = await fetch("/setup-api/hermes/clawai", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -356,13 +1013,14 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     await reloadClawai();
     setSelectedProvider(CLAWAI_PROVIDER);
     notifyChatHeader();
-    setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
-    setConfigured(true);
+    setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.nowActive") });
+    finishWizardStep(CLAWAI_PROVIDER);
   }
 
   async function applyClawai() {
     setApplyingClawai(true);
     setClawaiStatus(null);
+    beginConfiguring(CLAWAI_PROVIDER);
     try {
       const res = await fetch("/setup-api/hermes/clawai", {
         method: "POST",
@@ -377,11 +1035,12 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       const applied = uiTierToDeviceTier(uiTier);
       setClawai((c) => (c ? { ...c, active: true, tier: applied, tierStored: applied, model: data.model } : c));
       setAppliedUiTier(uiTier);
-      setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
+      setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.nowActive") });
       notifyChatHeader();
-      setConfigured(true);
+      finishWizardStep(CLAWAI_PROVIDER);
     } catch (e) {
-      setClawaiStatus({ kind: "err", msg: e instanceof Error ? e.message : "Couldn't switch to ClawBox AI" });
+      abortConfiguring();
+      setClawaiStatus({ kind: "err", msg: e instanceof Error ? e.message : t("hermesProvider.clawai.switchFailed") });
     } finally {
       setApplyingClawai(false);
     }
@@ -394,17 +1053,18 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       // published a model list for the provider yet. Saying "no credentials"
       // here would be flatly wrong and send the user back to re-paste it.
       return keySaved
-        ? `Key saved for ${name}, but it hasn't published a model list yet — reopen this panel in a moment and pick a model.`
-        : `${name} has no credentials yet — sign in or paste an API key first.`;
+        ? t("hermesProvider.save.keySavedNoCatalog", { provider: name })
+        : t("hermesProvider.save.noCredentials", { provider: name });
     }
     if (data?.error === "catalog_unavailable") {
-      return `Hermes' model list is unreachable right now, so ${name}'s models can't be checked. Try again in a moment.`;
+      return t("hermesProvider.save.catalogUnavailable", { provider: name });
     }
     return typeof data?.error === "string" && data.error ? data.error : `HTTP ${statusCode}`;
   }
 
   async function saveModelProvider() {
     setSaving(true);
+    beginConfiguring(selectedProvider);
     setSaveStatus(null);
     try {
       const key = apiKey.trim();
@@ -447,11 +1107,15 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       setClawai((c) => (c ? { ...c, active: false } : c));
       setAppliedUiTier(null);
       if (!modelInScope) refreshModels();
-      setSaveStatus({ kind: "ok", msg: savingKey ? "Key saved — provider & model updated" : "Saved" });
+      setSaveStatus({
+        kind: "ok",
+        msg: savingKey ? t("hermesProvider.save.keySavedOk") : t("hermesProvider.save.ok"),
+      });
       notifyChatHeader();
-      setConfigured(true);
+      finishWizardStep(selectedProvider);
     } catch (e) {
-      setSaveStatus({ kind: "err", msg: e instanceof Error ? e.message : "Save failed" });
+      abortConfiguring();
+      setSaveStatus({ kind: "err", msg: e instanceof Error ? e.message : t("hermesProvider.save.failed") });
     } finally {
       setSaving(false);
     }
@@ -460,10 +1124,17 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   const selectCls =
     "w-full rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]";
   const labelCls = "block text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)] mb-1.5";
-  const rowCls = (isSelected: boolean) =>
-    `flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--coral-bright)] has-[:focus-visible]:ring-inset ${
-      isSelected ? "bg-orange-500/5" : "hover:bg-[var(--surface-card)]"
-    }`;
+  /** A row's connection state, pulsing while its "make default" call is out. */
+  const rowStatus = (id: string) => {
+    const row = statusById.get(id);
+    if (!row) return null;
+    return (
+      <ProviderConnectionLabel
+        state={row.state}
+        className={`shrink-0 ${settingDefault === id ? "animate-pulse" : ""}`}
+      />
+    );
+  };
 
   function statusLine(s: Status) {
     if (!s) return null;
@@ -480,76 +1151,180 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   }
 
 
+  const Title = embedded ? "h2" : "h1";
+
+  // The sign-in card's shape for the selected provider. An "external" flow
+  // (Hermes' dashboard will not run it) is still a sign-in when ClawBox can
+  // drive the provider's CLI login; only then does the button show.
+  const oauthEntry = selectedDef?.oauthId ? oauth[selectedDef.oauthId] : undefined;
+  const oauthExternal = oauthEntry?.flow === "external";
+  const oauthCanSignIn = Boolean(selectedDef?.oauthId) && (!oauthExternal || oauthEntry?.cliAvailable === true);
+  const showAuthTabs = Boolean(selectedDef?.keyProvider) && oauthCanSignIn && !oauthEntry?.loggedIn;
+  const apiKeyField = selectedDef?.keyProvider ? (
+    <div>
+      <label className={labelCls} htmlFor={`${uid}-key`}>
+        {t("hermesProvider.key.label", { provider: selectedDef.name })}
+      </label>
+      <input
+        id={`${uid}-key`}
+        type="password"
+        className={selectCls}
+        placeholder={t("hermesProvider.key.placeholder")}
+        value={apiKey}
+        autoComplete="off"
+        onChange={(e) => setApiKey(e.target.value)}
+      />
+    </div>
+  ) : null;
+
   return (
     <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
-      <div className="card-surface rounded-2xl p-5 sm:p-8">
-        <h1 className="text-xl sm:text-2xl font-bold font-display mb-1">Hermes models</h1>
+      <div className="card-surface rounded-2xl p-5 sm:p-8 relative overflow-hidden">
+        {configuring && (
+          <ConfiguringOverlay
+            provider={configuring.provider}
+            providerName={configuringProviderName}
+            steps={configuringSteps}
+            phase={configuring.phase}
+            detail={null}
+            progressPercent={null}
+            completed={configuring.completed}
+            onCancel={configuring.completed ? undefined : cancelConfiguring}
+            cancelLabel={t("hermesProvider.oauth.startOver")}
+            t={t}
+          />
+        )}
+        <div className={configuring ? "invisible h-0 overflow-hidden" : ""} aria-hidden={configuring ? true : undefined}>
+        {/* Embedded in Settings the window already owns the page's h1; one
+            document with two of them claims two titles. */}
+        <Title className="text-xl sm:text-2xl font-bold font-display mb-1">{title ?? t("hermesProvider.title")}</Title>
         <p id={`${uid}-intro`} className="text-[var(--text-secondary)] mb-5 leading-relaxed text-sm">
-          This device runs on Hermes. Choose an inference provider and default model —
-          they switch through Hermes natively, no dashboard needed.
+          {description ?? t("hermesProvider.intro")}
         </p>
 
-        {/* Provider radio-cards (OpenClaw-style) */}
+        {/* THE HERO — what is answering right now. Absent until the box has a
+            default at all, which is the honest state during first-run setup.
+            Settings only: the wizard step is the OpenClaw shape — one
+            recommended card, no default hero (the default model is a Settings
+            → Providers concern after setup). */}
+        {embedded && defaultRow && (
+          <ProviderDefaultHero
+            row={defaultRow}
+            model={heroModel}
+            // "Change model" scrolls to the model dropdown — which the wizard
+            // hides (default-model picking is a post-setup, Settings concern).
+            // Offer it only where that dropdown exists.
+            onChangeModel={embedded && defaultHasRow ? changeModel : undefined}
+            note={t("hermesProvider.hero.nativeSwitch")}
+          />
+        )}
+
+        {/* Provider radio-cards (OpenClaw-style), now each carrying its own
+            connection state on the right. */}
         <div
           role="radiogroup"
-          aria-label="AI Provider"
+          aria-label={t("settings.providers.radioGroupLabel")}
           aria-describedby={`${uid}-intro`}
           className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden"
         >
           {/* Identical to the OpenClaw wizard's row — same component, not a lookalike. */}
+          {(!listCollapsed || isClawaiSelected) && (
           <ClawboxAiProviderRow
             radioName="hermes-ai-provider"
             selected={isClawaiSelected}
-            onSelect={() => pickProvider(CLAWAI_PROVIDER)}
+            isDefault={statusById.get(CLAWAI_PROVIDER)?.isDefault ?? false}
+            onSelect={() => choose(CLAWAI_PROVIDER)}
             trailingBadge={clawai?.active ? (
               <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-emerald-500/15 text-emerald-400 leading-none">
-                Active
+                {t("hermesProvider.clawai.activeBadge")}
               </span>
             ) : null}
+            statusSlot={rowStatus(CLAWAI_PROVIDER)}
           />
-          {HERMES_PANEL_PROVIDERS.map((provider) => {
-            const isSelected = selectedProvider === provider.id;
+          )}
+          {HERMES_PANEL_PROVIDERS.filter((provider) => !listCollapsed || provider.id === selectedProvider).map((provider) => {
+            const descriptionKey = PROVIDER_DESCRIPTION_KEYS[provider.id];
             return (
-              <label key={provider.id} className={rowCls(isSelected)}>
-                <input
-                  type="radio"
-                  name="hermes-ai-provider"
-                  value={provider.id}
-                  checked={isSelected}
-                  onChange={() => pickProvider(provider.id)}
-                  className="sr-only"
-                />
-                <span
-                  aria-hidden="true"
-                  className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 ${
-                    isSelected ? "border-[var(--coral-bright)]" : "border-gray-600"
-                  }`}
-                >
-                  {isSelected && <span className="w-2.5 h-2.5 rounded-full bg-orange-500" />}
-                </span>
-                <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.06] shrink-0">
-                  <AIProviderIcon provider={provider.id} size={22} />
-                </span>
-                <div className="flex-1 min-w-0">
-                  <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
-                    {provider.name}
-                  </span>
-                  <span className="block text-xs text-[var(--text-muted)]">{provider.description}</span>
-                </div>
-              </label>
+              <ProviderRadioRow
+                key={provider.id}
+                radioName="hermes-ai-provider"
+                value={provider.id}
+                selected={selectedProvider === provider.id}
+                onSelect={() => choose(provider.id)}
+                isDefault={statusById.get(provider.id)?.isDefault ?? false}
+                name={provider.name}
+                description={descriptionKey ? t(descriptionKey) : provider.description}
+                statusSlot={rowStatus(provider.id)}
+              />
             );
           })}
+          {listCollapsed && (
+            <button
+              type="button"
+              onClick={() => setShowMoreProviders(true)}
+              aria-expanded={false}
+              // Same control as the OpenClaw step's: no border-top of its own,
+              // the row above already draws the divider.
+              className="flex w-full min-h-[48px] items-center gap-2 px-4 py-3 text-[length:var(--t-4)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] transition-colors"
+            >
+              <span className="material-symbols-rounded shrink-0" aria-hidden="true" style={{ fontSize: 18 }}>expand_more</span>
+              {t("ai.showMore")}
+            </button>
+          )}
         </div>
+
+        {summary?.degraded && (
+          <p className="mt-3 text-[11px] text-[var(--amber-ink)] opacity-80">
+            {t("settings.providers.degraded")}
+          </p>
+        )}
+        {statusError && !summary && (
+          <p className="mt-3 text-[11px] text-[var(--text-muted)]">
+            {t("settings.providers.loadFailed")}
+          </p>
+        )}
+        {defaultError && (
+          <output
+            aria-live="polite"
+            className="mt-3 block rounded-lg border border-[var(--red-edge)] bg-[var(--red-wash)] px-3 py-2 text-xs text-[var(--red-ink)]"
+          >
+            {t("settings.providers.defaultFailed", { message: defaultError })}
+          </output>
+        )}
+        {/* The hook's OTHER answer: the default WAS written and the box
+            qualified it. Unreachable on Hermes today — /setup-api/providers/default
+            takes the setHermesPairing leg, whose POST returns no top-level
+            `warning` on any exit — but this is the third consumer of a shared
+            hook whose two siblings both render it, and a dropped notice is
+            silent by construction. Amber, never the red above: the change
+            landed.
+
+            MOUNTED IN EVERY STATE, like AiProviderList's equivalent: `<output>`
+            carries an implicit `role="status"`, and a live region that appears
+            together with its text announces a node insertion, which assistive
+            tech may drop. The chrome is what is conditional, not the node. */}
+        <output
+          aria-live="polite"
+          className={defaultWarning
+            ? "mt-3 block rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-200"
+            : ""}
+        >
+          {defaultWarning ?? ""}
+        </output>
 
         {/* Contextual controls for the selection. The min-height keeps the card
             from resizing under the cursor while the user arrows down the list. */}
         <div className="mt-5 min-h-[240px]">
           {isClawaiSelected ? (
             <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
+              {/* `hasToken` is this panel's whole notion of "the box is signed
+                  in to an account"; without it `uiTier` is a default, and a
+                  default must not be printed as the owner's plan. */}
               <ClawboxAiPlanPicker
                 tier={uiTier}
                 onTierChange={changeUiTier}
                 disabled={applyingClawai || loginBusy}
+                planKnown={!!clawai?.hasToken}
               />
               {clawai?.hasToken ? (
                 <>
@@ -560,14 +1335,14 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                     className="mt-4 w-full rounded-xl bg-[var(--coral-bright)] text-white font-semibold py-2.5 hover:opacity-90 transition-opacity disabled:opacity-50"
                   >
                     {applyingClawai
-                      ? "Switching…"
+                      ? t("hermesProvider.clawai.switching")
                       : clawaiDirty
-                        ? `Switch to ${CLAWAI_TIER_INFO[uiTier].pillLabel}`
-                        : "ClawBox AI in use"}
+                        ? t("hermesProvider.clawai.switchTo", { tier: CLAWAI_TIER_INFO[uiTier].pillLabel })
+                        : t("hermesProvider.clawai.inUse")}
                   </button>
                   {clawai.model && (
                     <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
-                      Model: <span className="font-mono">{clawai.model}</span>
+                      {t("hermesProvider.clawai.modelLabel")} <span className="font-mono">{clawai.model}</span>
                     </p>
                   )}
                 </>
@@ -586,55 +1361,247 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
           ) : (
             <div className="space-y-4">
               {selectedDef?.oauthId && (() => {
-                const st = oauth[selectedDef.oauthId];
+                const oauthId = selectedDef.oauthId;
+                const st = oauth[oauthId];
                 const connected = st?.loggedIn;
+                const external = st?.flow === "external";
+                const cliDriven = external && st?.cliAvailable === true;
+                const effectiveFlow = external ? st?.cliFlow : st?.flow;
+                const flow = signin && signin.providerId === oauthId ? signin : null;
+                const showSignInButton = !connected && oauthCanSignIn && (!flow || flow.stage === "failed");
+                const keyTab = showAuthTabs && authTab === "key";
                 return (
                   <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-deep)]/50 p-3">
+                    {showAuthTabs && (
+                      <div
+                        role="tablist"
+                        aria-label={t("hermesProvider.oauth.signInWith", { provider: selectedDef.name })}
+                        className="mb-3 grid grid-cols-2 gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-card)] p-0.5"
+                      >
+                        {(["signin", "key"] as const).map((tab) => (
+                          <button
+                            key={tab}
+                            type="button"
+                            role="tab"
+                            aria-selected={authTab === tab}
+                            onClick={() => setAuthTab(tab)}
+                            className={`rounded-md px-3 py-1.5 text-sm font-semibold transition-colors ${
+                              authTab === tab
+                                ? "bg-[var(--bg-deep)] text-[var(--text-primary)] shadow-[inset_0_0_0_1px_var(--border-subtle)]"
+                                : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+                            }`}
+                          >
+                            {tab === "signin" ? t("hermesProvider.oauth.tabSignIn") : t("hermesProvider.oauth.tabApiKey")}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {keyTab ? apiKeyField : (<>
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="text-sm font-medium text-gray-200">Sign in with {selectedDef.name}</p>
+                        <p className="text-sm font-medium text-gray-200">
+                          {t("hermesProvider.oauth.signInWith", { provider: selectedDef.name })}
+                        </p>
                         <p className="text-xs text-[var(--text-muted)]">
-                          {connected ? "Connected — OAuth credentials active." : "OAuth through Hermes (no API key needed)."}
+                          {connected
+                            ? t("hermesProvider.oauth.connectedDesc")
+                            : external
+                              ? (cliDriven
+                                ? t("hermesProvider.oauth.attendedDesc", { provider: selectedDef.name })
+                                : t("hermesProvider.oauth.cliMissingDesc", { provider: selectedDef.name }))
+                              : t("hermesProvider.oauth.availableDesc")}
                         </p>
                       </div>
-                      {connected ? (
+                      {connected && (
                         <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-emerald-400">
                           <span className="material-symbols-rounded" style={{ fontSize: 14 }}>check_circle</span>
-                          Connected
+                          {t("hermesProvider.oauth.connectedBadge")}
                         </span>
-                      ) : (
+                      )}
+                      {showSignInButton && (
                         <button
                           type="button"
-                          onClick={openHermesOAuth}
+                          onClick={() => { void startOauth(oauthId); }}
                           className="shrink-0 rounded-lg bg-[var(--coral-bright)] px-3 py-2 text-sm font-semibold text-white hover:opacity-90 transition-opacity"
                         >
-                          Sign in ↗
+                          {flow?.stage === "failed"
+                            ? t("hermesProvider.oauth.tryAgain")
+                            : t("hermesProvider.oauth.signIn")}
                         </button>
                       )}
                     </div>
-                    {selectedDef.keyProvider && (
-                      <p className="text-[11px] text-[var(--text-muted)] mt-2">…or paste an API key below instead.</p>
+                    {!connected && external && !cliDriven && st?.docsUrl && (
+                      <a
+                        href={st.docsUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-2 inline-block text-xs font-semibold text-[var(--coral-bright)] underline"
+                      >
+                        {t("hermesProvider.oauth.learnMore")}
+                      </a>
                     )}
+                    {showSignInButton && !flow && (
+                      // What pressing the button sets off, before it is
+                      // pressed: the page that opens, and the code that comes
+                      // back — the two moments an owner is not warned about.
+                      <ol className="mt-3 space-y-1.5 text-xs text-[var(--text-secondary)]" data-testid="hermes-oauth-steps">
+                        {[
+                          t("hermesProvider.oauth.stepPress", { provider: selectedDef.name }),
+                          t("hermesProvider.oauth.stepApprove", { provider: selectedDef.name }),
+                          effectiveFlow === "device_code"
+                            ? t("hermesProvider.oauth.stepEnterCode")
+                            : t("hermesProvider.oauth.stepPasteCode", { provider: selectedDef.name }),
+                        ].map((step, index) => (
+                          <li key={index} className="flex gap-2">
+                            <span className="min-w-[20px] rounded border border-[var(--border-subtle)] text-center font-mono text-[10px] leading-4 text-[var(--coral-bright)]">{index + 1}</span>
+                            <span>{step}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                    {!connected && flow?.stage === "starting" && (
+                      <p className="mt-3 text-xs text-[var(--text-muted)]" role="status" aria-live="polite">
+                        {t("hermesProvider.oauth.starting", { provider: selectedDef.name })}
+                      </p>
+                    )}
+                    {!connected && flow?.stage === "pkce" && (
+                      <div className="mt-3 space-y-2">
+                        <p className="text-xs text-[var(--text-muted)]">
+                          {t("hermesProvider.oauth.pkceInstructions", { provider: selectedDef.name })}{" "}
+                          <a
+                            href={flow.authUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline text-[var(--text-secondary)]"
+                          >
+                            {t("hermesProvider.oauth.reopenSignInPage")}
+                          </a>
+                        </p>
+                        <label className="sr-only" htmlFor={`${uid}-oauth-code`}>
+                          {t("hermesProvider.oauth.codeLabel", { provider: selectedDef.name })}
+                        </label>
+                        <input
+                          id={`${uid}-oauth-code`}
+                          type="text"
+                          className={selectCls}
+                          placeholder={t("hermesProvider.oauth.codeLabel", { provider: selectedDef.name })}
+                          value={oauthCode}
+                          autoComplete="off"
+                          onChange={(e) => setOauthCode(e.target.value)}
+                        />
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => { void submitOauthCode(); }}
+                            disabled={oauthBusy || !oauthCode.trim()}
+                            className="rounded-lg bg-[var(--coral-bright)] px-3 py-2 text-sm font-semibold text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+                          >
+                            {oauthBusy
+                              ? t("hermesProvider.oauth.submitting")
+                              : t("hermesProvider.oauth.submitCode")}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={resetSignin}
+                            className="text-xs text-[var(--text-muted)] underline hover:text-[var(--text-secondary)]"
+                          >
+                            {t("hermesProvider.oauth.startOver")}
+                          </button>
+                        </div>
+                        {flow.error && (
+                          <p role="alert" aria-live="polite" className="text-xs text-red-400">{flow.error}</p>
+                        )}
+                      </div>
+                    )}
+                    {!connected && flow?.stage === "device" && (
+                      <div className="mt-3 space-y-2">
+                        <p className="text-xs text-[var(--text-muted)]">
+                          {t("hermesProvider.oauth.deviceInstructions", { provider: selectedDef.name })}
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <span
+                            data-testid="hermes-oauth-user-code"
+                            className="rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2 text-base font-mono font-semibold tracking-widest text-[var(--text-primary)]"
+                          >
+                            {flow.userCode}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => copyUserCode(flow.userCode)}
+                            className="rounded-lg border border-[var(--border-subtle)] px-2.5 py-2 text-xs font-semibold text-[var(--text-secondary)] hover:bg-[var(--surface-card)] transition-colors"
+                          >
+                            {codeCopied ? t("hermesProvider.oauth.copied") : t("hermesProvider.oauth.copyCode")}
+                          </button>
+                        </div>
+                        {flow.verificationUrl && (
+                          <a
+                            href={flow.verificationUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-block text-xs font-semibold text-[var(--coral-bright)] underline"
+                          >
+                            {t("hermesProvider.oauth.openVerificationPage")}
+                          </a>
+                        )}
+                        <div className="flex items-center gap-3">
+                          <p className="text-xs text-[var(--text-muted)]" role="status" aria-live="polite">
+                            {t("hermesProvider.oauth.waitingApproval")}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={resetSignin}
+                            className="text-xs text-[var(--text-muted)] underline hover:text-[var(--text-secondary)]"
+                          >
+                            {t("hermesProvider.oauth.startOver")}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {!connected && flow?.stage === "failed" && (
+                      <p role="alert" aria-live="polite" className="mt-2 text-xs text-red-400">{flow.message}</p>
+                    )}
+                    {!connected && !external && (
+                      <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+                        {t("hermesProvider.oauth.advancedLabel")}{" "}
+                        <button
+                          type="button"
+                          onClick={openHermesOAuth}
+                          className="underline hover:text-[var(--text-secondary)]"
+                        >
+                          {t("hermesProvider.oauth.dashboardLink")}
+                        </button>
+                      </p>
+                    )}
+                    </>)}
                   </div>
                 );
               })()}
+              {/* Default-model dropdown — a post-setup, Settings concern. The
+                  wizard hides it: connecting a provider auto-pins that
+                  provider's recommended default (commitWizardDefault on OAuth,
+                  saveModelProvider on a key), so first-boot never asks the owner
+                  to choose a model. Shown only when embedded in Settings, and
+                  only once the provider has a credential: without one the
+                  harness lists no models, so the control was a disabled box
+                  reading "No credentials for this provider yet" — a picker
+                  that cannot pick. The key field below is the step that
+                  matters; the dropdown appears when a save has landed. */}
+              {embedded && (
               <div>
-                <label className={labelCls} htmlFor={`${uid}-model`}>Default model</label>
+                {scope?.authenticated !== false && (<>
+                <label className={labelCls} htmlFor={`${uid}-model`}>{t("hermesProvider.model.label")}</label>
                 <select
                   id={`${uid}-model`}
+                  ref={modelSelectRef}
                   className={selectCls}
                   value={model}
                   disabled={loading || !scope?.models.length}
                   aria-busy={loading}
                   onChange={(e) => setPicked(e.target.value)}
                 >
-                  {loading && <option value="">Loading…</option>}
+                  {loading && <option value="">{t("hermesProvider.model.loading")}</option>}
                   {!loading && !scope?.models.length && (
-                    <option value="">
-                      {scope?.authenticated === false
-                        ? "No credentials for this provider yet"
-                        : "No models available"}
-                    </option>
+                    <option value="">{t("hermesProvider.model.noModels")}</option>
                   )}
                   {(scope?.models ?? []).map((m) => (
                     <option key={m.id} value={m.id}>
@@ -642,6 +1609,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                     </option>
                   ))}
                 </select>
+                </>)}
                 {scope?.warning && (
                   <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">{scope.warning}</p>
                 )}
@@ -649,39 +1617,36 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                   // The server tells us the device's saved pairing belongs to a
                   // DIFFERENT provider. Say so, so Save is never a surprise.
                   <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
-                    This device is currently using{" "}
+                    {t("hermesProvider.model.savedElsewherePrefix")}{" "}
                     <span className="text-[var(--text-secondary)]">
                       {hermesProviderLabel(scope.savedElsewhere.provider)}
                     </span>
                     {scope.savedElsewhere.model ? (
                       <> · <span className="font-mono">{scope.savedElsewhere.model}</span></>
                     ) : null}
-                    . Saving switches it to {selectedDef?.name ?? selectedProvider}.
+                    {t("hermesProvider.model.savedElsewhereSuffix", {
+                      provider: selectedDef?.name ?? selectedProvider,
+                    })}
                   </p>
                 )}
                 {scope?.stale && !loading && (
                   <p className="mt-1.5 text-[11px] text-amber-400/80">
-                    {scope.source === "cold-start"
-                      ? "Hermes hasn't published a model list yet — showing a minimal fallback."
-                      : "Showing a cached model list; Hermes' live catalogue is unreachable."}
+                    {/* `degraded` first: this box HAD a live catalogue and lost
+                        it to a blip, which the other two lines cannot say — one
+                        of them describes a box that has never reached its
+                        dashboard, the other a cache that is merely old. Reuses
+                        the Providers strip's own wording for the same fact. */}
+                    {scope.degraded
+                      ? t("settings.providers.degraded")
+                      : scope.source === "cold-start"
+                        ? t("hermesProvider.model.staleColdStart")
+                        : t("hermesProvider.model.staleCached")}
                   </p>
                 )}
               </div>
-
-              {selectedDef?.keyProvider && (
-                <div>
-                  <label className={labelCls} htmlFor={`${uid}-key`}>{selectedDef.name} API key</label>
-                  <input
-                    id={`${uid}-key`}
-                    type="password"
-                    className={selectCls}
-                    placeholder="Paste API key (optional if already set)"
-                    value={apiKey}
-                    autoComplete="off"
-                    onChange={(e) => setApiKey(e.target.value)}
-                  />
-                </div>
               )}
+
+              {!showAuthTabs && apiKeyField}
 
               <button
                 type="button"
@@ -696,10 +1661,17 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                 // this field exists to collect. A pending key is its own reason
                 // to enable it (the save path stores the key first, then lets
                 // the server pick that provider's own default model).
-                disabled={saving || loading || (!modelInScope && !hasPendingKey)}
+                //
+                // `loading` is now held for the whole catalogue retry while the
+                // box answers with a placeholder (the Hermes dashboard is down
+                // or still booting) — and pasting a key is the very gesture that
+                // recovers such a box, so it must not be greyed out waiting for
+                // a catalogue `saveModelProvider` does not need. The model
+                // <select> beside it still shows its spinner.
+                disabled={saving || (loading && !hasPendingKey) || (!modelInScope && !hasPendingKey)}
                 className="w-full rounded-xl bg-[var(--coral-bright)] text-white font-semibold py-3 hover:opacity-90 transition-opacity disabled:opacity-50"
               >
-                {saving ? "Saving…" : "Save model & provider"}
+                {saving ? t("hermesProvider.save.saving") : t("hermesProvider.save.button")}
               </button>
               {statusLine(saveStatus)}
             </div>
@@ -710,11 +1682,12 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
           <button
             type="button"
             onClick={() => onNext?.()}
-            className="mt-7 w-full rounded-xl bg-[var(--surface-card)] text-[var(--text-primary)] font-semibold py-3 hover:opacity-90 transition-opacity"
+            className="mt-7 w-full min-h-[40px] px-3 rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] transition-colors"
           >
-            Continue
+            {t("ai.skipUseLocalOnly")}
           </button>
         )}
+        </div>
       </div>
     </div>
   );

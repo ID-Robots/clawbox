@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 
 // vi.mock is hoisted above this file's top-level code, so the auth-error class
 // the factory returns must be built inside vi.hoisted() to exist when it runs.
@@ -34,11 +35,12 @@ const mockSetMany = vi.mocked(setMany);
 
 describe("POST /setup-api/wifi/connect", () => {
   let wifiConnectPost: (req: Request) => Promise<Response>;
+  let session: SessionFixture;
 
   function jsonRequest(body: unknown): Request {
     return new Request("http://localhost/test", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Cookie: session.cookie },
       body: JSON.stringify(body),
     });
   }
@@ -46,6 +48,7 @@ describe("POST /setup-api/wifi/connect", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    session = installSessionFixture();
 
     mockSwitchToClient.mockResolvedValue({ message: "connected" });
     mockSet.mockResolvedValue();
@@ -58,6 +61,7 @@ describe("POST /setup-api/wifi/connect", () => {
   afterEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
+    session.cleanup();
   });
 
   // The single-radio handoff tears down the setup hotspot mid-connect, so the
@@ -138,7 +142,7 @@ describe("POST /setup-api/wifi/connect", () => {
   it("returns 400 for invalid JSON", async () => {
     const req = new Request("http://localhost/test", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Cookie: session.cookie },
       body: "not json",
     });
     const res = await wifiConnectPost(req);

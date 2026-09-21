@@ -1,0 +1,7 @@
+{
+  "id": "clawbox-path-guard",
+  "name": "ClawBox path guard",
+  "description": "Refuses tool calls that delete, overwrite, truncate or move the ClawBox tree or a local-model folder.",
+  "activation": { "onStartup": true },
+  "configSchema": { "type": "object", "additionalProperties": false }
+}

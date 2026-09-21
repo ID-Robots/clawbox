@@ -5,9 +5,10 @@ import net from "net";
 //
 // Narrow escape hatch for genuinely cross-origin/custom-origin Control UI
 // deployments (for example, a reverse proxy on a different hostname or
-// port). Same-origin access via `<hostname>.local`,
-// Tailscale `.ts.net` names, or a private LAN IP already works without any
-// entry here — see gateway-proxy.ts's isReflectableHost().
+// port). Same-origin access via the box's own hostname — bare
+// (`http://clawbox/`) or `<hostname>.local` — a Tailscale `.ts.net` name, or a
+// private LAN IP already works without any entry here — see gateway-proxy.ts's
+// isReflectableHost().
 //
 // Contract: a JSON array of strings at CLAWBOX_CONTROL_UI_ORIGINS_FILE (or
 // the default path below) is read and validated. A missing file is normal

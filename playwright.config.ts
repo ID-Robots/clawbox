@@ -23,6 +23,11 @@ export default defineConfig({
   reporter: "html",
   use: {
     baseURL,
+    // US English, pinned, for the same reason as e2e-install: with no
+    // `pref:ui_language` stored the UI falls back to `navigator.language`, and
+    // these specs assert English copy. The specs that WANT another language
+    // (mobile-chat-first) set the preference, which wins over this.
+    locale: "en-US",
     trace: "on-first-retry",
     // CI runners share one `bun run dev` server across all sequential
     // tests (workers: 1). After ~35 tests the dev server gets sluggish

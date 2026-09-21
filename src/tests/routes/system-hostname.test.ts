@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { startRootStep } from "@/lib/root-step-runner";
 
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-hostname-tests-${process.pid}-${Date.now()}`);
 const HOSTNAME_ENV_PATH = path.join(TEST_ROOT, "data", "hostname.env");
@@ -11,6 +12,11 @@ const setControlUiAllowedOriginsMock = vi.fn();
 const restartGatewayMock = vi.fn();
 const getMock = vi.fn();
 const setMock = vi.fn();
+
+vi.mock("@/lib/root-step-runner", () => ({
+  ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
+  startRootStep: vi.fn(async () => {}),
+}));
 
 vi.mock("child_process", () => ({
   execFile: (
@@ -23,9 +29,14 @@ vi.mock("child_process", () => ({
     else cb(null, { stdout: result?.stdout ?? "", stderr: "" });
   },
 }));
+// `gatewayIsAbsent` decides whether the OpenClaw allowed-origins write happens
+// at all. Default false so these cases keep exercising the OpenClaw path they
+// were written for; the Hermes case below flips it.
+const gatewayIsAbsentMock = vi.fn(() => false);
 vi.mock("@/lib/openclaw-config", () => ({
   setControlUiAllowedOrigins: setControlUiAllowedOriginsMock,
   restartGateway: restartGatewayMock,
+  gatewayIsAbsent: gatewayIsAbsentMock,
 }));
 vi.mock("@/lib/config-store", () => ({
   get: getMock,
@@ -48,6 +59,10 @@ beforeEach(() => {
   restartGatewayMock.mockReset().mockResolvedValue(undefined);
   getMock.mockReset();
   setMock.mockReset().mockResolvedValue(undefined);
+  // Reset like the rest. `mockReturnValue` outlives the test that set it, so
+  // without this the gateway-absent case below would silently make every test
+  // added after it run on the Hermes branch.
+  gatewayIsAbsentMock.mockReset().mockReturnValue(false);
 });
 
 afterEach(async () => {
@@ -136,8 +151,9 @@ describe("/setup-api/system/hostname POST", () => {
     expect(body.fqdn).toBe("happy.local");
   });
 
-  it("returns 500 when systemd command fails (but persists state)", async () => {
-    execFileMock.mockReturnValue({ error: new Error("Failed to start unit") });
+  it("returns 500 when the root step fails (but persists state)", async () => {
+    execFileMock.mockReturnValue({ stdout: "" });
+    vi.mocked(startRootStep).mockRejectedValueOnce(new Error("Failed to start unit"));
     const mod = await import("@/app/setup-api/system/hostname/route");
     const res = await mod.POST(makeRequest({ hostname: "stillpersisted" }));
     expect(res.status).toBe(500);
@@ -147,11 +163,79 @@ describe("/setup-api/system/hostname POST", () => {
     expect(setMock).toHaveBeenCalledWith("hostname", "stillpersisted");
   });
 
-  it("tolerates gateway-restart failures (logs but proceeds)", async () => {
+  it("still applies the hostname when the gateway leg fails, and says so", async () => {
+    // The rename proceeds — it never depended on the gateway — but the answer
+    // stops calling itself a plain success: the control UI keeps the old
+    // allowed-origins list until the gateway is serving again, so the body
+    // carries `gatewayRestarted: false` and the status says which half failed.
     execFileMock.mockReturnValue({ stdout: "" });
     setControlUiAllowedOriginsMock.mockRejectedValue(new Error("config locked"));
     const mod = await import("@/app/setup-api/system/hostname/route");
     const res = await mod.POST(makeRequest({ hostname: "gracedeg" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(body).toMatchObject({ success: true, hostname: "gracedeg", gatewayRestarted: false });
+    expect(typeof body.warning).toBe("string");
+    // The rename itself still ran: this must never become a false failure.
+    expect(setMock).toHaveBeenCalledWith("hostname", "gracedeg");
+    expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("set_hostname");
+  });
+
+  it("names the restart, not the origins write, when the restart is the half that failed", async () => {
+    execFileMock.mockReturnValue({ stdout: "" });
+    setControlUiAllowedOriginsMock.mockResolvedValue(undefined);
+    restartGatewayMock.mockRejectedValue(new Error("Unit is masked"));
+    const mod = await import("@/app/setup-api/system/hostname/route");
+    const res = await mod.POST(makeRequest({ hostname: "maskedgw" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(body).toMatchObject({ success: true, gatewayRestarted: false });
+    expect(body.warning).toMatch(/gateway could not be restarted/i);
+    expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("set_hostname");
+  });
+
+  it("does not bounce the gateway when the origin list was never written", async () => {
+    // A restart onto the config it already has costs the owner an outage and
+    // tells them nothing — and the warning must blame the write, not the
+    // gateway that was never asked to do anything.
+    execFileMock.mockReturnValue({ stdout: "" });
+    setControlUiAllowedOriginsMock.mockRejectedValue(new Error("config locked"));
+    const mod = await import("@/app/setup-api/system/hostname/route");
+    const body = await (await mod.POST(makeRequest({ hostname: "nowrite" }))).json();
+
+    expect(restartGatewayMock).not.toHaveBeenCalled();
+    expect(body.warning).toMatch(/allowed-origin list/i);
+  });
+
+  it("does not spend the readiness budget on a rename that reboots the box", async () => {
+    // The caller's next act is POST /setup-api/system/power, and the reboot
+    // restarts the gateway anyway. Waiting here would only delay it.
+    execFileMock.mockReturnValue({ stdout: "" });
+    setControlUiAllowedOriginsMock.mockResolvedValue(undefined);
+    const mod = await import("@/app/setup-api/system/hostname/route");
+    await mod.POST(makeRequest({ hostname: "nowait" }));
+
+    expect(restartGatewayMock).toHaveBeenCalledWith({ awaitReady: false });
+  });
+
+  it("does not manufacture ~/.openclaw on an edition that has no gateway", async () => {
+    // `setControlUiAllowedOrigins` ends in `writeConfig`, which MKDIRs
+    // `~/.openclaw` and writes an allowedOrigins block — on the one SKU whose
+    // defining property is not having one, for a gateway that is removed and
+    // masked there and will never read it. The rename itself is unaffected,
+    // so this was never a false success; it is litter that makes `~/.openclaw`
+    // exist and misleads the next person debugging an edition question.
+    gatewayIsAbsentMock.mockReturnValue(true);
+    execFileMock.mockReturnValue({ stdout: "" });
+    setControlUiAllowedOriginsMock.mockResolvedValue(undefined);
+
+    const mod = await import("@/app/setup-api/system/hostname/route");
+    const res = await mod.POST(makeRequest({ hostname: "gracedeg" }));
+
     expect(res.status).toBe(200);
+    expect(setControlUiAllowedOriginsMock).not.toHaveBeenCalled();
+    expect(restartGatewayMock).not.toHaveBeenCalled();
   });
 });

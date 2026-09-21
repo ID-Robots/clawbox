@@ -1,8 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 // A device installed as one edition and then re-installed as another completed
 // all 26 steps and printed "All N checks healthy" — on a box that was broken.
@@ -110,6 +115,7 @@ function runRefusal(env: Record<string, string> = {}): {
   const script = [
     "set -euo pipefail",
     `PROJECT_DIR=${JSON.stringify(projectDir)}`,
+    'SRC_DIR="$PROJECT_DIR"',
     REFUSAL_BLOCK.replace('"/etc/clawbox/edition.env"', JSON.stringify(lockPath)).replace(
       '"/etc/systemd/system/clawbox-setup.service.d/edition.conf"',
       JSON.stringify(dropinPath),
@@ -393,11 +399,23 @@ function runValidator(
   edition: string,
   units: Record<string, string>,
 ): { status: number; stdout: string } {
+  // The on-device TTS verdict is stubbed healthy for the same reason systemctl
+  // and curl are: this file's subject is the edition checks, and a validator
+  // that also reads the TTS verdict would otherwise fail every case here for a
+  // reason that has nothing to do with editions.
+  const ttsStatus = path.join(tmp, "tts-status");
+  // BOTH engine verdicts, because scripts/install-voice.sh now publishes
+  // both and step_validate_services fails an ABSENT one under the same
+  // rule it already applied to KOKORO. This device is healthy, so the TTS
+  // probe is not what these tests are about.
+  fs.writeFileSync(ttsStatus, "KOKORO=ready\nPIPER=ready\n");
+
   const script = [
     "set -uo pipefail",
     `CLAWBOX_EDITION=${edition}`,
     "CLAWBOX_TEST_MODE=1",
     "PROJECT_DIR=/nonexistent",
+    'SRC_DIR="$PROJECT_DIR"',
     "CLAWBOX_HOME=/nonexistent",
     'IFACE_ENV="/nonexistent/network.env"',
     SERVICE_REGISTRY,
@@ -422,7 +440,10 @@ function runValidator(
     encoding: "utf-8",
     // NODE_ENV is not read by any shell here; it is carried only because this
     // repo's ProcessEnv typing makes it required on an env literal.
-    env: { PATH: process.env.PATH ?? "", NODE_ENV: process.env.NODE_ENV },
+    // TTS_STATUS_FILE travels as an environment variable rather than as an
+    // interpolated shell assignment: JSON quoting is not shell quoting, and a
+    // path is data, not script.
+    env: { PATH: process.env.PATH ?? "", NODE_ENV: process.env.NODE_ENV, TTS_STATUS_FILE: ttsStatus },
   });
   return { status: r.status ?? -1, stdout: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
@@ -437,6 +458,7 @@ function healthyOpenclaw(): Record<string, string> {
     "clawbox-codex-auth-sync.timer": "enabled:active",
     "clawbox-heartbeat.service": "static:inactive",
     "clawbox-browser.service": "disabled:inactive",
+    "clawbox-embed.service": "static:inactive",
     "clawbox-tunnel.service": "disabled:inactive",
     "clawbox-root-update@.service": "static:inactive",
     "clawbox-ap-watchdog.service": "static:inactive",
@@ -498,6 +520,7 @@ d("step_validate_services sees units belonging to another edition", () => {
       "clawbox-hermes-dashboard-proxy.service": "enabled:active",
       "clawbox-heartbeat.service": "static:inactive",
       "clawbox-browser.service": "disabled:inactive",
+      "clawbox-embed.service": "static:inactive",
       "clawbox-tunnel.service": "disabled:inactive",
       "clawbox-root-update@.service": "static:inactive",
       "clawbox-ap-watchdog.service": "static:inactive",
@@ -515,9 +538,11 @@ d("step_validate_services sees units belonging to another edition", () => {
     const withoutHermes = runValidator("openclaw", healthyOpenclaw());
     const total = /All (\d+) checks healthy/.exec(withoutHermes.stdout)?.[1];
     expect(total).toBeDefined();
-    // 5 active (test mode drops clawbox-ap + clawbox-performance) + 6 installed
-    // + 1 probe (test mode drops the WiFi probe) + 3 foreign-unit checks.
-    expect(Number(total)).toBe(15);
+    // 5 active (test mode drops clawbox-ap + clawbox-performance) + 7 installed
+    // (clawbox-embed.service among them, on demand and never enabled) + 1 probe
+    // (test mode drops the WiFi probe) + 1 on-device TTS verdict (openclaw
+    // only — Hermes has no TTS step) + 3 foreign-unit checks.
+    expect(Number(total)).toBe(17);
   });
 });
 

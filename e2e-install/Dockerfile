@@ -27,9 +27,20 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
       openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 — matches what install.sh installs at runtime. pipefail is
-# required so a silent `curl` failure doesn't leave `bash -` reading nothing
-# and exiting 0 (which would produce an image missing the nodesource apt
+# Node.js 22 — DELIBERATELY NOT the version install.sh ends up with.
+#
+# The pinned core (2026.9.3) needs `>=24.16.0 <25 || >=26.1.0`, so install.sh
+# performs a Node MAJOR upgrade on its way through (TASK-788). Baking 24 in here
+# would satisfy the engine guard on its first call, and `setup_24.x` plus
+# `apt-get install nodejs` would then never execute in CI on either path — a
+# broken channel, a lost apt lock or a host apt cannot move would leave
+# e2e-install green. Every field unit starts exactly here, on Node 22 from
+# NodeSource, so this image is the honest model of one and it is what makes CI
+# exercise the switch for real. `main`'s own pin (openclaw 2026.7.1) accepts both
+# 22 and 24, so the main → beta upgrade spec has a valid baseline either way.
+#
+# pipefail is required so a silent `curl` failure doesn't leave `bash -` reading
+# nothing and exiting 0 (which would produce an image missing the nodesource apt
 # list and then failing later in confusing ways).
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
@@ -75,10 +86,20 @@ RUN systemctl enable NetworkManager avahi-daemon dbus
 
 # Create the clawbox user — install.sh does this too, but pre-creating it lets
 # us bake volume permissions correctly on first boot.
+# Two blanket drop-ins, on purpose. `90-clawbox-nopasswd` is the file the flash
+# pipeline bakes into the image, so a freshly flashed device is born with it —
+# nothing in this repo writes it, which is why it survives every install.sh run
+# and why quarantine_overbroad_sudoers is the only thing that can clear it.
+# `clawbox-nopasswd` is the second name seen in the field. The two lines are
+# also spelled differently on purpose — `NOPASSWD:ALL` and `NOPASSWD: ALL` —
+# because sudoers_grants_blanket_nopasswd parses the rule rather than matching
+# text, and both spellings are real. Seeding both proves the detector is
+# content-based, not name- or format-based.
 RUN useradd -m -s /bin/bash -u 1000 clawbox && \
     usermod -aG sudo clawbox && \
     echo 'clawbox ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/clawbox-nopasswd && \
-    chmod 0440 /etc/sudoers.d/clawbox-nopasswd
+    printf 'clawbox ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/90-clawbox-nopasswd && \
+    chmod 0440 /etc/sudoers.d/clawbox-nopasswd /etc/sudoers.d/90-clawbox-nopasswd
 
 # Pre-create project dir so volume mounts land on the right owner.
 RUN mkdir -p /home/clawbox/clawbox && chown -R clawbox:clawbox /home/clawbox

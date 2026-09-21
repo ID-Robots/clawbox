@@ -1,19 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
+import { hasOwnerSession } from "./owner-session";
 import fs from "fs/promises";
 import os from "os";
 import net from "net";
 import crypto from "crypto";
 import { statSync } from "node:fs";
+import { envPort } from "./port-probe";
 import {
   loadConfiguredOrigins,
   normalizeOrigin,
   resolveOriginsPath,
 } from "./control-ui-origins";
+import { controlUiEmailDirectiveScript, controlUiLocale } from "./control-ui-email-directives";
 
-const GATEWAY_PORT = process.env.GATEWAY_PORT || "18789";
-const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_HOME
-  ? `${process.env.OPENCLAW_HOME}/openclaw.json`
-  : `${process.env.HOME ?? "/home/clawbox"}/.openclaw/openclaw.json`;
+const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
+const OPENCLAW_CONFIG_PATH = `${
+  process.env.CLAWBOX_OPENCLAW_HOME
+  || process.env.OPENCLAW_HOME
+  || `${process.env.HOME ?? "/home/clawbox"}/.openclaw`
+}/openclaw.json`;
 
 const ALLOWED_PROTOS = new Set(["http", "https"]);
 const CANONICAL_ORIGIN = process.env.CANONICAL_ORIGIN || "http://clawbox.local";
@@ -24,21 +29,37 @@ const ALLOWED_HOSTS = new Set(
     .filter(Boolean)
 );
 
-// Single mDNS label — letters/digits/hyphens, no dots, no leading/trailing
-// hyphen. We append `.local` ourselves; allowing dots in the input would
-// let a host header like `evil..local` slip through host comparison.
+// Single hostname label — letters/digits/hyphens, no dots, no leading/trailing
+// hyphen. It validates the nodename's first label below, and we append `.local`
+// to that ourselves; allowing dots in the input would let a host header like
+// `evil..local` slip through host comparison. Same regex as MDNS_LABEL_RE in
+// scripts/hermes-dashboard-proxy.js, and as HOSTNAME_RE in the rename route, so
+// every name a rename can produce is a label all three accept.
 const MDNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-let cachedMdnsHost: string | null | undefined; // undefined = not loaded yet
-function getSystemMdnsHost(): string | null {
-  if (cachedMdnsHost !== undefined) return cachedMdnsHost;
+// The names this box calls itself, from the kernel's nodename: the BARE hostname
+// and its `<label>.local` form. The bare one is what this missed — a router that
+// registers the DHCP hostname, or a LAN with a DNS search domain, serves the
+// desktop on `http://clawbox/`, and reflecting `clawbox.local` at that browser
+// is the same dead end the rename case was. TASK-808. The LAN-domain form
+// (`clawbox.lan`) is deliberately not derived, for the reason written out beside
+// systemHostname() in scripts/hermes-dashboard-proxy.js: the DHCP search domain
+// is not ours to trust. Reflection here also stays narrower than that proxy's
+// guard — this box's two names or a configured origin, never any `<label>.local`.
+//
+// Read per call, never cached for the process lifetime: a rename applies
+// `hostnamectl set-hostname` without restarting this server, so a name captured
+// at first use would reflect the old one for the rest of the process's life.
+function systemHostnames(): string[] {
+  let label: string;
   try {
-    const label = os.hostname().trim().toLowerCase();
-    cachedMdnsHost = MDNS_LABEL_RE.test(label) ? `${label}.local` : null;
+    // A nodename carrying a domain (`clawbox.lan`) still yields `clawbox`.
+    label = os.hostname().trim().toLowerCase().split(".")[0];
   } catch {
-    cachedMdnsHost = null;
+    return [];
   }
-  return cachedMdnsHost;
+  if (!MDNS_LABEL_RE.test(label)) return [];
+  return [label, `${label}.local`];
 }
 
 // Without renamed-host support, ALLOWED_HOSTS was frozen to `clawbox.local`
@@ -46,8 +67,9 @@ function getSystemMdnsHost(): string | null {
 // the gateway was busy and we fell back to CANONICAL_ORIGIN.
 function isReflectableHost(rawHost: string): boolean {
   if (ALLOWED_HOSTS.has(rawHost)) return true;
-  if (rawHost === getSystemMdnsHost()) return true;
   if (net.isIPv4(rawHost)) return true;
+  // Last, so a listed name or a LAN IP is answered without the uname(2) call.
+  if (systemHostnames().includes(rawHost)) return true;
   return false;
 }
 
@@ -214,19 +236,37 @@ export async function getOrGenerateGatewayToken(): Promise<string | null> {
 }
 
 /**
- * Fetches the gateway SPA HTML and injects the ClawBox bar + auth token.
- * Used by both the root route and the catch-all gateway route.
+ * Fetches the gateway SPA HTML and injects the ClawBox bar, the auth token and
+ * the `EMAIL:` directive handling. Its one caller is the catch-all gateway
+ * route (`src/app/[...gateway]/route.ts`), which reaches it only for a
+ * NAVIGATION — a script `fetch()` for the same path is proxied as bytes.
  */
 export async function serveGatewayHTML(
   request: NextRequest
 ): Promise<NextResponse> {
   try {
+    // The token is injected ONLY for a caller who proved they are the owner.
+    //
+    // This page is the one place a gateway credential leaves the device, and
+    // it used to be handed to anyone who could reach a path that landed here.
+    // Several could, without a session: `/fonts/…` is an unconditional public
+    // prefix, middleware matches on a LOWER-CASED path while the router uses
+    // the raw one (so `/Login`, `/Manifest.json`, `/SW.JS` folded into the
+    // public list and then fell through to this route), and the middleware
+    // matcher skips `fonts/` and `images/` entirely. Each was a full gateway
+    // credential on the open internet through the tunnel.
+    //
+    // Gating HERE rather than only patching those paths is the point: this
+    // route owns the secret, so it does not matter which gate upstream is
+    // wrong or is added wrongly later. Without a session the shell is still
+    // served — first-boot and the login redirect keep working — it simply
+    // carries no token, and the UI then asks for one the normal way.
     const [res, gatewayToken] = await Promise.all([
       fetch(`http://127.0.0.1:${GATEWAY_PORT}/`, {
         cache: "no-store",
         signal: AbortSignal.timeout(3000),
       }),
-      getGatewayToken(),
+      hasOwnerSession(request).then((owner) => (owner ? getGatewayToken() : "")),
     ]);
     if (!res.ok) {
       return redirectToSetup(request);
@@ -269,7 +309,21 @@ export async function serveGatewayHTML(
   }catch(e){}
 })();
 </script>`;
-    html = html.replace(/<body\b[^>]*>/i, `$&${CLAWBOX_BAR}${wsScript}`);
+    // TASK-700: the gateway's own Control UI chat is a third `webchat` surface
+    // and showed `EMAIL:<uid>` as a bare internal id. No outbound hook can
+    // separate it from ClawBox's own two chats, so the directive handling rides
+    // in with the bar — on the page ClawBox already serves and already injects
+    // into. Not gated on the owner session: the shell is served without one and
+    // an id on screen is not a credential.
+    const emailDirectives = controlUiEmailDirectiveScript(await controlUiLocale());
+    // A replacer FUNCTION, not a string: `$&`, `` $` ``, `$'` and `$1` are
+    // substitutions inside a replacement string, and the injected script now
+    // carries a translated label — one `$'` from a translator would otherwise
+    // duplicate the rest of the document into the page.
+    html = html.replace(
+      /<body\b[^>]*>/i,
+      (match) => `${match}${CLAWBOX_BAR}${wsScript}${emailDirectives}`,
+    );
     return new NextResponse(html, {
       status: 200,
       headers: {
@@ -280,4 +334,109 @@ export async function serveGatewayHTML(
   } catch {
     return redirectToSetup(request);
   }
+}
+
+// ─── Gateway HTTP proxy ───
+//
+// /assets/* and /api/* used to reach the gateway through next.config.ts
+// `beforeFiles` rewrites. Next's rewrite proxy stamps its OWN
+// x-forwarded-{for,host,proto,port} onto every hop it makes, and OpenClaw 2
+// refuses any request presenting proxy attribution from an address it was not
+// told to trust: 403 {"type":"proxy_attribution_required"}. So the Control UI
+// 403'd on every asset — /chat itself still rendered (serveGatewayHTML fetches
+// it server-side and never forwards those headers) and not one byte of its JS
+// or CSS did, which is the "OpenClaw app is a dark rectangle" report.
+//
+// production-server.js already fixed this for WebSocket upgrades by DROPPING
+// the forwarded-client headers, so each proxied hop looks like the clean
+// loopback client it really is. This is that same strip for ordinary HTTP —
+// keep the two header sets in sync.
+//
+// Deliberately NOT solved with `gateway.trustedProxies`: that trusts the hop
+// but then rejects any request whose resolved client IP is itself loopback
+// (`isLoopbackAddress(clientIp)` -> unattributable-proxy), so browsing the
+// desktop from the box's own browser would keep 403ing.
+const FORWARDED_CLIENT_HEADERS = new Set([
+  "x-real-ip", "forwarded", "true-client-ip", "cdn-loop",
+  "cf-connecting-ip", "cf-connecting-ipv6", "cf-ipcountry", "cf-visitor", "cf-ray", "cf-warp-tag-id",
+]);
+
+// Connection-scoped headers must not be forwarded to the upstream hop, and
+// undici rejects some of them outright on an outgoing fetch.
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection", "keep-alive", "transfer-encoding", "upgrade",
+  "proxy-authenticate", "proxy-authorization", "te", "trailer",
+]);
+
+/** Statuses whose response must not carry a body (undici throws if one does). */
+const BODILESS_STATUSES = new Set([204, 205, 304]);
+
+/**
+ * The request headers to send upstream: everything the client sent, minus the
+ * forwarded-client family (the whole point — see above), minus hop-by-hop
+ * headers, with Origin rewritten to the port-less loopback form the gateway's
+ * `controlUi.allowedOrigins` allowlist carries. Exported for the unit test.
+ */
+export function gatewayProxyHeaders(source: Headers): Headers {
+  const headers = new Headers();
+  source.forEach((value, name) => {
+    const lc = name.toLowerCase();
+    if (lc.startsWith("x-forwarded-")) return;
+    if (FORWARDED_CLIENT_HEADERS.has(lc)) return;
+    if (HOP_BY_HOP_HEADERS.has(lc)) return;
+    // Let undici derive Host from the upstream URL, and never let a client's
+    // Content-Length describe a body we may re-frame.
+    if (lc === "host" || lc === "content-length") return;
+    headers.set(name, value);
+  });
+  headers.set("origin", "http://127.0.0.1");
+  // The gateway would happily gzip for us, but undici transparently decodes the
+  // body while the upstream Content-Encoding header would survive the copy —
+  // ask for identity instead of shipping a header that lies about the bytes.
+  headers.set("accept-encoding", "identity");
+  return headers;
+}
+
+/**
+ * Reverse-proxy one request to the OpenClaw gateway with client attribution
+ * stripped. Path and query come from the request itself, so the caller does not
+ * have to reassemble a catch-all segment.
+ *
+ * No timeout: /api/* carries the gateway's streaming endpoints, and an
+ * AbortSignal would cut a long-lived response at the deadline.
+ */
+export async function proxyGatewayRequest(request: NextRequest): Promise<NextResponse> {
+  const upstream = `http://127.0.0.1:${GATEWAY_PORT}${request.nextUrl.pathname}${request.nextUrl.search}`;
+  const method = request.method.toUpperCase();
+  const hasBody = method !== "GET" && method !== "HEAD";
+
+  let res: Response;
+  try {
+    res = await fetch(upstream, {
+      method,
+      headers: gatewayProxyHeaders(request.headers),
+      body: hasBody ? request.body : undefined,
+      // Streaming request bodies need the half-duplex opt-in; it is not in the
+      // DOM RequestInit type Next ships, hence the cast.
+      ...(hasBody ? { duplex: "half" } : {}),
+      redirect: "manual",
+      cache: "no-store",
+    } as RequestInit);
+  } catch {
+    return NextResponse.json(
+      { error: "Gateway unavailable" },
+      { status: 502, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+
+  const headers = new Headers(res.headers);
+  headers.delete("content-encoding");
+  headers.delete("content-length");
+  for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
+
+  return new NextResponse(BODILESS_STATUSES.has(res.status) ? null : res.body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers,
+  });
 }

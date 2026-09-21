@@ -13,6 +13,9 @@ vi.mock("@/lib/code-projects", () => ({
   deleteFile: vi.fn().mockResolvedValue(undefined),
   searchFiles: vi.fn().mockResolvedValue([]),
   buildProject: vi.fn().mockResolvedValue({ url: "/test", filesInlined: 0 }),
+  // Absolute, and stubbed as such: the agent edits these files from a process
+  // with a different working directory, so a relative path resolves elsewhere.
+  projectPath: vi.fn((id: string) => `/home/clawbox/clawbox/data/code-projects/${id}`),
   validateProjectId: vi.fn((id: string) => /^[a-zA-Z0-9_-]{1,64}$/.test(id)),
   NotFoundError: class extends Error { constructor(m: string) { super(m); this.name = "NotFoundError"; } },
   ValidationError: class extends Error { constructor(m: string) { super(m); this.name = "ValidationError"; } },
@@ -65,6 +68,9 @@ describe("/setup-api/code", () => {
     const body = await res.json();
     expect(body.success).toBe(true);
     expect(body.project.projectId).toBe("test");
+    // The path the agent is handed has to be absolute — see
+    // src/tests/unit/mcp-code-project-paths.test.ts for why.
+    expect(body.path).toBe("/home/clawbox/clawbox/data/code-projects/test");
   });
 
   it("init: rejects invalid ID", async () => {
@@ -83,11 +89,21 @@ describe("/setup-api/code", () => {
     expect(body.projects).toEqual([]);
   });
 
+  it("list-projects: carries an absolute path per project", async () => {
+    vi.mocked(listProjects).mockResolvedValueOnce([
+      { projectId: "notes", name: "Notes", color: "", description: "", created: "", updated: "" },
+    ]);
+    const res = await POST(req({ action: "list-projects" }));
+    const body = await res.json();
+    expect(body.projects[0].path).toBe("/home/clawbox/clawbox/data/code-projects/notes");
+  });
+
   it("get-project: returns project", async () => {
     mockGetProject.mockResolvedValue({ projectId: "test", name: "Test", color: "", description: "", created: "", updated: "" });
     const res = await POST(req({ action: "get-project", projectId: "test" }));
     const body = await res.json();
     expect(body.project.projectId).toBe("test");
+    expect(body.path).toBe("/home/clawbox/clawbox/data/code-projects/test");
   });
 
   it("delete-project: deletes", async () => {
@@ -100,6 +116,7 @@ describe("/setup-api/code", () => {
     const res = await POST(req({ action: "file-list", projectId: "test" }));
     const body = await res.json();
     expect(body.files).toEqual([]);
+    expect(body.path).toBe("/home/clawbox/clawbox/data/code-projects/test");
   });
 
   it("file-read: returns content", async () => {
@@ -138,6 +155,55 @@ describe("/setup-api/code", () => {
     const body = await res.json();
     expect(body.matches).toHaveLength(1);
     expect(body.total).toBe(1);
+  });
+
+  it("search: forwards caseSensitive and maxResults, and no regex option", async () => {
+    await POST(req({ action: "search", projectId: "test", pattern: "x", caseSensitive: true, maxResults: 5, regex: false }));
+    expect(mockSearchFiles).toHaveBeenCalledWith("test", "x", { caseSensitive: true, maxResults: 5 });
+    expect(mockSearchFiles.mock.calls[0][2]).not.toHaveProperty("regex");
+  });
+
+  it("search: refuses regex:true with 400 regex_unsupported rather than quietly matching text", async () => {
+    // The regex branch was the ReDoS: "(a+)+$" pinned the whole web server.
+    // An old caller that still asks gets an honest refusal, never a search
+    // that silently means something else.
+    const res = await POST(req({ action: "search", projectId: "test", pattern: "(a+)+$", regex: true }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "Regex search is not supported — use a plain-text pattern",
+      code: "regex_unsupported",
+    });
+    expect(mockSearchFiles).not.toHaveBeenCalled();
+  });
+
+  it("search: a non-string pattern is 400 invalid_pattern, not a 500 from searchFiles", async () => {
+    // `!pattern` let `{}` and `42` through, and searchFiles' `.toLowerCase()`
+    // turned the caller's typo into a server error.
+    for (const pattern of [{}, 42, ["a"], true]) {
+      const res = await POST(req({ action: "search", projectId: "test", pattern }));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: "Search pattern must be a string",
+        code: "invalid_pattern",
+      });
+    }
+    expect(mockSearchFiles).not.toHaveBeenCalled();
+  });
+
+  it("search: a missing or empty pattern is still the plain 400 it always was", async () => {
+    for (const body of [{ action: "search", projectId: "test" }, { action: "search", projectId: "test", pattern: "" }]) {
+      const res = await POST(req(body));
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Search pattern required");
+    }
+    expect(mockSearchFiles).not.toHaveBeenCalled();
+  });
+
+  it("search: any truthy regex value is refused — the string \"false\" switched the old branch on", async () => {
+    const res = await POST(req({ action: "search", projectId: "test", pattern: "x", regex: "false" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("regex_unsupported");
+    expect(mockSearchFiles).not.toHaveBeenCalled();
   });
 
   it("build: builds project", async () => {

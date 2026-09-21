@@ -6,6 +6,10 @@ summary: "Symptom-first fixes for ClawBox issues — connection, login, updates,
 
 Find your symptom below. Each section starts with the fastest checks and escalates to deeper fixes — run them in order. Commands marked **over SSH** are typed after connecting with `ssh clawbox@YOUR_BOX_IP` (your box password).
 
+<Frame caption="Settings → System, the first place to look when the box is behaving oddly">
+  <img src="/images/4.0/settings-system.png" alt="The System settings panel: device uptime, hostname, operating system, kernel and architecture, with CPU, memory and disk meters below." />
+</Frame>
+
 <Tip>
 **Fast triage:** Is the box reachable at all? → [Can't reach the ClawBox](#i-cant-reach-the-clawbox). Reachable but login fails? → [Browser rejects my password](#the-browser-rejects-my-password-but-ssh-accepts-it). Logged in but AI errors? → [AI provider errors](#ai-provider-errors-401-incorrect-api-key). Update problems? → [Updates](#updates-say-up-to-date-but-the-version-is-old).
 </Tip>
@@ -41,7 +45,7 @@ Find your symptom below. Each section starts with the fastest checks and escalat
 
 ## The browser rejects my password (but SSH accepts it)
 
-There is **no separate admin password** — the browser login uses the same system password as SSH. When SSH accepts it but the browser says *Incorrect password*, work down this ladder:
+There is **no separate admin password** — the browser login uses the same system password as SSH. When SSH accepts it but the browser says *Incorrect password*, work down this ladder. (If *neither* accepts it — the password is forgotten, not mistyped — that's a different page: [Forgot the Password](/support/password-recovery).)
 
 <Steps>
   <Step title="Confirm you're on the right page">
@@ -101,7 +105,7 @@ There is **no separate admin password** — the browser login uses the same syst
 
 ## Updates say "up to date" but the version is old
 
-The updater only offers a release when the device's code history matches the official release line. A box whose code was modified locally (committed changes — e.g. by an on-box agent or manual edits) **silently stops seeing updates** on v3.1.4 and earlier.
+The updater only offers a release when the device's code history matches the official release line. A box whose code was modified locally (committed changes, for example by an on-box agent or by hand) **stops seeing updates** until that divergence is resolved.
 
 <AccordionGroup>
   <Accordion title="Check whether the device has diverged (over SSH)">
@@ -163,13 +167,13 @@ A ClawBox update is more than `git pull` — the installer also refreshes the **
   <Accordion title="'Incorrect API key … sk-proj-…' after switching OpenAI to the ChatGPT subscription">
     Cause: OpenAI has two separate lanes with different credentials, and after a switch an old dead API key can keep being used — recurring `401` on every reply, returning after each restart. (Full explanation: [AI Providers](/technical/ai-providers).)
 
-    **Fix now, on any version:** open **Settings → AI**, choose **ChatGPT (sign in with ChatGPT)**, complete the sign-in again — then reboot once and confirm it still works after the restart. The beta channel (and the next stable release) [self-heals this on boot](/technical/ai-providers#self-healing-on-boot-beta-channel); if the manual fix doesn't stick, contact support.
+    **Fix now, on any version:** open **Settings → Providers**, choose **ChatGPT (sign in with ChatGPT)**, complete the sign-in again — then reboot once and confirm it still works after the restart. The beta channel (and the next stable release) [self-heals this on boot](/technical/ai-providers#self-healing-on-boot-beta-channel); if the manual fix doesn't stick, contact support.
   </Accordion>
   <Accordion title="Replies stopped after changing provider or plan">
-    Re-save the provider in **Settings → AI** (this rewrites the full provider config), then reboot. Check quota/billing on the provider's dashboard — an exhausted key returns errors that look like auth failures.
+    Re-save the provider in **Settings → Providers** (this rewrites the full provider config), then reboot. Check quota/billing on the provider's dashboard — an exhausted key returns errors that look like auth failures.
   </Accordion>
   <Accordion title="Local models (Ollama / llama.cpp) not responding">
-    Local models share the Jetson's memory — only one local runtime is active at a time. Check status in **Settings → AI**. Over SSH: `systemctl status ollama` and retry after `sudo systemctl restart ollama`.
+    Local models share the Jetson's memory — only one local runtime is active at a time. Check status in **Settings → Providers**. Over SSH: `systemctl status ollama` and retry after `sudo systemctl restart ollama`.
   </Accordion>
 </AccordionGroup>
 
@@ -216,6 +220,33 @@ When contacting support, include the relevant log tail — it usually pins the c
 journalctl -u clawbox-setup -n 50 --no-pager     # web app / login / setup API
 journalctl -u clawbox-gateway -n 50 --no-pager   # AI gateway / providers / channels
 ```
+
+The journal is **persistent** — it lives in `/var/log/journal` and survives a
+reboot, so a log tail is still useful after the box has been power-cycled. Add
+`-b -1` to read the previous boot, or `--since "1 hour ago"`.
+
+Every HTTP request the web app serves is logged to the `clawbox-setup` journal,
+which is the fastest way to tell whether a request reached the device at all and
+where it came from:
+
+```bash
+journalctl -u clawbox-setup --no-pager | grep '\[access\]'
+# [access] 200 GET /setup-api/system/stats 9ms ip=192.168.50.10 host=clawbox.local
+```
+
+`ip=` is the real client address (it reads Cloudflare's `CF-Connecting-IP`, so
+requests arriving over Remote Access show the visitor, not `127.0.0.1`), and
+`host=` is the hostname the request arrived on — useful for telling LAN traffic
+apart from traffic through a `*.trycloudflare.com` Remote Access URL. Sensitive
+query values are replaced with `REDACTED`.
+
+<Note>
+The first ~10 seconds of every boot (roughly 888 kernel lines) are timestamped
+about a year early. The Jetson Orin Nano has no battery-backed real-time clock,
+so the kernel starts with an incorrect date and only picks up the right one when
+the `nvvrs-pseq-rtc` driver hands over. Timestamps after that point — including
+everything from ClawBox's own services — are correct.
+</Note>
 
 You can also message the assistant `/diagnostics` in chat (if it's responding) to get a self-report.
 

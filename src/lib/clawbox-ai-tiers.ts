@@ -31,6 +31,18 @@ export interface ClawaiTierInfo {
   hasTrial: boolean;
   /** Bullet copy shown in the highlight card. */
   features: string[];
+  /* ── The same three, as translation keys ──
+   *
+   * This module cannot call `t()`: it is imported by a route (see the header)
+   * and by the Hermes panel, so it stays pure data. The English above is the
+   * FLOOR the picker falls back to when a locale pack has not reached a key —
+   * `t()` answers with the raw key when it is missing, and "ai.planNameMax" on
+   * the price line would be worse than "Max plan". `featureKeys` is index-for-
+   * index with `features`; the copy test pins that.
+   */
+  planNameKey: string;
+  pricePeriodKey: string;
+  featureKeys: string[];
   /** Tailwind palette classes for the highlight card + selector pill. */
   cardClass: string;
   cardHeadlineClass: string;
@@ -41,15 +53,23 @@ export interface ClawaiTierInfo {
 export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
   free: {
     planName: "Free plan",
+    planNameKey: "ai.planNameFree",
     pillLabel: "Free",
     priceEuro: 0,
     pricePeriod: "free forever",
+    pricePeriodKey: "ai.planPeriodFree",
     hasTrial: false,
     features: [
       "Standard daily usage",
       "DeepSeek V4 Flash",
       "1 GB ClawKeep cloud backups",
       "Portal access",
+    ],
+    featureKeys: [
+      "ai.planFeatureStandardUsage",
+      "ai.planFeatureFlashModel",
+      "ai.planFeatureBackups1gb",
+      "ai.planFeaturePortal",
     ],
     cardClass: "border-white/10 bg-white/[0.03]",
     cardHeadlineClass: "text-gray-100",
@@ -58,9 +78,11 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
   },
   flash: {
     planName: "Pro plan",
+    planNameKey: "ai.planNamePro",
     pillLabel: "Pro",
     priceEuro: 9,
     pricePeriod: "/month",
+    pricePeriodKey: "ai.planPeriodMonth",
     // Pro bills from day one; flip to true if a trial returns.
     hasTrial: false,
     features: [
@@ -71,6 +93,14 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
       "Priority processing",
       "Email support",
     ],
+    featureKeys: [
+      "ai.planFeature5xUsage",
+      "ai.planFeatureFlashModel",
+      "ai.planFeatureBackups5gb",
+      "ai.planFeatureRemoteDesktop",
+      "ai.planFeaturePriority",
+      "ai.planFeatureEmailSupport",
+    ],
     cardClass: "border-orange-400/20 bg-orange-500/5",
     cardHeadlineClass: "text-orange-100",
     cardCheckClass: "text-orange-300",
@@ -78,9 +108,11 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
   },
   pro: {
     planName: "Max plan",
+    planNameKey: "ai.planNameMax",
     pillLabel: "Max",
     priceEuro: 49,
     pricePeriod: "/month",
+    pricePeriodKey: "ai.planPeriodMonth",
     hasTrial: true,
     features: [
       "Maximum usage",
@@ -89,6 +121,14 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
       "Remote Desktop access",
       "Highest priority",
       "Full Support — real humans via Call/Meeting",
+    ],
+    featureKeys: [
+      "ai.planFeatureMaxUsage",
+      "ai.planFeatureProModel",
+      "ai.planFeatureBackups50gb",
+      "ai.planFeatureRemoteDesktop",
+      "ai.planFeatureHighestPriority",
+      "ai.planFeatureFullSupport",
     ],
     cardClass:
       "border-fuchsia-400/25 bg-gradient-to-br from-fuchsia-500/10 via-pink-500/5 to-transparent",
@@ -100,9 +140,16 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
 
 export const CLAWAI_TIER_ORDER: readonly ClawaiTier[] = ["free", "flash", "pro"] as const;
 
-/** The one marketing line for ClawBox AI. Both panels render this string. */
+/** The one marketing line for ClawBox AI, in English. No component renders
+ *  this string any more — the shared row asks the catalogue through the key
+ *  below (locale sweep DE-1, 2026-09-07). It is what the `en` pack must carry
+ *  under that key, and `clawbox-ai-plan-copy.test.ts` pins the two together so
+ *  the catalogue and this copy cannot drift. */
 export const CLAWBOX_AI_DESCRIPTION =
   "All-in cloud AI for ClawBox — backups, remote desktop, full support";
+
+/** The catalogue key both panels draw the line from. */
+export const CLAWBOX_AI_DESCRIPTION_KEY = "ai.clawboxAiDescription";
 
 export function normalizeClawaiUiTier(value: unknown): ClawaiTier | null {
   return value === "free" || value === "flash" || value === "pro" ? value : null;
@@ -125,4 +172,45 @@ export function uiTierToDeviceTier(tier: ClawaiTier): ClawboxAiTier {
  */
 export function deviceTierToUiTier(stored: string | null | undefined): ClawaiTier {
   return stored === "pro" ? "pro" : stored === "flash" ? "flash" : "free";
+}
+
+/**
+ * The UI tier the customer last chose, or the safe default.
+ *
+ * "flash" ("Pro plan") is the default only because it is what the connect flow
+ * pre-selects for someone who has not paired anything yet. It must never be
+ * used as the answer for a box that IS paired — see `resolveUiTier`.
+ */
+export function readStoredUiTier(): ClawaiTier {
+  if (typeof window === "undefined") return "flash";
+  try {
+    return normalizeClawaiUiTier(window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY)) ?? "flash";
+  } catch {
+    return "flash";
+  }
+}
+
+/**
+ * Which PLAN card to show for a paired device.
+ *
+ * The device tier cannot represent Free: `uiTierToDeviceTier` maps both "free"
+ * and "flash" to the device's "flash" (Free and Pro run the same DeepSeek V4
+ * Flash weights), so a stored "flash" means Free OR Pro. Trusting local storage
+ * blindly showed "Pro plan — €9/month" to a Free user; trusting it on a paired
+ * Max box shows "Pro plan — €9/month" to someone paying €49 (TASK-468). "pro"
+ * (Max) is unambiguous and always wins over local storage.
+ *
+ * `hasToken` is what makes this safe for the wizard: an UNPAIRED box has no
+ * account to reconcile against, and the picker there is the customer choosing a
+ * plan they do not have yet, so their stored intent must survive untouched.
+ *
+ * Shared by both provider panels on purpose. The OpenClaw panel read only local
+ * storage for months while the Hermes panel had this rule, which is exactly the
+ * drift this module exists to prevent.
+ */
+export function resolveUiTier(hasToken: boolean, tierStored: string | null | undefined): ClawaiTier {
+  if (!hasToken) return readStoredUiTier();
+  const device = deviceTierToUiTier(tierStored);
+  if (device !== "flash") return device;
+  return readStoredUiTier() === "free" ? "free" : "flash";
 }

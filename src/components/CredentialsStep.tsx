@@ -3,10 +3,38 @@
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import StatusMessage from "./StatusMessage";
 import CredentialsHandoffOverlay from "./CredentialsHandoffOverlay";
+import CredentialsWriteDownDialog from "./CredentialsWriteDownDialog";
 import { useT } from "@/lib/i18n";
 
 interface CredentialsStepProps {
   onNext: () => void;
+  /** Hermes edition: the save/AP-handoff overlay takes the agent's palette. */
+  hermes?: boolean;
+}
+
+/**
+ * One submit, frozen at the moment it validated.
+ *
+ * The step's fields are not the only writers of its state: the mount-time reads
+ * of `/setup-api/system/hotspot` and `/setup-api/system/hostname` also set the
+ * device name, the hotspot's name and whether the hotspot is on at all. The
+ * write-down confirmation puts a human-length pause between "these are your
+ * passwords" and the request that applies them, and a late read landing inside
+ * that pause could otherwise change the SSID — or switch the hotspot off —
+ * between the values the customer wrote down and the values actually saved.
+ *
+ * So the submit carries its own values. What was validated is what is shown,
+ * and what is shown is what is sent.
+ */
+interface CredentialsSubmission {
+  /** Normalized, without the `.local` suffix. */
+  hostname: string;
+  password: string;
+  hotspotEnabled: boolean;
+  /** Trimmed. Falls back to the product default when the hotspot is off. */
+  hotspotName: string;
+  /** Empty when the hotspot is off — nothing to set. */
+  hotspotPassword: string;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -76,7 +104,7 @@ function FieldLabel({ htmlFor, children }: { htmlFor: string; children: ReactNod
   );
 }
 
-export default function CredentialsStep({ onNext }: CredentialsStepProps) {
+export default function CredentialsStep({ onNext, hermes = false }: CredentialsStepProps) {
   const { t } = useT();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -91,17 +119,35 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const [hotspotEnabled, setHotspotEnabled] = useState(true);
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Both passwords on this screen are write-only once saved: nothing on the box
+  // can read either back, and a customer who forgets one is locked out of sudo
+  // and SSH with only a factory reset to recover. So the save is interposed —
+  // the values are read back in full and acknowledged before anything is sent.
+  // Non-null means the confirmation is up, and holds the exact values it is
+  // showing, which are the exact values Continue will send.
+  const [pending, setPending] = useState<CredentialsSubmission | null>(null);
   // Purely presentational disclosure state. Both fields behind them already
   // carry a working default read back from the device, so the screen opens on
   // what the customer must supply and keeps what they may rename one tap away.
   const [nameOpen, setNameOpen] = useState(false);
   const [hotspotNameOpen, setHotspotNameOpen] = useState(false);
   // The hotspot secret is the one disclosure here with no working default
-  // behind it, so the row that opens it states the outstanding requirement
-  // rather than merely hinting there is a field.
-  const [hotspotSecretOpen, setHotspotSecretOpen] = useState(false);
+  // behind it — and it is the only one whose fields the primary action waits
+  // for. Collapsed, that made Connect unavailable for a reason nothing on the
+  // screen was showing, so it OPENS ON ARRIVAL, while both fields are still
+  // empty. The owner may still collapse it; it is a disclosure, not a panel
+  // nailed open.
+  const [hotspotSecretOpen, setHotspotSecretOpen] = useState(true);
+  // …and if they collapsed it and then filled both system passwords, the
+  // hotspot secret is by then the ONLY thing left holding the button, so the
+  // panel comes back — once. The ref is what keeps that a single nudge rather
+  // than a disclosure that refuses to close.
+  const reopenedForSystemPassword = useRef(false);
   const [status, setStatus] = useState<{
-    type: "success" | "error";
+    // "info" is the saved-but-not-fully-applied case: the hotspot settings are
+    // on disk, and the radio did not do what they say. Reporting that as plain
+    // success is what let a failed AP toggle read as "Settings saved!".
+    type: "success" | "error" | "info";
     message: string;
   } | null>(null);
   // When a save restarts the setup AP (and/or renames the device), the connection
@@ -110,6 +156,8 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     targetUrl: string;
     sameOrigin: boolean;
     hotspotSsid: string | null;
+    /** A saved-but-not-applied hotspot toggle, carried across the reconnect. */
+    notice?: string | null;
   } | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveControllerRef = useRef<AbortController | null>(null);
@@ -141,54 +189,89 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     };
   }, []);
 
-  const save = async () => {
+  /**
+   * Everything the save used to check before it sent anything. Split out so the
+   * write-down confirmation can stand between a VALID form and the first
+   * request: an invalid form still fails where it always did, at the field,
+   * with no dialog in the way.
+   */
+  const validate = (): CredentialsSubmission | null => {
     setTouched(true);
     // Validate hostname
-    const normalizedHostname = hostname.trim().toLowerCase().replace(/\.local$/, "");
-    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(normalizedHostname)) {
+    const normalized = hostname.trim().toLowerCase().replace(/\.local$/, "");
+    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(normalized)) {
       setStatus({ type: "error", message: t("credentials.hostnameInvalid") });
-      return;
+      return null;
     }
     // Validate system password (required)
     if (!password) {
       setStatus({ type: "error", message: t("credentials.passwordRequired") });
-      return;
+      return null;
     }
     if (password.length < 8) {
       setStatus({
         type: "error",
         message: t("credentials.passwordMinLength"),
       });
-      return;
+      return null;
     }
     if (password !== confirmPassword) {
       setStatus({ type: "error", message: t("credentials.passwordsDontMatch") });
-      return;
+      return null;
     }
 
     // Validate hotspot fields (only when enabled)
     if (hotspotEnabled) {
       if (!hotspotName.trim()) {
         setStatus({ type: "error", message: t("credentials.hotspotNameRequired") });
-        return;
+        return null;
       }
       if (!hotspotPassword) {
         setStatus({ type: "error", message: t("credentials.hotspotPasswordRequired") });
-        return;
+        return null;
       }
       if (hotspotPassword.length < 8) {
         setStatus({
           type: "error",
           message: t("credentials.hotspotPasswordMinLength"),
         });
-        return;
+        return null;
       }
       if (hotspotPassword !== confirmHotspotPassword) {
         setStatus({ type: "error", message: t("credentials.hotspotPasswordsDontMatch") });
-        return;
+        return null;
       }
     }
+    return {
+      hostname: normalized,
+      password,
+      hotspotEnabled,
+      hotspotName: hotspotEnabled ? hotspotName.trim() : "ClawBox-Setup",
+      hotspotPassword: hotspotEnabled ? hotspotPassword : "",
+    };
+  };
 
+  /** The button's (and Enter's) action: validate, then ask before saving. */
+  const requestSave = () => {
+    if (saving || pending) return;
+    const submission = validate();
+    if (!submission) return;
+    setStatus(null);
+    setPending(submission);
+  };
+
+  /**
+   * Apply the step: device name, then the system password, then the hotspot.
+   *
+   * Unchanged by the write-down confirmation — it still sends exactly these
+   * three requests, in this order, and still hands off to the reconnect
+   * overlay when the save takes the connection down with it. What moved is
+   * where its values come from: the confirmed submission, not the live fields,
+   * so a late device read cannot change them out from under the customer
+   * between the acknowledgement and the request.
+   */
+  const save = async (submission: CredentialsSubmission) => {
+    const normalizedHostname = submission.hostname;
     saveControllerRef.current?.abort();
     const controller = new AbortController();
     saveControllerRef.current = controller;
@@ -222,11 +305,11 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
       if (controller.signal.aborted) return;
 
       // Save system password if provided
-      if (password) {
+      if (submission.password) {
         const res = await fetch("/setup-api/system/credentials", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password }),
+          body: JSON.stringify({ password: submission.password }),
           signal: controller.signal,
         });
         if (controller.signal.aborted) return;
@@ -245,9 +328,9 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ssid: hotspotEnabled ? hotspotName.trim() : "ClawBox-Setup",
-          password: hotspotEnabled ? (hotspotPassword || undefined) : undefined,
-          enabled: hotspotEnabled,
+          ssid: submission.hotspotName,
+          password: submission.hotspotPassword || undefined,
+          enabled: submission.hotspotEnabled,
         }),
         signal: controller.signal,
       });
@@ -267,10 +350,27 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
       // device name changed the box reappears at a new *.local origin. Either
       // way the overlay probes until the box answers, then continues.
       const apRestarted = hotspotData.apRestarted === true;
+      // A save whose AP toggle THREW is saved, not applied. The route now says
+      // which of the two happened (`apAction`) instead of answering both with
+      // apRestarted:false, and the owner is told rather than shown "Settings
+      // saved!". The text comes from the route, like the error text above it.
+      const apFailed = hotspotData.apAction === "failed";
+      const apWarning = apFailed
+        ? (typeof hotspotData.warning === "string" && hotspotData.warning.trim()
+          ? hotspotData.warning
+          : t("credentials.failedSaveHotspot"))
+        : null;
       const currentHost = window.location.hostname.toLowerCase();
       const hostnameChanged =
         currentHost.endsWith(".local") && currentHost !== newHost && isAllowedRedirect;
 
+      // The handoff wins over the AP warning, and only in one combination: the
+      // device was ALSO renamed, so this origin is about to stop answering.
+      // (`apRestarted` and `apFailed` are mutually exclusive — a toggle that
+      // threw restarted nothing.) Holding a message on a page the box is no
+      // longer reachable at would strand the customer, so the reconnect goes
+      // first; the hotspot warning is still recoverable from Settings, where
+      // the same verdict is read.
       if (apRestarted || hostnameChanged) {
         if (timeoutRef.current) clearTimeout(timeoutRef.current);
         setHandoff({
@@ -278,8 +378,20 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
             ? newSetupUrl.toString()
             : new URL("/setup", window.location.href).toString(),
           sameOrigin: !hostnameChanged,
-          hotspotSsid: apRestarted && hotspotEnabled ? hotspotName.trim() : null,
+          hotspotSsid: apRestarted && submission.hotspotEnabled ? submission.hotspotName : null,
+          // A rename plus a failed AP toggle is the one combination where the
+          // warning would otherwise be lost: this origin is about to stop
+          // answering, so it travels with the reconnect instead of being held
+          // on a page the box is leaving.
+          notice: apWarning,
         });
+        return;
+      }
+
+      if (apWarning) {
+        setStatus({ type: "info", message: apWarning });
+        // No auto-advance: the one thing that must not happen here is the
+        // message being replaced by the next step before it has been read.
         return;
       }
 
@@ -305,7 +417,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
             ? newSetupUrl.toString()
             : new URL("/setup", window.location.href).toString(),
           sameOrigin: !hostnameChanged,
-          hotspotSsid: hotspotEnabled ? hotspotName.trim() : null,
+          hotspotSsid: submission.hotspotEnabled ? submission.hotspotName : null,
         });
         return;
       }
@@ -365,20 +477,59 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   // so the button can paint the two reasons differently: "not yet" (something
   // is still missing) is a quiet control, while "in flight" keeps its coral —
   // the action is happening, and coral means ACTION.
-  const incomplete =
-    !password ||
-    !confirmPassword ||
-    (hotspotEnabled && (!hotspotPassword || !confirmHotspotPassword));
+  const systemSecretMissing = !password || !confirmPassword;
+  const hotspotSecretOutstanding = hotspotEnabled && hotspotSecretMissing;
+  const incomplete = systemSecretMissing || hotspotSecretOutstanding;
   const blocked = saving || incomplete;
+
+  // Why the button will not move, in the same words as the fields it is
+  // waiting on. A disabled control that explains nothing is the whole defect:
+  // the only clue used to be a grey "Minimum 8 characters" on a collapsed row
+  // the owner had no reason to open.
+  const blockedReasonKey = saving
+    ? null
+    : systemSecretMissing && hotspotSecretOutstanding
+      ? "credentials.blockedBoth"
+      : systemSecretMissing
+        ? "credentials.blockedSystem"
+        : hotspotSecretOutstanding
+          ? "credentials.blockedHotspot"
+          : null;
+
+  // The second half of the disclosure's promise (see `hotspotSecretOpen`):
+  // both system passwords in and the hotspot secret still empty means this is
+  // the last outstanding field, so re-open the panel that holds it — once.
+  useEffect(() => {
+    if (reopenedForSystemPassword.current) return;
+    if (systemSecretMissing || !hotspotSecretOutstanding) return;
+    reopenedForSystemPassword.current = true;
+    setHotspotSecretOpen(true);
+  }, [systemSecretMissing, hotspotSecretOutstanding]);
 
   return (
     <div className="w-full max-w-[520px]" data-testid="setup-step-credentials">
       {handoff && (
         <CredentialsHandoffOverlay
+          hermes={hermes}
           targetUrl={handoff.targetUrl}
           sameOrigin={handoff.sameOrigin}
           hotspotSsid={handoff.hotspotSsid}
+          notice={handoff.notice ?? null}
           onContinue={onNext}
+        />
+      )}
+      {pending && !handoff && (
+        <CredentialsWriteDownDialog
+          hermes={hermes}
+          systemPassword={pending.password}
+          hotspotPassword={pending.hotspotEnabled ? pending.hotspotPassword : null}
+          hotspotSsid={pending.hotspotName}
+          onCancel={() => setPending(null)}
+          onConfirm={() => {
+            const submission = pending;
+            setPending(null);
+            void save(submission);
+          }}
         />
       )}
       <div className="card-surface rounded-[var(--r-3)] p-[var(--s-5)] sm:p-[var(--s-7)]">
@@ -447,7 +598,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                   type="text"
                   value={hostname}
                   onChange={(e) => setHostname(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") save(); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") requestSave(); }}
                   maxLength={63}
                   placeholder="clawbox"
                   autoComplete="off"
@@ -484,7 +635,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") save();
+                if (e.key === "Enter") requestSave();
               }}
               placeholder={t("credentials.minChars")}
               autoComplete="new-password"
@@ -494,7 +645,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
             <button
               type="button"
               onClick={() => setShowPassword((v) => !v)}
-              aria-label={showPassword ? "Hide password" : "Show password"}
+              aria-label={showPassword ? t("login.hidePassword") : t("login.showPassword")}
               className={REVEAL}
             >
               {showPassword ? EyeClosed : EyeOpen}
@@ -511,7 +662,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") save();
+                if (e.key === "Enter") requestSave();
               }}
               placeholder={t("credentials.reenterPassword")}
               autoComplete="new-password"
@@ -521,7 +672,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
             <button
               type="button"
               onClick={() => setShowConfirm((v) => !v)}
-              aria-label={showConfirm ? "Hide password" : "Show password"}
+              aria-label={showConfirm ? t("login.hidePassword") : t("login.showPassword")}
               className={REVEAL}
             >
               {showConfirm ? EyeClosed : EyeOpen}
@@ -573,7 +724,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               type="button"
               role="switch"
               aria-checked={hotspotEnabled}
-              aria-label="Enable hotspot"
+              aria-label={t("credentials.enableHotspot")}
               onClick={() => setHotspotEnabled((v) => !v)}
               className="grid place-items-center shrink-0 h-12 px-[var(--s-1)] bg-transparent border-none cursor-pointer"
             >
@@ -607,7 +758,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                 value={hotspotName}
                 onChange={(e) => setHotspotName(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") save();
+                  if (e.key === "Enter") requestSave();
                 }}
                 maxLength={32}
                 className={`${FIELD} ${FIELD_PAD} ${inputBorder(touched && !hotspotName.trim())}`}
@@ -688,7 +839,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                   value={hotspotPassword}
                   onChange={(e) => setHotspotPassword(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") save();
+                    if (e.key === "Enter") requestSave();
                   }}
                   placeholder={t("credentials.minChars")}
                   className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && (!hotspotPassword || hotspotPassword !== confirmHotspotPassword))}`}
@@ -697,7 +848,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                 <button
                   type="button"
                   onClick={() => setShowHotspotPassword((v) => !v)}
-                  aria-label={showHotspotPassword ? "Hide password" : "Show password"}
+                  aria-label={showHotspotPassword ? t("login.hidePassword") : t("login.showPassword")}
                   className={REVEAL}
                 >
                   {showHotspotPassword ? EyeClosed : EyeOpen}
@@ -715,7 +866,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                     value={confirmHotspotPassword}
                     onChange={(e) => setConfirmHotspotPassword(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") save();
+                      if (e.key === "Enter") requestSave();
                     }}
                     placeholder={t("credentials.reenterHotspot")}
                     className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && hotspotPassword !== confirmHotspotPassword)}`}
@@ -724,7 +875,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                   <button
                     type="button"
                     onClick={() => setShowConfirmHotspot((v) => !v)}
-                    aria-label={showConfirmHotspot ? "Hide password" : "Show password"}
+                    aria-label={showConfirmHotspot ? t("login.hidePassword") : t("login.showPassword")}
                     className={REVEAL}
                   >
                     {showConfirmHotspot ? EyeClosed : EyeOpen}
@@ -742,11 +893,12 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         {/* A disabled primary reads "not yet", not "broken": the product's own
             quiet-control recipe, solid. Opacity is deliberately not the signal
             — a button becoming unavailable is a fact, not a fade. */}
-        <div className="mt-[var(--s-6)]">
+        <div className="mt-[var(--s-6)] flex flex-wrap items-center gap-x-[var(--s-4)] gap-y-[var(--s-2)]">
           <button
             type="button"
-            onClick={save}
+            onClick={requestSave}
             disabled={blocked}
+            aria-describedby={blockedReasonKey ? "credentials-blocked-reason" : undefined}
             className={`w-full sm:w-auto inline-flex items-center justify-center gap-[var(--s-2)] min-h-[48px] px-[var(--s-6)] rounded-[var(--r-1)] ${
               incomplete
                 ? "bg-[var(--fill-2)] border border-[var(--hair-2)] text-[var(--text-muted)] cursor-not-allowed"
@@ -765,8 +917,26 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                 className="inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"
               />
             )}
-            {saving ? t("connecting") : t("settings.connect")}
+            {saving ? t("saving") : t("credentials.saveAndContinue")}
           </button>
+          {/* Beside the button, not buried up the form: the reason is only
+              useful where the owner is looking when nothing happens. `status`
+              announces it politely rather than interrupting whatever the
+              screen reader is saying about the field being typed in. */}
+          {blockedReasonKey && (
+            <p
+              id="credentials-blocked-reason"
+              role="status"
+              data-testid="credentials-blocked-reason"
+              className="m-0 text-[var(--amber-ink)]"
+              style={{
+                fontSize: "var(--t-2)",
+                lineHeight: "var(--lh-tight)",
+              }}
+            >
+              {t(blockedReasonKey)}
+            </p>
+          )}
         </div>
       </div>
     </div>

@@ -54,15 +54,19 @@ describe("the message shown for a failed Hermes turn", () => {
   });
 
   it("drops stack frames rather than showing them in a chat bubble", () => {
+    // A REAL CPython traceback prints an indented SOURCE line under every
+    // `File "…"` frame. Omitting it let this test pass against a filter that
+    // only knew about the frame header — the very hole it was meant to close.
     const stderr = [
       "session_id: 20260811_000000_aaaaaa",
       "Traceback (most recent call last):",
-      '  File "/home/clawbox/.hermes/x.py", line 12, in run',
+      '  File "/home/clawbox/.hermes/agent.py", line 88, in _call_provider',
+      '    raise RuntimeError("upstream refused the request")',
       "RuntimeError: upstream refused the request",
     ].join("\n");
     const msg = hermesFailureMessage("", stderr);
     expect(msg).toBe("RuntimeError: upstream refused the request");
-    expect(msg).not.toMatch(/Traceback|File "/);
+    expect(msg).not.toMatch(/Traceback|File "|raise /);
   });
 
   it("returns empty when neither stream says anything, so the caller can be generic", () => {
@@ -72,6 +76,72 @@ describe("the message shown for a failed Hermes turn", () => {
 
   it("bounds the message so a runaway line cannot fill a chat bubble", () => {
     expect(hermesFailureMessage("error: " + "x".repeat(5000), "").length).toBeLessThanOrEqual(400);
+  });
+});
+
+/**
+ * Hermes hard-wraps at ~76 columns. Keeping only the first line therefore cut
+ * every multi-line message mid-clause, and the half that was dropped was the
+ * half the customer could act on. Both stdout blocks below are the exact bytes
+ * captured from `hermes chat -q` on the QA box (TASK-451 / TASK-446).
+ */
+describe("a Hermes message that arrives hard-wrapped", () => {
+  it("keeps the remedy half of 'No inference provider configured'", () => {
+    const stdout = [
+      "No inference provider configured. Run 'hermes model' to choose a provider and",
+      "model, or set an API key (OPENROUTER_API_KEY, OPENAI_API_KEY, etc.) in",
+      "~/.hermes/.env.",
+    ].join("\r\n");
+
+    const msg = hermesFailureMessage(stdout, "");
+
+    // It used to end on a dangling "and".
+    expect(msg).not.toMatch(/\band$/);
+    expect(msg).toContain("OPENROUTER_API_KEY");
+    expect(msg).toContain("~/.hermes/.env");
+    expect(msg).toBe(
+      "No inference provider configured. Run 'hermes model' to choose a provider and "
+      + "model, or set an API key (OPENROUTER_API_KEY, OPENAI_API_KEY, etc.) in ~/.hermes/.env.",
+    );
+  });
+
+  it("keeps the whole context-window explanation, all five lines of it", () => {
+    const stdout = [
+      "Failed to initialize agent: Model qwen2.5:3b has a context window of 32,768",
+      "tokens, which is below the minimum 64,000 required by Hermes Agent. Choose a",
+      "model with at least 64K context. If your server reports a window smaller than",
+      "the model's true window, set model.context_length in config.yaml to the real",
+      "value (this must be at least 64K).",
+    ].join("\n");
+
+    const msg = hermesFailureMessage(stdout, "");
+
+    expect(msg).toContain("at least 64K context");
+    expect(msg).toContain("model.context_length");
+    expect(msg).toMatch(/\)\.$/);
+    expect(msg.length).toBeLessThanOrEqual(400);
+  });
+
+  it("does not glue two independent failures together", () => {
+    const stdout = [
+      "API call failed after 3 retries: HTTP 404: model: claude-opus-4-20250514xxxx",
+      "HTTP 401: invalid api key",
+    ].join("\n");
+    // The second line opens with its own `HTTP nnn` marker, so it is a new
+    // record however long the line above it is.
+    expect(hermesFailureMessage(stdout, "")).toBe(
+      "API call failed after 3 retries: HTTP 404: model: claude-opus-4-20250514xxxx",
+    );
+  });
+
+  it("leaves a short two-line report as two lines", () => {
+    // Nothing was wrapped here — the first line is well under the wrap column.
+    expect(hermesFailureMessage("failed early\nsomething else entirely", "")).toBe("failed early");
+  });
+
+  it("marks a message it had to cut", () => {
+    const long = "error: " + "x".repeat(5000);
+    expect(hermesFailureMessage(long, "").endsWith("…")).toBe(true);
   });
 });
 
@@ -139,5 +209,175 @@ describe("the message shown for an interrupted Hermes turn", () => {
     // so the two must not collapse into one message.
     expect(hermesExitMessage(HERMES_INTERRUPTED_EXIT_CODE, "", INTERRUPTED_STDERR))
       .not.toMatch(/timed out/i);
+  });
+});
+
+/**
+ * A failed turn on a RESUMED session surfaced the resume banner as the error.
+ *
+ * Captured verbatim from the owner's box (2026-08-25, session
+ * 20260825_165225_be089e): `hermes chat -q … --resume` exited 1 with the real
+ * cause on stdout and only bookkeeping on stderr. `errorFromStderr` saw a
+ * non-empty stderr line and returned it, so the chat bubble read
+ * "Error: ↻ Resumed session …" — a status line dressed as a failure — and
+ * the actual `HTTP 403` was discarded without ever being read.
+ */
+describe("a failed turn on a resumed session", () => {
+  // The exact stderr bytes observed on the device.
+  const RESUMED_STDERR = [
+    "",
+    '↻ Resumed session 20260825_165225_be089e "What model are you and what is this machine?" (2 user messages, 7 total messages)',
+    "Model restored from session: claude-fable-5 (anthropic)",
+    "",
+    "session_id: 20260825_165225_be089e",
+    "",
+  ].join("\n");
+
+  it("never reports the resume banner as the error", () => {
+    const msg = hermesFailureMessage("HTTP 403 — Just a moment...", RESUMED_STDERR);
+    expect(msg).not.toMatch(/Resumed session/);
+    expect(msg).toBe("HTTP 403 — Just a moment...");
+  });
+
+  it("treats a resume with nothing else said as silence, so the exit falls back to its code", () => {
+    expect(hermesFailureMessage("", RESUMED_STDERR)).toBe("");
+    expect(hermesExitMessage(1, "", RESUMED_STDERR)).toBe("hermes exited with code 1");
+  });
+
+  it("drops the model-restored line as bookkeeping too", () => {
+    expect(hermesFailureMessage("", "Model restored from session: claude-fable-5 (anthropic)")).toBe("");
+  });
+
+  it("still lets a genuine stderr cause win on a resumed run", () => {
+    const msg = hermesFailureMessage(
+      "partial answer text",
+      `${RESUMED_STDERR}\nHTTP 401: invalid api key`,
+    );
+    expect(msg).toBe("HTTP 401: invalid api key");
+  });
+
+  it("keeps prose that merely mentions a resumed session", () => {
+    // Only a line-leading banner is bookkeeping; an answer ABOUT sessions is not.
+    const stdout = "The error came from a Resumed session banner in your logs.";
+    expect(hermesFailureMessage(stdout, "")).toBe(stdout);
+  });
+
+  it("drops the banner even without its ↻ prefix", () => {
+    const msg = hermesFailureMessage(
+      "HTTP 403 — Just a moment...",
+      'Resumed session 20260825_165225_be089e "t" (1 user message, 5 total messages)',
+    );
+    expect(msg).toBe("HTTP 403 — Just a moment...");
+  });
+});
+
+/**
+ * The chat bubble showed a line of PYTHON SOURCE when Hermes crashed.
+ *
+ * Every line was trimmed before it was classified, which threw away the one
+ * signal CPython gives for free: it INDENTS everything belonging to a frame —
+ * the `File "…"` header, the source line under it, and (3.11+) the `^^^^`
+ * anchor beneath that — and returns the exception summary to column 0. With
+ * the indentation gone, `raise RuntimeError("upstream refused the request")`
+ * matched the "names a failure" heuristic on "RuntimeError", sat earlier in
+ * the stream than the real summary, and won. Captured shape below is what
+ * CPython 3.11+ prints.
+ */
+describe("a Python traceback in the output", () => {
+  const TRACEBACK = [
+    "session_id: 20260811_000000_aaaaaa",
+    "Traceback (most recent call last):",
+    '  File "/home/clawbox/.hermes/agent.py", line 212, in _turn',
+    "    return self._call_provider(payload)",
+    "           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+    '  File "/home/clawbox/.hermes/agent.py", line 88, in _call_provider',
+    '    raise RuntimeError("upstream refused the request")',
+    "RuntimeError: upstream refused the request",
+  ].join("\n");
+
+  it("shows the exception summary, never the source line that raised it", () => {
+    expect(hermesFailureMessage("", TRACEBACK)).toBe("RuntimeError: upstream refused the request");
+  });
+
+  it("shows no fragment of a frame — header, source line or anchor", () => {
+    const msg = hermesFailureMessage("", TRACEBACK);
+    expect(msg).not.toMatch(/raise |_call_provider|\^\^\^|File "|Traceback/);
+  });
+
+  it("still wins over partial answer text left on stdout", () => {
+    expect(hermesFailureMessage("half an answer", TRACEBACK))
+      .toBe("RuntimeError: upstream refused the request");
+  });
+
+  it("reads a traceback on stdout the same way", () => {
+    expect(hermesFailureMessage(TRACEBACK, "")).toBe("RuntimeError: upstream refused the request");
+  });
+
+  it("reports an exception summary, not a source line, for a chained traceback", () => {
+    const stderr = [
+      "Traceback (most recent call last):",
+      '  File "/home/clawbox/.hermes/agent.py", line 88, in _call_provider',
+      "    resp = self.session.post(url, json=payload)",
+      "ConnectionError: connection refused",
+      "",
+      "During handling of the above exception, another exception occurred:",
+      "",
+      "Traceback (most recent call last):",
+      '  File "/home/clawbox/.hermes/chat.py", line 40, in turn',
+      '    raise RuntimeError("the turn failed")',
+      "RuntimeError: the turn failed",
+    ].join("\n");
+    const msg = hermesFailureMessage("", stderr);
+    expect(msg).toMatch(/^(?:ConnectionError|RuntimeError): /);
+    expect(msg).not.toMatch(/resp = |raise |File "|above exception/);
+  });
+
+  it("says nothing rather than guess when the stream is cut off mid-frame", () => {
+    // stderr hit the size cap partway through the frames, so no summary line
+    // ever arrived. Silence lets the caller fall back to the exit code; a
+    // source line here would be a confident wrong answer.
+    const stderr = [
+      "Traceback (most recent call last):",
+      '  File "/home/clawbox/.hermes/agent.py", line 212, in _turn',
+      "    return self._call_provider(payload)",
+    ].join("\n");
+    expect(hermesFailureMessage("", stderr)).toBe("");
+    expect(hermesExitMessage(1, "", stderr)).toBe("hermes exited with code 1");
+  });
+
+  it("stops dropping indented lines once the traceback has ended", () => {
+    // The frame rule is scoped to the traceback. An indented line in ordinary
+    // Hermes output after it is still something the customer needs, and here
+    // it is the only line naming the failure at all.
+    const stderr = [
+      "Traceback (most recent call last):",
+      '  File "/home/clawbox/.hermes/agent.py", line 88, in run',
+      "    resp = self.session.post(url, json=payload)",
+      "KeyboardInterrupt",
+      "  the provider denied the request; check the API key",
+    ].join("\n");
+    expect(hermesFailureMessage("", stderr))
+      .toBe("the provider denied the request; check the API key");
+  });
+
+  it("keeps a sentence that merely starts with File \"…\" after the traceback", () => {
+    // `File "` alone used to open a traceback block, so an ordinary diagnostic
+    // naming a file was both discarded AND reopened suppression over the lines
+    // under it. Only the real frame shape — File "…", line <n> — opens one.
+    const stderr = [
+      "Traceback (most recent call last):",
+      '  File "/home/clawbox/.hermes/agent.py", line 88, in run',
+      "    cfg = load(path)",
+      "KeyboardInterrupt",
+      '  File "config.yaml" was denied to the hermes user',
+    ].join("\n");
+    const msg = hermesFailureMessage("", stderr);
+    expect(msg).toBe('File "config.yaml" was denied to the hermes user');
+    expect(msg).not.toMatch(/cfg = load|agent\.py/);
+  });
+
+  it("keeps indented prose that was never part of a traceback", () => {
+    expect(hermesFailureMessage("    the request was denied by the provider", ""))
+      .toBe("the request was denied by the provider");
   });
 });

@@ -10,11 +10,13 @@ const FAKE_BIN = path.join(TEST_ROOT, "fake-cloudflared");
 const execFileMock = vi.fn();
 
 vi.mock("child_process", () => ({
-  execFile: (
-    cmd: string,
-    args: string[],
-    cb: (err: Error | null, out: { stdout: string; stderr: string }) => void,
-  ) => {
+  // The callback is always LAST: some callers pass an options object between
+  // the argv and the callback (readTunnelUrlFromJournal raises maxBuffer).
+  execFile: (cmd: string, args: string[], ...rest: unknown[]) => {
+    const cb = rest[rest.length - 1] as (
+      err: Error | null,
+      out: { stdout: string; stderr: string },
+    ) => void;
     const result = execFileMock(cmd, args);
     if (result?.error) {
       const err = result.error as Error & { stdout?: string };
@@ -28,6 +30,7 @@ vi.mock("child_process", () => ({
 
 let cloudflared: typeof import("@/lib/cloudflared");
 let TUNNEL_URL_FILE: string;
+let TUNNEL_URL_LOG_FILE: string;
 
 beforeAll(async () => {
   process.env.CLAWBOX_ROOT = TEST_ROOT;
@@ -37,6 +40,7 @@ beforeAll(async () => {
   cloudflared = await import("@/lib/cloudflared");
   await fs.mkdir(cloudflared.CLOUDFLARED_DIR, { recursive: true });
   TUNNEL_URL_FILE = cloudflared.TUNNEL_URL_FILE;
+  TUNNEL_URL_LOG_FILE = cloudflared.TUNNEL_URL_LOG_FILE;
 });
 
 afterAll(async () => {
@@ -48,6 +52,7 @@ afterAll(async () => {
 beforeEach(async () => {
   execFileMock.mockReset();
   await fs.rm(TUNNEL_URL_FILE, { force: true });
+  await fs.rm(TUNNEL_URL_LOG_FILE, { force: true });
   await fs.rm(FAKE_BIN, { force: true });
 });
 
@@ -113,6 +118,27 @@ describe("cloudflared — startTunnelService", () => {
     });
     await expect(cloudflared.startTunnelService()).resolves.not.toThrow();
   });
+
+  it("reports that boot-start was NOT recorded when enable fails", async () => {
+    // Non-fatal is not the same as unreported. The tunnel is up, and it will be
+    // down again after the next reboot — two facts, and the caller only ever
+    // got the first one.
+    execFileMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("enable")) return { error: new Error("Failed to enable") };
+      return { stdout: "" };
+    });
+    const result = await cloudflared.startTunnelService();
+    expect(result.bootPersisted).toBe(false);
+    expect(result.bootPersistWarning).toMatch(/reboot/i);
+  });
+
+  it("reports a clean start as persisted, with nothing to warn about", async () => {
+    execFileMock.mockReturnValue({ stdout: "" });
+    expect(await cloudflared.startTunnelService()).toEqual({
+      bootPersisted: true,
+      bootPersistWarning: null,
+    });
+  });
 });
 
 describe("cloudflared — stopTunnelService", () => {
@@ -122,6 +148,36 @@ describe("cloudflared — stopTunnelService", () => {
     const calls = execFileMock.mock.calls.map(([cmd, args]) => `${cmd} ${args.join(" ")}`);
     expect(calls).toContain("sudo -n /usr/bin/systemctl stop clawbox-tunnel.service");
     expect(calls).toContain("sudo -n /usr/bin/systemctl disable clawbox-tunnel.service");
+  });
+
+  it("reports that the OFF was NOT recorded when disable fails", async () => {
+    // The one that matters. A stop whose `disable` failed leaves a box that
+    // starts publishing a public *.trycloudflare.com address again at the next
+    // power cycle — after its owner switched Remote Access off and was told it
+    // worked.
+    execFileMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("disable")) return { error: new Error("Failed to disable") };
+      return { stdout: "" };
+    });
+    const result = await cloudflared.stopTunnelService();
+    expect(result.bootPersisted).toBe(false);
+    expect(result.bootPersistWarning).toMatch(/reboot/i);
+  });
+
+  it("still throws when the stop itself fails — that is not a warning", async () => {
+    execFileMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("stop")) return { error: new Error("Failed to stop") };
+      return { stdout: "" };
+    });
+    await expect(cloudflared.stopTunnelService()).rejects.toThrow(/Failed to stop/);
+  });
+
+  it("reports a clean stop as persisted", async () => {
+    execFileMock.mockReturnValue({ stdout: "" });
+    expect(await cloudflared.stopTunnelService()).toEqual({
+      bootPersisted: true,
+      bootPersistWarning: null,
+    });
   });
 });
 
@@ -147,5 +203,114 @@ describe("cloudflared — getTunnelServiceState", () => {
   it("returns `unknown` for unrecognized output", async () => {
     execFileMock.mockReturnValue({ stdout: "weird\n" });
     expect(await cloudflared.getTunnelServiceState()).toBe("unknown");
+  });
+});
+
+describe("cloudflared — readTunnelUrlHistory", () => {
+  // `tunnel.url` is deleted by run-tunnel.sh on every stop, so it can only ever
+  // answer "what is the URL right now". When a retired *.trycloudflare.com
+  // hostname was found still serving the box, nobody could say which URLs it
+  // had published — the journal was volatile and there was no access log. This
+  // file is that record.
+  it("returns [] when the history file does not exist", async () => {
+    expect(await cloudflared.readTunnelUrlHistory()).toEqual([]);
+  });
+
+  it("returns records newest-first", async () => {
+    await fs.writeFile(
+      TUNNEL_URL_LOG_FILE,
+      [
+        "2026-08-20T10:00:00Z https://old-one.trycloudflare.com",
+        "2026-08-21T11:30:00Z https://middle-one.trycloudflare.com",
+        "2026-08-22T09:15:00Z https://newest-one.trycloudflare.com",
+        "",
+      ].join("\n"),
+    );
+
+    expect(await cloudflared.readTunnelUrlHistory()).toEqual([
+      { at: "2026-08-22T09:15:00Z", url: "https://newest-one.trycloudflare.com" },
+      { at: "2026-08-21T11:30:00Z", url: "https://middle-one.trycloudflare.com" },
+      { at: "2026-08-20T10:00:00Z", url: "https://old-one.trycloudflare.com" },
+    ]);
+  });
+
+  it("honours the limit", async () => {
+    const lines = Array.from(
+      { length: 20 },
+      (_, i) => `2026-08-22T00:00:${String(i).padStart(2, "0")}Z https://url-${i}.trycloudflare.com`,
+    );
+    await fs.writeFile(TUNNEL_URL_LOG_FILE, lines.join("\n"));
+
+    expect(await cloudflared.readTunnelUrlHistory()).toHaveLength(10); // default
+    expect(await cloudflared.readTunnelUrlHistory(3)).toEqual([
+      { at: "2026-08-22T00:00:19Z", url: "https://url-19.trycloudflare.com" },
+      { at: "2026-08-22T00:00:18Z", url: "https://url-18.trycloudflare.com" },
+      { at: "2026-08-22T00:00:17Z", url: "https://url-17.trycloudflare.com" },
+    ]);
+    expect(await cloudflared.readTunnelUrlHistory(0)).toEqual([]);
+    expect(await cloudflared.readTunnelUrlHistory(-1)).toEqual([]);
+  });
+
+  it("skips garbage instead of throwing — a half-written line must not 500 the status route", async () => {
+    await fs.writeFile(
+      TUNNEL_URL_LOG_FILE,
+      [
+        "not-a-timestamp https://ok.trycloudflare.com",
+        "2026-08-22T09:00:00Z https://evil.example.com",
+        "2026-08-22T09:00:01Z",
+        "",
+        "   ",
+        "2026-08-22T09:00:02Z https://good.trycloudflare.com/",
+      ].join("\n"),
+    );
+
+    expect(await cloudflared.readTunnelUrlHistory()).toEqual([
+      { at: "2026-08-22T09:00:02Z", url: "https://good.trycloudflare.com" },
+    ]);
+  });
+});
+
+/**
+ * TASK-453 round 2 (smoke) — last-resort URL recovery.
+ *
+ * `tunnel.url` is the normal source, written by scripts/run-tunnel.sh. When it
+ * is missing while the unit is active — a hand-started unit, a truncated write,
+ * a wiped data dir — the journal is the only remaining record of a hostname
+ * that is at that moment serving the whole device to the internet. Answering
+ * "remote access is off" in that state is the worst thing the status API can do.
+ */
+describe("readTunnelUrlFromJournal", () => {
+  const JOURNAL = [
+    "Starting Cloudflare Quick Tunnel...",
+    "Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):",
+    "https://old-hostname-from-a-previous-run.trycloudflare.com",
+    "Registered tunnel connection connIndex=0",
+    "Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):",
+    "https://stat-door-tournament-resorts.trycloudflare.com",
+  ].join("\n");
+
+  it("returns the newest hostname the unit announced", async () => {
+    execFileMock.mockReturnValue({ stdout: JOURNAL });
+    expect(await cloudflared.readTunnelUrlFromJournal()).toBe(
+      "https://stat-door-tournament-resorts.trycloudflare.com",
+    );
+    const [cmd, args] = execFileMock.mock.calls[0];
+    expect(cmd).toBe("journalctl");
+    expect(args).toContain("clawbox-tunnel.service");
+  });
+
+  it("returns null when the journal holds no tunnel URL", async () => {
+    execFileMock.mockReturnValue({ stdout: "Started Cloudflare Tunnel.\nStopping...\n" });
+    expect(await cloudflared.readTunnelUrlFromJournal()).toBeNull();
+  });
+
+  it("returns null instead of throwing when journalctl is unavailable", async () => {
+    execFileMock.mockReturnValue({ error: new Error("journalctl: command not found") });
+    expect(await cloudflared.readTunnelUrlFromJournal()).toBeNull();
+  });
+
+  it("never returns a hostname that is not a quick tunnel", async () => {
+    execFileMock.mockReturnValue({ stdout: "Visit https://evil.example.com/ for details\n" });
+    expect(await cloudflared.readTunnelUrlFromJournal()).toBeNull();
   });
 });

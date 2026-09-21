@@ -9,7 +9,7 @@ queries:
 # (e.g. js/insecure-temporary-file across src/tests/**) are noise.
 #
 # NOTE: scripts/** is intentionally NOT excluded — it holds security-critical
-# runtime code (scripts/terminal-server.ts WebSocket server, browser launcher)
+# runtime code (scripts/terminal-server.mjs WebSocket server, browser launcher)
 # that must stay under CodeQL coverage. CI-only script alerts are dismissed
 # individually instead.
 paths-ignore:
@@ -18,3 +18,9 @@ paths-ignore:
   - "**/*.test.tsx"
   - "**/*.test.js"
   - "**/*.test.mjs"
+  # The bench harness is operator-run test tooling: its whole job is reading
+  # this box's own tokens off disk and writing captured API responses to
+  # files, and its seed fixtures are deliberately imperfect code for the
+  # coding agent to work on. None of it ships in the product or listens to
+  # anything — benchmark tooling, not the device's attack surface.
+  - "bench/**"

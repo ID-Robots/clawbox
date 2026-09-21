@@ -1,0 +1,138 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * TASK-453 round 2 — `app_uninstall` left the deployed webapp on disk.
+ *
+ * Observed live: after `app_uninstall qa-t453a-revalidate` the desktop icon and
+ * the preference were gone, but `data/webapps/qa-t453a-revalidate/` was still
+ * there and `/setup-api/webapps?app=qa-t453a-revalidate` still answered 200
+ * with the agent's page. The owner is told the app is removed while it stays
+ * served to anyone holding the URL.
+ *
+ * Real temp directory rather than a mocked fs: the point of the test is that
+ * the FILES are gone, and a mocked `rm` can only prove a call was made.
+ */
+
+const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-uninstall-"));
+const PREVIOUS_ROOT = process.env.CLAWBOX_ROOT;
+process.env.CLAWBOX_ROOT = ROOT;
+
+const SKILLS_ROOT = path.join(ROOT, "openclaw-workspace");
+
+// Inline implementations, not chained .mockResolvedValue: the config's
+// `mockReset: true` wipes chained values before every test while a vi.fn(impl)
+// keeps its implementation, and this factory only runs once per file.
+vi.mock("@/lib/openclaw-config", () => ({
+  // The edition-aware skill root the route deletes under. Non-null here: this
+  // file's device is an OpenClaw one. The Hermes half — where it is null and
+  // nothing under a workspace this box does not have may be removed — is
+  // pinned in uninstall-edition.test.ts against the real implementation.
+  openclawSkillRoot: vi.fn(() => path.join(SKILLS_ROOT, "skills")),
+  clearSkillEntry: vi.fn(async () => false),
+  OpenclawConfigUnreadableError: class OpenclawConfigUnreadableError extends Error {
+    readonly code = "config_unreadable";
+  },
+}));
+
+// The rescan behind an uninstall would spawn the real openclaw CLI here.
+vi.mock("@/lib/openclaw-skill-info", () => ({
+  refreshSkillsCache: vi.fn(),
+}));
+
+vi.mock("@/lib/kv-store", () => ({
+  kvDelete: vi.fn(),
+}));
+
+vi.mock("@/lib/preference-store", () => ({
+  setPreferences: vi.fn(async () => undefined),
+}));
+
+vi.mock("@/lib/config-store", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/config-store")>();
+  return { ...actual, getAll: vi.fn(async () => ({})) };
+});
+
+const WEBAPPS = path.join(ROOT, "data", "webapps");
+
+function deployWebapp(appId: string): string {
+  const dir = path.join(WEBAPPS, appId);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "index.html"), "<h1>T453 MARKER</h1>");
+  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify({ name: appId }));
+  return dir;
+}
+
+async function uninstall(appId: unknown): Promise<Response> {
+  const mod = await import("@/app/setup-api/apps/uninstall/route");
+  return mod.POST(
+    new Request("http://localhost/setup-api/apps/uninstall", {
+      method: "POST",
+      body: JSON.stringify({ appId }),
+    }),
+  );
+}
+
+beforeEach(() => {
+  vi.resetModules();
+  fs.rmSync(WEBAPPS, { recursive: true, force: true });
+});
+
+afterAll(() => {
+  // Restore rather than leak the temp root into anything that runs after.
+  if (PREVIOUS_ROOT === undefined) delete process.env.CLAWBOX_ROOT;
+  else process.env.CLAWBOX_ROOT = PREVIOUS_ROOT;
+  fs.rmSync(ROOT, { recursive: true, force: true });
+});
+
+describe("/setup-api/apps/uninstall — the deployed webapp goes with the app", () => {
+  it("deletes data/webapps/<appId>/ so the URL stops serving", async () => {
+    const dir = deployWebapp("qa-t453a-revalidate");
+    expect(fs.existsSync(path.join(dir, "index.html"))).toBe(true);
+
+    const res = await uninstall("qa-t453a-revalidate");
+
+    expect(res.status).toBe(200);
+    // `null`, not `false`: this fixture deploys a webapp and no skill
+    // directory, and a WEB APP has no skill half to report on. `false` is
+    // "this box has a skills root and nothing of that name was in it", which
+    // `mcp/tools/desktop.ts` states out loud as "there was no skill of that
+    // name on disk" — an absence report about something that never existed.
+    // The webapp is recognised here by the deployed directory this uninstall
+    // removed, since `installed_meta` is empty in this fixture.
+    await expect(res.json()).resolves.toEqual({
+      ok: true,
+      appId: "qa-t453a-revalidate",
+      skillRemoved: null,
+    });
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  it("leaves every other deployed webapp alone", async () => {
+    deployWebapp("keep-me");
+    const doomed = deployWebapp("remove-me");
+
+    await uninstall("remove-me");
+
+    expect(fs.existsSync(doomed)).toBe(false);
+    expect(fs.readFileSync(path.join(WEBAPPS, "keep-me", "index.html"), "utf8")).toContain("T453 MARKER");
+  });
+
+  it("succeeds for an app that never deployed a webapp", async () => {
+    const res = await uninstall("never-built");
+    expect(res.status).toBe(200);
+  });
+
+  it("cannot be walked out of the webapps directory", async () => {
+    const sibling = path.join(ROOT, "data", "config.json");
+    fs.mkdirSync(path.dirname(sibling), { recursive: true });
+    fs.writeFileSync(sibling, "{}");
+
+    const res = await uninstall("../config.json");
+
+    expect(res.status).toBe(400);
+    expect(fs.existsSync(sibling)).toBe(true);
+  });
+});

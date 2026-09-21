@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { get, set } from "@/lib/config-store";
-import { getActiveHarness, type Harness } from "@/lib/harness";
+import {
+  getActiveHarness,
+  getActiveHarnessSource,
+  type ActiveHarnessSource,
+  type Harness,
+} from "@/lib/harness";
 import {
   readTelegramAllowFrom,
   listTelegramPairingRequests,
@@ -15,6 +20,7 @@ import {
   notifyHermesTelegramUser,
   type HermesPairingRequest,
 } from "@/lib/hermes-telegram";
+import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 import { PAIRING_TOKEN_RE, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
 
 export const dynamic = "force-dynamic";
@@ -29,9 +35,43 @@ const APPROVED_NAMES_KEY = "telegram_approved_names";
 // it with `hermes send`.
 const APPROVED_NOTICE = "You're approved — send me a message and I'll answer.";
 
-async function isConfigured(): Promise<boolean> {
-  const token = await get("telegram_bot_token");
-  return typeof token === "string" && token.length > 0;
+/**
+ * Does this box have a Telegram bot at all?
+ *
+ * ONE reader for both editions, `telegram-bot-identity.ts` — the same one
+ * /telegram/status, /setup/status and the approvals guard use. On both editions
+ * the credential is the HARNESS's (openclaw.json's channel block, ~/.hermes/.env
+ * plus the config.yaml fallback its env bridge reads) and ClawBox's copy is
+ * written only as a side effect of /setup-api/telegram/configure. Asking that
+ * copy on a box paired through the harness's own CLI, or restored without
+ * config.json, answered `configured: false` for a working bot — and this route's
+ * GET returns an EMPTY pairing state on that answer: page.tsx polls it every 20 s
+ * for the "someone wants to talk to your bot" popup, so a new household member's
+ * request was never shown to anyone.
+ *
+ * The three surfaces used to answer this from three different places with three
+ * different failure policies — this one raised a 500 out of `hermesSecretsPresent`
+ * where the others degraded — which meant the panel's verdict depended on which
+ * route it happened to call. Now they share the reader and its tri-state.
+ *
+ * A plain file read, no CLI: this route is on a 20 s desktop poll, which is why
+ * its Hermes paths are deliberately CLI-free.
+ */
+async function isConfigured(
+  source: ActiveHarnessSource,
+): Promise<{ configured: boolean; unknown: boolean }> {
+  // The resolved source, not the bare harness: the reader takes the edition
+  // from the same read that named the harness, so an update rewriting the lock
+  // between the two cannot make this route answer about the wrong SKU.
+  const { token, known } = await readActiveTelegramBot(source);
+  // The third state is carried out rather than collapsed. "This box has no bot"
+  // and "we could not read this device's Telegram configuration" have different
+  // fixes, and this route's empty answer is what the desktop polls for the
+  // pairing popup — so a store it could not read must not read as a box with
+  // nothing to show. Nothing renders `unknown` yet (that needs a UI state and
+  // ten locales); it is here so the panel can, and so the fact is in the
+  // response instead of only in the journal.
+  return { configured: token !== null, unknown: !known && token === null };
 }
 
 async function readApprovedNames(): Promise<Record<string, string>> {
@@ -61,22 +101,41 @@ async function buildApproved(
   return ids.map((id) => ({ id, name: nameMap[id] }));
 }
 
-// GET — list approved senders (fast: a single file read). With `?pending=1` it
-// also runs the harness's `pairing list` CLI, which on OpenClaw is a ~10-12 s
-// cold start on a Jetson, so pending stays opt-in rather than being fetched on
-// every status refresh.
+// GET — list approved senders (fast: one read of OpenClaw's state store, or
+// of the legacy allowFrom file on a v1 box). With `?pending=1` it also runs
+// the harness's `pairing list` CLI, which on OpenClaw is a ~10-12 s cold start
+// on a Jetson, so pending stays opt-in rather than being fetched on every
+// status refresh.
 export async function GET(request: Request) {
   try {
-    if (!(await isConfigured())) {
+    const harnessSource = await getActiveHarnessSource();
+    const harness = harnessSource.active;
+    const state = await isConfigured(harnessSource);
+    // Only a CONFIDENT "this box has no bot" short-circuits. An `unknown` used
+    // to take this branch too, and the desktop's 20 s poller reads an empty
+    // `pending` as "nothing is waiting" and clears the pairing popup — so an
+    // unreadable ~/.hermes/.env (root-owned after a `sudo hermes config set`,
+    // which the gateway survives because it loaded the token at start) silently
+    // hid a household member's access request from everyone. Worse than beta,
+    // which raised a 500 here and left the poller's list alone.
+    //
+    // The path the poller takes needs no credential: `?poll=1` and the approved
+    // list are plain reads of the pairing store and the allowlist, separate
+    // files the harness writes. So the honest answer to "we could not read the
+    // token" is still to say what is waiting. (`?pending=1` — the Settings
+    // "Check" button, an explicit gesture — spawns the harness's own CLI, which
+    // on the same broken box may fail and 500; that is a stated failure the
+    // owner asked for, not a silent empty list on a 20 s poll.)
+    if (!state.configured && !state.unknown) {
       return NextResponse.json(
-        { configured: false, approved: [], pending: [] },
+        { configured: false, unknown: false, approved: [], pending: [] },
         { headers: { "Cache-Control": "no-store" } },
       );
     }
-    const harness = await getActiveHarness();
     const params = new URL(request.url).searchParams;
     const approved = await buildApproved(harness);
-    // `?poll=1` reads the pairing-store file (fast — safe for the desktop poller);
+    // `?poll=1` reads the pairing store directly — the state database, or the
+    // legacy file on a v1 box (fast — safe for the desktop poller);
     // `?pending=1` uses the authoritative CLI (the Settings "Check" button).
     const wantsPoll = params.get("poll") === "1";
     const wantsPending = params.get("pending") === "1";
@@ -93,7 +152,7 @@ export async function GET(request: Request) {
       pending = await listTelegramPairingRequests();
     }
     return NextResponse.json(
-      { configured: true, approved, pending },
+      { configured: state.configured, unknown: state.unknown, approved, pending },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {

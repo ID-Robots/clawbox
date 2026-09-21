@@ -1,18 +1,18 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-vi.mock("child_process", () => ({
-  execFile: vi.fn(),
-}));
-
-vi.mock("util", () => ({
-  promisify: vi.fn().mockReturnValue(vi.fn().mockResolvedValue({ stdout: "", stderr: "" })),
-}));
-
 vi.mock("fs/promises", () => ({
   default: {
     mkdir: vi.fn().mockResolvedValue(undefined),
     writeFile: vi.fn().mockResolvedValue(undefined),
   },
+}));
+
+vi.mock("@/lib/openclaw-config", () => ({
+  setSkillEnabled: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/lib/openclaw-skill-info", () => ({
+  refreshSkillsCache: vi.fn(),
 }));
 
 describe("/setup-api/apps/settings", () => {
@@ -21,11 +21,11 @@ describe("/setup-api/apps/settings", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    const { promisify } = await import("util");
-    vi.mocked(promisify).mockReturnValue(vi.fn().mockResolvedValue({ stdout: "", stderr: "" }) as never);
     const fsMod = await import("fs/promises");
     vi.mocked(fsMod.default.mkdir).mockResolvedValue(undefined as never);
     vi.mocked(fsMod.default.writeFile).mockResolvedValue(undefined);
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    vi.mocked(setSkillEnabled).mockResolvedValue(undefined);
     const mod = await import("@/app/setup-api/apps/settings/route");
     POST = mod.POST;
   });
@@ -39,6 +39,22 @@ describe("/setup-api/apps/settings", () => {
     expect(res.status).toBe(400);
   });
 
+  // "__proto__" passes the charset regex; through setSkillEnabled it would
+  // resolve to Object.prototype and set `enabled` on every object in the
+  // process.
+  it("rejects reserved appIds before they reach setSkillEnabled", async () => {
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    for (const appId of ["__proto__", "constructor", "prototype"]) {
+      const req = new Request("http://localhost/setup-api/apps/settings", {
+        method: "POST",
+        body: JSON.stringify({ appId, settings: { _setEnabled: true } }),
+      });
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+    }
+    expect(setSkillEnabled).not.toHaveBeenCalled();
+  });
+
   it("rejects missing settings", async () => {
     const req = new Request("http://localhost/setup-api/apps/settings", {
       method: "POST",
@@ -48,15 +64,88 @@ describe("/setup-api/apps/settings", () => {
     expect(res.status).toBe(400);
   });
 
-  it("handles enable/disable setting", async () => {
+  it("writes the enable/disable switch straight to openclaw.json", async () => {
+    const req = new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({ appId: "test-app", settings: { _setEnabled: false } }),
+    });
+    const res = await POST(req);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.enabled).toBe(false);
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    expect(setSkillEnabled).toHaveBeenCalledWith("test-app", false);
+    // The switch changes what `openclaw skills list --json` reports for this
+    // skill, and that list is cached for ten minutes.
+    const { refreshSkillsCache } = await import("@/lib/openclaw-skill-info");
+    expect(refreshSkillsCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("invalidates the skill list after a config write too", async () => {
+    // OpenClaw evaluates a skill's required CONFIG the same way it evaluates
+    // its bins and env, and this is the branch that writes the file the skill
+    // reads — so a saved credential changes `eligible` exactly as the switch
+    // does. Left out, a Connect left the badge on "Needs setup" for the whole
+    // freshness window.
+    const { refreshSkillsCache } = await import("@/lib/openclaw-skill-info");
+    const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({
+        appId: "home-assistant",
+        settings: { ha_url: "http://ha.local:8123", ha_token: "t" },
+      }),
+    }));
+    expect(await res.json()).toEqual({ ok: true, configWritten: true });
+    expect(refreshSkillsCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not invalidate the skill list for an app with no writer", async () => {
+    const { refreshSkillsCache } = await import("@/lib/openclaw-skill-info");
+    const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({ appId: "some-other-app", settings: { anything: "x" } }),
+    }));
+    expect(await res.json()).toEqual({ ok: true, configWritten: false });
+    expect(refreshSkillsCache).not.toHaveBeenCalled();
+  });
+
+  it("does not invalidate the skill list when the write failed", async () => {
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    const { refreshSkillsCache } = await import("@/lib/openclaw-skill-info");
+    vi.mocked(setSkillEnabled).mockRejectedValueOnce(new Error("EACCES"));
+    const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({ appId: "test-app", settings: { _setEnabled: false } }),
+    }));
+    expect(res.status).toBe(500);
+    // Nothing changed, so spending a CLI boot on a rescan would be waste.
+    expect(refreshSkillsCache).not.toHaveBeenCalled();
+  });
+
+  it("refuses a non-boolean _setEnabled — the string \"false\" must not enable", async () => {
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    for (const value of ["false", "true", 1, 0, null, {}]) {
+      const req = new Request("http://localhost/setup-api/apps/settings", {
+        method: "POST",
+        body: JSON.stringify({ appId: "test-app", settings: { _setEnabled: value } }),
+      });
+      const res = await POST(req);
+      expect(res.status).toBe(400);
+    }
+    expect(setSkillEnabled).not.toHaveBeenCalled();
+  });
+
+  it("answers 500 without the underlying message when the write fails", async () => {
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    vi.mocked(setSkillEnabled).mockRejectedValue(new Error("EACCES: /home/clawbox/.openclaw/openclaw.json"));
     const req = new Request("http://localhost/setup-api/apps/settings", {
       method: "POST",
       body: JSON.stringify({ appId: "test-app", settings: { _setEnabled: true } }),
     });
     const res = await POST(req);
+    expect(res.status).toBe(500);
     const body = await res.json();
-    expect(body.ok).toBe(true);
-    expect(body.enabled).toBe(true);
+    expect(body.error).toBe("Failed to toggle skill");
   });
 
   it("writes config for home-assistant", async () => {
@@ -94,5 +183,58 @@ describe("/setup-api/apps/settings", () => {
     });
     const res = await POST(req);
     expect(res.status).toBe(400);
+  });
+
+  /**
+   * Every OTHER name that is already a property of every object literal.
+   * `toString` passes the charset rule, and before this it resolved through
+   * the writer table's prototype to `Object.prototype.toString` — called with
+   * no `this`, it returns "[object Undefined]" without throwing, so the route
+   * answered `{ ok: true, configWritten: true }` over a file it never wrote
+   * and InstalledAppSettings rendered that as "Connected". Its siblings
+   * (`valueOf`, `hasOwnProperty`, …) threw instead and leaked the raw message
+   * with a 500. Both are the same missing rule.
+   */
+  it("refuses an appId that names a property of Object.prototype", async () => {
+    const fsMod = await import("fs/promises");
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    for (const appId of ["toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "toLocaleString", "propertyIsEnumerable"]) {
+      const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+        method: "POST",
+        body: JSON.stringify({ appId, settings: { ha_url: "http://ha.local:8123" } }),
+      }));
+      expect(res.status, `${appId} must be refused`).toBe(400);
+      expect(await res.json()).toEqual({ error: "Invalid appId" });
+    }
+    expect(fsMod.default.writeFile).not.toHaveBeenCalled();
+    expect(setSkillEnabled).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The length every producer already applies — APP_ID_RE is 1-64 — so an id
+   * this door accepts is one the rest of the surface can still name. The
+   * `_setEnabled` branch writes `skills.entries.<id>.enabled` into the
+   * harness's own openclaw.json, and the ad-hoc regex here had no length bound
+   * at all: a caller could park a megabyte-long key in that file.
+   */
+  it("refuses an appId longer than the producers can mint", async () => {
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({ appId: "a".repeat(65), settings: { _setEnabled: true } }),
+    }));
+    expect(res.status).toBe(400);
+    expect(setSkillEnabled).not.toHaveBeenCalled();
+  });
+
+  it("still takes an appId of exactly the length the producers can mint", async () => {
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    const appId = "a".repeat(64);
+    const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({ appId, settings: { _setEnabled: true } }),
+    }));
+    expect(res.status).toBe(200);
+    expect(setSkillEnabled).toHaveBeenCalledWith(appId, true);
   });
 });

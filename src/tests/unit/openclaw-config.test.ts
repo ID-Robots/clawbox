@@ -2,9 +2,18 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
 import fs from "fs/promises";
 import fsSync from "fs";
+import { saveEnv } from "../helpers/env";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
+}));
+
+// `restartGateway()` is not finished until :18789 is listening again. These
+// cases are about which unit it touches, so the readiness wait answers yes;
+// gateway-restart-readiness.test.ts is where the wait itself is pinned.
+vi.mock("@/lib/port-probe", async (orig) => ({
+  ...(await orig<typeof import("@/lib/port-probe")>()),
+  waitForPortOpen: vi.fn(async () => true),
 }));
 
 vi.mock("fs/promises", () => ({
@@ -13,6 +22,11 @@ vi.mock("fs/promises", () => ({
     writeFile: vi.fn(),
     rename: vi.fn(),
     mkdir: vi.fn(),
+    // `rm` and `chmod`: writeConfig clears a stale temp and forces 0600 on
+    // the one it writes (rename swaps the inode), so a mocked filesystem
+    // has to answer both.
+    chmod: vi.fn(),
+    rm: vi.fn(),
   },
 }));
 
@@ -128,17 +142,23 @@ describe("openclaw-config", () => {
     });
   });
 
-  describe("ensureCompactionReserveFloor", () => {
-    it("writes the default reserve floor when compaction config is missing", async () => {
-      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({ agents: { defaults: {} } }) as never);
+  describe("setSkillEnabled", () => {
+    it("refuses prototype-chain skill ids before touching anything", async () => {
+      // The route guards these too, but the invariant lives here so a second
+      // caller (an MCP tool, a CLI path) cannot write `enabled` onto
+      // Object.prototype through ensurePlainObject.
+      for (const skillId of ["__proto__", "constructor", "prototype"]) {
+        await expect(openclawConfig.setSkillEnabled(skillId, true)).rejects.toThrow("Invalid skill id");
+      }
+      // The hazard the guard exists for: nothing landed on Object.prototype.
+      expect(({} as Record<string, unknown>).enabled).toBeUndefined();
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
 
-      await openclawConfig.ensureCompactionReserveFloor();
-
-      expect(mockFs.writeFile).toHaveBeenCalledWith(
-        expect.stringContaining("openclaw.json.tmp"),
-        expect.stringContaining('"reserveTokensFloor": 24000'),
-        "utf-8"
-      );
+    it("writes skills.entries.<id>.enabled for a normal id", async () => {
+      await openclawConfig.setSkillEnabled("home-assistant", false);
+      const written = JSON.parse(String(mockFs.writeFile.mock.calls[0][1]));
+      expect(written.skills.entries["home-assistant"].enabled).toBe(false);
     });
   });
 
@@ -172,6 +192,29 @@ describe("openclaw-config", () => {
         expect(mod.CONFIG_PATH).toBe("/custom/path/openclaw.json");
       } finally {
         delete process.env.OPENCLAW_HOME;
+      }
+    });
+
+    it("falls back to /home/clawbox when HOME is present but empty", async () => {
+      const savedHome = process.env.HOME;
+      const savedOpenclawHome = process.env.OPENCLAW_HOME;
+      const savedClawboxOpenclawHome = process.env.CLAWBOX_OPENCLAW_HOME;
+      vi.resetModules();
+      process.env.HOME = "";
+      delete process.env.OPENCLAW_HOME;
+      delete process.env.CLAWBOX_OPENCLAW_HOME;
+      try {
+        const mod = await import("@/lib/openclaw-config");
+        expect(mod.OPENCLAW_HOME).toBe("/home/clawbox/.openclaw");
+        expect(mod.CONFIG_PATH).toBe("/home/clawbox/.openclaw/openclaw.json");
+      } finally {
+        if (savedHome === undefined) delete process.env.HOME;
+        else process.env.HOME = savedHome;
+        if (savedOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
+        else process.env.OPENCLAW_HOME = savedOpenclawHome;
+        if (savedClawboxOpenclawHome === undefined) delete process.env.CLAWBOX_OPENCLAW_HOME;
+        else process.env.CLAWBOX_OPENCLAW_HOME = savedClawboxOpenclawHome;
+        vi.resetModules();
       }
     });
   });
@@ -290,7 +333,7 @@ describe("openclaw-config", () => {
     });
 
     it("handles missing config file", async () => {
-      mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
+      mockFs.readFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
 
       await openclawConfig.setTelegramToken("123:abc");
 
@@ -309,14 +352,19 @@ describe("openclaw-config", () => {
       );
     });
 
-    it("writes to temp file and renames atomically", async () => {
+    // The mode goes with the write and again as an explicit chmod: `rename`
+    // replaces the inode, so the temp file's mode is the one openclaw.json ends
+    // up with, and `writeFile`'s own `mode` is ignored for a stale temp that
+    // already exists.
+    it("writes to temp file at the config's own mode and renames atomically", async () => {
       await openclawConfig.setTelegramToken("123:abc");
 
       expect(mockFs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining(".tmp"),
         expect.any(String),
-        "utf-8"
+        { mode: 0o600, encoding: "utf-8" },
       );
+      expect(mockFs.chmod).toHaveBeenCalledWith(expect.stringContaining(".tmp"), 0o600);
       expect(mockFs.rename).toHaveBeenCalled();
     });
 
@@ -467,6 +515,26 @@ describe("openclaw-config", () => {
       );
     });
 
+    it("does not bypass a runtime mask by starting the standalone user gateway", async () => {
+      const masked = new Error(
+        "Failed to restart clawbox-gateway.service: Unit clawbox-gateway.service is masked.",
+      );
+      setupExecFileMock({
+        "/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service": masked,
+      });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await expect(openclawConfig.restartGateway()).rejects.toBe(masked);
+
+      expect(mockExecFile).not.toHaveBeenCalledWith(
+        "systemctl",
+        ["--user", "restart", "openclaw-gateway.service"],
+        expect.anything(),
+        expect.any(Function),
+      );
+      errorSpy.mockRestore();
+    });
+
     it("throws when restart fails", async () => {
       setupExecFileMock({
         systemctl: new Error("Service not found"),
@@ -528,13 +596,54 @@ describe("openclaw-config", () => {
       expect(result).toBe("/custom/workspace");
     });
 
-    it("falls back to .openclaw/workspace when it exists", () => {
-      mockFsSync.readFileSync.mockReturnValue(JSON.stringify({}));
-      mockFsSync.existsSync.mockReturnValue(true);
+    it("falls back to <OpenClaw home>/workspace when it exists", () => {
+      // Named explicitly rather than matched as `/\.openclaw\/workspace$/`:
+      // the well-known workspace is a child of the home the CONFIG was read
+      // from (`CLAWBOX_OPENCLAW_HOME` / `OPENCLAW_HOME` / `$HOME/.openclaw`),
+      // and a `$HOME`-shaped assertion passed whichever of the two the code
+      // used. This is the delete target `openclawSkillRoot()` appends `skills`
+      // to, so the two spellings must not be interchangeable here.
+      // `CLAWBOX_OPENCLAW_HOME` outranks `OPENCLAW_HOME`, so a suite that
+      // happened to carry one would decide this assertion instead of the code.
+      const restore = saveEnv("CLAWBOX_OPENCLAW_HOME", "OPENCLAW_HOME");
+      delete process.env.CLAWBOX_OPENCLAW_HOME;
+      process.env.OPENCLAW_HOME = "/custom/openclaw-home";
+      try {
+        mockFsSync.readFileSync.mockReturnValue(JSON.stringify({}));
+        mockFsSync.existsSync.mockReturnValue(true);
 
-      const result = openclawConfig.getSkillsDir();
+        const result = openclawConfig.getSkillsDir();
 
-      expect(result).toMatch(/\.openclaw\/workspace$/);
+        expect(result).toBe("/custom/openclaw-home/workspace");
+      } finally {
+        restore();
+      }
+    });
+
+    it("expands a ~ workspace against HOME", () => {
+      // The same rule `gateway-pre-start.sh` (expanduser) and
+      // `openclawWorkspaceDir()` in src/lib/language-persona.ts already apply
+      // to this key. Left literal, `~/clawd` resolved to a `~` directory under
+      // the server's own working directory — a delete target no configuration
+      // on the box names.
+      // Through `saveEnv` like the rest of the file: `process.env` coerces an
+      // assignment to a string, so restoring an UNSET `HOME` by assignment
+      // would write the literal "undefined" — truthy — and every later
+      // `process.env.HOME || …` in this worker would resolve under a directory
+      // of that name, far from the file that caused it.
+      const restore = saveEnv("HOME");
+      process.env.HOME = "/test/home";
+      try {
+        mockFsSync.readFileSync.mockReturnValue(
+          JSON.stringify({ agents: { defaults: { workspace: "~/clawd" } } }),
+        );
+
+        const result = openclawConfig.getSkillsDir();
+
+        expect(result).toBe("/test/home/clawd");
+      } finally {
+        restore();
+      }
     });
 
     it("falls back to ~/clawd when workspace dir does not exist", () => {
@@ -604,7 +713,9 @@ describe("openclaw-config", () => {
     });
 
     it("uses HOME env var for path resolution", () => {
-      const originalHome = process.env.HOME;
+      // Through `saveEnv` for the reason spelled out on the case above: an
+      // assignment restore writes the string "undefined" for an unset HOME.
+      const restore = saveEnv("HOME");
       process.env.HOME = "/test/home";
       try {
         // Reset modules so getSkillsDir picks up new HOME
@@ -616,7 +727,7 @@ describe("openclaw-config", () => {
         // getSkillsDir reads HOME at call time
         expect(result).toBe("/test/home/clawd");
       } finally {
-        process.env.HOME = originalHome;
+        restore();
       }
     });
   });
@@ -664,6 +775,49 @@ describe("openclaw-config", () => {
         model: "llamacpp/gemma4-e2b-it-q4_0",
       });
     });
+
+    // The UI sweep of 2026-09-07: the llama.cpp migration leaves the retired
+    // ollama-hosted embedder declared under `models.providers.ollama.models`,
+    // and the first entry of that list was the box's local model for every
+    // reader — the picker, setup/status, and the fallback writer, which then
+    // put a model that cannot produce a word into the chat's fallbacks.
+    it("does not take an Ollama model that can only embed as the box's local model", () => {
+      const result = openclawConfig.inferConfiguredLocalModel({
+        models: { providers: { ollama: { models: [{ id: "qwen3-embedding:0.6b" }] } } },
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it("takes the first Ollama model that can chat, past an embedder declared ahead of it", () => {
+      const result = openclawConfig.inferConfiguredLocalModel({
+        models: { providers: { ollama: { models: [{ id: "qwen3-embedding:0.6b" }, { id: "qwen2.5:0.5b" }] } } },
+      });
+
+      expect(result).toEqual({ provider: "ollama", model: "ollama/qwen2.5:0.5b" });
+    });
+
+    it("skips an embedder a box has already written into its fallbacks", () => {
+      // Once there, it would otherwise have been found FIRST on every read.
+      const config = {
+        agents: { defaults: { model: { primary: "deepseek/deepseek-chat", fallbacks: ["ollama/qwen3-embedding:0.6b"] } } },
+        models: { providers: { ollama: { models: [{ id: "qwen3-embedding:0.6b" }] } } },
+      };
+
+      expect(openclawConfig.inferConfiguredLocalModel(config)).toBeNull();
+      expect(openclawConfig.inferConfiguredLocalModel({
+        ...config,
+        models: { providers: { ...config.models.providers, llamacpp: { models: [{ id: "gemma4-e2b-it-q4_0" }] } } },
+      })).toEqual({ provider: "llamacpp", model: "llamacpp/gemma4-e2b-it-q4_0" });
+    });
+
+    it("leaves the name rule to Ollama models — a llama.cpp model is never judged by its name", () => {
+      const result = openclawConfig.inferConfiguredLocalModel({
+        models: { providers: { llamacpp: { models: [{ id: "embed-gemma-q4_0" }] } } },
+      });
+
+      expect(result).toEqual({ provider: "llamacpp", model: "llamacpp/embed-gemma-q4_0" });
+    });
   });
 
   describe("ensureLocalAiProxyUrls", () => {
@@ -683,13 +837,146 @@ describe("openclaw-config", () => {
       expect(mockFs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining("openclaw.json.tmp"),
         expect.stringContaining('"baseUrl": "http://127.0.0.1/setup-api/local-ai/llamacpp/v1"'),
-        "utf-8",
+        { mode: 0o600, encoding: "utf-8" },
       );
       expect(mockFs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining("openclaw.json.tmp"),
         expect.stringContaining('"baseUrl": "http://127.0.0.1/setup-api/local-ai/ollama"'),
-        "utf-8",
+        { mode: 0o600, encoding: "utf-8" },
       );
+    });
+
+    it("moves the proxy bearer with the URL, never leaving a foreign key beside it", async () => {
+      // The proxy validates Authorization against data/.local-ai-token and
+      // answers 401 to anything else, so adopting the proxy URL while keeping
+      // somebody else's key turns "the wrong endpoint" into a refused request
+      // on every turn.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: { baseUrl: "http://127.0.0.1:8080/v1", apiKey: "an-operators-own-key" },
+          },
+        },
+      }) as never);
+
+      expect(await openclawConfig.ensureLocalAiProxyUrls()).toBe(true);
+
+      const written = mockFs.writeFile.mock.calls.at(-1)?.[1] as string;
+      expect(written).toContain('"baseUrl": "http://127.0.0.1/setup-api/local-ai/llamacpp/v1"');
+      expect(written).not.toContain("an-operators-own-key");
+    });
+
+    it("pins the proxy bearer itself, not merely the absence of the old one", async () => {
+      // The assertion above only proves the operator's key is gone. Deleting
+      // `apiKey`, or writing an unrelated value there, would satisfy it too —
+      // and either leaves the proxy answering 401 to every turn.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: { providers: { llamacpp: { baseUrl: "http://127.0.0.1:8080/v1", apiKey: "an-operators-own-key" } } },
+      }) as never);
+
+      expect(await openclawConfig.ensureLocalAiProxyUrls()).toBe(true);
+
+      // From the SAME module instance the code under test got: `beforeEach`
+      // resets the registry, and this module caches the token it creates, so a
+      // top-level import would hold a different one and the assertion would be
+      // about module identity rather than about the value written.
+      const { getLocalAiToken } = await import("@/lib/local-ai-token");
+      const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+      expect(written.models.providers.llamacpp.apiKey).toBe(getLocalAiToken());
+    });
+
+    it("leaves a provider entry that is not an object alone, rather than throwing over it", async () => {
+      // `readConfig()` validates the ROOT object only, so anything at all can
+      // be sitting at `models.providers.llamacpp`. Module code is strict mode:
+      // assigning `baseUrl` on a string primitive throws a TypeError, and the
+      // repair's caller would see a crash where a hand-edited config needed a
+      // no-op.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: { providers: { llamacpp: "http://127.0.0.1:8080/v1" } },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(false);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it("does not report a repair it could not persist, for an entry written as a list", async () => {
+      // An array takes the assignments and `JSON.stringify` drops every named
+      // property off it, so the write lands without `baseUrl` or `apiKey` while
+      // the function answers `true` — a repair reported and never made.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: { providers: { llamacpp: [] } },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(false);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it("does not put the proxy bearer beside a model row that points somewhere else", async () => {
+      // OpenClaw resolves a row's endpoint as `model.baseUrl ?? provider.baseUrl`
+      // and there is no per-model credential slot — `providers.<p>.apiKey` is
+      // the bearer for every row under it. So adopting the proxy's token beside
+      // a row that keeps its own foreign baseUrl mails that token to a third
+      // party on every turn of that row. The same rule the openai image
+      // migration already applies through `foreignOpenAiRoute`: a provider
+      // block we did not build is one to leave alone, not to half-configure.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: {
+              baseUrl: "http://127.0.0.1:8080/v1",
+              apiKey: "an-operators-own-key",
+              models: [{ id: "gemma-4-e2b", baseUrl: "https://models.example.net/v1" }],
+            },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(false);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it("still adopts the proxy when a row names THIS box", async () => {
+      // A row on loopback or on our own proxy is not somewhere the bearer could
+      // leak to — it is where the bearer already goes. Refusing there would be a
+      // false failure, and on the boot-migration side it leaves the entry with
+      // no provider baseUrl at all, which OpenClaw's schema rejects for this
+      // provider: a dead gateway bought for no security at all.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: {
+              baseUrl: "http://127.0.0.1:8080/v1",
+              models: [
+                { id: "own-server", baseUrl: "http://127.0.0.1:8080/v1" },
+                { id: "on-the-proxy", baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1" },
+              ],
+            },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(true);
+      const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+      expect(written.models.providers.llamacpp.baseUrl)
+        .toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
+    });
+
+    it("ignores a row OpenClaw's own schema would reject when deciding that", async () => {
+      // `ModelDefinitionSchema` requires a non-empty `id`, so a row without one
+      // can never route a turn and its baseUrl cannot receive anything. Letting
+      // it veto the repair would be the same false failure one shape over.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: {
+              baseUrl: "http://127.0.0.1:8080/v1",
+              models: [{ name: "no id here", baseUrl: "https://models.example.net/v1" }],
+            },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(true);
     });
 
     it("skips writes when local AI providers already point at the proxy", async () => {

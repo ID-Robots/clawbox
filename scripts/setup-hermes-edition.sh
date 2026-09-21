@@ -14,6 +14,18 @@
 set -euo pipefail
 
 PROJECT_DIR="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
+# Where ROOT reads the code and unit files it installs, as opposed to where the
+# box lives. install.sh passes the root-owned mirror it was itself started from
+# (see $SRC_DIR there and docs/root-exec-mirror.md); everything else — an
+# operator running this by hand — gets $PROJECT_DIR and behaves as before.
+#
+# It matters for exactly one thing here: section 3 installs unit files into
+# /etc/systemd/system as root. `hermes_edition` is on WEB_ROOT_STEPS and runs on
+# every in-app update, so reading those from the clawbox-writable tree let the
+# account the web server runs as hand root a unit with no User= and an ExecStart
+# of its choosing. The three scripts below are dropped to $CLAWBOX_USER with
+# runuser and stay on $PROJECT_DIR: that is clawbox running clawbox's own files.
+SRC_DIR="${CLAWBOX_SRC_DIR:-$PROJECT_DIR}"
 CLAWBOX_USER="${CLAWBOX_USER:-clawbox}"
 CLAWBOX_HOME="$(getent passwd "$CLAWBOX_USER" | cut -d: -f6)"
 CLAWBOX_HOME="${CLAWBOX_HOME:-/home/$CLAWBOX_USER}"
@@ -199,7 +211,7 @@ fi
 
 # ── 3. Install + enable the Hermes dashboard + auth-proxy services. ─────────
 for unit in clawbox-hermes-dashboard clawbox-hermes-dashboard-proxy; do
-  src="$PROJECT_DIR/config/$unit.service"
+  src="$SRC_DIR/config/$unit.service"
   if [ -f "$src" ]; then
     install -m 644 -o root -g root "$src" "/etc/systemd/system/$unit.service"
     log "installed $unit.service"
@@ -216,13 +228,43 @@ done
 #
 # Note this writes $EDITION, not a hardcoded "hermes": doing the latter on a
 # dual box would silently downgrade the premium SKU.
+#
+# BOTH RECORDS ARE WRITTEN ATOMICALLY — a temp beside the target, then a
+# rename. `> "$file"` is open(O_TRUNC) + write + close, so for the length of the
+# write every reader on the box sees a zero-length or half-written lock, and
+# `readEditionSource()` turns that into `{edition: "openclaw", defaulted:
+# true}`. This script is dispatched by install.sh's `step_hermes_edition` on
+# EVERY in-app update of a hermes or dual box, while the middleware,
+# `openclawIsAbsent()`, the updater's own `hasHermesHarness()`, the gateway
+# catch-all and the MCP server are all reading that file — so a Hermes box
+# briefly answered as an OpenClaw one, which is how the flagship SKU's
+# gateway-only paths stop 404-ing and the MCP server registers the wrong tool
+# set. A rename cannot be observed half-done. install.sh:step_edition_lock is
+# the OTHER writer of these same two records and goes through
+# `install_root_file` for exactly this reason (TASK-584, TASK-761); this script
+# cannot call that function, so it does the same thing in six lines.
+# The content arrives on STDIN, so the bytes written are exactly the bytes the
+# caller printed — a `$(...)` argument would eat the trailing newline both of
+# these records end with.
+write_root_file() {
+  local dst="$1" mode="$2" tmp
+  # In the TARGET's directory, or the rename would cross filesystems and stop
+  # being atomic.
+  tmp="$(mktemp "$dst.XXXXXX")" || return 1
+  cat > "$tmp" || { rm -f "$tmp"; return 1; }
+  chown root:root "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod "$mode" "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dst" || { rm -f "$tmp"; return 1; }
+}
+
 install -d -o root -g root -m 0755 /etc/clawbox
-printf '# ClawBox edition lock — written by setup-hermes-edition.sh.\n# Root-owned on purpose: this is the authority for the device SKU.\nCLAWBOX_EDITION=%s\n' \
-  "$EDITION" > "$EDITION_FILE"
-chown root:root "$EDITION_FILE"
-chmod 0644 "$EDITION_FILE"
 mkdir -p /etc/systemd/system/clawbox-setup.service.d
-printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$EDITION" > "$EDITION_DROPIN"
+printf '# ClawBox edition lock — written by setup-hermes-edition.sh.\n# Root-owned on purpose: this is the authority for the device SKU.\nCLAWBOX_EDITION=%s\n' \
+  "$EDITION" | write_root_file "$EDITION_FILE" 0644 \
+  || fail "could not write the edition lock at $EDITION_FILE"
+printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$EDITION" \
+  | write_root_file "$EDITION_DROPIN" 0644 \
+  || fail "could not write the edition drop-in at $EDITION_DROPIN"
 log "wrote edition lock (CLAWBOX_EDITION=$EDITION)"
 
 systemctl daemon-reload

@@ -1,10 +1,31 @@
 import fs from "fs/promises";
+import { GatewayWsUnavailableError, gatewayWsCall, gatewayWsPatchConfig } from "@/lib/openclaw-gateway-ws";
+import { listAgentIds, readSessionEntries, sessionStorePath } from "./openclaw-session-store";
+import { isPatchableSession, patchSessionModels, type GatewayRpcCall } from "./openclaw-session-model";
+import { clearPairingState, readPairingAllowEntries, readPairingRequests } from "./openclaw-state-store";
 import fsSync from "fs";
 import path from "path";
 import { execFile, spawn } from "child_process";
-import { promisify } from "util";
+import { randomUUID } from "crypto";
+import { isDeepStrictEqual, promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
+import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import { readEdition } from "@/lib/edition-source";
+import { getProviderReasoningConfig, isThinkingLevel } from "@/lib/chat-reasoning";
+import { get as getConfigStoreValue } from "@/lib/config-store";
+import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
+import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
+import { isDiscordSnowflake, isSafeDiscordToken } from "@/lib/discord-api";
+import { envPort, waitForPortOpen } from "@/lib/port-probe";
+import { getLocalAiToken } from "@/lib/local-ai-token";
+import { LEGACY_EXEC_APPROVALS_RE } from "@/lib/openclaw-doctor-blocker";
+import {
+  DOCTOR_SERVICE_OWNERSHIP_RE,
+  withExternalGatewaySupervisor,
+} from "@/lib/openclaw-doctor-ownership";
+import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
+import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
+import { isConfigMutationConflict } from "@/lib/config-conflict";
 
 const exec = promisify(execFile);
 
@@ -21,6 +42,24 @@ export class OpenclawUnavailableError extends Error {
   constructor(message = "The OpenClaw CLI is not available on this edition.") {
     super(message);
     this.name = "OpenclawUnavailableError";
+  }
+}
+
+/**
+ * The CLI was still running at its deadline and was SIGKILLed.
+ *
+ * A distinct type because it says something the other spawn failures do not:
+ * NOTHING was observed. An exit code is the CLI's own answer — 0 wrote, 1
+ * refused — but a kill leaves the question open, and `openclaw config set`
+ * writes the config early and then spends seconds validating catalogs, so on a
+ * Jetson the value routinely lands inside the window we kill in. Callers that
+ * know what they asked for read the config back rather than guessing (see
+ * {@link runOpenclawConfigSet}).
+ */
+export class OpenclawSpawnTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OpenclawSpawnTimeoutError";
   }
 }
 
@@ -74,19 +113,185 @@ export interface OpenclawConfigSetOptions {
  * multiple `config set` calls back-to-back, or a `config set` races with the
  * gateway touching `meta.lastTouchedAt` during a reload, one of the writes
  * can fail with `ConfigMutationConflictError: config changed since last
- * load`. The mutation itself is safe to retry — the next attempt re-reads
- * the fresh hash and converges.
+ * load` — or with the same refusal worded for a human, which names no class at
+ * all. Both spellings are matched by {@link isConfigMutationConflict}. The
+ * mutation itself is safe to retry — the next attempt re-reads the fresh hash
+ * and converges.
  *
  * This helper retries *only* on that specific error (other failures bubble
  * up immediately) with a short linear backoff, so callers don't need to
  * handle the race individually.
+ *
+ * ONE failure is not simply rethrown: a spawn killed at its deadline. The CLI
+ * writes the config early and then spends seconds validating catalogs, so on a
+ * Jetson the value lands inside the window we kill in — and a SIGKILL carries
+ * no exit code to read. The assignments are looked for in the config on disk,
+ * and only a write this process can SEE there is reported as success; every
+ * other failure, including an unreadable config, still throws. See
+ * {@link configSetLanded}.
  */
 export async function runOpenclawConfigSet(
   args: string[],
   options: OpenclawConfigSetOptions = {},
 ): Promise<void> {
+  if (await configSetViaGateway([args], options)) return;
+  await runConfigSetVerified([args], options, () =>
+    withConfigMutationRetry(
+      (timeoutMs) => spawnOpenclawConfigSet(args, { ...options, timeoutMs }),
+      options,
+      "runOpenclawConfigSet",
+    ),
+  );
+}
+
+/**
+ * The same assignments as ONE `config.patch` through the running gateway.
+ *
+ * `openclaw config set` is a validated read-modify-write of openclaw.json by
+ * a process that costs ~3 s to start; the gateway's `config.patch` is the
+ * same validated write by the process that is already running, in ~50 ms,
+ * and it hot-applies what it can on the way. Answers true when the write
+ * landed that way. Answers false — and the caller runs the CLI as before —
+ * when the gateway is not there, when the assignments carry options only the
+ * CLI honours (another user's uid/gid, a cwd, an env), when the argv carries
+ * a `config set` FLAG this path cannot honour, when a path cannot be turned
+ * into a merge, when the gateway's answer does not SHOW the write, or when
+ * the gateway REFUSED it: the CLI's refusal carries the wording callers parse
+ * (`refuseUnresolvableModel` reads "Cannot set model reference"), so a
+ * refusal is re-asked of the CLI rather than re-worded here. That costs a CLI
+ * start only on the failing path.
+ *
+ * THE FLAGS ARE PART OF THE DECISION, not noise to filter away.
+ * `openclaw config set <path> <json-object>` REPLACES the value at the path;
+ * `config.patch` applies an RFC-7396-style MERGE (`applyMergePatch`, with
+ * `mergeObjectArraysById: true` at the gateway's own call site), so an object
+ * value is merged key by key and an id-keyed array is merged by id. The core's
+ * `rejectDestructiveArrayPatchWithoutIntent` refuses only the subset that
+ * REMOVES entries — a non-removing replacement would land silently as a merge,
+ * which is a different config from the one the caller asked for. So anything
+ * beyond the two value-mode flags {@link parseConfigSetArgs} understands sends
+ * the whole batch to the CLI. `--replace` is deliberately NOT translated into
+ * `replacePaths` here: the gateway's replace applies to ARRAY paths, the CLI's
+ * to the value at the path, and mapping one onto the other is a semantic claim
+ * no caller has asked for.
+ */
+const GATEWAY_PATCHABLE_CONFIG_SET_FLAGS = new Set(["--json", "--strict-json"]);
+
+/** How many times the gateway's optimistic-concurrency refusal is re-tried on
+ *  the socket before the batch is handed to the CLI. `gatewayWsPatchConfig`
+ *  does `config.get` then `config.patch`, and the gateway touching
+ *  `meta.lastTouchedAt` on a reload between the two is the documented race
+ *  {@link withConfigMutationRetry} exists for — losing it here means the fast
+ *  path pays a full CLI start on exactly the collision it was built for, plus
+ *  a misleading "refused" journal line. Each retry re-reads the hash and costs
+ *  milliseconds; the CLI start costs ~3 s on a Jetson. */
+const GATEWAY_PATCH_CONFLICT_ATTEMPTS = 3;
+
+async function configSetViaGateway(
+  batch: readonly OpenclawConfigSetArgs[],
+  options: OpenclawConfigSetOptions,
+): Promise<boolean> {
+  if (options.uid !== undefined || options.gid !== undefined || options.cwd || options.env) return false;
+  if (gatewayIsAbsent()) return false;
+  const patch: Record<string, unknown> = {};
+  /** Every asked-for path as the gateway spells a changed leaf: the same
+   *  segments, dot-joined, which is what its own `diffConfigLeafPaths` builds. */
+  const askedPaths: string[] = [];
+  for (const args of batch) {
+    if (args.some((arg) => arg.startsWith("--") && !GATEWAY_PATCHABLE_CONFIG_SET_FLAGS.has(arg))) return false;
+    let entry: { path: string; value: unknown };
+    try {
+      entry = parseConfigSetArgs(args);
+    } catch {
+      return false;
+    }
+    const segments = configPathSegments(entry.path);
+    if (!segments || segments.length === 0) return false;
+    // A container value is a REPLACEMENT for the CLI and a MERGE for
+    // `config.patch`: a key the caller left out survives the merge, which is
+    // a different config from the one asked for (a stale `apiKey` under a
+    // provider entry, say). Only a scalar means the same thing to both
+    // writers, so objects and arrays keep the CLI they always had.
+    if (entry.value !== null && typeof entry.value === "object") return false;
+    askedPaths.push(segments.join("."));
+    let node: Record<string, unknown> = patch;
+    for (const key of segments.slice(0, -1)) {
+      const next = node[key];
+      if (next && typeof next === "object" && !Array.isArray(next)) {
+        node = next as Record<string, unknown>;
+      } else {
+        const fresh: Record<string, unknown> = {};
+        node[key] = fresh;
+        node = fresh;
+      }
+    }
+    node[segments[segments.length - 1]] = entry.value;
+  }
+  for (let attempt = 1; attempt <= GATEWAY_PATCH_CONFLICT_ATTEMPTS; attempt++) {
+    try {
+      const { noop, changedPaths } = await gatewayWsPatchConfig(patch, { timeoutMs: options.timeoutMs });
+      // The read-back this module is built on ({@link configSetLanded}: "only a
+      // write this process can SEE there is reported as success"), applied to
+      // the answer the gateway already sends. `config.patch` reports `noop`
+      // whenever the merged config equals the source — which covers the
+      // assignment that was DROPPED rather than applied (`applyMergePatch`
+      // silently skips a key `isMergePatchObjectKeyAllowed` blocks, and any
+      // merge it cannot express, with no error frame) as well as the value
+      // that was already there. The two are indistinguishable from here, so
+      // neither is claimed: the CLI re-reads the file and settles it. An
+      // already-correct value therefore costs a CLI start it used to skip;
+      // that is the price of never reporting a write that did not happen.
+      if (noop) {
+        console.warn(`[openclaw-config] gateway config.patch changed nothing (${loggedConfigAreas(batch.map(configSetEntryPath))}); asking the CLI`);
+        return false;
+      }
+      const uncovered = askedPaths.filter(
+        (asked) => !changedPaths.some((changed) => changed === asked || changed.startsWith(`${asked}.`)),
+      );
+      if (uncovered.length > 0) {
+        console.warn(`[openclaw-config] gateway config.patch did not report ${loggedConfigAreas(uncovered)} as changed; asking the CLI`);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      if (err instanceof GatewayWsUnavailableError) return false;
+      // The conflict is the one refusal a repeat settles: `config.get` and
+      // `config.patch` are two calls, and the gateway touching the file
+      // between them is ordinary rather than a rejection of this write.
+      if (isConfigMutationConflict(err) && attempt < GATEWAY_PATCH_CONFLICT_ATTEMPTS) continue;
+      console.warn(`[openclaw-config] gateway config.patch refused (${loggedConfigAreas(batch.map(configSetEntryPath))}); asking the CLI`);
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * Retry `attempt` while it fails with OpenClaw's config-mutation conflict.
+ *
+ * Shared by {@link runOpenclawConfigSet} and {@link runOpenclawConfigSetBatch}
+ * so both forms of the write survive the same race. Any other failure is
+ * rethrown on the first try — a schema rejection does not become valid by
+ * being repeated.
+ *
+ * The conflict is recognised by {@link isConfigMutationConflict}, not by the
+ * `ConfigMutationConflictError` class name this used to grep for. The CLI also
+ * words that refusal for a human ("The config file changed while this command
+ * was writing…"), and that spelling carries no class name — so the retry did
+ * not fire for it, a race the next attempt would have settled was reported as a
+ * hard failure, and the CLI's sentence was what the owner read.
+ *
+ * Retrying is all this does. A rethrown timeout is then settled by the config
+ * on disk, one level up in {@link runConfigSetVerified}, because a SIGKILL is
+ * the only failure that carries no answer about whether the write happened.
+ */
+async function withConfigMutationRetry(
+  attemptFn: (timeoutMs: number) => Promise<void>,
+  options: OpenclawConfigSetOptions,
+  label: string,
+): Promise<void> {
   const {
-    timeoutMs = 30_000,
+    timeoutMs = DEFAULT_SPAWN_TIMEOUT_MS,
     maxAttempts = 4,
     baseBackoffMs = 100,
   } = options;
@@ -94,29 +299,52 @@ export async function runOpenclawConfigSet(
   let lastError: Error | null = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      await spawnOpenclawConfigSet(args, { ...options, timeoutMs });
+      await attemptFn(timeoutMs);
       return;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      const isConflict = /ConfigMutationConflictError/i.test(lastError.message);
-      if (!isConflict || attempt === maxAttempts) {
+      if (!isConfigMutationConflict(lastError) || attempt === maxAttempts) {
         throw lastError;
       }
       const delayMs = baseBackoffMs * attempt;
       console.warn(
-        `[openclaw-config] ConfigMutationConflictError on attempt ${attempt}/${maxAttempts}; retrying after ${delayMs}ms`,
+        `[openclaw-config] config mutation conflict on attempt ${attempt}/${maxAttempts}; retrying after ${delayMs}ms`,
       );
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
-  throw lastError ?? new Error("runOpenclawConfigSet exhausted retries");
+  throw lastError ?? new Error(`${label} exhausted retries`);
 }
 
-interface SpawnOpenclawOptions {
-  /** Per-call timeout in ms. Default 30_000 (Jetson CLI cold-start is ~10-12s). */
+/**
+ * What may stand in an `agents.defaults.<tool>Model` slot.
+ *
+ * A BARE STRING is one of them, and the type used to say otherwise (TASK-755):
+ * the core coerces it (`hasExplicitToolModelConfig` →
+ * `coerceFactoryToolModelConfig` → `resolvePrimaryStringValue`, which answers a
+ * string with itself), `openclaw config validate` accepts it, and a reader
+ * typed to the object form is a reader that believes an owner-authored model is
+ * an empty slot. Every caller has to narrow before reading `primary`.
+ */
+export type ToolModelSlot = string | { primary?: string; fallbacks?: string[] };
+
+export interface SpawnOpenclawOptions {
+  /** Per-call timeout in ms. Default {@link DEFAULT_SPAWN_TIMEOUT_MS}. */
   timeoutMs?: number;
   /** Capture and resolve stdout (needed to read `--json` output). Default false. */
   captureStdout?: boolean;
+  /**
+   * Write this to the child's stdin and close it. The one way to hand the CLI
+   * a secret without putting it in argv (`models auth paste-api-key` reads the
+   * key from stdin). Callers passing one should set labelArgs anyway — the
+   * value never appears in the label, but argv hygiene is theirs to keep.
+   */
+  stdinData?: string;
+  /**
+   * Argv to name the process by in error messages, when the real argv must not
+   * appear in one. Defaults to `args`. See {@link spawnOpenclawConfigSet}.
+   */
+  labelArgs?: string[];
   uid?: number;
   gid?: number;
   cwd?: string;
@@ -141,16 +369,16 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
     return Promise.reject(new OpenclawUnavailableError());
   }
   const bin = findOpenclawBin();
-  const { uid, gid, captureStdout = false } = options;
-  const timeoutMs = options.timeoutMs ?? 30_000;
+  const { uid, gid, captureStdout = false, stdinData } = options;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
   const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
   const env = { HOME: "/home/clawbox", ...process.env, ...(options.env ?? {}) };
-  const label = `${bin} ${args.join(" ")}`;
+  const label = `${bin} ${(options.labelArgs ?? args).join(" ")}`;
 
   return new Promise((resolve, reject) => {
     let settled = false;
     const child = spawn(bin, args, {
-      stdio: ["ignore", captureStdout ? "pipe" : "ignore", "pipe"],
+      stdio: [stdinData !== undefined ? "pipe" : "ignore", captureStdout ? "pipe" : "ignore", "pipe"],
       cwd,
       ...(uid !== undefined ? { uid } : {}),
       ...(gid !== undefined ? { gid } : {}),
@@ -166,12 +394,33 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
       stderr += chunk.toString();
     });
 
+    if (stdinData !== undefined) {
+      // EPIPE when the child exits before reading — close() reports the truth.
+      child.stdin?.on("error", () => {});
+      child.stdin?.write(stdinData);
+      child.stdin?.end();
+    }
+
     const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        child.kill("SIGKILL");
-        reject(new Error(`${label} timed out after ${timeoutMs}ms`));
-      }
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      // `kill(2)` returns when the signal is QUEUED, not when the process is
+      // gone, and a `config set` sitting in its final rename can still land the
+      // write. The caller reads the config back to decide whether a killed
+      // write landed, so answering before the child is reaped would read the
+      // file on the wrong side of that rename. Bounded: a process that will not
+      // die must not hold the request open either.
+      const error = new OpenclawSpawnTimeoutError(`${label} timed out after ${timeoutMs}ms`);
+      let answered = false;
+      const answer = () => {
+        if (answered) return;
+        answered = true;
+        clearTimeout(reapTimer);
+        reject(error);
+      };
+      const reapTimer = setTimeout(answer, KILL_REAP_WAIT_MS);
+      child.once("close", answer);
     }, timeoutMs);
 
     child.on("error", (err) => {
@@ -193,11 +442,118 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
   });
 }
 
+/**
+ * Public face of {@link spawnOpenclaw} for other libs in this repo.
+ *
+ * Exported as a named wrapper rather than by exporting `spawnOpenclaw` itself
+ * so the edition guard, the timeout and the stdio rules stay in ONE place: a
+ * caller that wants `--json` output gets the same "drain stdout or the child
+ * deadlocks" handling every internal caller already has, and the
+ * OpenclawUnavailableError guard cannot be routed around.
+ */
+export function spawnOpenclawCli(
+  args: string[],
+  options: SpawnOpenclawOptions = {},
+): Promise<string> {
+  return spawnOpenclaw(args, options);
+}
+
+/** Bound on the gateway round trip itself; the spawn budget adds the CLI's own start-up on top. */
+const GATEWAY_RPC_TIMEOUT_MS = 20_000;
+const GATEWAY_RPC_SPAWN_ALLOWANCE_MS = 30_000;
+
+/** Default per-call deadline. A Jetson CLI cold start is ~10-12s. */
+const DEFAULT_SPAWN_TIMEOUT_MS = 30_000;
+
+/** How long a SIGKILLed child is given to actually exit before we answer anyway. */
+const KILL_REAP_WAIT_MS = 1_000;
+
+/**
+ * One gateway RPC through the CLI: `openclaw gateway call <method> --params
+ * <json> --json`. The CLI is the gateway's own client — it holds the device
+ * identity, the token and the protocol version, so nothing here can drift
+ * from what the gateway accepts. With `--json` it prints the method's result
+ * object and nothing else on success; a failure is written as an error
+ * payload with exit 1, which `spawnOpenclaw` turns into a rejection carrying
+ * that text. The `ok === false` check is for a build that reports a refusal
+ * on exit 0.
+ *
+ * Costs one CLI start-up (10-12 s on a Jetson), so callers batch: a sweep
+ * over N sessions is one `sessions.patchMany`, not N calls.
+ */
+export async function callGatewayRpc(
+  method: string,
+  params: Record<string, unknown>,
+  options: { timeoutMs?: number } = {},
+): Promise<Record<string, unknown>> {
+  const timeoutMs = options.timeoutMs ?? GATEWAY_RPC_TIMEOUT_MS;
+  // In-process first: the gateway's own WebSocket answers in milliseconds
+  // where `openclaw gateway call` spends ~3 s starting the CLI. A gateway
+  // that is not there to talk to falls through to the CLI, whose words for
+  // that case every caller already knows.
+  if (!gatewayIsAbsent()) {
+    try {
+      return await gatewayWsCall(method, params, { timeoutMs });
+    } catch (err) {
+      if (!(err instanceof GatewayWsUnavailableError)) throw err;
+    }
+  }
+  const out = await spawnOpenclaw(
+    ["gateway", "call", method, "--params", JSON.stringify(params), "--json", "--timeout", String(timeoutMs)],
+    {
+      captureStdout: true,
+      timeoutMs: timeoutMs + GATEWAY_RPC_SPAWN_ALLOWANCE_MS,
+      // Session keys are not secrets, but a 100-target params blob is not a log line either.
+      labelArgs: ["gateway", "call", method, "--params", "<json>", "--json"],
+    },
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(out);
+  } catch {
+    throw new Error(`${method} returned no JSON`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${method} returned no object`);
+  }
+  const payload = parsed as Record<string, unknown>;
+  if (payload.ok === false) {
+    const error = payload.error as { message?: unknown } | undefined;
+    throw new Error(typeof error?.message === "string" ? error.message : `${method} failed`);
+  }
+  return payload;
+}
+
+/**
+ * Argv for a `config set` call with the *value* elided, for use in a log line.
+ *
+ * `openclaw config set <path> <value>` carries the secret in argv — the ClawBox
+ * AI portal token, a provider API key, the Telegram bot token, the gateway
+ * token. `spawnOpenclaw` names the process in the two errors it can reject with
+ * (timeout, and a non-zero exit that produced no output), and every caller of
+ * `runOpenclawConfigSet` logs that message. Naming the config path is what makes
+ * such a line diagnosable; the value never adds anything a reader needs, and
+ * writing it puts a live credential in the journal (CWE-532).
+ *
+ * Flags keep their literal form — they are part of the command's shape, not its
+ * payload — so a reader still sees `--json` and can reproduce the call.
+ */
+export function configSetLabelArgs(args: string[]): string[] {
+  const [configPath, ...rest] = args;
+  return [
+    "config",
+    "set",
+    ...(configPath === undefined ? [] : [configPath]),
+    ...rest.map((arg) => (arg.startsWith("--") ? arg : "<redacted>")),
+  ];
+}
+
 function spawnOpenclawConfigSet(
   args: string[],
   options: OpenclawConfigSetOptions & { timeoutMs: number },
 ): Promise<void> {
   return spawnOpenclaw(["config", "set", ...args], {
+    labelArgs: configSetLabelArgs(args),
     timeoutMs: options.timeoutMs,
     uid: options.uid,
     gid: options.gid,
@@ -205,7 +561,396 @@ function spawnOpenclawConfigSet(
     env: options.env,
   }).then(() => undefined);
 }
-const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
+
+/**
+ * One `openclaw config set` assignment, in the same argv form
+ * {@link runOpenclawConfigSet} takes: `[path, value]`, optionally followed by
+ * `--json` when `value` is already JSON text.
+ */
+export type OpenclawConfigSetArgs = string[];
+
+/**
+ * Turn one `config set` argv into the `{ path, value }` entry the CLI's batch
+ * mode wants.
+ *
+ * The CLI's own two value modes are reproduced exactly, because a batch has to
+ * write the same config a sequence of single calls would:
+ *  - with `--json` (aka `--strict-json`) the value text is parsed as JSON and a
+ *    parse failure is an error;
+ *  - without it the CLI tries to parse the text and silently falls back to the
+ *    raw string, which is how `"24000"` becomes the number 24000 and
+ *    `"deepseek/deepseek-v4-pro"` stays a string.
+ *
+ * (The CLI reaches for JSON5 rather than JSON on the lenient path. Every value
+ * this repo writes without `--json` is a plain model id, a mode word, a token
+ * or a decimal integer, for which the two parsers agree; JSON5 is not a
+ * dependency here and pulling one in to cover values we never send would be
+ * cost without benefit.)
+ */
+export function parseConfigSetArgs(args: OpenclawConfigSetArgs): { path: string; value: unknown } {
+  const flags = args.filter((arg) => arg.startsWith("--"));
+  const positional = args.filter((arg) => !arg.startsWith("--"));
+  const [path, raw] = positional;
+  if (!path) throw new Error("config set batch entry is missing a path");
+  if (raw === undefined) throw new Error(`config set batch entry for ${path} is missing a value`);
+  const strictJson = flags.includes("--json") || flags.includes("--strict-json");
+  if (strictJson) return { path, value: JSON.parse(raw) };
+  try {
+    return { path, value: JSON.parse(raw) };
+  } catch {
+    return { path, value: raw };
+  }
+}
+
+/**
+ * Split a `config set` path into the segments the CLI addresses, or null when
+ * this code cannot say for certain what they are.
+ *
+ * `.` separates, and a bracket-quoted segment is ONE key however many dots it
+ * contains — `agents.defaults.models["openai/gpt-5.5"].agentRuntime.id`, the
+ * Codex runtime arm, is the path that made this necessary. Null for anything
+ * else (an unterminated bracket, an unquoted index, an empty DOTTED segment —
+ * `[""]` is a legal key and parses as one), because
+ * the only caller uses this to decide that a write it did not see finish
+ * actually landed, and a path it cannot read must not become that claim.
+ */
+function configPathSegments(configPath: string): string[] | null {
+  const segments: string[] = [];
+  let i = 0;
+  while (i < configPath.length) {
+    if (configPath[i] === "[") {
+      const quote = configPath[i + 1];
+      if (quote !== '"' && quote !== "'") return null;
+      const end = configPath.indexOf(`${quote}]`, i + 2);
+      if (end < 0) return null;
+      const segment = configPath.slice(i + 2, end);
+      // The CLI builds these with JSON.stringify, so a quoted segment can carry
+      // escapes; this reader does not unescape, and a segment it would match
+      // against the wrong key must be a null rather than a guess.
+      if (segment.includes("\\")) return null;
+      segments.push(segment);
+      i = end + 2;
+    } else {
+      const rest = configPath.slice(i);
+      const dot = rest.indexOf(".");
+      const bracket = rest.indexOf("[");
+      const stops = [dot, bracket].filter((n) => n >= 0);
+      const end = i + (stops.length ? Math.min(...stops) : rest.length);
+      if (end === i) return null;
+      segments.push(configPath.slice(i, end));
+      i = end;
+    }
+    if (configPath[i] === ".") {
+      i += 1;
+      if (i === configPath.length) return null; // trailing separator
+    } else if (i < configPath.length && configPath[i] !== "[") {
+      return null;
+    }
+  }
+  return segments.length > 0 ? segments : null;
+}
+
+/**
+ * The value at a dotted config path, or `undefined` when the path is absent.
+ *
+ * OWN properties only. A plain `current[segment]` walks the prototype chain, so
+ * `constructor` or `toString` would answer with something that is not in
+ * `openclaw.json` — and the one job here is to say what the file holds.
+ */
+function valueAtConfigPath(config: unknown, segments: readonly string[]): unknown {
+  let current: unknown = config;
+  for (const segment of segments) {
+    if (!isPlainObject(current)) return undefined;
+    if (!Object.hasOwn(current, segment)) return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+/**
+ * The config areas this module is willing to NAME in a log line.
+ *
+ * A config path is caller text. The two request bodies CodeQL traced into the
+ * journal line below (js/log-injection, alert #473) are `POST
+ * /setup-api/chat/model`, whose model reference becomes
+ * `agents.defaults.models[<ref>].agentRuntime` through
+ * `chatgptRuntimeEntryPath`, and `POST /setup-api/tts`, whose provider id
+ * becomes `<tts|messages.tts>.providers.<id>.voice`. (`models.providers.<id>`
+ * is the same shape, from `POST /setup-api/ai-models/configure`.) Escaping that
+ * text is not enough to make the record ours: a caller who chooses the content,
+ * and with it the length, of what one API call writes to the journal can forge
+ * entries inside a line as well as across two.
+ *
+ * So the path is mapped onto one of these literals and the caller's own text
+ * never reaches the line. The write is still diagnosable — which subsystem was
+ * being configured is the part an operator reads — and a path under anything
+ * else is named "other" rather than quoted.
+ */
+const LOGGED_CONFIG_AREAS = [
+  "agents",
+  "channels",
+  "gateway",
+  "memory",
+  "messages",
+  "models",
+  "plugins",
+  "tools",
+  "tts",
+] as const;
+
+/**
+ * The path a `config set` entry assigns: the first non-flag argv element, the
+ * same rule {@link parseConfigSetArgs} reads it by. Total where that one throws
+ * — an entry this cannot read yields `""`, which {@link loggedConfigAreas}
+ * names "other". A log line describing a success must not be able to turn it
+ * into a failure.
+ */
+function configSetEntryPath(args: OpenclawConfigSetArgs): string {
+  return args.find((arg) => !arg.startsWith("--")) ?? "";
+}
+
+/**
+ * Name the areas some config paths write to, using only the literals above.
+ *
+ * `find`, not a membership test: what is returned is the element of
+ * {@link LOGGED_CONFIG_AREAS}, so nothing derived from the caller's path is
+ * what gets logged. `LOGGED_CONFIG_AREAS.includes(root) ? root : "other"` would
+ * read the same and put the request's text straight back into the record.
+ */
+function loggedConfigAreas(configPaths: readonly string[]): string {
+  const areas = new Set<string>();
+  for (const configPath of configPaths) {
+    const root = configPathSegments(configPath)?.[0];
+    areas.add(LOGGED_CONFIG_AREAS.find((area) => area === root) ?? "other");
+  }
+  return [...areas].sort().join(", ");
+}
+
+/**
+ * Did the assignments of a killed `config set` actually reach the file?
+ *
+ * Measured on the OpenClaw box (TASK-654): `POST /setup-api/chat/model`
+ * answered 500 with `openclaw config set agents.defaults.model.primary
+ * <redacted> timed out after 30000ms` — and `agents.defaults.model.primary`
+ * was the new model. The owner was told the switch failed over a switch that
+ * had happened.
+ *
+ * The read is STRICT and every failure answers false: an EACCES or a file
+ * caught half-written proves nothing, and `readConfig`'s `{}` for those would
+ * be indistinguishable from a config that genuinely lacks the value. False
+ * here means the caller's original timeout is rethrown, which is the safe
+ * direction — a real failure stays a failure, and only a write this process
+ * can SEE on disk is forgiven.
+ */
+async function configSetLanded(batch: readonly OpenclawConfigSetArgs[]): Promise<boolean> {
+  let config: OpenClawConfig;
+  try {
+    config = await readConfigStrict();
+  } catch {
+    return false;
+  }
+  for (const args of batch) {
+    let entry: { path: string; value: unknown };
+    try {
+      entry = parseConfigSetArgs(args);
+    } catch {
+      return false;
+    }
+    const segments = configPathSegments(entry.path);
+    if (!segments) return false;
+    if (!isDeepStrictEqual(valueAtConfigPath(config, segments), entry.value)) return false;
+  }
+  return true;
+}
+
+/**
+ * Run a `config set` and, if it is killed at its deadline, let the config on
+ * disk settle whether it landed.
+ *
+ * A SIGKILL is the one failure that carries no answer, and this is the only
+ * place that can ask the question cheaply: the CLI has already been paid for,
+ * and `readConfigStrict` is a file read. Every other failure — an exit code, a
+ * spawn error, `OpenclawUnavailableError` — is the CLI's own verdict and is
+ * rethrown untouched.
+ */
+async function runConfigSetVerified(
+  batch: readonly OpenclawConfigSetArgs[],
+  options: OpenclawConfigSetOptions,
+  attempt: () => Promise<void>,
+): Promise<void> {
+  try {
+    await attempt();
+  } catch (err) {
+    if (!(err instanceof OpenclawSpawnTimeoutError)) throw err;
+    if (!(await configSetLanded(batch))) throw err;
+    // Not `err.message`: the spawn label carries the caller's config path. (The
+    // VALUES are already elided by configSetLabelArgs / configSetBatchLabelArgs;
+    // the paths are not, and they are the half built from a request body.) The
+    // deadline is read off the caller's options and NOT off the error, every
+    // field of which hangs on an object built from that same path.
+    const areas = loggedConfigAreas(batch.map(configSetEntryPath));
+    console.warn(
+      `[openclaw-config] a config set (${areas}) was killed at its ${options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS}ms deadline, but every assignment is on disk — the write landed, reporting success`,
+    );
+  }
+}
+
+/**
+ * The unset half of {@link configSetLanded}: is the path gone from the file?
+ *
+ * Same deadline, same kill, same false failure — a removal reported as a
+ * failure sends the caller to repair what is already repaired (the configure
+ * route answers 502 and tells the owner to run the command by hand). An
+ * unreadable config still answers false, for the reason given there.
+ */
+async function configUnsetLanded(configPath: string): Promise<boolean> {
+  const segments = configPathSegments(configPath);
+  if (!segments) return false;
+  // An ABSENT config answers `{}` from readConfigStrict, and "the path is not
+  // in `{}`" is not evidence of a removal — it is the one shape where the
+  // "every failure answers false" rule would otherwise fail OPEN. The callers
+  // only unset a path they have just seen, so a file that is now missing is a
+  // state to report, not to bless.
+  if (!fsSync.existsSync(CONFIG_PATH)) return false;
+  try {
+    return valueAtConfigPath(await readConfigStrict(), segments) === undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Argv for a batched `config set`, with every *value* elided, for use in a log
+ * line — the batch counterpart of {@link configSetLabelArgs}.
+ *
+ * Batch mode puts the whole payload in a single argv element, so the values
+ * that {@link configSetLabelArgs} carefully keeps out of the journal (the
+ * ClawBox AI portal token, provider API keys, the gateway token) would all ride
+ * into an error message inside one JSON blob. Name the paths, which is what
+ * makes such a line diagnosable, and nothing else.
+ */
+export function configSetBatchLabelArgs(batch: readonly OpenclawConfigSetArgs[]): string[] {
+  return [
+    "config",
+    "set",
+    "--batch-json",
+    `[${batch.map((args) => `${configSetEntryPath(args) || "<no path>"}=<redacted>`).join(",")}]`,
+  ];
+}
+
+/**
+ * Apply several `config set` assignments in ONE `openclaw` invocation.
+ *
+ * Why this exists: the CLI is a full Node program that loads the gateway SDK,
+ * parses plugins and validates the config schema on every run, so on a Jetson
+ * Orin Nano a single `config set` costs ~8 s of startup and does milliseconds
+ * of work. First-run setup wrote ~18 keys one at a time and spent about two and
+ * a half minutes doing it, with the wizard sitting on "Almost ready" for the
+ * last two of them (TASK-483). `--batch-json` applies N assignments in one
+ * validated read-modify-write, so N keys cost one startup instead of N.
+ *
+ * Semantics match a sequence of `config set --json` calls: the CLI applies the
+ * entries in order against one snapshot, runs the same non-destructive
+ * replacement guard per entry, and writes once. The difference that matters is
+ * atomicity — a batch either lands whole or not at all — so a caller that needs
+ * two failures kept apart must issue two batches, not one.
+ *
+ * A single-entry batch is sent through {@link runOpenclawConfigSet} unchanged:
+ * there is nothing to save, and the plain form is the one every other caller
+ * has been using.
+ */
+export async function runOpenclawConfigSetBatch(
+  batch: readonly OpenclawConfigSetArgs[],
+  options: OpenclawConfigSetOptions = {},
+): Promise<void> {
+  if (batch.length === 0) return;
+  if (batch.length === 1) {
+    await runOpenclawConfigSet(batch[0], options);
+    return;
+  }
+  if (await configSetViaGateway(batch, options)) return;
+  const payload = JSON.stringify(batch.map(parseConfigSetArgs));
+  await runConfigSetVerified(batch, options, () =>
+    withConfigMutationRetry(
+      (timeoutMs) =>
+        spawnOpenclaw(["config", "set", "--batch-json", payload], {
+          labelArgs: configSetBatchLabelArgs(batch),
+          timeoutMs,
+          uid: options.uid,
+          gid: options.gid,
+          cwd: options.cwd,
+          env: options.env,
+        }).then(() => undefined),
+      options,
+      "runOpenclawConfigSetBatch",
+    ),
+  );
+}
+
+/**
+ * Run `openclaw config unset <path>`, with the same conflict retry as
+ * {@link runOpenclawConfigSet}.
+ *
+ * `config set` has no way to say "remove this key": a `null` or `{}` value
+ * leaves the path present, and a present-but-empty `models.providers.<p>` is
+ * still read by the gateway as a provider definition. Removal needs the CLI's
+ * own `unset` verb — and it races the gateway's config reload exactly like a
+ * set does, so it gets the same retry rather than a bare spawn.
+ *
+ * NOT safe to call unconditionally: verified against OpenClaw 2026.7.1-2, the
+ * CLI exits 1 with "Config path not found: <path>. Nothing was changed." when
+ * the path is absent. Callers must check the config first and only unset a path
+ * that is actually there, so a real removal failure stays loud.
+ *
+ * Like {@link runOpenclawConfigSet}, a spawn killed at its deadline is settled
+ * by the file rather than assumed failed: the removal is reported as done only
+ * when the path is provably gone from a config this process could read. See
+ * {@link configUnsetLanded}.
+ */
+export async function runOpenclawConfigUnset(
+  configPath: string,
+  options: OpenclawConfigSetOptions = {},
+): Promise<void> {
+  try {
+    await withConfigMutationRetry(
+      (timeoutMs) =>
+        spawnOpenclaw(["config", "unset", configPath], {
+          timeoutMs,
+          uid: options.uid,
+          gid: options.gid,
+          cwd: options.cwd,
+          env: options.env,
+        }).then(() => undefined),
+      options,
+      "runOpenclawConfigUnset",
+    );
+  } catch (err) {
+    if (!(err instanceof OpenclawSpawnTimeoutError)) throw err;
+    if (!(await configUnsetLanded(configPath))) throw err;
+    // The path is the caller's text here too — see {@link LOGGED_CONFIG_AREAS}.
+    console.warn(
+      `[openclaw-config] a config unset (${loggedConfigAreas([configPath])}) was killed at its ${options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS}ms deadline, but the path is gone from the config — the removal landed, reporting success`,
+    );
+  }
+}
+
+/**
+ * OpenClaw's home directory, resolved from the environment.
+ *
+ * ONE expression for it, called from the constants below and from the
+ * skills-root readers at the end of this file — which resolve per call, the
+ * way `getSkillsDir()` has always read `HOME` per call. Identical answers on a
+ * device, where the environment does not change under a running server; the
+ * point is that there is no second, hard-coded spelling of the path to drift
+ * from this one (the wrong-directory delete of TASK-551 started as two).
+ */
+function openclawHome(): string {
+  return process.env.CLAWBOX_OPENCLAW_HOME
+    || process.env.OPENCLAW_HOME
+    || path.join(process.env.HOME || "/home/clawbox", ".openclaw");
+}
+
+export const OPENCLAW_HOME = openclawHome();
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;
@@ -292,8 +1037,33 @@ interface ApplyModelOverrideOpts {
    * chat). No such surface ships today, so this branch currently has
    * no production caller — kept for the test contract and as the
    * obvious extension point.
+   *
+   * Before that surface ships, note the contract is now backend-dependent:
+   * on an OpenClaw 2 agent the gateway records "pinned to the new default"
+   * by clearing the override (no `modelOverrideSource: "user"` survives),
+   * so a later soft sweep would not see that session as sticky, where the
+   * legacy file path leaves the tag in place.
    */
   skipUserTagged?: boolean;
+  /**
+   * The gateway transport for OpenClaw 2 agents (their sessions live in a
+   * store only the gateway may write). Defaults to the CLI-backed
+   * {@link callGatewayRpc}; tests inject a fake.
+   */
+  callGateway?: GatewayRpcCall;
+}
+
+export interface ApplyModelOverrideResult {
+  /** Agents whose sessions changed: one per store or sessions.json touched. */
+  filesUpdated: number;
+  sessionsUpdated: number;
+  /**
+   * OpenClaw 2 sessions the gateway would not repoint (each one logged with
+   * the gateway's reason). They keep their previous model; nothing else is
+   * tried, because the only other way to change them is the store rewrite
+   * that invalidates every row.
+   */
+  sessionsSkipped: number;
 }
 
 async function listAgentSessionsFiles(agentsDir: string): Promise<string[]> {
@@ -317,42 +1087,136 @@ async function listAgentSessionsFiles(agentsDir: string): Promise<string[]> {
 }
 
 async function atomicWriteSessionsFile(filePath: string, data: unknown): Promise<void> {
-  const tmp = `${filePath}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
-  await fs.rename(tmp, filePath);
+  // Same inode swap as writeConfig, on a file that holds the owner's own
+  // conversations, so the mode has to be put back after the rename rather than
+  // left to the umask. 0600 like the config: nothing on the device reads an
+  // agent's sessions as anyone but its own user.
+  //
+  // NARROWED, not preserved, even though the HARNESS owns this file — beta
+  // wrote it with no mode at all, so the umask decided. The argument that makes
+  // "preserve" right for `hermes-env.ts` (ClawBox only ever puts a value into a
+  // file the harness maintains) does not reach here: this writer replaces the
+  // inode, so there is no mode left to preserve, only one to choose. ClawBox
+  // and the gateway run as the same user on a box, so 0600 costs no reader.
+  await writeSecretJsonAtomically(filePath, data);
 }
 
 /**
- * Rewrite every session's per-session model/provider override across
- * every agent on disk to the given target, tagged with the given
- * source. Returns how many sessions were touched.
+ * Repoint every existing session, across every agent on disk, to the given
+ * model, so the switch reaches the chats that are already open and not only
+ * the sessions born after it.
  *
- * Use `source: "user"` (also the default) when the caller is acting
- * on a direct user choice — chat-panel model dropdown, Local-only
- * toggle, etc. OpenClaw's per-turn model resolver explicitly returns
- * early for entries whose `modelOverrideSource === "user"`, which is
- * the only value that survives the auto-picker re-evaluating on
- * every message. `"manual"` looks reasonable but is not special-cased
- * anywhere in the OpenClaw dist and gets silently overwritten back
- * to `"auto"` on the next turn.
+ * Two store generations, two mechanisms:
+ *   - OpenClaw 2 agents (an `agent/openclaw-agent.sqlite`) are patched through
+ *     the gateway — `sessions.patchMany { model }` — which writes the override
+ *     fields itself, tags them `modelOverrideSource: "user"` and normalises a
+ *     stale `thinkingLevel`. The store is only READ, to learn the session keys.
+ *     A session the gateway refuses is counted in `sessionsSkipped` and left
+ *     alone; there is no fallback, because a direct `session_nodes` write is
+ *     what bricked chat on every switch (finding M-03).
+ *   - Legacy agents (`sessions/sessions.json`) get the atomic file rewrite,
+ *     with the fields below written by hand. `source: "user"` (the default) is
+ *     the only value OpenClaw's per-turn resolver treats as sticky; `"manual"`
+ *     is not special-cased anywhere and is overwritten back to `"auto"` on the
+ *     next turn.
  *
- * Writes are atomic (temp + rename). If any individual sessions.json
- * fails to parse/write, the error is logged and the sweep continues —
- * one bad file should not block the rest.
+ * One bad agent — an unreadable store, a corrupt file — is logged and the
+ * sweep continues with the rest.
  */
 export async function applyModelOverrideToAllAgentSessions(
   update: SessionOverrideUpdate,
   opts: ApplyModelOverrideOpts = {},
-): Promise<{ filesUpdated: number; sessionsUpdated: number }> {
+): Promise<ApplyModelOverrideResult> {
   const agentsDir = opts.agentsDir ?? AGENTS_DIR;
   const source = update.source ?? "user";
   const authProfile = update.authProfile ?? `${update.provider}:default`;
   const skipUserTagged = opts.skipUserTagged === true;
+  const callGateway = opts.callGateway ?? callGatewayRpc;
 
   let filesUpdated = 0;
   let sessionsUpdated = 0;
+  let sessionsSkipped = 0;
 
-  const files = await listAgentSessionsFiles(agentsDir);
+  /**
+   * The soft sweep's exclusion: a session the user pinned to something else.
+   * A pin that already matches the target is still swept so its source and
+   * auth profile converge.
+   */
+  const keepsUserPick = (session: Record<string, unknown>): boolean => {
+    if (!skipUserTagged || session.modelOverrideSource !== "user") return false;
+    const sameProvider =
+      session.providerOverride === update.provider ||
+      session.modelProvider === update.provider;
+    const sameModel =
+      session.modelOverride === update.modelId ||
+      session.model === update.modelId;
+    return !sameProvider || !sameModel;
+  };
+
+  /** The legacy-file mutation. */
+  const applyToSession = (session: Record<string, unknown>): boolean => {
+    if (keepsUserPick(session)) return false;
+    session.providerOverride = update.provider;
+    session.modelOverride = update.modelId;
+    session.modelOverrideSource = source;
+    session.authProfileOverride = authProfile;
+    session.authProfileOverrideSource = source;
+    session.modelProvider = update.provider;
+    session.model = update.modelId;
+    // Normalise the sticky reasoning-effort override to the new model's
+    // capability. `thinkingLevel` is a per-session sticky the gateway keeps
+    // (set via `sessions.patch`); repointing the session to a model that
+    // can't honour the old level would otherwise leave e.g. a DeepSeek
+    // `high` on a local llama.cpp Gemma session, and the gateway rejects the
+    // next turn with `thinkingLevel "high" is not supported for llamacpp/…
+    // (use off)`. Only rewrite when the existing level is actually
+    // unsupported, so a compatible level (e.g. cloud→cloud) is left intact.
+    if (isThinkingLevel(session.thinkingLevel)) {
+      const reasoning = getProviderReasoningConfig(update.provider, `${update.provider}/${update.modelId}`);
+      if (!reasoning.levels.includes(session.thinkingLevel)) {
+        session.thinkingLevel = reasoning.default;
+      }
+    }
+    return true;
+  };
+
+  // OpenClaw 2 agents: the store names the sessions, the gateway changes them.
+  // An agent with a store is served from it whatever else is on disk — its
+  // (absent or archived) sessions.json is an archive the gateway no longer
+  // reads, and is left alone below.
+  const migratedAgents = new Set<string>();
+  const model = `${update.provider}/${update.modelId}`;
+  for (const agentId of listAgentIds(agentsDir)) {
+    if (!sessionStorePath(agentId, agentsDir)) continue;
+    migratedAgents.add(agentId);
+    const rows = readSessionEntries(agentId, agentsDir);
+    if (!rows) {
+      console.warn(`[openclaw-config] could not list the sessions of agent ${agentId}; they keep their previous model`);
+      continue;
+    }
+    const targets = rows
+      .filter(({ entry }) => isPatchableSession(entry) && !keepsUserPick(entry))
+      .map(({ key }) => ({ key, agentId }));
+    if (targets.length === 0) continue;
+    let patched = 0;
+    for (const outcome of await patchSessionModels(targets, model, { call: callGateway })) {
+      if (outcome.ok) {
+        patched += 1;
+        continue;
+      }
+      sessionsSkipped += 1;
+      console.warn(
+        `[openclaw-config] session ${outcome.key} (agent ${agentId}) keeps its previous model:`,
+        outcome.error,
+      );
+    }
+    sessionsUpdated += patched;
+    if (patched > 0) filesUpdated += 1;
+  }
+
+  const files = (await listAgentSessionsFiles(agentsDir)).filter(
+    (file) => !migratedAgents.has(path.basename(path.dirname(path.dirname(file)))),
+  );
   for (const file of files) {
     let parsed: unknown;
     try {
@@ -367,28 +1231,7 @@ export async function applyModelOverrideToAllAgentSessions(
     let touchedInFile = 0;
     for (const session of Object.values(sessions)) {
       if (!session || typeof session !== "object") continue;
-      // Preserve sticky per-session user choices when the caller asked
-      // for a soft sweep. A session whose existing override matches
-      // the new target is still touched so its source/authProfile
-      // converge with the target — only diverging user picks stay put.
-      if (skipUserTagged && session.modelOverrideSource === "user") {
-        const sameProvider =
-          session.providerOverride === update.provider ||
-          session.modelProvider === update.provider;
-        const sameModel =
-          session.modelOverride === update.modelId ||
-          session.model === update.modelId;
-        if (!sameProvider || !sameModel) {
-          continue;
-        }
-      }
-      session.providerOverride = update.provider;
-      session.modelOverride = update.modelId;
-      session.modelOverrideSource = source;
-      session.authProfileOverride = authProfile;
-      session.authProfileOverrideSource = source;
-      session.modelProvider = update.provider;
-      session.model = update.modelId;
+      if (!applyToSession(session)) continue;
       touchedInFile += 1;
     }
 
@@ -402,7 +1245,7 @@ export async function applyModelOverrideToAllAgentSessions(
     }
   }
 
-  return { filesUpdated, sessionsUpdated };
+  return { filesUpdated, sessionsUpdated, sessionsSkipped };
 }
 
 /**
@@ -419,19 +1262,56 @@ export function parseFullyQualifiedModel(fq: string): { provider: string; modelI
 
 export interface OpenClawConfig {
   [key: string]: unknown;
+  /** OpenClaw 2's home for speech output (was messages.tts before 2026.8). */
+  tts?: {
+    provider?: string;
+    providers?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
   channels?: {
     [name: string]: {
       enabled?: boolean;
       botToken?: string;
+      /** Indirect credential ("read it from this env var"). Discord uses this
+       *  form rather than a literal `botToken` — see setDiscordToken. */
+      token?: { source?: string; provider?: string; id?: string };
       dmPolicy?: string;
       allowFrom?: string[];
       streaming?: { mode?: string; [key: string]: unknown };
       [key: string]: unknown;
     };
   };
+  /**
+   * Where a `token: {source, provider, id}` reference is resolved FROM.
+   * OpenClaw looks the `provider` name up in here; there is no implicit
+   * default, so a reference without a matching entry is unresolvable at
+   * runtime. See {@link envSecretRef}.
+   */
+  secrets?: {
+    providers?: Record<string, { source?: string; [key: string]: unknown }>;
+    [key: string]: unknown;
+  };
+  /**
+   * Plugin registry. `entries.<id>.enabled` is what makes the gateway TRUST an
+   * external (non-bundled) plugin; without it a configured channel is refused
+   * even though the package is installed. See {@link trustChannelPlugin}.
+   */
+  plugins?: {
+    entries?: Record<string, { enabled?: boolean; [key: string]: unknown }>;
+    [key: string]: unknown;
+  };
   tools?: {
     profile?: string;
     web?: { search?: { enabled?: boolean } };
+    // Media understanding — the surface a channel voice note is transcribed
+    // through. Not a models[] row: it has its own endpoint and its own ordered
+    // list of engines (src/lib/stt-preference.ts builds the audio one).
+    media?: {
+      audio?: { baseUrl?: string; models?: unknown[]; [key: string]: unknown };
+      /** OpenClaw 2's shared media-model list (audio rows carry capabilities: ["audio"]). */
+      models?: unknown[];
+      [key: string]: unknown;
+    };
   };
   auth?: {
     profiles?: Record<string, { provider?: string; mode?: string }>;
@@ -439,24 +1319,49 @@ export interface OpenClawConfig {
   models?: {
     mode?: string;
     providers?: Record<string, {
-      models?: Array<{ id?: string; name?: string }>;
+      // `baseUrl` appears at both levels and the model-level one wins:
+      // OpenClaw resolves a row's endpoint as `model.baseUrl ?? provider.baseUrl`
+      // and only then falls back to the provider's own default host. Callers
+      // deciding where a configured row actually points need to see both.
+      baseUrl?: string;
+      models?: Array<{ id?: string; name?: string; baseUrl?: string; api?: string; [key: string]: unknown }>;
       [key: string]: unknown;
     }>;
   };
   agents?: {
+    /**
+     * One entry per configured agent, keyed by agent id. ClawBox's own is
+     * `main`; an owner can add more from the Terminal, which is what makes
+     * {@link openclawSkillsAgentArgs} necessary.
+     */
+    entries?: Record<string, unknown>;
     defaults?: {
+      // NOT widened to `ToolModelSlot`, deliberately: the core coerces a bare
+      // string here too, but every reader of the CHAT model slot is outside
+      // TASK-755 and none of them was measured, so widening the type would only
+      // scatter narrowing over code this card did not test. Its own card.
       model?: { primary?: string; fallbacks?: string[] };
+      /** OpenClaw 2's explicit model restrictions, independent of the primary. */
+      modelPolicy?: { allow?: string[]; [key: string]: unknown };
+      // Which model the `image_generate` tool draws with. Same shape as
+      // `model`, entirely separate key — and distinct again from `imageModel`,
+      // which selects the vision (image *understanding*) model.
+      imageGenerationModel?: ToolModelSlot;
+      /** OpenClaw 2's home for the same choice: mediaModels.image. */
+      mediaModels?: { image?: ToolModelSlot; [key: string]: unknown };
+      // Which model *looks at* an image — the vision model OpenClaw resolves
+      // when a text-only session model is handed a picture and the `image`
+      // tool has to describe it. Same shape, separate key from
+      // `imageGenerationModel`; nothing aliases the two.
+      imageModel?: ToolModelSlot;
       workspace?: string;
       compaction?: { reserveTokensFloor?: number };
     };
   };
 }
 
-const DEFAULT_LOCAL_AI_PROXY_ROOT_URL = "http://127.0.0.1";
-
 function getOllamaProxyBaseUrl(): string {
-  const root = (process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL || DEFAULT_LOCAL_AI_PROXY_ROOT_URL).trim().replace(/\/+$/, "");
-  return `${root}/setup-api/local-ai/ollama`;
+  return `${getLocalAiProxyRootUrl()}/setup-api/local-ai/ollama`;
 }
 
 function normalizeLocalProvider(provider: string | null | undefined): "llamacpp" | "ollama" | null {
@@ -473,6 +1378,28 @@ function toLocalModel(provider: "llamacpp" | "ollama", modelId: string | null | 
   return `${provider}/${trimmed}`;
 }
 
+/**
+ * The name half of "can this Ollama model chat?": nobody tags a chat model
+ * "embed". `ollamaModelCanChat` (ollama-capabilities.ts) asks Ollama's own
+ * `/api/show` first and falls back to this; `inferConfiguredLocalModel` below
+ * runs with no Ollama to ask, so for it the name is the whole rule.
+ */
+export function ollamaModelNameCanChat(modelId: string): boolean {
+  return !/embed/i.test(modelId);
+}
+
+// An Ollama model that only embeds is no local CHAT model. The llama.cpp
+// migration leaves the retired embedder declared under `models.providers
+// .ollama.models`, and taking that list's first entry made it the box's local
+// model for EVERY reader of this — the picker, `setup/status`, and the
+// fallback writer, which then put it in `agents.defaults.model.fallbacks`,
+// where a cloud outage would route the chat to a model that cannot produce a
+// word, and where this inference would then find it FIRST (the UI sweep of
+// 2026-09-07). Refused here, at the inference, rather than at one consumer.
+function isLocalChatCandidate(provider: "llamacpp" | "ollama", modelId: string): boolean {
+  return provider !== "ollama" || ollamaModelNameCanChat(modelId);
+}
+
 export function inferConfiguredLocalModel(config: OpenClawConfig): { provider: "llamacpp" | "ollama"; model: string } | null {
   const modelDefaults = config.agents?.defaults?.model;
   const localCandidates = [
@@ -484,6 +1411,7 @@ export function inferConfiguredLocalModel(config: OpenClawConfig): { provider: "
       const [provider, ...rest] = value.split("/");
       const normalizedProvider = normalizeLocalProvider(provider);
       if (!normalizedProvider || rest.length === 0) return null;
+      if (!isLocalChatCandidate(normalizedProvider, rest.join("/"))) return null;
       return { provider: normalizedProvider, model: value };
     })
     .filter((value): value is { provider: "llamacpp" | "ollama"; model: string } => value !== null);
@@ -494,7 +1422,9 @@ export function inferConfiguredLocalModel(config: OpenClawConfig): { provider: "
 
   const providerDefs = config.models?.providers ?? {};
   for (const provider of ["llamacpp", "ollama"] as const) {
-    const candidate = toLocalModel(provider, providerDefs[provider]?.models?.[0]?.id);
+    const declared = providerDefs[provider]?.models ?? [];
+    const first = declared.find((entry) => typeof entry?.id === "string" && isLocalChatCandidate(provider, entry.id));
+    const candidate = toLocalModel(provider, first?.id);
     if (candidate) {
       return { provider, model: candidate };
     }
@@ -503,20 +1433,672 @@ export function inferConfiguredLocalModel(config: OpenClawConfig): { provider: "
   return null;
 }
 
+/** A JSON value that can hold named keys — i.e. not an array, null or a primitive. */
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export async function readConfig(): Promise<OpenClawConfig> {
+  // Same file, same root rule as the writers' reader — an unreadable file is
+  // the one place they differ: a reader gets `{}`, a writer gets the throw.
   try {
-    const raw = await fs.readFile(CONFIG_PATH, "utf-8");
-    return JSON.parse(raw);
+    return await readConfigForWrite();
   } catch {
     return {};
   }
 }
 
-async function writeConfig(config: OpenClawConfig): Promise<void> {
+/**
+ * {@link readConfig}, except that only an ENOENT is allowed to mean "there is
+ * no config".
+ *
+ * `readConfig` answers `{}` to every failure alike — a missing file, an EACCES,
+ * a file caught half-written by a concurrent `config set`. That is the right
+ * default for the many callers asking "is X switched on?", where UNKNOWN and NO
+ * lead to the same harmless place.
+ *
+ * It is the wrong default for a caller that is about to SKIP a repair because
+ * the thing it repairs reads as already absent. There, `{}` from an unreadable
+ * file is indistinguishable from a genuinely clean config, so the repair is
+ * quietly declared unnecessary and the route reports success while the state it
+ * promised to remove is still on disk.
+ *
+ * So: ENOENT returns `{}` (there is nothing to read, and nothing to repair),
+ * and every other read or parse failure throws.
+ */
+export async function readConfigStrict(): Promise<OpenClawConfig> {
+  const parsed = await parseConfigFileIfPresent();
+  if (parsed === undefined) return {};
+  // Deliberately the OPPOSITE of readConfig's answer for the same file. This
+  // function exists so a caller about to skip a repair cannot be told "already
+  // clean" by a config it could not read, and a root array or primitive is
+  // exactly that: parseable, and not a config. Normalising it to `{}` here
+  // would hand back the false "nothing to remove" this variant was written to
+  // prevent.
+  if (!isPlainObject(parsed)) {
+    throw new Error("openclaw.json does not contain a configuration object");
+  }
+  return parsed as OpenClawConfig;
+}
+
+/**
+ * The read half of a read-modify-write.
+ *
+ * `readConfig` answers `{}` to every failure alike, and a writer that starts
+ * from that `{}` and saves has just replaced the whole file with the one block
+ * it was asked to add — every model provider, auth profile and gateway setting
+ * gone, and the route answers 200. That is exactly what a momentarily
+ * unreadable file produces: an EACCES, a file caught half-written by a
+ * concurrent `openclaw config set`. So here a file that cannot be read or
+ * parsed THROWS, the route answers 500, and the config on disk is untouched.
+ *
+ * Two shapes are still forgiven, deliberately. ENOENT is the first-run
+ * contract: there is nothing to lose. And a parseable non-object root (`[]`,
+ * `"nope"`, `3`, `null`) is a file OpenClaw cannot load at all — the gateway
+ * exits 78/CONFIG on it — so there is no working configuration to protect, and
+ * the writers repair it inside the same atomic write (see
+ * {@link ensurePlainObject}). That last case is the one difference from
+ * {@link readConfigStrict}, whose callers are about to SKIP a repair and must
+ * not be told "already clean" by a root that is not a config.
+ */
+export async function readConfigForWrite(): Promise<OpenClawConfig> {
+  const parsed = await parseConfigFileIfPresent();
+  // The ROOT is a container too, and it is the one every helper below stands
+  // on. A file holding `[]` parses fine, so without this the writers attach
+  // their keys to an array and `JSON.stringify` drops all of them; a root
+  // string or number makes the first assignment throw in strict mode. See
+  // {@link ensurePlainObject}.
+  return isPlainObject(parsed) ? (parsed as OpenClawConfig) : {};
+}
+
+/**
+ * openclaw.json exists but could not be read or parsed. The message is the
+ * one the owner sees — the Telegram routes answer it as the 500 body — so it
+ * says what happened and what was (not) done, never the parser's internals or
+ * the file's absolute path. The underlying error is kept on `cause`.
+ */
+export class OpenclawConfigUnreadableError extends Error {
+  readonly code = "config_unreadable";
+
+  constructor(cause: unknown) {
+    const reason =
+      cause instanceof SyntaxError
+        ? "it is not valid JSON"
+        : (cause as NodeJS.ErrnoException)?.code ?? "read failed";
+    super(
+      `OpenClaw's configuration file (openclaw.json) could not be read (${reason}), so nothing was saved. Check the file and try again.`,
+      { cause },
+    );
+    this.name = "OpenclawConfigUnreadableError";
+  }
+}
+
+/**
+ * The file's parsed JSON, or `undefined` when there is no file (JSON.parse
+ * never yields `undefined`, so the sentinel cannot collide with content).
+ * Every other read error and every parse error surfaces as
+ * {@link OpenclawConfigUnreadableError} — the callers above exist to tell "no
+ * config" apart from "could not read the config".
+ */
+async function parseConfigFileIfPresent(): Promise<unknown> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(CONFIG_PATH, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    throw new OpenclawConfigUnreadableError(err);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new OpenclawConfigUnreadableError(err);
+  }
+}
+
+/**
+ * Return `container[key]` as a plain object, REPLACING first whatever else is
+ * there — an array, a string, a number, a boolean.
+ *
+ * `??=` is not enough for this, and the difference does not show up until the
+ * write has already been reported as successful:
+ *
+ *   * `[]` is not nullish, so `config.plugins ??= {}` keeps the array. The next
+ *     assignment attaches a NAMED PROPERTY to it, and `JSON.stringify` — which
+ *     is how every config write in this module reaches disk — drops named
+ *     properties of arrays. The save writes a config missing the very key it
+ *     was called to add, and answers 200.
+ *   * `[].entries` is not nullish either: it is `Array.prototype.entries`. So
+ *     `plugins.entries ??= {}` keeps the intrinsic and the channel's trust
+ *     entry is written onto a shared JS function. Measured: after one such
+ *     save, an unrelated `[].entries.discord` reads `{"enabled":true}` for the
+ *     rest of the server process's life.
+ *   * a string or a number is worse again — assigning a property to a
+ *     primitive THROWS in strict mode (ES modules always are), so the save dies
+ *     halfway as an opaque 500.
+ *
+ * Replacing rather than refusing is deliberate, and it is the opposite of the
+ * choice {@link envSecretRef} makes one screen down. A non-object `secrets` is
+ * the operator's own credential wiring: we cannot interpret it, and overwriting
+ * it would break channels that resolve through it today, so that path refuses
+ * and writes nothing. A non-object `plugins`/`channels`/`agents`/`gateway` is
+ * not a shape OpenClaw's schema can load at all — the gateway exits 78/CONFIG
+ * on it — so there is no working configuration to protect, and refusing would
+ * only leave the box stuck in the state it is already broken in. Normalising
+ * repairs it inside the same atomic write.
+ */
+function ensurePlainObject(container: Record<string, unknown>, key: string): Record<string, unknown> {
+  const existing = container[key];
+  if (isPlainObject(existing)) return existing;
+  const replacement: Record<string, unknown> = {};
+  container[key] = replacement;
+  return replacement;
+}
+
+/** The config as a bag of keys, for the container helpers above. */
+function asBag(config: OpenClawConfig): Record<string, unknown> {
+  return config as Record<string, unknown>;
+}
+
+/**
+ * The existing block for one channel, as something safe to spread.
+ *
+ * Every channel writer here rebuilds the block as `{...existing, enabled, …}`
+ * so it can drop the keys it re-secures. Spreading a STRING splits it into
+ * indexed characters (`"on"` becomes `{"0":"o","1":"n"}`), and one key OpenClaw
+ * does not know takes the whole gateway down with exit 78/CONFIG — every other
+ * channel with it. A block that is not a plain object carries nothing worth
+ * merging, so it is treated as absent.
+ */
+function existingChannelBlock(
+  channels: Record<string, unknown>,
+  channelId: string,
+): Record<string, unknown> {
+  const existing = channels[channelId];
+  return isPlainObject(existing) ? existing : {};
+}
+
+/**
+ * Write `file` at 0600, temp-then-rename, without a window at a looser mode.
+ *
+ * `rename` swaps the INODE, so a temp written under the process umask takes its
+ * mode with it and whatever the destination had is gone. Measured on an
+ * OpenClaw box: `~/.openclaw/openclaw.json` is 0600 and the service user's
+ * umask is 0002, so a plain temp-then-rename left the file holding
+ * `channels.telegram.botToken` and the gateway's auth token at 0664 — readable
+ * by every account on the device, from a save that reported success.
+ *
+ * 0600 unconditionally, not the mode the file happens to have: every box that
+ * already took an update is sitting at that 0664, nothing on the device chmods
+ * this file, and preserving what the defect widened would leave its own victims
+ * the only boxes the fix never reaches. It is also what OpenClaw's own CLI
+ * created the file with, and what `config-store.ts`, `writeDiscordGatewayEnv`,
+ * `email-pending.ts` and `writeAuthProfiles` all force for the same reason.
+ *
+ * The stale temp is removed first, because `writeFile`'s `mode` is ignored for
+ * a file that already exists — a temp left at 0666 by a crashed write would
+ * otherwise hold the whole credential file at that mode until the chmod, and
+ * carry it across the rename if the chmod failed.
+ */
+async function writeSecretJsonAtomically(file: string, data: unknown): Promise<void> {
+  const tmpPath = `${file}.tmp`;
+  await fs.rm(tmpPath, { force: true });
+  await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600, encoding: "utf-8" });
+  try {
+    await fs.chmod(tmpPath, 0o600);
+  } catch {
+    // Best-effort, as everywhere else here: a failed chmod must not turn a
+    // working save into an error. The `mode` above already covers the ordinary
+    // path, where the temp did not exist.
+  }
+  await fs.rename(tmpPath, file);
+}
+
+export async function writeConfig(config: OpenClawConfig): Promise<void> {
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
-  const tmpPath = CONFIG_PATH + ".tmp";
-  await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf-8");
-  await fs.rename(tmpPath, CONFIG_PATH);
+  await writeSecretJsonAtomically(CONFIG_PATH, config);
+}
+
+const OPENCLAW_CONFIG_LOCK_STALE_MS = 30_000;
+const OPENCLAW_CONFIG_LOCK_MAX_BYTES = 1024 * 1024;
+
+type FileStat = Awaited<ReturnType<typeof fs.lstat>>;
+type LockOwnerPayload = {
+  pid?: number;
+  createdAt?: string;
+  starttime?: number;
+  clawboxOwnerToken?: string;
+};
+type LockSnapshot = { raw: string; payload: LockOwnerPayload | null; stat: FileStat };
+
+/** True only when both stats name the same filesystem object. */
+function sameFileIdentity(left: FileStat, right: FileStat): boolean {
+  return BigInt(left.dev) === BigInt(right.dev) && BigInt(left.ino) === BigInt(right.ino);
+}
+
+/** Normalize Stats/BigIntStats' millisecond timestamp overload to a number. */
+function fileMtimeMs(stat: FileStat): number {
+  return Number(stat.mtimeMs);
+}
+
+/** Read Linux's process-start identity, which disambiguates a reused PID. */
+async function processStarttime(pid: number): Promise<number | null> {
+  if (process.platform !== "linux" || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const raw = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+    const commEnd = raw.lastIndexOf(")");
+    if (commEnd < 0) return null;
+    const fields = raw.slice(commEnd + 1).trimStart().split(/\s+/);
+    const value = Number(fields[19]);
+    return Number.isInteger(value) && value >= 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Prove a PID dead without treating EPERM or an unreadable procfs as death. */
+async function pidIsDefinitelyDead(pid: number): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ESRCH";
+  }
+  if (process.platform !== "linux") return false;
+  try {
+    return /^State:\s+Z\b/m.test(await fs.readFile(`/proc/${pid}/status`, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read one stable, bounded snapshot of a sidecar without following symlinks.
+ * A changed inode or oversized/malformed payload is retained, never guessed
+ * stale; fail-closed is the safe direction for another process's lock.
+ */
+async function readLockSnapshot(lockPath: string): Promise<LockSnapshot | null> {
+  const noFollow = typeof fsSync.constants.O_NOFOLLOW === "number" ? fsSync.constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fsSync.constants.O_NONBLOCK === "number" ? fsSync.constants.O_NONBLOCK : 0;
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    // Open first, with symlink following disabled, then inspect and read only
+    // through that pinned descriptor. A pathname lstat before open is a TOCTOU:
+    // another process can replace the sidecar between the check and use. The
+    // post-read lstat below is only an identity proof that this still-pinned
+    // file remains the path's current owner.
+    handle = await fs.open(lockPath, fsSync.constants.O_RDONLY | noFollow | nonBlock);
+    const opened = await handle.stat();
+    if (!opened.isFile()) return null;
+    const capacity = Math.min(opened.size, OPENCLAW_CONFIG_LOCK_MAX_BYTES) + 1;
+    const buffer = Buffer.alloc(capacity);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > OPENCLAW_CONFIG_LOCK_MAX_BYTES) return null;
+    const after = await fs.lstat(lockPath).catch(() => null);
+    if (!after?.isFile() || !sameFileIdentity(opened as FileStat, after)) return null;
+    const raw = buffer.subarray(0, bytesRead).toString("utf8");
+    let payload: LockOwnerPayload | null = null;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        payload = parsed as LockOwnerPayload;
+      }
+    } catch {
+      // OpenClaw's ownership token is whitespace, so its payload remains valid
+      // JSON. Any other trailing content is not an owner we can safely judge.
+    }
+    return { raw, payload, stat: after };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ELOOP") return null;
+    throw err;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/** Apply OpenClaw's dead-PID/expired-owner stale policy to one snapshot. */
+async function lockIsStale(snapshot: LockSnapshot): Promise<boolean> {
+  const payload = snapshot.payload;
+  const pid = typeof payload?.pid === "number" && Number.isInteger(payload.pid) && payload.pid > 0
+    ? payload.pid
+    : null;
+  if (pid !== null) {
+    if (typeof payload?.starttime === "number" && Number.isInteger(payload.starttime) && payload.starttime >= 0) {
+      const current = await processStarttime(pid);
+      if (current !== null && current !== payload.starttime) return true;
+    }
+    // A valid, live PID wins over an old createdAt, exactly as OpenClaw's own
+    // shouldRemoveDeadOwnerOrExpiredLock policy does.
+    return pidIsDefinitelyDead(pid);
+  }
+  const createdAt = typeof payload?.createdAt === "string" ? Date.parse(payload.createdAt) : Number.NaN;
+  // A crash can leave the exclusively-created sidecar empty, before its owner
+  // payload is written. Missing/malformed owner data ages by the file itself;
+  // otherwise that zero-byte lock can never be reclaimed.
+  const ownerTimestamp = Number.isFinite(createdAt) ? createdAt : fileMtimeMs(snapshot.stat);
+  return Number.isFinite(ownerTimestamp) && Date.now() - ownerTimestamp > OPENCLAW_CONFIG_LOCK_STALE_MS;
+}
+
+type ReclaimGuardState = "missing" | "active" | "reclaimed";
+
+/**
+ * Inspect OpenClaw's reclaim guard through a pinned directory descriptor.
+ * A recent guard is live and retained. An abandoned guard ages out after the
+ * same 30 s as its lock. Reclamation first atomically renames the path to an
+ * unpredictable quarantine: a successor created at the canonical path is
+ * never removed, and the moved directory is deleted only when its descriptor
+ * identity is the stale directory we observed.
+ */
+async function inspectReclaimGuard(guardPath: string): Promise<ReclaimGuardState> {
+  const noFollow = typeof fsSync.constants.O_NOFOLLOW === "number" ? fsSync.constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fsSync.constants.O_NONBLOCK === "number" ? fsSync.constants.O_NONBLOCK : 0;
+  const directory = typeof fsSync.constants.O_DIRECTORY === "number" ? fsSync.constants.O_DIRECTORY : 0;
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    handle = await fs.open(guardPath, fsSync.constants.O_RDONLY | noFollow | nonBlock | directory);
+    const opened = await handle.stat() as FileStat;
+    if (!opened.isDirectory()) return "active";
+    const guardMtimeMs = fileMtimeMs(opened);
+    if (!Number.isFinite(guardMtimeMs) || Date.now() - guardMtimeMs <= OPENCLAW_CONFIG_LOCK_STALE_MS) {
+      return "active";
+    }
+    const quarantinePath = `${guardPath}.quarantine-${randomUUID()}`;
+    try {
+      await fs.rename(guardPath, quarantinePath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return "missing";
+      if (code === "EEXIST" || code === "ENOTEMPTY") return "active";
+      throw err;
+    }
+
+    let movedHandle: Awaited<ReturnType<typeof fs.open>> | null = null;
+    try {
+      movedHandle = await fs.open(quarantinePath, fsSync.constants.O_RDONLY | noFollow | nonBlock | directory);
+      const moved = await movedHandle.stat() as FileStat;
+      if (!moved.isDirectory() || !sameFileIdentity(opened, moved)) {
+        // The canonical path was replaced between open and rename. Retain the
+        // moved successor under quarantine and restore guard *presence* with
+        // an exclusive mkdir; never rename over a newer live guard.
+        await fs.mkdir(guardPath).catch((err) => {
+          if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        });
+        return "active";
+      }
+      try {
+        await fs.rmdir(quarantinePath);
+        return "reclaimed";
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return "reclaimed";
+        if (code === "EEXIST" || code === "ENOTEMPTY") {
+          await fs.mkdir(guardPath).catch((mkdirErr) => {
+            if ((mkdirErr as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirErr;
+          });
+          return "active";
+        }
+        throw err;
+      }
+    } finally {
+      await movedHandle?.close().catch(() => {});
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return "missing";
+    if (code === "ELOOP" || code === "ENOTDIR") return "active";
+    throw err;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/** Remove only the exact inode and bytes represented by `snapshot`. */
+async function unlinkUnchangedSnapshot(lockPath: string, snapshot: LockSnapshot): Promise<boolean> {
+  const current = await readLockSnapshot(lockPath);
+  if (!current || !sameFileIdentity(snapshot.stat, current.stat) || snapshot.raw !== current.raw) return false;
+  try {
+    await fs.unlink(lockPath);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+}
+
+/** Reclaim one proven-stale lock under OpenClaw's `.reclaim` hand-off guard. */
+async function reclaimStaleLock(lockPath: string): Promise<boolean> {
+  const observed = await readLockSnapshot(lockPath);
+  if (!observed || !(await lockIsStale(observed))) return false;
+  const guardPath = `${lockPath}.reclaim`;
+  try {
+    await fs.mkdir(guardPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw err;
+  }
+  try {
+    const current = await readLockSnapshot(lockPath);
+    if (!current
+      || !sameFileIdentity(observed.stat, current.stat)
+      || observed.raw !== current.raw
+      || !(await lockIsStale(current))) return false;
+    return unlinkUnchangedSnapshot(lockPath, current);
+  } finally {
+    await fs.rmdir(guardPath).catch(() => {});
+  }
+}
+
+/** Release our sidecar only while its inode or unique owner token is ours. */
+async function releaseOwnedLock(lockPath: string, heldStat: FileStat | null, ownerToken: string): Promise<void> {
+  const current = await readLockSnapshot(lockPath).catch(() => null);
+  if (!current) return;
+  const owns = heldStat
+    ? sameFileIdentity(heldStat, current.stat)
+    : current.payload?.clawboxOwnerToken === ownerToken;
+  if (owns) await unlinkUnchangedSnapshot(lockPath, current).catch(() => {});
+}
+
+/**
+ * Run one direct config mutation under OpenClaw 2's cross-process sidecar
+ * lock. The core CLI uses an exclusive `openclaw.json.lock` regular file for
+ * the same purpose, so holding it serializes direct writes with gateway and
+ * CLI mutations as well as other setup writers that acquire this lock.
+ */
+async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promise<T> {
+  const lockPath = `${CONFIG_PATH}.lock`;
+  const reclaimGuardPath = `${lockPath}.reclaim`;
+  const deadline = Date.now() + 30_000;
+  let attempt = 0;
+  let lockHandle: Awaited<ReturnType<typeof fs.open>>;
+  let heldStat: FileStat | null = null;
+  const ownerToken = randomUUID();
+  const starttime = await processStarttime(process.pid);
+  const ownerRaw = JSON.stringify({
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+    ...(starttime === null ? {} : { starttime }),
+    clawboxOwnerToken: ownerToken,
+  }) + "\n";
+
+  // `readConfigStrict` deliberately treats ENOENT as a fresh `{}` config and
+  // `writeConfig` creates this directory. The lock has to preserve that same
+  // first-run contract rather than failing one step earlier when even the
+  // OpenClaw home directory does not exist yet.
+  await fs.mkdir(OPENCLAW_HOME, { recursive: true });
+
+  while (true) {
+    try {
+      const guardState = await inspectReclaimGuard(reclaimGuardPath);
+      if (guardState === "active") {
+        throw Object.assign(new Error(`config lock reclamation is active: ${reclaimGuardPath}`), { code: "EEXIST" });
+      }
+      if (guardState === "reclaimed") continue;
+      lockHandle = await fs.open(lockPath, "wx", 0o600);
+      let acquisitionError: unknown = null;
+      try {
+        heldStat = await lockHandle.stat() as FileStat;
+      } catch (err) {
+        acquisitionError = err;
+      }
+      try {
+        await lockHandle.writeFile(ownerRaw, "utf8");
+      } catch (err) {
+        acquisitionError ??= err;
+      }
+      if (acquisitionError) {
+        await lockHandle.close().catch(() => {});
+        await releaseOwnedLock(lockPath, heldStat, ownerToken);
+        throw acquisitionError;
+      }
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw err;
+      }
+      if (await reclaimStaleLock(lockPath)) continue;
+      if (Date.now() >= deadline) throw err;
+      const delayMs = Math.min(250, Math.round(25 * (1.2 ** attempt)));
+      attempt += 1;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  try {
+    return await mutate();
+  } finally {
+    await lockHandle.close().catch(() => {});
+    await releaseOwnedLock(lockPath, heldStat, ownerToken);
+  }
+}
+
+/**
+ * Set only `agents.defaults.model.primary` without catalog validation.
+ *
+ * This is reserved for the setup contract that accepts a placeholder API key:
+ * OpenClaw 2's CLI rejects the model when its live catalog cannot authenticate,
+ * even though the gateway may keep that unresolved reference at rest. The
+ * complete-file fallback must nevertheless use the core's sidecar lock so it
+ * cannot overwrite a concurrent provider, auth, or gateway mutation.
+ */
+export async function setPrimaryModelWithoutCatalogValidation(modelRef: string): Promise<void> {
+  if (!parseFullyQualifiedModel(modelRef)) {
+    throw new Error(`Invalid fully-qualified model reference: ${modelRef}`);
+  }
+  await withOpenclawConfigSidecarLock(async () => {
+    const config = await readConfigStrict();
+    const agents = (config.agents ??= {});
+    const defaults = (agents.defaults ??= {}) as Record<string, unknown>;
+    const model = (defaults.model ??= {}) as Record<string, unknown>;
+    model.primary = modelRef;
+    await writeConfig(config);
+  });
+}
+
+/**
+ * Grant the equivalent Flash alias only while the policy explicitly allows
+ * former Pro. The native cross-process lock covers the read, permission check,
+ * append and atomic write, so concurrent CLI/gateway edits cannot be replaced
+ * by an allowlist captured earlier in the chat request.
+ *
+ * This narrow repair completes before the separate, validated primary-model
+ * CLI write. If that later write fails, the added Flash permission remains;
+ * no existing permissions or restrictions are removed.
+ */
+export async function repairClawboxAiFlashModelPolicy(): Promise<boolean> {
+  return withOpenclawConfigSidecarLock(async () => {
+    const config = await readConfigStrict();
+    const allow = config.agents?.defaults?.modelPolicy?.allow;
+    if (!allow || !needsClawboxAiFlashPolicyRepair(config)) return false;
+    allow.push(CLAWBOX_AI_MODEL_BY_TIER.flash);
+    await writeConfig(config);
+    return true;
+  });
+}
+
+/**
+ * `skills.entries.<id>.enabled` — the switch the installed-app window flips.
+ *
+ * Written directly rather than through `openclaw config set`: that CLI costs
+ * 10–17 s per call on the Jetson (the App Store's toggle used to spend a 10 s
+ * budget on it and answer 500 after the value had already landed), while the
+ * gateway hot-reloads exactly this key from the file, so a JSON write is the
+ * same change without the wait. Absent means enabled, which is OpenClaw's
+ * default too.
+ */
+export async function readSkillEnabled(skillId: string): Promise<boolean> {
+  const config = await readConfig();
+  const skills = config.skills;
+  const entries = isPlainObject(skills) ? skills.entries : undefined;
+  const entry = isPlainObject(entries) ? entries[skillId] : undefined;
+  return !(isPlainObject(entry) && entry.enabled === false);
+}
+
+export async function setSkillEnabled(skillId: string, enabled: boolean): Promise<void> {
+  // Guarded here, not only in the apps/settings route: `__proto__` would
+  // resolve to Object.prototype in ensurePlainObject and write `enabled` onto
+  // every object in the process without ever reaching the file, and a second
+  // caller (an MCP tool, a CLI path) must not be able to reintroduce that.
+  if (skillId === "__proto__" || skillId === "constructor" || skillId === "prototype") {
+    throw new Error(`Invalid skill id: ${skillId}`);
+  }
+  const config = await readConfigStrict();
+  const skills = ensurePlainObject(asBag(config), "skills");
+  const entries = ensurePlainObject(skills, "entries");
+  const entry = ensurePlainObject(entries, skillId);
+  entry.enabled = enabled;
+  await writeConfig(config);
+}
+
+/**
+ * Drop `skills.entries.<id>` when an app is uninstalled, so a later install
+ * under the same id does not inherit a stale `enabled: false`. Answers whether
+ * anything was written; a config with no such entry is left untouched.
+ */
+export async function clearSkillEntry(skillId: string): Promise<boolean> {
+  const config = await readConfigStrict();
+  const skills = config.skills;
+  const entries = isPlainObject(skills) ? skills.entries : undefined;
+  if (!isPlainObject(entries) || !Object.prototype.hasOwnProperty.call(entries, skillId)) return false;
+  delete entries[skillId];
+  await writeConfig(config);
+  return true;
+}
+
+/**
+ * Keep Microsoft's bundled Edge TTS out of the speech chain.
+ *
+ * OpenClaw's fallback order is every registered speech provider sorted by a
+ * hard-coded rank, and Microsoft (rank 30) sits between our cloud voice and
+ * the on-device voice (rank 1000). Measured on this box: a failing ClawBox AI
+ * call fell back to Microsoft's public web endpoint — a second cloud the
+ * privacy notice never named — before Kokoro ever got the text. Nothing
+ * reorders that rank; the documented switch is `providers.microsoft.enabled`,
+ * which the provider's own isConfigured() honours everywhere: synthesis, the
+ * auto-selected primary, the gateway's startup scope and `tts.status`.
+ *
+ * Two guards keep this a default, not a decree: an explicit boolean either way
+ * is the owner's and is left alone, and the switch is only written on a box
+ * that HAS its own voice (`tts-local-cli` registered). A box with no local
+ * voice and no cloud entitlement would otherwise have no voice at all.
+ */
+export async function ensureMicrosoftTtsExcluded(): Promise<boolean> {
+  const config = await readConfig();
+  // OpenClaw 2 home first (top-level tts), then the pre-2026.8 messages.tts.
+  // The switch is written back into whichever home the providers were found
+  // in — writing the other one would be a key the running gateway refuses.
+  const topLevel = (config as { tts?: Record<string, unknown> }).tts;
+  const messages = (config as { messages?: Record<string, unknown> }).messages;
+  const legacy = messages?.tts as { providers?: Record<string, unknown> } | undefined;
+  const tts = (topLevel && typeof topLevel === "object" ? topLevel : undefined) ?? legacy;
+  const providers = (tts as { providers?: Record<string, unknown> } | undefined)?.providers;
+  if (!providers || typeof providers !== "object") return false;
+  if (!providers["tts-local-cli"]) return false;
+  const microsoft = providers.microsoft;
+  const entry = microsoft && typeof microsoft === "object" ? (microsoft as Record<string, unknown>) : {};
+  if (typeof entry.enabled === "boolean") return false;
+  providers.microsoft = { ...entry, enabled: false };
+  await writeConfig(config);
+  return true;
 }
 
 export async function ensureLocalAiProxyUrls(): Promise<boolean> {
@@ -528,17 +2110,83 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
 
   let changed = false;
 
-  const llamaProvider = providers.llamacpp;
-  if (llamaProvider && llamaProvider.baseUrl !== getLlamaCppProxyBaseUrl()) {
-    llamaProvider.baseUrl = getLlamaCppProxyBaseUrl();
-    changed = true;
-  }
+  // The bearer travels WITH the URL. This repair points the entry at ClawBox's
+  // own local-AI proxy, and that proxy validates `Authorization` against
+  // data/.local-ai-token and answers 401 to anything else — so moving the
+  // baseUrl while leaving somebody else's apiKey beside it turns "the wrong
+  // endpoint" into "a refused request on every single turn", which is not an
+  // improvement. Only ever alongside a baseUrl WE just wrote: an entry already
+  // on the proxy is left exactly as the owner has it.
+  //
+  // And the bearer is PROVIDER-WIDE. OpenClaw resolves a row's endpoint as
+  // `model.baseUrl ?? provider.baseUrl` (see the `models.providers` type above)
+  // and has no per-model credential slot, so `providers.<p>.apiKey` is the
+  // bearer for every row under the entry. An entry carrying a row on ANOTHER
+  // HOST is therefore one we cannot re-point without mailing this box's local-AI
+  // token to that host on every turn of that row — so it is left exactly as its
+  // owner wrote it.
+  //
+  // Foreign, not merely present. The same principle as `foreignOpenAiRoute` in
+  // the configure route — a provider block we did not build is one to leave
+  // alone rather than half-configure — but the test there can be sharper,
+  // because ClawBox marks its own image rows and can recognise them. There is no
+  // such marker on a llamacpp row, so ownership is decided by HOST: loopback and
+  // the proxy's own authority are this box, and everything else (including a URL
+  // that will not parse — guessing permissively is the wrong way to be wrong
+  // about a credential) is not. Refusing over a row that points AT US would be a
+  // false failure, and its sibling in `scripts/gateway-pre-start.sh` pays for
+  // that one in a dead gateway: the entry it declines to complete has no
+  // provider `baseUrl`, which OpenClaw's schema requires for this provider.
+  //
+  // A row without an id is skipped: `ModelDefinitionSchema` requires a non-empty
+  // one, so such a row can never route a turn and its `baseUrl` can never
+  // receive anything.
+  const hostOf = (url: string): string | null => {
+    try {
+      return new URL(url).hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+  };
 
-  const ollamaProvider = providers.ollama;
-  if (ollamaProvider && ollamaProvider.baseUrl !== getOllamaProxyBaseUrl()) {
-    ollamaProvider.baseUrl = getOllamaProxyBaseUrl();
-    changed = true;
-  }
+  const routesToAnotherHost = (provider: Record<string, unknown>, proxyUrl: string): boolean => {
+    const ours = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+    const proxyHost = hostOf(proxyUrl);
+    if (proxyHost) ours.add(proxyHost);
+    return (Array.isArray(provider.models) ? provider.models : []).some((row) => {
+      if (!isPlainObject(row)) return false;
+      if (typeof row.id !== "string" || row.id.trim() === "") return false;
+      const baseUrl = typeof row.baseUrl === "string" ? row.baseUrl.trim() : "";
+      if (!baseUrl) return false;
+      const host = hostOf(baseUrl);
+      return host === null || !ours.has(host);
+    });
+  };
+
+  const adoptProxy = (provider: unknown, proxyUrl: string, id: string): boolean => {
+    // `readConfig()` validates the ROOT object only, so anything at all can be
+    // sitting at `models.providers.<id>` in a hand-edited file. Module code is
+    // strict mode: the assignments below THROW on a primitive, and on an array
+    // they land on named properties that `JSON.stringify` then drops — a repair
+    // reported to the caller and never written. Neither is an entry. (The boot
+    // migration in `scripts/gateway-pre-start.sh` REPLACES such an entry with a
+    // fresh valid one; here we only decline to write into it, because this
+    // function repairs a URL and is not the place that rebuilds a provider.)
+    if (!isPlainObject(provider) || provider.baseUrl === proxyUrl) return false;
+    if (routesToAnotherHost(provider, proxyUrl)) {
+      // The URL is deliberately not logged: an owner-configured endpoint can
+      // carry user-info or query credentials, and the journal keeps what it is
+      // given.
+      console.warn(`[openclaw-config] ${id} has a model row on another host; leaving the entry as configured`);
+      return false;
+    }
+    provider.baseUrl = proxyUrl;
+    provider.apiKey = getLocalAiToken();
+    return true;
+  };
+
+  if (adoptProxy(providers.llamacpp, getLlamaCppProxyBaseUrl(), "llamacpp")) changed = true;
+  if (adoptProxy(providers.ollama, getOllamaProxyBaseUrl(), "ollama")) changed = true;
 
   if (changed) {
     await writeConfig(config);
@@ -547,31 +2195,15 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
   return changed;
 }
 
-export async function ensureCompactionReserveFloor(
-  reserveTokensFloor = DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR
-): Promise<void> {
-  const config = await readConfig();
-  config.agents ??= {};
-  config.agents.defaults ??= {};
-  config.agents.defaults.compaction ??= {};
-  if (
-    typeof config.agents.defaults.compaction.reserveTokensFloor !== "number" ||
-    config.agents.defaults.compaction.reserveTokensFloor < reserveTokensFloor
-  ) {
-    config.agents.defaults.compaction.reserveTokensFloor = reserveTokensFloor;
-    await writeConfig(config);
-  }
-}
-
 /**
  * Set the OpenClaw gateway control-UI allowed origins to include the given
  * mDNS hostname. Always preserves the standard local origins so the device
  * remains reachable via IP and the AP captive portal even after a rename.
  */
 export async function setControlUiAllowedOrigins(hostname: string): Promise<void> {
-  const config = await readConfig();
-  const gateway = (config.gateway ?? {}) as Record<string, unknown>;
-  const controlUi = (gateway.controlUi ?? {}) as Record<string, unknown>;
+  const config = await readConfigForWrite();
+  const gateway = ensurePlainObject(asBag(config), "gateway");
+  const controlUi = ensurePlainObject(gateway, "controlUi");
   const existing = Array.isArray(controlUi.allowedOrigins)
     ? (controlUi.allowedOrigins as unknown[]).filter((v): v is string => typeof v === "string")
     : [];
@@ -584,16 +2216,15 @@ export async function setControlUiAllowedOrigins(hostname: string): Promise<void
     "http://10.43.0.1", // alt subnet when home network collides with 10.42.0.0/24
   ]);
   controlUi.allowedOrigins = Array.from(origins);
-  gateway.controlUi = controlUi;
-  config.gateway = gateway;
   await writeConfig(config);
 }
 
+/** OpenClaw's id for the Telegram channel — the config key's, and the plugin's. */
+const TELEGRAM_CHANNEL_ID = "telegram";
+
 export async function setTelegramToken(botToken: string): Promise<void> {
-  const config = await readConfig();
-  if (!config.channels) {
-    config.channels = {};
-  }
+  const config = await readConfigForWrite();
+  const channels = ensurePlainObject(asBag(config), "channels");
   // Do NOT set `dmPolicy` or `allowFrom` here. OpenClaw's default
   // (`dmPolicy: "pairing"`) requires the owner to approve every new sender
   // via an in-Telegram pairing code before the agent responds. Writing
@@ -602,8 +2233,12 @@ export async function setTelegramToken(botToken: string): Promise<void> {
   // finds the handle. Reconfiguring a bot token on a device with those
   // values already stored should re-secure the channel, so strip them here
   // too rather than merging on top of the stale insecure config.
-  const { dmPolicy: _dmPolicy, allowFrom: _allowFrom, ...rest } = config.channels.telegram ?? {};
-  config.channels.telegram = {
+  const {
+    dmPolicy: _dmPolicy,
+    allowFrom: _allowFrom,
+    ...rest
+  } = existingChannelBlock(channels, TELEGRAM_CHANNEL_ID);
+  channels[TELEGRAM_CHANNEL_ID] = {
     ...rest,
     enabled: true,
     botToken,
@@ -623,18 +2258,16 @@ export async function getTelegramProgressStreaming(): Promise<boolean> {
 }
 
 export async function setTelegramProgressStreaming(enabled: boolean): Promise<void> {
-  const config = await readConfig();
-  if (!config.channels) {
-    config.channels = {};
-  }
-  const existing = config.channels.telegram ?? {};
+  const config = await readConfigForWrite();
+  const channels = ensurePlainObject(asBag(config), "channels");
+  const existing = existingChannelBlock(channels, TELEGRAM_CHANNEL_ID);
   if (enabled) {
     // Restore OpenClaw's default by dropping our override entirely.
     const { streaming: _streaming, ...rest } = existing;
-    config.channels.telegram = { ...rest };
+    channels[TELEGRAM_CHANNEL_ID] = { ...rest };
   } else {
     // Final-answer-only: suppress the progress/preview draft.
-    config.channels.telegram = { ...existing, streaming: { mode: "off" } };
+    channels[TELEGRAM_CHANNEL_ID] = { ...existing, streaming: { mode: "off" } };
   }
   // Note: unlike setTelegramToken this does not strip dmPolicy/allowFrom — it's
   // a preference toggle, not a token re-secure; gateway-pre-start.sh already
@@ -642,14 +2275,381 @@ export async function setTelegramProgressStreaming(enabled: boolean): Promise<vo
   await writeConfig(config);
 }
 
+// === Discord ===
+//
+// Discord differs from Telegram in one structural way that is easy to miss:
+// OpenClaw's Discord channel takes its credential as an env REFERENCE
+// (`token: {source:"env", provider:"default", id:"DISCORD_BOT_TOKEN"}`), not as
+// a literal string like `channels.telegram.botToken`. So writing the config is
+// only half the job — DISCORD_BOT_TOKEN also has to be present in the gateway
+// PROCESS environment, and `secrets.providers.default` has to exist for the
+// reference to resolve at all (see envSecretRef below), or the config
+// validates, the gateway starts, and the bot silently never logs in.
+//
+// That is what `data/discord.env` is for: clawbox-gateway.service loads it with
+// `EnvironmentFile=-`, the same mechanism it already uses for network.env.
+// systemd re-reads EnvironmentFile on every start, so the restart that follows
+// a save is what picks the value up.
+
+// === Env-backed credentials (SecretRefs) ====================================
+//
+// A channel whose credential lives in the gateway's PROCESS environment is
+// configured with a reference, not a literal:
+//
+//     token: { source: "env", provider: "default", id: "DISCORD_BOT_TOKEN" }
+//
+// OpenClaw resolves that through `resolveProviderRefs()`, which switches on
+// `secrets.providers[<provider>].source`. THERE IS NO IMPLICIT DEFAULT
+// PROVIDER — grepping the shipped runtime for one finds nothing. A config that
+// carries the reference and no `secrets` block therefore validates, starts the
+// channel, and then kills it on first use:
+//
+//     Discord bot token configured for account "default" is unavailable;
+//     resolve SecretRefs against the active runtime snapshot before using this
+//     account.
+//
+// which on a live box was a restart loop behind a panel reporting success.
+// Adding the provider and restarting fixed it immediately.
+
+/** The single provider name every env SecretRef this repo writes points at. */
+export const ENV_SECRET_PROVIDER = "default";
+
+/**
+ * Mint an env SecretRef for `envVar`, installing the provider it resolves
+ * through into `config` as a side effect.
+ *
+ * THE CHOKEPOINT. The reference and the provider that makes it resolvable are
+ * produced by one call, so a channel added later cannot repeat this bug by
+ * writing the reference and forgetting the provider — the two cannot be
+ * written apart. Grep `source: "env"` across `src/` and this is the only
+ * production writer of one; `gateway-proxy.ts` only ever READS the shape.
+ *
+ * CREATE-IF-ABSENT, never rewrite, and REFUSE on a conflict.
+ *
+ * `secrets.providers` is shared config: the name is a plain map key and
+ * OpenClaw resolves purely on the entry's `source` (resolveProviderRefs
+ * switches on it and uses the name only for the lookup and the error text). So
+ * an entry already there was put there by whoever administers the box, and
+ * silently repointing it at the environment because one channel wanted that is
+ * how a change that "fixed Discord" would quietly break somebody else's file-
+ * or exec-backed secrets.
+ *
+ * Writing the reference anyway is not the safe fallback either. It produces a
+ * channel that is configured, enabled, and cannot start — the exact state this
+ * change exists to remove — and it does it to a config the operator owns, on a
+ * box where their other secrets already resolve. Refusing costs the owner one
+ * actionable message; writing costs them a channel that lies about itself.
+ *
+ * The caller turns this into `token_unresolved` for the panel, having written
+ * nothing.
+ *
+ * (A malformed provider entry is a separate and harsher failure: OpenClaw
+ * validates the whole config on boot, so one out-of-schema `secrets` value
+ * makes the gateway exit 78/CONFIG and roll openclaw.json back to
+ * `.last-good` — taking every other channel with it. We never write that shape;
+ * the note is here because it is what makes `secrets` worth leaving alone.)
+ */
+export class EnvSecretProviderConflictError extends Error {
+  constructor(
+    readonly provider: string,
+    readonly conflictingSource: string,
+  ) {
+    super(
+      `Secret provider "${provider}" has source "${conflictingSource}", so an environment-backed ` +
+        `reference cannot resolve through it.`,
+    );
+    this.name = "EnvSecretProviderConflictError";
+  }
+}
+
+export function envSecretRef(
+  config: OpenClawConfig,
+  envVar: string,
+): { source: "env"; provider: string; id: string } {
+  // Everything here came off disk via readConfig(), which returns whatever the
+  // file parsed to. A `secrets` that is a string, or a provider entry that is
+  // null, must produce the typed refusal the caller already handles — not a
+  // TypeError that becomes an opaque 500 halfway through a save.
+  if (config.secrets !== undefined && !isPlainObject(config.secrets)) {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, typeof config.secrets);
+  }
+  const secrets = (config.secrets ??= {});
+  if (secrets.providers !== undefined && !isPlainObject(secrets.providers)) {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, typeof secrets.providers);
+  }
+  const providers = (secrets.providers ??= {});
+
+  const existing = providers[ENV_SECRET_PROVIDER];
+  if (existing === undefined) {
+    providers[ENV_SECRET_PROVIDER] = { source: "env" };
+  } else if (!isPlainObject(existing)) {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, existing === null ? "null" : typeof existing);
+  } else if (existing.source !== "env") {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, String(existing.source));
+  }
+  return { source: "env", provider: ENV_SECRET_PROVIDER, id: envVar };
+}
+
+/** Env var the gateway resolves the Discord credential from. */
+export const DISCORD_TOKEN_ENV_VAR = "DISCORD_BOT_TOKEN";
+
+/** OpenClaw's id for the Discord channel — the config key's, and the plugin's. */
+const DISCORD_CHANNEL_ID = "discord";
+
+// The data dir is re-derived here rather than imported from config-store, and
+// that is load-bearing, not a style choice. This module is imported (via
+// updater.ts and the setup-api routes) by test files that replace
+// "@/lib/config-store" with a factory mock listing only the store functions
+// they use. `DATA_DIR` is then `undefined`, and a top-level
+// `path.join(DATA_DIR, …)` throws while merely IMPORTING this file — killing
+// whole unrelated test files. The resolution below matches config-store.ts
+// exactly, so both still write under the same root; every other lib that needs
+// the data dir without depending on the store does the same (tunnel.ts,
+// sqlite-store.ts, mcp-token.ts).
+const DATA_DIR = path.join(
+  process.env.CLAWBOX_ROOT ||
+    (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox"),
+  "data",
+);
+
+/** EnvironmentFile the gateway unit loads the Discord token from. */
+export const DISCORD_ENV_PATH = path.join(DATA_DIR, "discord.env");
+
+/**
+ * Write `data/discord.env` at 0600.
+ *
+ * Written temp-then-rename, and chmod'ed explicitly: `writeFile`'s `mode` is
+ * only honoured when it CREATES the file, so a rewrite over an existing 0644
+ * would silently keep the loose mode (same reasoning as config-store.ts).
+ *
+ * The value is interpolated unquoted, which is safe because this function
+ * itself restricts the token to `[A-Za-z0-9._-]` (isSafeDiscordToken) before
+ * writing — no newline can split the line, no quote can escape it.
+ *
+ * That guard is also the answer to "a request body ends up in a file here". The
+ * destination is DISCORD_ENV_PATH, a module constant, so nothing request-derived
+ * chooses where this lands; the only request-derived part is the token, which
+ * has to BE the credential for the write to be worth doing at all. The configure
+ * route rejects anything outside that charset far earlier with an actionable
+ * message, and Discord itself has to accept the token before the write happens
+ * — but the charset invariant no longer depends on either of them holding.
+ */
+export async function writeDiscordGatewayEnv(botToken: string): Promise<void> {
+  // Enforced HERE, not just trusted from the caller. The unquoted interpolation
+  // below is only safe while the token cannot contain a newline or a quote, and
+  // an exported writer whose safety lives entirely in whoever calls it is one
+  // future caller away from an env-file injection. The configure route still
+  // rejects a bad token far earlier, with a message the owner can act on; this
+  // is the guarantee that the file format cannot be broken even if it doesn't.
+  if (!isSafeDiscordToken(botToken)) {
+    throw new Error("Refusing to write an unsafe Discord token to the gateway env file");
+  }
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  const tmpPath = `${DISCORD_ENV_PATH}.tmp`;
+  const body =
+    "# Written by ClawBox. Loaded by clawbox-gateway.service (EnvironmentFile).\n" +
+    "# Do not edit by hand — the Discord section of Settings rewrites this file.\n" +
+    `${DISCORD_TOKEN_ENV_VAR}=${botToken}\n`;
+  await fs.writeFile(tmpPath, body, { mode: 0o600, encoding: "utf-8" });
+  await fs.chmod(tmpPath, 0o600);
+  await fs.rename(tmpPath, DISCORD_ENV_PATH);
+}
+
+/**
+ * What the box learned about a bot from Discord itself, written beside the
+ * token so the channel works the moment the gateway starts — the three things
+ * an owner otherwise had to say to the agent in the chat before the bot did
+ * anything:
+ *
+ *   * `applicationId` — OpenClaw resolves it at startup with a REST call when
+ *     it is absent, and a refused or rate-limited lookup keeps the whole
+ *     Discord monitor down ("Failed to resolve Discord application id").
+ *   * `guilds` — the default `groupPolicy` is `allowlist`, so a server that is
+ *     not listed is ignored however the bot was invited.
+ *   * the owners — each guild's owner goes on that guild's `users` and on the
+ *     channel's `allowFrom`, so the person who set the bot up can talk to it in
+ *     the server and in a DM without a pairing code.
+ */
+export interface DiscordOpenclawAccess {
+  applicationId?: string | null;
+  guilds?: ReadonlyArray<{ id: string; ownerId: string | null }>;
+}
+
+/**
+ * Only specific numeric ids ever come out of this: never `"*"`, never a name,
+ * never `dmPolicy` — the pairing default stays in force for everyone else.
+ */
+function numericIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const ids: string[] = [];
+  for (const entry of value) {
+    if (isDiscordSnowflake(entry) && !ids.includes(entry)) ids.push(entry);
+  }
+  return ids;
+}
+
+function withDiscordAccess(
+  block: Record<string, unknown>,
+  previousAllowFrom: unknown,
+  access: DiscordOpenclawAccess,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...block };
+  if (isDiscordSnowflake(access.applicationId)) next.applicationId = access.applicationId;
+
+  const allowFrom = numericIds(previousAllowFrom);
+  const guildList = (access.guilds ?? []).filter((g) => isDiscordSnowflake(g.id));
+  if (guildList.length > 0) {
+    const guilds = isPlainObject(next.guilds) ? { ...next.guilds } : {};
+    for (const guild of guildList) {
+      const owner = isDiscordSnowflake(guild.ownerId) ? guild.ownerId : null;
+      const existing = guilds[guild.id];
+      if (isPlainObject(existing)) {
+        // A guild the owner already tuned keeps its settings; the owner is only
+        // added when a `users` list exists and leaves them out.
+        const users = numericIds(existing.users);
+        if (owner && Array.isArray(existing.users) && !users.includes(owner)) {
+          guilds[guild.id] = { ...existing, users: [...users, owner] };
+        }
+      } else {
+        // requireMention false: on the owner's own server the bot answers in
+        // every channel it can see, the way the chat on the box answers.
+        guilds[guild.id] = owner ? { requireMention: false, users: [owner] } : { requireMention: false };
+      }
+      if (owner && !allowFrom.includes(owner)) allowFrom.push(owner);
+    }
+    next.guilds = guilds;
+  }
+  if (allowFrom.length > 0) next.allowFrom = allowFrom;
+  return next;
+}
+
+/**
+ * Write the access half alone — a bot that was invited to a server AFTER its
+ * token was saved. Refuses a config with no Discord channel in it: nothing here
+ * may create one without a token behind it.
+ */
+export async function setDiscordAccess(access: DiscordOpenclawAccess): Promise<boolean> {
+  const config = await readConfigForWrite();
+  const channels = ensurePlainObject(asBag(config), "channels");
+  const existing = channels[DISCORD_CHANNEL_ID];
+  if (!isPlainObject(existing)) return false;
+  const { allowFrom: previousAllowFrom, ...rest } = existing;
+  const next = withDiscordAccess(rest, previousAllowFrom, access);
+  if (isDeepStrictEqual(next, existing)) return false;
+  channels[DISCORD_CHANNEL_ID] = next;
+  trustChannelPlugin(config, DISCORD_CHANNEL_ID);
+  await writeConfig(config);
+  return true;
+}
+
+/**
+ * Register the Discord channel with the OpenClaw gateway.
+ *
+ * Deliberately writes the smallest config that can work:
+ *   * `enabled` + the env-reference `token`, plus what Discord itself told us
+ *     about the bot (`DiscordOpenclawAccess`: `applicationId`, the guilds it is
+ *     in and their owners). Every key is checked against the
+ *     `@openclaw/discord` schema; OpenClaw refuses to start on an unknown key
+ *     and a refusal takes the WHOLE config down — including a working Telegram
+ *     bot — so nothing is guessed (no groupPolicy, commands, streaming).
+ *   * `dmPolicy` is STRIPPED, never written, and `allowFrom` only ever holds
+ *     specific numeric ids — the guild owners. OpenClaw defaults to
+ *     `dmPolicy: "pairing"`, i.e. the owner approves each new sender. Writing
+ *     "open"/["*"] would expose the agent's shell/file/system_power tools to
+ *     anyone who finds the bot — the exact bug the Telegram path carries a boot-
+ *     time migration for (scripts/gateway-pre-start.sh), which now covers this
+ *     channel too.
+ *   * a literal `botToken` left by any other writer is dropped, so the env
+ *     reference is the only credential path and a stale copy cannot outlive it.
+ */
+/**
+ * Mark the channel plugin `channelId` as trusted, in whatever config object the
+ * caller is about to write.
+ *
+ * INSTALLATION AND TRUST ARE DIFFERENT FACTS. `openclaw plugins install` puts
+ * the package in OpenClaw's own store AND writes `plugins.entries.<id>` — but
+ * that entry lives in the same openclaw.json every other route in this repo
+ * read-modify-writes. A route that read the file before a channel save and
+ * wrote it after drops the entry without touching anything it meant to, and the
+ * gateway then refuses the channel it is still configured for:
+ *
+ *     channels.discord: channel is configured, but external plugin "discord" is
+ *     installed without explicit trust. Add plugins.entries.discord.enabled=true.
+ *
+ * Measured on a live box: the channel connected, a config write two minutes
+ * later dropped the entry, and `channels status` answered `unknown channel:
+ * discord` from then on while the panel's card sat at "unknown". Restoring the
+ * entry brought it back to connected across a full restart.
+ *
+ * So ClawBox writes the trust entry ITSELF, in the same atomic write as the
+ * channel block — the same reasoning as {@link envSecretRef}: the facts that
+ * have to be true together are written together, and cannot be separated by a
+ * concurrent writer.
+ *
+ * Merges rather than replaces, because the entry is shared config and may carry
+ * keys this repo knows nothing about.
+ */
+export function trustChannelPlugin(config: OpenClawConfig, channelId: string): void {
+  // `??=` cannot be used for either container: `"plugins": []` is not nullish
+  // and neither is `[].entries` (it is `Array.prototype.entries`), so the entry
+  // would be attached to an array — dropped by `JSON.stringify` on the way to
+  // disk — or onto a JS intrinsic. Both look like a successful save and leave
+  // the gateway answering `unknown channel` for a channel it is configured for,
+  // which is the failure this whole function exists to prevent. See
+  // {@link ensurePlainObject}.
+  const plugins = ensurePlainObject(asBag(config), "plugins");
+  const entries = ensurePlainObject(plugins, "entries");
+  const existing = entries[channelId];
+  entries[channelId] = { ...(isPlainObject(existing) ? existing : {}), enabled: true };
+}
+
+export async function setDiscordToken(
+  botToken: string,
+  access: DiscordOpenclawAccess = {},
+): Promise<void> {
+  const config = await readConfigForWrite();
+  const channels = ensurePlainObject(asBag(config), "channels");
+  const {
+    dmPolicy: _dmPolicy,
+    allowFrom: previousAllowFrom,
+    botToken: _legacyLiteralToken,
+    ...rest
+  } = existingChannelBlock(channels, DISCORD_CHANNEL_ID);
+  channels[DISCORD_CHANNEL_ID] = withDiscordAccess(
+    {
+      ...rest,
+      enabled: true,
+      // envSecretRef also installs `secrets.providers.default`, without which
+      // this reference is unresolvable at runtime — see its doc comment.
+      token: envSecretRef(config, DISCORD_TOKEN_ENV_VAR),
+    },
+    previousAllowFrom,
+    access,
+  );
+  // Same write, deliberately: an installed-but-untrusted plugin is a channel
+  // the gateway refuses, and leaving the entry to survive on its own is what
+  // let a later read-modify-write silently take Discord back down.
+  trustChannelPlugin(config, DISCORD_CHANNEL_ID);
+  await writeConfig(config);
+  // Config first, secret second: a half-applied save that has the reference but
+  // not the value is a bot that does not log in, which the status route reports
+  // honestly. The reverse — a token on disk for a channel nothing reads — is
+  // the failure mode that made the Hermes Telegram bug so hard to see.
+  await writeDiscordGatewayEnv(botToken);
+}
+
 // === Telegram pairing (DM sender approval) ===
 //
 // OpenClaw's default `dmPolicy: "pairing"` makes an unknown Telegram sender's
-// first message inert until the owner approves their 8-char code. OpenClaw
-// persists approvals in `~/.openclaw/credentials/telegram-<account>-allowFrom.json`
-// (a string array of user ids) — a *different* file from `openclaw.json`, so the
-// boot-time `channels.telegram.allowFrom` strip in gateway-pre-start.sh never
-// touches them. We only ever approve specific senders; we never widen dmPolicy.
+// first message inert until the owner approves their 8-char code. OpenClaw 2
+// persists approvals and pending codes in `~/.openclaw/state/openclaw.sqlite`
+// (see openclaw-state-store.ts); OpenClaw 1 kept them in
+// `~/.openclaw/credentials/telegram-<account>-allowFrom.json` (a string array
+// of user ids) + `telegram-pairing.json`, which the readers below still serve
+// on a box that has not migrated. Either way it is a *different* store from
+// `openclaw.json`, so the boot-time `channels.telegram.allowFrom` strip in
+// gateway-pre-start.sh never touches them. We only ever approve specific
+// senders; we never widen dmPolicy.
 
 const CREDENTIALS_DIR = path.join(OPENCLAW_HOME, "credentials");
 export const PAIRING_CODE_RE = /^[A-Z0-9]{8}$/;
@@ -698,11 +2698,14 @@ export async function listTelegramPairingRequests(): Promise<TelegramPairingRequ
 
 /**
  * Pending Telegram DM pairing requests read straight from OpenClaw's pairing
- * store file — a plain read with no CLI cold-start, so it's cheap enough to poll
- * for the desktop "new request" popup. The store path mirrors the allowFrom
- * store; the default account is unsuffixed (`telegram-pairing.json`).
+ * store — a plain read with no CLI cold-start, so it's cheap enough to poll
+ * for the desktop "new request" popup. OpenClaw 2 answers from the state
+ * database; the legacy file path mirrors the allowFrom store, with the default
+ * account unsuffixed (`telegram-pairing.json`).
  */
 export async function readTelegramPairingRequests(account = "default"): Promise<TelegramPairingRequest[]> {
+  const fromStore = readPairingRequests("telegram", account);
+  if (fromStore) return withDerivedNames(fromStore);
   const file = path.join(
     CREDENTIALS_DIR,
     account === "default" ? "telegram-pairing.json" : `telegram-${account}-pairing.json`,
@@ -732,9 +2735,14 @@ export async function approveTelegramPairing(code: string): Promise<void> {
 /**
  * Approved Telegram sender ids, read from the allowFrom store (empty on any
  * failure). `account` is OpenClaw's channel account id; ClawBox is single-account
- * so it defaults to "default" (file `telegram-default-allowFrom.json`).
+ * so it defaults to "default". The v2 state database wins whenever it exists:
+ * it is what the gateway enforces, and a migrated box's leftover JSON is a
+ * stale copy that must not shadow it. Without one, the legacy file
+ * (`telegram-default-allowFrom.json`) is the store.
  */
 export async function readTelegramAllowFrom(account = "default"): Promise<string[]> {
+  const fromStore = readPairingAllowEntries("telegram", account);
+  if (fromStore) return fromStore;
   const file = path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`);
   try {
     const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as { allowFrom?: unknown };
@@ -748,9 +2756,20 @@ export async function readTelegramAllowFrom(account = "default"): Promise<string
 /**
  * Wipe the per-account Telegram allowlist + pending stores. Used when the bot
  * token changes: previously-approved senders belong to the old bot, so a new
- * bot should start with a fresh allowlist. Best-effort — missing files are fine.
+ * bot should start with a fresh allowlist. Clears the v2 state database rows
+ * when the store exists, then the legacy files, so no copy survives for a
+ * later migration to carry back in. A missing store or file is fine. A store
+ * that exists but could not be cleared is not: its approvals are still what
+ * the gateway enforces, so this throws — before the legacy files are touched,
+ * leaving the state exactly as it was — and the caller must not report a
+ * reset that did not happen.
  */
 export async function clearTelegramPairingState(account = "default"): Promise<void> {
+  if (!clearPairingState("telegram", account)) {
+    throw new Error(
+      "Could not clear the previous Telegram approvals from OpenClaw's state store; they are still in force",
+    );
+  }
   const files = [
     path.join(CREDENTIALS_DIR, `telegram-${account}-allowFrom.json`),
     path.join(CREDENTIALS_DIR, account === "default" ? "telegram-pairing.json" : `telegram-${account}-pairing.json`),
@@ -758,33 +2777,151 @@ export async function clearTelegramPairingState(account = "default"): Promise<vo
   await Promise.all(files.map((f) => fs.rm(f, { force: true }).catch(() => {})));
 }
 
-// Toggles `plugins.entries.anthropic.enabled` in lock-step with the active
-// provider. Every enabled plugin loads its tool schemas synchronously on
-// the gateway's main loop during agent prep (~5-8s for anthropic on Jetson),
-// so leaving it on while the user is not using Claude is pure waste. Other
-// plugins (openai) are shared across providers and stay enabled. Pass the
-// provider segment of `agents.defaults.model.primary`.
-export async function setProviderPlugins(activeProvider: string): Promise<void> {
-  const wantAnthropic = activeProvider === "anthropic";
+// === The anthropic plugin, around the primary write =========================
+//
+// `plugins.entries.anthropic.enabled` is on whenever the box could use it: the
+// primary is anthropic, or an Anthropic credential exists that the owner has
+// not switched off. It used to follow the active provider alone — every
+// enabled plugin loads its tool schemas synchronously on the gateway's main
+// loop during agent prep (5-8 s for anthropic on a Jetson, an old measurement
+// TASK-654 re-takes on 2026.8.1), so the plugin was switched off whenever the
+// owner was not on Claude. On OpenClaw 2 that starves the catalog: measured on
+// a 2026.8.1 box, `openclaw models list --provider anthropic --all --json` with
+// the plugin disabled answers ONE row (the configured primary) against eleven
+// with it enabled, and that one row is the three-model picker owners saw. A
+// credentialed provider's plugin therefore stays on; the prep-latency saving
+// only applies where nothing could use the plugin anyway. Other plugins
+// (openai) are shared across providers and stay enabled.
+//
+// The toggle is two halves around the `agents.defaults.model.primary` write:
+//
+//   enableProviderPluginOps(refs)   IN the same batch as the write, before it
+//                                   (src/lib/provider-plugin-ops.ts)
+//   setProviderPlugins(provider)    AFTER it
+//
+// OpenClaw 2 validates a model reference on `config set` against the captured
+// catalogs of the ENABLED plugins only. With the plugin off, every
+// `anthropic/*` reference is refused: "Unknown model: anthropic/claude-sonnet-5.
+// Run openclaw models list to list available models." Both callers used to
+// write first and toggle after, and on a 2026.8.1 core the chat popup showed
+// the owner exactly that line on every switch back to Claude (2026.7.x
+// answered from the bundled catalog whatever the plugin state, which is why
+// the order never mattered before). The OFF half stays AFTER the write on
+// purpose: a plugin whose model is the CURRENT primary is never switched off
+// underneath it. It is idempotent and non-fatal.
+//
+// NEITHER HALF NEEDS A GATEWAY RESTART. The CLI prints "Restart the gateway to
+// apply" after a `plugins.entries.*` write, and that sentence is what this
+// paragraph used to relay as an instruction to the caller. The core's own
+// reload table disagrees with it (docs/gateway/configuration.md, "What
+// hot-applies vs what needs a restart": `plugins.entries.*` → "No (reloads
+// plugin runtime)"), and a plugin flipped through the gateway's own
+// `config.patch` was measured applying in 400 ms with the process id unchanged
+// (a box, 2026-09-17). So `src/app/setup-api/chat/model/route.ts` restarts
+// nothing. The ONE caller that still does is
+// `src/app/setup-api/ai-models/configure/route.ts`, and not for this write:
+// that route also rewrites provider entries and auth profiles during a
+// first-run save, where one restart is cheaper than reasoning about which of
+// the keys in that batch hot-applies.
+
+/**
+ * Does this box hold an Anthropic credential the owner has not switched off —
+ * an auth profile or the inline override key, and `anthropic` not in the
+ * owner's disabled-providers set (the switch takes the provider out of every
+ * place the box picks a model, so a credential behind it is one nothing can
+ * route to).
+ *
+ * Read off openclaw.json's `auth.profiles` METADATA, not the agent's SQLite
+ * credential store the core resolves a usable profile from. Unverified on a
+ * box (no device in this run): whether `openclaw models auth logout` also
+ * drops the metadata entry. If it does not, a logged-out box keeps the plugin
+ * on until the owner switches the provider off — the cost is prep latency,
+ * never a broken box.
+ */
+function hasUsableAnthropicCredential(config: OpenClawConfig, disabledProviders: ReadonlySet<string>): boolean {
+  if (disabledProviders.has("anthropic")) return false;
+  const profiles = Object.entries(config.auth?.profiles ?? {});
+  if (profiles.some(([key, entry]) => {
+    const provider = typeof entry?.provider === "string" && entry.provider.trim()
+      ? entry.provider
+      : key.split(":")[0];
+    return provider.trim().toLowerCase() === "anthropic";
+  })) return true;
+  const override = config.models?.providers?.anthropic as { apiKey?: unknown } | undefined;
+  return typeof override?.apiKey === "string" && override.apiKey.trim().length > 0;
+}
+
+/**
+ * Does the config still POINT at an Anthropic model — the default primary or
+ * any of its fallbacks? A configured reference outranks every other signal,
+ * the owner's provider switch included: the gateway will try to route there,
+ * and the plugin is what resolves it. The core does not protect this by
+ * itself — a batch whose only operation is the plugin flag touches no model
+ * ref, so `collectTouchedTextModelRefs` validates nothing and the disable
+ * lands (read on 2026.8.1); the fallback then fails when it is next selected.
+ *
+ * Prefix match on the provider segment, the shape ClawBox writes everywhere.
+ * A model ALIAS that resolves to anthropic is not seen here — resolving one
+ * needs the core's own resolver, and nothing in ClawBox writes aliases.
+ */
+function configReferencesAnthropic(config: OpenClawConfig): boolean {
+  const modelDefaults = config.agents?.defaults?.model;
+  return [
+    modelDefaults?.primary,
+    ...(Array.isArray(modelDefaults?.fallbacks) ? modelDefaults.fallbacks : []),
+  ].some((ref) => typeof ref === "string" && ref.trim().toLowerCase().startsWith("anthropic/"));
+}
+
+/**
+ * AFTER the primary write: keep the anthropic plugin on while the config still
+ * names an Anthropic model (primary or fallback) or a usable Anthropic
+ * credential exists; off only when nothing on the box could use it. Pass the
+ * provider segment of `agents.defaults.model.primary`. Idempotent and
+ * non-fatal.
+ */
+export async function setProviderPlugins(activeProvider: string): Promise<string | null> {
+  // Strict, because the decision below is about ABSENCE: `readConfig` answers
+  // `{}` to an unreadable file, and that would read as "no Anthropic
+  // credential" and switch the plugin off on a box that has one — the very
+  // starvation this gate exists to avoid. An unreadable config leaves the
+  // plugin where it is; the next switch or save re-applies the gate.
+  let config: OpenClawConfig;
   try {
-    const config = await readConfig();
-    const current = (config.plugins as { entries?: Record<string, { enabled?: boolean }> } | undefined)
-      ?.entries?.anthropic?.enabled;
-    if (current === wantAnthropic) return;
-  } catch {
-    // Fall through and write — readConfig already swallows errors.
-  }
-  try {
-    await runOpenclawConfigSet(
-      ["plugins.entries.anthropic.enabled", wantAnthropic ? "true" : "false", "--json"],
-    );
+    config = await readConfigStrict();
   } catch (err) {
-    // Non-fatal: the gateway will still work, just with the heavier prep cost.
+    console.warn(
+      "[openclaw-config] Leaving the anthropic plugin as it is — could not read the config:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+  const disabled = parseDisabledProviders(await getConfigStoreValue(DISABLED_PROVIDERS_KEY).catch(() => undefined));
+  const wanted = activeProvider === "anthropic"
+    || configReferencesAnthropic(config)
+    || hasUsableAnthropicCredential(config, disabled);
+  // An absent flag IS enabled: the plugin declares `enabledByDefault: true`,
+  // so a fresh box needs no write to be on.
+  const current = (config.plugins as { entries?: Record<string, { enabled?: boolean }> } | undefined)
+    ?.entries?.anthropic?.enabled ?? true;
+  if (current === wanted) return null;
+  try {
+    await runOpenclawConfigSet([ANTHROPIC_PLUGIN_ENABLED_KEY, wanted ? "true" : "false", "--json"]);
+    // WHICH provider's catalogue just changed, for the caller to pass on. This
+    // gate governs exactly one plugin, and switching it off is what empties
+    // `openclaw models list --provider anthropic`; returning the id keeps that
+    // fact here rather than hand-copied into every call site, and returning
+    // `null` on the no-op paths means a caller cannot announce a change that
+    // did not happen.
+    return "anthropic";
+  } catch (err) {
+    // Non-fatal: a gate left wrong costs prep seconds or one catalog refresh,
+    // never correctness, and the next switch or save re-applies it.
     console.warn(
       "[openclaw-config] Failed to toggle anthropic plugin:",
       err instanceof Error ? err.message : err,
     );
   }
+  return null;
 }
 
 /**
@@ -801,18 +2938,268 @@ export function gatewayIsAbsent(): boolean {
   return readEdition() === "hermes";
 }
 
-export async function restartGateway(): Promise<void> {
+/**
+ * OpenClaw 2 keeps auth profiles in `state/openclaw.sqlite` and refuses to
+ * hydrate plaintext credentials found in openclaw.json — the gateway exits
+ * with AuthProfileMigrationRequiredError until `doctor --fix` migrates them.
+ * Every `config set auth.profiles.*` recreates that condition, so the
+ * configure route runs this right before its gateway restart, mirroring
+ * install.sh: gateway stopped first (doctor migrates the store the gateway
+ * holds open), safe migrations only, and the caller's restart starts it
+ * again. On OpenClaw 1 there is nothing to migrate and doctor answers fast.
+ *
+ * ONE FAILURE IS NOT A FAILED MIGRATION, and it is reported rather than thrown
+ * (TASK-741). With a legacy `exec-approvals.json` in the state directory the
+ * core's security gate throws on the file's mere PRESENCE, so `doctor --fix`
+ * exits 1 having migrated NOTHING — measured against 2026.8.1 on 2026-09-06,
+ * with the sentence on STDERR and in full:
+ *
+ *     Legacy exec approvals exist at <state>/exec-approvals.json. Run
+ *     `openclaw doctor --fix` with OPENCLAW_STATE_DIR set to <state> before
+ *     using exec approvals.
+ *
+ * — i.e. advice for the command that has just run, with the state directory the
+ * caller had already set. THE MIGRATION STILL FAILED, and the caller's answer
+ * to that does not change: a legacy `auth-profiles.json` left in place is what
+ * stops an OpenClaw 2 gateway from starting. What changes is that the caller
+ * can now say WHICH failure it was, and name a file the owner can act on,
+ * instead of repeating the core's unusable advice.
+ *
+ * HARNESS FIRST, and the answer is uncomfortable: the core DOES have the
+ * importer. `--fix` arms its state migrations, and `migrateLegacyExecApprovals`
+ * imports a non-empty legacy file into SQLite, verifies it and removes the
+ * JSON. The exit 1 above is a different check — the runtime gate
+ * `assertNoPendingLegacyExecApprovals` — firing before that migration gets to
+ * run. So ClawBox is routing around an ordering defect in the core's own
+ * doctor, not filling a missing capability; that is worth reporting upstream
+ * and worth deleting from here when it lands.
+ *
+ * Returned rather than thrown as a typed error on purpose: 59 suites replace
+ * this module with a hand-written factory, and a new class to narrow on with
+ * `instanceof` is `undefined` in every one of them that omits it (see
+ * `openclaw-config-mock-completeness.test.ts`). A value a caller compares is
+ * inert under those mocks — an omitted `runOpenclawDoctorFix` answers
+ * `undefined`, which is not this outcome, which is the behaviour they have now.
+ * EVERY OTHER failure still throws, untouched.
+ */
+export type OpenclawDoctorFixOutcome =
+  | "completed"
+  | "blocked-by-legacy-exec-approvals"
+  | "blocked-by-service-ownership";
+
+export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> {
+  if (gatewayIsAbsent()) return "completed";
+  try {
+    await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+      timeout: 30000,
+    });
+  } catch {
+    /* older sudoers or already stopped — doctor itself reports real trouble */
+  }
+  try {
+    // The stop above is necessary and was never sufficient: the core refused
+    // over the service's OWNERSHIP, which a stopped unit does not change. This
+    // environment is the other half — see `@/lib/openclaw-doctor-ownership`.
+    // It goes last in `spawnOpenclaw`'s merge, so an inherited supervisor mode
+    // cannot put the refusal back.
+    await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], {
+      timeoutMs: 180_000,
+      env: withExternalGatewaySupervisor(),
+    });
+  } catch (err) {
+    // `spawnOpenclaw` rejects with `stderr.trim()` when there is any, which is
+    // where the core prints this. A timeout or a spawn error carries neither
+    // the sentence nor a verdict and is rethrown.
+    if (err instanceof Error && LEGACY_EXEC_APPROVALS_RE.test(err.message)) {
+      return "blocked-by-legacy-exec-approvals";
+    }
+    // A box that STILL refuses on ownership after the declaration above is one
+    // the environment did not reach — an older core, or a wrapper that strips
+    // it. Reported rather than thrown for the same reason the approvals
+    // outcome is: the caller's rollback judgement is unchanged (doctor
+    // migrated nothing either way), but "run `openclaw doctor --fix` from the
+    // Terminal" is advice for the command that just refused, and this box's
+    // owner has already been sent round that loop once.
+    if (err instanceof Error && DOCTOR_SERVICE_OWNERSHIP_RE.test(err.message)) {
+      return "blocked-by-service-ownership";
+    }
+    throw err;
+  }
+  return "completed";
+}
+
+/**
+ * Thrown when the gateway was restarted but never started listening again.
+ *
+ * A distinct type because it is not a failed restart: the config write landed,
+ * `systemctl restart` succeeded, and the box may still recover on its own. What
+ * it is NOT is a finished save — callers answer 502 rather than `{success:true}`.
+ */
+export class GatewayNotReadyError extends Error {
+  constructor(message = "gateway did not come back") {
+    super(message);
+    this.name = "GatewayNotReadyError";
+  }
+}
+
+/**
+ * How long a restarted gateway has to bind its port before the restart is
+ * called a failure.
+ *
+ * 30 s is the repo's own normal-path figure: `GATEWAY_HEALTH_WAIT_MS` in
+ * updater.ts waits exactly that for a gateway to come up, install.sh's
+ * post-restart recovery check settles for `sleep 8`, and the updater keeps its
+ * longer 45 s (`GATEWAY_RECOVERY_WAIT_MS`) for the harder case of a restart
+ * that follows a repair. It is also triple what OpenClaw itself allows a
+ * respawned gateway (`UPDATE_RESPAWN_HEALTH_TIMEOUT_MS`, 10 s) — deliberately,
+ * because that budget is written for a desktop and this one for a cold Jetson.
+ * Erring long is the point: a slow but healthy restart reported as a failure
+ * would be the exact inverse of the bug this wait exists to fix.
+ *
+ * The wait begins AFTER `systemctl restart` returns, so it covers only the new
+ * process's startup — not the drain (`TimeoutStopSec=30`) and not the pre-start
+ * (`TimeoutStartSec=600`, already bounded by this call's own 60 s exec budget).
+ *
+ * Read per call rather than frozen at import, so a box that needs longer can be
+ * given it without a rebuild. Nothing in the repo sets `GATEWAY_READY_WAIT_MS`
+ * today; it is an operator escape hatch, not a test seam (the tests mock the
+ * wait itself).
+ */
+export function gatewayReadyWaitMs(): number {
+  // Guarded exactly as respawnWaitMs() guards its Hermes twin: a typo in the
+  // escape hatch above must not become a budget. `waitForPortOpen` reads a
+  // non-finite budget as a single probe, so an unguarded NaN would turn a 30 s
+  // wait into one connect attempt — and the diagnostic would say "nothing is
+  // listening after NaNms", which names neither the cause nor the typo.
+  const override = Number(process.env.GATEWAY_READY_WAIT_MS);
+  return Number.isFinite(override) && override > 0 ? override : 30000;
+}
+
+// Validated: this is the port awaitGatewayReady hands to waitForPortOpen, and
+// `net.Socket.connect` throws ERR_SOCKET_BAD_PORT synchronously on a malformed
+// or out-of-range one — which would surface as "the gateway failed to restart"
+// over a restart that worked.
+export const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
+
+export interface RestartGatewayOptions {
+  /**
+   * Wait for the gateway to listen again before resolving. Default true.
+   *
+   * Only a caller that runs its own readiness wait afterwards may turn this
+   * off, and the updater is the one that does: it waits 45 s itself and reads
+   * the unit's journal when that fails, so a throw from here would skip the
+   * legacy-state recovery it exists to perform.
+   */
+  awaitReady?: boolean;
+}
+
+/**
+ * Block until the gateway is listening again, or say it never came back.
+ *
+ * One TCP connect to :18789, polled — which is OpenClaw's OWN answer to this
+ * question, not a ClawBox invention: upstream's `waitForHealthyGatewayChild`
+ * polls `waitForGatewayPortReady`, a bare `net.createConnection` to the gateway
+ * port, to decide whether a respawned gateway is serving. It is also already
+ * this repo's answer, in `updater.ts` `waitForGateway` and
+ * `/setup-api/gateway/health`, which is why this reuses their loop rather than
+ * writing a second one.
+ *
+ * The CLI verbs that answer the same question — `openclaw gateway status
+ * --require-rpc`, `openclaw gateway probe`, `openclaw health` — are not usable
+ * as a poll: each is a full CLI cold start (10-12 s on a Jetson, measured; see
+ * runOpenclawConfigSet) plus a WebSocket handshake, so one poll would outlast
+ * the whole wait and would inherit the gateway's own event-loop stalls. The
+ * kernel completes a TCP handshake without the target process's event loop,
+ * which is the reason /setup-api/gateway/health probes the port too.
+ *
+ * Nothing is remembered between calls: a readiness answer describes one moment
+ * of one process, and a cached one is how the next probe-once bug starts.
+ */
+async function awaitGatewayReady(options: RestartGatewayOptions): Promise<void> {
+  if (options.awaitReady === false) return;
+  const budgetMs = gatewayReadyWaitMs();
+  // 250 ms, not the updater's 1 500 ms: a person is waiting on this one, and
+  // OpenClaw polls the same port at 200 ms for the same question. A loopback
+  // connect that is refused costs nothing.
+  if (await waitForPortOpen(GATEWAY_PORT, "127.0.0.1", { timeoutMs: budgetMs, intervalMs: 250 })) return;
+  console.error(
+    `[openclaw-config] Gateway restarted but nothing is listening on ${GATEWAY_PORT} after ${budgetMs}ms`,
+  );
+  throw new GatewayNotReadyError();
+}
+
+/**
+ * How many times this process has bounced the gateway.
+ *
+ * A monotonic counter, exported so anything holding a memo of something the
+ * GATEWAY told us can tell whether its answer predates a restart. A restart
+ * takes every channel, every provider and every session down at once, while the
+ * ~14 callers of {@link restartGateway} — a model save, an STT change, a
+ * browser install, the updater, boot — know nothing about any of them and
+ * cannot each be taught to invalidate the right caches.
+ *
+ * Bumped TWICE per restart, at both ends, and one bump is not enough: with only
+ * the first, a read that STARTS after the bump and lands while the gateway is
+ * on its way down carries the new generation already, so the row it caches —
+ * read from the dying process — is accepted for a full window after the new one
+ * is up. The second bump makes every read that overlapped the restart older
+ * than the generation that follows it.
+ *
+ * What it cannot cover is the sub-second window between `systemctl restart`
+ * being issued and the old process actually closing its socket, on a caller
+ * that did not wait for readiness (`awaitReady: false`) and so has no "after"
+ * to bump at. A read landing exactly there is bounded instead by the memo's own
+ * short failure window, because the moment the socket is gone the CLI answers
+ * `gatewayReachable: false` and that is not stored as an answer at all.
+ *
+ * Deliberately in this direction: this module imports nothing from the memo
+ * holders, so they read the counter and there is no cycle. (A previous note
+ * claimed one; it was wrong.)
+ */
+let gatewayRestartCount = 0;
+
+/** @see gatewayRestartCount */
+export function gatewayRestartGeneration(): number {
+  return gatewayRestartCount;
+}
+
+export async function restartGateway(options: RestartGatewayOptions = {}): Promise<void> {
   if (gatewayIsAbsent()) return;
+  // The FIRST of the two bumps — see gatewayRestartCount. Before the restart,
+  // so a row read from the gateway that is about to go down is already stale.
+  gatewayRestartCount += 1;
+  // Best effort, before the restart: a unit that crash-looped through its
+  // StartLimitBurst (20/hour — one bad config during an update is enough)
+  // refuses every restart for the rest of the window with "Start request
+  // repeated too quickly", and nothing else running as the clawbox user can
+  // clear that state. Ignored wherever sudoers has not learned the verb yet.
+  try {
+    await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "reset-failed", "clawbox-gateway.service"], {
+      timeout: 15000,
+    });
+  } catch {
+    /* older sudoers, or nothing to reset — the restart below tells the truth */
+  }
   try {
     await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
       timeout: 60000,
     });
+    await awaitGatewayReady(options);
+    // The SECOND bump: everything read while this restart was in flight belongs
+    // to the generation that is now behind us.
+    gatewayRestartCount += 1;
+    return;
   } catch (err) {
+    if (err instanceof GatewayNotReadyError) throw err;
     const message = err instanceof Error ? err.message : String(err);
-    // "is masked" is the other way this unit says "I am not running here" — a
-    // masked unit is a deliberate removal, not an error to surface. Without it
-    // the message fell past this branch to the throw below.
-    if (/clawbox-gateway\.service.*(?:not found|is masked)|Unit clawbox-gateway\.service not found|could not be found/i.test(message)) {
+    // Fall back only when this installation genuinely has no ClawBox system
+    // unit. A runtime mask is an update/factory-reset lock: starting the legacy
+    // user unit through it would defeat the lock and recreate concurrent
+    // gateway/SQLite writers.
+    const systemGatewayMasked = /clawbox-gateway\.service[^\n]*\bmasked\b/i.test(message);
+    const systemGatewayMissing =
+      /clawbox-gateway\.service[^\n]*(?:not found|could not be found)/i.test(message);
+    if (!systemGatewayMasked && systemGatewayMissing) {
       try {
         await exec("systemctl", ["--user", "restart", "openclaw-gateway.service"], {
           timeout: 60000,
@@ -822,8 +3209,14 @@ export async function restartGateway(): Promise<void> {
             XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 1000}`,
           },
         });
+        // The legacy user unit serves the same port, so it owes the same proof.
+        await awaitGatewayReady(options);
+        gatewayRestartCount += 1;
         return;
       } catch (fallbackErr) {
+        // A gateway that was restarted but never came back must not be reported
+        // as the missing-unit error that sent us down this branch.
+        if (fallbackErr instanceof GatewayNotReadyError) throw fallbackErr;
         console.error(
           "[openclaw-config] Failed to restart fallback OpenClaw user gateway:",
           fallbackErr instanceof Error ? fallbackErr.message : fallbackErr
@@ -855,15 +3248,49 @@ export async function restartGateway(): Promise<void> {
  * services it by exiting 0 and handing off to the supervisor. Every skill install
  * therefore stopped the gateway and left it to systemd to bring back.
  */
-/** Find the openclaw binary — checks common locations including nvm, caches result. */
+/**
+ * Find the openclaw binary — the device's MANAGED core first, then the places a
+ * dev machine keeps one.
+ *
+ * THE MANAGED CORE WINS, and the order is the fix. `$HOME/.npm-global` is the
+ * one prefix install.sh installs the pinned core into (`NPM_PREFIX`), the one
+ * `clawbox-gateway.service` ExecStarts and the one `gateway-pre-start.sh` runs
+ * its migrations with. The node dir used to be asked FIRST, and on the device
+ * node is the distro package — `/usr/bin/node` — whose npm has `/usr` as its
+ * default prefix, so a single `sudo npm install -g openclaw` leaves a second,
+ * root-owned core at `/usr/bin/openclaw` that no update ever touches again. On
+ * 2026-09-18 a box carried one from July (2026.7.1-2) beside the managed
+ * 2026.9.3: the gateway ran the new core, which migrated openclaw.json and the
+ * state database, while every CLI call from this web server ran the OLD one,
+ * which refuses both ("meta: Unrecognized key: migrations", "state database
+ * uses newer schema version 16; this OpenClaw build supports 1"). Every
+ * `config set` failed, `doctor --fix` threw, and the ClawBox AI sign-in was
+ * rolled back with "Credential migration failed" — advice to run the very
+ * command that works fine from the owner's Terminal, whose PATH has the managed
+ * prefix first. `installedOpenclawCoreGeneration` derives the core's manifest
+ * from this path too, so the same box was also classified as the wrong
+ * GENERATION. install.sh's `remove_shadowing_system_openclaw` takes such an
+ * install off the box; this order is what makes it harmless meanwhile.
+ *
+ * ONLY THE MANAGED PATH IS CACHED. A fallback answer describes a box whose
+ * managed core is not there YET — an install still running, a core promotion
+ * between its two renames — and remembering it for the life of the process
+ * would pin this web server to the wrong core after the right one landed. The
+ * re-probe is a handful of `existsSync` calls in front of a CLI cold start that
+ * is measured in seconds.
+ */
 let _openclawBinCache: string | null = null;
 export function findOpenclawBin(): string {
   if (_openclawBinCache) return _openclawBinCache;
   const nodeDir = path.dirname(process.execPath);
   const home = process.env.HOME || "/home/clawbox";
+  const managed = path.join(home, ".npm-global", "bin", "openclaw");
+  if (fsSync.existsSync(managed)) {
+    _openclawBinCache = managed;
+    return managed;
+  }
   const candidates = [
     path.join(nodeDir, "openclaw"),
-    path.join(home, ".npm-global", "bin", "openclaw"),
     "/usr/local/bin/openclaw",
     "/usr/bin/openclaw",
   ];
@@ -875,24 +3302,175 @@ export function findOpenclawBin(): string {
     }
   } catch {}
   for (const p of candidates) {
-    if (fsSync.existsSync(p)) {
-      _openclawBinCache = p;
-      return p;
-    }
+    if (fsSync.existsSync(p)) return p;
   }
   return "openclaw";
 }
 
-/** Resolve the OpenClaw workspace/skills directory from config or well-known paths. */
-export function getSkillsDir(): string {
-  const home = process.env.HOME || "/home/clawbox";
-  const openclawConfig = path.join(home, ".openclaw", "openclaw.json");
+/**
+ * The OpenClaw skills root — `<workspace>/skills`, the directory a store app's
+ * skill lives in and the one OpenClaw watches.
+ *
+ * THREE answers, deliberately distinct, because two of them used to be one
+ * `null` and every caller read it as the harmless one:
+ *
+ *   - a PATH — this device has OpenClaw, and this is where its skills are;
+ *   - `null` — the `hermes` SKU: there is no OpenClaw here to have a skills
+ *     root, so there is nothing to remove and nothing has gone wrong;
+ *   - a thrown {@link OpenclawConfigUnreadableError} — openclaw.json EXISTS and
+ *     could not be read or parsed, so WHERE the skills are is unknown right
+ *     now. That is not "there is no OpenClaw here", and a caller told the two
+ *     apart by one `null` acts on the wrong one: `apps/uninstall` dropped the
+ *     desktop entry, the preferences and the KV, left the skill on disk and
+ *     still loaded, and answered `{ok:true}` (TASK-551).
+ *
+ * The unreadable case is real and transient: `openclaw config set` rewrites the
+ * file in place, so a half-written read is the documented race (see
+ * {@link readConfigForWrite}), and an EACCES reads the same way. `getSkillsDir()`
+ * below swallows it and falls through to a well-known path — a good enough
+ * guess for the `stat` its own caller makes, and never a delete target, because
+ * on a box whose workspace is not the well-known one it redirects the delete.
+ *
+ * Keyed on the EDITION rather than the active harness, deliberately. On `dual`
+ * the OpenClaw workspace exists and its skills are real whichever harness is
+ * running, so an app installed there stays removable; only the `hermes` SKU
+ * genuinely has no OpenClaw.
+ */
+export function openclawSkillRoot(): string | null {
+  if (openclawIsAbsent()) return null;
+  // ONE read answers both "can the config be read at all" and "what does it
+  // say": a probe followed by getSkillsDir()'s own read reopened the in-place
+  // rewrite race in the gap between them.
+  return path.resolve(readConfiguredWorkspace() ?? wellKnownWorkspace(), "skills");
+}
+
+/**
+ * `agents.defaults.workspace` as an absolute path (see
+ * {@link resolveWorkspaceValue}), or `undefined` when no config names one.
+ *
+ * Throws {@link OpenclawConfigUnreadableError} when openclaw.json exists and
+ * cannot be read or parsed — the discipline {@link readConfigStrict} states at
+ * length, for the same reason: a caller about to act on "there is nothing here"
+ * must not be told that by a file it could not read. ENOENT is not a failure —
+ * there is no config, and the well-known paths are the answer.
+ */
+function readConfiguredWorkspace(): string | undefined {
+  let raw: string;
   try {
-    const config = JSON.parse(fsSync.readFileSync(openclawConfig, "utf-8"));
-    const workspace = config?.agents?.defaults?.workspace;
-    if (typeof workspace === "string" && workspace) return workspace;
-  } catch {}
-  const openclawWorkspace = path.join(home, ".openclaw", "workspace");
+    raw = fsSync.readFileSync(path.join(openclawHome(), "openclaw.json"), "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    throw new OpenclawConfigUnreadableError(err);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new OpenclawConfigUnreadableError(err);
+  }
+  const workspace = (parsed as { agents?: { defaults?: { workspace?: unknown } } } | null)
+    ?.agents?.defaults?.workspace;
+  if (typeof workspace !== "string" || !workspace.trim()) return undefined;
+  return resolveWorkspaceValue(workspace.trim());
+}
+
+/**
+ * `agents.defaults.workspace` as an ABSOLUTE path, the way the gateway itself
+ * reads it: `~` against `$HOME`, and a relative value against OpenClaw's home.
+ *
+ * The value is not guaranteed absolute — the owner writes it, or `openclaw
+ * config set` does — and this was the third reading of it in the repo and the
+ * only one that skipped that: `path.resolve(ws, "skills")` on a bare name
+ * answers `<cwd>/<ws>/skills` — the Next.js server's working directory — and on
+ * `~/…` a literal `~` folder under it. The gateway loads the skill from the
+ * real workspace, so the uninstall would find nothing at that address, answer
+ * `skillRemoved: false` and tell the owner there was no skill of that name
+ * while it stays on disk and loaded. That is TASK-551's own symptom, reached
+ * through the value rather than through the edition.
+ *
+ * Line for line the same expression as `openclawWorkspaceDir()` in
+ * `src/lib/language-persona.ts`, which spells out the rule and explains why a
+ * guard and the write it guards must name one directory.
+ * `scripts/gateway-pre-start.sh` agrees on the tilde and on preferring an
+ * absolute value, but joins a RELATIVE one — and its own default — against
+ * `$HOME/.openclaw` (`:3138,3147`) rather than the `CLAWBOX_OPENCLAW_HOME` /
+ * `OPENCLAW_HOME` override its config path already honours (`:27`). The two
+ * agree on every shipped box: on ARM (`install.sh`) neither override is set,
+ * so both sides are `$HOME/.openclaw`, and on x64 `install-x64.sh:1100,1104`
+ * sets `HOME` and `CLAWBOX_OPENCLAW_HOME` to the matching pair. They are not
+ * the same expression, and the shell side is out of this route's scope to
+ * change.
+ */
+function resolveWorkspaceValue(workspace: string): string {
+  const home = process.env.HOME || "/home/clawbox";
+  const expanded = workspace === "~" ? home
+    : workspace.startsWith("~/") ? path.join(home, workspace.slice(2))
+    : workspace;
+  return path.isAbsolute(expanded) ? expanded : path.join(openclawHome(), expanded);
+}
+
+/** The workspace when the config names none: the current path, else the legacy one. */
+function wellKnownWorkspace(): string {
+  // Under OpenClaw's home, the same one the config was read from — not a
+  // second `$HOME/.openclaw` spelling. The two agree on a shipped box by
+  // convention only (`install-x64.sh:1100,1104` sets `HOME` and
+  // `CLAWBOX_OPENCLAW_HOME` to a matching pair; on ARM neither override
+  // exists); keyed on `$HOME` this line would resolve a DELETE target from a
+  // directory the box's own config does not live in.
+  const openclawWorkspace = path.join(openclawHome(), "workspace");
   if (fsSync.existsSync(openclawWorkspace)) return openclawWorkspace;
-  return path.join(home, "clawd");
+  // The legacy workspace is a HOME-relative path in its own right, never a
+  // child of OpenClaw's home.
+  return path.join(process.env.HOME || "/home/clawbox", "clawd");
+}
+
+/**
+ * Resolve the OpenClaw workspace/skills directory from config or well-known
+ * paths. Lenient on purpose — an unreadable config falls through to the
+ * well-known paths — because its caller only `stat`s the answer, where a miss
+ * costs a cache rescan and nothing else. Anything that DELETES under the root
+ * goes through {@link openclawSkillRoot}, which refuses to guess.
+ */
+export function getSkillsDir(): string {
+  try {
+    const configured = readConfiguredWorkspace();
+    if (configured) return configured;
+  } catch {
+    // See above: a stat under the wrong root is a miss, not damage.
+  }
+  return wellKnownWorkspace();
+}
+
+/**
+ * The `--agent <id>` argument an `openclaw skills …` call needs, or nothing.
+ *
+ * `openclaw skills` infers its owner from the cwd and then from the default
+ * agent, and when neither inference lands AND more than one agent is
+ * configured it refuses outright: `cli_error`, "Multiple agents are
+ * configured, but the skills command has no explicit owner. Pass --agent
+ * <id>." The web server's cwd is the ClawBox checkout, which infers nothing,
+ * so on a box whose owner added a second agent every `skills` call failed —
+ * `skills list` took the whole App Store skill surface with it (a 503 for
+ * every id, installed or not: the settings window, the Ready / Needs setup
+ * badge and the enable switch's read-back), and `skills install` refused
+ * before it had even looked at the ref.
+ *
+ * Named only when the config actually holds more than one agent, which is the
+ * only condition the CLI refuses: a stock appliance has one and keeps the
+ * inference that has always worked there, so this can never make a working box
+ * worse. `main` is ClawBox's own agent — the same id `clawkeep-memory.ts`
+ * names for `openclaw memory` — and with several agents and no `main` the
+ * first entry is a better guess than a certain refusal.
+ *
+ * Lenient by construction: {@link readConfig} answers `{}` for a config it
+ * cannot read, which lands on the empty argument list and today's behaviour.
+ */
+export async function openclawSkillsAgentArgs(): Promise<string[]> {
+  const config = await readConfig();
+  const entries = config.agents?.entries;
+  if (!isPlainObject(entries)) return [];
+  const ids = Object.keys(entries);
+  if (ids.length < 2) return [];
+  const id = ids.includes("main") ? "main" : ids[0];
+  return ["--agent", id];
 }

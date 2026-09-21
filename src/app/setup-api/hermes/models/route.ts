@@ -2,18 +2,27 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
+import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
+import { getActiveHarness } from "@/lib/harness";
+import { requireSession } from "@/lib/route-auth";
+import { reconcileClawaiModelsWithHermes } from "@/lib/hermes-clawai";
 import { reconcileLocalAiWithHermes } from "@/lib/hermes-local-ai";
 import {
+  catalogStaleness,
   getModelOptions,
   invalidateModelOptions,
   isAllowedProvider,
   isPairAllowed,
   isSafeModelId,
+  readCatalogRefreshMark,
   shouldEnforcePairing,
   scopeFromPayload,
   type HermesModelOption,
   type ModelOptionsPayload,
+  type ScopedModelsReply,
 } from "@/lib/hermes-model-options";
+import { readProviderVerified } from "@/lib/provider-verified";
 
 // Hermes' provider/model configuration.
 //
@@ -57,12 +66,60 @@ function unionModels(payload: ModelOptionsPayload): HermesModelOption[] {
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
-  const refresh = flag(url.searchParams.get("refresh"));
   const provider = (url.searchParams.get("provider") || "").trim();
 
+  // `?refresh=1` is not a read: it busts Hermes' per-provider disk cache and
+  // fans out into a live /v1/models call per provider. An unauthenticated
+  // caller could therefore drive real upstream traffic and — before the
+  // downgrade guard in hermes-model-options.ts — swap a healthy 47-provider
+  // catalogue for the 2-provider disk fallback by timing it against a slow
+  // dashboard. The plain GET stays reachable for the wizard; the cache bust
+  // needs a session. Degrading to a read (rather than 401ing) keeps the panel
+  // rendering for a caller whose session expired mid-page. TASK-446.
+  let refresh = flag(url.searchParams.get("refresh"));
+  let refreshDenied = false;
+  if (refresh && (await requireSession(request))) {
+    refresh = false;
+    refreshDenied = true;
+  }
+
   // A device whose local model was enabled before Hermes knew how to host it
-  // repairs itself here — once per process, and a no-op on every other device.
-  await reconcileLocalAiWithHermes();
+  // repairs itself here — once per process, and a no-op on every other device —
+  // and the same for the ClawBox AI catalogue, which a box linked before Hermes
+  // was told what the proxy serves does not have. Both write the `providers:`
+  // block Hermes' OWN pickers read, so a box fixes its Telegram `/model`
+  // keyboard by being asked this question once.
+  //
+  // GATED ON THE HARNESS, once, in front of both. Their first act is a `hermes`
+  // spawn, and on an OpenClaw box there is no binary to spawn and no
+  // `providers:` block to repair: `runHermesCli` would reject, the catch would
+  // log a failure, and the repair would unlatch and do it again on the next
+  // request. Today this route is unreachable there (`ChatPopup` passes no
+  // Hermes provider), which is exactly why the guard belongs at the call site
+  // rather than in two modules that each assume their own edition.
+  if ((await getActiveHarness()) === "hermes") {
+    await reconcileLocalAiWithHermes();
+    await reconcileClawaiModelsWithHermes();
+  }
+
+  // When this box last got the harness to re-read its providers' lists, as
+  // opposed to how old this process's copy of the answer is. `fetchedAt`/
+  // `stale` below answer only the second question — they are this server's
+  // 60-second L1 cache — so a list Hermes has been carrying forward for a week
+  // reports `fetchedAt` two seconds ago and `stale: false`. TASK-781.
+  //
+  // READ AFTER `getModelOptions`, never beside it. `?refresh=1` performs the
+  // check inside that call, so a mark read up here would be the PRE-refresh one
+  // and the one action that fixes staleness would answer `catalogStale: true`
+  // — a false failure over an operation that had just succeeded.
+  //
+  // Read per request rather than baked into the cached payload, for the other
+  // direction: a payload built at 23 h old would otherwise still call itself
+  // fresh two hours later, from the L1 cache.
+  const catalogAge = async () => {
+    const mark = await readCatalogRefreshMark();
+    return { catalogCheckedAt: mark.checkedAt, catalogStale: catalogStaleness(mark) };
+  };
 
   try {
     if (provider) {
@@ -70,10 +127,27 @@ export async function GET(request: Request) {
       if (!isAllowedProvider(scoped, provider)) {
         return NextResponse.json({ error: "Unknown provider" }, { status: 400 });
       }
-      return NextResponse.json(await scopeFromPayload(scoped, provider));
+      // `reasoning` and `savedPair` ride along: both are device-wide, not per
+      // provider, and a reader of the scoped form (ai_list_models before a
+      // switch) otherwise reports them as unknown with the values one field
+      // away. The shape is `ScopedModelsReply`, declared beside the scope it
+      // extends so the MCP server's reader cannot drift from it.
+      const reply: ScopedModelsReply = {
+        ...(await scopeFromPayload(scoped, provider)),
+        reasoning: scoped.reasoning,
+        savedPair: scoped.current,
+        ...(await catalogAge()),
+      };
+      return NextResponse.json(reply);
     }
 
     const payload = await getModelOptions({ refresh });
+    // What has actually ANSWERED on this box, from ClawBox's own store: a read
+    // of data/config.json plus one stat of Hermes' pooled credential store, per
+    // request on a polled route — and no provider traffic at all, which is the
+    // whole point. See src/lib/provider-verified.ts for why a completed turn is
+    // the evidence, a probe is not, and what this does and does not cover.
+    const verifiedAt = await readProviderVerified();
     const models = unionModels(payload);
     const current = payload.current.model;
     // Keep the saved model present in the unscoped list even when its provider
@@ -90,6 +164,27 @@ export async function GET(request: Request) {
         id: row.id,
         name: row.name,
         authenticated: row.authenticated,
+        // Same value, honestly named. `authenticated` means Hermes found an API
+        // key or a user-defined endpoint — presence, never a working
+        // credential. `verified` is the one that would mean it works, and is
+        // null until something actually probes the provider. A consumer that
+        // reads `authenticated` as "this will answer" is the reason a bogus
+        // provider looked healthy right up until the first turn 403'd.
+        credentialPresent: row.authenticated,
+        // Hermes' own verdict still wins where it ever reports one — it comes
+        // from the harness and would be a real probe result, while ours is
+        // inference from a turn. In practice Hermes has never populated this
+        // field on any box measured (it is null on all 48 rows), so the
+        // precedence has never actually been exercised; if it starts reporting
+        // `false` transiently, that ordering is the first thing to revisit,
+        // because a working credential painted broken is the failure this field
+        // exists to prevent. Otherwise a turn this provider served is the
+        // answer, and having served one can only mean true — a provider that
+        // never answered stays NULL, "not checked", never `false`: an offline
+        // box and a rate-limited subscription must not be painted as a broken
+        // credential.
+        verified: row.verified ?? (verifiedAt[row.id] ? true : null),
+        ...(row.verified === null && verifiedAt[row.id] ? { verifiedAt: verifiedAt[row.id] } : {}),
         isUserDefined: row.isUserDefined,
         source: row.source,
         total: row.total,
@@ -98,6 +193,9 @@ export async function GET(request: Request) {
       source: payload.source,
       stale: payload.stale,
       fetchedAt: payload.fetchedAt,
+      ...(await catalogAge()),
+      ...(payload.degraded ? { degraded: payload.degraded } : {}),
+      ...(refreshDenied ? { refreshDenied: true } : {}),
     });
   } catch {
     // Never surface the dashboard origin, its password, or the hermes binary
@@ -152,6 +250,9 @@ export async function POST(request: Request) {
   // (pick Anthropic, keep saving deepseek). When the caller didn't name a
   // model we take that provider's own recommended default.
   let targetModel = model;
+  // Did the CALLER name it, or did we resolve one for them? Only the first is a
+  // choice worth remembering (TASK-713).
+  const namedModel = Boolean(model);
   if (!targetModel) {
     if (targetProvider === previousProvider) {
       targetModel = payload.current.model;
@@ -197,10 +298,23 @@ export async function POST(request: Request) {
 
   // Only text WE produced is safe to echo back — a raw spawn rejection can
   // carry the hermes binary path.
+  //
+  // `r.stderr` is not that text. It is the CLI's, and when `hermes config set`
+  // CRASHES it is a CPython traceback: frames naming /home/clawbox/.hermes and
+  // the `raise` line above the summary, all of it landing verbatim in the
+  // Settings save banner through `saveErrorMessage`. That is the same input PR
+  // #515 cleaned out of the chat bubble, arriving through the panel instead —
+  // so it goes through the same parser. The raw stream still reaches the
+  // journal, which is where a path is a diagnosis rather than a disclosure.
   class ConfigSetError extends Error {}
   const setKey = async (key: string, value: string) => {
     const r = await runHermesCli(["config", "set", key, value]);
-    if (r.code !== 0) throw new ConfigSetError(r.stderr || `Failed to set ${key}`);
+    if (r.code !== 0) {
+      console.error("[hermes models] config set exit", r.code, r.stderr);
+      throw new ConfigSetError(
+        safeHermesFailureMessage(r.stdout, r.stderr) || `Failed to set ${key}`,
+      );
+    }
   };
 
   try {
@@ -219,6 +333,17 @@ export async function POST(request: Request) {
       if (providerChanged || targetModel !== payload.current.model) {
         await setKey("model.default", targetModel);
       }
+      // The owner chose this model here, so the ClawBox AI tier badge may not
+      // fill one in over it on the next link or re-pair (TASK-713). Recorded
+      // after the write landed, and on the no-op path too: "already on the model
+      // I want" is the same choice.
+      //
+      // Only when the REQUEST named a model. A provider-only switch — which is
+      // what `/setup-api/providers/default` and the MCP `ai_set_provider` tool
+      // send, both deliberately — resolves that provider's own recommended
+      // default, and recording another default as a choice is the very
+      // confusion this marker exists to end.
+      if (namedModel) await recordExplicitModelPick(targetModel);
     } catch (err) {
       if (providerChanged && previousProvider) {
         // runHermesCli RESOLVES with a non-zero `code` on a failed command and
@@ -243,6 +368,14 @@ export async function POST(request: Request) {
   } finally {
     // The device's selection changed (or attempted to) — never serve the old
     // `current` from cache.
+    //
+    // THE ONE `invalidateModelOptions()` SITE WITH NO MCP REFRESH BESIDE IT, and
+    // deliberately. Its five siblings move CREDENTIALS, which is what changes the
+    // set `mcp/lib/context.ts` builds `ai_set_provider`'s enum from; this one
+    // moves only the SELECTION, and every provider it will accept had to be in
+    // that set already (`isAllowedProvider` above). More to the point, this route
+    // is what `ai_set_provider` itself POSTs to — asking for a global
+    // `reload.mcp` here would shut down the very MCP child that is mid-call.
     invalidateModelOptions();
   }
 

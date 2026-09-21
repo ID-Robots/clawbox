@@ -1,34 +1,56 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useId, useRef, useCallback } from "react";
+import { useMobileBack } from "@/lib/mobile-back";
+import SystemUpdateApp, { componentNeedsUpdate, shipsOpenclaw, type VersionInfo } from "@/components/SystemUpdateApp";
 import Image from "next/image";
 import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
 import AIProviderIcon from "./AIProviderIcon";
+import AiProviderList from "./AiProviderList";
 import HarnessPicker from "./HarnessPicker";
+import PetPicker from "./PetPicker";
+import SettingsDisclosureButton from "./SettingsDisclosureButton";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
-import { dispatchOpenApp } from "@/lib/ui-events";
+import { useTr } from "@/lib/i18n-floor";
+import { CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
+import AnthropicAccountsCard from "./AnthropicAccountsCard";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
+import LocalAiPanel from "./LocalAiPanel";
+import VoiceOutputPanel from "./VoiceOutputPanel";
+import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
+import ClawboxAiPitchCard from "./ClawboxAiPitchCard";
 import { copyToClipboard } from "@/lib/clipboard";
+// The ending vocabulary and the gesture table, from the module that owns the
+// outcome shape — never a second copy of either. Both are plain functions on a
+// const list; the card component beside them is not pulled in by naming these.
+import { emailEnding, endingAsAsked, type EmailEnding } from "@/lib/chat-email-batch";
+import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
+import { installPendingRefresh } from "@/lib/email-pending-refresh";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
-import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
+import { cachedEdition, fetchHarness } from "@/lib/client-harness";
 import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
-import { lastModelSegment } from "@/lib/chat-header-pills";
 import { QRCodeSVG } from "qrcode.react";
-import type { UpdateState } from "@/lib/updater";
-import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
-import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
+import { formatBytes as formatByteCount } from "@/lib/format-bytes";
+import { BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
 import { useReconnect } from "@/hooks/useReconnect";
-import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
+import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
+import BackgroundJobsPanel from "./BackgroundJobsPanel";
+import ClawboxMcpPanel from "./ClawboxMcpPanel";
+// From the pure module, never `@/lib/plugin-repair`: that one reads the
+// marker file and would pull `fs` into the browser bundle.
+import { canonicalPluginId } from "@/lib/plugin-repair-id";
+import PluginRepairNotice, { type PluginRepairInfo } from "./PluginRepairNotice";
+import { customWallpaperId, customWallpaperIndex } from "@/lib/custom-wallpapers";
 
 /* ── Types ── */
 
@@ -38,7 +60,8 @@ export interface UISettings {
   wpBgColor: string;
   wpOpacity: number;
   mascotHidden: boolean;
-  wallpapers: { id: string; name: string; image?: string }[];
+  /** Readonly: the shared built-in list is frozen per edition and never mutated here. */
+  wallpapers: readonly { id: string; name: string; image?: string }[];
   customWallpapers: string[];
   onWallpaperChange: (id: string) => void;
   onWpFitChange: (fit: "fill" | "fit" | "center") => void;
@@ -51,7 +74,135 @@ export interface UISettings {
 
 interface SettingsAppProps {
   ui: UISettings;
+  /**
+   * Is Settings the whole PAGE (the standalone `/app/settings` route), or one
+   * window on the desktop?
+   *
+   * It decides which landmark the panel region may claim. The desktop mounts
+   * every open window in ONE document and six of its apps draw an `h1` of their
+   * own (ClawKeep, the App Store, Coding Agent, Memory Shard, the Hermes skills
+   * store, System Update), so a window may claim neither the document's title
+   * nor its `main`: "skip to main content" read from ClawKeep would otherwise
+   * land inside the Settings window behind it. As a window the panel is a
+   * REGION named after the panel; as a page it is the `main` under the window
+   * title's `h1`. Either way the cards' captions are the `h3`s beneath.
+   */
+  asPage?: boolean;
 }
+
+/** Exactly what /setup-api/email/status returns. The address is already
+ *  masked server-side and the password is only ever a boolean. */
+type EmailMode = "send" | "read" | "answer";
+
+interface EmailStatus {
+  configured: boolean;
+  address: string | null;
+  smtpHost: string | null;
+  smtpPort: number | null;
+  imapHost: string | null;
+  allowedSenders: string[];
+  inbound: boolean;
+  inboundSupported: boolean;
+  /** What the assistant may do with the mailbox. */
+  mode: EmailMode;
+  /** The explicit incoming-server override; null when it is being derived. */
+  imapHostExplicit: string | null;
+  /** When true, email_send queues a draft instead of sending. */
+  askBeforeSend: boolean;
+  /** How many drafts are waiting for approval. */
+  pendingCount: number;
+}
+
+/** One outgoing message the assistant queued, waiting for the owner. */
+interface PendingEmail {
+  id: string;
+  to: string[];
+  subject: string;
+  preview: string;
+  createdAt: number;
+}
+
+/**
+ * A draft that is no longer waiting, and what became of it.
+ *
+ * The strip above used to just stop listing such a draft, which is honest about
+ * the queue and silent about the mail: an owner who approved on Telegram opened
+ * this panel to nothing at all and could not tell "it went out" from "it was
+ * deleted" from "this box never had it". The queue is where he comes to find
+ * out, so it is where the answer belongs.
+ */
+interface HandledEmail {
+  id: string;
+  /**
+   * DERIVED from `EMAIL_ENDINGS`, never spelled out again.
+   *
+   * That list exists so a sixth ending cannot be added in one place and go
+   * unread in another — its own comment calls a partial copy "how a real ending
+   * quietly becomes 'no idea'". A hand-written union here made this strip the
+   * one reader the compiler could not warn; the renderer below carries the
+   * other half of that promise, an exhaustive chain ending in `never`, because
+   * the type alone would have let a sixth ending render as "Failed: " with no
+   * reason.
+   */
+  kind: EmailEnding;
+  at: number;
+  to: string[];
+  subject: string;
+  error?: string;
+}
+
+/**
+ * A draft that was approved, claimed out of the queue and then failed to send.
+ * /setup-api/email/pending hands the whole message back for exactly this, so
+ * the owner's approved mail is not lost to a transient SMTP error.
+ */
+interface LostDraft {
+  to: string[];
+  subject: string;
+  body: string;
+  /**
+   * The send was never confirmed one way or the other, so the heading over this
+   * draft must not say it was not sent.
+   *
+   * The route computes which failure it was and sends the receipt's word back
+   * (`ending`). A dropped connection after DATA leaves nobody able to say
+   * whether the message arrived, and a confident "This message was not sent" is
+   * precisely how an owner is talked into sending it a second time — while the
+   * handled strip on the same screen was about to say "could not be confirmed".
+   */
+  unconfirmed: boolean;
+}
+
+/**
+ * "Approve from Telegram", as the panel sees it.
+ *
+ * `ownerChats` is a COUNT and never the ids: the panel only needs to warn that
+ * nobody is paired yet, and publishing the household's Telegram user ids into
+ * the DOM to say so would be a worse trade than the warning is worth.
+ */
+interface ChatApprovalState {
+  enabled: boolean;
+  botConfigured: boolean;
+  botUsername: string | null;
+  ownerChats: number;
+}
+
+/** One shape, one parser. Two hand-rolled copies drift the moment a field moves. */
+function parseChatApprovalState(d: unknown): ChatApprovalState {
+  const r = (typeof d === "object" && d !== null ? d : {}) as Record<string, unknown>;
+  return {
+    enabled: r.enabled === true,
+    botConfigured: r.botConfigured === true,
+    botUsername: typeof r.botUsername === "string" ? r.botUsername : null,
+    ownerChats: typeof r.ownerChats === "number" ? r.ownerChats : 0,
+  };
+}
+
+// How often the open approvals strip re-reads the queue, and the focus /
+// visible-edge / not-behind-a-hidden-tab rules around it, now live in
+// `@/lib/email-pending-refresh` — shared with the chat surface's batch card,
+// which asks the same question about the same queue and must not answer it on
+// a different schedule.
 
 interface SwapStats { used: number; total: number; percent: number }
 interface DiskMount { filesystem: string; size: string; used: string; avail: string; usePercent: number; mountpoint: string }
@@ -59,18 +210,70 @@ interface NetworkIface { name: string; ip: string; rx: number; tx: number }
 interface ProcessEntry { pid: string; user: string; cpu: number; mem: number; command: string }
 interface SystemStats {
   overview: { hostname: string; os: string; kernel: string; uptime: string; arch: string; platform: string };
-  cpu: { usage: number; model: string; cores: number; loadAvg: string[]; speed: number };
+  cpu: { usage: number; model: string; cores: number; loadAvg: string[]; speed: number; perCore?: number[] };
   memory: { total: number; used: number; free: number; usedPercent: number; swap: SwapStats };
-  temperature?: { value: number | null; display: string };
+  temperature?: { value: number | null };
   gpu?: { usage: number };
   storage: DiskMount[];
   network: NetworkIface[];
-  processes: ProcessEntry[];
+  /**
+   * Absent when this page asked for no process lists — the busiest-processes
+   * block is collapsed, so the route is told not to spawn `ps` for it. Also
+   * absent on a server that predates the parameter? No: such a server ignores
+   * the query string and sends the list, which is exactly the fallback we want.
+   */
+  processes?: ProcessEntry[];
+  /** The same processes ordered by memory. Absent on a server that predates it. */
+  processesByMemory?: ProcessEntry[];
   timestamp: number;
 }
 
 
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "telegram", "remote", "system", "about"] as const;
+// codingAgent is gone from this list on purpose: its settings moved into the
+// Coding Agent app itself (the owner asked for them back there).
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
+
+/**
+ * The channels that live behind the single "Messaging Channels" entry — the same idea
+ * as GNOME's Online Accounts: one page listing every outside service the
+ * assistant can be reached through, each row opening its own settings.
+ *
+ * They are still ordinary Sections, so their panes, their deep links
+ * (`clawbox:open-settings`) and their status lines are unchanged; only the
+ * sidebar stops carrying four near-identical entries.
+ */
+const CHANNEL_SECTIONS = ["telegram", "email", "whatsapp", "discord"] as const;
+type ChannelSection = typeof CHANNEL_SECTIONS[number];
+
+const CHANNEL_ITEMS: { id: ChannelSection; icon: string; labelKey: string; hintKey: string }[] = [
+  { id: "telegram", icon: "send", labelKey: "settings.telegram", hintKey: "settings.channelsTelegramHint" },
+  { id: "email", icon: "mail", labelKey: "settings.email", hintKey: "settings.channelsEmailHint" },
+  { id: "whatsapp", icon: "chat", labelKey: "settings.whatsapp", hintKey: "settings.channelsWhatsappHint" },
+  { id: "discord", icon: "forum", labelKey: "settings.discord", hintKey: "settings.channelsDiscordHint" },
+];
+
+function isChannelSection(id: string): id is ChannelSection {
+  return (CHANNEL_SECTIONS as readonly string[]).includes(id);
+}
+
+/**
+ * Cut a translated sentence into the text before and after a placeholder, so
+ * the value can be rendered as its own styled node instead of flattened into
+ * the string. A translation that dropped the slot keeps its whole sentence
+ * AFTER the value — the layout the English copy already had — rather than
+ * losing either half.
+ */
+function splitAtSlot(sentence: string, slot: string): [string, string] {
+  const at = sentence.indexOf(slot);
+  return at < 0 ? ["", sentence] : [sentence.slice(0, at), sentence.slice(at + slot.length)];
+}
+
+/** The three mailbox modes, in increasing order of what the assistant may do. */
+const EMAIL_MODE_OPTIONS: { id: EmailMode; labelKey: string; hintKey: string }[] = [
+  { id: "send", labelKey: "settings.emailModeSend", hintKey: "settings.emailModeSendHint" },
+  { id: "read", labelKey: "settings.emailModeRead", hintKey: "settings.emailModeReadHint" },
+  { id: "answer", labelKey: "settings.emailModeAnswer", hintKey: "settings.emailModeAnswerHint" },
+];
 
 const REBOOT_PROBE_GRACE_MS = 8_000;
 const REBOOT_PROBE_INTERVAL_MS = 3_000;
@@ -78,42 +281,191 @@ const REBOOT_PROBE_TIMEOUT_MS = 2_500;
 const REBOOT_HARD_REDIRECT_MS = 45_000;
 type Section = typeof SECTIONS[number];
 
+/** Shape of GET /setup-api/whatsapp/status, normalised client-side. */
+interface WhatsappStatus {
+  supported: boolean;
+  state?: "not_configured" | "enabled_not_paired" | "paired" | "unsupported";
+  enabled?: boolean;
+  paired?: boolean;
+  mode?: "bot" | "self-chat" | null;
+  allowedUsers?: string[];
+  allowAllUsers?: boolean;
+  /** null = the bridge directory was not found, which is not "bridge broken". */
+  bridgeReady?: boolean | null;
+  /**
+   * Does the gateway's sender allowlist cover the paired account? Pairing and
+   * authorization are separate gates upstream, and a box that clears the first
+   * but not the second looks healthy while dropping every message.
+   */
+  authorized?: boolean;
+  receiving?: boolean;
+}
+
+/** A PNG data URL that actually carries an image. Mirrors the server's guard. */
+const WHATSAPP_QR_DATA_URL_RE = /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/;
+
+/** Phases of GET /setup-api/whatsapp/pair. Mirrors WhatsappPairPhase server-side. */
+type WhatsappPairPhase = "idle" | "preparing" | "starting" | "waiting" | "scanned" | "paired" | "error";
+
+/** Shape of GET/POST /setup-api/whatsapp/pair, normalised client-side. */
+interface WhatsappPairSnapshot {
+  phase: WhatsappPairPhase;
+  /** Raw Baileys payload (Hermes). Rendered as a QR; never shown as text. */
+  qr: string | null;
+  /** Pre-rendered PNG data URL (OpenClaw, whose plugin draws the code itself). */
+  qrImage: string | null;
+  /** Distinct QR payloads this session — proof the rotation is live. */
+  qrCount: number;
+  restarts: number;
+  error: string | null;
+  user: { id: string | null; name: string | null } | null;
+}
+
 /* ── Sidebar nav items ── */
-const NAV_ITEMS: { id: Section; icon: string; labelKey?: string; label?: string }[] = [
+const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
+  // Appearance leads because it is the page a new owner reaches for first
+  // (wallpaper, mascot, language), and it is where Settings opens — see
+  // DEFAULT_SECTION. After that, ordered by how often an owner comes here,
+  // not by history: the brain and the ways to reach it first, the box's own
+  // machinery next, the once-a-year pages last.
   { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
+  // Providers (cloud sign-ins) and Local AI (the on-device model and the
+  // inventory of everything running on the box) are neighbours, each with its
+  // own provider list on top. "localModels" stays a Section so its deep links
+  // land on Local AI.
+  { id: "ai", icon: "smart_toy", labelKey: "settings.providers" },
+  { id: "localAi", icon: "memory", labelKey: "settings.localAi" },
+  // The harness page: the engine that runs the agent (the harness picker)
+  // and what that engine does on its own (the background-jobs switches).
+  // Both used to sit at the top of System, where their switches pushed the
+  // device's own figures off the screen (the owner's request, 2026-09-07);
+  // beside the AI pages because they are about the agent, not the box.
+  { id: "harness", icon: "hub", labelKey: "settings.harness" },
+  // The coding agent's settings — its switch, folder, effort and GitHub
+  // account — moved here from the Coding Agent app, which keeps the runs.
+  // Next to the AI pages because it is the other thing the assistant does
+  // with a model.
+  // One entry for every messaging channel; the four panes live behind it
+  // (CHANNEL_ITEMS) rather than each claiming a sidebar row of its own.
+  { id: "channels", icon: "forum", labelKey: "settings.channels" },
+  { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
-  { id: "ai", icon: "smart_toy", labelKey: "settings.aiProvider" },
-  { id: "localAi", icon: "memory", label: "Local AI" },
-  { id: "telegram", icon: "send", labelKey: "settings.telegram" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
+  // The whole system update — versions, the run, beta channel, branch pin,
+  // force — is a Settings page now; the About tile only points here.
+  { id: "update", icon: "system_update", labelKey: "settings.systemUpdate" },
   { id: "about", icon: "info", labelKey: "settings.about" },
 ];
 
-/* ── Helpers ── */
-// Hermes registers the on-device model under this single provider id whichever
-// local runtime backs it (see HERMES_LOCAL_PROVIDER in lib/hermes-local-ai.ts).
-// OpenClaw instead names the runtime directly ("llamacpp" / "ollama"), so
-// "is the local model the active provider" has to accept either spelling.
-const HERMES_LOCAL_PROVIDER_ID = "clawlocal";
+// Where Settings opens when no deep link asks for a page. Appearance, which is
+// both the first sidebar row and the page an owner actually comes here for —
+// wallpaper, mascot, language. It used to open on Providers, so the first thing
+// Settings showed was a list of AI credentials.
+const DEFAULT_SECTION: Section = "appearance";
 
-// Copy for the four Local AI states, kept as data so the status line and the
-// card below cannot drift apart. "Selected" vs "available" is the distinction
-// that matters: installing the on-device model does not make it the one that
-// answers, and saying "sleeping until needed" when it was never selected read
-// as though it were.
-const LOCAL_AI_STATUS_SUFFIX = {
-  offline: "endpoint not responding",
-  available: "available, not currently selected",
-  standby: "selected · sleeping until needed",
-  running: "selected · running",
-} as const;
+/** A deep-link value as a Section, or null. The old Local Models section is
+ *  part of Local AI now. */
+function toSection(value: unknown): Section | null {
+  if (typeof value !== "string" || !(SECTIONS as readonly string[]).includes(value)) return null;
+  return value === "localModels" ? "localAi" : (value as Section);
+}
 
-function formatBytes(b: number): string {
+// The section a cold open was asked for, read BEFORE the first render so the
+// default pane never mounts — and starts its fetches — only to be swapped out
+// a tick later. A peek, not a take: the mount effect still deletes the slot,
+// because React may run a state initializer twice.
+function peekPendingSection(): Section | null {
+  if (typeof window === "undefined") return null;
+  return toSection((window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection);
+}
+
+/* ── Discord ── */
+// The four states GET /setup-api/discord/status can report, each with exactly
+// one remedy in the UI. "connected" is the only one that may render as live.
+const DISCORD_STATES = ["connected", "intents-missing", "denied-no-allowlist", "offline"] as const;
+
+/** How often the panel asks whether an invited bot has joined a server. */
+const DISCORD_INVITE_POLL_MS = 4_000;
+
+/**
+ * The box's invite link, or null. Only Discord's own OAuth2 address with a
+ * numeric client id ever reaches an href, whatever a response carried.
+ */
+function safeDiscordInviteUrl(value: unknown): string | null {
+  return typeof value === "string" &&
+    /^https:\/\/discord\.com\/oauth2\/authorize\?client_id=\d{15,25}&[A-Za-z0-9=&+._-]*$/.test(value)
+    ? value
+    : null;
+}
+type DiscordConnectionState = (typeof DISCORD_STATES)[number];
+
+function isDiscordState(value: unknown): value is DiscordConnectionState {
+  return typeof value === "string" && (DISCORD_STATES as readonly string[]).includes(value);
+}
+
+/** One row of the "who may talk to the assistant" picker. */
+interface DiscordMemberOption {
+  id: string;
+  displayName: string;
+  username: string;
+  isOwner: boolean;
+  guildName: string;
+}
+
+function toDiscordMembers(value: unknown): DiscordMemberOption[] {
+  if (!Array.isArray(value)) return [];
+  const out: DiscordMemberOption[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const m = entry as Record<string, unknown>;
+    if (typeof m.id !== "string") continue;
+    out.push({
+      id: m.id,
+      displayName: typeof m.displayName === "string" ? m.displayName : "",
+      username: typeof m.username === "string" ? m.username : "",
+      isOwner: m.isOwner === true,
+      guildName: typeof m.guildName === "string" ? m.guildName : "",
+    });
+  }
+  return out;
+}
+
+// The System page's figures take the UI locale: a German desktop read
+// "5.8 GB", "56.1°C" and "Load 2.69" between German words (locale sweep
+// DE-11, 2026-09-07). Fraction digits are pinned at both ends and grouping is
+// off, so the English figures are exactly what `toFixed` printed before — it
+// never grouped, and a grouped "1.010" is a fraction to a German reader.
+function localeFixed(n: number, digits: number, locale: string): string {
+  return n.toLocaleString(locale, { minimumFractionDigits: digits, maximumFractionDigits: digits, useGrouping: false });
+}
+
+// The stats route hands the disk figures over as `df -h` printed them —
+// "391G", "5.8G": the English decimal point, and a unit style ("G") the
+// memory line above it does not use ("GB"). Read the figure back into bytes
+// (`-h` is binary: K, M, G, T… are powers of 1024, at most one decimal) and
+// print it through the UI locale like every other size on the page. A string
+// df wrote some other way — "-" for a pseudo filesystem — is shown as sent.
+const DF_HUMAN_UNITS = "KMGTPE";
+function diskFigure(raw: string, locale: string): string {
+  const m = /^(\d+(?:[.,]\d+)?)([KMGTPE])?$/.exec(raw.trim());
+  if (!m) return raw;
+  const bytes = Number(m[1].replace(",", ".")) * 1024 ** (m[2] ? DF_HUMAN_UNITS.indexOf(m[2]) + 1 : 0);
+  return formatByteCount(bytes, locale) ?? "0 B";
+}
+
+function formatBytes(b: number, locale: string): string {
   if (!b) return "0 B";
   const u = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(b) / Math.log(1024));
-  return (b / Math.pow(1024, i)).toFixed(1) + " " + u[i];
+  return localeFixed(b / Math.pow(1024, i), 1, locale) + " " + u[i];
+}
+
+/** The stats route sends load averages as `toFixed(2)` strings; a value that
+ *  is not a number is shown as sent rather than as "NaN". */
+function formatLoad(load: string | number, locale: string): string {
+  const n = Number(load);
+  return Number.isFinite(n) ? localeFixed(n, 2, locale) : String(load);
 }
 
 function barColor(pct: number): string {
@@ -124,7 +476,14 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) =
   return (
     <div className="flex items-center justify-between">
       <span className="text-sm text-[var(--text-primary)]">{label}</span>
+      {/* The label is a sibling span, not a <label> — htmlFor only binds to
+          form controls and this is a styled <button> — so without an explicit
+          name and role a screen reader read "button" with no state at all. */}
       <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label={label}
         onClick={() => onToggle(!on)}
         className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors cursor-pointer border-none shrink-0 ${on ? "bg-orange-500" : "bg-white/15"}`}
       >
@@ -139,21 +498,98 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) =
 
 type SectionStatus = { subtitle: string | null };
 
-export default function SettingsApp({ ui }: SettingsAppProps) {
+export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const { t, locale, setLocale } = useT();
-  const navLabel = useCallback((item: { label?: string; labelKey?: string }) => item.label ?? (item.labelKey ? t(item.labelKey) : ""), [t]);
+  // English is the floor for a key the locale packs do not carry yet: `t`
+  // answers with the raw key when it is missing, so a string keyed here before
+  // its translations land would put `settings.accessDeviceAt` on screen — worse
+  // than the English sentence it replaces. Same helper as the desktop shell's.
+  const tr = useCallback((key: string, english: string) => {
+    const value = t(key);
+    return value === key ? english : value;
+  }, [t]);
+  const navLabel = useCallback((item: { labelKey: string }) => t(item.labelKey), [t]);
   const notifyChatModelStateChanged = useCallback(() => {
-    window.dispatchEvent(new Event("clawbox:chat-model-state-changed"));
+    window.dispatchEvent(new Event(CHAT_MODEL_STATE_EVENT));
+    // And in the edition-neutral vocabulary, so that "every path that changes
+    // the providers emits `clawbox:providers-changed`" is literally true and a
+    // listener written against that one name alone is never left deaf.
+    notifyProvidersChanged();
   }, []);
   const [langOpen, setLangOpen] = useState(false);
+  // Which row the keyboard is standing on while the list is open, -1 while it
+  // is closed. The list is a `role="listbox"` of `role="option"` rows, which
+  // promises arrow-key navigation; it had none, so a keyboard user could open
+  // the picker and then only Tab through all ten rows or Escape back out. Same
+  // roving-tabindex shape as HeaderDropdown — one focusable row at a time,
+  // arrows move DOM focus, so there is no aria-activedescendant to keep in
+  // step with it.
+  const [langActive, setLangActive] = useState(-1);
   const langRef = useRef<HTMLDivElement>(null);
   const currentLang = LANGUAGES.find(l => l.code === locale) ?? LANGUAGES[0];
-  const [section, setSection] = useState<Section>("appearance");
+  /** The one place the list is torn down. `refocus` is for the paths where the
+   * owner is still driving the control — Escape, Tab, a pick — rather than
+   * clicking away from it, where focus belongs wherever they clicked. */
+  const closeLangList = useCallback((refocus = false) => {
+    setLangOpen(false);
+    setLangActive(-1);
+    if (refocus) document.getElementById("settings-language-button")?.focus();
+  }, []);
+  const openLangList = useCallback((seek: "active" | "last") => {
+    const current = LANGUAGES.findIndex(l => l.code === locale);
+    setLangActive(seek === "last" ? LANGUAGES.length - 1 : current >= 0 ? current : 0);
+    setLangOpen(true);
+  }, [locale]);
+  const pickLang = useCallback((code: string) => {
+    setLocale(code as Locale);
+    closeLangList(true);
+  }, [setLocale, closeLangList]);
+  const langListKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const last = LANGUAGES.length - 1;
+    switch (e.key) {
+      case "ArrowDown": e.preventDefault(); setLangActive(i => (i >= last ? 0 : i + 1)); return;
+      case "ArrowUp": e.preventDefault(); setLangActive(i => (i <= 0 ? last : i - 1)); return;
+      case "Home": e.preventDefault(); setLangActive(0); return;
+      case "End": e.preventDefault(); setLangActive(last); return;
+      case "Enter":
+      case " ": {
+        // The rows are <button>s, so the browser synthesises a click for both
+        // keys — but only on the row that HAS focus, and preventing the default
+        // here is what stops Space from scrolling the settings pane under an
+        // open list.
+        e.preventDefault();
+        const lang = LANGUAGES[langActive];
+        if (lang) pickLang(lang.code);
+        return;
+      }
+      case "Tab":
+        // Let focus leave, but not out of a list left standing over the page:
+        // the focused row is about to be unmounted, and the browser resolves
+        // the next tab stop from wherever focus is — from <body> that means
+        // restarting at the top of Settings.
+        closeLangList(true);
+        return;
+      default:
+    }
+  }, [langActive, pickLang, closeLangList]);
+  // Focus follows the active row. The rows carry the tabindex, so this is what
+  // actually MOVES the focus an arrow key asked for.
+  useEffect(() => {
+    if (!langOpen || langActive < 0) return;
+    const row = langRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]')[langActive];
+    if (!row) return;
+    row.focus();
+    // Guarded: jsdom ships an Element without it, and a missing convenience
+    // must not take the picker down.
+    row.scrollIntoView?.({ block: "nearest" });
+  }, [langOpen, langActive]);
+  const [initialSection] = useState(peekPendingSection);
+  const [section, setSection] = useState<Section>(initialSection ?? DEFAULT_SECTION);
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
   const [requestedAiProviderId, setRequestedAiProviderId] = useState<string | null>(null);
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
   // Mobile: null means show nav list, a section means show content with back button
-  const [mobileSection, setMobileSection] = useState<Section | null>(null);
+  const [mobileSection, setMobileSection] = useState<Section | null>(initialSection);
 
   // ClawBox account gate — Remote Control needs the user to be signed in to
   // the portal so the tunnel can be claimed. The hook polls /ai-models/status
@@ -182,11 +618,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         <div
           role="status"
           aria-live="polite"
-          aria-label="Loading Remote Control"
+          aria-label={t("settings.loadingRemote")}
           className="max-w-xl flex items-center justify-center py-12 text-[var(--text-muted)]"
         >
           <span
-            className="material-symbols-rounded animate-spin"
+            className="material-symbols-rounded motion-safe:animate-spin"
             style={{ fontSize: 24 }}
             aria-hidden="true"
           >
@@ -213,7 +649,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // (URL deep-link, tier-based redirects) where blocking would be confusing.
   const setSectionGated = useCallback((next: Section) => {
     if (next === "remote" && requireLoginFor("remote")) return;
+    // The old Local Models section is part of Local AI now.
+    if (next === "localModels") next = "localAi";
     setSection(next);
+    // Both, so one navigation call works on either layout: the mobile view
+    // reads `mobileSection`, and a hub row that only set `section` would
+    // leave a phone sitting on the page it was already showing.
+    setMobileSection(next);
   }, [requireLoginFor]);
 
   // Allow other parts of the desktop (e.g. the "new version available" toast)
@@ -221,13 +663,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // on `window` first, so a deep-link issued before this effect runs (cold
   // open of Settings) isn't lost to a listener-mount race.
   useEffect(() => {
-    const isSection = (s: unknown): s is Section =>
-      typeof s === "string" && (SECTIONS as readonly string[]).includes(s);
     const apply = (s: unknown) => {
-      if (isSection(s)) {
-        setSection(s);
-        setMobileSection(s);
-      }
+      const next = toSection(s);
+      if (!next) return;
+      setSection(next);
+      setMobileSection(next);
     };
     const requestClawAiOffer = () => {
       setSection("ai");
@@ -258,8 +698,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       requestClawAiOffer();
       delete w.__clawboxPendingClawAiOffer;
     }
-    const handler = (event: Event) =>
+    const handler = (event: Event) => {
       apply((event as CustomEvent<{ section?: string }>).detail?.section);
+      // The dispatcher sets the cold-open handoff AND fires this event, not
+      // knowing whether Settings is up. When it is, this path is what applies
+      // the section — so the handoff has to be taken here too, or it sits on
+      // `window` until the NEXT cold open of Settings, which then lands on
+      // whatever section some earlier deep link asked for.
+      delete (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection;
+    };
     const providerHandler = (event: Event) =>
       requestProviderSelection((event as CustomEvent<{ providerId?: string }>).detail?.providerId);
     const offerHandler = () => requestClawAiOffer();
@@ -273,6 +720,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     };
   }, []);
   const [isMobile, setIsMobile] = useState(false);
+  // On a phone a section is a level below the list: Back returns to the list
+  // rather than closing Settings (lib/mobile-back).
+  useMobileBack(isMobile && mobileSection !== null, () => setMobileSection(null));
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 640);
     check();
@@ -280,15 +730,29 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     return () => window.removeEventListener("resize", check);
   }, []);
 
-  // Close language dropdown on click outside
+  // Close language dropdown on click outside — and on Escape, which left the
+  // list open with no way back to the trigger for anyone not using a mouse.
+  // Capture phase and stopped there, like HeaderDropdown's: Escape must close
+  // the innermost thing open, not the window the list is floating in. Focus
+  // goes back to the trigger, or it would be lost with the element it was on.
   useEffect(() => {
     if (!langOpen) return;
     const handler = (e: MouseEvent) => {
-      if (langRef.current && !langRef.current.contains(e.target as Node)) setLangOpen(false);
+      if (langRef.current && !langRef.current.contains(e.target as Node)) closeLangList();
+    };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeLangList(true);
     };
     document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [langOpen]);
+    document.addEventListener("keydown", keyHandler, true);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", keyHandler, true);
+    };
+  }, [langOpen, closeLangList]);
 
   /* ── System stats ──
    * Poll only when System section is visible (live CPU/mem/temp/etc.),
@@ -296,92 +760,61 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
    * (arch/platform) render instead of "...".
    */
   const [stats, setStats] = useState<SystemStats | null>(null);
+  /**
+   * Which ordering the busiest-processes table is showing.
+   *
+   * Not persisted: it is a way of LOOKING at a live table, and an owner who
+   * opened the page to see what is eating the memory does not want that choice
+   * following them around a week later.
+   */
+  const [processOrder, setProcessOrder] = useState<"cpu" | "mem">("cpu");
+  /**
+   * The two blocks on this page that are drawn only when asked for, COLLAPSED
+   * BY DEFAULT. Not persisted, for the same reason the ordering above is not:
+   * they are ways of looking at a live box, and an owner who opened the process
+   * table once to find what was eating the memory should not be spawning `ps`
+   * every three seconds a week later.
+   *
+   * These are not merely display flags — they are what the poll below asks the
+   * server for, so a collapsed block is not computed on the box either.
+   */
+  const [perCoreOpen, setPerCoreOpen] = useState(false);
+  const [processesOpen, setProcessesOpen] = useState(false);
+  // Which commit this box is really running, and whether that agrees with the
+  // code on its disk. Fetched only where it is shown (About + System).
+  const buildIdentity = useBuildIdentity(section === "system" || section === "about");
+  // `processes` has always been the by-CPU list, so a server that predates the
+  // second ordering simply has no memory view to switch to.
+  const processRows = (processOrder === "mem" ? stats?.processesByMemory : stats?.processes) ?? stats?.processes ?? [];
   useEffect(() => {
     if (section !== "system" && section !== "about") return;
-    const poll = () => fetch("/setup-api/system/stats", { cache: "no-store" }).then(r => r.json()).then(setStats).catch(() => {});
+    // Ask only for what is on screen. About draws neither block, and on System
+    // each one is behind its own button — so a collapsed panel costs no `ps`
+    // and no /proc/stat diff on the box, not merely a hidden <div> here.
+    // Re-running on each toggle is deliberate: expanding fetches at once rather
+    // than showing an empty card until the next 3 s tick.
+    const query = new URLSearchParams({
+      processes: section === "system" && processesOpen ? "1" : "0",
+      perCore: section === "system" && perCoreOpen ? "1" : "0",
+    });
+    const url = `/setup-api/system/stats?${query}`;
+    const poll = () => fetch(url, { cache: "no-store" }).then(r => r.json()).then(setStats).catch(() => {});
     poll();
     if (section !== "system") return;
     const iv = setInterval(poll, 3000);
     return () => clearInterval(iv);
-  }, [section]);
+  }, [section, processesOpen, perCoreOpen]);
 
-  /* ── System update ── */
-  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
-  const [updateStarted, setUpdateStarted] = useState(false);
-  const [updateError, setUpdateError] = useState<string | null>(null);
-  const [updateConfirm, setUpdateConfirm] = useState(false);
-  const [versionInfo, setVersionInfo] = useState<{
-    clawbox: { current: string; target: string | null; updateAvailable?: boolean };
-    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
-  } | null>(null);
-  const [versionLoading, setVersionLoading] = useState(false);
-  const [updateBranch, setUpdateBranch] = useState<string | null>(null);
-  const [branchInput, setBranchInput] = useState("");
-  const [branchSaving, setBranchSaving] = useState(false);
-  const [branchError, setBranchError] = useState<string | null>(null);
-  const [betaEnabled, setBetaEnabled] = useState(false);
-  const [betaConfirm, setBetaConfirm] = useState(false);
-  const [betaSaving, setBetaSaving] = useState(false);
-  const updatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const updatePollControllerRef = useRef<AbortController | null>(null);
+  /* ── Versions, for About's rows and the sidebar subtitles. The update
+     itself — its run, the beta channel, the branch pin, the force — is the
+     System Update page (SystemUpdateApp, embedded), not state of this
+     component any more. ── */
+  // The shape and the per-edition rule come from SystemUpdateApp, the other
+  // reader of this payload. They were restated here, and the two panels had
+  // already drifted three ways by the time TASK-548 lined them up.
+  const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
 
-  const stopUpdatePolling = useCallback(() => {
-    if (updatePollRef.current) { clearInterval(updatePollRef.current); updatePollRef.current = null; }
-    updatePollControllerRef.current?.abort();
-    updatePollControllerRef.current = null;
-  }, []);
-
-  const startUpdatePolling = useCallback(() => {
-    if (updatePollRef.current) return;
-    const controller = new AbortController();
-    updatePollControllerRef.current = controller;
-    let failureCount = 0;
-    let serverWentDown = false;
-    updatePollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch("/setup-api/update/status", { signal: controller.signal });
-        if (controller.signal.aborted) return;
-        if (!res.ok) { failureCount++; if (failureCount >= 3) serverWentDown = true; return; }
-        if (serverWentDown) { window.location.reload(); return; }
-        failureCount = 0;
-        const data: UpdateState = await res.json();
-        if (controller.signal.aborted) return;
-        setUpdateState(data);
-        if (data.phase !== "running") stopUpdatePolling();
-      } catch {
-        if (controller.signal.aborted) return;
-        failureCount++;
-        if (failureCount >= 3) serverWentDown = true;
-      }
-    }, 2000);
-  }, [stopUpdatePolling]);
-
-  useEffect(() => () => stopUpdatePolling(), [stopUpdatePolling]);
-
-  // Auto-dismiss the update overlay once the update finishes. Full updates
-  // (with a `restart` step) get a longer grace window and a hard navigation
-  // to `/` so the browser picks up any freshly built client bundle; scoped
-  // updates just clear the overlay in place.
-  useEffect(() => {
-    if (updateState?.phase !== "completed") return;
-    const isFullUpdate = updateState.steps.some(s => s.id === RESTART_STEP_ID);
-    const timer = setTimeout(() => {
-      if (isFullUpdate) {
-        stopUpdatePolling();
-        // replace() instead of assigning href so Back doesn't land on the
-        // stale Settings URL whose in-memory state is already gone.
-        window.location.replace("/");
-        return;
-      }
-      setUpdateStarted(false);
-      setUpdateError(null);
-      setUpdateState(null);
-      stopUpdatePolling();
-    }, isFullUpdate ? 5000 : 3000);
-    return () => clearTimeout(timer);
-  }, [updateState?.phase, updateState?.steps, stopUpdatePolling]);
-
-  // Load version info and beta status on mount
+  // Load version info on mount
   useEffect(() => {
     // /update/status only returns versions when phase=idle and not completed.
     // Use the dedicated /update/versions endpoint which always reports them.
@@ -389,82 +822,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data?.clawbox || data?.openclaw) setVersionInfo(data); })
       .catch(() => {});
-    fetch("/setup-api/system/update-branch")
-      .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data?.branch === "beta") setBetaEnabled(true); })
-      .catch(() => {});
   }, []);
-
-
-
-  const saveUpdateBranch = async (branch: string) => {
-    setBranchSaving(true);
-    setBranchError(null);
-    try {
-      const res = await fetch("/setup-api/system/update-branch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ branch: branch || null }) });
-      const data = await res.json();
-      if (res.ok) { setUpdateBranch(data.branch ?? null); } else { setBranchError(data.error || t("settings.failedSetBranch")); }
-    } catch (err) { setBranchError(err instanceof Error ? err.message : t("settings.failedSetBranch")); } finally { setBranchSaving(false); }
-  };
-
-  const toggleBeta = async (enable: boolean) => {
-    if (enable) {
-      setBetaConfirm(true);
-      return;
-    }
-    setBetaSaving(true);
-    try {
-      const res = await fetch("/setup-api/system/update-branch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ branch: null }),
-      });
-      if (res.ok) {
-        setBetaEnabled(false);
-        setUpdateBranch(null);
-        setBranchInput("");
-      }
-    } catch {} finally { setBetaSaving(false); }
-  };
-
-  const confirmBeta = async () => {
-    setBetaConfirm(false);
-    setBetaSaving(true);
-    try {
-      const res = await fetch("/setup-api/system/update-branch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ branch: "beta" }),
-      });
-      if (res.ok) {
-        setBetaEnabled(true);
-        setUpdateBranch("beta");
-        setBranchInput("beta");
-      }
-    } catch {} finally { setBetaSaving(false); }
-  };
-
-  const triggerUpdate = async () => {
-    setUpdateStarted(true);
-    setUpdateError(null);
-    setUpdateState(null);
-    try {
-      const res = await fetch("/setup-api/update/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: true }) });
-      if (!res.ok) { const data = await res.json().catch(() => ({})); setUpdateError(typeof data.error === "string" ? data.error : t("settings.failedStartUpdate")); return; }
-      startUpdatePolling();
-    } catch (err) { setUpdateError(err instanceof Error ? err.message : t("settings.failedStartUpdate")); }
-  };
-
-  const triggerOpenclawUpdate = async () => {
-    setUpdateStarted(true);
-    setUpdateError(null);
-    setUpdateState(null);
-    try {
-      const res = await fetch("/setup-api/update/openclaw", { method: "POST" });
-      if (!res.ok) { const data = await res.json().catch(() => ({})); setUpdateError(typeof data.error === "string" ? data.error : t("settings.failedStartUpdate")); return; }
-      startUpdatePolling();
-    } catch (err) { setUpdateError(err instanceof Error ? err.message : t("settings.failedStartUpdate")); }
-  };
 
   /* ── WiFi ── */
   const [ssid, setSsid] = useState("");
@@ -512,6 +870,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [hotspotEnabled, setHotspotEnabled] = useState<boolean | null>(null);
   const [hotspotSSID, setHotspotSSID] = useState("ClawBox-Setup");
   const [hotspotToggling, setHotspotToggling] = useState(false);
+  // The hotspot route saves the SETTINGS and then tries to move the radio, and
+  // those are two different outcomes. It used to answer both with
+  // `{ success: true, apRestarted: false }`, so a toggle whose AP command threw
+  // flipped this switch and said nothing — a box still broadcasting behind a
+  // control that reads "off". It now names the verdict; this is where a failed
+  // one is shown.
+  const [hotspotApWarning, setHotspotApWarning] = useState<string | null>(null);
   const [hotspotSSIDInput, setHotspotSSIDInput] = useState("ClawBox-Setup");
   const [hotspotSSIDSaving, setHotspotSSIDSaving] = useState(false);
   const [hotspotSSIDStatus, setHotspotSSIDStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -542,7 +907,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   useEffect(() => { void refreshSavedNetworks(); }, []);
   const updateSavedPassword = async (name: string) => {
     if (savedNewPassword.length < 8 || savedNewPassword.length > 63) {
-      setSavedStatus({ type: "error", message: "Password must be 8–63 characters" });
+      setSavedStatus({ type: "error", message: t("settings.security.wifiPasswordLength") });
       return;
     }
     setSavedBusy(name); setSavedStatus(null);
@@ -552,11 +917,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ ssid: name, password: savedNewPassword, action: "update" }),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Failed");
-      setSavedStatus({ type: "success", message: `Password updated for ${name}` });
+      if (!r.ok) throw new Error(d.error || t("settings.security.failed"));
+      setSavedStatus({ type: "success", message: t("settings.security.wifiPasswordUpdated", { ssid: name }) });
       setSavedEditing(null); setSavedNewPassword("");
     } catch (err) {
-      setSavedStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
+      setSavedStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.security.failed") });
     } finally {
       setSavedBusy(null);
     }
@@ -580,84 +945,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   };
 
-  /* ── User name (used by mascot greetings) ── */
-  const [userName, setUserName] = useState<string>("");
-  const [userNameSaved, setUserNameSaved] = useState<string>("");
-  const userNameSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Track whether the user has touched the field locally — without this,
-  // a slow GET /preferences could resolve after the user already started
-  // typing and overwrite their input mid-keystroke. Same flag also
-  // guards the periodic refetch below so an agent write that lands
-  // mid-edit doesn't clobber the user's in-flight typing.
-  const userNameEditedRef = useRef(false);
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    // Refetch every 5 s so a name the agent just persisted via the
-    // `preferences_set` MCP tool ("Hey, I'm Krasi" → agent writes
-    // ui_user_name → field updates here without a manual reload).
-    // The userNameEditedRef gate keeps the user's local typing
-    // authoritative — once they touch the field, polling backs off
-    // entirely until the next mount.
-    const tick = () => {
-      fetch("/setup-api/preferences?keys=ui_user_name", { cache: "no-store" })
-        .then(r => r.ok ? r.json() : null)
-        .then(data => {
-          if (cancelled || !data) return;
-          if (userNameEditedRef.current) return;
-          const next = typeof data.ui_user_name === "string" ? data.ui_user_name : "";
-          // Avoid noisy state updates when the value didn't change —
-          // React's strict-equality bail-out covers it but the input
-          // still re-renders on parent state churn otherwise.
-          setUserName(prev => prev === next ? prev : next);
-          setUserNameSaved(prev => prev === next ? prev : next);
-        })
-        .catch(() => { /* transient — try again next tick */ })
-        .finally(() => {
-          // Stop scheduling once the user has started typing — otherwise
-          // we'd keep firing fetches every 5s with results discarded by
-          // the userNameEditedRef guard above. Effect cleanup re-mounts
-          // (after page navigation, etc.) restart polling fresh.
-          if (!cancelled && !userNameEditedRef.current) timer = setTimeout(tick, 5_000);
-        });
-    };
-    tick();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-      // Cancel any debounce-pending POST so a tab-close or section-switch
-      // mid-debounce doesn't fire after the component is gone.
-      if (userNameSaveTimerRef.current) {
-        clearTimeout(userNameSaveTimerRef.current);
-        userNameSaveTimerRef.current = null;
-      }
-    };
-  }, []);
-  const persistUserName = useCallback((value: string) => {
-    if (userNameSaveTimerRef.current) clearTimeout(userNameSaveTimerRef.current);
-    // Debounce so every keystroke doesn't hit the API; the mascot only
-    // needs the latest committed value.
-    userNameSaveTimerRef.current = setTimeout(() => {
-      fetch("/setup-api/preferences", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ui_user_name: value.trim() }),
-      })
-        .then((res) => {
-          // Only treat the write as committed if the server actually accepted
-          // it. Previously every completed fetch flipped the "Saved." badge —
-          // including 4xx/5xx — which lied to the user when the preference
-          // never landed.
-          if (!res.ok) {
-            throw new Error(`preferences POST failed (${res.status})`);
-          }
-          setUserNameSaved(value.trim());
-          window.dispatchEvent(new Event("clawbox-user-name-changed"));
-        })
-        .catch(() => { /* keep local edit; next save attempt will retry */ });
-    }, 600);
-  }, []);
-
   /* ── Local URL (mDNS hostname) ── */
   const [hostname, setHostname] = useState<string>("");
   const [ipv4, setIpv4] = useState<string>("");
@@ -678,20 +965,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [sysPasswordStatus, setSysPasswordStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [sysPasswordConfirmOpen, setSysPasswordConfirmOpen] = useState(false);
   const [sysPasswordConfirmReveal, setSysPasswordConfirmReveal] = useState(false);
-  const sysPasswordConfirmCancelRef = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    if (!sysPasswordConfirmOpen) return;
-    const previouslyFocused = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
-    sysPasswordConfirmCancelRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !sysPasswordSaving) setSysPasswordConfirmOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      previouslyFocused?.focus?.();
-    };
-  }, [sysPasswordConfirmOpen, sysPasswordSaving]);
+  const closeSystemPasswordConfirm = useCallback(() => {
+    if (!sysPasswordSaving) setSysPasswordConfirmOpen(false);
+  }, [sysPasswordSaving]);
+  const systemPasswordConfirmPanelRef = useModalDialog<HTMLDivElement>({
+    open: sysPasswordConfirmOpen,
+    onClose: closeSystemPasswordConfirm,
+  });
   const verifyCurrentPassword = async () => {
     if (!sysCurrentPassword) return;
     setSysVerifying(true);
@@ -703,11 +983,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ password: sysCurrentPassword }),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || "Verification failed");
+      if (!r.ok) throw new Error(d.error || t("settings.security.verificationFailed"));
       setSysCurrentVerified(true);
     } catch (err) {
       setSysCurrentVerified(false);
-      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Verification failed" });
+      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.security.verificationFailed") });
     } finally {
       setSysVerifying(false);
     }
@@ -719,10 +999,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     setSysPasswordConfirmOpen(false); setSysPasswordConfirmReveal(false);
   };
   const validateNewPassword = (): string | null => {
-    if (sysPassword.length < 8) return "New password must be at least 8 characters";
-    if (sysPassword !== sysPasswordConfirm) return "New passwords don't match";
-    if (sysPassword === sysCurrentPassword) return "New password must differ from current";
-    if (/[\r\n\x00-\x1f\x7f]/.test(sysPassword)) return "Password contains invalid characters";
+    if (sysPassword.length < 8) return t("settings.security.errorTooShort");
+    if (sysPassword !== sysPasswordConfirm) return t("settings.security.errorMismatch");
+    if (sysPassword === sysCurrentPassword) return t("settings.security.errorSameAsCurrent");
+    if (/[\r\n\x00-\x1f\x7f]/.test(sysPassword)) return t("settings.security.errorInvalidChars");
     return null;
   };
 
@@ -748,11 +1028,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ currentPassword: sysCurrentPassword, password: sysPassword }),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || "Failed");
+      if (!r.ok) throw new Error(d.error || t("settings.security.failed"));
       resetSysPasswordForm();
-      setSysPasswordStatus({ type: "success", message: "Password updated. Use the new password next time you sign in or SSH." });
+      setSysPasswordStatus({ type: "success", message: t("settings.security.updateSuccess") });
     } catch (err) {
-      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
+      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.security.failed") });
     } finally {
       setSysPasswordSaving(false);
     }
@@ -849,8 +1129,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ hostname: name }),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
+      // 502 WITH `success` = renamed, but the gateway has not come back with the
+      // new allowed-origins list. The reboot below is what completes the rename
+      // and starts the gateway clean, so it must still happen — treating that as
+      // a failed save would strand the box mid-rename and report a change that
+      // in fact went through. `success` is required, not just the status, so a
+      // 502 from anywhere else stays the error it is. `=== true`, not a truthy
+      // read: `res.json()` is an open record the assertion does not enforce, so
+      // a body carrying `success` as a string would otherwise buy a reboot over
+      // a rename that never landed. Same strict form as the Telegram saves and
+      // /setup-api/providers/default.
+      const data = await res.json().catch(() => ({} as { error?: string; success?: boolean }));
+      if (!res.ok && !(res.status === 502 && data.success === true)) {
         setHostnameStatus({ type: "error", message: data.error || t("settings.hostnameSaveFailed") });
         setHostnameSaving(false);
         setHostnameConfirm(false);
@@ -876,8 +1166,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   };
 
+  /**
+   * What a 200 from the hotspot route actually achieved.
+   *
+   * `apAction` separates the three things the old `apRestarted: false` collapsed
+   * into one: a deliberate deferral (the radio is a client, so bouncing the AP
+   * would sever this connection), a clean stop, and a toggle that THREW. Only
+   * the last one is a problem, and only it carries a `warning`.
+   */
+  const readHotspotVerdict = async (res: Response): Promise<string | null> => {
+    const data = await res.json().catch(() => ({})) as { apAction?: unknown; warning?: unknown };
+    if (data.apAction !== "failed") return null;
+    return typeof data.warning === "string" && data.warning.trim()
+      ? data.warning
+      : "Your hotspot settings were saved, but the hotspot itself did not change.";
+  };
+
   const performHotspotToggle = async (newEnabled: boolean) => {
     setHotspotToggling(true);
+    setHotspotApWarning(null);
     try {
       const res = await fetch("/setup-api/system/hotspot", {
         method: "POST",
@@ -885,7 +1192,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ ssid: hotspotSSID, enabled: newEnabled }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
+      // The switch follows the SAVED setting, which did change. What may not
+      // have changed is the radio, and that is what the warning is for — the
+      // "off" case especially, where a box goes on broadcasting behind a
+      // control that says it stopped.
       setHotspotEnabled(newEnabled);
+      setHotspotApWarning(await readHotspotVerdict(res));
     } catch { /* leave state unchanged */ } finally {
       setHotspotToggling(false);
     }
@@ -905,11 +1217,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const saveHotspotSSID = async () => {
     const next = hotspotSSIDInput.trim();
     if (!next) {
-      setHotspotSSIDStatus({ type: "error", message: "Hotspot name is required" });
+      setHotspotSSIDStatus({ type: "error", message: t("settings.hotspotNameRequired") });
       return;
     }
     if (next.length > 32) {
-      setHotspotSSIDStatus({ type: "error", message: "Hotspot name must be 32 characters or less" });
+      setHotspotSSIDStatus({ type: "error", message: t("settings.hotspotNameTooLong") });
       return;
     }
     if (next === hotspotSSID) return;
@@ -926,7 +1238,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         throw new Error(data.error || "Failed");
       }
       setHotspotSSID(next);
-      setHotspotSSIDStatus({ type: "success", message: "Hotspot name updated" });
+      // The AP verdict lives in ONE place — the card-level warning — and is
+      // written on every AP outcome, `null` included. Setting it only on
+      // failure would leave a stale warning from an earlier failed toggle
+      // sitting over a save that has since worked, which is the same class of
+      // wrong answer this PR is about. The field status stays about the field:
+      // the name WAS saved, whatever the radio did.
+      setHotspotApWarning(await readHotspotVerdict(res));
+      setHotspotSSIDStatus({ type: "success", message: t("settings.hotspotNameUpdated") });
     } catch (err) {
       setHotspotSSIDStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
     } finally {
@@ -940,7 +1259,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       return;
     }
     if (hotspotPassword.length > 63) {
-      setHotspotPasswordStatus({ type: "error", message: "Password must be 63 characters or less" });
+      setHotspotPasswordStatus({ type: "error", message: t("settings.hotspotPasswordTooLong") });
       return;
     }
     setHotspotPasswordSaving(true);
@@ -957,7 +1276,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       }
       setHotspotHasPassword(true);
       setHotspotPassword("");
-      setHotspotPasswordStatus({ type: "success", message: "Hotspot password updated" });
+      // Same rule as the SSID save above: one home for the AP verdict, written
+      // on every outcome so a later success clears an earlier failure.
+      setHotspotApWarning(await readHotspotVerdict(res));
+      setHotspotPasswordStatus({ type: "success", message: t("settings.hotspotPasswordUpdated") });
     } catch (err) {
       setHotspotPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
     } finally {
@@ -988,145 +1310,201 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   };
 
   /* ── AI Provider ── */
-  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null } | null>(null);
+  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null; clawaiTokenRejected?: boolean; clawaiConfigured?: boolean } | null>(null);
   useEffect(() => {
-    // The Local AI panel needs this too: it is the only source that knows which
-    // provider the ACTIVE harness is really set to, which is what separates
-    // "the on-device model is installed" from "it is what answers".
-    if (section !== "ai" && section !== "localAi" && !isMobile) return;
-    fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+    if (section !== "ai" && !isMobile) return;
+    const load = () => {
+      fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+    };
+    load();
+    // And again whenever the providers change. This card names the ACTIVE
+    // provider and its model, so a default chosen from the strip directly above
+    // it made the two disagree on screen — the strip showing the new default
+    // while the card underneath still named the old one — until the section was
+    // left and re-entered. Seen on a live box, in the same window.
+    return onProvidersChanged(load);
   }, [section, isMobile]);
-  // Which agent consumes the local model. Named the harness outright, and said
-  // "OpenClaw" on a Hermes box where OpenClaw isn't installed.
-  const [harnessLabel, setHarnessLabel] = useState(
-    () => (cachedActiveHarness() === "hermes" ? "Hermes" : "OpenClaw"),
-  );
+
+  // Device EDITION (openclaw | hermes | dual), tracked the same way AIModelsStep
+  // tracks its own copy — seeded from the immutable cache, then confirmed once.
+  // It gates exactly one thing here: whether the AI section's own Status card is
+  // drawn. On the Hermes edition that card is the hero's twin (same provider,
+  // same model, same "connected"), so it is suppressed there and the hero is the
+  // single source. On openclaw and dual there is no hero — AIModelsStep renders
+  // the OpenClaw picker — so the card stays and is unchanged. Keyed on edition,
+  // not the active harness: a dual box's active harness can be hermes while its
+  // AI panel is still the OpenClaw picker, which needs the card.
+  const [edition, setEdition] = useState<string | null>(() => cachedEdition());
   useEffect(() => {
+    if (edition !== null) return;
     let alive = true;
     void fetchHarness().then((d) => {
-      if (alive && d) setHarnessLabel(d.active === "hermes" ? "Hermes" : "OpenClaw");
+      if (alive) setEdition(d?.edition || "openclaw");
     });
     return () => { alive = false; };
-  }, []);
+  }, [edition]);
 
-  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
-  const [localAiDisabling, setLocalAiDisabling] = useState(false);
-  const [localAiError, setLocalAiError] = useState<string | null>(null);
-  const refreshLocalAiStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/setup-api/setup/status", { cache: "no-store" });
-      const data = await res.json();
-      const configured = !!data.local_ai_configured;
-      const provider = typeof data.local_ai_provider === "string" ? data.local_ai_provider : null;
-      const model = typeof data.local_ai_model === "string" ? data.local_ai_model : null;
+  // Only the sidebar subtitle reads this; the pane itself (LocalAiPanel) polls
+  // its own inventory. Read once when the section opens and again when the
+  // providers change — the subtitle names the configured model, which changes
+  // through actions, not on its own.
+  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null } | null>(null);
+  const localTabOpen = section === "localAi";
+  useEffect(() => {
+    if (!localTabOpen && !isMobile) return;
+    const load = () => {
+      fetch("/setup-api/setup/status", { cache: "no-store" })
+        .then(r => r.json())
+        .then(data => setLocalAiStatus({
+          configured: !!data.local_ai_configured,
+          provider: typeof data.local_ai_provider === "string" ? data.local_ai_provider : null,
+          model: typeof data.local_ai_model === "string" ? data.local_ai_model : null,
+        }))
+        .catch(() => setLocalAiStatus({ configured: false, provider: null, model: null }));
+    };
+    load();
+    return onProvidersChanged(load);
+  }, [localTabOpen, isMobile]);
 
-      let running: boolean | null = null;
-      let standbyEnabled = false;
-      if (configured && provider === "llamacpp") {
-        const llamaRes = await fetch("/setup-api/llamacpp/status", { cache: "no-store" }).then(r => r.json()).catch(() => null);
-        running = !!llamaRes?.running;
-        standbyEnabled = !!llamaRes?.standbyEnabled;
-      } else if (configured && provider === "ollama") {
-        const ollamaRes = await fetch("/setup-api/ollama/status", { cache: "no-store" }).then(r => r.json()).catch(() => null);
-        running = !!ollamaRes?.running;
-        standbyEnabled = !!ollamaRes?.standbyEnabled;
-      }
+  // Same shape for the coding agent: the sidebar's "On · Max effort" line is
+  // the only reader here. Read once when the section opens (or on mobile,
+  // where the subtitle is visible from the list), then let the panel hand
+  // over every status the route answers with — the switch changes through
+  // actions on that panel, not on its own.
 
-      setLocalAiStatus({ configured, provider, model, running, standbyEnabled });
-      setLocalAiError(null);
-    } catch {
-      setLocalAiStatus({ configured: false, provider: null, model: null, running: null, standbyEnabled: false });
-    }
-  }, []);
-  // Is the on-device model the provider the active harness will actually answer
-  // with? `localAiStatus` alone can never say — it is built from the
-  // config-store keys written when the model was installed, and installing one
-  // deliberately does not take over from the provider the customer chose. The
-  // harness's own selection (via /setup-api/ai-models/status) is the only proof.
-  const localAiIsActive = !!localAiStatus?.configured
-    && !!aiProvider?.provider
-    && (aiProvider.provider === HERMES_LOCAL_PROVIDER_ID || aiProvider.provider === localAiStatus.provider);
 
   /**
-   * The four states the Local AI cards render, resolved once so the status line
-   * and the card copy cannot drift apart:
-   *   offline   — configured, but the endpoint isn't answering and there is no standby
-   *   available — installed and healthy, but something else is answering
-   *   standby   — selected, asleep to free RAM until it is needed
-   *   running   — selected and resident
+   * WHO NEEDS A CHANNEL'S STATUS.
+   *
+   * Not just that channel's own pane. The Channels hub draws a live dot and a
+   * status line per channel from the very same state, and the four status
+   * fetches used to be gated on `section === "<that channel>"` alone — so a
+   * cold open of the hub asked nothing and drew every configured channel with
+   * no dot and its static hint, exactly as if it were not set up. The owner
+   * read that as "not configured" and it only corrected itself once he had
+   * opened each pane.
+   *
+   * The reader stays the harness's own edition-aware status route
+   * (/setup-api/<channel>/status); the hub and the pane just share it.
+   *
+   * ENTERING A PANE STILL RE-ASKS. An earlier revision gated each effect on a
+   * boolean that was already `true` on the hub and stayed `true` in the pane,
+   * so the channel was probed exactly once per Settings mount — and a status
+   * that failed on the cold read could never be retried: the pane it opened
+   * sat on its loading skeleton with no request outstanding. That is the
+   * probe-once class this file is supposed to be rid of. Each effect keeps
+   * `section` in its dependencies, as it did before the hub existed, so every
+   * arrival at a channel is a fresh read; the routes' own memos absorb the
+   * repeat.
+   *
+   * Cost: a cold hub open asks all four at once. The fan-out itself is not new
+   * — `openclaw-channels.ts` already notes that on mobile, where the panels'
+   * `!isMobile` escapes never return early, one section change re-reads every
+   * channel — and what bounds it is server-side and per route, not uniform:
+   * the shared `channels status` memo (15 s) on the OpenClaw edition, each
+   * route's own `HERMES_PROBE_TTL` (15 s) on Hermes, plus 60 s bot-info caches
+   * on Telegram and Discord. `/setup-api/email/status` has no memo and needs
+   * none — it is a config read with no shell-out. Seeding every channel from
+   * ONE `channels status` spawn is TASK-694.
    */
-  const localAiState: "offline" | "available" | "standby" | "running" | null = !localAiStatus?.configured
-    ? null
-    : localAiStatus.running === false && !localAiStatus.standbyEnabled
-      ? "offline"
-      : !localAiIsActive
-        ? "available"
-        : localAiStatus.running === false
-          ? "standby"
-          : "running";
-  const localAiOffline = localAiState === "offline";
+  /**
+   * The newest status request per channel.
+   *
+   * The hub, the pane and every save can have reads in flight at once now that
+   * arriving at a pane re-asks. Responses are not ordered, so an older one
+   * landing last would write its stale answer over a newer one — turning a
+   * just-saved channel back into "not configured". Each refresher claims a
+   * generation before it fetches and writes nothing, not even the settled
+   * mark, once it has been superseded.
+   */
+  const channelReqRef = useRef<Record<ChannelSection, number>>({
+    telegram: 0,
+    email: 0,
+    whatsapp: 0,
+    discord: 0,
+  });
+  const claimChannelRead = useCallback(
+    (id: ChannelSection) => {
+      const gen = channelReqRef.current[id] + 1;
+      channelReqRef.current[id] = gen;
+      return () => channelReqRef.current[id] === gen;
+    },
+    [],
+  );
 
-  const disableLocalAi = useCallback(async () => {
-    setLocalAiDisabling(true);
-    setLocalAiError(null);
-    try {
-      const res = await fetch("/setup-api/local-ai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "disable" }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.success) {
-        throw new Error(typeof data.error === "string" ? data.error : "Failed to disable Local AI");
-      }
-      await refreshLocalAiStatus();
-      notifyChatModelStateChanged();
-    } catch (err) {
-      setLocalAiError(err instanceof Error ? err.message : "Failed to disable Local AI");
-    } finally {
-      setLocalAiDisabling(false);
-    }
-  }, [notifyChatModelStateChanged, refreshLocalAiStatus]);
-  useEffect(() => {
-    if (section !== "localAi" && !isMobile) return;
-    refreshLocalAiStatus();
-    if (section !== "localAi") return;
-    const interval = setInterval(() => {
-      refreshLocalAiStatus().catch(() => {});
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [refreshLocalAiStatus, section, isMobile]);
+  /**
+   * Channels whose status route has ANSWERED ONE WAY OR THE OTHER.
+   *
+   * All four refreshers deliberately keep the last known value when the route
+   * 5xxs or the network drops, which is right for a pane that already has one.
+   * On a cold hub open there is no last value, so without this a failed read is
+   * indistinguishable from a read still in flight: the row would pulse "still
+   * asking" for the life of the session over a question nobody is still asking.
+   */
+  const [settledChannels, setSettledChannels] = useState<ReadonlySet<ChannelSection>>(
+    () => new Set(),
+  );
+  const markChannelSettled = useCallback((id: ChannelSection) => {
+    setSettledChannels((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+  }, []);
+  /**
+   * Put a channel back to "being asked".
+   *
+   * Retrying an unreadable row otherwise changed nothing on screen for the two
+   * seconds the CLI takes, and changed nothing again if it failed — a dead
+   * press, twice. Dropping the settled mark first makes the row honestly
+   * `unknown` ("Checking…", pulsing) for the duration and land on whichever
+   * state is true afterwards.
+   */
+  const unsettleChannel = useCallback((id: ChannelSection) => {
+    setSettledChannels((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
 
-  const [localOnlyMode, setLocalOnlyMode] = useState<boolean | null>(null);
-  const [localOnlyPending, setLocalOnlyPending] = useState(false);
-  useEffect(() => {
-    if (section !== "localAi") return;
-    fetch("/setup-api/local-ai/exclusive", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((d) => setLocalOnlyMode(!!d.enabled))
-      .catch(() => setLocalOnlyMode(false));
-  }, [section]);
-  const toggleLocalOnly = useCallback(async (next: boolean) => {
-    setLocalOnlyPending(true);
+  /**
+   * The hub row's navigating button, per channel.
+   *
+   * A Retry is rendered only while its row is unreachable, so pressing it
+   * unmounts it — and a focused element that disappears drops focus to
+   * `<body>`, leaving a keyboard or screen-reader owner nowhere, twice: once
+   * while the read runs and again when it lands. Focus moves here instead,
+   * which is the control whose accessible name carries the channel's state, so
+   * focus follows the answer rather than falling out of the page.
+   */
+  // TASK-606: what the boot script could not install or consent, so a
+  // channel row can say why it is off and offer the harness's own repair.
+  // Read once per Channels visit rather than polled: it changes at boot and
+  // when the owner presses Retry, and both of those re-read it explicitly.
+  const [pluginRepairs, setPluginRepairs] = useState<PluginRepairInfo[]>([]);
+  const fetchPluginRepairs = useCallback(async (): Promise<PluginRepairInfo[] | null> => {
     try {
-      const res = await fetch("/setup-api/local-ai/exclusive", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: next }),
+      const r = await fetch("/setup-api/plugins/repair", { cache: "no-store" });
+      if (!r.ok) return null;
+      const body = (await r.json()) as { repairs?: unknown };
+      if (!Array.isArray(body.repairs)) return [];
+      // EVERY ROW CHECKED, not just the array. This renders inside Settings, so
+      // a row missing `pluginId` or `reason` is not a missing badge — it is a
+      // throw that takes the whole Settings window down.
+      return body.repairs.filter((row): row is PluginRepairInfo => {
+        const r = row as PluginRepairInfo | null;
+        return !!r && typeof r === "object"
+          && typeof r.pluginId === "string"
+          && typeof r.reason === "string"
+          && (r.stage === "install" || r.stage === "consent" || r.stage === "not-installed");
       });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
-      setLocalOnlyMode(next);
-      notifyChatModelStateChanged();
-      fetch("/setup-api/ai-models/status", { cache: "no-store" })
-        .then((r) => r.json())
-        .then(setAiProvider)
-        .catch(() => {});
-    } catch (err) {
-      setLocalAiError(err instanceof Error ? err.message : "Failed to toggle local-only mode");
-    } finally {
-      setLocalOnlyPending(false);
+    } catch {
+      // A box that cannot answer keeps the rows exactly as they were.
+      return null;
     }
-  }, [notifyChatModelStateChanged]);
+  }, []);
+
+  const channelRowRefs = useRef<Partial<Record<ChannelSection, HTMLButtonElement | null>>>({});
+  /** The WhatsApp pane's own root, for the same reason. */
+  const whatsappPaneRef = useRef<HTMLDivElement | null>(null);
 
   /* ── Telegram ── */
   const [tgToken, setTgToken] = useState("");
@@ -1135,6 +1513,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [tgConfiguring, setTgConfiguring] = useState(false);
   const [tgStatus, setTgStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [tgConfigured, setTgConfigured] = useState<boolean | null>(null);
+  /**
+   * Whether Telegram is actually RECEIVING, as `/setup-api/telegram/status`
+   * reports it — `configured && gateway.running` on Hermes.
+   *
+   * TRI-STATE, and the third state is the point: the OpenClaw branch of that
+   * route answers `{ configured: true, ...info }` with no `receiving` key at
+   * all, so a missing field means "this box cannot say", never "no". Reading
+   * it as false would blank the dot on every OpenClaw box — the same false
+   * failure inverted.
+   */
+  const [tgReceiving, setTgReceiving] = useState<boolean | null>(null);
   const [tgBotInfo, setTgBotInfo] = useState<{ username?: string; firstName?: string; link?: string } | null>(null);
   const [tgReconfigure, setTgReconfigure] = useState(false);
   // Promise the overlay awaits before declaring "ready". Resolves when
@@ -1149,6 +1538,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // null = loading; default ON when unset on the device.
   const [tgStreaming, setTgStreaming] = useState<boolean | null>(null);
   const [tgStreamingPending, setTgStreamingPending] = useState(false);
+  // The route answers "saved, but not live yet" in two shapes — 200 while the
+  // gateway is still coming back, 502 when the restart was refused — and the
+  // switch keeps its new position for both. Without this the owner saw a
+  // toggle that had moved and nothing saying it was not applied.
+  const [tgStreamingNotice, setTgStreamingNotice] = useState<string | null>(null);
   // Telegram pairing / user-access state.
   const [tgApproved, setTgApproved] = useState<Array<{ id: string; name?: string }>>([]);
   const [tgPending, setTgPending] = useState<Array<{ code?: string; id?: string; name?: string; createdAt?: string }> | null>(null);
@@ -1158,8 +1552,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [tgPairingStatus, setTgPairingStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   const refreshTelegramStatus = useCallback(async () => {
+    const isCurrent = claimChannelRead("telegram");
     try {
       const r = await fetch("/setup-api/telegram/status", { cache: "no-store" });
+      if (!isCurrent()) return;
       if (!r.ok) {
         // Don't clobber existing state on a transient error (gateway
         // restarting, 5xx, etc.) — keep the last known bot info visible.
@@ -1167,7 +1563,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return;
       }
       const d = await r.json();
+      if (!isCurrent()) return;
       setTgConfigured(d.configured ?? false);
+      setTgReceiving(typeof d.receiving === "boolean" ? d.receiving : null);
       if (d.configured && d.username) {
         setTgBotInfo({ username: d.username, firstName: d.firstName, link: d.link });
       } else {
@@ -1177,8 +1575,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       // Network error — likewise keep the last known state instead of
       // flashing "not configured" at the user mid-restart.
       console.warn("[telegram] refresh failed:", err);
+    } finally {
+      if (isCurrent()) markChannelSettled("telegram");
     }
-  }, []);
+  }, [markChannelSettled, claimChannelRead]);
 
   const refreshPairing = useCallback(async () => {
     try {
@@ -1191,15 +1591,30 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   }, []);
 
+  // The status the hub's dot and the pane's card both read.
+  //
+  // `unsettleChannel` first, and never without the read that follows it: a
+  // channel whose hub read failed keeps its settled mark, so entering its pane
+  // drew "Could not check" for the whole duration of the pane's OWN fresh read
+  // and only then flipped. That is the round-3 pulse pointing the other way —
+  // claiming the question is unanswerable while it is being asked. The other
+  // three status effects below do the same, for the same reason.
+  useEffect(() => {
+    if (!isMobile && section !== "telegram" && section !== "channels") return;
+    unsettleChannel("telegram");
+    refreshTelegramStatus();
+  }, [section, isMobile, refreshTelegramStatus, unsettleChannel]);
+
+  // Pane-only detail — the approved list and the streaming toggle have no
+  // reader on the hub, so the hub must not pay for them.
   useEffect(() => {
     if (section !== "telegram" && !isMobile) return;
-    refreshTelegramStatus();
     refreshPairing();
     fetch("/setup-api/telegram/streaming", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setTgStreaming(d ? d.enabled !== false : true))
       .catch(() => setTgStreaming(true));
-  }, [section, isMobile, refreshTelegramStatus, refreshPairing]);
+  }, [section, isMobile, refreshPairing]);
 
   // Refresh the approved/pending lists when an approval happens anywhere (e.g.
   // the desktop popup) so the Settings list updates without a manual reload.
@@ -1216,6 +1631,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const toggleTelegramStreaming = useCallback(async (next: boolean) => {
     const prev = tgStreaming;
     setTgStreamingPending(true);
+    setTgStreamingNotice(null);
     setTgStreaming(next); // optimistic
     try {
       const res = await fetch("/setup-api/telegram/streaming", {
@@ -1223,11 +1639,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: next }),
       });
-      // 502 = saved but gateway restart failed; the setting still persisted,
-      // so keep the optimistic value rather than reverting.
-      if (!res.ok && res.status !== 502) {
+      const body = (await res.json().catch(() => ({}))) as { warning?: unknown };
+      const warning = typeof body.warning === "string" && body.warning ? body.warning : null;
+      // 502 = saved, but not serving it yet; the setting IS persisted, so keep
+      // the optimistic value rather than reverting. The WARNING is required, not
+      // the status alone — a cloudflared or nginx 502 has an HTML body that the
+      // `.catch` turns into `{}`, and a request that may never have reached the
+      // box must not be rendered as a save. Same guard as
+      // /setup-api/providers/default and ChatPopup apply to the same hazard.
+      if (!res.ok && !(res.status === 502 && warning)) {
         setTgStreaming(prev); // revert on a real failure
+        return;
       }
+      if (warning) setTgStreamingNotice(warning);
     } catch {
       setTgStreaming(prev);
     } finally {
@@ -1325,21 +1749,45 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         configureReject(new Error("aborted"));
         return;
       }
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({}));
+      // 502 = the token was saved but the gateway is not serving it yet, and
+      // that must not be reported as a failed save — the same split
+      // /telegram/streaming makes for the same condition. The exception is
+      // qualified by the BODY, not by the status alone: the route's own
+      // `success` AND the warning that explains the 502. A cloudflared or nginx
+      // 502 has an HTML body, which the `.catch` above turns into `{}`, and a
+      // request that may never have reached the box must stay the failure it is
+      // — reported in the card's own words rather than as a JSON parse error
+      // from an unguarded `res.json()`. Same guard as /telegram/streaming,
+      // /setup-api/providers/default and ChatPopup apply to the same hazard.
+      const gatewayPending =
+        res.status === 502 &&
+        data.success === true &&
+        typeof data.warning === "string" &&
+        data.warning.length > 0;
+      if (!res.ok && !gatewayPending) {
         configureReject(new Error(data.error || "configure failed"));
         setTgConfiguring(false);
         setTgStatus({ type: "error", message: data.error || t("settings.failedSave") });
         return;
       }
-      const data = await res.json();
       if (controller.signal.aborted) {
         configureReject(new Error("aborted"));
         return;
       }
       if (data.success) {
         configureResolve();
-        setTgStatus({ type: "success", message: t("settings.telegramConfigured") });
+        // On a warning the token is stored but nothing is serving it YET, and
+        // this is not the component that gets to decide how that ends:
+        // TelegramConfiguringOverlay is still mounted and still polling gateway
+        // health on its own deadline. It calls onDone when the gateway comes up
+        // (often seconds after this 502) and onTimeout, which sets the failure
+        // message, when it does not. Writing a verdict here would leave a red
+        // "will apply on next restart" sitting under a card that has since
+        // flipped to configured. One adjudicator, and it is the overlay.
+        if (!data.warning) {
+          setTgStatus({ type: "success", message: t("settings.telegramConfigured") });
+        }
         setTgConfigured(true);
         setTgReconfigure(false);
         setTgToken("");
@@ -1370,42 +1818,1261 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   };
 
+  /* ── Email (SMTP) ── */
+  // Gmail's submission endpoint, used only to prefill the form. The device
+  // itself has no Gmail-specific path: any SMTP server works.
+  const GMAIL_SMTP_HOST = "smtp.gmail.com";
+  // Only ever a placeholder now: leaving the incoming-server field blank lets
+  // the device derive it from the outgoing one.
+  const GMAIL_IMAP_HOST = "imap.gmail.com";
+  const [emailStatus, setEmailStatus] = useState<EmailStatus | null>(null);
+  const [emailAddress, setEmailAddress] = useState("");
+  const [emailPassword, setEmailPassword] = useState("");
+  const [emailShowPassword, setEmailShowPassword] = useState(false);
+  const [emailHost, setEmailHost] = useState(GMAIL_SMTP_HOST);
+  const [emailPort, setEmailPort] = useState("587");
+  const [emailMode, setEmailMode] = useState<EmailMode>("send");
+  // Empty means "derive it from the outgoing server" — the panel only sends a
+  // value when the user typed one, so smtp.gmail.com keeps implying
+  // imap.gmail.com without pinning it into the saved config.
+  const [emailImapHost, setEmailImapHost] = useState("");
+  const [emailAllowedSenders, setEmailAllowedSenders] = useState("");
+  const [emailAskBeforeSend, setEmailAskBeforeSend] = useState(true);
+  const [emailPending, setEmailPending] = useState<PendingEmail[]>([]);
+  const [emailHandled, setEmailHandled] = useState<HandledEmail[]>([]);
+  const [emailPendingBusy, setEmailPendingBusy] = useState<string | null>(null);
+  const [emailLostDraft, setEmailLostDraft] = useState<LostDraft | null>(null);
+  const [emailSaving, setEmailSaving] = useState(false);
+  const [emailTesting, setEmailTesting] = useState(false);
+  const [emailReconfigure, setEmailReconfigure] = useState(false);
+  // `info` is the third tone, and it exists because two are not enough here: a
+  // send the box handed over and never heard back is neither a success nor a
+  // failure, and both of the other two are a claim nothing can support.
+  const [emailMsg, setEmailMsg] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
+  const emailSaveControllerRef = useRef<AbortController | null>(null);
+  const [chatApproval, setChatApproval] = useState<ChatApprovalState | null>(null);
+  const [chatApprovalToken, setChatApprovalToken] = useState("");
+  const [chatApprovalBusy, setChatApprovalBusy] = useState(false);
+
+  const refreshEmailStatus = useCallback(async () => {
+    const isCurrent = claimChannelRead("email");
+    try {
+      const r = await fetch("/setup-api/email/status", { cache: "no-store" });
+      if (!isCurrent() || !r.ok) return;
+      const d = await r.json();
+      if (!isCurrent()) return;
+      // Every field is guarded: the component test's fetch stub answers unknown
+      // URLs with {}, and a transient 5xx must not blank the panel either.
+      setEmailStatus({
+        configured: d?.configured === true,
+        address: typeof d?.address === "string" ? d.address : null,
+        smtpHost: typeof d?.smtpHost === "string" ? d.smtpHost : null,
+        smtpPort: typeof d?.smtpPort === "number" ? d.smtpPort : null,
+        imapHost: typeof d?.imapHost === "string" ? d.imapHost : null,
+        allowedSenders: Array.isArray(d?.allowedSenders)
+          ? d.allowedSenders.filter((s: unknown): s is string => typeof s === "string")
+          : [],
+        inbound: d?.inbound === true,
+        inboundSupported: d?.inboundSupported === true,
+        mode: d?.mode === "read" || d?.mode === "answer" ? d.mode : "send",
+        imapHostExplicit: typeof d?.imapHostExplicit === "string" ? d.imapHostExplicit : null,
+        // Absent means an older device that has no gate — reporting `false`
+        // matches what such a device actually does.
+        askBeforeSend: d?.askBeforeSend === true,
+        pendingCount: typeof d?.pendingCount === "number" ? d.pendingCount : 0,
+      });
+    } catch {
+      // keep the last known state rather than flashing "not configured"
+    } finally {
+      if (isCurrent()) markChannelSettled("email");
+    }
+  }, [markChannelSettled, claimChannelRead]);
+
+  /**
+   * The approval queue. Session-gated server-side (the MCP bearer is refused
+   * there on purpose), so this only ever succeeds for a logged-in browser.
+   */
+  const refreshEmailPending = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/email/pending", { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      setEmailPending(
+        Array.isArray(d?.pending)
+          ? d.pending
+              .filter((p: unknown): p is PendingEmail => typeof p === "object" && p !== null)
+              .map((p: Record<string, unknown>) => ({
+                id: String(p.id ?? ""),
+                to: Array.isArray(p.to) ? p.to.filter((x): x is string => typeof x === "string") : [],
+                subject: typeof p.subject === "string" ? p.subject : "",
+                preview: typeof p.preview === "string" ? p.preview : "",
+                createdAt: typeof p.createdAt === "number" ? p.createdAt : 0,
+              }))
+          : [],
+      );
+      // Read out of the SAME response as the queue, never a second request:
+      // two requests can catch a draft in neither answer, and the panel would
+      // then show the one state that is never true — no draft, and no word
+      // about where it went.
+      setEmailHandled(
+        Array.isArray(d?.outcomes)
+          ? d.outcomes
+              .filter((o: unknown): o is Record<string, unknown> => typeof o === "object" && o !== null)
+              // `emailEnding` is the vocabulary, so the wire is read through it
+              // rather than against a fourth hand-written copy of the same five
+              // words — and it NARROWS, which is what removes the cast the row
+              // below used to need.
+              .flatMap((o: Record<string, unknown>): HandledEmail[] => {
+                const kind = emailEnding(o.kind);
+                if (typeof o.id !== "string" || typeof o.at !== "number" || !kind) return [];
+                return [{
+                  id: o.id,
+                  kind,
+                  at: o.at,
+                  to: Array.isArray(o.to) ? o.to.filter((x): x is string => typeof x === "string") : [],
+                  subject: typeof o.subject === "string" ? o.subject : "",
+                  ...(typeof o.error === "string" ? { error: o.error } : {}),
+                }];
+              })
+          : [],
+      );
+    } catch {
+      // keep the last known queue rather than blanking the strip
+    }
+  }, []);
+
+  const refreshChatApproval = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/email/chat-approval", { cache: "no-store" });
+      if (!r.ok) return;
+      setChatApproval(parseChatApprovalState(await r.json()));
+    } catch {
+      // keep the last known state
+    }
+  }, []);
+
+  // The status the hub's dot and the pane's card both read. Unsettle-then-read,
+  // as on the Telegram effect above.
+  useEffect(() => {
+    if (!isMobile && section !== "email" && section !== "channels") return;
+    unsettleChannel("email");
+    refreshEmailStatus();
+  }, [section, isMobile, refreshEmailStatus, unsettleChannel]);
+
+  // Pane-only detail — the approvals strip and the chat-approval bot.
+  useEffect(() => {
+    if (section !== "email" && !isMobile) return;
+    refreshEmailPending();
+    refreshChatApproval();
+  }, [section, isMobile, refreshEmailPending, refreshChatApproval]);
+
+  /**
+   * KEEP THE QUEUE HONEST WHILE THE PANEL IS OPEN.
+   *
+   * The approval strip used to be fetched on mount and after this panel's own
+   * buttons, and nowhere else — so a draft approved ANYWHERE ELSE went on being
+   * listed here as if it were still waiting. That was true of the chat card and
+   * of a second browser tab already, and it is unavoidable now that a draft can
+   * be approved from Telegram, where this page is not even open.
+   *
+   * A stale entry in an approvals list is not a cosmetic bug: the owner reads
+   * it as "this message has not gone out", and the honest answers are either to
+   * re-approve something already sent or to delete a draft that no longer
+   * exists. So the strip re-reads the server whenever this tab could have
+   * missed something — when it comes back to the foreground, and on a slow tick
+   * while it is being looked at.
+   *
+   * Only while the section is actually on screen, and stopped the moment it is
+   * not: this is a Jetson serving its own UI, and a poll that runs behind a
+   * hidden tab is a poll nobody is reading.
+   *
+   * Which is why the guard is `emailPanelVisible` and not the `&& !isMobile`
+   * shape the one-shot fetches above use. That shape inverts on a phone —
+   * `!isMobile` is false, so the early return never fires and the section is
+   * never consulted — and the WhatsApp heartbeat above learned the same lesson
+   * the expensive way: an interval that could not be stopped by browsing away.
+   * An extra GET on mount costs nothing; a timer that never stops does.
+   */
+  const emailPanelVisible = isMobile ? mobileSection === "email" : section === "email";
+
+  useEffect(() => {
+    if (!emailPanelVisible) return;
+    // The pacing — interval, focus, visible-edge, and never behind a hidden tab
+    // — is `installPendingRefresh`, shared with the chat surface's batch card so
+    // the two cannot drift into disagreeing about how fresh this list is.
+    return installPendingRefresh(() => {
+      refreshEmailStatus();
+      refreshEmailPending();
+      // The panel's own state can go stale the same way: an owner who pairs
+      // with the approvals bot in Telegram while this is open should stop
+      // being told nobody can be asked.
+      refreshChatApproval();
+    });
+  }, [emailPanelVisible, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
+
+  /** Save a token, flip the switch, or forget the bot. One busy flag for all three. */
+  const submitChatApproval = async (body: { enabled?: boolean; botToken?: string } | null) => {
+    setChatApprovalBusy(true);
+    setEmailMsg(null);
+    try {
+      const r = await fetch("/setup-api/email/chat-approval", {
+        method: body === null ? "DELETE" : "POST",
+        headers: { "Content-Type": "application/json" },
+        ...(body === null ? {} : { body: JSON.stringify(body) }),
+      });
+      const d = await r.json().catch(() => null);
+      if (!r.ok) {
+        setEmailMsg({ type: "error", message: typeof d?.error === "string" ? d.error : t("settings.failedSave") });
+        return;
+      }
+      setChatApproval(parseChatApprovalState(d));
+      setChatApprovalToken("");
+    } catch {
+      setEmailMsg({ type: "error", message: t("settings.failedSave") });
+    } finally {
+      setChatApprovalBusy(false);
+    }
+  };
+
+  /**
+   * Open the setup form on what is actually saved, rather than on the defaults.
+   *
+   * Done here, in the click, and not in an effect keyed on the status: an effect
+   * would also fire on every background refresh and overwrite whatever the user
+   * was halfway through typing.
+   */
+  const openEmailReconfigure = () => {
+    setEmailMsg(null);
+    if (emailStatus?.configured) {
+      setEmailMode(emailStatus.mode);
+      setEmailAskBeforeSend(emailStatus.askBeforeSend);
+      // The outgoing server too, not only the new fields: leaving these at
+      // the Gmail defaults means a Fastmail box reopens the form showing
+      // smtp.gmail.com:587, and an owner who only retypes their password
+      // saves that host over the working one.
+      if (emailStatus.smtpHost) setEmailHost(emailStatus.smtpHost);
+      if (emailStatus.smtpPort) setEmailPort(String(emailStatus.smtpPort));
+      setEmailImapHost(emailStatus.imapHostExplicit ?? "");
+      setEmailAllowedSenders(emailStatus.allowedSenders.join(", "));
+    }
+    setEmailReconfigure(true);
+  };
+
+  const decidePending = async (id: string, action: "approve" | "reject") => {
+    setEmailPendingBusy(id);
+    setEmailMsg(null);
+    setEmailLostDraft(null);
+    try {
+      const res = await fetch("/setup-api/email/pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, id }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        /**
+         * A decision somebody already made is NOT this click failing — but only
+         * when it is the decision this click was asking for.
+         *
+         * The owner tapped *Approve & send* in Telegram, the message went out,
+         * and this row was still on screen because the queue is re-read on a
+         * schedule. The route answers 404 "no longer waiting" — correctly, this
+         * request did nothing — and painting that red put a failure over a send
+         * that succeeded, directly above the green "Sent ✓" the handled strip
+         * was about to show for the same message.
+         *
+         * KEYED ON THE GESTURE, because the two directions are not symmetric and
+         * reading the ending alone gets both of the crossed cases backwards.
+         * *Discard* answered `sent` is the worst outcome available on that click
+         * — the owner asked for a message NOT to go out and it went out — and a
+         * green banner there congratulates him for it. *Approve & send* answered
+         * `rejected` means nothing was sent and nothing will be; the words are
+         * honest, and the colour is what is read first.
+         *
+         * `duplicate` is good news either way: an identical message reached the
+         * recipient, so the send happened and this copy is not waiting. An
+         * ending of `failed` or `unconfirmed`, and a 404 with no ending at all,
+         * stay red — all three are something to look at.
+         */
+        const ending = emailEnding(data?.ending);
+        // THE SHARED TABLE, not a second copy of it. The chat card weighs an
+        // ending against a gesture with the same two lines, and the one time
+        // these two surfaces each kept their own reading of a single message is
+        // the defect this whole change exists to remove. `reject` is this
+        // panel's word for the gesture the card calls `delete`; the endings and
+        // the verdict are identical.
+        const asAsked = ending !== undefined && endingAsAsked(ending, action === "approve" ? "approve" : "delete");
+        /**
+         * Neither a success nor a failure, and it needs its own tone.
+         *
+         * The 502 from an approve carries the receipt's ending too, and
+         * `unconfirmed` means the box handed the message over and never heard
+         * back. Red "Could not send the message." there is a positive claim
+         * nothing in this process can support — and one `refreshEmailPending()`
+         * later the handled strip below says "Could not be confirmed — check
+         * your Sent folder" about the very same draft. Two verdicts on one
+         * screen, and the definite one is the one the owner acts on, by mailing
+         * the recipient twice. `info` is the amber StatusMessage already has;
+         * the words are the strip's own.
+         */
+        const unconfirmed = ending === "unconfirmed";
+        /**
+         * The other event that is neither, and the one the chat card had
+         * already ruled on.
+         *
+         * He pressed *Discard* and the message had gone out from Telegram
+         * seconds earlier. Red is defensible — the deletion genuinely did not
+         * happen — but there is nothing here to fix and everything to look at,
+         * and the card settled on amber for this exact event in the same
+         * change. Two screens speaking differently about one message is what
+         * this whole thing is against, so they say it the same way. The WORDS
+         * are the route's and unchanged: "That message was already sent."
+         */
+        const sentAnyway = action === "reject" && ending === "sent";
+        /**
+         * The third of them: a 404 the receipts could not explain.
+         *
+         * `whatBecameOf` found nothing, and THREE different things put it
+         * there, which is why the amber says "no idea" rather than naming one:
+         *
+         *   - another surface is between claiming the draft and the end of its
+         *     SMTP conversation, so the message may be going out this second;
+         *   - the receipt EXPIRED — they live 24 h (`route.ts`), and a draft
+         *     decided before that is indistinguishable here from one that was
+         *     never queued;
+         *   - `email-pending.json` could not be read at all, so the claim
+         *     failed and produced this identical 404.
+         *
+         * Only the first is a race. The other two are recorded as filed-not-
+         * fixed in the PR that introduced this branch: the way out of both is a
+         * `kind` of its own from the route, which would let the strip say which
+         * one it is instead of guessing. Red "That draft is no longer waiting."
+         * over any of the three is a failure claimed over an unknown, and the
+         * chat card renders the identical row muted. Narrowed to the stale
+         * answer by `kind === "gone"`: a 409 with no account, a 400 or a 502 the
+         * mail server spoke carry their own kinds and stay red, because those
+         * really are this click failing.
+         */
+        const endingUnknown = data?.kind === "gone" && ending === undefined;
+        setEmailMsg({
+          type: unconfirmed || sentAnyway || endingUnknown ? "info" : asAsked ? "success" : "error",
+          message: unconfirmed
+            ? t("settings.emailHandledUnconfirmed")
+            : data?.error || t("settings.emailApproveFailed"),
+        });
+        // The route claims a draft before it sends, so a failed send has
+        // already taken it out of the queue and refreshEmailPending() is about
+        // to remove the row. Hold what it handed back, or the message the
+        // owner approved disappears from the screen with the error.
+        const lost: unknown = data?.draft;
+        if (lost && typeof lost === "object") {
+          const d = lost as Partial<LostDraft>;
+          if (Array.isArray(d.to) && typeof d.subject === "string" && typeof d.body === "string") {
+            setEmailLostDraft({ to: d.to.map(String), subject: d.subject, body: d.body, unconfirmed });
+          }
+        }
+      } else {
+        setEmailMsg({
+          type: "success",
+          message: action === "approve" ? t("settings.emailApproved") : t("settings.emailRejected"),
+        });
+      }
+    } catch (err) {
+      setEmailMsg({ type: "error", message: err instanceof Error ? err.message : t("settings.emailApproveFailed") });
+    } finally {
+      setEmailPendingBusy(null);
+      refreshEmailPending();
+      refreshEmailStatus();
+    }
+  };
+
+  const saveEmail = async () => {
+    if (!emailAddress.trim()) {
+      setEmailMsg({ type: "error", message: t("settings.emailEnterAddress") });
+      return;
+    }
+    if (!emailPassword) {
+      setEmailMsg({ type: "error", message: t("settings.emailEnterPassword") });
+      return;
+    }
+    emailSaveControllerRef.current?.abort();
+    const controller = new AbortController();
+    emailSaveControllerRef.current = controller;
+    setEmailSaving(true);
+    setEmailMsg(null);
+    try {
+      const res = await fetch("/setup-api/email/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          address: emailAddress.trim(),
+          password: emailPassword,
+          smtpHost: emailHost.trim(),
+          smtpPort: Number(emailPort) || 587,
+          mode: emailMode,
+          askBeforeSend: emailAskBeforeSend,
+          // Only ever the EXPLICIT override. Left blank, the device derives it
+          // from the outgoing server (smtp.gmail.com -> imap.gmail.com).
+          imapHost: emailMode === "send" ? "" : emailImapHost.trim(),
+          allowedSenders: emailMode === "answer" ? emailAllowedSenders : "",
+        }),
+        signal: controller.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        setEmailMsg({ type: "error", message: data?.error || t("settings.failedSave") });
+        return;
+      }
+      // The app password is in memory for as long as this panel is open;
+      // drop it the moment the device has accepted it.
+      setEmailPassword("");
+      setEmailReconfigure(false);
+      refreshEmailPending();
+      setEmailMsg({
+        type: data.warning ? "error" : "success",
+        message: data.warning || t("settings.emailConfigured"),
+      });
+      refreshEmailStatus();
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setEmailMsg({ type: "error", message: err instanceof Error ? err.message : t("settings.failedSave") });
+    } finally {
+      if (!controller.signal.aborted) setEmailSaving(false);
+    }
+  };
+
+  const sendTestEmail = async () => {
+    setEmailTesting(true);
+    setEmailMsg(null);
+    try {
+      const res = await fetch("/setup-api/email/test", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        setEmailMsg({ type: "error", message: data?.error || t("settings.emailTestFailed") });
+        return;
+      }
+      setEmailMsg({
+        type: "success",
+        message: t("settings.emailTestSent", { address: emailStatus?.address || "" }),
+      });
+    } catch (err) {
+      setEmailMsg({ type: "error", message: err instanceof Error ? err.message : t("settings.emailTestFailed") });
+    } finally {
+      setEmailTesting(false);
+    }
+  };
+
+  const disconnectEmail = async () => {
+    setEmailSaving(true);
+    setEmailMsg(null);
+    try {
+      const res = await fetch("/setup-api/email/configure", { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        setEmailMsg({ type: "error", message: data?.error || t("settings.failedSave") });
+        return;
+      }
+      setEmailReconfigure(false);
+      setEmailMode("send");
+      setEmailPending([]);
+      // The receipts go with the queue — the route clears them server-side for
+      // the same reason, and leaving them on screen would keep the disconnected
+      // account's recipients and subjects up until the next poll.
+      setEmailHandled([]);
+      // And the same for the one draft this panel keeps in full. It is rendered
+      // on its own condition, not on `configured`, so a failed send from the
+      // account just disconnected would sit there — recipients, subject and
+      // body — until another approval happened to fail.
+      setEmailLostDraft(null);
+      setEmailMsg({ type: "success", message: t("settings.emailDisconnected") });
+      refreshEmailStatus();
+    } catch (err) {
+      setEmailMsg({ type: "error", message: err instanceof Error ? err.message : t("settings.failedSave") });
+    } finally {
+      setEmailSaving(false);
+    }
+  };
+
+  /* ── WhatsApp ──
+   *
+   * The panel owns the whole channel now, pairing included: /whatsapp/pair
+   * drives the same Baileys bridge `hermes whatsapp` drives and hands back the
+   * raw QR payload, so the QR below is rendered from real pairing material
+   * rather than instructions to go and find a terminal. */
+  const [waStatus, setWaStatus] = useState<WhatsappStatus | null>(null);
+  const [waNumber, setWaNumber] = useState("");
+  const [waSaving, setWaSaving] = useState(false);
+  const [waMsg, setWaMsg] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  const refreshWhatsapp = useCallback(async () => {
+    const isCurrent = claimChannelRead("whatsapp");
+    try {
+      const r = await fetch("/setup-api/whatsapp/status", { cache: "no-store" });
+      // keep the last known state rather than flashing "off"
+      if (!isCurrent() || !r.ok) return;
+      const d = await r.json();
+      if (!isCurrent()) return;
+      // `verified: false` is the gateway failing to be asked, dressed up as a
+      // 200 — the route still has to answer `state: "not_configured"` because
+      // the panel needs something to offer an action for. That is the 5xx above
+      // wearing a different hat, so it is handled the same way and, crucially,
+      // in the same PLACE: three readers each deciding what an unverified
+      // answer means is how the hub came to say "Could not check" while the
+      // pane one click later said "Not configured", with a Link-a-number button
+      // under a phone that was paired. Absent means an older build that cannot
+      // tell us either way — verified, so an upgrade never blanks every row.
+      if (d?.verified === false) return;
+      // Every field is defaulted: an older build (or a stubbed fetch) answering
+      // `{}` must render as "no WhatsApp here", never as a half-populated panel.
+      setWaStatus({
+        supported: d?.supported === true,
+        state: d?.state,
+        enabled: d?.enabled === true,
+        paired: d?.paired === true,
+        mode: d?.mode ?? null,
+        allowedUsers: Array.isArray(d?.allowedUsers) ? d.allowedUsers : [],
+        allowAllUsers: d?.allowAllUsers === true,
+        bridgeReady: d?.bridgeReady ?? null,
+        authorized: d?.authorized === true,
+        receiving: d?.receiving === true,
+      });
+    } catch {
+      // transient — keep the previous state
+    } finally {
+      if (isCurrent()) markChannelSettled("whatsapp");
+    }
+  }, [markChannelSettled, claimChannelRead]);
+
+  // Unsettle-then-read, as on the Telegram effect above.
+  useEffect(() => {
+    if (!isMobile && section !== "whatsapp" && section !== "channels") return;
+    unsettleChannel("whatsapp");
+    refreshWhatsapp();
+  }, [section, isMobile, refreshWhatsapp, unsettleChannel]);
+
+  const saveWhatsapp = useCallback(
+    async (payload: { allowedUsers?: string[]; mode?: "bot" | "self-chat"; enabled?: boolean }) => {
+      setWaSaving(true);
+      setWaMsg(null);
+      try {
+        const res = await fetch("/setup-api/whatsapp/configure", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.success) {
+          setWaMsg({
+            type: "error",
+            message:
+              data.error === "not_paired"
+                ? t("settings.whatsappNotPairedError")
+                : data.error || t("settings.failedSave"),
+          });
+          return false;
+        }
+        setWaMsg({
+          type: "success",
+          message:
+            data.warning === "restart_pending"
+              ? t("settings.whatsappSavedRestartPending")
+              : data.warning === "no_allowed_users"
+                ? t("settings.whatsappSavedNoUsers")
+                : t("settings.whatsappSaved"),
+        });
+        await refreshWhatsapp();
+        return true;
+      } catch (err) {
+        setWaMsg({
+          type: "error",
+          message: `${t("settings.failedSave")}: ${err instanceof Error ? err.message : err}`,
+        });
+        return false;
+      } finally {
+        setWaSaving(false);
+      }
+    },
+    [refreshWhatsapp, t],
+  );
+
+  const addWhatsappNumber = useCallback(async () => {
+    const raw = waNumber.trim();
+    if (!raw) return;
+    const current = waStatus?.allowedUsers ?? [];
+    const ok = await saveWhatsapp({ allowedUsers: [...current, raw] });
+    if (ok) setWaNumber("");
+  }, [waNumber, waStatus, saveWhatsapp]);
+
+  const removeWhatsappNumber = useCallback(
+    async (number: string) => {
+      const current = waStatus?.allowedUsers ?? [];
+      await saveWhatsapp({ allowedUsers: current.filter((n) => n !== number) });
+    },
+    [waStatus, saveWhatsapp],
+  );
+
+  /* ── WhatsApp pairing ──
+   *
+   * The poll below is not a progress bar, it is the session's heartbeat: the
+   * server keeps the bridge alive only while these GETs keep arriving, and
+   * reaps it a minute after they stop. So the effect must run for every phase
+   * that is not terminal — including "starting", which is where a session sits
+   * during the seconds between a bridge restart and the next QR. */
+  const [waPair, setWaPair] = useState<WhatsappPairSnapshot | null>(null);
+  const [waPairBusy, setWaPairBusy] = useState(false);
+  const [waAdvanced, setWaAdvanced] = useState(false);
+  const [waUnpairConfirm, setWaUnpairConfirm] = useState(false);
+
+  const readPairSnapshot = useCallback((d: unknown): WhatsappPairSnapshot => {
+    const raw = (d ?? {}) as Record<string, unknown>;
+    const phase = typeof raw.phase === "string" ? raw.phase : "idle";
+    return {
+      phase: (["idle", "preparing", "starting", "waiting", "scanned", "paired", "error"] as const).includes(
+        phase as WhatsappPairPhase,
+      )
+        ? (phase as WhatsappPairPhase)
+        : "idle",
+      qr: typeof raw.qr === "string" && raw.qr.length > 0 ? raw.qr : null,
+      // Prefix AND payload. `"data:image/png;base64,"` on its own is a valid
+      // data URL for an empty image, and would render a blank square the owner
+      // is invited to scan. Same rule as readQrDataUrl() server-side.
+      qrImage: WHATSAPP_QR_DATA_URL_RE.test(String(raw.qrImage ?? "")) ? (raw.qrImage as string) : null,
+      qrCount: typeof raw.qrCount === "number" ? raw.qrCount : 0,
+      restarts: typeof raw.restarts === "number" ? raw.restarts : 0,
+      error: typeof raw.error === "string" ? raw.error : null,
+      user:
+        raw.user && typeof raw.user === "object"
+          ? {
+              id: typeof (raw.user as { id?: unknown }).id === "string" ? ((raw.user as { id: string }).id) : null,
+              name:
+                typeof (raw.user as { name?: unknown }).name === "string"
+                  ? ((raw.user as { name: string }).name)
+                  : null,
+            }
+          : null,
+    };
+  }, []);
+
+  const startWhatsappPairing = useCallback(
+    async (force = false) => {
+      setWaPairBusy(true);
+      setWaMsg(null);
+      // Show "preparing" the instant the click lands: on a box with no
+      // node_modules the POST below does not return until npm has finished,
+      // and a dead button for two minutes reads as a broken one.
+      setWaPair({ phase: "preparing", qr: null, qrImage: null, qrCount: 0, restarts: 0, error: null, user: null });
+      try {
+        const res = await fetch("/setup-api/whatsapp/pair", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ force }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setWaPair({
+            phase: "error",
+            qr: null,
+            qrImage: null,
+            qrCount: 0,
+            restarts: 0,
+            error: typeof data?.error === "string" ? data.error : "start_failed",
+            user: null,
+          });
+          return;
+        }
+        setWaPair(readPairSnapshot(data));
+      } catch {
+        setWaPair({ phase: "error", qr: null, qrImage: null, qrCount: 0, restarts: 0, error: "start_failed", user: null });
+      } finally {
+        setWaPairBusy(false);
+      }
+    },
+    [readPairSnapshot],
+  );
+
+  const cancelWhatsappPairing = useCallback(async () => {
+    setWaPairBusy(true);
+    try {
+      await fetch("/setup-api/whatsapp/pair", { method: "DELETE" });
+    } catch {
+      // The reaper collects the session anyway once the polls stop.
+    } finally {
+      setWaPair(null);
+      setWaPairBusy(false);
+    }
+  }, []);
+
+  const unpairWhatsappPhone = useCallback(async () => {
+    setWaPairBusy(true);
+    setWaMsg(null);
+    try {
+      const res = await fetch("/setup-api/whatsapp/unpair", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setWaMsg({ type: "error", message: t("settings.whatsappUnpairFailed") });
+        return;
+      }
+      setWaPair(null);
+      setWaUnpairConfirm(false);
+      setWaMsg({ type: "success", message: t("settings.whatsappUnpairDone") });
+      await refreshWhatsapp();
+    } catch {
+      setWaMsg({ type: "error", message: t("settings.whatsappUnpairFailed") });
+    } finally {
+      setWaPairBusy(false);
+    }
+  }, [refreshWhatsapp, t]);
+
+  /* Baileys reports the linked account as "<number>:<device>@s.whatsapp.net".
+     Only the number half is meaningful to an owner, and it is the same digits
+     the allowlist uses, so show that and drop the device suffix. */
+  const waPairedNumber = (() => {
+    const id = waPair?.user?.id;
+    if (id) {
+      const digits = id.split(/[:@]/)[0].replace(/\D/g, "");
+      if (digits) return `+${digits}`;
+    }
+    return null;
+  })();
+
+  const waPairPhase = waPair?.phase ?? null;
+  const waPairActive =
+    waPairPhase === "preparing" || waPairPhase === "starting" || waPairPhase === "waiting" || waPairPhase === "scanned";
+
+  /* Which section is actually on screen.
+     `section` is the desktop sidebar selection; on mobile the rendered panel is
+     `mobileSection`, and null there means the nav list, with no panel at all.
+     The one-shot status fetches elsewhere in this file get away with
+     `&& !isMobile` because an extra GET costs nothing. This is different: the
+     pairing poll is a 2 s heartbeat that a live `node bridge.js` on the Jetson
+     stays alive for, so "is the panel visible" has to be the real answer. With
+     `!isMobile` the guard inverted on a phone — the interval never stopped and
+     the DELETE never fired, so browsing away from WhatsApp left the server
+     renewing lastPollAt forever and the reaper could never collect the bridge. */
+  const whatsappVisible = isMobile ? mobileSection === "whatsapp" : section === "whatsapp";
+
+  useEffect(() => {
+    if (!waPairActive) return;
+    if (!whatsappVisible) return;
+
+    let cancelled = false;
+    const id = setInterval(async () => {
+      try {
+        const res = await fetch("/setup-api/whatsapp/pair", { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const snap = readPairSnapshot(await res.json());
+        if (cancelled) return;
+        setWaPair(snap);
+        // The channel status behind the panel (enabled / paired / receiving)
+        // only changes once, at the moment of success. Refresh it there rather
+        // than polling two routes for five minutes.
+        if (snap.phase === "paired") await refreshWhatsapp();
+      } catch {
+        // A dropped poll is not a failed pairing; the next tick re-reads.
+      }
+    }, 2_000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [waPairActive, whatsappVisible, readPairSnapshot, refreshWhatsapp]);
+
+  /* Leaving the WhatsApp panel stops the heartbeat, and the server reaps the
+     bridge a minute later. Tell it now instead, so a browsed-away session does
+     not hold a Baileys socket open for that minute. */
+  useEffect(() => {
+    if (whatsappVisible) return;
+    if (!waPairActive) return;
+    void fetch("/setup-api/whatsapp/pair", { method: "DELETE" }).catch(() => {});
+    setWaPair(null);
+  }, [whatsappVisible, waPairActive]);
+
+  /* ── Discord ── */
+  // Three things can leave a Discord bot configured and silent, and only the
+  // first was ever visible here:
+  //   * the token is dead                  -> dcTokenRejected
+  //   * MESSAGE CONTENT was never enabled  -> dcIntentsMissing / state
+  //     "intents-missing"
+  //   * nothing is on the allowlist        -> state "denied-no-allowlist",
+  //     fixed by the member picker below
+  // The status card renders exactly one of the four states the route reports,
+  // each next to the one thing that fixes it.
+  const [dcToken, setDcToken] = useState("");
+  const [dcShowToken, setDcShowToken] = useState(false);
+  const [dcSaving, setDcSaving] = useState(false);
+  const [dcStatus, setDcStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [dcConfigured, setDcConfigured] = useState<boolean | null>(null);
+  /** As `/setup-api/discord/status` reports it (`state === "connected"`). Tri-state, see `tgReceiving`. */
+  const [dcReceiving, setDcReceiving] = useState<boolean | null>(null);
+  const [dcBotName, setDcBotName] = useState<string | null>(null);
+  // Discord itself said the stored token is dead — surfaced even while the
+  // section otherwise reads "configured", because nothing else would explain a
+  // bot that is set up and silent.
+  const [dcTokenRejected, setDcTokenRejected] = useState(false);
+  const [dcReconfigure, setDcReconfigure] = useState(false);
+  // The invite link comes from the box, which reads the application id off the
+  // token — the owner never types one. `dcNeedsInvite` is the step between a
+  // saved token and a working bot: the bot is in no server yet, so the panel
+  // offers the link and finishes the setup itself once the bot has joined.
+  const [dcInviteUrl, setDcInviteUrl] = useState<string | null>(null);
+  // "first": the bot is in no server, done as soon as it is in one.
+  // "another": opened from a working bot's link, done when a NEW server was set up.
+  const [dcNeedsInvite, setDcNeedsInvite] = useState<false | "first" | "another">(false);
+  // What the gateway actually reports, not what a stored token implies.
+  const [dcState, setDcState] = useState<DiscordConnectionState | null>(null);
+  // The picker. `dcMembers` is what the bot can see; `dcSelected` is what the
+  // owner has ticked. Both come back from configure and from status.
+  const [dcMembers, setDcMembers] = useState<DiscordMemberOption[]>([]);
+  const [dcSelected, setDcSelected] = useState<string[]>([]);
+  const [dcAllowlistSupported, setDcAllowlistSupported] = useState(true);
+  const [dcAllowAllUsers, setDcAllowAllUsers] = useState(false);
+  const [dcMembersSaving, setDcMembersSaving] = useState(false);
+  // Set when the preflight refused the save. Kept until the next save attempt
+  // so the fix instructions stay on screen while the owner follows them.
+  const [dcIntentsMissing, setDcIntentsMissing] = useState<string[] | null>(null);
+  const [dcMembersUnavailable, setDcMembersUnavailable] = useState(false);
+  const dcSaveControllerRef = useRef<AbortController | null>(null);
+
+  const refreshDiscordStatus = useCallback(async () => {
+    const isCurrent = claimChannelRead("discord");
+    try {
+      const r = await fetch("/setup-api/discord/status", { cache: "no-store" });
+      if (!isCurrent()) return;
+      if (!r.ok) {
+        // Transient error — keep the last known state rather than flashing
+        // "not configured" at someone whose bot is fine.
+        console.warn("[discord] /setup-api/discord/status returned", r.status);
+        return;
+      }
+      const d = await r.json();
+      if (!isCurrent()) return;
+      setDcConfigured(d.configured ?? false);
+      setDcReceiving(typeof d.receiving === "boolean" ? d.receiving : null);
+      setDcBotName(typeof d.username === "string" ? d.username : null);
+      setDcTokenRejected(d.tokenRejected === true);
+      setDcInviteUrl(safeDiscordInviteUrl(d.inviteUrl));
+      setDcState(isDiscordState(d.state) ? d.state : null);
+      setDcAllowlistSupported(d.allowlistSupported !== false);
+      setDcAllowAllUsers(d.allowAllUsers === true);
+      // The server owns the allowlist; the picker only ever proposes a change.
+      if (Array.isArray(d.allowedUserIds)) {
+        setDcSelected(d.allowedUserIds.filter((id: unknown) => typeof id === "string"));
+      }
+    } catch (err) {
+      console.warn("[discord] refresh failed:", err);
+    } finally {
+      if (isCurrent()) markChannelSettled("discord");
+    }
+  }, [markChannelSettled, claimChannelRead]);
+
+  // The member list costs Discord API calls, so it is fetched only while the
+  // Discord section is actually open — never from the status poll that backs
+  // the sidebar subtitle.
+  const refreshDiscordMembers = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/discord/members", { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.supported === false) {
+        setDcAllowlistSupported(false);
+        return;
+      }
+      if (d.configured === false) return;
+      setDcMembers(toDiscordMembers(d.members));
+      setDcMembersUnavailable(d.available === false);
+      if (Array.isArray(d.allowedUserIds)) {
+        setDcSelected(d.allowedUserIds.filter((id: unknown) => typeof id === "string"));
+      }
+    } catch (err) {
+      console.warn("[discord] member refresh failed:", err);
+    }
+  }, []);
+
+  // Unsettle-then-read, as on the Telegram effect above.
+  useEffect(() => {
+    if (!isMobile && section !== "discord" && section !== "channels") return;
+    unsettleChannel("discord");
+    refreshDiscordStatus();
+  }, [section, isMobile, refreshDiscordStatus, unsettleChannel]);
+
+  useEffect(() => {
+    if (section !== "discord") return;
+    if (!dcConfigured) return;
+    refreshDiscordMembers();
+  }, [section, dcConfigured, refreshDiscordMembers]);
+
+  useEffect(() => () => dcSaveControllerRef.current?.abort(), []);
+
+  // While the bot is in no server, ask the box every few seconds whether it has
+  // joined one. The `{sync:true}` save is a no-op until it has, and then gives
+  // the server's owner access and restarts the channel — the step the owner
+  // used to do by telling the agent in the chat.
+  useEffect(() => {
+    if (section !== "discord" || !dcNeedsInvite) return;
+    let cancelled = false;
+    let inFlight = false;
+    const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetch("/setup-api/discord/configure", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sync: true }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled || !res.ok || data.needsInvite !== false) return;
+        if (dcNeedsInvite === "another" && data.changed !== true) return;
+        setDcNeedsInvite(false);
+        setDcStatus({
+          type: data.warning ? "error" : "success",
+          message: discordWarningText(data.warning) ?? t("settings.discordInviteDone"),
+        });
+        refreshDiscordStatus();
+        refreshDiscordMembers();
+      } catch {
+        // Offline for a moment — the next tick asks again.
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = setInterval(tick, DISCORD_INVITE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // discordWarningText and t are recreated each render and read only when a
+    // tick lands; re-arming the interval for them would reset the clock.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section, dcNeedsInvite, refreshDiscordStatus, refreshDiscordMembers]);
+
+  /** Warning tokens the configure route returns, mapped to translated copy. */
+  const discordWarningText = (warning: unknown): string | null => {
+    if (warning === "restart_pending") return t("settings.discordSavedRestartPending");
+    if (warning === "no_allowed_users") return t("settings.discordSavedNoUsers");
+    if (warning === "members_unavailable") return t("settings.discordMembersUnavailable");
+    if (warning === "server_members_intent") return t("settings.discordMembersUnavailable");
+    // The OpenClaw channel-plugin states. The two install failures share one
+    // sentence on purpose — the codes differ so a support log can tell a
+    // refused install from a slow one, but the remedy the owner acts on is the
+    // same: check the connection and save again.
+    if (warning === "plugin_install_failed" || warning === "plugin_install_timeout") {
+      return t("settings.discordSavePluginFailed");
+    }
+    if (warning === "token_unresolved") return t("settings.discordSaveTokenUnresolved");
+    if (warning === "channel_unverified") return t("settings.discordSaveUnverified");
+    if (warning === "not_connected") return t("settings.discordSaveNotConnected");
+    return null;
+  };
+
+  const saveDiscord = async () => {
+    if (!dcToken.trim()) {
+      setDcStatus({ type: "error", message: t("settings.enterToken") });
+      return;
+    }
+    dcSaveControllerRef.current?.abort();
+    const controller = new AbortController();
+    dcSaveControllerRef.current = controller;
+    setDcSaving(true);
+    setDcStatus(null);
+    setDcIntentsMissing(null);
+    try {
+      const res = await fetch("/setup-api/discord/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ botToken: dcToken.trim() }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        // The preflight refusal is not a sentence, it is a checklist — render
+        // the four steps rather than a one-line error nobody can act on.
+        if (data.code === "intents_missing") {
+          setDcInviteUrl(safeDiscordInviteUrl(data.inviteUrl));
+          setDcIntentsMissing(
+            Array.isArray(data.missingIntents)
+              ? data.missingIntents.filter((i: unknown) => typeof i === "string")
+              : [],
+          );
+          setDcStatus({ type: "error", message: t("settings.discordStateIntentsMissingHint") });
+          return;
+        }
+        // A blocking channel state: the credential IS saved, the channel is
+        // just not reachable yet, and the panel can say which of the four
+        // reasons it was. Falling through to "failed to save" here would be
+        // both wrong (it did save) and unactionable.
+        const blocked = discordWarningText(data.code);
+        if (blocked) {
+          setDcStatus({ type: "error", message: blocked });
+          setDcInviteUrl(safeDiscordInviteUrl(data.inviteUrl));
+          setDcNeedsInvite(data.needsInvite === true ? "first" : false);
+          setDcConfigured(true);
+          setDcToken("");
+          setDcReconfigure(false);
+          refreshDiscordStatus();
+          return;
+        }
+        // The route already phrases its other errors for a person (bad token vs
+        // "couldn't reach Discord"), so show them rather than a generic line.
+        setDcStatus({ type: "error", message: data.error || t("settings.failedSave") });
+        return;
+      }
+      setDcStatus({
+        type: data.warning ? "error" : "success",
+        message: discordWarningText(data.warning) ?? t("settings.discordConfigured"),
+      });
+      setDcConfigured(true);
+      setDcTokenRejected(false);
+      setDcInviteUrl(safeDiscordInviteUrl(data.inviteUrl));
+      setDcNeedsInvite(data.needsInvite === true ? "first" : false);
+      setDcBotName(typeof data.username === "string" ? data.username : null);
+      setDcMembers(toDiscordMembers(data.members));
+      setDcMembersUnavailable(data.warning === "members_unavailable");
+      setDcAllowlistSupported(data.allowlistSupported !== false);
+      if (Array.isArray(data.allowedUserIds)) {
+        setDcSelected(data.allowedUserIds.filter((id: unknown) => typeof id === "string"));
+      }
+      setDcReconfigure(false);
+      setDcToken("");
+      refreshDiscordStatus();
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setDcStatus({ type: "error", message: t("settings.failedSave") });
+    } finally {
+      if (!controller.signal.aborted) setDcSaving(false);
+    }
+  };
+
+  const toggleDiscordMember = (id: string) => {
+    setDcStatus(null);
+    setDcSelected((current) =>
+      current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id],
+    );
+  };
+
+  /**
+   * Save the picker on its own — the token is already stored, so this is the
+   * one write that turns a connected-but-denying bot into a working one.
+   */
+  const saveDiscordMembers = async () => {
+    setDcMembersSaving(true);
+    setDcStatus(null);
+    try {
+      const res = await fetch("/setup-api/discord/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allowedUserIds: dcSelected }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setDcStatus({
+          type: "error",
+          message:
+            data.code === "empty_allowlist"
+              ? t("settings.discordMembersEmptyWarning")
+              : data.error || t("settings.failedSave"),
+        });
+        return;
+      }
+      setDcStatus({
+        type: data.warning ? "error" : "success",
+        message: discordWarningText(data.warning) ?? t("settings.discordConfigured"),
+      });
+      refreshDiscordStatus();
+    } catch {
+      setDcStatus({ type: "error", message: t("settings.failedSave") });
+    } finally {
+      setDcMembersSaving(false);
+    }
+  };
+
+  // One descriptor per state, so the icon, the colour and the sentence cannot
+  // drift apart — and so "live" is reachable from exactly one of them.
+  const dcStateView = (() => {
+    switch (dcState) {
+      case "connected":
+        return {
+          tone: "live" as const,
+          icon: "check_circle",
+          title: dcBotName || t("settings.discordStateConnected"),
+          hint: t("settings.discordStateConnectedHint"),
+        };
+      case "intents-missing":
+        return {
+          tone: "warn" as const,
+          icon: "report",
+          title: t("settings.discordStateIntentsMissing"),
+          hint: t("settings.discordStateIntentsMissingHint"),
+        };
+      case "denied-no-allowlist":
+        return {
+          tone: "warn" as const,
+          icon: "block",
+          title: t("settings.discordStateDenied"),
+          hint: t("settings.discordStateDeniedHint"),
+        };
+      case "offline":
+        return {
+          tone: "idle" as const,
+          icon: "link_off",
+          title: t("settings.discordStateOffline"),
+          hint: t("settings.discordStateOfflineHint"),
+        };
+      default:
+        // No state reported (OpenClaw, or a status call that has not landed
+        // yet). Say the bot is set up and stop short of claiming it is live.
+        return {
+          tone: "idle" as const,
+          icon: "forum",
+          title: dcBotName || t("settings.botConnected"),
+          hint: "",
+        };
+    }
+  })();
+
   /* ── Factory Reset ── */
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
-
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetTyped, setResetTyped] = useState("");
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetSubmitting, setResetSubmitting] = useState(false);
 
   const [resetPhase, setResetPhase] = useState<"waiting" | "reconnecting" | "done" | null>(null);
   const [resetDots, setResetDots] = useState(0);
   const resetPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resetDotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const resetReconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resetPollControllerRef = useRef<AbortController | null>(null);
+  // Every reset attempt owns one generation. A hard timeout increments it so
+  // even a fetch implementation that ignores AbortSignal cannot publish a
+  // late success and schedule the /setup redirect.
+  const resetPollGenerationRef = useRef(0);
+
+  /** Clear every owner-entered value when the reset confirmation is dismissed. */
+  const clearResetConfirm = useCallback(() => {
+    setResetConfirm(false);
+    setResetPassword("");
+    setResetTyped("");
+    setResetError(null);
+  }, []);
+  const closeResetConfirm = useCallback(() => {
+    // The request has crossed the destructive boundary. Neither Escape nor a
+    // stray click may dismiss its progress context until the route answers.
+    if (resetSubmitting) return;
+    clearResetConfirm();
+  }, [clearResetConfirm, resetSubmitting]);
+  const factoryResetPanelRef = useModalDialog<HTMLDivElement>({
+    open: resetConfirm && !resetting,
+    onClose: closeResetConfirm,
+  });
+  const keepResetProgressOpen = useCallback(() => {
+    // Once the wipe was accepted there is no safe dismiss action. Escape is
+    // still captured by useModalDialog so it cannot reach the desktop behind.
+  }, []);
+  const factoryResetProgressPanelRef = useModalDialog<HTMLDivElement>({
+    open: resetting && resetPhase !== null,
+    onClose: keepResetProgressOpen,
+  });
 
   const resetSetup = async () => {
+    if (resetSubmitting) return;
+    setResetSubmitting(true);
+    setResetError(null);
+
+    // The wipe only starts once the box has accepted the password and the typed
+    // word. Until then this stays a plain dialog: the old flow fired the request
+    // and went straight to the "erasing…" overlay without ever reading the
+    // response, so a refusal looked exactly like a reset in progress.
+    let accepted = false;
+    try {
+      const res = await fetch("/setup-api/setup/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: resetPassword, confirm: resetTyped }),
+      });
+      accepted = res.ok;
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        setResetError(detail.error || t("settings.factoryResetRefused"));
+      }
+    } catch {
+      // The reset route schedules reboot only after it has returned a success
+      // response. A fetch exception therefore gives us no evidence the wipe
+      // was accepted; treating it as success strands the UI in reconnect
+      // polling when the request never reached the device.
+      setResetError(t("settings.connectionFailed"));
+    } finally {
+      setResetSubmitting(false);
+    }
+
+    if (!accepted) return;
+
     setResetting(true);
-    setResetConfirm(false);
+    clearResetConfirm();
     setResetPhase("waiting");
     setResetDots(0);
+    resetPollControllerRef.current?.abort();
+    resetPollControllerRef.current = null;
+    const pollGeneration = ++resetPollGenerationRef.current;
 
     // Animate dots
     resetDotsRef.current = setInterval(() => setResetDots(d => (d + 1) % 4), 500);
-
-    try {
-      await fetch("/setup-api/setup/reset", { method: "POST" });
-    } catch { /* device reboots, connection drops */ }
+    resetReconnectTimeoutRef.current = setTimeout(() => {
+      if (resetPollGenerationRef.current !== pollGeneration) return;
+      resetReconnectTimeoutRef.current = null;
+      resetPollGenerationRef.current += 1;
+      if (resetPollRef.current) clearInterval(resetPollRef.current);
+      if (resetDotsRef.current) clearInterval(resetDotsRef.current);
+      resetPollControllerRef.current?.abort();
+      resetPollControllerRef.current = null;
+      resetPollRef.current = null;
+      resetDotsRef.current = null;
+      setResetting(false);
+      setResetPhase(null);
+      setResetError(t("settings.connectionFailed"));
+      setResetConfirm(true);
+    }, 5 * 60 * 1000);
 
     // Wait for device to go down, then poll for reconnect
     setTimeout(() => {
+      if (resetPollGenerationRef.current !== pollGeneration) return;
       setResetPhase("reconnecting");
-      resetPollRef.current = setInterval(async () => {
-        try {
-          const res = await fetch("/setup-api/setup/status", { signal: AbortSignal.timeout(3000) });
-          if (res.ok) {
-            if (resetPollRef.current) clearInterval(resetPollRef.current);
-            if (resetDotsRef.current) clearInterval(resetDotsRef.current);
-            setResetPhase("done");
-            setTimeout(() => { window.location.replace("/setup"); }, 1500);
+      resetPollRef.current = setInterval(() => {
+        if (resetPollGenerationRef.current !== pollGeneration || resetPollControllerRef.current) return;
+        const controller = new AbortController();
+        resetPollControllerRef.current = controller;
+        const requestTimeout = setTimeout(() => controller.abort(), 3000);
+        void (async () => {
+          try {
+            const res = await fetch("/setup-api/setup/status", { signal: controller.signal });
+            if (
+              res.ok
+              && !controller.signal.aborted
+              && resetPollGenerationRef.current === pollGeneration
+            ) {
+              if (resetPollRef.current) clearInterval(resetPollRef.current);
+              if (resetDotsRef.current) clearInterval(resetDotsRef.current);
+              if (resetReconnectTimeoutRef.current) clearTimeout(resetReconnectTimeoutRef.current);
+              resetReconnectTimeoutRef.current = null;
+              setResetPhase("done");
+              setTimeout(() => {
+                if (resetPollGenerationRef.current === pollGeneration) {
+                  window.location.replace("/setup");
+                }
+              }, 1500);
+            }
+          } catch {
+            /* still offline */
+          } finally {
+            clearTimeout(requestTimeout);
+            if (resetPollControllerRef.current === controller) {
+              resetPollControllerRef.current = null;
+            }
           }
-        } catch { /* still offline */ }
+        })();
       }, 3000);
     }, 5000);
   };
@@ -1413,13 +3080,53 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      resetPollGenerationRef.current += 1;
       if (resetPollRef.current) clearInterval(resetPollRef.current);
       if (resetDotsRef.current) clearInterval(resetDotsRef.current);
+      if (resetReconnectTimeoutRef.current) clearTimeout(resetReconnectTimeoutRef.current);
+      resetPollControllerRef.current?.abort();
+      resetPollControllerRef.current = null;
     };
   }, []);
 
   const activeSection = isMobile ? (mobileSection ?? section) : section;
+
+  // Read when the Channels list or a channel pane is on screen — the two
+  // places the badge can appear — and not on every section, since it costs a
+  // request that answers nothing anywhere else.
+  useEffect(() => {
+    if (activeSection !== "channels" && !isChannelSection(activeSection)) return;
+    // `alive` because the answer comes back after an await and a Settings pane
+    // is left by clicking another one.
+    let alive = true;
+    (async () => {
+      const rows = await fetchPluginRepairs();
+      if (alive && rows) setPluginRepairs(rows);
+    })();
+    return () => { alive = false; };
+  }, [activeSection, fetchPluginRepairs]);
+
+  // A channel pane keeps the Messaging Channels entry lit: the sidebar no longer has a
+  // row of its own to highlight, and an unlit sidebar reads as "nowhere".
+  const navSection: Section = isChannelSection(activeSection)
+    ? "channels"
+    : activeSection === "localModels" ? "localAi" : activeSection;
   const visibleNavItems = NAV_ITEMS;
+  // The panel's own heading. Taken from the entry that already names it — the
+  // channels list for a channel pane, the sidebar for every other section — so
+  // a heading needs no new translation key and cannot drift from the row the
+  // owner clicked. `navSection` is what it reads for the non-channel case, so
+  // any section folded onto another's page (localModels onto Local AI) takes
+  // that page's name. Every reachable section has an entry; the fallback is
+  // there so a section added without one renders a named heading rather than an
+  // empty one.
+  const panelTitleKey =
+    CHANNEL_ITEMS.find(item => item.id === activeSection)?.labelKey
+    ?? NAV_ITEMS.find(item => item.id === navSection)?.labelKey
+    ?? "settings.title";
+  // Per instance: the desktop can have this window open beside the standalone
+  // page in another tab, and the region's name is resolved by id.
+  const panelTitleId = useId();
   const resetProgressSteps = [
     {
       id: "erase",
@@ -1460,10 +3167,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const resetOverlay = resetting && resetPhase && typeof document !== "undefined"
     ? createPortal(
         <div
+          ref={factoryResetProgressPanelRef}
           className="fixed inset-0 flex items-center justify-center"
           style={{ zIndex: 2147483647, background: "rgba(13, 17, 23, 1)" }}
-          role="status"
-          aria-live="polite"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="factory-reset-progress-title"
         >
           <style>{`
             @keyframes factory-reset-pulse {
@@ -1471,7 +3180,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               50% { opacity: 0.1; transform: scale(1.18); }
             }
           `}</style>
-          <div className="flex flex-col items-center gap-8 max-w-md w-full text-center px-6">
+          <div
+            className="flex flex-col items-center gap-8 max-w-md w-full text-center px-6"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
             {resetPhase === "done" ? (
               <div className="relative w-28 h-28 flex items-center justify-center">
                 <div className="absolute inset-0 rounded-full border-2 border-emerald-500/20" />
@@ -1481,20 +3195,20 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
             ) : (
               <div className="relative w-32 h-32 flex items-center justify-center">
-                <div className="absolute inset-0 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: "#f97316" }} />
+                <div className="absolute inset-0 rounded-full border-[3px] border-white/10 motion-safe:animate-spin" style={{ borderTopColor: "#f97316" }} />
                 <div className="absolute inset-3 rounded-full border border-[#f97316]/15" style={{ animation: "factory-reset-pulse 2.5s ease-in-out infinite" }} />
                 <Image
                   src="/clawbox-crab.png"
                   alt="ClawBox"
-                  width={96}
-                  height={96}
-                  className="w-24 h-24 object-contain animate-welcome-powerup relative z-10"
+                  width={50}
+                  height={50}
+                  className="w-[50px] h-[50px] object-contain animate-welcome-powerup relative z-10"
                 />
               </div>
             )}
 
             <div>
-              <h2 className="text-2xl font-bold text-white mb-2">{resetOverlayTitle}</h2>
+              <h2 id="factory-reset-progress-title" className="text-2xl font-bold text-white mb-2">{resetOverlayTitle}</h2>
               <p className="text-sm text-white/45">{resetOverlayDescription}</p>
             </div>
 
@@ -1509,7 +3223,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </span>
                   ) : step.status === "running" ? (
                     <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                      <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" aria-hidden="true" />
+                      <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent motion-safe:animate-spin" aria-hidden="true" />
                     </span>
                   ) : (
                     <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white/[0.04] shrink-0">
@@ -1528,43 +3242,214 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       )
     : null;
 
+  // One dialog, rendered from both the mobile and the desktop tree below. It
+  // used to be copy-pasted into each, which is how the two could have drifted.
+  const factoryResetDialog = resetConfirm && !resetting && (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+      <div
+        ref={factoryResetPanelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="factory-reset-title"
+        className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]"
+      >
+        <h3 id="factory-reset-title" className="text-lg font-bold text-[var(--text-primary)] mb-2">
+          {t("settings.factoryResetTitle")}
+        </h3>
+        <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
+
+        <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5" htmlFor="factory-reset-password">
+          {t("settings.security.currentPassword")}
+        </label>
+        <input
+          id="factory-reset-password"
+          type="password"
+          autoComplete="current-password"
+          value={resetPassword}
+          onChange={e => { setResetPassword(e.target.value); setResetError(null); }}
+          className="w-full mb-4 px-3 py-2.5 bg-white/5 border border-[var(--border-subtle)] rounded-xl text-base text-[var(--text-primary)] outline-none focus:border-[#fe6e00]"
+        />
+
+        <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5" htmlFor="factory-reset-confirm">
+          {t("settings.factoryResetTypeToConfirm", { word: FACTORY_RESET_CONFIRMATION })}
+        </label>
+        <input
+          id="factory-reset-confirm"
+          type="text"
+          autoComplete="off"
+          spellCheck={false}
+          value={resetTyped}
+          onChange={e => { setResetTyped(e.target.value); setResetError(null); }}
+          placeholder={FACTORY_RESET_CONFIRMATION}
+          className="w-full px-3 py-2.5 bg-white/5 border border-[var(--border-subtle)] rounded-xl text-base text-[var(--text-primary)] outline-none focus:border-[#fe6e00]"
+        />
+
+        {resetError && <p className="mt-3 text-xs text-red-400" role="alert">{resetError}</p>}
+
+        <div className="flex gap-3 mt-5">
+          <button
+            onClick={closeResetConfirm}
+            disabled={resetSubmitting}
+            className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-40"
+          >
+            {t("cancel")}
+          </button>
+          <button
+            onClick={resetSetup}
+            disabled={resetSubmitting || !resetPassword || !isFactoryResetConfirmed(resetTyped)}
+            className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors disabled:opacity-40 disabled:hover:bg-red-500 disabled:cursor-not-allowed"
+          >
+            {resetSubmitting ? `${t("settings.resetting")}…` : t("settings.reset")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // Shared by mobile and desktop. Keeping one dialog prevents the mobile
+  // early-return layout from silently dropping password confirmation.
+  const systemPasswordConfirmDialog = sysPasswordConfirmOpen && (
+    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+      <div ref={systemPasswordConfirmPanelRef} role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
+          <h3 id="sys-pw-confirm-title" className="text-lg font-bold text-[var(--text-primary)]">{t("settings.security.confirmTitle")}</h3>
+        </div>
+        <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
+          {t("settings.security.confirmBodyPrefix")} <span className="text-[var(--text-primary)] font-medium">{t("settings.security.confirmBodyScope")}</span>{t("settings.security.confirmBodySuffix")}
+        </p>
+        <div className="rounded-lg border border-amber-400/30 bg-amber-400/[0.08] px-3 py-2.5 mb-5">
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <span className="text-[10px] font-semibold text-amber-200/80 uppercase tracking-widest">{t("settings.security.newPassword")}</span>
+            <button type="button" onClick={() => setSysPasswordConfirmReveal(v => !v)} className="text-[10px] text-amber-200 hover:text-amber-100 bg-transparent border-none cursor-pointer flex items-center gap-1" aria-label={sysPasswordConfirmReveal ? t("settings.security.hidePassword") : t("settings.security.revealPassword")}>
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{sysPasswordConfirmReveal ? "visibility_off" : "visibility"}</span>
+              {sysPasswordConfirmReveal ? t("settings.security.hide") : t("settings.security.reveal")}
+            </button>
+          </div>
+          <div className="font-mono text-sm text-amber-50 break-all min-h-[1.25rem]">
+            {sysPasswordConfirmReveal ? sysPassword : "••••••••"}
+          </div>
+        </div>
+        <div className="flex gap-3">
+          <button disabled={sysPasswordSaving} onClick={closeSystemPasswordConfirm} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">{t("cancel")}</button>
+          <button disabled={sysPasswordSaving} onClick={() => { setSysPasswordConfirmOpen(false); void saveSystemPassword(); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors disabled:opacity-50">
+            {sysPasswordSaving ? t("settings.security.saving") : t("settings.security.confirmChange")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  /**
+   * The headings a panel owes a reader who navigates by heading, and that a
+   * sighted reader already has elsewhere: the name of the panel that is open
+   * (the lit sidebar row) and, where Settings is the whole page, the window's
+   * title (its title bar). Both are `sr-only` — drawing them a second time
+   * would change the page — and the cards' own captions are the visible `h3`s
+   * beneath them. The `h1` is the page's alone, for the reason on `asPage`.
+   */
+  const panelHeadings = (
+    <>
+      {asPage && <h1 className="sr-only">{t("settings.title")}</h1>}
+      <h2 id={panelTitleId} className="sr-only">{t(panelTitleKey)}</h2>
+    </>
+  );
+  /** `main` where Settings IS the page, a named region where it is a window. */
+  const PanelRegion = asPage ? "main" : "section";
+  /** The phone's nav-list title, for the same reason. */
+  const MobileTitle = asPage ? "h1" : "h2";
+  /** What names that region when it is a section: the panel's own heading. */
+  const panelRegionProps = asPage ? {} : { "aria-labelledby": panelTitleId };
+
   const renderContent = () => (
     <>
         {/* ─── Appearance ─── */}
         {activeSection === "appearance" && (
           <div className="max-w-xl space-y-5">
 
-            {/* Your name — used by the mascot for occasional name-greeting popups */}
+            {/* Language card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-3">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>person</span>
-                <label htmlFor="ui-user-name" className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.userName.label")}</label>
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>translate</span>
+                {/* A <label> named this card and pointed at nothing: htmlFor
+                    only binds to form controls, and the control here is a
+                    button. The heading is what reaches the accessibility tree,
+                    and the button still names itself after it by id. */}
+                <h3 id="settings-language-label" className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.language")}</h3>
               </div>
-              <input
-                id="ui-user-name"
-                type="text"
-                value={userName}
-                maxLength={40}
-                onChange={e => {
-                  userNameEditedRef.current = true;
-                  setUserName(e.target.value);
-                  persistUserName(e.target.value);
-                }}
-                className="w-full rounded-xl bg-white/[0.04] border border-white/10 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-[var(--coral-bright)]/60 focus:bg-white/[0.06]"
-              />
-              <p className="mt-2 text-[11px] text-[var(--text-muted)]">
-                {t("settings.userName.helper")}
-                {userNameSaved && userNameSaved === userName.trim() && userNameSaved.length > 0 && (
-                  <span className="ml-1 text-emerald-400/80">{t("settings.userName.saved")}</span>
+              <div className="relative" ref={langRef}>
+                <button
+                  type="button"
+                  id="settings-language-button"
+                  onClick={() => (langOpen ? closeLangList() : openLangList("active"))}
+                  // Enter and Space are not handled: the trigger is a <button>,
+                  // so the browser already synthesises a click for both. The
+                  // arrows are what a listbox trigger owes a keyboard — down
+                  // opens on the current language, up on the last row.
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowDown") { e.preventDefault(); openLangList("active"); }
+                    else if (e.key === "ArrowUp") { e.preventDefault(); openLangList("last"); }
+                  }}
+                  // Both ids: the heading says WHAT this control is, the
+                  // button's own text says which language is on it, and naming
+                  // it after the heading alone would take that answer away.
+                  aria-labelledby="settings-language-label settings-language-button"
+                  aria-haspopup="listbox"
+                  aria-expanded={langOpen}
+                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg text-sm text-[var(--text-primary)] hover:border-white/20 transition-colors cursor-pointer"
+                >
+                  <span className="text-base leading-none" aria-hidden="true">{currentLang.flag}</span>
+                  <span className="flex-1 text-left">{currentLang.label}</span>
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }}>
+                    {langOpen ? "expand_less" : "expand_more"}
+                  </span>
+                </button>
+                {langOpen && (
+                  /* The trigger promises `aria-haspopup="listbox"`; this was a
+                     plain div of buttons, so a screen reader was told to expect
+                     a list of options and found none. Same shape as
+                     HeaderDropdown: role on the container, role + aria-selected
+                     on every row. */
+                  <div
+                    role="listbox"
+                    aria-labelledby="settings-language-label"
+                    onKeyDown={langListKeyDown}
+                    className="absolute z-50 mt-1 w-full bg-[var(--bg-elevated)] border border-white/10 rounded-lg shadow-xl max-h-60 overflow-y-auto"
+                  >
+                    {LANGUAGES.map((lang, index) => (
+                      <button
+                        key={lang.code}
+                        type="button"
+                        role="option"
+                        aria-selected={lang.code === locale}
+                        // One tab stop for the whole list: Tab reaches the row
+                        // the arrows are on, and leaves the list rather than
+                        // walking all ten languages.
+                        tabIndex={index === langActive ? 0 : -1}
+                        onClick={() => pickLang(lang.code)}
+                        className={`w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm transition-colors cursor-pointer border-none ${
+                          lang.code === locale
+                            ? "bg-orange-500/15 text-[var(--coral-bright)]"
+                            : "text-white/70 hover:bg-white/[0.06]"
+                        }`}
+                      >
+                        <span className="text-base leading-none">{lang.flag}</span>
+                        <span className="flex-1 text-left">{lang.label}</span>
+                        {lang.code === locale && (
+                          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>check</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
                 )}
-              </p>
+              </div>
             </div>
 
             {/* Wallpaper card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>wallpaper</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.wallpaper")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.wallpaper")}</h3>
               </div>
               <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
                 {ui.wallpapers.map(wp => {
@@ -1572,6 +3457,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   return (
                     <button
                       key={wp.id}
+                      type="button"
+                      data-testid="wallpaper-tile"
+                      data-wallpaper-id={wp.id}
+                      aria-pressed={selected}
+                      aria-label={wp.name}
                       onClick={() => ui.onWallpaperChange(wp.id)}
                       className={`relative rounded-xl overflow-hidden aspect-video transition-all cursor-pointer border-none p-0 group ${
                         selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02] hover:ring-1 hover:ring-white/20 hover:ring-offset-1 hover:ring-offset-[#0d1117]"
@@ -1595,38 +3485,53 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   );
                 })}
                 {ui.customWallpapers.map((dataUrl, i) => {
-                  const selected = ui.wallpaperId === `custom-${i}`;
+                  const selected = ui.wallpaperId === customWallpaperId(i);
+                  // The last two names on this card that never followed the UI
+                  // language: an uploaded wallpaper announced itself as
+                  // "Custom 1" beside tiles whose names were translated.
+                  const customName = t("settings.customWallpaper", { n: i + 1 });
                   return (
-                    <button
+                    <div
                       key={`custom-${i}`}
-                      onClick={() => ui.onWallpaperChange(`custom-${i}`)}
-                      className={`relative rounded-xl overflow-hidden aspect-video transition-all cursor-pointer border-none p-0 group ${
-                        selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02]"
-                      }`}
+                      className="relative aspect-video group"
                     >
-                      <img src={dataUrl} alt={`Custom ${i + 1}`} className="w-full h-full object-cover" />
-                      {selected && (
-                        <span className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-orange-500 flex items-center justify-center shadow-lg">
-                          <span className="material-symbols-rounded text-white" style={{ fontSize: 14 }}>check</span>
-                        </span>
-                      )}
                       <button
-                        onClick={e => { e.stopPropagation(); ui.onCustomWallpaperDelete(i); }}
-                        className="absolute top-1.5 left-1.5 w-5 h-5 bg-red-500/90 rounded-full text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer border-none shadow-lg"
+                        type="button"
+                        aria-pressed={selected}
+                        aria-label={customName}
+                        onClick={() => ui.onWallpaperChange(customWallpaperId(i))}
+                        className={`relative w-full h-full rounded-xl overflow-hidden transition-all cursor-pointer border-none p-0 ${
+                          selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02]"
+                        }`}
+                      >
+                        <img src={dataUrl} alt="" className="w-full h-full object-cover" />
+                        {selected && (
+                          <span aria-hidden="true" className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-orange-500 flex items-center justify-center shadow-lg">
+                            <span className="material-symbols-rounded text-white" style={{ fontSize: 14 }}>check</span>
+                          </span>
+                        )}
+                        <span className={`absolute bottom-0 inset-x-0 text-[10px] py-1.5 text-center font-medium backdrop-blur-md ${
+                          selected ? "bg-orange-500/70 text-white" : "bg-black/50 text-white/70"
+                        }`}>{customName}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => ui.onCustomWallpaperDelete(i)}
+                        aria-label={t("settings.removeCustomWallpaper", { n: i + 1 })}
+                        className="absolute top-1.5 left-1.5 w-5 h-5 bg-red-500/90 rounded-full text-white opacity-60 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center justify-center cursor-pointer border-none shadow-lg"
                       >
                         <span className="material-symbols-rounded" style={{ fontSize: 12 }}>close</span>
                       </button>
-                      <span className={`absolute bottom-0 inset-x-0 text-[10px] py-1.5 text-center font-medium backdrop-blur-md ${
-                        selected ? "bg-orange-500/70 text-white" : "bg-black/50 text-white/70"
-                      }`}>Custom {i + 1}</span>
-                    </button>
+                    </div>
                   );
                 })}
                 <button
                   onClick={() => ui.onWallpaperUpload()}
                   className="rounded-xl aspect-video border-2 border-dashed border-[var(--border-subtle)] hover:border-orange-400/40 hover:bg-orange-500/5 flex flex-col items-center justify-center gap-1.5 text-[var(--text-muted)] opacity-60 hover:text-[var(--coral-bright)]/70 transition-all cursor-pointer"
                 >
-                  <span className="material-symbols-rounded" style={{ fontSize: 24 }}>add_photo_alternate</span>
+                  {/* A Material ligature is TEXT: left unhidden it joined the
+                      accessible name, which read "add_photo_alternate Upload". */}
+                  <span aria-hidden="true" className="material-symbols-rounded" style={{ fontSize: 24 }}>add_photo_alternate</span>
                   <span className="text-[10px] font-medium">{t("settings.upload")}</span>
                 </button>
               </div>
@@ -1636,7 +3541,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 space-y-5">
               <div className="flex items-center gap-2">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>tune</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.display")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.display")}</h3>
               </div>
 
               {/* Fit mode */}
@@ -1648,6 +3553,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     return (
                       <button
                         key={mode}
+                        type="button"
+                        aria-pressed={ui.wpFit === mode}
+                        aria-label={t(`settings.${mode}`)}
                         onClick={() => ui.onWpFitChange(mode)}
                         className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer border-none capitalize ${
                           ui.wpFit === mode ? "bg-orange-500/15 text-[var(--coral-bright)] shadow-sm" : "text-white/35 hover:text-[var(--text-secondary)] hover:bg-white/[0.04]"
@@ -1670,6 +3578,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="relative h-6 flex items-center">
                   <input
                     type="range" min={0} max={100} value={ui.wpOpacity}
+                    aria-label={t("settings.opacity")}
                     onChange={e => ui.onWpOpacityChange(parseInt(e.target.value, 10))}
                     className="w-full h-1.5 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#fe6e00] [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-[#0d1117] [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_rgba(254,110,0,0.3),0_2px_6px_rgba(0,0,0,0.3)] [&::-webkit-slider-thumb]:cursor-pointer"
                     style={{
@@ -1686,6 +3595,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <div className="relative">
                     <input
                       type="color" value={ui.wpBgColor}
+                      // Same defect as the opacity slider beside it: the card's
+                      // <label> has no htmlFor, so this swatch had no name.
+                      aria-label={t("settings.bgColor")}
                       onChange={e => ui.onWpBgColorChange(e.target.value)}
                       className="w-10 h-10 rounded-xl cursor-pointer border-2 border-[var(--border-subtle)] hover:border-white/20 transition-colors"
                     />
@@ -1701,57 +3613,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>auto_awesome</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.extras")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.extras")}</h3>
               </div>
               <Toggle on={!ui.mascotHidden} onToggle={v => {
                 const hidden = !v;
                 ui.onMascotToggle(hidden);
                 window.dispatchEvent(new Event(hidden ? "clawbox-hide-mascot" : "clawbox-show-mascot"));
               }} label={t("settings.showMascot")} />
+
             </div>
 
-            {/* Language card */}
-            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>translate</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.language")}</label>
-              </div>
-              <div className="relative" ref={langRef}>
-                <button
-                  type="button"
-                  onClick={() => setLangOpen(v => !v)}
-                  className="w-full flex items-center gap-2.5 px-3.5 py-2.5 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg text-sm text-[var(--text-primary)] hover:border-white/20 transition-colors cursor-pointer"
-                >
-                  <span className="text-base leading-none">{currentLang.flag}</span>
-                  <span className="flex-1 text-left">{currentLang.label}</span>
-                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }}>
-                    {langOpen ? "expand_less" : "expand_more"}
-                  </span>
-                </button>
-                {langOpen && (
-                  <div className="absolute z-50 mt-1 w-full bg-[#1a1f2e] border border-white/10 rounded-lg shadow-xl max-h-60 overflow-y-auto">
-                    {LANGUAGES.map(lang => (
-                      <button
-                        key={lang.code}
-                        type="button"
-                        onClick={() => { setLocale(lang.code as Locale); setLangOpen(false); }}
-                        className={`w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm transition-colors cursor-pointer border-none ${
-                          lang.code === locale
-                            ? "bg-orange-500/15 text-[var(--coral-bright)]"
-                            : "text-white/70 hover:bg-white/[0.06]"
-                        }`}
-                      >
-                        <span className="text-base leading-none">{lang.flag}</span>
-                        <span className="flex-1 text-left">{lang.label}</span>
-                        {lang.code === locale && (
-                          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>check</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
+            {/* Mascot pet — every edition; renders nothing only when the route cannot be reached. */}
+            <PetPicker />
           </div>
         )}
 
@@ -1763,7 +3636,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>wifi</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</h3>
               </div>
               {connectedSSID ? (
                 <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5">
@@ -1793,10 +3666,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>settings_ethernet</span>
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm text-[var(--text-primary)] font-medium truncate">Ethernet{ethernet.iface ? ` (${ethernet.iface})` : ""}</div>
+                    <div className="text-sm text-[var(--text-primary)] font-medium truncate">{t("wifi.ethernet")}{ethernet.iface ? ` (${ethernet.iface})` : ""}</div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                      <span className="text-xs text-green-400/80">Wired · {t("settings.connected")}</span>
+                      <span className="text-xs text-green-400/80">{tr("settings.wired", "Wired")} · {t("settings.connected")}</span>
                     </div>
                   </div>
                 </div>
@@ -1816,24 +3689,46 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="mt-4 rounded-xl border px-4 py-3 border-white/[0.06] bg-white/[0.03]">
                   <div className="flex items-center gap-2 mb-1.5">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>link</span>
-                    <span className="text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">Access this device at</span>
+                    <h4 className="text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">{tr("settings.accessDeviceAt", "Access this device at")}</h4>
                   </div>
                   <div className="flex items-center gap-2">
                     <a href={primaryUrl} className="flex-1 min-w-0 text-sm font-mono text-[var(--text-primary)] hover:text-[var(--coral-bright)] truncate underline-offset-2 hover:underline">{primaryLabel}</a>
                     <button
                       onClick={copyLocalUrl}
                       className="px-2.5 py-1.5 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors flex items-center gap-1"
-                      title="Copy URL"
-                      aria-label={copiedLocalUrl ? "URL copied" : "Copy URL"}
+                      title={tr("settings.copyUrl", "Copy URL")}
+                      aria-label={copiedLocalUrl ? tr("settings.urlCopied", "URL copied") : tr("settings.copyUrl", "Copy URL")}
                     >
                       <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{copiedLocalUrl ? "check" : "content_copy"}</span>
-                      {copiedLocalUrl ? "Copied" : "Copy"}
+                      {/* The setup pack has carried "copy"/"copied" in all ten
+                          languages since the wizard shipped; this button was
+                          simply never wired to them. */}
+                      {copiedLocalUrl ? t("copied") : t("copy")}
                     </button>
                   </div>
-                  <span className="sr-only" aria-live="polite">{copiedLocalUrl ? "URL copied to clipboard" : ""}</span>
+                  <span className="sr-only" aria-live="polite">{copiedLocalUrl ? tr("settings.urlCopiedToClipboard", "URL copied to clipboard") : ""}</span>
                   {ipv4 && localUrl && (
                     <p className="text-[11px] text-[var(--text-muted)] mt-2 leading-relaxed">
-                      <span className="font-mono text-[var(--text-secondary)]">{localUrl}</span> also works on networks that support mDNS. The IP can change when the device reconnects — reserve it in your router for a permanent address.
+                      {/* Split at the slot rather than rendering the address
+                          first and the sentence after it: the URL keeps its
+                          monospace styling, and a language that does not open
+                          with the subject can move the slot. */}
+                      {(() => {
+                        const [before, after] = splitAtSlot(
+                          tr(
+                            "settings.mdnsHint",
+                            "{url} also works on networks that support mDNS. The IP can change when the device reconnects — reserve it in your router for a permanent address.",
+                          ),
+                          "{url}",
+                        );
+                        return (
+                          <>
+                            {before}
+                            <span className="font-mono text-[var(--text-secondary)]">{localUrl}</span>
+                            {after}
+                          </>
+                        );
+                      })()}
                     </p>
                   )}
                 </div>
@@ -1857,6 +3752,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </div>
                 </div>
                 <button
+                  type="button"
+                  role="switch"
+                  aria-checked={hotspotEnabled === true}
+                  aria-label={t("settings.hotspot")}
                   onClick={toggleHotspot}
                   disabled={hotspotEnabled === null || hotspotToggling}
                   className={`relative w-11 h-6 rounded-full transition-colors cursor-pointer border-none ${hotspotEnabled ? "bg-[#fe6e00]" : "bg-white/10"} ${hotspotToggling ? "opacity-50" : ""}`}
@@ -1864,6 +3763,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${hotspotEnabled ? "translate-x-5" : "translate-x-0"}`} />
                 </button>
               </div>
+              {hotspotApWarning && (
+                <div className="mt-3"><StatusMessage type="info" message={hotspotApWarning} /></div>
+              )}
               {hotspotEnabled && hotspotActive !== false && (
                 <p className="text-[11px] text-[var(--text-muted)] opacity-50 mt-3 leading-relaxed">
                   {t("settings.hotspotDesc", { ssid: hotspotSSID })}
@@ -1873,9 +3775,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2.5">
                   <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 18 }}>warning</span>
                   <div className="text-[11px] text-amber-100/90 leading-relaxed">
-                    Hotspot is not broadcasting{hotspotBlockedBy ? ` because this device is connected to "${hotspotBlockedBy}" over WiFi` : ""}.
-                    The Jetson has a single WiFi radio, so the hotspot can only run when WiFi is disconnected or the device is on Ethernet.
-                    Saved settings will apply automatically the next time the AP starts.
+                    {/* This file's `tr` takes no params (see its definition),
+                        so the one slot is filled here rather than by the
+                        helper — the placeholder is identical in every locale. */}
+                    {hotspotBlockedBy
+                      ? tr("settings.hotspotNotBroadcastingWifi", "Hotspot is not broadcasting because this device is connected to “{ssid}” over WiFi.").replaceAll("{ssid}", hotspotBlockedBy)
+                      : tr("settings.hotspotNotBroadcasting", "Hotspot is not broadcasting.")}{" "}
+                    {tr("settings.hotspotSingleRadioNote", "The Jetson has a single WiFi radio, so the hotspot can only run when WiFi is disconnected or the device is on Ethernet. Saved settings will apply automatically the next time the AP starts.")}
                   </div>
                 </div>
               )}
@@ -1911,7 +3817,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         type={hotspotPasswordShow ? "text" : "password"}
                         value={hotspotPassword}
                         onChange={e => { setHotspotPassword(e.target.value); setHotspotPasswordStatus(null); }}
-                        placeholder={hotspotHasPassword ? "••••••••" : "At least 8 characters"}
+                        placeholder={hotspotHasPassword ? "••••••••" : tr("settings.minEightChars", "At least 8 characters")}
                         maxLength={63}
                         className="flex-1 min-w-0 px-3.5 py-2.5 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/15"
                       />
@@ -1919,7 +3825,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         type="button"
                         onClick={() => setHotspotPasswordShow(v => !v)}
                         className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer"
-                        aria-label={hotspotPasswordShow ? "Hide password" : "Show password"}
+                        aria-label={hotspotPasswordShow ? t("login.hidePassword") : t("login.showPassword")}
                       >
                         <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{hotspotPasswordShow ? "visibility_off" : "visibility"}</span>
                       </button>
@@ -1941,7 +3847,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>link</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.localUrl")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.localUrl")}</h3>
               </div>
               <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-3 leading-relaxed">{t("settings.localUrlDesc")}</p>
               <div className="flex items-stretch gap-2">
@@ -1972,7 +3878,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>bookmark</span>
-                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Saved Networks</label>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Saved Networks</h3>
                 </div>
                 <div className="space-y-2">
                   {savedNetworks.map(net => {
@@ -1986,23 +3892,23 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                             <div className="text-sm text-[var(--text-primary)] font-medium truncate">{net.name}</div>
                             {isActive && <div className="text-[10px] text-green-400/80 mt-0.5">Connected</div>}
                           </div>
-                          <button onClick={() => { setSavedEditing(isEditing ? null : net.name); setSavedNewPassword(""); setSavedStatus(null); }} disabled={savedBusy === net.name} className="px-2 py-1 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors disabled:opacity-50" title="Edit password" aria-label={`Edit password for ${net.name}`}>
-                            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{isEditing ? "close" : "edit"}</span>
+                          <button onClick={() => { setSavedEditing(isEditing ? null : net.name); setSavedNewPassword(""); setSavedStatus(null); }} disabled={savedBusy === net.name} className="px-2 py-1 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors disabled:opacity-50" title={t("settings.editPassword")} aria-label={t("settings.editPasswordFor", { name: net.name })}>
+                            <span aria-hidden="true" className="material-symbols-rounded" style={{ fontSize: 16 }}>{isEditing ? "close" : "edit"}</span>
                           </button>
-                          <button onClick={() => forgetSavedNetwork(net.name)} disabled={savedBusy === net.name} className="px-2 py-1 bg-white/[0.06] hover:bg-red-500/30 text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors disabled:opacity-50" title="Forget" aria-label={`Forget ${net.name}`}>
-                            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span>
+                          <button onClick={() => forgetSavedNetwork(net.name)} disabled={savedBusy === net.name} className="px-2 py-1 bg-white/[0.06] hover:bg-red-500/30 text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors disabled:opacity-50" title={t("settings.forgetNetwork")} aria-label={t("settings.forgetNetworkFor", { name: net.name })}>
+                            <span aria-hidden="true" className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span>
                           </button>
                         </div>
                         {isEditing && (
                           <div className="px-4 pb-3 pt-1 border-t border-white/[0.04]">
                             <div className="flex items-stretch gap-2 mt-2">
                               <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                                <input type={savedShowPassword ? "text" : "password"} value={savedNewPassword} onChange={e => { setSavedNewPassword(e.target.value); setSavedStatus(null); }} placeholder="New password" maxLength={63} className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20" />
+                                <input type={savedShowPassword ? "text" : "password"} value={savedNewPassword} onChange={e => { setSavedNewPassword(e.target.value); setSavedStatus(null); }} placeholder={t("settings.security.newPassword")} maxLength={63} className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20" />
                                 <button type="button" onClick={() => setSavedShowPassword(v => !v)} className="px-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer">
                                   <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{savedShowPassword ? "visibility_off" : "visibility"}</span>
                                 </button>
                               </div>
-                              <button onClick={() => updateSavedPassword(net.name)} disabled={savedBusy === net.name || savedNewPassword.length < 8} className="px-3 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-xs font-semibold cursor-pointer border-none">Save</button>
+                              <button onClick={() => updateSavedPassword(net.name)} disabled={savedBusy === net.name || savedNewPassword.length < 8} className="px-3 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-xs font-semibold cursor-pointer border-none">{t("save")}</button>
                             </div>
                           </div>
                         )}
@@ -2018,7 +3924,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.connectToNetworkBtn")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.connectToNetworkBtn")}</h3>
               </div>
 
               {/* Network list */}
@@ -2029,7 +3935,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   className="w-full py-2.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[var(--text-primary)] rounded-xl text-sm font-medium cursor-pointer transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                 >
                   {wifiScanning ? (
-                    <><span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span> {t("settings.scanning")}</>
+                    <><span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }}>progress_activity</span> {t("settings.scanning")}</>
                   ) : (
                     <><span className="material-symbols-rounded" style={{ fontSize: 16 }}>wifi_find</span> {t("settings.availableNetworks")}</>
                   )}
@@ -2040,13 +3946,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <>
                   <div className="border border-white/[0.08] rounded-xl overflow-hidden mb-3">
                     <div className="flex items-center justify-between px-3.5 py-2 border-b border-white/[0.06]">
-                      <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.availableNetworks")}</span>
+                      <h4 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.availableNetworks")}</h4>
                       <button
                         onClick={scanWifiNetworks}
                         disabled={wifiScanning}
                         className="flex items-center gap-1 text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5 disabled:opacity-50 transition-colors"
                       >
-                        <span className={`material-symbols-rounded ${wifiScanning ? "animate-spin" : ""}`} style={{ fontSize: 14 }}>refresh</span>
+                        <span className={`material-symbols-rounded ${wifiScanning ? "motion-safe:animate-spin" : ""}`} style={{ fontSize: 14 }}>refresh</span>
                         {wifiScanning ? t("settings.scanning") : t("wifi.refresh")}
                       </button>
                     </div>
@@ -2123,7 +4029,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       className="flex-1 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
                     >
                       {wifiConnecting ? (
-                        <><span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span> {t("connecting")}</>
+                        <><span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }}>progress_activity</span> {t("connecting")}</>
                       ) : (
                         <><span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span> {t("settings.connect")}</>
                       )}
@@ -2143,95 +4049,48 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
-        {/* ─── AI Provider ─── */}
+        {/* ─── Providers: the cloud sign-ins, the owner's connected ones listed first ─── */}
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
+            {/* The offer, first, and only on a box that holds NO ClawBox AI
+                credential (the owner's decision of 2026-09-15). An EXPLICIT
+                false: the status is null until the first read answers, and a
+                falsy test would flash a subscribe pitch at a subscriber every
+                time this page opened. A refused credential is still a
+                configured one and is the connect panel's to fix, not this
+                card's to pitch over. */}
+            {aiProvider?.clawaiConfigured === false && (
+              <ClawboxAiPitchCard
+                onConnect={() => {
+                  // Two panels answer this page, and only one of them acts on
+                  // the offer counter. On Hermes the pane below is
+                  // HermesProviderConfig, which draws its own ClawBox AI
+                  // sign-in once the provider is SELECTED — the offer counter
+                  // there is read by an AIModelsStep that returns before
+                  // rendering anything, so it would start a device login with
+                  // no card on screen to show the code.
+                  if (edition === "hermes") {
+                    setRequestedAiProviderId("clawai");
+                    setProviderSelectionRequest((current) => current + 1);
+                    return;
+                  }
+                  setOpenClawAIOfferRequest((current) => current + 1);
+                }}
+                onLocalAi={() => setSectionGated("localAi")}
+              />
+            )}
 
-            {/* Provider status card */}
-            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
-              </div>
-              {aiProvider === null ? (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
-                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
-                  <div className="flex-1 space-y-2">
-                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
-                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
-                  </div>
-                </div>
-              ) : aiProvider.connected ? (
-                (() => {
-                  const isClawai = aiProvider.provider === "clawai";
-                  const cardClass = `flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5${
-                    isClawai ? " hover:bg-green-500/[0.1] hover:border-green-500/25 transition-colors cursor-pointer no-underline group" : ""
-                  }`;
-                  const inner = (
-                    <>
-                      <div className="relative w-10 h-10 rounded-full bg-green-500/15 border border-green-400/10 flex items-center justify-center shrink-0">
-                        <AIProviderIcon provider={aiProvider.provider} size={24} />
-                        <span className="absolute -right-1 -bottom-1 w-5 h-5 rounded-full bg-[#10261d] border border-green-500/25 flex items-center justify-center">
-                          <span className="material-symbols-rounded text-green-400" style={{ fontSize: 14 }}>check</span>
-                        </span>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm text-[var(--text-primary)] font-medium truncate">{aiProvider.providerLabel}</span>
-                          {(() => {
-                            const tier = isClawai ? normalizeClawboxAiTier(aiProvider.clawaiTier) : null;
-                            if (!tier) return null;
-                            return (
-                              <span
-                                className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md border ${
-                                  tier === "pro"
-                                    ? "bg-fuchsia-500/15 border-fuchsia-400/30 text-fuchsia-200"
-                                    : "bg-orange-500/15 border-orange-400/30 text-orange-200"
-                                }`}
-                              >
-                                {CLAWBOX_AI_TIER_LABEL[tier]}
-                              </span>
-                            );
-                          })()}
-                        </div>
-                        <div className="flex items-center gap-1.5 mt-0.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                          <span className="text-xs text-green-400/80">
-                            {aiProvider.model ? aiProvider.model.split("/").pop() : t("settings.connected")}
-                          </span>
-                        </div>
-                      </div>
-                      {isClawai && (
-                        <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50 group-hover:opacity-100 group-hover:text-green-400 transition-all shrink-0" style={{ fontSize: 18 }} aria-hidden="true">open_in_new</span>
-                      )}
-                    </>
-                  );
-                  return isClawai ? (
-                    <a
-                      href={PORTAL_DASHBOARD_URL}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className={cardClass}
-                      aria-label="Open ClawBox AI portal dashboard"
-                    >
-                      {inner}
-                    </a>
-                  ) : (
-                    <div className={cardClass}>{inner}</div>
-                  );
-                })()
-              ) : (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
-                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
-                    <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }}>link_off</span>
-                  </div>
-                  <div>
-                    <div className="text-sm text-[var(--text-muted)]">{t("settings.noProviderConnected")}</div>
-                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">{t("settings.selectProvider")}</div>
-                  </div>
-                </div>
-              )}
-            </div>
+            <AiProviderList />
+
+            {/* No status card here. The AI Providers panel below opens with the
+                hero, which names the active provider, its model and its
+                connection — this card said the same three things one card
+                higher. It was already suppressed on the Hermes edition for
+                exactly that reason; the hero now renders on every edition, so
+                the reason applies everywhere and the twin is gone. The two
+                affordances only this card carried both survive inside the
+                panel: the plan picker shows the ClawBox AI tier and links the
+                portal dashboard. */}
 
             <I18nProvider><AIModelsStep
               embedded
@@ -2242,191 +4101,218 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               openClawAIOfferRequest={openClawAIOfferRequest}
               requestedProviderId={requestedAiProviderId}
               providerSelectionRequest={providerSelectionRequest}
-              title="Connect AI Provider"
-              description="Choose the primary AI service your assistant should use day to day"
+              title={tr("settings.aiConnectTitle", "Connect AI Provider")}
+              description={tr("settings.aiConnectDesc", "Choose the primary AI service your assistant should use day to day")}
               onConfigured={() => {
                 fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
                 notifyChatModelStateChanged();
                 window.dispatchEvent(new Event("clawbox:primary-ai-configured"));
               }}
             /></I18nProvider>
+
+            {/* The ClawBox AI allowances are no longer a card of their own down
+                here. They now hang off the ClawBox AI row in the list above,
+                behind a button, collapsed by default — the owner's ask: the
+                block was always open, and the card polls the portal every
+                minute for as long as it is on screen, which everyone who opened
+                Providers for any other reason was paying for. The row is only
+                ever drawn for a provider that holds a sign-in, so the condition
+                that used to live here (a credential the portal still accepts)
+                is the list's own filter now, and a switched-off ClawBox AI
+                shows neither the meter nor the button. */}
+
+            {/* The Anthropic accounts coding runs spend, in the owner's order,
+                with the one a usage limit set aside and when it is back
+                (TASK-902). On every edition and whatever the chat provider
+                above is: it is the coding agent's pool, not the chat's, and
+                the limit notices open this section to show it. */}
+            <AnthropicAccountsCard />
           </div>
         )}
 
-        {/* ─── Local AI ─── */}
+        {/* ─── Local AI: everything on the box, one grouped list ─── */}
         {activeSection === "localAi" && (
+          <LocalAiPanel active={localTabOpen} edition={edition} />
+        )}
+
+
+        {/* ─── Voice ─── */}
+        {activeSection === "voice" && (
+          <VoiceOutputPanel active={activeSection === "voice"} />
+        )}
+
+        {/* ─── Accounts (the hub) ───
+            One page for every messaging channel the assistant can be reached
+            through, in the shape people already know from GNOME's Online
+            Accounts: a row per channel with its live status, opening that
+            channel's own settings. */}
+        {activeSection === "channels" && (
           <div className="max-w-xl space-y-5">
-
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>memory</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>forum</span>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+                  {t("settings.channelsConnect")}
+                </h3>
               </div>
-              {localAiStatus === null ? (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
-                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
-                  <div className="flex-1 space-y-2">
-                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
-                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
-                  </div>
-                </div>
-              ) : localAiStatus.configured ? (
-                <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 border ${
-                  localAiOffline
-                    ? "bg-amber-500/[0.06] border-amber-500/15"
-                    : "bg-cyan-500/[0.06] border-cyan-500/15"
-                }`}>
-                  <div className={`relative w-10 h-10 rounded-full border flex items-center justify-center shrink-0 ${
-                    localAiOffline
-                      ? "bg-amber-500/10 border-amber-400/10"
-                      : "bg-cyan-500/10 border-cyan-400/10"
-                  }`}>
-                    <AIProviderIcon provider={localAiStatus.provider} size={24} />
-                    <span className={`absolute -right-1 -bottom-1 w-5 h-5 rounded-full border flex items-center justify-center ${
-                      localAiOffline
-                        ? "bg-[#2a1d10] border-amber-500/25"
-                        : "bg-[#10212a] border-cyan-500/25"
-                    }`}>
-                      <span className={`material-symbols-rounded ${
-                        localAiOffline ? "text-amber-300" : "text-cyan-300"
-                      }`} style={{ fontSize: 14 }}>
-                        {localAiOffline ? "warning" : "check"}
-                      </span>
-                    </span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm text-[var(--text-primary)] font-medium">
-                      {localAiStatus.provider === "llamacpp" ? "Gemma 4 Local" : localAiStatus.provider === "ollama" ? "Ollama Local" : "Local AI"}
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${
-                        localAiOffline ? "bg-amber-300" : "bg-cyan-300"
-                      }`} />
-                      <span className={`text-xs ${
-                        localAiOffline ? "text-amber-300/80" : "text-cyan-300/80"
-                      }`}>
-                        {`${localAiStatus.model ? lastModelSegment(localAiStatus.model) : "Configured"} · ${
-                          localAiState ? LOCAL_AI_STATUS_SUFFIX[localAiState] : ""
-                        }`}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
-                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
-                    <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }}>memory</span>
-                  </div>
-                  <div>
-                    <div className="text-sm text-[var(--text-muted)]">No local model configured</div>
-                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">Turn on Gemma 4 or Ollama to add a private on-device backup.</div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {localAiError && (
-              <div className="rounded-xl border border-red-500/20 bg-red-500/[0.06] px-4 py-3 text-sm text-red-300">
-                {localAiError}
-              </div>
-            )}
-
-            {localAiStatus?.configured && (
-              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-semibold text-[var(--text-primary)]">Local-only mode</div>
-                    <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-                      Route everything to the local model. Disables all cloud AI providers (including fallbacks).
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {localOnlyPending && (
-                      <span
-                        className="material-symbols-rounded animate-spin text-[var(--text-muted)]"
-                        style={{ fontSize: 18 }}
-                        aria-hidden="true"
-                      >
-                        progress_activity
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-label="Local-only mode"
-                      aria-checked={!!localOnlyMode}
-                      aria-busy={localOnlyPending}
-                      disabled={localOnlyPending || localOnlyMode === null}
-                      onClick={() => toggleLocalOnly(!localOnlyMode)}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 ${
-                        localOnlyMode ? "bg-[var(--coral-bright)]" : "bg-gray-600"
-                      }`}
+              <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">{t("settings.channelsHelper")}</p>
+              <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]" data-testid="settings-channels-list">
+                {CHANNEL_ITEMS.map((item) => {
+                  const state = channelState(item.id);
+                  // The account IS set up in both states; only one of them is
+                  // carrying traffic. The icon follows the account, the dot
+                  // follows the traffic.
+                  const configured = state === "connected" || state === "silent";
+                  const { subtitle } = sectionStatus(item.id);
+                  const refreshChannel = {
+                    telegram: refreshTelegramStatus,
+                    email: refreshEmailStatus,
+                    whatsapp: refreshWhatsapp,
+                    discord: refreshDiscordStatus,
+                  }[item.id];
+                  // TASK-606: the boot script could not install or consent
+                  // this channel's plugin and switched it off, which is why the
+                  // row says "Offline" with nothing the owner can act on.
+                  const repair = pluginRepairs.find(
+                    (row) => canonicalPluginId(row.pluginId) === item.id,
+                  );
+                  return (
+                    <div key={item.id} className="w-full">
+                    <div
+                      className="w-full flex items-center hover:bg-white/[0.04] transition-colors"
                     >
-                      <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${localOnlyMode ? "translate-x-6" : "translate-x-1"}`} />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {localAiStatus?.configured && (
-              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <div className="text-lg font-semibold text-[var(--text-primary)]">
-                      {localAiStatus.provider === "llamacpp" ? "Gemma 4" : "Ollama"}
+                      {/* The row navigates; Retry is its SIBLING, not a control
+                          nested inside it. A <button> may not contain another
+                          interactive element: the retry's label would be
+                          absorbed into the accessible name of the control that
+                          navigates away, and browse mode commonly flattens the
+                          inner one out of reach entirely. */}
+                      <button
+                        type="button"
+                        ref={(el) => { channelRowRefs.current[item.id] = el; }}
+                        onClick={() => setSectionGated(item.id)}
+                        data-testid={`settings-channel-${item.id}`}
+                        data-state={state}
+                        className="flex-1 min-w-0 flex items-center gap-3 px-3 py-3 text-left bg-transparent border-none cursor-pointer"
+                      >
+                        {/* The ligature IS the glyph's text, so without this the
+                            row's accessible name began "chat", "send", "mail",
+                            "forum" — read out before the channel's own name. */}
+                        <span className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06]" aria-hidden="true">
+                          <span className="material-symbols-rounded" style={{ fontSize: 20, color: configured ? "var(--coral-bright)" : "var(--text-muted)" }}>
+                            {item.icon}
+                          </span>
+                        </span>
+                        <span className="flex-1 min-w-0">
+                          <span className="block text-sm text-[var(--text-primary)] font-medium truncate">{t(item.labelKey)}</span>
+                          {/* State first, subtitle second. A subtitle is only
+                              ever a description of an ANSWER, so when there is
+                              no answer it must not be allowed to speak: reading
+                              `subtitle ?? …` here let a route that says "not
+                              configured" without being able to verify it print
+                              those very words over a live channel.
+                              The words are part of the row's accessible name,
+                              which is what actually carries the state to a
+                              screen reader — a live region that appears already
+                              populated does not reliably announce. */}
+                          <span className="block text-[11px] text-[var(--text-muted)] truncate">
+                            {state === "unknown"
+                              ? t("settings.checking")
+                              : state === "unreachable"
+                                ? t("settings.statusUnavailable")
+                                : (subtitle ?? t(item.hintKey))}
+                          </span>
+                        </span>
+                        {/* A mark per state: receiving, set up but silent,
+                            still asking, and asked but unanswered. "Still
+                            asking" used to look exactly like "nothing there",
+                            which is the bug this row had; the emerald dot used
+                            to mean CONFIGURED, which is the one this one fixes
+                            — on Discord it sat beside the word "Offline" in the
+                            same row. The dot is decoration (`aria-hidden`), so
+                            the state reaches assistive tech through the
+                            subtitle above it, which every branch words. */}
+                        {state === "connected" ? (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
+                        ) : state === "silent" ? (
+                          /* Full opacity, like the emerald beside it: the two
+                             "we cannot say" dots are the faded ones
+                             (`white/25`), and this is a definite answer. */
+                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" aria-hidden="true" />
+                        ) : state === "unknown" ? (
+                          <span
+                            className="w-1.5 h-1.5 rounded-full bg-white/25 shrink-0 animate-pulse motion-reduce:animate-none"
+                            aria-hidden="true"
+                          />
+                        ) : state === "unreachable" ? (
+                          <span className="w-1.5 h-1.5 rounded-full bg-white/25 shrink-0" aria-hidden="true" />
+                        ) : null}
+                        <span className="material-symbols-rounded text-[var(--text-muted)] shrink-0" style={{ fontSize: 18 }} aria-hidden="true">
+                          chevron_right
+                        </span>
+                      </button>
+                      {/* A dead end needs a way out. Named per channel, because
+                          up to four rows can be unreachable at once and four
+                          controls all called "Retry" name nothing. */}
+                      {state === "unreachable" && (
+                        <button
+                          type="button"
+                          data-testid={`settings-channel-retry-${item.id}`}
+                          aria-label={`${t("settings.retry")} — ${t(item.labelKey)}`}
+                          onClick={() => {
+                            // Before anything re-renders: this button is about
+                            // to unmount under its own click, and focus must
+                            // land on the row rather than on <body>.
+                            channelRowRefs.current[item.id]?.focus();
+                            unsettleChannel(item.id);
+                            void refreshChannel();
+                          }}
+                          className="text-[11px] text-[var(--coral-bright)] shrink-0 mr-3 px-1 py-1 bg-transparent border-none cursor-pointer hover:underline"
+                        >
+                          {t("settings.retry")}
+                        </button>
+                      )}
                     </div>
-                    <p className="text-sm text-[var(--text-secondary)] mt-1">
-                      {localAiState === "offline"
-                        ? "Configured, but currently offline."
-                        : localAiState === "available"
-                          // Installed and ready, but the harness is pointed
-                          // elsewhere — name what IS answering so the state is
-                          // unambiguous. The label comes from the same endpoint
-                          // that reports the active provider, so it can't drift.
-                          ? `Installed and ready, but ${harnessLabel} is currently set to ${aiProvider?.providerLabel || aiProvider?.provider || "another provider"}.`
-                          : localAiState === "standby"
-                            ? `Selected. Kept in on-demand standby to free RAM until ${harnessLabel} needs it.`
-                            : "Selected and running as your on-device model."}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={disableLocalAi}
-                    disabled={localAiDisabling}
-                    className="px-4 py-2.5 bg-red-500/10 text-red-300 border border-red-500/20 rounded-xl text-sm font-semibold cursor-pointer hover:bg-red-500/20 transition-colors disabled:opacity-50"
-                  >
-                    {localAiDisabling ? "Disabling..." : "Disable"}
-                  </button>
-                </div>
-                <p className="text-xs text-[var(--text-muted)] mt-3">
-                  Disabling Local AI stops the local model and frees the memory it is using.
-                </p>
+                    {repair && (
+                      <PluginRepairNotice
+                        repair={repair}
+                        onRepaired={() => {
+                          // DROP THE ROW FIRST. `PluginRepairNotice` calls this
+                          // only after the device verified the repair, so the
+                          // badge is wrong from this moment on — while
+                          // `fetchPluginRepairs` answers null on a failed GET
+                          // (deliberately: a box that cannot answer keeps the
+                          // rows it had), and the GET right after a gateway
+                          // restart is exactly the one that fails. That left
+                          // the badge up until the section was re-entered.
+                          setPluginRepairs((rows) => rows.filter((row) => row.pluginId !== repair.pluginId));
+                          void fetchPluginRepairs().then((rows) => { if (rows) setPluginRepairs(rows); });
+                          void refreshChannel();
+                        }}
+                        className="px-3 pb-3"
+                      />
+                    )}
+                    </div>
+                  );
+                })}
               </div>
-            )}
+            </div>
+          </div>
+        )}
 
-            <I18nProvider><AIModelsStep
-              embedded
-              providerIds={["llamacpp"]}
-              defaultProviderId="llamacpp"
-              currentProviderId={localAiStatus?.provider ?? null}
-              currentModel={localAiStatus?.model ?? null}
-              // Installed is not selected. Without this the panel rendered the
-              // green "already configured" pill and hid its own switch button,
-              // so a device that had Gemma installed but unselected offered no
-              // way to actually start using it.
-              localAiIsActive={localAiIsActive}
-              title="Set Up Local AI"
-              description={localAiStatus?.configured
-                ? "Gemma 4 is installed as your private on-device model."
-                : "Turn on a local model so ClawBox always has a private on-device backup."}
-              configureScope="local"
-              testId="settings-local-ai-step"
-              onConfigured={() => {
-                refreshLocalAiStatus().catch(() => {});
-                notifyChatModelStateChanged();
-              }}
-            /></I18nProvider>
+        {/* The way back out of a channel pane, now that the sidebar has no
+            row of its own for it. */}
+        {isChannelSection(activeSection) && (
+          <div className="max-w-xl">
+            <button
+              type="button"
+              onClick={() => setSectionGated("channels")}
+              data-testid="settings-channels-back"
+              className="flex items-center gap-1 mb-3 px-2 py-1 -ml-2 rounded-lg bg-transparent border-none cursor-pointer text-[13px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.05] transition-colors"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">chevron_left</span>
+              {t("settings.channels")}
+            </button>
           </div>
         )}
 
@@ -2438,7 +4324,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="#f97316"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.96 6.504-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.479.33-.913.492-1.302.48-.428-.012-1.252-.242-1.865-.44-.751-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</h3>
               </div>
               {tgConfigured === null ? (
                 <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
@@ -2478,6 +4364,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       {t("settings.openInTelegram", { name: `@${tgBotInfo.username}` })}
                     </a>
                   )}
+                  {/* Progress streaming is the OpenClaw gateway's Telegram
+                      channel setting. Hermes runs Telegram from ~/.hermes/.env
+                      and has no streaming mode at all, so this switch rendered
+                      itself ON (a missing config file reads as "not off") over
+                      a route that answered {restarted:true} for a gateway that
+                      does not exist. Telegram ITSELF works on Hermes — only
+                      this sub-setting does not, so only this row goes. */}
+                  {edition !== "hermes" && (
                   <div className="flex items-center justify-between gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 mb-4">
                     <div className="min-w-0 flex-1">
                       <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.telegramProgress")}</div>
@@ -2485,7 +4379,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       {tgStreamingPending && (
-                        <span className="material-symbols-rounded animate-spin text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">progress_activity</span>
+                        <span className="material-symbols-rounded motion-safe:animate-spin text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">progress_activity</span>
                       )}
                       <button
                         type="button"
@@ -2503,6 +4397,22 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       </button>
                     </div>
                   </div>
+                  )}
+                  {/* Mounted in every state so the announcement is a text
+                      change rather than a node insertion; polite, because the
+                      save landed and only the switch-over is pending. The TEXT
+                      is the live region's own child — a conditional <p> inside
+                      a mounted <div> is still a node insertion, which is the
+                      failure this pattern exists to avoid. Same shape as
+                      AiProviderList, HermesProviderConfig and LocalAiPanel. */}
+                  <p
+                    role="status"
+                    aria-live="polite"
+                    data-testid="telegram-streaming-notice"
+                    className={tgStreamingNotice ? "mb-4 text-xs text-amber-300/90" : ""}
+                  >
+                    {tgStreamingNotice ?? ""}
+                  </p>
                   <button
                     onClick={() => { setTgReconfigure(true); setTgStatus(null); }}
                     className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
@@ -2528,7 +4438,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                 <div className="flex items-center gap-2 mb-1">
                   <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">group</span>
-                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.pairingTitle")}</label>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.pairingTitle")}</h3>
                 </div>
                 <p className="text-xs text-[var(--text-secondary)] mb-4">{t("settings.pairingHint")}</p>
 
@@ -2552,7 +4462,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     onClick={() => approvePairingCode(tgPairingCode)}
                     className="px-4 py-2.5 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors shrink-0 inline-flex items-center gap-1.5"
                   >
-                    {tgApproving && <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                    {tgApproving && <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
                     {t("settings.pairingApprove")}
                   </button>
                 </div>
@@ -2568,7 +4478,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       onClick={loadPending}
                       className="inline-flex items-center gap-1.5 text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer disabled:opacity-50 p-0"
                     >
-                      <span className={`material-symbols-rounded ${tgPendingLoading ? "animate-spin" : ""}`} style={{ fontSize: 16 }} aria-hidden="true">{tgPendingLoading ? "progress_activity" : "refresh"}</span>
+                      <span className={`material-symbols-rounded ${tgPendingLoading ? "motion-safe:animate-spin" : ""}`} style={{ fontSize: 16 }} aria-hidden="true">{tgPendingLoading ? "progress_activity" : "refresh"}</span>
                       {tgPendingLoading ? t("settings.pairingChecking") : t("settings.pairingCheck")}
                     </button>
                   ) : (
@@ -2581,7 +4491,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                           onClick={loadPending}
                           className="inline-flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50 p-0"
                         >
-                          <span className={`material-symbols-rounded ${tgPendingLoading ? "animate-spin" : ""}`} style={{ fontSize: 14 }} aria-hidden="true">{tgPendingLoading ? "progress_activity" : "refresh"}</span>
+                          <span className={`material-symbols-rounded ${tgPendingLoading ? "motion-safe:animate-spin" : ""}`} style={{ fontSize: 14 }} aria-hidden="true">{tgPendingLoading ? "progress_activity" : "refresh"}</span>
                           {t("settings.pairingCheck")}
                         </button>
                       </div>
@@ -2653,14 +4563,23 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       setTgConfigurePromise(undefined);
                       refreshTelegramStatus();
                     }}
+                    onTimeout={() => {
+                      tgSaveControllerRef.current?.abort();
+                      tgSaveControllerRef.current = null;
+                      setTgSaving(false);
+                      setTgConfiguring(false);
+                      setTgConfigurePromise(undefined);
+                      setTgStatus({ type: "error", message: t("settings.connectionFailed") });
+                      refreshTelegramStatus();
+                    }}
                   />
                 )}
                 <div className={tgConfiguring ? "invisible h-0 overflow-hidden" : ""}>
                 <div className="flex items-center gap-2 mb-4">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
-                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
                     {tgReconfigure ? t("settings.reconfigureBot") : t("settings.setupBot")}
-                  </label>
+                  </h3>
                 </div>
 
                 {/* Instructions with QR */}
@@ -2670,21 +4589,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </div>
                   <ol className="ml-0 pl-5 leading-[1.9] text-sm text-white/70 list-decimal">
                     <li>
-                      Scan the QR or open{" "}
+                      {tr("telegram.step1Prefix", "Scan the QR or open")}{" "}
                       <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" className="text-[var(--coral-bright)] hover:text-orange-300 font-semibold no-underline">
                         @BotFather
                       </a>{" "}
-                      in Telegram
+                      {t("telegram.step1Suffix")}
                     </li>
                     <li>
                       Send{" "}
                       <code className="bg-white/[0.06] px-1.5 py-0.5 rounded text-xs text-[var(--coral-bright)]">
                         /newbot
                       </code>{" "}
-                      and follow the prompts
+                      {t("telegram.step2Suffix")}
                     </li>
                     <li>
-                      Copy the <strong className="text-[var(--text-primary)]">Bot Token</strong> and paste below
+                      {tr("telegram.step3Prefix", "Copy the")} <strong className="text-[var(--text-primary)]">{t("telegram.step3bold")}</strong> {tr("telegram.step3Suffix", "and paste below")}
                     </li>
                   </ol>
                 </div>
@@ -2725,7 +4644,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   >
                     {tgSaving ? (
                       <>
-                        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                        <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
                         {t("connecting")}
                       </>
                     ) : (
@@ -2751,11 +4670,1367 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
+        {/* ─── Email ─── */}
+        {activeSection === "email" && (
+          <div className="max-w-xl space-y-5" data-testid="settings-section-email">
+
+            {/* Status */}
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">mail</span>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</h3>
+              </div>
+
+              {emailStatus === null ? (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
+                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 w-40 rounded bg-white/[0.08]" />
+                    <div className="h-2 w-24 rounded bg-white/[0.06]" />
+                  </div>
+                </div>
+              ) : emailStatus.configured && !emailReconfigure ? (
+                <div>
+                  <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5 mb-4">
+                    <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
+                      <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>check_circle</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-[var(--text-primary)] font-medium truncate">
+                        {t("settings.emailConnected", { address: emailStatus.address || "" })}
+                      </div>
+                      <div className="text-xs text-[var(--text-muted)] mt-0.5 truncate">
+                        {emailStatus.smtpHost}:{emailStatus.smtpPort}
+                      </div>
+                      {emailStatus.inboundSupported && (
+                        <div className="text-xs text-[var(--text-muted)] opacity-70 mt-0.5">
+                          {emailStatus.inbound ? t("settings.emailInboundOn") : t("settings.emailInboundOff")}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={sendTestEmail}
+                      disabled={emailTesting}
+                      className="px-4 py-2.5 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors border-none cursor-pointer inline-flex items-center gap-2"
+                    >
+                      {emailTesting && <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                      {emailTesting ? t("settings.emailSendingTest") : t("settings.emailSendTest")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openEmailReconfigure}
+                      className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
+                    >
+                      {t("settings.emailReconfigure")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={disconnectEmail}
+                      disabled={emailSaving}
+                      className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50"
+                    >
+                      {t("settings.emailDisconnect")}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
+                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50" style={{ fontSize: 22 }}>link_off</span>
+                  </div>
+                  <div className="text-sm text-[var(--text-muted)]">{t("settings.notConfigured")}</div>
+                </div>
+              )}
+
+              {emailMsg && <div className="mt-4"><StatusMessage type={emailMsg.type} message={emailMsg.message} /></div>}
+            </div>
+
+            {/* Approvals. Only shown when something is actually waiting — an
+                empty queue is not news, and this panel is mostly looked at for
+                other reasons. Every string here is agent-composed text, so it
+                is rendered as text and never as markup. */}
+            {emailLostDraft !== null && (
+              <div className="rounded-2xl border border-amber-400/30 bg-amber-500/[0.06] p-5" data-testid="settings-email-lost-draft">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="material-symbols-rounded text-amber-300" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
+                  {/* The heading is a verdict of its own, and there are two of
+                      them. "This message was not sent" is right over a refusal
+                      the mail server spoke and wrong over a dropped connection,
+                      where nobody knows — and the wrong one is the one that
+                      gets the recipient mailed twice. */}
+                  <span className="text-sm text-[var(--text-primary)]">
+                    {t(emailLostDraft.unconfirmed ? "settings.emailApproveUnconfirmedDraft" : "settings.emailApproveFailedDraft")}
+                  </span>
+                </div>
+                <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                  <div className="text-xs text-[var(--text-muted)] break-words">
+                    {t("settings.emailPendingTo")}: {emailLostDraft.to.join(", ")}
+                  </div>
+                  <div className="text-sm text-[var(--text-primary)] font-medium mt-1 break-words">{emailLostDraft.subject}</div>
+                  <div className="text-xs text-[var(--text-secondary)] mt-1 whitespace-pre-wrap break-words">{emailLostDraft.body}</div>
+                </div>
+              </div>
+            )}
+
+            {emailPending.length > 0 && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-approvals">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">outgoing_mail</span>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailPending")}</h3>
+                  <span className="ml-auto text-xs font-mono text-[var(--coral-bright)]/70 bg-orange-500/10 px-2 py-0.5 rounded-md">
+                    {t("settings.emailPendingCount", { count: String(emailPending.length) })}
+                  </span>
+                </div>
+
+                <div className="space-y-3">
+                  {emailPending.map((draft) => (
+                    <div key={draft.id} className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                      <div className="text-xs text-[var(--text-muted)] truncate">
+                        {t("settings.emailPendingTo")}: {draft.to.join(", ")}
+                      </div>
+                      <div className="text-sm text-[var(--text-primary)] font-medium mt-1 break-words">{draft.subject}</div>
+                      <div className="text-xs text-[var(--text-secondary)] mt-1 whitespace-pre-wrap break-words">{draft.preview}</div>
+                      <div className="flex flex-wrap items-center gap-3 mt-3">
+                        <button
+                          type="button"
+                          onClick={() => decidePending(draft.id, "approve")}
+                          disabled={emailPendingBusy !== null}
+                          className="px-4 py-2 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors border-none cursor-pointer inline-flex items-center gap-2"
+                        >
+                          {emailPendingBusy === draft.id && <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                          {t("settings.emailApprove")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => decidePending(draft.id, "reject")}
+                          disabled={emailPendingBusy !== null}
+                          className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50"
+                        >
+                          {t("settings.emailReject")}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* What became of the drafts that are no longer waiting.
+                Shown only when there is something to say — an empty
+                strip is not news — and it fades on its own, because
+                the receipts behind it expire after a day. Every
+                string here is agent-composed text and is rendered as
+                text, exactly like the queue above it. */}
+            {emailHandled.length > 0 && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-handled">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">history</span>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailHandled")}</h3>
+                </div>
+                <div className="space-y-3">
+                  {emailHandled.map((entry) => (
+                    <div
+                      key={entry.id}
+                      data-outcome-id={entry.id}
+                      data-outcome-kind={entry.kind}
+                      className="rounded-xl bg-white/[0.02] border border-white/[0.06] px-4 py-3"
+                    >
+                      <div className="text-xs text-[var(--text-muted)] truncate">
+                        {t("settings.emailPendingTo")}: {entry.to.join(", ")}
+                      </div>
+                      <div className="text-sm text-[var(--text-primary)] font-medium mt-1 break-words">{entry.subject}</div>
+                      <div
+                        className={`text-xs mt-1 break-words ${entry.kind === "sent" ? "text-emerald-300" : entry.kind === "failed" ? "text-red-300" : entry.kind === "unconfirmed" ? "text-amber-300" : "text-[var(--text-muted)]"}`}
+                      >
+                        {/* Each ending in its own words. "Not sent" over a
+                            deletion, a duplicate and a mail-server refusal
+                            alike would send the owner looking for a fault in
+                            two cases where there is none. */}
+                        {entry.kind === "sent"
+                          ? t("settings.emailHandledSent", {
+                              time: new Date(entry.at).toLocaleTimeString(undefined, {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              }),
+                            })
+                          : entry.kind === "rejected"
+                            ? t("settings.emailHandledDeleted")
+                            : entry.kind === "duplicate"
+                              ? t("settings.emailHandledDuplicate")
+                              : entry.kind === "unconfirmed"
+                                // Never "Not sent": the box handed the message
+                                // over and never heard back, and a confident
+                                // "not sent" is how a person sends it twice.
+                                ? t("settings.emailHandledUnconfirmed")
+                                : entry.kind === "failed"
+                                  ? t("settings.emailHandledFailed", { reason: entry.error || "" })
+                                  // `entry.kind` is `never` here, so a sixth
+                                  // member of `EMAIL_ENDINGS` is a COMPILE
+                                  // ERROR rather than a row announced as
+                                  // "Failed: " with an empty reason. Reading
+                                  // the wire through `emailEnding` is what lets
+                                  // an unknown ending reach this renderer at
+                                  // all — the hand-written filter dropped it —
+                                  // so the guard has to travel with it. If it
+                                  // were ever reached it answers with the one
+                                  // sentence that claims nothing.
+                                  : ((unreachable: never) => {
+                                      void unreachable;
+                                      return t("settings.emailHandledUnconfirmed");
+                                    })(entry.kind)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Approve from chat. Shown only once an account exists AND the
+                owner has asked to be asked -- with askBeforeSend off there is
+                nothing to approve, and offering the switch would suggest
+                otherwise. */}
+            {emailStatus?.configured && emailStatus.askBeforeSend && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-chat-approval">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">forum</span>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailChatApproval")}</h3>
+                </div>
+                <p className="text-xs text-[var(--text-secondary)] mb-4">{t("settings.emailChatApprovalHelp")}</p>
+
+                {chatApproval?.botConfigured ? (
+                  <div className="space-y-3">
+                    <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                      <label className="flex items-start gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          data-testid="settings-email-chat-approval-toggle"
+                          checked={chatApproval.enabled}
+                          disabled={chatApprovalBusy}
+                          onChange={(e) => submitChatApproval({ enabled: e.target.checked })}
+                          className="mt-0.5 accent-[var(--coral-bright)]"
+                        />
+                        <span className="min-w-0">
+                          <span className="block text-sm text-[var(--text-primary)] font-medium">{t("settings.emailChatApprovalOn")}</span>
+                          <span className="block text-xs text-[var(--text-secondary)] mt-0.5 break-words">
+                            {t("settings.emailChatApprovalConnected", { bot: chatApproval.botUsername ?? "" })}
+                          </span>
+                        </span>
+                      </label>
+                    </div>
+                    {chatApproval.ownerChats === 0 && (
+                      <p className="text-xs text-amber-300/90" data-testid="settings-email-chat-approval-no-peers">
+                        {t("settings.emailChatApprovalNoPeers")}
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => submitChatApproval(null)}
+                      disabled={chatApprovalBusy}
+                      className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50 px-0"
+                    >
+                      {t("settings.emailChatApprovalDisconnect")}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <input
+                      type="password"
+                      data-testid="settings-email-chat-approval-token"
+                      value={chatApprovalToken}
+                      onChange={(e) => setChatApprovalToken(e.target.value)}
+                      placeholder={t("settings.emailChatApprovalToken")}
+                      autoComplete="off"
+                      className="w-full px-4 py-3 rounded-xl bg-white/[0.03] border border-white/[0.06] text-base text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => submitChatApproval({ botToken: chatApprovalToken.trim(), enabled: true })}
+                      disabled={chatApprovalBusy || chatApprovalToken.trim().length === 0}
+                      className="px-4 py-2 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors border-none cursor-pointer inline-flex items-center gap-2"
+                    >
+                      {chatApprovalBusy && <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                      {t("settings.emailChatApprovalConnect")}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Setup */}
+            {(emailStatus === null || !emailStatus.configured || emailReconfigure) && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">add_circle</span>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailAccount")}</h3>
+                </div>
+
+                {/* The 3-step Gmail guide, in the panel rather than behind a docs link */}
+                <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5 mb-5">
+                  <div className="text-sm text-[var(--text-primary)] font-medium mb-2">{t("settings.emailGuideTitle")}</div>
+                  <ol className="ml-0 pl-5 leading-[1.9] text-sm text-[var(--text-secondary)] list-decimal">
+                    <li>{t("settings.emailGuideStep1")}</li>
+                    <li>
+                      {t("settings.emailGuideStep2")}{" "}
+                      <a
+                        href="https://myaccount.google.com/apppasswords"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[var(--coral-bright)] hover:text-orange-300 font-semibold no-underline"
+                      >
+                        {t("settings.emailGuideLink")}
+                      </a>
+                    </li>
+                    <li>{t("settings.emailGuideStep3")}</li>
+                  </ol>
+                  <p className="text-xs text-[var(--text-muted)] mt-2">{t("settings.emailGuideOther")}</p>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label htmlFor="settings-email-address" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailAddress")}</label>
+                    <input
+                      id="settings-email-address"
+                      type="email"
+                      value={emailAddress}
+                      onChange={(e) => { setEmailAddress(e.target.value); setEmailMsg(null); }}
+                      placeholder="you@gmail.com"
+                      spellCheck={false}
+                      autoComplete="off"
+                      className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="settings-email-password" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailAppPassword")}</label>
+                    <div className="relative">
+                      <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>key</span>
+                      <input
+                        id="settings-email-password"
+                        type={emailShowPassword ? "text" : "password"}
+                        value={emailPassword}
+                        onChange={(e) => { setEmailPassword(e.target.value); setEmailMsg(null); }}
+                        placeholder="abcd efgh ijkl mnop"
+                        spellCheck={false}
+                        autoComplete="off"
+                        className="w-full pl-10 pr-10 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                        onKeyDown={(e) => e.key === "Enter" && saveEmail()}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setEmailShowPassword((v) => !v)}
+                        aria-label={emailShowPassword ? t("login.hidePassword") : t("login.showPassword")}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-50 hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer p-0.5"
+                      >
+                        <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{emailShowPassword ? "visibility_off" : "visibility"}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3">
+                    <div className="flex-1 min-w-0">
+                      <label htmlFor="settings-email-host" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailHost")}</label>
+                      <input
+                        id="settings-email-host"
+                        type="text"
+                        value={emailHost}
+                        onChange={(e) => { setEmailHost(e.target.value); setEmailMsg(null); }}
+                        spellCheck={false}
+                        autoComplete="off"
+                        className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 transition-all"
+                      />
+                    </div>
+                    <div className="w-24 shrink-0">
+                      <label htmlFor="settings-email-port" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailPort")}</label>
+                      <input
+                        id="settings-email-port"
+                        type="text"
+                        inputMode="numeric"
+                        value={emailPort}
+                        onChange={(e) => { setEmailPort(e.target.value.replace(/[^0-9]/g, "")); setEmailMsg(null); }}
+                        className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 transition-all"
+                      />
+                    </div>
+                  </div>
+
+                  {/* The three modes, as ONE choice: "answers senders but may
+                      not read them" is not a thing, so two booleans would spell
+                      states that cannot exist. */}
+                  <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                    <div className="text-[11px] font-medium text-white/35 uppercase tracking-wider mb-3">{t("settings.emailMode")}</div>
+                    <div className="space-y-3" role="radiogroup" aria-label={t("settings.emailMode")}>
+                      {EMAIL_MODE_OPTIONS.map((opt) => {
+                        // "Answer senders" is Hermes' native adapter and has no
+                        // OpenClaw equivalent. Shown disabled with the reason
+                        // rather than silently missing, so the panel does not
+                        // look different on the two editions for no visible cause.
+                        const unavailable = opt.id === "answer" && !emailStatus?.inboundSupported;
+                        return (
+                          <label
+                            key={opt.id}
+                            className={`flex items-start gap-3 ${unavailable ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                          >
+                            <input
+                              type="radio"
+                              name="settings-email-mode"
+                              data-testid={`settings-email-mode-${opt.id}`}
+                              value={opt.id}
+                              checked={emailMode === opt.id}
+                              disabled={unavailable}
+                              onChange={() => { setEmailMode(opt.id); setEmailMsg(null); }}
+                              className="mt-0.5 accent-[var(--coral-bright)]"
+                            />
+                            <span className="min-w-0">
+                              <span className="block text-sm text-[var(--text-primary)] font-medium">{t(opt.labelKey)}</span>
+                              <span className="block text-xs text-[var(--text-secondary)] mt-0.5">
+                                {unavailable ? t("settings.emailModeAnswerUnavailable") : t(opt.hintKey)}
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+
+                    {emailMode !== "send" && (
+                      <div className="mt-4 space-y-3">
+                        <div>
+                          <label htmlFor="settings-email-imap" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailImapHost")}</label>
+                          <input
+                            id="settings-email-imap"
+                            type="text"
+                            value={emailImapHost}
+                            onChange={(e) => { setEmailImapHost(e.target.value); setEmailMsg(null); }}
+                            placeholder={GMAIL_IMAP_HOST}
+                            spellCheck={false}
+                            autoComplete="off"
+                            className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 transition-all placeholder-white/15"
+                          />
+                          <p className="text-xs text-[var(--text-muted)] mt-1.5">{t("settings.emailImapHostHint")}</p>
+                        </div>
+
+                        {emailMode === "answer" && (
+                          <div>
+                            <label htmlFor="settings-email-allowed" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailAllowedSenders")}</label>
+                            <input
+                              id="settings-email-allowed"
+                              type="text"
+                              value={emailAllowedSenders}
+                              onChange={(e) => { setEmailAllowedSenders(e.target.value); setEmailMsg(null); }}
+                              placeholder="you@work.com, colleague@work.com"
+                              spellCheck={false}
+                              autoComplete="off"
+                              className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 transition-all placeholder-white/15"
+                            />
+                            <p className="text-xs text-[var(--text-muted)] mt-1.5">{t("settings.emailAllowedSendersHint")}</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Independent of the mode above: that one is about the INBOX,
+                      this one is about what leaves the device. */}
+                  <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                    <label className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        data-testid="settings-email-ask-before-send"
+                        checked={emailAskBeforeSend}
+                        onChange={(e) => { setEmailAskBeforeSend(e.target.checked); setEmailMsg(null); }}
+                        className="mt-0.5 accent-[var(--coral-bright)]"
+                      />
+                      <span className="min-w-0">
+                        <span className="block text-sm text-[var(--text-primary)] font-medium">{t("settings.emailAskBeforeSend")}</span>
+                        <span className="block text-xs text-[var(--text-secondary)] mt-0.5">{t("settings.emailAskBeforeSendHint")}</span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <p className="text-xs text-[var(--text-muted)]">{t("settings.emailSecurityNote")}</p>
+                </div>
+
+                <div className="flex items-center gap-3 mt-5">
+                  <button
+                    type="button"
+                    onClick={saveEmail}
+                    disabled={emailSaving || !emailAddress.trim() || !emailPassword}
+                    className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
+                  >
+                    {emailSaving ? (
+                      <>
+                        <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                        {t("connecting")}
+                      </>
+                    ) : (
+                      <>
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span>
+                        {t("settings.connect")}
+                      </>
+                    )}
+                  </button>
+                  {emailReconfigure && (
+                    <button
+                      type="button"
+                      onClick={() => { setEmailReconfigure(false); setEmailMsg(null); setEmailPassword(""); }}
+                      className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer"
+                    >
+                      {t("cancel")}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ─── WhatsApp ─── */}
+        {activeSection === "whatsapp" && (
+          /* `tabIndex={-1}` is not a tab stop; it is somewhere for focus to
+             land when the status card's Retry replaces itself. */
+          <div className="max-w-xl space-y-5" data-testid="settings-section-whatsapp" ref={whatsappPaneRef} tabIndex={-1}>
+
+            {/* Upstream's ban-risk warning, shown before anything else rather
+                than hidden behind a docs link — it is the single most important
+                thing an owner needs to know before linking a number. */}
+            <div className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.06] p-4">
+              <div className="flex gap-3">
+                <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 20 }} aria-hidden="true">warning</span>
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-amber-200">{t("settings.whatsappRiskTitle")}</div>
+                  <p className="text-xs text-[var(--text-secondary)] mt-1 leading-relaxed">{t("settings.whatsappRiskBody")}</p>
+                </div>
+              </div>
+            </div>
+
+            {waStatus && !waStatus.supported ? (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappUnsupportedTitle")}</div>
+                <p className="text-xs text-[var(--text-secondary)] mt-1.5 leading-relaxed">{t("settings.whatsappUnsupportedBody")}</p>
+              </div>
+            ) : (
+              <>
+                {/* Status */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                  <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-4">{t("settings.status")}</h3>
+                  {waStatus === null ? (
+                    /* Nothing known — but there are two ways to know nothing,
+                       and the pane owes the owner the same distinction the hub
+                       row draws. Pulsing "loading" over a read that has already
+                       come back empty is the row's own bug one screen along:
+                       nothing re-asks while the pane is open, so the pulse would
+                       run for the life of the mount. */
+                    channelState("whatsapp") === "unreachable" ? (
+                      <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5" data-testid="whatsapp-status-unavailable">
+                        <div className="w-10 h-10 rounded-full bg-white/[0.06] flex items-center justify-center shrink-0">
+                          <span className="material-symbols-rounded" style={{ fontSize: 22 }} aria-hidden="true">cloud_off</span>
+                        </div>
+                        <div className="min-w-0 flex-1 text-sm text-[var(--text-primary)] font-medium">
+                          {t("settings.statusUnavailable")}
+                        </div>
+                        <button
+                          type="button"
+                          data-testid="whatsapp-status-retry"
+                          onClick={() => {
+                            // Same reason as the hub's Retry: this card is about
+                            // to be replaced by the skeleton, so move focus to
+                            // the pane before it goes.
+                            whatsappPaneRef.current?.focus();
+                            unsettleChannel("whatsapp");
+                            void refreshWhatsapp();
+                          }}
+                          className="text-xs text-[var(--coral-bright)] shrink-0 px-2 py-1 bg-transparent border-none cursor-pointer hover:underline"
+                        >
+                          {t("settings.retry")}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
+                        <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
+                        <div className="flex-1 space-y-2">
+                          <div className="h-3 w-32 rounded bg-white/[0.08]" />
+                          <div className="h-2 w-20 rounded bg-white/[0.06]" />
+                        </div>
+                      </div>
+                    )
+                  ) : (
+                    <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 border ${
+                      waStatus.receiving
+                        ? "bg-green-500/[0.06] border-green-500/15"
+                        : waStatus.state === "not_configured"
+                          ? "bg-white/[0.03] border-white/[0.06]"
+                          : "bg-amber-500/[0.06] border-amber-500/15"
+                    }`}>
+                      <div className="w-10 h-10 rounded-full bg-white/[0.06] flex items-center justify-center shrink-0">
+                        <span className="material-symbols-rounded" style={{ fontSize: 22 }} aria-hidden="true">
+                          {waStatus.receiving ? "check_circle" : waStatus.state === "not_configured" ? "link_off" : "pending"}
+                        </span>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-sm text-[var(--text-primary)] font-medium">
+                          {waStatus.receiving
+                            ? t("settings.whatsappActive")
+                            : waStatus.state === "paired"
+                              ? t("settings.whatsappPairedIdle")
+                              : waStatus.state === "enabled_not_paired"
+                                ? t("settings.whatsappEnabledNotPaired")
+                                : t("settings.notConfigured")}
+                        </div>
+                        <div className="text-xs text-[var(--text-muted)] mt-0.5">
+                          {waStatus.state === "not_configured"
+                            ? t("settings.whatsappNotConfiguredHint")
+                            : waStatus.receiving
+                              ? t("settings.whatsappActiveHint")
+                              : t("settings.whatsappGatewayStopped")}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {waStatus?.bridgeReady === false && (
+                    <p className="text-xs text-amber-300/90 mt-3 leading-relaxed">{t("settings.whatsappBridgeMissing")}</p>
+                  )}
+                </div>
+
+                {/* Pairing — done here, in the panel, with a real QR */}
+                {waStatus && (
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="whatsapp-pairing">
+                    <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappPairTitle")}</div>
+
+                    {waStatus.paired || waPair?.phase === "paired" ? (
+                      <>
+                        <div className="flex items-center gap-3 mt-3 rounded-xl px-4 py-3 border bg-green-500/[0.06] border-green-500/15">
+                          <span className="material-symbols-rounded text-green-400 shrink-0" style={{ fontSize: 20 }} aria-hidden="true">
+                            check_circle
+                          </span>
+                          <div className="min-w-0">
+                            <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappPairedTitle")}</div>
+                            {waPairedNumber && (
+                              <div className="text-xs text-[var(--text-muted)] mt-0.5 font-mono truncate">
+                                {t("settings.whatsappPairedAs", { number: waPairedNumber })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <p className="text-xs text-[var(--text-secondary)] mt-3 leading-relaxed">{t("settings.whatsappUnpairHint")}</p>
+
+                        {waUnpairConfirm ? (
+                          <div className="flex flex-wrap gap-2 mt-3">
+                            <button
+                              type="button"
+                              onClick={unpairWhatsappPhone}
+                              disabled={waPairBusy}
+                              className="px-4 py-2 rounded-lg bg-red-500/15 border border-red-500/40 text-sm font-semibold text-red-300 cursor-pointer disabled:opacity-50"
+                            >
+                              {t("settings.whatsappUnpairConfirm")}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setWaUnpairConfirm(false)}
+                              disabled={waPairBusy}
+                              className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
+                            >
+                              {t("settings.whatsappUnpairCancel")}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap gap-2 mt-3">
+                            <button
+                              type="button"
+                              onClick={() => setWaUnpairConfirm(true)}
+                              disabled={waPairBusy}
+                              className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
+                            >
+                              {t("settings.whatsappUnpair")}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => startWhatsappPairing(true)}
+                              disabled={waPairBusy}
+                              className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
+                            >
+                              {t("settings.whatsappPairRelink")}
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-xs text-[var(--text-secondary)] mt-1.5 leading-relaxed">{t("settings.whatsappPairIntro")}</p>
+
+                        {/* Not started yet, cancelled, or failed to start */}
+                        {(waPair === null || waPair.phase === "idle" || waPair.phase === "error") && (
+                          <>
+                            {waPair?.phase === "error" && (
+                              <div role="alert" className="mt-3 rounded-xl border border-red-500/25 bg-red-500/[0.06] px-4 py-3">
+                                <div className="text-sm text-red-200 font-medium">{t("settings.whatsappPairFailedTitle")}</div>
+                                <p className="text-xs text-[var(--text-secondary)] mt-1 leading-relaxed">
+                                  {/* Two harnesses, two words for one thing:
+                                      Hermes cannot find its Baileys script,
+                                      OpenClaw has no web-login provider and
+                                      could not install one. Mapping only the
+                                      first left the second saying nothing.
+                                      Hermes' `prepare_failed` stays on the
+                                      generic tail on purpose — "something went
+                                      wrong while starting the bridge" is
+                                      precisely what it means — and so does
+                                      `start_failed`. */}
+                                  {waPair.error === "bridge_missing" || waPair.error === "plugin_missing"
+                                    ? t("settings.whatsappPairErrBridge")
+                                    : waPair.error === "install_failed"
+                                      ? t("settings.whatsappPairErrInstall")
+                                      : t("settings.whatsappPairErrGeneric")}
+                                </p>
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => startWhatsappPairing(false)}
+                              disabled={waPairBusy}
+                              data-testid="whatsapp-pair-start"
+                              className="mt-3 px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
+                            >
+                              {waPair?.phase === "error" ? t("settings.whatsappPairRetry") : t("settings.whatsappPairButton")}
+                            </button>
+                          </>
+                        )}
+
+                        {/* Bridge dependencies downloading, or socket coming up.
+                            Both are "wait a moment", and neither is a failure. */}
+                        {(waPair?.phase === "preparing" || waPair?.phase === "starting") && (
+                          <div className="flex items-center gap-3 mt-3 rounded-xl px-4 py-3 bg-white/[0.03] border border-white/[0.06]" aria-live="polite">
+                            <span className="material-symbols-rounded motion-safe:animate-spin shrink-0" style={{ fontSize: 20 }} aria-hidden="true">
+                              progress_activity
+                            </span>
+                            <div className="min-w-0">
+                              <div className="text-sm text-[var(--text-primary)] font-medium">
+                                {waPair.phase === "preparing" ? t("settings.whatsappPairPreparing") : t("settings.whatsappPairStarting")}
+                              </div>
+                              <div className="text-xs text-[var(--text-muted)] mt-0.5 leading-relaxed">
+                                {waPair.phase === "preparing"
+                                  ? t("settings.whatsappPairPreparingHint")
+                                  : t("settings.whatsappPairStartingHint")}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* The QR itself. White plate + marginSize=4 gives the
+                            quiet zone the spec asks for; without it a phone
+                            camera has to fight the dark panel for the finder
+                            patterns. Level L keeps the module count down —
+                            these payloads run past 200 characters, and at 256px
+                            a denser correction level shrinks each module below
+                            what a phone reads at arm's length. */}
+                        {waPair?.phase === "waiting" && (waPair.qr || waPair.qrImage) && (
+                          <div className="mt-3" aria-live="polite">
+                            <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappPairScanTitle")}</div>
+                            <div className="flex justify-center my-4">
+                              <div className="bg-white rounded-xl p-3" data-testid="whatsapp-qr">
+                                {/* Two harnesses, one card. The Hermes bridge emits the raw
+                                    Baileys payload, so we draw the code ourselves; the
+                                    OpenClaw plugin renders it and hands back a PNG, so
+                                    there is nothing to draw and re-encoding it would only
+                                    lose fidelity. `qr` wins when both are somehow present:
+                                    a vector at any zoom beats a fixed bitmap. */}
+                                {waPair.qr ? (
+                                  <QRCodeSVG
+                                    value={waPair.qr}
+                                    size={256}
+                                    level="L"
+                                    marginSize={4}
+                                    bgColor="#ffffff"
+                                    fgColor="#000000"
+                                    title={t("settings.whatsappPairQrLabel")}
+                                  />
+                                ) : (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img
+                                    src={waPair.qrImage as string}
+                                    alt={t("settings.whatsappPairQrLabel")}
+                                    width={256}
+                                    height={256}
+                                    className="block"
+                                  />
+                                )}
+                              </div>
+                            </div>
+                            <p className="text-xs text-[var(--text-secondary)] leading-relaxed">{t("settings.whatsappPairScanHint")}</p>
+                            <p className="text-xs text-[var(--text-muted)] mt-1.5 leading-relaxed">{t("settings.whatsappPairNoRush")}</p>
+                            <button
+                              type="button"
+                              onClick={cancelWhatsappPairing}
+                              disabled={waPairBusy}
+                              className="mt-3 px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
+                            >
+                              {t("settings.whatsappPairCancel")}
+                            </button>
+                          </div>
+                        )}
+
+                        {waPair?.phase === "scanned" && (
+                          <div className="flex items-center gap-3 mt-3 rounded-xl px-4 py-3 bg-green-500/[0.06] border border-green-500/15" aria-live="polite">
+                            <span className="material-symbols-rounded motion-safe:animate-spin shrink-0 text-green-400" style={{ fontSize: 20 }} aria-hidden="true">
+                              progress_activity
+                            </span>
+                            <div className="min-w-0">
+                              <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappPairScanned")}</div>
+                              <div className="text-xs text-[var(--text-muted)] mt-0.5 leading-relaxed">{t("settings.whatsappPairScannedHint")}</div>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {/* The old terminal route, kept because it still works and
+                        is the only path left if the bridge cannot start — but
+                        collapsed, because it is no longer how this is done. */}
+                    <div className="mt-4 pt-3 border-t border-white/[0.06]">
+                      <button
+                        type="button"
+                        onClick={() => setWaAdvanced((v) => !v)}
+                        aria-expanded={waAdvanced}
+                        className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none p-0 cursor-pointer"
+                      >
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
+                          {waAdvanced ? "expand_less" : "expand_more"}
+                        </span>
+                        {t("settings.whatsappAdvancedToggle")}
+                      </button>
+                      {waAdvanced && (
+                        <ol className="mt-2.5 space-y-2 text-xs text-[var(--text-secondary)] list-decimal list-inside">
+                          <li>{t("settings.whatsappPairStep1")}</li>
+                          <li>
+                            {t("settings.whatsappPairStep2")}{" "}
+                            <code className="px-1.5 py-0.5 rounded bg-white/[0.08] text-[var(--text-primary)] font-mono">hermes whatsapp</code>
+                          </li>
+                          <li>{t("settings.whatsappPairStep3")}</li>
+                        </ol>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Everything below edits the channel, so it may only be
+                    offered over a channel that was actually read — the same
+                    gate the pairing card above already carries. A live "Add
+                    number", mode picker and Enable switch under a "Could not
+                    check" card is the hub-versus-pane contradiction again,
+                    one card down. */}
+                {waStatus && (<>
+                {/* Allowlist — the security-critical field */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                  <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">{t("settings.whatsappAllowedTitle")}</h3>
+                  <p className="text-xs text-[var(--text-secondary)] leading-relaxed">{t("settings.whatsappAllowedHint")}</p>
+                  {waStatus?.allowAllUsers && (
+                    <p className="text-xs text-amber-300/90 mt-2 leading-relaxed">{t("settings.whatsappAllowAllWarning")}</p>
+                  )}
+                  <ul className="mt-3 space-y-1.5 list-none p-0">
+                    {(waStatus?.allowedUsers ?? []).map((number) => (
+                      <li key={number} className="flex items-center justify-between gap-3 bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2">
+                        <span className="text-sm text-[var(--text-primary)] font-mono truncate">+{number}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeWhatsappNumber(number)}
+                          disabled={waSaving}
+                          aria-label={t("settings.whatsappRemoveNumber")}
+                          className="text-xs text-[var(--text-muted)] hover:text-red-300 bg-transparent border-none cursor-pointer disabled:opacity-50"
+                        >
+                          {t("settings.whatsappRemoveNumber")}
+                        </button>
+                      </li>
+                    ))}
+                    {waStatus && (waStatus.allowedUsers ?? []).length === 0 && (
+                      <li className="text-xs text-[var(--text-muted)]">{t("settings.whatsappNoNumbers")}</li>
+                    )}
+                  </ul>
+                  <div className="flex gap-2 mt-3">
+                    <input
+                      type="tel"
+                      inputMode="tel"
+                      value={waNumber}
+                      onChange={(e) => setWaNumber(e.target.value)}
+                      placeholder={t("settings.whatsappNumberPlaceholder")}
+                      aria-label={t("settings.whatsappNumberPlaceholder")}
+                      className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/60"
+                    />
+                    <button
+                      type="button"
+                      onClick={addWhatsappNumber}
+                      disabled={waSaving || !waNumber.trim()}
+                      className="px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
+                    >
+                      {t("settings.whatsappAddNumber")}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Mode */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                  <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-3">{t("settings.whatsappModeTitle")}</h3>
+                  <div className="space-y-2">
+                    {(["bot", "self-chat"] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => saveWhatsapp({ mode })}
+                        disabled={waSaving}
+                        aria-pressed={waStatus?.mode === mode}
+                        className={`flex w-full items-start gap-3 rounded-xl px-4 py-3 text-left border cursor-pointer disabled:opacity-50 ${
+                          waStatus?.mode === mode
+                            ? "bg-[var(--coral-bright)]/12 border-[var(--coral-bright)]/40"
+                            : "bg-white/[0.03] border-white/[0.06]"
+                        }`}
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-sm text-[var(--text-primary)] font-medium">
+                            {mode === "bot" ? t("settings.whatsappModeBot") : t("settings.whatsappModeSelf")}
+                          </span>
+                          <span className="block text-xs text-[var(--text-secondary)] mt-0.5">
+                            {mode === "bot" ? t("settings.whatsappModeBotHint") : t("settings.whatsappModeSelfHint")}
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Enable — deliberately impossible until a session exists */}
+                <div className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] px-5 py-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappEnable")}</div>
+                    <p className="text-xs text-[var(--text-secondary)] mt-0.5 leading-relaxed">
+                      {waStatus?.paired ? t("settings.whatsappEnableHint") : t("settings.whatsappEnableBlocked")}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-label={t("settings.whatsappEnable")}
+                    aria-checked={!!waStatus?.enabled}
+                    disabled={waSaving || waStatus === null || (!waStatus.paired && !waStatus.enabled)}
+                    onClick={() => saveWhatsapp({ enabled: !waStatus?.enabled })}
+                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 ${
+                      waStatus?.enabled ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+                    }`}
+                  >
+                    <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${waStatus?.enabled ? "translate-x-6" : "translate-x-1"}`} />
+                  </button>
+                </div>
+                </>)}
+
+                {waMsg && (
+                  <div
+                    role="status"
+                    className={`rounded-xl px-4 py-3 text-sm ${
+                      waMsg.type === "success"
+                        ? "bg-green-500/10 border border-green-500/20 text-green-300"
+                        : "bg-red-500/10 border border-red-500/20 text-red-300"
+                    }`}
+                  >
+                    {waMsg.message}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ─── Discord ─── */}
+        {activeSection === "discord" && (
+          <div className="max-w-xl space-y-5">
+
+            {/* Status card */}
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-[#5865F2]" style={{ fontSize: 18 }} aria-hidden="true">forum</span>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</h3>
+              </div>
+              {dcConfigured === null ? (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
+                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
+                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
+                  </div>
+                </div>
+              ) : dcConfigured && !dcReconfigure ? (
+                <div data-testid="discord-status-card" data-state={dcState ?? "unknown"}>
+                  <div
+                    className={`flex items-center gap-4 rounded-xl px-4 py-3.5 mb-4 border ${
+                      dcStateView.tone === "live"
+                        ? "bg-green-500/[0.06] border-green-500/15"
+                        : dcStateView.tone === "warn"
+                          ? "bg-amber-500/[0.06] border-amber-500/15"
+                          : "bg-white/[0.03] border-white/[0.06]"
+                    }`}
+                  >
+                    <div className="w-10 h-10 rounded-full bg-white/[0.06] flex items-center justify-center shrink-0">
+                      <span
+                        className={`material-symbols-rounded ${
+                          dcStateView.tone === "live"
+                            ? "text-green-400"
+                            : dcStateView.tone === "warn"
+                              ? "text-amber-400"
+                              : "text-[var(--text-muted)] opacity-60"
+                        }`}
+                        style={{ fontSize: 22 }}
+                        aria-hidden="true"
+                      >
+                        {dcStateView.icon}
+                      </span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-[var(--text-primary)] font-medium">
+                        {dcStateView.title}
+                      </div>
+                      {/* The live dot is bound to the one state that earns it.
+                          It used to show whenever a token was stored, which is
+                          how a bot that could not connect at all read as
+                          "Discord channel active". */}
+                      {dcState === "connected" ? (
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                          <span className="text-xs text-green-400/80">{t("settings.discordActive")}</span>
+                        </div>
+                      ) : dcStateView.hint ? (
+                        <div className="text-xs text-[var(--text-secondary)] mt-0.5 leading-relaxed">
+                          {dcStateView.hint}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                  {dcTokenRejected && (
+                    <div className="mb-4">
+                      <StatusMessage type="error" message={t("settings.discordTokenRejected")} />
+                    </div>
+                  )}
+                  {dcAllowAllUsers && (
+                    <p className="text-xs text-amber-300/90 mb-4 leading-relaxed">
+                      {t("settings.discordAllowAllWarning")}
+                    </p>
+                  )}
+                  {dcStatus && !dcReconfigure && (
+                    <div className="mb-4"><StatusMessage type={dcStatus.type} message={dcStatus.message} /></div>
+                  )}
+                  <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                    <button
+                      onClick={() => { setDcReconfigure(true); setDcStatus(null); }}
+                      className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
+                    >
+                      {t("settings.reconfigureBot")}
+                    </button>
+                    {dcInviteUrl && !dcNeedsInvite && (
+                      <a
+                        href={dcInviteUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        data-testid="discord-invite-link"
+                        // Opened from here (a reload since the save, or a second
+                        // server): watch for the join the same way, so the new
+                        // server is set up without another save.
+                        onClick={() => { setDcStatus(null); setDcNeedsInvite("another"); }}
+                        className="text-sm text-[#98a2ff] hover:text-[#b8bfff] underline underline-offset-2"
+                      >
+                        {t("settings.discordInviteOpen")}
+                      </a>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
+                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50" style={{ fontSize: 22 }}>link_off</span>
+                  </div>
+                  <div>
+                    <div className="text-sm text-[var(--text-muted)]">{t("settings.notConfigured")}</div>
+                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">{t("settings.discordSetupBelow")}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Privileged intents — the checklist that fixes a silent bot.
+                Shown either because the save was refused by the preflight, or
+                because the gateway is already reporting that failure. Both are
+                the same problem, so both get the same four steps. */}
+            {(dcIntentsMissing !== null || dcState === "intents-missing") && (
+              <div
+                className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.06] p-5"
+                data-testid="discord-intents-fix"
+              >
+                <div className="flex gap-3 mb-3">
+                  <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 20 }} aria-hidden="true">warning</span>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-amber-200">{t("settings.discordIntentsFixTitle")}</div>
+                    <p className="text-xs text-[var(--text-secondary)] mt-1 leading-relaxed">
+                      {t("settings.discordStateIntentsMissingHint")}
+                    </p>
+                  </div>
+                </div>
+                <ol className="ml-0 pl-5 leading-[1.9] text-sm text-white/70 list-decimal">
+                  <li>
+                    {t("settings.discordIntentsFixStep1")}{" "}
+                    <a
+                      href="https://discord.com/developers/applications"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[var(--coral-bright)] hover:text-orange-300 underline underline-offset-2"
+                    >
+                      discord.com/developers
+                    </a>
+                  </li>
+                  <li>{t("settings.discordIntentsFixStep2")}</li>
+                  <li>{t("settings.discordIntentsFixStep3")}</li>
+                  <li>{t("settings.discordIntentsFixStep4")}</li>
+                </ol>
+                {dcIntentsMissing !== null && dcIntentsMissing.length > 0 && (
+                  <ul className="mt-3 space-y-1 list-none p-0">
+                    {dcIntentsMissing.map((intent) => (
+                      <li key={intent} className="text-xs font-mono text-amber-200/90">{intent}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {/* The one step between a saved token and a working bot: add it to
+                a server. The panel finishes the setup on its own once it has
+                joined (see the `{sync:true}` poll above). */}
+            {dcConfigured && !dcReconfigure && dcNeedsInvite && (
+              <div
+                className="rounded-2xl border border-[#5865F2]/30 bg-[#5865F2]/[0.06] p-5"
+                data-testid="discord-invite"
+              >
+                <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
+                  {t("settings.discordInviteTitle")}
+                </h3>
+                <p className="text-xs text-[var(--text-secondary)] leading-relaxed">{t("settings.discordInviteHint")}</p>
+                {dcInviteUrl && (
+                  <a
+                    href={dcInviteUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid="discord-invite-open"
+                    className="flex items-center justify-center gap-2 w-full px-4 py-3 mt-3 bg-[#5865F2]/15 hover:bg-[#5865F2]/25 border border-[#5865F2]/40 hover:border-[#5865F2]/60 rounded-lg text-sm font-semibold text-[#98a2ff] transition-colors no-underline"
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">open_in_new</span>
+                    {t("settings.discordInviteOpen")}
+                  </a>
+                )}
+                <div className="flex items-center gap-2 mt-3 text-xs text-[var(--text-muted)]" role="status">
+                  <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 14 }} aria-hidden="true">progress_activity</span>
+                  {t("settings.discordInviteWaiting")}
+                </div>
+                <p className="text-[11px] text-[var(--text-muted)] mt-2 mb-0">{t("settings.discordPermissionsNote")}</p>
+              </div>
+            )}
+
+            {/* Who may talk to the assistant.
+                A connected Discord bot denies every message until one of the
+                DISCORD_ALLOWED_* variables exists, and says so only in the
+                gateway log. This is the panel's answer to that: the members the
+                bot can actually see, with the server owner ticked by default. */}
+            {dcConfigured && !dcReconfigure && dcAllowlistSupported && (
+              <div
+                className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5"
+                data-testid="discord-members"
+              >
+                <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
+                  {t("settings.discordMembersTitle")}
+                </h3>
+                <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+                  {t("settings.discordMembersHint")}
+                </p>
+
+                {dcMembersUnavailable && (
+                  <p className="text-xs text-amber-300/90 mt-2 leading-relaxed">
+                    {t("settings.discordMembersUnavailable")}
+                  </p>
+                )}
+
+                <ul className="mt-3 space-y-1.5 list-none p-0">
+                  {dcMembers.map((member) => {
+                    const checked = dcSelected.includes(member.id);
+                    const label = member.displayName || member.username || member.id;
+                    return (
+                      <li key={member.id}>
+                        <label className="flex items-center gap-3 bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleDiscordMember(member.id)}
+                            disabled={dcMembersSaving}
+                            className="shrink-0 accent-[var(--coral-bright)]"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-sm text-[var(--text-primary)] truncate">{label}</span>
+                            <span className="block text-xs text-[var(--text-muted)] truncate">
+                              {member.isOwner ? t("settings.discordMembersOwner") : member.guildName}
+                            </span>
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                  {dcMembers.length === 0 && (
+                    <li className="text-xs text-[var(--text-muted)]">{t("settings.discordMembersNone")}</li>
+                  )}
+                </ul>
+
+                {/* The never-empty invariant, made visible. The save is refused
+                    server-side too — this is so nobody has to click to find
+                    out. */}
+                {dcMembers.length > 0 && dcSelected.length === 0 && (
+                  <p className="text-xs text-amber-300/90 mt-3 leading-relaxed" data-testid="discord-members-empty">
+                    {t("settings.discordMembersEmptyWarning")}
+                  </p>
+                )}
+
+                {dcMembers.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={saveDiscordMembers}
+                    disabled={dcMembersSaving || dcSelected.length === 0}
+                    className="mt-3 px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
+                  >
+                    {t("settings.discordMembersSave")}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Setup card — shown when not configured or reconfiguring */}
+            {(dcConfigured === false || dcReconfigure) && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+                    {dcReconfigure ? t("settings.reconfigureBot") : t("settings.discordGuideTitle")}
+                  </h3>
+                </div>
+
+                <ol className="ml-0 pl-5 leading-[1.9] text-sm text-white/70 list-decimal">
+                  <li>
+                    {t("settings.discordStep1")}{" "}
+                    <a
+                      href="https://discord.com/developers/applications"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[var(--coral-bright)] hover:text-orange-300 font-semibold no-underline"
+                    >
+                      discord.com/developers
+                    </a>
+                  </li>
+                  <li>{t("settings.discordStep2")}</li>
+                  <li>{t("settings.discordStep3")}</li>
+                  {/* Public Bot is on by default in the Developer Portal. Left on,
+                      anyone with the client id can add the bot to their own
+                      server — and a server's owner is given access on join. */}
+                  <li>{t("settings.discordStepPublicBot")}</li>
+                  <li>{t("settings.discordStep4")}</li>
+                </ol>
+
+                {/* The single most common Discord support ticket — a checklist
+                    item, not a docs link. */}
+                <div className="flex items-start gap-2 mt-4 px-3 py-2.5 rounded-lg bg-amber-500/[0.08] border border-amber-500/20">
+                  <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
+                  <p className="text-xs text-amber-200/90 m-0">{t("settings.discordIntentsWarning")}</p>
+                </div>
+
+                {/* Token input */}
+                <div className="mt-5">
+                  <label htmlFor="settings-dc-token" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.botToken")}</label>
+                  <div className="relative">
+                    <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>key</span>
+                    <input
+                      id="settings-dc-token"
+                      type={dcShowToken ? "text" : "password"}
+                      value={dcToken}
+                      onChange={(e) => { setDcToken(e.target.value); setDcStatus(null); }}
+                      placeholder="••••••••••••••••••••••••"
+                      spellCheck={false}
+                      autoComplete="off"
+                      className="w-full pl-10 pr-10 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                      onKeyDown={e => e.key === "Enter" && saveDiscord()}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setDcShowToken(v => !v)}
+                      aria-label={t("settings.botToken")}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-50 hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer p-0.5"
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{dcShowToken ? "visibility_off" : "visibility"}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {dcStatus && <div className="mt-3"><StatusMessage type={dcStatus.type} message={dcStatus.message} /></div>}
+
+                <div className="flex items-center gap-3 mt-5">
+                  <button
+                    onClick={saveDiscord}
+                    disabled={dcSaving || !dcToken.trim()}
+                    className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
+                  >
+                    {dcSaving ? (
+                      <>
+                        <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                        {t("settings.discordChecking")}
+                      </>
+                    ) : (
+                      <>
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span>
+                        {t("settings.connect")}
+                      </>
+                    )}
+                  </button>
+                  {dcReconfigure && (
+                    <button
+                      onClick={() => { setDcReconfigure(false); setDcStatus(null); setDcToken(""); }}
+                      className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer"
+                    >
+                      {t("cancel")}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+          </div>
+        )}
+
+        {/* ─── Harness ─── */}
+        {activeSection === "harness" && (
+          <div className="max-w-xl space-y-5" data-testid="settings-harness-page">
+            {/* The engine that runs the agent, and what it does WITHOUT being
+                asked (TASK-609) — the only place on the box that says those
+                jobs exist at all. Both moved here from the top of System,
+                where their switches pushed the device's own figures off the
+                screen. */}
+            <HarnessPicker />
+            {/* The assistant's device tools — the ClawBox MCP server's on/off
+                switch (owner's request, 2026-09-15). Beside the harness it
+                runs on, because that is the thing it is a capability OF. */}
+            <ClawboxMcpPanel />
+            <BackgroundJobsPanel />
+
+            {/* Desktop environment and Performance mode, moved here from
+                System at the owner's request (2026-09-09): set once and then
+                left alone, like the harness picker and the background jobs.
+                The box's password went back to System on 2026-09-16 — it is
+                about the box, not the assistant. The state, the handlers and
+                the confirmation dialog are where they were, so the mobile and
+                desktop layouts still share one dialog and one form. */}
+            <SystemProfilePanel />
+          </div>
+        )}
+
         {/* ─── System ─── */}
         {activeSection === "system" && (
           <div className="max-w-xl space-y-5">
-
-            <HarnessPicker />
 
             {stats ? (
               <>
@@ -2763,7 +6038,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>computer</span>
-                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.device")}</label>
+                    <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.device")}</h3>
                     <span className="ml-auto text-xs font-mono text-[var(--coral-bright)]/70 bg-orange-500/10 px-2 py-0.5 rounded-md">{stats.overview.uptime}</span>
                   </div>
                   <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
@@ -2778,7 +6053,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>speed</span>
-                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.resources")}</label>
+                    <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.resources")}</h3>
                   </div>
 
                   {/* CPU bar */}
@@ -2792,7 +6067,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                     <div className="flex items-center justify-between mt-1.5">
                       <span className="text-[10px] text-[var(--text-muted)] opacity-50 font-mono truncate max-w-[60%]">{stats.cpu.model}</span>
-                      <span className="text-[10px] text-[var(--text-muted)] opacity-50">{stats.cpu.cores} {t("settings.cores")} &middot; Load {stats.cpu.loadAvg[0]}</span>
+                      <span className="text-[10px] text-[var(--text-muted)] opacity-50">{stats.cpu.cores} {t("settings.cores")} &middot; {t("settings.load")} {formatLoad(stats.cpu.loadAvg[0], locale)}</span>
                     </div>
                   </div>
 
@@ -2800,12 +6075,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <div className="mb-4">
                     <div className="flex items-center justify-between mb-1.5">
                       <span className="text-xs text-[var(--text-muted)]">{t("settings.memory")}</span>
-                      <span className="text-xs font-mono text-[var(--text-muted)]">{formatBytes(stats.memory.used)} / {formatBytes(stats.memory.total)}</span>
+                      <span className="text-xs font-mono text-[var(--text-muted)]">{formatBytes(stats.memory.used, locale)} / {formatBytes(stats.memory.total, locale)}</span>
                     </div>
                     <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
                       <div className="h-full rounded-full transition-all duration-700" style={{ width: `${stats.memory.usedPercent}%`, backgroundColor: barColor(stats.memory.usedPercent) }} />
                     </div>
-                    <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{stats.memory.usedPercent}% &middot; {formatBytes(stats.memory.free)} free</div>
+                    <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{stats.memory.usedPercent}% &middot; {t("settings.freeAmount", { amount: formatBytes(stats.memory.free, locale) })}</div>
                   </div>
 
                   {/* Swap bar (if any) */}
@@ -2813,12 +6088,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <div>
                       <div className="flex items-center justify-between mb-1.5">
                         <span className="text-xs text-[var(--text-muted)]">{t("settings.swap")}</span>
-                        <span className="text-xs font-mono text-[var(--text-muted)]">{formatBytes(stats.memory.swap.used)} / {formatBytes(stats.memory.swap.total)}</span>
+                        <span className="text-xs font-mono text-[var(--text-muted)]">{formatBytes(stats.memory.swap.used, locale)} / {formatBytes(stats.memory.swap.total, locale)}</span>
                       </div>
                       <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
                         <div className="h-full rounded-full transition-all duration-700" style={{ width: `${stats.memory.swap.percent}%`, backgroundColor: "#a855f7" }} />
                       </div>
-                      <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{stats.memory.swap.percent}% used</div>
+                      <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{t("settings.percentUsed", { percent: stats.memory.swap.percent })}</div>
                     </div>
                   )}
 
@@ -2841,11 +6116,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                     <div className="flex items-center gap-2 mb-4">
                       <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>thermostat</span>
-                      <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.temperature")}</label>
+                      <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.temperature")}</h3>
                     </div>
                     <div className="flex items-end gap-3">
                       <span className="text-3xl font-mono font-bold" style={{ color: stats.temperature.value > 80 ? "#ef4444" : stats.temperature.value > 60 ? "#f97316" : "#22d3ee" }}>
-                        {stats.temperature.display}
+                        {localeFixed(stats.temperature.value, 1, locale)}°C
                       </span>
                       <span className="text-xs text-[var(--text-muted)] opacity-50 mb-1.5">
                         {stats.temperature.value > 80 ? t("settings.critical") : stats.temperature.value > 60 ? t("settings.warm") : t("settings.normal")}
@@ -2870,58 +6145,202 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>hard_drive</span>
-                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.storage")}</label>
+                    <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.storage")}</h3>
                   </div>
                   <div className="space-y-3">
                     {stats.storage.filter(m => m.mountpoint !== "/boot/efi").map(m => (
                       <div key={m.mountpoint}>
                         <div className="flex items-center justify-between mb-1.5">
                           <span className="text-xs text-[var(--text-secondary)] font-mono">{m.mountpoint}</span>
-                          <span className="text-xs text-white/35 font-mono">{m.used} / {m.size}</span>
+                          <span className="text-xs text-white/35 font-mono">{diskFigure(m.used, locale)} / {diskFigure(m.size, locale)}</span>
                         </div>
                         <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
                           <div className="h-full rounded-full transition-all duration-700" style={{ width: `${m.usePercent}%`, backgroundColor: barColor(m.usePercent) }} />
                         </div>
-                        <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{m.usePercent}% &middot; {m.avail} free</div>
+                        <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{m.usePercent}% &middot; {t("settings.freeAmount", { amount: diskFigure(m.avail, locale) })}</div>
                       </div>
                     ))}
                   </div>
                 </div>
 
+                {/* Per core, and the busiest processes — the two things an
+                    owner opens a system page to see that a single aggregate
+                    bar cannot tell them. They live here rather than in a
+                    second app because the password card and the desktop
+                    switches left (2026-09-09) and this is what System is for.
+
+                    Both degrade rather than lie: a server that predates the
+                    per-core reading sends no `perCore`, and one with no reading
+                    to give sends an empty list — it could not read /proc/stat,
+                    or has nothing to diff it against yet, which is every first
+                    request after a restart. Either way the row is absent until
+                    the next 3 s poll, never a row of zeros claiming an idle
+                    machine. */}
+                {/* The CARD is unconditional now, and only its BODY waits on
+                    data: the button has to exist before there is anything to
+                    show, or a collapsed block — which asks the server for no
+                    per-core reading at all — would have no way back open. */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-per-core">
+                  <div className="flex items-center gap-2">
+                    <SettingsDisclosureButton
+                      open={perCoreOpen}
+                      onToggle={() => setPerCoreOpen(open => !open)}
+                      label={t("settings.perCore")}
+                      controls="settings-per-core-panel"
+                      icon="view_module"
+                      testId="settings-per-core-toggle"
+                    />
+                    {/* The load average belongs to this card, so it comes and
+                        goes with it rather than sitting over a closed one. */}
+                    {perCoreOpen && (
+                      <span className="ml-auto text-[10px] font-mono text-[var(--text-muted)] opacity-60">
+                        {t("settings.load")} {stats.cpu.loadAvg.map(v => formatLoad(v, locale)).join(" · ")}
+                      </span>
+                    )}
+                  </div>
+                  {perCoreOpen && stats.cpu.perCore && stats.cpu.perCore.length > 0 && (
+                    <div id="settings-per-core-panel" className="grid grid-cols-2 gap-x-4 gap-y-2.5 mt-4">
+                      {stats.cpu.perCore.map((busy, n) => (
+                        <div key={n} className="flex items-center gap-2">
+                          <span className="text-[10px] font-mono text-[var(--text-muted)] opacity-50 w-6 shrink-0">{n}</span>
+                          <div className="flex-1 h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                            <div className="h-full rounded-full transition-all duration-700" style={{ width: `${busy}%`, backgroundColor: barColor(busy) }} />
+                          </div>
+                          <span className="text-[10px] font-mono tabular-nums w-9 text-right shrink-0" style={{ color: barColor(busy) }}>{busy}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {/* Open, but the reading is not in yet. The first poll after
+                      the button is pressed has nothing to diff `/proc/stat`
+                      against — the route stopped sampling while this was shut —
+                      so it answers empty and the real bars arrive on the next
+                      3 s tick. Say that, rather than leaving a card that looks
+                      broken or a row of zeros claiming an idle box. */}
+                  {perCoreOpen && !(stats.cpu.perCore && stats.cpu.perCore.length > 0) && (
+                    <p id="settings-per-core-panel" className="mt-4 text-[11px] text-[var(--text-muted)]" role="status">
+                      {t("settings.checking")}
+                    </p>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-processes">
+                  <div className="flex items-center gap-2">
+                    <SettingsDisclosureButton
+                      open={processesOpen}
+                      onToggle={() => setProcessesOpen(open => !open)}
+                      label={t("settings.busiestProcesses")}
+                      controls="settings-processes-panel"
+                      icon="list_alt"
+                      testId="settings-processes-toggle"
+                    />
+                    {/* The ordering matters as much as the list: CPU is what a
+                        slow desktop looks like, memory is what an OOM-killed
+                        update looks like. The toggle is only offered when the
+                        server actually sent the second ordering — and only
+                        while the table it reorders is on screen. */}
+                    {processesOpen && stats.processesByMemory && (
+                      <div className="ml-auto flex rounded-lg bg-white/[0.06] p-0.5" role="group">
+                        {(["cpu", "mem"] as const).map(by => (
+                          <button
+                            key={by}
+                            type="button"
+                            onClick={() => setProcessOrder(by)}
+                            aria-pressed={processOrder === by}
+                            className={`px-2.5 py-1 text-[10px] rounded-md border-none cursor-pointer transition-colors ${processOrder === by ? "bg-white/[0.12] text-[var(--text-primary)]" : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]"}`}
+                          >
+                            {by === "cpu" ? t("settings.byCpu") : t("settings.byMemory")}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  {processesOpen && processRows.length === 0 && (
+                    <p id="settings-processes-panel" className="mt-4 text-[11px] text-[var(--text-muted)]" role="status">
+                      {t("settings.checking")}
+                    </p>
+                  )}
+                  {processesOpen && processRows.length > 0 && (
+                    <div id="settings-processes-panel" className="mt-4">
+                    {/* A real table, because the figures are meaningless
+                        without their column: two grids of divs read out as
+                        "1201 llama-server 42.5 3.1", with nothing saying which
+                        number is CPU and which is memory. The percent sign is
+                        in the header rather than on every cell so the columns
+                        stay narrow and the unit is still said once. */}
+                    {/* Named, because the headers say what a CELL is and
+                        nothing says what the TABLE is: a screen-reader user
+                        landing on it hears a grid of numbers before they know
+                        what they are looking at. */}
+                    <table className="w-full table-fixed border-collapse" aria-label={t("settings.busiestProcesses")}>
+                      <thead>
+                        <tr className="text-[10px] uppercase tracking-widest text-[var(--text-muted)] opacity-50">
+                          <th scope="col" className="w-12 text-left font-semibold pb-2">{t("settings.pid")}</th>
+                          <th scope="col" className="text-left font-semibold pb-2">{t("settings.busiestProcesses")}</th>
+                          <th scope="col" className="w-14 text-right font-semibold pb-2">{t("settings.cpu")} %</th>
+                          <th scope="col" className="w-14 text-right font-semibold pb-2">{t("settings.memory")} %</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {processRows.map(proc => (
+                          <tr key={`${proc.pid}-${proc.command}`}>
+                            <td className="text-[11px] font-mono text-[var(--text-muted)] opacity-60 tabular-nums py-0.5 pr-3">{proc.pid}</td>
+                            <td className="text-xs font-mono text-[var(--text-secondary)] truncate py-0.5 pr-3" title={proc.command}>{proc.command}</td>
+                            {/* One decimal, which is what `ps` reports and what
+                                fits the column; `formatLoad` is the load
+                                average's two and would read as false precision
+                                on a percentage. */}
+                            <td className="text-[11px] font-mono tabular-nums text-right py-0.5" style={{ color: barColor(proc.cpu) }}>{localeFixed(proc.cpu, 1, locale)}</td>
+                            <td className="text-[11px] font-mono tabular-nums text-right py-0.5 pl-3" style={{ color: barColor(proc.mem) }}>{localeFixed(proc.mem, 1, locale)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    </div>
+                  )}
+                </div>
+
               </>
             ) : (
               <div className="flex items-center justify-center py-12 text-[var(--text-muted)] opacity-60">
-                <div className="w-6 h-6 border-2 border-white/20 rounded-full animate-spin mr-3" style={{ borderTopColor: "#fe6e00" }} />
+                <div className="w-6 h-6 border-2 border-white/20 rounded-full motion-safe:animate-spin mr-3" style={{ borderTopColor: "#fe6e00" }} />
                 <span className="text-sm">{t("settings.loadingStats")}</span>
               </div>
             )}
 
-            {/* Password card — used for both web sign-in and SSH/sudo (PAM-backed) */}
+
+            {/* Password card — used for both web sign-in and SSH/sudo (PAM-backed).
+                It is about the box, not the assistant, so it lives with the box's
+                figures (owner, 2026-09-16); Desktop & power stays on Harness.
+                Rendered outside the stats ternary: a box whose stats call fails
+                must still let the owner change its password. */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-2">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>key</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Password</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.security.passwordLabel")}</h3>
               </div>
+              {/* Split around the font-mono span: markup can't live in a catalogue
+                  value, and `sudo` is a command name that must not be translated. */}
               <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-3 leading-relaxed">
-                Used for web sign-in, SSH, and <span className="font-mono">sudo</span>. Updating it here changes all three.
+                {t("settings.security.passwordHintPrefix")} <span className="font-mono">sudo</span>{t("settings.security.passwordHintSuffix")}
               </p>
               <div className="space-y-2">
                 <div className="flex items-stretch gap-2">
                   <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                    <label htmlFor="sys-current-password" className="sr-only">Current password</label>
+                    <label htmlFor="sys-current-password" className="sr-only">{t("settings.security.currentPassword")}</label>
                     <input
                       id="sys-current-password"
                       type={sysPasswordShow ? "text" : "password"}
                       value={sysCurrentPassword}
                       onChange={e => { setSysCurrentPassword(e.target.value); if (sysCurrentVerified) setSysCurrentVerified(false); setSysPasswordStatus(null); }}
                       onKeyDown={e => { if (e.key === "Enter" && !sysCurrentVerified) { e.preventDefault(); void verifyCurrentPassword(); } }}
-                      placeholder="Current password"
+                      placeholder={t("settings.security.currentPassword")}
                       maxLength={128}
                       autoComplete="current-password"
                       disabled={sysCurrentVerified}
                       className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20 disabled:opacity-60"
                     />
-                    <button type="button" onClick={() => setSysPasswordShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysPasswordShow ? "Hide current password" : "Show current password"}>
+                    <button type="button" onClick={() => setSysPasswordShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysPasswordShow ? t("settings.security.hideCurrentPassword") : t("settings.security.showCurrentPassword")}>
                       <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysPasswordShow ? "visibility_off" : "visibility"}</span>
                     </button>
                   </div>
@@ -2930,11 +6349,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       type="button"
                       onClick={resetSysPasswordForm}
                       className="px-3 py-2 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors flex items-center gap-1"
-                      title="Clear and re-enter current password"
-                      aria-label="Clear and re-enter current password"
+                      title={t("settings.security.clearAndReenter")}
+                      aria-label={t("settings.security.clearAndReenter")}
                     >
                       <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }}>check_circle</span>
-                      Re-enter
+                      {t("settings.security.reenter")}
                     </button>
                   ) : (
                     <button
@@ -2943,7 +6362,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       disabled={sysVerifying || !sysCurrentPassword}
                       className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
                     >
-                      {sysVerifying ? "Checking…" : "Verify"}
+                      {sysVerifying ? t("settings.security.checking") : t("settings.security.verify")}
                     </button>
                   )}
                 </div>
@@ -2951,40 +6370,40 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 {sysCurrentVerified && (
                   <>
                     <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                      <label htmlFor="sys-new-password" className="sr-only">New password</label>
+                      <label htmlFor="sys-new-password" className="sr-only">{t("settings.security.newPassword")}</label>
                       <input
                         id="sys-new-password"
                         type={sysNewShow ? "text" : "password"}
                         value={sysPassword}
                         onChange={e => { setSysPassword(e.target.value); setSysPasswordStatus(null); }}
-                        placeholder="New password (8+ characters)"
+                        placeholder={t("settings.security.newPasswordPlaceholder")}
                         maxLength={128}
                         autoComplete="new-password"
                         autoFocus
                         className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
                       />
-                      <button type="button" onClick={() => setSysNewShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysNewShow ? "Hide new password" : "Show new password"}>
+                      <button type="button" onClick={() => setSysNewShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysNewShow ? t("settings.security.hideNewPassword") : t("settings.security.showNewPassword")}>
                         <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysNewShow ? "visibility_off" : "visibility"}</span>
                       </button>
                     </div>
                     <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                      <label htmlFor="sys-confirm-password" className="sr-only">Confirm new password</label>
+                      <label htmlFor="sys-confirm-password" className="sr-only">{t("settings.security.confirmNewPassword")}</label>
                       <input
                         id="sys-confirm-password"
                         type={sysConfirmShow ? "text" : "password"}
                         value={sysPasswordConfirm}
                         onChange={e => { setSysPasswordConfirm(e.target.value); setSysPasswordStatus(null); }}
-                        placeholder="Confirm new password"
+                        placeholder={t("settings.security.confirmNewPassword")}
                         maxLength={128}
                         autoComplete="new-password"
                         className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
                       />
-                      <button type="button" onClick={() => setSysConfirmShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysConfirmShow ? "Hide confirm password" : "Show confirm password"}>
+                      <button type="button" onClick={() => setSysConfirmShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysConfirmShow ? t("settings.security.hideConfirmPassword") : t("settings.security.showConfirmPassword")}>
                         <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysConfirmShow ? "visibility_off" : "visibility"}</span>
                       </button>
                     </div>
                     {sysPassword.length > 0 && sysPasswordConfirm.length > 0 && sysPassword !== sysPasswordConfirm && (
-                      <div role="alert" aria-live="polite" className="text-[11px] text-amber-300/90">Passwords don&apos;t match yet</div>
+                      <div role="alert" aria-live="polite" className="text-[11px] text-amber-300/90">{t("settings.security.passwordsDontMatchYet")}</div>
                     )}
                     <div className="flex justify-end">
                       <button
@@ -2992,7 +6411,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         disabled={sysPasswordSaving || sysPassword.length < 8 || sysPassword !== sysPasswordConfirm}
                         className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
                       >
-                        {sysPasswordSaving ? "Saving…" : "Update password"}
+                        {sysPasswordSaving ? t("settings.security.saving") : t("settings.security.updatePassword")}
                       </button>
                     </div>
                   </>
@@ -3000,7 +6419,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
               {sysPasswordStatus && <div className="mt-3"><StatusMessage type={sysPasswordStatus.type} message={sysPasswordStatus.message} /></div>}
             </div>
-
           </div>
         )}
 
@@ -3008,9 +6426,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {activeSection === "remote" && renderRemoteSection()}
 
         {/* ─── About ─── */}
+        {activeSection === "update" && (
+          <div className="max-w-2xl" data-testid="settings-update-section">
+            <SystemUpdateApp embedded />
+          </div>
+        )}
+
         {activeSection === "about" && (<>
           <div className="max-w-xl space-y-6">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t("settings.aboutClawBox")}</h2>
+            <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t("settings.aboutClawBox")}</h3>
 
             <div className="bg-white/5 rounded-xl p-5 space-y-4">
               <div className="flex items-center gap-4">
@@ -3026,6 +6450,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <span className="text-[var(--text-muted)]">{t("settings.version")}</span>
                   <span className="text-[var(--text-primary)]">{versionInfo?.clawbox.current ?? process.env.NEXT_PUBLIC_APP_VERSION ?? "unknown"}</span>
                 </div>
+                {/* Harness version, per edition. The Hermes SKU ships no
+                    OpenClaw at all, so its row could only ever read "not
+                    installed" — a meaningless line about software the device
+                    was never supposed to have. Show the harness this box
+                    actually runs instead; `dual` has both, so it shows both.
+                    A server that predates the `edition` field falls through to
+                    the OpenClaw row exactly as before. */}
+                {shipsOpenclaw(versionInfo) && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-[var(--text-muted)]">OpenClaw</span>
+                    <span className="text-[var(--text-primary)]">{cleanVersion(versionInfo?.openclaw.current) ?? t("settings.notInstalled")}</span>
+                  </div>
+                )}
+                {versionInfo?.hermes && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-[var(--text-muted)]">Hermes</span>
+                    <span className="text-[var(--text-primary)]">{versionInfo.hermes.current ?? t("settings.notInstalled")}</span>
+                  </div>
+                )}
+                <BuildIdentityRows identity={buildIdentity} />
                 <div className="flex justify-between text-sm">
                   <span className="text-[var(--text-muted)]">{t("settings.runtime")}</span>
                   <span className="text-[var(--text-primary)]">Next.js + Bun</span>
@@ -3038,7 +6482,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </div>
 
             <a
-              href="https://openclawhardware.dev/docs"
+              href="https://clawbox.com/docs"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-3 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors no-underline"
@@ -3070,32 +6514,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <span className="material-symbols-rounded ml-auto" style={{ fontSize: 16 }}>open_in_new</span>
             </a>
 
-            {/* Beta toggle */}
-            <div className="bg-white/5 rounded-xl px-4 py-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 20 }}>science</span>
-                  <div>
-                    <span className="text-sm text-[var(--text-primary)]">{t("settings.betaChannel")}</span>
-                    <p className="text-xs text-[var(--text-muted)] mt-0.5">{t("settings.betaDesc")}</p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => toggleBeta(!betaEnabled)}
-                  disabled={betaSaving}
-                  className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors cursor-pointer border-none shrink-0 ${betaEnabled ? "bg-amber-500" : "bg-white/15"} ${betaSaving ? "opacity-50" : ""}`}
-                >
-                  <span
-                    className="absolute w-4 h-4 rounded-full bg-white shadow-md transition-transform duration-200"
-                    style={{ left: 2, transform: betaEnabled ? "translateX(18px)" : "translateX(0)" }}
-                  />
-                </button>
-              </div>
-              {betaEnabled && (
-                <p className="text-xs text-amber-400/60 mt-2">{t("settings.betaInstallNote")}</p>
-              )}
-            </div>
-
             {/* Only the ClawBox System Update tile is exposed. OpenClaw is
                 pinned by ClawBox (config/openclaw-target.txt) and travels
                 with the full release, so a standalone "OpenClaw Update"
@@ -3104,7 +6522,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 in the version-info section above. */}
             <div className="flex gap-2">
               <button
-                onClick={() => dispatchOpenApp("system_update")}
+                onClick={() => { setSection("update"); setMobileSection("update"); }}
+                data-testid="settings-about-open-update"
                 className="flex items-center gap-3 flex-1 bg-green-500/10 rounded-xl px-4 py-3 text-sm text-green-400/80 hover:text-green-400 border border-green-500/20 hover:bg-green-500/15 transition-colors cursor-pointer text-left"
               >
                 <span className="material-symbols-rounded shrink-0" style={{ fontSize: 20 }}>system_update</span>
@@ -3129,62 +6548,147 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             </button>
           </div>
 
-          {/* Beta confirmation dialog */}
-          {betaConfirm && (
-            <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-              <div className="bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-2xl p-6 max-w-sm mx-4 shadow-2xl">
-                <div className="flex items-center gap-3 mb-4">
-                  <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 28 }}>warning</span>
-                  <h3 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.enableBeta")}</h3>
-                </div>
-                <div className="space-y-3 mb-6">
-                  <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
-                    {t("settings.betaWarning")}
-                  </p>
-                  <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
-                    <p className="text-xs text-red-400 leading-relaxed">
-                      {t("settings.betaDisclaimer")}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setBetaConfirm(false)}
-                    className="flex-1 px-4 py-2.5 bg-white/10 hover:bg-white/15 text-[var(--text-secondary)] rounded-lg text-sm font-medium cursor-pointer transition-colors"
-                  >
-                    {t("cancel")}
-                  </button>
-                  <button
-                    onClick={confirmBeta}
-                    className="flex-1 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-sm font-medium cursor-pointer transition-colors"
-                  >
-                    {t("settings.enableBetaBtn")}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
         </>)}
     </>
   );
 
   // ─── Section status (subtitle) shared by mobile list + desktop sidebar ───
   // SectionStatus type is declared at module scope (above component)
+  /** Whether a channel actually holds a working account right now. */
+  const channelConnected = (id: ChannelSection): boolean => {
+    switch (id) {
+      case "telegram": return tgConfigured === true;
+      case "email": return emailStatus?.configured === true;
+      case "whatsapp": return waStatus?.state === "paired";
+      case "discord": return dcConfigured === true;
+    }
+  };
+
+  /**
+   * Whether the server has actually answered for this channel yet. Without
+   * this there are only two states in the UI and "we have not asked" renders
+   * as "not set up" — the false failure this hub shipped with.
+   */
+  const channelStatusKnown = (id: ChannelSection): boolean => {
+    switch (id) {
+      case "telegram": return tgConfigured !== null;
+      case "email": return emailStatus !== null;
+      case "whatsapp": return waStatus !== null;
+      case "discord": return dcConfigured !== null;
+    }
+  };
+
+  /**
+   * Is this channel actually RECEIVING — as its own status route reports it,
+   * not as ClawBox infers it?
+   *
+   * `null` means the route did not say, and that is a real third answer rather
+   * than a no: the OpenClaw branch of `/setup-api/telegram/status` publishes no
+   * `receiving` key, and neither does `/setup-api/email/status`, whose mailbox
+   * modes are a different question ("answer senders" is `inbound`, and a box
+   * that only sends is not broken). Treating a missing field as false would
+   * blank the dot on every OpenClaw box.
+   */
+  const channelReceiving = (id: ChannelSection): boolean | null => {
+    switch (id) {
+      case "telegram": return tgReceiving;
+      case "email": return null;
+      case "whatsapp": return waStatus?.receiving ?? null;
+      case "discord": return dcReceiving;
+    }
+  };
+
+  /**
+   * The states a channel row may honestly be in.
+   *
+   * `unknown` and `unreachable` are both "we cannot say", but only one of them
+   * is still being worked on: pulsing at the owner after the read has already
+   * failed would be its own small lie.
+   *
+   * `silent` is CONFIGURED AND NOT RECEIVING, and it is the state this hub
+   * shipped without: a Hermes box with the bot saved and `hermes gateway`
+   * stopped drew the emerald dot anyway, and on Discord that dot sat in the
+   * same row as the subtitle "Offline", contradicting the words beside it. It
+   * is deliberately NOT counted as disconnected — the account is set up, and
+   * the "N connected" count still asks `channelConnected`.
+   */
+  const channelState = (
+    id: ChannelSection,
+  ): "connected" | "silent" | "not-configured" | "unknown" | "unreachable" => {
+    if (channelStatusKnown(id)) {
+      if (!channelConnected(id)) return "not-configured";
+      return channelReceiving(id) === false ? "silent" : "connected";
+    }
+    // Nothing known, and a read is outstanding (or has never run) — including
+    // one a Retry just started. Only once it has settled with nothing to show
+    // may the row say the channel could not be read.
+    return settledChannels.has(id) ? "unreachable" : "unknown";
+  };
+
   const sectionStatus = (id: Section): SectionStatus => {
     switch (id) {
+      case "channels": {
+        // A count is only true once every channel has answered. This said "Not
+        // configured" over a box with three live channels because the hub's
+        // fetches had not run yet; reporting "1 connected" off the one channel
+        // a deep link happened to load is the same lie with a different
+        // number. So: silence while anything is still in flight, as `ai` and
+        // `localAi` below already do.
+        const connected = CHANNEL_ITEMS.filter((a) => channelConnected(a.id)).length;
+        if (CHANNEL_ITEMS.every((a) => channelStatusKnown(a.id))) {
+          return {
+            subtitle: connected > 0
+              ? t("settings.channelsConnectedCount", { n: connected })
+              : (t("settings.notConfigured") || "Not configured"),
+          };
+        }
+        // Not everything is known, but nothing is still being asked either —
+        // one of the routes could not be reached. Report what was actually
+        // confirmed rather than going silent for the rest of the session; the
+        // count can only understate, and never says "Not configured" over a
+        // channel nobody managed to read.
+        const allSettled = CHANNEL_ITEMS.every((a) => channelState(a.id) !== "unknown");
+        if (allSettled && connected > 0) {
+          return { subtitle: t("settings.channelsConnectedCount", { n: connected }) };
+        }
+        return { subtitle: null };
+      }
       case "appearance": {
-        const sub = ui.wallpaperId.startsWith("custom-")
-          ? `Custom ${parseInt(ui.wallpaperId.split("-")[1] || "0") + 1}`
-          : ui.wallpaperId;
+        // `ui.wallpaperId` is what the page is PAINTING, so a slot named here
+        // is one the grid below can highlight — the row used to print
+        // "Custom 3" over a grid of two with nothing selected. Through `t()`,
+        // like the tile it names: this was the last name on the card that
+        // never followed the UI language.
+        const customIdx = customWallpaperIndex(ui.wallpaperId);
+        const sub = customIdx === null
+          // A built-in's NAME, not its id — the row printed the raw slug
+          // `deep-space` beside a tile labelled "Deep Space".
+          ? (ui.wallpapers.find((w) => w.id === ui.wallpaperId)?.name ?? ui.wallpaperId)
+          : t("settings.customWallpaper", { n: customIdx + 1 });
         return { subtitle: sub };
       }
       case "wifi":
         if (connectedSSID) return { subtitle: connectedSSID };
-        if (ethernet.connected) return { subtitle: ethernet.iface ? `Ethernet (${ethernet.iface})` : "Ethernet" };
+        if (ethernet.connected) return { subtitle: ethernet.iface ? `${t("wifi.ethernet")} (${ethernet.iface})` : t("wifi.ethernet") };
         return { subtitle: t("settings.notConnected") || "Not connected" };
       case "ai": {
         if (aiProvider === null) return { subtitle: null };
         if (!aiProvider.connected) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        // The portal has told this box its ClawBox AI credential is refused, so
+        // the provider's NAME is no longer the useful thing to print here: it
+        // reads as health, and every turn is about to fail (TASK-419). Optional
+        // on the type because an older /status response does not carry it, and
+        // absent must mean "nobody said", never "rejected". `needsReauth` is
+        // the catalogue's existing "Needs sign-in", already in all ten locales.
+        // Scoped to the ACTIVE provider, the way the route scopes `clawaiTier`
+        // one field above and for the same reason: `clawaiTokenRejected` is an
+        // ACCOUNT fact (it also breaks images, cloud voice and ClawKeep), while
+        // this line names the provider driving the chat. A box that moved its
+        // chat to Anthropic months ago must keep reading "Anthropic Claude"
+        // here, not "Needs sign-in" over a provider that answers every turn.
+        if (aiProvider.provider === "clawai" && aiProvider.clawaiTokenRejected) {
+          return { subtitle: t("settings.providers.needsReauth") };
+        }
         return { subtitle: aiProvider.providerLabel || (aiProvider.model ? aiProvider.model.split("/").pop() ?? null : null) };
       }
       case "localAi": {
@@ -3195,12 +6699,59 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       case "telegram": {
         if (tgConfigured === null) return { subtitle: null };
         if (!tgConfigured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        // A channel that is set up and not listening outranks the bot's name,
+        // the way Discord's own states already outrank it below: this line is
+        // what carries the fact to a screen reader, since the dot is
+        // decoration. WhatsApp and Discord already word their own.
+        if (tgReceiving === false) return { subtitle: t("settings.channelNotReceiving") };
         return { subtitle: tgBotInfo?.username ? `@${tgBotInfo.username}` : (t("settings.botConnected") || "Connected") };
+      }
+      case "email": {
+        if (emailStatus === null) return { subtitle: null };
+        if (!emailStatus.configured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        return { subtitle: emailStatus.address };
+      }
+      case "whatsapp": {
+        if (waStatus === null) return { subtitle: null };
+        if (!waStatus.supported) return { subtitle: t("settings.whatsappUnavailable") };
+        if (waStatus.state === "paired") {
+          return { subtitle: waStatus.receiving ? t("settings.whatsappActive") : t("settings.whatsappPairedIdle") };
+        }
+        if (waStatus.state === "enabled_not_paired") return { subtitle: t("settings.whatsappEnabledNotPaired") };
+        return { subtitle: t("settings.notConfigured") || "Not configured" };
+      }
+      case "discord": {
+        if (dcConfigured === null) return { subtitle: null };
+        if (!dcConfigured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        // A problem the owner has to act on outranks the bot's name here: the
+        // sidebar is the only place a closed section can say anything at all.
+        if (dcState === "intents-missing") return { subtitle: t("settings.discordStateIntentsMissing") };
+        if (dcState === "denied-no-allowlist") return { subtitle: t("settings.discordStateDenied") };
+        if (dcState === "offline") return { subtitle: t("settings.discordStateOffline") };
+        return { subtitle: dcBotName || (t("settings.botConnected") || "Connected") };
       }
       case "remote":
         return { subtitle: null };
       case "system":
         return { subtitle: hostname ? `${hostname}.local` : null };
+      case "update": {
+        const cb = versionInfo?.clawbox;
+        if (!cb) return { subtitle: null };
+        // The same predicate the update page decides with, so the sidebar
+        // never offers an update the page then denies (a `v` prefix, a
+        // target older than current).
+        const needs = componentNeedsUpdate(cb);
+        if (needs && cb.target) {
+          return { subtitle: `${cleanVersion(cb.current) ?? cb.current} → ${cleanVersion(cb.target) ?? cb.target}` };
+        }
+        // A device that could not reach its update remote compared HEAD against
+        // the STALE refs the last successful fetch left, so "no delta" is not
+        // evidence of anything. Say nothing rather than repeat the claim the
+        // Update page has already stopped making (TASK-655) — no subtitle needs
+        // no string in ten locales, and the page beside it gives the reason.
+        if (versionInfo?.remote && !versionInfo.remote.reachable) return { subtitle: null };
+        return { subtitle: t("settings.upToDate") };
+      }
       case "about":
         return { subtitle: versionInfo?.clawbox?.current ? cleanVersion(versionInfo.clawbox.current) : null };
       default:
@@ -3213,10 +6764,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     return (
       <div className="flex flex-col h-full bg-[var(--bg-deep)]">
         {mobileSection === null ? (
-          /* Nav list — iOS-style grouped rows with status subtitles */
-          <div className="flex-1 overflow-y-auto px-4 pt-4 pb-6">
-            <h2 className="text-2xl font-bold text-[var(--text-primary)] px-1 mb-4">{t("settings.title")}</h2>
-            <nav className="bg-white/[0.04] border border-white/[0.06] rounded-2xl overflow-hidden divide-y divide-white/[0.06]">
+          /* Nav list — iOS-style grouped rows with status subtitles. The title
+             is the page's `h1` only where Settings IS the page (see `asPage`);
+             in a window it is the list screen's own heading. Both tags paint
+             identically: the size and weight are in the class. */
+          <PanelRegion {...panelRegionProps} className="flex-1 overflow-y-auto px-4 pt-4 pb-6">
+            <MobileTitle id={panelTitleId} className="text-2xl font-bold text-[var(--text-primary)] px-1 mb-4">{t("settings.title")}</MobileTitle>
+            <nav aria-label={t("settings.title")} className="bg-white/[0.04] border border-white/[0.06] rounded-2xl overflow-hidden divide-y divide-white/[0.06]">
               {visibleNavItems.map(item => {
                 const { subtitle } = sectionStatus(item.id);
                 return (
@@ -3243,7 +6797,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 );
               })}
             </nav>
-          </div>
+          </PanelRegion>
         ) : (
           /* Content — chrome back closes window in one tap. A small "All settings"
               link at the top lets the user switch sections without leaving. */
@@ -3257,123 +6811,36 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <span>{t("settings.title")}</span>
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-4">
+            <PanelRegion {...panelRegionProps} className="flex-1 overflow-y-auto p-4">
+              {panelHeadings}
               {renderContent()}
-            </div>
+            </PanelRegion>
           </>
         )}
 
-        {/* Update confirmation modal */}
-      {updateConfirm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded-2xl shadow-2xl p-6 max-w-sm w-full">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.systemUpdate")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-4 leading-relaxed">
-              {t("settings.updateDesc")}
-            </p>
-            {versionLoading ? (
-              <div className="mb-4 text-xs text-[var(--text-muted)] opacity-60">{t("settings.checkingVersions")}</div>
-            ) : versionInfo && (
-              <div className="mb-4 space-y-2 text-xs">
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">ClawBox</span>
-                  <span className="text-[var(--text-primary)]">
-                    {versionInfo.clawbox.current}
-                    {versionInfo.clawbox.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
-                    ) : (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
-                    )}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">OpenClaw</span>
-                  <span className="text-[var(--text-primary)]">
-                    {versionInfo.openclaw.current ?? t("settings.notInstalled")}
-                    {versionInfo.openclaw.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
-                    ) : versionInfo.openclaw.current ? (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
-                    ) : null}
-                  </span>
-                </div>
-              </div>
-            )}
-            {/* Branch selector */}
-            {!versionLoading && (updateBranch || /^v\d+\.\d+\.\d+-.+/.test(versionInfo?.clawbox.current ?? "")) && (
-              <div className="mb-4">
-                <label htmlFor="settings-update-branch" className="text-xs text-[var(--text-muted)] opacity-60 mb-1 block">Update branch</label>
-                <div className="flex gap-2">
-                  <input
-                    id="settings-update-branch"
-                    type="text"
-                    value={branchInput}
-                    onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
-                    placeholder={t("settings.main")}
-                    className="flex-1 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] opacity-40 outline-none focus:border-[var(--coral-bright)]"
-                  />
-                  <button
-                    type="button"
-                    disabled={branchSaving || branchInput === (updateBranch ?? "")}
-                    onClick={() => saveUpdateBranch(branchInput)}
-                    className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-500 rounded-lg cursor-pointer disabled:opacity-40"
-                  >
-                    {branchSaving ? "..." : "Set"}
-                  </button>
-                </div>
-                {branchError && <p className="mt-1 text-xs text-red-400">{branchError}</p>}
-                {updateBranch && (
-                  <div className="mt-1 flex items-center gap-2">
-                    <span className="text-xs text-emerald-400">{t("settings.pinnedBranch", { branch: updateBranch ?? "" })}</span>
-                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">{t("settings.clearBranch")}</button>
-                  </div>
-                )}
-                {!updateBranch && !branchError && (
-                  <p className="mt-1 text-xs text-[var(--text-muted)] opacity-40">{t("settings.branchHint")}</p>
-                )}
-              </div>
-            )}
-            <div className="flex items-center gap-3 justify-end">
-              <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-white/10 text-[var(--text-primary)] border border-[var(--border-subtle)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-white/15 transition-colors">
-                {t("cancel")}
-              </button>
-              <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-orange-600 hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
-                {t("settings.update")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Factory Reset confirmation modal */}
-      {resetConfirm && !resetting && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.factoryResetTitle")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
-            <div className="flex gap-3">
-              <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
-                {t("cancel")}
-              </button>
-              <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
-                {t("settings.reset")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {factoryResetDialog}
+
+      <ClawBoxLoginModal
+        open={loginModal.open}
+        feature={loginModal.feature}
+        onClose={() => setLoginModal((m) => ({ ...m, open: false }))}
+      />
+
+      {systemPasswordConfirmDialog}
 
       {/* Hotspot enable confirmation — single-radio collision warning */}
       {hotspotConfirmEnable && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">Enable hotspot?</h3>
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
-              The Jetson has a single WiFi radio. Turning the hotspot on will disconnect this device from <span className="text-[var(--text-primary)] font-medium">{connectedSSID}</span>. You&apos;ll lose internet until you turn the hotspot back off, plug in Ethernet, or reconfigure WiFi.
+              {tr("settings.hotspotConfirmPrefix", "The Jetson has a single WiFi radio. Turning the hotspot on will disconnect this device from")} <span className="text-[var(--text-primary)] font-medium">{connectedSSID}</span>{tr("settings.hotspotConfirmSuffix", ". You’ll lose internet until you turn the hotspot back off, plug in Ethernet, or reconfigure WiFi.")}
             </p>
             <div className="flex gap-3">
               <button onClick={() => setHotspotConfirmEnable(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">{t("cancel")}</button>
-              <button onClick={() => { setHotspotConfirmEnable(false); void performHotspotToggle(true); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors">Enable hotspot</button>
+              <button onClick={() => { setHotspotConfirmEnable(false); void performHotspotToggle(true); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors">{tr("credentials.enableHotspot", "Enable hotspot")}</button>
             </div>
           </div>
         </div>
@@ -3391,7 +6858,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="flex items-start gap-2">
                 <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 16 }}>warning</span>
                 <div>
-                  After reboot you&apos;ll need to reconnect at:
+                  {tr("settings.hostnameReconnectAt", "After reboot you’ll need to reconnect at:")}
                   <div className="mt-1 font-mono text-amber-50 break-all">http://{hostnameInput.trim().toLowerCase().replace(/\.local$/, "")}.local/</div>
                 </div>
               </div>
@@ -3415,17 +6882,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   // ─── Desktop layout: sidebar + content ───
   return (
-    <div className="flex h-full bg-[var(--bg-deep)]">
-      {/* Sidebar */}
-      <nav className="w-60 shrink-0 bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] py-4 px-2 flex flex-col gap-0.5">
+    <div className="flex h-full min-h-0 overflow-hidden bg-[var(--bg-deep)]">
+      {/* Sidebar. The nav scrolls on its own so a long section list can never
+          grow the row past the window body and paint outside the frame. */}
+      <nav aria-label={t("settings.title")} className="w-60 shrink-0 min-h-0 overflow-y-auto bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] py-4 px-2 flex flex-col gap-0.5">
         {visibleNavItems.map(item => {
-          const active = activeSection === item.id;
+          const active = navSection === item.id;
           const status = sectionStatus(item.id);
           return (
             <button
               key={item.id}
+              // The lit row is how a sighted owner knows where they are; this is
+              // the same fact for everyone else. Announced, not merely coloured.
+              aria-current={active ? "page" : undefined}
               onClick={() => setSectionGated(item.id)}
-              className={`flex items-center gap-3 px-2.5 py-2 rounded-xl text-[15px] border-none cursor-pointer transition-colors text-left ${
+              className={`flex shrink-0 items-center gap-3 px-2.5 py-2 rounded-xl text-[15px] border-none cursor-pointer transition-colors text-left ${
                 active
                   ? "bg-[var(--coral-bright)]/15 text-[var(--text-primary)]"
                   : "text-[var(--text-secondary)] hover:bg-white/[0.05] hover:text-[var(--text-primary)]"
@@ -3434,7 +6905,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <span className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 ${active ? "bg-[var(--coral-bright)]/25" : "bg-white/[0.06]"}`}>
                 <span className="material-symbols-rounded" style={{ fontSize: 20, color: active ? "var(--coral-bright)" : "var(--text-muted)" }}>{item.icon}</span>
               </span>
-              <span className="flex-1 min-w-0 truncate font-medium">{navLabel(item)}</span>
+              {/* Wraps rather than truncates: at the 240px rail width German's
+                  "Systemaktualisierung" was the one label that did not fit and
+                  read as "Systemaktualisier…" — a section name clipped to an
+                  ellipsis is unreadable, while a second line only costs a few
+                  pixels of rail height on the one row that needs it. */}
+              <span className="flex-1 min-w-0 break-words font-medium leading-tight">{navLabel(item)}</span>
               {status.subtitle && <span className="sr-only">{status.subtitle}</span>}
             </button>
           );
@@ -3442,11 +6918,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         <div className="flex-1" />
       </nav>
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto p-6 flex flex-col items-center">
-        <div className="w-full max-w-3xl flex flex-col items-stretch [&>div]:mx-auto [&>div]:w-full">
+      {/* Content. The panel is a landmark of its own — the `main` the standalone
+          page's "skip to content" can skip to, a named region inside a desktop
+          window — where a screen reader's landmark list had nothing before. */}
+      <div className="flex-1 min-w-0 min-h-0 overflow-y-auto p-6 flex flex-col items-center">
+        <PanelRegion {...panelRegionProps} className="w-full max-w-3xl flex flex-col items-stretch [&>div]:mx-auto [&>div]:w-full">
+          {panelHeadings}
           {renderContent()}
-        </div>
+        </PanelRegion>
       </div>
 
       <ClawBoxLoginModal
@@ -3455,104 +6934,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         onClose={() => setLoginModal((m) => ({ ...m, open: false }))}
       />
 
-      {/* Update confirmation modal */}
-      {updateConfirm && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div className="bg-[var(--bg-elevated)] border border-[var(--border-subtle)] rounded-2xl shadow-2xl p-6 max-w-sm w-full">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.systemUpdate")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-4 leading-relaxed">
-              {t("settings.updateDesc")}
-            </p>
-            {versionLoading ? (
-              <div className="mb-4 text-xs text-[var(--text-muted)] opacity-60">{t("settings.checkingVersions")}</div>
-            ) : versionInfo && (
-              <div className="mb-4 space-y-2 text-xs">
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">ClawBox</span>
-                  <span className="text-[var(--text-primary)]">
-                    {versionInfo.clawbox.current}
-                    {versionInfo.clawbox.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.clawbox.target}</span></span>
-                    ) : (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
-                    )}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between bg-white/[0.04] rounded-lg px-3 py-2">
-                  <span className="text-[var(--text-muted)] font-medium">OpenClaw</span>
-                  <span className="text-[var(--text-primary)]">
-                    {versionInfo.openclaw.current ?? t("settings.notInstalled")}
-                    {versionInfo.openclaw.target ? (
-                      <span className="text-[var(--text-muted)] opacity-60">{" → "}<span className="text-emerald-400">{versionInfo.openclaw.target}</span></span>
-                    ) : versionInfo.openclaw.current ? (
-                      <span className="text-emerald-400 ml-2 text-[10px] uppercase font-semibold">{t("settings.latest")}</span>
-                    ) : null}
-                  </span>
-                </div>
-              </div>
-            )}
-            {!versionLoading && (updateBranch || /^v\d+\.\d+\.\d+-.+/.test(versionInfo?.clawbox.current ?? "")) && (
-              <div className="mb-4">
-                <label htmlFor="settings-update-branch-d" className="text-xs text-[var(--text-muted)] opacity-60 mb-1 block">Update branch</label>
-                <div className="flex gap-2">
-                  <input
-                    id="settings-update-branch-d"
-                    type="text"
-                    value={branchInput}
-                    onChange={(e) => { setBranchInput(e.target.value); setBranchError(null); }}
-                    placeholder={t("settings.main")}
-                    className="flex-1 bg-white/[0.04] border border-[var(--border-subtle)] rounded-lg px-3 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] opacity-40 outline-none focus:border-[var(--coral-bright)]"
-                  />
-                  <button
-                    type="button"
-                    disabled={branchSaving || branchInput === (updateBranch ?? "")}
-                    onClick={() => saveUpdateBranch(branchInput)}
-                    className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-500 rounded-lg cursor-pointer disabled:opacity-40"
-                  >
-                    {branchSaving ? "..." : "Set"}
-                  </button>
-                </div>
-                {branchError && <p className="mt-1 text-xs text-red-400">{branchError}</p>}
-                {updateBranch && (
-                  <div className="mt-1 flex items-center gap-2">
-                    <span className="text-xs text-emerald-400">{t("settings.pinnedBranch", { branch: updateBranch ?? "" })}</span>
-                    <button type="button" onClick={() => { setBranchInput(""); saveUpdateBranch(""); }} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">{t("settings.clearBranch")}</button>
-                  </div>
-                )}
-                {!updateBranch && !branchError && (
-                  <p className="mt-1 text-xs text-[var(--text-muted)] opacity-40">{t("settings.branchHint")}</p>
-                )}
-              </div>
-            )}
-            <div className="flex items-center gap-3 justify-end">
-              <button type="button" onClick={() => setUpdateConfirm(false)} className="px-5 py-2.5 bg-white/10 text-[var(--text-primary)] border border-[var(--border-subtle)] rounded-lg text-sm font-semibold cursor-pointer hover:bg-white/15 transition-colors">
-                {t("cancel")}
-              </button>
-              <button type="button" disabled={branchSaving} onClick={() => { setUpdateConfirm(false); triggerUpdate(); }} className="px-5 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-semibold cursor-pointer hover:bg-orange-600 hover:scale-105 transition-all disabled:opacity-40 disabled:hover:scale-100">
-                {t("settings.update")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Factory Reset confirmation modal */}
-      {resetConfirm && !resetting && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.factoryResetTitle")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
-            <div className="flex gap-3">
-              <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
-                {t("cancel")}
-              </button>
-              <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
-                {t("settings.reset")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {factoryResetDialog}
 
       {/* Hostname confirmation modal */}
       {hostnameConfirm && (
@@ -3566,7 +6950,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="flex items-start gap-2">
                 <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 16 }}>warning</span>
                 <div>
-                  After reboot you&apos;ll need to reconnect at:
+                  {tr("settings.hostnameReconnectAt", "After reboot you’ll need to reconnect at:")}
                   <div className="mt-1 font-mono text-amber-50 break-all">http://{hostnameInput.trim().toLowerCase().replace(/\.local$/, "")}.local/</div>
                 </div>
               </div>
@@ -3587,50 +6971,20 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       {hotspotConfirmEnable && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">Enable hotspot?</h3>
+            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
-              The Jetson has a single WiFi radio. Turning the hotspot on will disconnect this device from <span className="text-[var(--text-primary)] font-medium">{connectedSSID}</span>. You&apos;ll lose internet until you turn the hotspot back off, plug in Ethernet, or reconfigure WiFi.
+              {tr("settings.hotspotConfirmPrefix", "The Jetson has a single WiFi radio. Turning the hotspot on will disconnect this device from")} <span className="text-[var(--text-primary)] font-medium">{connectedSSID}</span>{tr("settings.hotspotConfirmSuffix", ". You’ll lose internet until you turn the hotspot back off, plug in Ethernet, or reconfigure WiFi.")}
             </p>
             <div className="flex gap-3">
               <button onClick={() => setHotspotConfirmEnable(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">{t("cancel")}</button>
-              <button onClick={() => { setHotspotConfirmEnable(false); void performHotspotToggle(true); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors">Enable hotspot</button>
+              <button onClick={() => { setHotspotConfirmEnable(false); void performHotspotToggle(true); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors">{tr("credentials.enableHotspot", "Enable hotspot")}</button>
             </div>
           </div>
         </div>
       )}
 
       {/* System password change confirmation */}
-      {sysPasswordConfirmOpen && (
-        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <div className="flex items-center gap-2 mb-3">
-              <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
-              <h3 id="sys-pw-confirm-title" className="text-lg font-bold text-[var(--text-primary)]">Write this password down</h3>
-            </div>
-            <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
-              This will change your password for <span className="text-[var(--text-primary)] font-medium">web sign-in, SSH, and sudo</span>. If you forget it, you may be locked out of the device entirely and need a factory reset to recover.
-            </p>
-            <div className="rounded-lg border border-amber-400/30 bg-amber-400/[0.08] px-3 py-2.5 mb-5">
-              <div className="flex items-center justify-between gap-2 mb-1.5">
-                <span className="text-[10px] font-semibold text-amber-200/80 uppercase tracking-widest">New password</span>
-                <button type="button" onClick={() => setSysPasswordConfirmReveal(v => !v)} className="text-[10px] text-amber-200 hover:text-amber-100 bg-transparent border-none cursor-pointer flex items-center gap-1" aria-label={sysPasswordConfirmReveal ? "Hide password" : "Reveal password"}>
-                  <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{sysPasswordConfirmReveal ? "visibility_off" : "visibility"}</span>
-                  {sysPasswordConfirmReveal ? "Hide" : "Reveal"}
-                </button>
-              </div>
-              <div className="font-mono text-sm text-amber-50 break-all min-h-[1.25rem]">
-                {sysPasswordConfirmReveal ? sysPassword : "••••••••"}
-              </div>
-            </div>
-            <div className="flex gap-3">
-              <button ref={sysPasswordConfirmCancelRef} disabled={sysPasswordSaving} onClick={() => setSysPasswordConfirmOpen(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">{t("cancel")}</button>
-              <button disabled={sysPasswordSaving} onClick={() => { setSysPasswordConfirmOpen(false); void saveSystemPassword(); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors disabled:opacity-50">
-                {sysPasswordSaving ? "Saving…" : "I’ve written it down — change"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {systemPasswordConfirmDialog}
 
       {/* System Update full-screen overlay (portal to escape window stacking context) */}
       {hostnameRebootTo && typeof document !== "undefined" && createPortal(
@@ -3638,134 +6992,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
             <div className="relative w-20 h-20" aria-hidden="true">
               <div className="absolute inset-0 rounded-full border-2 border-[#fe6e00]/20 animate-pulse" />
-              <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#fe6e00] animate-spin" />
+              <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#fe6e00] motion-safe:animate-spin" />
             </div>
             <div className="space-y-2">
               <h2 id="hostname-reboot-title" className="text-xl font-semibold text-white">Restarting device…</h2>
               <p className="text-sm text-white/60 leading-relaxed">
-                The Jetson is rebooting with its new name.<br/>You&apos;ll be redirected automatically when it&apos;s back online.
+                {tr("settings.hostnameRebootBody", "The Jetson is rebooting with its new name.")}<br/>{tr("settings.hostnameRebootRedirect", "You’ll be redirected automatically when it’s back online.")}
               </p>
             </div>
             <a href={hostnameRebootTo} className="text-xs text-[#fe6e00] hover:text-[#ff8b1a] font-mono underline-offset-2 hover:underline break-all">
               {hostnameRebootTo}
             </a>
             <p className="text-[11px] text-white/30">
-              This usually takes 30–60 seconds. If your browser doesn&apos;t redirect, click the link above.
+              {tr("settings.hostnameRebootWait", "This usually takes 30–60 seconds. If your browser doesn’t redirect, click the link above.")}
             </p>
           </div>
         </div>,
         document.body,
       )}
 
-      {updateStarted && typeof document !== "undefined" && createPortal(
-        <div className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(10, 15, 26, 1)" }}>
-          <style>{`
-            @keyframes update-pulse { 0%, 100% { opacity: 0.3; transform: scale(1); } 50% { opacity: 0.15; transform: scale(1.3); } }
-            @keyframes update-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
-          `}</style>
-          <div className="flex flex-col items-center gap-8 max-w-md w-full text-center px-6">
-            {/* Mascot with animated ring */}
-            <div className="relative w-28 h-28 flex items-center justify-center">
-              {/* Pulse rings */}
-              {!(updateError || updateState?.phase === "failed") && updateState?.phase !== "completed" && (
-                <>
-                  <div className="absolute inset-0 rounded-full border-2 border-[#f97316]/20" style={{ animation: "update-pulse 2.5s ease-in-out infinite" }} />
-                  <div className="absolute inset-3 rounded-full border border-[#f97316]/10" style={{ animation: "update-pulse 2.5s ease-in-out infinite 0.5s" }} />
-                </>
-              )}
-              {/* Completed ring */}
-              {updateState?.phase === "completed" && (
-                <div className="absolute inset-0 rounded-full border-2 border-emerald-500/30" />
-              )}
-              {/* Error ring */}
-              {(updateError || updateState?.phase === "failed") && (
-                <div className="absolute inset-0 rounded-full border-2 border-red-500/30" />
-              )}
-              {/* Logo — matches the welcome screen in the setup wizard */}
-              <img
-                src="/clawbox-crab.png"
-                alt="ClawBox"
-                className="w-24 h-24 object-contain relative z-10"
-                style={updateState?.phase === "completed" || updateError || updateState?.phase === "failed" ? {} : { animation: "update-float 3s ease-in-out infinite" }}
-              />
-            </div>
-
-            <div>
-              <h2 className="text-2xl font-bold text-white mb-2">
-                {updateState?.phase === "completed" ? t("settings.updateComplete") : updateError || updateState?.phase === "failed" ? t("settings.updateFailed") : t("settings.updating")}
-              </h2>
-              <p className="text-sm text-white/40">
-                {updateState?.phase === "completed"
-                  ? (updateState.steps.some(s => s.id === RESTART_STEP_ID) ? t("settings.restartingDevice") : t("settings.updateDone"))
-                  : updateError || updateState?.phase === "failed" ? "" : "Please don\u2019t turn off your device"}
-              </p>
-            </div>
-
-            {updateState && updateState.steps.length > 0 && (
-              <div className="w-full max-w-xs space-y-3 text-left bg-white/[0.03] rounded-2xl p-4 border border-white/[0.06]">
-                {updateState.steps.map((step) => (
-                  <div key={step.id} className="flex items-center gap-3 text-sm">
-                    {step.status === "completed" ? (
-                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M5 12l5 5L19 7" /></svg>
-                      </span>
-                    ) : step.status === "running" ? (
-                      <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                        <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" />
-                      </span>
-                    ) : step.status === "failed" ? (
-                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-red-500/20 text-red-400 shrink-0">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                      </span>
-                    ) : (
-                      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white/[0.04] shrink-0">
-                        <span className="w-1.5 h-1.5 rounded-full bg-white/20" />
-                      </span>
-                    )}
-                    <span className={step.status === "running" ? "text-white font-medium" : step.status === "completed" ? "text-emerald-400/70" : step.status === "failed" ? "text-red-400" : "text-white/25"}>
-                      {step.label}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {!updateState && !updateError && (
-              <div className="flex items-center gap-2 text-sm text-white/40">
-                <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" />
-                Connecting...
-              </div>
-            )}
-            {(updateError || updateState?.phase === "failed") && (
-              <div className="space-y-4">
-                <p className="text-sm text-red-400/80">{updateError || updateState?.error || "An error occurred during update"}</p>
-                {updateState?.steps.some((step) => step.status === "failed") && (
-                  <div className="w-full max-w-xs space-y-2 text-left">
-                    {updateState.steps
-                      .filter((step) => step.status === "failed")
-                      .map((step) => (
-                        <div
-                          key={`${step.id}-error`}
-                          className="rounded-xl border border-red-500/20 bg-red-500/8 px-3 py-2 text-xs text-red-300/90"
-                        >
-                          <span className="font-semibold text-red-300">{step.label}:</span>{" "}
-                          {step.error || t("unknownError")}
-                        </div>
-                      ))}
-                  </div>
-                )}
-                <button
-                  onClick={() => { setUpdateStarted(false); setUpdateError(null); setUpdateState(null); stopUpdatePolling(); }}
-                  className="px-6 py-2.5 bg-white/10 text-white rounded-xl text-sm font-medium cursor-pointer hover:bg-white/15 transition-colors border-none"
-                >
-                  Dismiss
-                </button>
-              </div>
-            )}
-          </div>
-        </div>,
-        document.body
-      )}
 
       {resetOverlay}
     </div>
@@ -3773,20 +7018,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 }
 
 function RemoteLoginPlaceholder({ onSignIn }: { onSignIn: () => void }) {
+  const tr = useTr();
   return (
     <div className="max-w-xl">
       <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-6 flex flex-col items-center text-center gap-4">
         <img
           src="/clawbox-crab.png"
           alt=""
-          width={64}
-          height={64}
+          width={48}
+          height={48}
           className="select-none pointer-events-none drop-shadow-[0_0_12px_rgba(249,115,22,0.5)]"
         />
         <div>
-          <h3 className="text-base font-semibold text-[var(--text-primary)] mb-1">Sign in to use Remote Control</h3>
+          <h3 className="text-base font-semibold text-[var(--text-primary)] mb-1">{tr("remoteControl.signInTitle", "Sign in to use Remote Control")}</h3>
           <p className="text-sm text-[var(--text-muted)] leading-relaxed">
-            Remote Control needs your ClawBox account so the portal can publish a secure tunnel back to this device.
+            {tr("remoteControl.signInBody", "Remote Control needs your ClawBox account so the portal can publish a secure tunnel back to this device.")}
           </p>
         </div>
         <button
@@ -3795,7 +7041,7 @@ function RemoteLoginPlaceholder({ onSignIn }: { onSignIn: () => void }) {
           className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl btn-gradient text-sm font-medium text-white cursor-pointer"
         >
           <span className="material-symbols-rounded" style={{ fontSize: 18 }}>open_in_new</span>
-          Open ClawBox Portal
+          {tr("login.openPortal", "Open ClawBox Portal")}
         </button>
       </div>
     </div>

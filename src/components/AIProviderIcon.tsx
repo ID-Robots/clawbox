@@ -55,21 +55,16 @@ export default function AIProviderIcon({
 
   if (normalized === "clawai") {
     // Render the crab oversized so the first-party mark dominates the
-    // provider tile — matches the "recommended" visual weight. 2.5x is
-    // chosen so the crab clearly fills the container beyond the other
-    // icons, in line with earlier UX direction.
+    // provider tile — matches the "recommended" visual weight.
     //
-    // The crab PNG (public/clawbox-crab.png) is 87x128 but its visible
-    // artwork lives in rows 29–88, i.e. the content center is at y=58.5
-    // while the PNG geometric center is at y=64 — the artwork sits
-    // ~4.3% above the image's bounding-box center. Flex- or transform-
-    // based centering on the image bounding box therefore leaves the
-    // visible crab visually above-center of the tile.
-    //
-    // Translating by `-50%, -45.7%` instead of `-50%, -50%` corrects for
-    // that asymmetry so the crab's visible center aligns with the tile's
-    // geometric center.
-    const crabSize = Math.round(size * 2.5);
+    // The crab PNG (public/clawbox-crab.png) is a tight 192x192 square: the
+    // artwork spans ~97% of its width and ~76% of its height, centred. 1.3x
+    // therefore makes the visible crab exactly the tile's height and lets it
+    // overhang the sides by ~13% each way, which reads as "bigger than the
+    // other marks" without swallowing the neighbouring text. (The previous
+    // artwork carried ~60% transparent padding and needed 2.5x plus an
+    // off-centre translate to land in the same place.)
+    const crabSize = Math.round(size * 1.3);
     return (
       <span
         className={`relative inline-flex items-center justify-center ${className}`}
@@ -89,7 +84,7 @@ export default function AIProviderIcon({
             position: "absolute",
             left: "50%",
             top: "50%",
-            transform: "translate(-49%, -45.7%)",
+            transform: "translate(-50%, -50%)",
           }}
         />
       </span>

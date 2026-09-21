@@ -6,6 +6,8 @@ import {
   isEncryptionConfigured,
   setPassphrase,
 } from "@/lib/clawkeep";
+import { hasOwnerSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -39,7 +41,21 @@ export async function GET() {
   }
 }
 
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest) {
+  // Owner-only, on the person's own page: the middleware admits the MCP bearer
+  // to every /setup-api route, and no MCP tool exists for this — the same gate
+  // restore, unpair and the snapshot mutations carry (security scan #20).
+  if (!(await hasOwnerSession(request)) || !isSameOriginRequest(request)) {
+    return NextResponse.json(
+      {
+        error: "Changing the backup passphrase needs a signed-in browser session on this ClawBox's own pages.",
+        code: "owner_only",
+        kind: "owner_only",
+      },
+      { status: 403, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+  const req = request;
   let body: Record<string, unknown>;
   try {
     body = (await req.json()) as Record<string, unknown>;
@@ -87,7 +103,20 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function DELETE() {
+export async function DELETE(request: NextRequest) {
+  // Owner-only, on the person's own page: the middleware admits the MCP bearer
+  // to every /setup-api route, and no MCP tool exists for this — the same gate
+  // restore, unpair and the snapshot mutations carry (security scan #20).
+  if (!(await hasOwnerSession(request)) || !isSameOriginRequest(request)) {
+    return NextResponse.json(
+      {
+        error: "Clearing the backup passphrase needs a signed-in browser session on this ClawBox's own pages — without it the next backup is plaintext and restorable by anyone who can read the account's storage.",
+        code: "owner_only",
+        kind: "owner_only",
+      },
+      { status: 403, headers: { "Cache-Control": "no-store" } },
+    );
+  }
   try {
     const result = await clearPassphrase();
     return NextResponse.json(

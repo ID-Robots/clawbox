@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+#
+# Choose the Jetson power profile. TASK-455.
+#
+# WHY this exists. clawbox-performance.service used to run, unconditionally at
+# every boot:
+#
+#     nvpmodel -m <MAXN id> && jetson_clocks
+#
+# `nvpmodel -m MAXN_SUPER` on its own is only a CEILING and costs nothing when
+# the box is quiet. `jetson_clocks` is the expensive half: it pins every CPU's
+# scaling_min_freq to scaling_max_freq, pins the GPU the same way and DISABLES
+# the cpuidle states, so the board sits at 1,728 MHz x6 + 1,020 MHz GPU at 4%
+# utilisation. Measured on the QA box: 7.21 W and ~58 C doing nothing, and
+# median Tj 74.8 C (max 75.4 C) under sustained 3B inference — over the 74 C
+# passive-cooling trip, in a fanless-by-default appliance that sits in a
+# living room.
+#
+# So there are two profiles: BALANCED (a real nvpmodel cap, DVFS left alone,
+# idle states on) and PERFORMANCE (the old pinned behaviour, verbatim).
+# Balanced was the default from TASK-455 until 2026-09-15, when the owner ruled
+# that performance is what a ClawBox runs by default and balanced is the
+# opt-out: DEFAULT_MODE below is what an absent or invalid state file resolves
+# to, so the update's `--apply` turns the pinned profile on for a box that
+# never chose, while a persisted `balanced` is honoured through every update.
+#
+#   --check         print current state as JSON; change nothing (dry run)
+#   --balanced      persist + apply the balanced profile
+#   --performance   persist + apply the pinned profile
+#   --apply         apply whatever is persisted (clawbox-performance.service)
+#   --restore       undo the pinning (unit ExecStop)
+#
+# Takes effect IMMEDIATELY — no reboot, unlike the desktop toggle.
+# --check needs no privileges; everything else must run as root.
+
+set -euo pipefail
+
+STATE_DIR="${CLAWBOX_STATE_DIR:-/etc/clawbox}"
+STATE_FILE="$STATE_DIR/power-mode"
+NVPMODEL_CONF="${CLAWBOX_NVPMODEL_CONF:-/etc/nvpmodel.conf}"
+DEFAULT_MODE="performance"
+
+usage() {
+  echo "Usage: $(basename "$0") --check | --balanced | --performance | --apply | --restore" >&2
+  exit 2
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ── Persisted intent ─────────────────────────────────────────────────────────
+#
+# Root-owned, next to /etc/clawbox/edition.env and for the same reason: the web
+# server runs as `clawbox` and its whole config tree is clawbox-writable, so the
+# thing root acts on at boot must not be. The only values ever written are the
+# two literals below, and a persisted literal always wins over DEFAULT_MODE —
+# that is what keeps an owner's `balanced` through the update that made
+# performance the default.
+read_mode() {
+  local raw=""
+  [ -f "$STATE_FILE" ] && raw="$(tr -d '[:space:]' < "$STATE_FILE" 2>/dev/null || true)"
+  case "$raw" in
+    balanced|performance) echo "$raw" ;;
+    *) echo "$DEFAULT_MODE" ;;
+  esac
+}
+
+write_mode() {
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$1" > "$STATE_FILE"
+  chown root:root "$STATE_FILE" 2>/dev/null || true
+  chmod 0644 "$STATE_FILE"
+}
+
+# ── nvpmodel mode resolution ─────────────────────────────────────────────────
+#
+# Read the IDs out of /etc/nvpmodel.conf rather than hardcoding them: the map is
+# per-module. On the shipped Orin Nano Super it is
+#   ID=0 NAME=15W, ID=1 NAME=25W, ID=2 NAME=MAXN_SUPER
+# but the same script has to do something sane on any other Jetson.
+nvp_modes() {
+  [ -f "$NVPMODEL_CONF" ] || return 0
+  sed -n 's/^[[:space:]]*<[[:space:]]*POWER_MODEL[[:space:]]\+ID=\([0-9]\+\)[[:space:]]\+NAME=\([^[:space:]>]\+\).*/\1 \2/p' "$NVPMODEL_CONF"
+}
+
+# Highest-numbered MAXN mode — the ceiling profile.
+performance_mode_id() {
+  nvp_modes | awk '$2 ~ /MAXN/ {id=$1} END {if (id != "") print id}'
+}
+
+# Balanced = the highest mode that is NOT MAXN (25W on the shipped module).
+# Falling back to the MAXN id is deliberate: on a module whose only mode is
+# MAXN, "balanced" still means "the cap nvpmodel gives us, with jetson_clocks
+# OFF" — the pinning is the part we are actually removing.
+balanced_mode_id() {
+  local id
+  id="$(nvp_modes | awk '$2 !~ /MAXN/ {id=$1} END {if (id != "") print id}')"
+  [ -n "$id" ] || id="$(performance_mode_id)"
+  echo "${id:-0}"
+}
+
+mode_name_for_id() {
+  nvp_modes | awk -v want="$1" '$1 == want {print $2; exit}'
+}
+
+current_nvpmodel_id() {
+  have nvpmodel || { echo ""; return; }
+  nvpmodel -q 2>/dev/null | awk 'NR>1 && /^[0-9]+$/ {print; exit}'
+}
+
+# ── Clock pinning ────────────────────────────────────────────────────────────
+
+# True when the CPUs are pinned, i.e. jetson_clocks (or equivalent) has left
+# scaling_min_freq == scaling_max_freq so the governor has nothing to scale.
+clocks_pinned() {
+  local policy min max seen=0
+  for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+    [ -d "$policy" ] || continue
+    min="$(cat "$policy/scaling_min_freq" 2>/dev/null || echo)"
+    max="$(cat "$policy/scaling_max_freq" 2>/dev/null || echo)"
+    [ -n "$min" ] && [ -n "$max" ] || continue
+    seen=1
+    # One policy the governor can still move is enough to say "not pinned".
+    [ "$min" = "$max" ] || return 1
+  done
+  [ "$seen" = "1" ]
+}
+
+# jetson_clocks also switches the cpuidle states off, and nothing in nvpmodel
+# turns them back on — so unpinning has to do it explicitly or the cores never
+# reach C7 again and the idle-power win never materialises.
+enable_cpuidle() {
+  local f
+  for f in /sys/devices/system/cpu/cpu*/cpuidle/state*/disable; do
+    [ -w "$f" ] || continue
+    echo 0 > "$f" 2>/dev/null || true
+  done
+}
+
+# Hand the governor its range back. `nvpmodel -m` rewrites the min/max caps for
+# the selected mode already; this is the belt-and-braces half, because a box
+# that was pinned by jetson_clocks BEFORE nvpmodel ran can end up with
+# scaling_min still at the ceiling.
+unpin_cpu_freq() {
+  local policy floor
+  for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+    [ -d "$policy" ] || continue
+    floor="$(cat "$policy/cpuinfo_min_freq" 2>/dev/null || echo)"
+    [ -n "$floor" ] || continue
+    [ -w "$policy/scaling_min_freq" ] || continue
+    echo "$floor" > "$policy/scaling_min_freq" 2>/dev/null || true
+  done
+}
+
+# Where the pre-pin clock state is snapshotted, so switching back to balanced
+# can hand every knob back rather than only the ones we remembered to name.
+#
+# `nvpmodel -m <balanced>` rewrites the CPU and GPU caps for us — measured: the
+# GPU devfreq really does return to 306-918 MHz with no help. It does NOT clear
+# the EMC rate lock that jetson_clocks sets, so on the QA box a
+# performance -> balanced round trip left EMC pinned at 3,199 MHz with
+# FreqOverride=1 and idle draw at 5,992 mW instead of 4,831 mW — +1,161 mW,
+# half of everything this profile saves, held until the next reboot
+# (measured 2026-08-24).
+#
+# Writing 0 to .../clk/emc/mrq_rate_locked clears the override flag but leaves
+# the rate itself at 3,199 MHz (also measured), so the flag alone is not the
+# fix. jetson_clocks' own --store/--restore is, and it covers whatever else a
+# future JetPack decides to pin.
+CLOCK_SNAPSHOT="/var/lib/clawbox/l4t_dfs.conf"
+EMC_RATE_LOCK="/sys/kernel/debug/bpmp/debug/clk/emc/mrq_rate_locked"
+
+# Snapshot the UNPINNED state, once. Guarded because a second --performance on
+# an already-pinned box would otherwise overwrite the pristine snapshot with a
+# pinned one, and then --balanced would "restore" the pinning.
+store_clock_state() {
+  have jetson_clocks || return 0
+  [ -e "$CLOCK_SNAPSHOT" ] && return 0
+  # Nor when the clocks are ALREADY pinned and no snapshot says by whom. Since
+  # performance became the default, an update's `--apply` reaches this on a
+  # box the pre-TASK-455 unit pinned at boot, and a snapshot taken there would
+  # be a pinned one — the next --balanced would "restore" the pinning. Leave
+  # it unstored and let restore_clock_state fall back to clearing the EMC
+  # lock, the way it does for every box pinned before there was a snapshot.
+  if clocks_pinned; then
+    echo "clock state not stored: clocks already pinned (--balanced clears the EMC lock instead)"
+    return 0
+  fi
+  mkdir -p "$(dirname "$CLOCK_SNAPSHOT")" 2>/dev/null || return 0
+  if jetson_clocks --store "$CLOCK_SNAPSHOT" >/dev/null 2>&1; then
+    echo "clock state stored to $CLOCK_SNAPSHOT"
+  else
+    echo "warning: could not store clock state; EMC may stay pinned until reboot" >&2
+  fi
+}
+
+# Hand the clocks back. Falls back to clearing the EMC lock directly for boxes
+# that were already pinned when this build landed and so have no snapshot —
+# they still need a reboot to drop the rate, but they stop being *locked*.
+restore_clock_state() {
+  if have jetson_clocks && [ -e "$CLOCK_SNAPSHOT" ]; then
+    if jetson_clocks --restore "$CLOCK_SNAPSHOT" >/dev/null 2>&1; then
+      echo "clock state restored from $CLOCK_SNAPSHOT"
+    else
+      echo "warning: jetson_clocks --restore failed" >&2
+    fi
+    # Consume it, so the next --performance snapshots a fresh unpinned state.
+    rm -f "$CLOCK_SNAPSHOT" 2>/dev/null || true
+    return 0
+  fi
+  if [ -w "$EMC_RATE_LOCK" ] && [ "$(cat "$EMC_RATE_LOCK" 2>/dev/null || echo 0)" = "1" ]; then
+    echo 0 > "$EMC_RATE_LOCK" 2>/dev/null || true
+    echo "EMC rate lock cleared (no snapshot; rate drops at next reboot)"
+  fi
+}
+
+apply_balanced() {
+  local id name
+  id="$(balanced_mode_id)"
+  name="$(mode_name_for_id "$id")"
+  # Before nvpmodel, so the mode's own caps are the last word.
+  restore_clock_state
+  if have nvpmodel; then
+    nvpmodel -m "$id" >/dev/null 2>&1 || echo "warning: nvpmodel -m $id failed" >&2
+    echo "nvpmodel mode $id (${name:-unknown})"
+  else
+    echo "nvpmodel not present, skipping mode select"
+  fi
+  # No jetson_clocks. That is the whole point of this profile.
+  unpin_cpu_freq
+  enable_cpuidle
+  echo "jetson_clocks: not applied (DVFS + cpuidle left to the kernel)"
+}
+
+apply_performance() {
+  local id name
+  id="$(performance_mode_id)"
+  [ -n "$id" ] || id="$(balanced_mode_id)"
+  name="$(mode_name_for_id "$id")"
+  if have nvpmodel; then
+    nvpmodel -m "$id" >/dev/null 2>&1 || echo "warning: nvpmodel -m $id failed" >&2
+    echo "nvpmodel mode $id (${name:-unknown})"
+  else
+    echo "nvpmodel not present, skipping mode select"
+  fi
+  if have jetson_clocks; then
+    # Snapshot BEFORE pinning — after it, there is nothing worth remembering.
+    store_clock_state
+    jetson_clocks >/dev/null 2>&1 || echo "warning: jetson_clocks failed" >&2
+    echo "jetson_clocks: applied (clocks pinned)"
+  else
+    echo "jetson_clocks not present"
+  fi
+}
+
+report() {
+  local mode id name pinned supported perf
+  mode="$(read_mode)"
+  id="$(current_nvpmodel_id)"
+  name="$(mode_name_for_id "${id:-}")"
+  if clocks_pinned; then pinned=true; else pinned=false; fi
+  if have nvpmodel; then supported=true; else supported=false; fi
+  perf="$(performance_mode_id)"
+  printf '{"supported":%s,"mode":"%s","nvpmodelId":%s,"nvpmodelName":"%s","clocksPinned":%s,"balancedId":%s,"performanceId":%s}\n' \
+    "$supported" "$mode" \
+    "${id:-null}" "${name:-unknown}" "$pinned" \
+    "$(balanced_mode_id)" "${perf:-null}"
+}
+
+require_root() {
+  if [ "$(id -u)" != "0" ]; then
+    echo "Error: this action must run as root" >&2
+    exit 1
+  fi
+}
+
+main() {
+  case "${1:-}" in
+    --check)
+      report
+      ;;
+    --balanced)
+      require_root
+      write_mode balanced
+      apply_balanced
+      report
+      ;;
+    --performance)
+      require_root
+      write_mode performance
+      apply_performance
+      report
+      ;;
+    --apply)
+      require_root
+      if [ "$(read_mode)" = "performance" ]; then apply_performance; else apply_balanced; fi
+      report
+      ;;
+    --restore)
+      require_root
+      # ExecStop path. Always unpins, whatever the persisted mode is: stopping
+      # the unit means "stop holding the clocks up".
+      apply_balanced
+      ;;
+    *)
+      usage
+      ;;
+  esac
+}
+
+main "$@"

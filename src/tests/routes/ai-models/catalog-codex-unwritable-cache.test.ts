@@ -1,0 +1,223 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "events";
+import * as childProcess from "child_process";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { NextRequest } from "next/server";
+
+// TASK-786 — `data/catalog-cache/codex.json`, a file no code path can write.
+//
+// Measured on the OpenClaw box (2026-09-09, core 2026.8.1): every other cache
+// file was stamped that morning; `codex.json` was seven days old, holding the
+// six curated rows of a build that predates `hasNoEnumerationOnThisCore`.
+// `refreshInBackground` now returns at that branch BEFORE `writeDiskCache`, so
+// nothing can ever restamp it — but `GET` still preferred it, and
+// `sanitizeCachedPayload` rebuilds the payload from the DISK rows rather than
+// from the curated catalogue. The picker was therefore serving a 2026-09-02
+// snapshot of a list this repo believes it owns.
+//
+// The customer-visible half: a model added to `CODEX_MODELS` never reaches a
+// box that carries this file. The contents happened to match on the day it was
+// found, which is exactly why it would have silently swallowed the fix.
+//
+// Its own file because it needs a module whose `memCache` is empty for `codex`
+// — the disk cache is only consulted when nothing is in memory.
+//
+// THREE of these four are red on unmodified beta: the served list, the file
+// left behind, and the missing gpt-5.3-codex-spark row. The `source` case is a
+// forward guard — the seeded fixture carries no `source` and the sanitiser
+// copies it through, so it holds before the fix too — and is here so a later
+// change cannot start stamping the curated list as a device's answer.
+
+vi.mock("child_process", () => ({ spawn: vi.fn() }));
+
+vi.mock("@/lib/openclaw-config", () => ({
+  findOpenclawBin: () => "openclaw",
+  openclawIsAbsent: () => false,
+}));
+
+// A per-PROCESS data root. A fixed `/tmp/<name>` is shared by every vitest
+// worker on the machine and by every checkout of this repo on it — the same
+// reason `vitest.config.ts` suffixes `CLAWBOX_ROOT` and `OPENCLAW_HOME`.
+const DATA_DIR = `/tmp/clawbox-catalog-codex-unwritable-test-${process.pid}`;
+vi.mock("@/lib/config-store", () => ({ DATA_DIR: `/tmp/clawbox-catalog-codex-unwritable-test-${process.pid}` }));
+
+import { GET } from "@/app/setup-api/ai-models/catalog/route";
+import { CODEX_MODELS } from "@/lib/provider-models";
+import { resetCoreModelLifecycle } from "@/lib/core-model-lifecycle";
+
+const mockSpawn = vi.mocked(childProcess.spawn);
+
+function fakeChild(json: unknown) {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: EventEmitter;
+    stderr: EventEmitter;
+    kill: () => void;
+  };
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => {};
+  queueMicrotask(() => {
+    child.stdout.emit("data", Buffer.from(JSON.stringify(json), "utf8"));
+    child.emit("close", 0);
+  });
+  return child;
+}
+
+const CACHE_DIR = path.join(DATA_DIR, "catalog-cache");
+const CODEX_CACHE = path.join(CACHE_DIR, "codex.json");
+
+/**
+ * The file as it sat on the box: the curated list of an older build, minus one
+ * row, under the real `fetchedAt` (2026-09-02T19:37:36Z). A row the current
+ * curated list does not carry is what makes the difference visible — with an
+ * identical copy the defect is invisible, which is how it survived.
+ */
+function seedStaleCodexCache(): void {
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+  fs.writeFileSync(
+    CODEX_CACHE,
+    JSON.stringify({
+      provider: "codex",
+      models: [
+        { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", contextWindow: 0 },
+        { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", contextWindow: 0 },
+        { id: "gpt-5.5", label: "GPT-5.5", contextWindow: 0 },
+        { id: "gpt-5.4", label: "GPT-5.4", contextWindow: 0 },
+        { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", contextWindow: 0 },
+      ],
+      defaultModelId: "gpt-5.5",
+      allowCustom: true,
+      fetchedAt: 1_788_377_856_920,
+    }),
+    "utf8",
+  );
+}
+
+beforeEach(() => {
+  // The boot warmup would otherwise reach openrouter.ai for real.
+  vi.stubGlobal("fetch", vi.fn(async () => {
+    throw new Error("no network in this suite");
+  }));
+  vi.clearAllMocks();
+  fs.rmSync(CACHE_DIR, { recursive: true, force: true });
+  mockSpawn.mockImplementation(
+    () => fakeChild({ count: 0, models: [] }) as unknown as ReturnType<typeof childProcess.spawn>,
+  );
+});
+
+describe("catalog — codex is never served from a cache the code cannot write", () => {
+  it("serves the curated ChatGPT catalogue, not the stale file", async () => {
+    seedStaleCodexCache();
+
+    const res = await GET(new NextRequest("http://clawbox.local/setup-api/ai-models/catalog?provider=codex"));
+    const body = (await res.json()) as { models: Array<{ id: string }> };
+
+    expect(body.models.map((m) => m.id)).toEqual(CODEX_MODELS.map((m) => m.id));
+  });
+
+  it("removes the leftover file so nothing can serve it again", async () => {
+    seedStaleCodexCache();
+
+    await GET(new NextRequest("http://clawbox.local/setup-api/ai-models/catalog?provider=codex"));
+
+    expect(fs.existsSync(CODEX_CACHE)).toBe(false);
+  });
+
+  it("offers gpt-5.3-codex-spark, which the core routes on this surface", async () => {
+    // Measured on the box, 2026-09-09, core 2026.8.1:
+    //   openclaw infer model run --local --model openai/gpt-5.3-codex-spark
+    //   -> api=openclaw-openai-chatgpt-responses-transport
+    //      url=https://chatgpt.com/backend-api/codex/responses  status=200
+    // The core's own route contract files it under
+    // OPENAI_SUBSCRIPTION_ONLY_ROUTE_MODEL_IDS — it runs on the ChatGPT
+    // account and NOWHERE else — and the openai (platform) enumeration
+    // reports it `available: false` for exactly that reason. The generation
+    // regex this surface used as its allowlist could not spell it, so the one
+    // surface that can run it was the one surface that hid it.
+    const res = await GET(new NextRequest("http://clawbox.local/setup-api/ai-models/catalog?provider=codex"));
+    const body = (await res.json()) as { models: Array<{ id: string }> };
+
+    expect(body.models.map((m) => m.id)).toContain("gpt-5.3-codex-spark");
+  });
+
+  it("does not claim the curated list is the box's own answer", async () => {
+    seedStaleCodexCache();
+
+    const res = await GET(new NextRequest("http://clawbox.local/setup-api/ai-models/catalog?provider=codex"));
+    const body = (await res.json()) as Record<string, unknown>;
+
+    // `source` is the stamp that means "a device enumerated this". The curated
+    // list is not that, on this path or any other.
+    expect(body.source).toBeUndefined();
+  });
+
+  it("serves what the INSTALLED core says the route carries", async () => {
+    // The end of the chain the rest of this suite only covers half of: the
+    // manifest on disk -> `chatgptSurface()` -> this payload. Shaped like core
+    // 2026.9.3's openai manifest, which lists `gpt-6-astra` first and suppresses
+    // `gpt-5.4` on `chatgpt.com` ("retired from the ChatGPT-account Codex
+    // route"). Both of those answers come from the file: the curated list can
+    // only widen what follows them, never reorder the head or restore a row the
+    // core retired.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "catalog-codex-manifest"));
+    const saved = {
+      HOME: process.env.HOME,
+      OPENCLAW_HOME: process.env.OPENCLAW_HOME,
+      CLAWBOX_OPENCLAW_HOME: process.env.CLAWBOX_OPENCLAW_HOME,
+    };
+    try {
+      const dir = path.join(home, ".openclaw", "extensions", "openai");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "openclaw.plugin.json"), JSON.stringify({
+        modelCatalog: {
+          providers: {
+            openai: {
+              models: [
+                { id: "gpt-6-astra", name: "GPT-6 Astra" },
+                { id: "gpt-5.5", name: "GPT-5.5" },
+                { id: "gpt-5.4", name: "GPT-5.4" },
+              ],
+            },
+          },
+          suppressions: [
+            {
+              provider: "openai",
+              model: "gpt-5.4",
+              reason: "GPT-5.4 has retired from the ChatGPT-account Codex route.",
+              when: { baseUrlHosts: ["chatgpt.com"] },
+            },
+          ],
+        },
+      }), "utf8");
+      process.env.HOME = home;
+      process.env.OPENCLAW_HOME = path.join(home, ".openclaw");
+      process.env.CLAWBOX_OPENCLAW_HOME = path.join(home, ".openclaw");
+      resetCoreModelLifecycle();
+
+      const res = await GET(new NextRequest("http://clawbox.local/setup-api/ai-models/catalog?provider=codex"));
+      const body = (await res.json()) as { models: Array<{ id: string; label: string }>; source?: string };
+
+      const ids = body.models.map((m) => m.id);
+      // The core's own rows first, in its order — a model this repo has never
+      // heard of reaches the payload, labelled by the core.
+      expect(ids.slice(0, 2)).toEqual(["gpt-6-astra", "gpt-5.5"]);
+      expect(body.models[0].label).toBe("GPT-6 Astra");
+      // …and the row the core retired from THIS route is gone, though the
+      // curated fallback still carries it.
+      expect(ids).not.toContain("gpt-5.4");
+      expect(CODEX_MODELS.map((m) => m.id)).toContain("gpt-5.4");
+      // Still not the box's own answer: the manifest says what the CORE routes,
+      // not what this account is entitled to, so it is served unstamped like
+      // every other list this route did not enumerate.
+      expect(body.source).toBeUndefined();
+    } finally {
+      process.env.HOME = saved.HOME;
+      process.env.OPENCLAW_HOME = saved.OPENCLAW_HOME;
+      process.env.CLAWBOX_OPENCLAW_HOME = saved.CLAWBOX_OPENCLAW_HOME;
+      fs.rmSync(home, { recursive: true, force: true });
+      resetCoreModelLifecycle();
+    }
+  });
+});

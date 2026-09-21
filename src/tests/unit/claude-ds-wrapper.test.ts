@@ -1,0 +1,811 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, statSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
+
+/**
+ * These run the SHIPPED wrapper — scripts/claude-ds, the same bytes install.sh
+ * copies to ~/.local/bin — with a fake `claude` on PATH that records the
+ * environment it was handed. Asserting against a re-implementation would have
+ * missed every bug that matters here, because all of them are about which
+ * variables reach the CLI.
+ *
+ * What must never regress:
+ *
+ *  - The wrapper must not leak ANTHROPIC_BASE_URL into anything but its own
+ *    child. OpenClaw drives `claude-cli` through the SAME binary, so a global
+ *    export reroutes every OpenClaw Claude call to DeepSeek silently.
+ *  - The model must follow the plan. ClawBox AI answers 403 for
+ *    deepseek-v4-pro below the Max plan, so a hard-wired pro default would
+ *    ship a harness that is broken for most owners.
+ *  - An inherited Anthropic credential must lose. ANTHROPIC_API_KEY outranks
+ *    ANTHROPIC_AUTH_TOKEN, so a stale key in the environment would send the
+ *    run to Anthropic under a DeepSeek model name.
+ *  - A box with no ClawBox AI login must say so in words its owner can act on,
+ *    and must not start Claude Code at all.
+ */
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+const REPO = process.cwd();
+const WRAPPER = path.join(REPO, "scripts", "claude-ds");
+
+let home: string;
+let root: string;
+let binDir: string;
+let envDump: string;
+let claudeLog: string;
+
+/** Write the device config the wrapper reads. */
+function writeDeviceConfig(config: Record<string, unknown>): void {
+  mkdirSync(path.join(root, "data"), { recursive: true });
+  writeFileSync(path.join(root, "data", "config.json"), JSON.stringify(config), "utf-8");
+}
+
+/** A stand-in for Claude Code that records its environment and its argv. */
+function installFakeClaude(): void {
+  const fake = path.join(binDir, "claude");
+  writeFileSync(
+    fake,
+    [
+      "#!/usr/bin/env bash",
+      `env > "${envDump}"`,
+      `printf '%s\\n' "$@" > "${claudeLog}"`,
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
+
+function runWrapper(
+  extraEnv: Record<string, string | undefined> = {},
+  args: string[] = [],
+  cwd: string = REPO,
+): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync("bash", [WRAPPER, ...args], {
+    encoding: "utf-8",
+    cwd,
+    env: {
+      // A MINIMAL path on purpose. Inheriting the host's PATH made the
+      // "Claude Code is not installed" case find the developer's own `claude`
+      // and pass for the wrong reason.
+      PATH: `${binDir}:/usr/bin:/bin`,
+      HOME: home,
+      CLAWBOX_ROOT: root,
+      ...extraEnv,
+      // A deliberately minimal environment; NODE_ENV is not part of it.
+    } as unknown as NodeJS.ProcessEnv,
+  });
+  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+/** The environment the fake `claude` was launched with. */
+function capturedEnv(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of readFileSync(envDump, "utf-8").split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return out;
+}
+
+beforeEach(() => {
+  const base = mkdtempSync(path.join(tmpdir(), "claude-ds-"));
+  home = path.join(base, "home");
+  root = path.join(base, "clawbox");
+  binDir = path.join(base, "bin");
+  envDump = path.join(base, "env.txt");
+  claudeLog = path.join(base, "argv.txt");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  installFakeClaude();
+  writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash" });
+});
+
+afterEach(() => {
+  rmSync(path.dirname(home), { recursive: true, force: true });
+});
+
+describe("the shipped wrapper", () => {
+  it("is executable in the repository, so the copy install.sh makes is runnable", () => {
+    // install.sh uses `install -m 755`, but a wrapper committed non-executable
+    // would still break `bash scripts/claude-ds` for anyone running it in place.
+    expect(existsSync(WRAPPER)).toBe(true);
+    expect(statSync(WRAPPER).mode & 0o111).not.toBe(0);
+  });
+
+  it("is valid bash", () => {
+    expect(() => execFileSync("bash", ["-n", WRAPPER])).not.toThrow();
+  });
+
+  it("names the same command the desktop icon types", () => {
+    expect(path.basename(WRAPPER)).toBe(CODING_HARNESS_COMMAND);
+    expect(CODING_HARNESS_WRAPPER_PATH.endsWith(`/${CODING_HARNESS_COMMAND}`)).toBe(true);
+  });
+});
+
+describe("routing to ClawBox AI", () => {
+  it("points Claude Code at the Anthropic surface of the proxy, not at DeepSeek", () => {
+    // Reaching api.deepseek.com directly cannot work: the box holds a portal
+    // token, and the DeepSeek keys live only on the proxy.
+    expect(runWrapper().status).toBe(0);
+    expect(capturedEnv().ANTHROPIC_BASE_URL).toBe("https://clawbox.com/api/ai/anthropic");
+  });
+
+  it("also moves Claude Code's NON-inference base, so nothing falls back to Anthropic", () => {
+    // ANTHROPIC_BASE_URL covers /v1/messages and nothing else. Claude Code
+    // keeps a second base for its account/entitlement calls
+    // (api.anthropic.com/api/oauth/claude_cli/*, /api/web/domain_info). On a
+    // box whose plan is ClawBox AI those can only fail, and Claude Code words
+    // that failure as "Failed to authenticate" — which reads like a bad token
+    // when the token is fine.
+    expect(runWrapper().status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_API_BASE_URL).toBe("https://clawbox.com/api/ai/anthropic");
+  });
+
+  it("moves both bases together when the proxy URL is overridden", () => {
+    runWrapper({ CLAWBOX_AI_PROXY_URL: "https://staging.example/api/ai" });
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://staging.example/api/ai/anthropic");
+    expect(env.CLAUDE_CODE_API_BASE_URL).toBe("https://staging.example/api/ai/anthropic");
+  });
+
+  it("lets the non-inference base be aimed somewhere else on purpose", () => {
+    runWrapper({ CLAUDE_DS_API_BASE_URL: "https://elsewhere.example/api" });
+    const env = capturedEnv();
+    expect(env.CLAUDE_CODE_API_BASE_URL).toBe("https://elsewhere.example/api");
+    // ...without dragging the messages API along with it.
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://clawbox.com/api/ai/anthropic");
+  });
+
+  it("honours CLAWBOX_AI_PROXY_URL — the same variable the device's provider config uses", () => {
+    runWrapper({ CLAWBOX_AI_PROXY_URL: "https://staging.example/api/ai" });
+    expect(capturedEnv().ANTHROPIC_BASE_URL).toBe("https://staging.example/api/ai/anthropic");
+  });
+
+  it("does not produce a double slash when the proxy URL has a trailing one", () => {
+    runWrapper({ CLAWBOX_AI_PROXY_URL: "https://staging.example/api/ai/" });
+    expect(capturedEnv().ANTHROPIC_BASE_URL).toBe("https://staging.example/api/ai/anthropic");
+  });
+
+  it("refuses to put the token on the wire in the clear", () => {
+    // The wrapper exports the portal token as ANTHROPIC_AUTH_TOKEN for whatever
+    // this URL names. A plaintext proxy would leak a live credential and still
+    // look like it was working.
+    const run = runWrapper({ CLAWBOX_AI_PROXY_URL: "http://proxy.example/api/ai" });
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("non-HTTPS");
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("still allows a loopback proxy, which cannot leave the box", () => {
+    expect(runWrapper({ CLAWBOX_AI_PROXY_URL: "http://127.0.0.1:8787/api/ai" }).status).toBe(0);
+    expect(capturedEnv().ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:8787/api/ai/anthropic");
+  });
+
+  it("sends the device's own portal token", () => {
+    runWrapper();
+    expect(capturedEnv().ANTHROPIC_AUTH_TOKEN).toBe("claw_test_token");
+  });
+
+  it("keeps a cloned repository's own settings out of the terminal, unless the caller chose its sources", () => {
+    // The trust answer is seeded for whatever folder the harness starts in,
+    // so a project's .claude/settings.json (its hooks, its grants) would load
+    // into the owner's terminal the moment it opens there; the delegated runs
+    // already restrict sources the same way.
+    runWrapper({}, ["--setting-sources", "project", "-p", "x"]);
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n--setting-sources\nproject\n-p\nx\n");
+  });
+
+  it("passes its arguments through to Claude Code untouched on a pinned level", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "max" });
+    runWrapper({}, ["-p", "explain this repo"]);
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n-p\nexplain this repo\n");
+  });
+});
+
+/**
+ * Effort: a pin for the fixed levels, a flag for ultracode.
+ *
+ * Seen on a real box: with CLAUDE_CODE_EFFORT_LEVEL=max exported, `/effort
+ * ultracode` in the terminal the app opened answered "overrides effort this
+ * session — clear it and ultracode takes over" and changed nothing. The mode
+ * is Claude Code's xhigh-plus-workflows setting and only `--effort ultracode`
+ * requests it, so the wrapper must leave the pin unset for it — and a
+ * terminal must follow the same setting the delegated runs use.
+ */
+describe("effort", () => {
+  it("asks for ultracode with the flag and no env pin when nothing else was chosen", () => {
+    runWrapper({}, ["-p", "explain this repo"]);
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n--setting-sources\nuser\n-p\nexplain this repo\n");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+  });
+
+  it("follows the effort the owner picked in the Coding Agent app", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "max" });
+    runWrapper({}, ["--resume", "abc"]);
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("max");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n--resume\nabc\n");
+  });
+
+  it("lets the run's own setting outrank the stored one", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "ultracode" });
+    runWrapper({ CLAUDE_DS_EFFORT: "low" }, ["-p", "x"]);
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("low");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n-p\nx\n");
+  });
+
+  it("drops an inherited pin, which would block the mode", () => {
+    runWrapper({ CLAUDE_CODE_EFFORT_LEVEL: "max", CLAUDE_DS_EFFORT: "ultracode" }, ["-p", "x"]);
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n--setting-sources\nuser\n-p\nx\n");
+  });
+
+  it("never doubles a --effort the caller passed itself", () => {
+    runWrapper({ CLAUDE_DS_EFFORT: "ultracode" }, ["--effort", "low", "-p", "x"]);
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n--effort\nlow\n-p\nx\n");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+  });
+
+  it("lets a caller's own --effort past a stored fixed level, unpinned", () => {
+    // A set CLAUDE_CODE_EFFORT_LEVEL overrides --effort for the session, so
+    // pinning here would make `claude-ds --effort ultracode` typed in a
+    // terminal silently stay at the owner's stored level.
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "max" });
+    runWrapper({ CLAUDE_CODE_EFFORT_LEVEL: "max" }, ["--effort", "ultracode", "-p", "x"]);
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n--effort\nultracode\n-p\nx\n");
+  });
+});
+
+describe("which model the owner actually gets", () => {
+  it("gives a Max box the pro model", () => {
+    // "pro" is the DEVICE tier name for the Max plan — the only tier ClawBox AI
+    // lets reach deepseek-v4-pro.
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
+    runWrapper();
+    expect(capturedEnv().ANTHROPIC_MODEL).toBe("deepseek-v4-pro[1m]");
+  });
+
+  it("gives every other plan flash, because the proxy 403s pro below Max", () => {
+    for (const tier of ["flash", "free", ""]) {
+      writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: tier });
+      runWrapper();
+      expect(capturedEnv().ANTHROPIC_MODEL, `tier=${tier || "<unset>"}`).toBe("deepseek-v4-flash");
+    }
+  });
+
+  it("gives flash when the tier field is missing entirely", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token" });
+    runWrapper();
+    expect(capturedEnv().ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
+  });
+
+  it("keeps the cheap model in the haiku slot on every plan", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
+    runWrapper();
+    expect(capturedEnv().ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("deepseek-v4-flash");
+  });
+
+  it("does NOT force one model on every sub-agent", () => {
+    // CLAUDE_CODE_SUBAGENT_MODEL outranks a per-agent `model:`, so setting it
+    // makes a mixed fleet impossible — a cheap reader and an expensive writer
+    // both collapse onto one model. The coding agent picks per agent instead,
+    // so the wrapper must leave this unset.
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
+    runWrapper();
+    expect(capturedEnv().CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
+  });
+
+  it("still lets someone force one deliberately", () => {
+    runWrapper({ CLAUDE_DS_SUBAGENT_MODEL: "deepseek-v4-flash" });
+    expect(capturedEnv().CLAUDE_CODE_SUBAGENT_MODEL).toBe("deepseek-v4-flash");
+  });
+
+  it("lets an override win over the plan", () => {
+    runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-pro" });
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_MODEL).toBe("deepseek-v4-pro");
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("deepseek-v4-pro");
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("deepseek-v4-pro");
+  });
+
+  it("says on screen which model is about to answer", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
+    expect(runWrapper().stderr).toContain("deepseek-v4-pro[1m]");
+  });
+});
+
+describe("isolation from the rest of the box", () => {
+  it("keeps its own Claude Code state directory, never the shared ~/.claude", () => {
+    runWrapper();
+    const dir = capturedEnv().CLAUDE_CONFIG_DIR;
+    expect(dir).toBe(path.join(home, ".claude-ds"));
+    expect(dir).not.toBe(path.join(home, ".claude"));
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it("clears an inherited Anthropic credential, which would otherwise outrank the portal token", () => {
+    runWrapper({
+      ANTHROPIC_API_KEY: "sk-ant-inherited",
+      ANTHROPIC_OAUTH_TOKEN: "oat-inherited",
+    });
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_OAUTH_TOKEN).toBeUndefined();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("claw_test_token");
+  });
+
+  it("writes no shell rc file — a global ANTHROPIC_BASE_URL would reroute OpenClaw itself", () => {
+    const bashrc = path.join(home, ".bashrc");
+    writeFileSync(bashrc, "# original\n", "utf-8");
+    runWrapper();
+    expect(readFileSync(bashrc, "utf-8")).toBe("# original\n");
+    // And the script contains no rc-appending at all.
+    const source = readFileSync(WRAPPER, "utf-8");
+    expect(source).not.toMatch(/>>\s*.*\.(bashrc|profile|zshrc)/);
+  });
+});
+
+describe("failing in a way the owner can act on", () => {
+  it("refuses, and never starts Claude Code, when ClawBox AI is not connected", () => {
+    writeDeviceConfig({ hostname: "clawbox" });
+    const run = runWrapper();
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("Settings");
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("distinguishes a corrupt config from a missing login", () => {
+    // Both used to be "something went wrong"; they need different answers.
+    mkdirSync(path.join(root, "data"), { recursive: true });
+    writeFileSync(path.join(root, "data", "config.json"), "{not json", "utf-8");
+    const run = runWrapper();
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("not readable JSON");
+    expect(run.stderr).not.toContain("Settings");
+  });
+
+  it("names the repair command when Claude Code is not installed", () => {
+    rmSync(path.join(binDir, "claude"));
+    const run = runWrapper();
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("--step coding_harness");
+  });
+
+  it("never prints the token", () => {
+    const run = runWrapper();
+    expect(run.stdout).not.toContain("claw_test_token");
+    expect(run.stderr).not.toContain("claw_test_token");
+  });
+});
+
+/**
+ * The trust dialog, and why it is pre-answered for the folder the harness
+ * starts in.
+ *
+ * Found on a real box: the Coding Agent asked "is this a project you created
+ * or one you trust?" on EVERY launch, because Claude Code never persists
+ * hasTrustDialogAccepted for $HOME — the flag stayed false on both test boxes
+ * across clean exits that did record lastCost and lastSessionId. A security
+ * prompt whose only other option is "exit", shown every single time, trains
+ * the owner to click through prompts instead of reading them.
+ *
+ * It used to be seeded for the home directory alone; the owner asked for
+ * every folder a terminal opens on to be trusted — a run's project folder,
+ * a code project, a clone — because on this appliance every one of them is
+ * the owner's own, behind the device login. The line these tests hold is
+ * that ONLY the starting folder is answered: nothing else in the config is
+ * touched, and a folder the harness never started in is never pre-answered.
+ */
+describe("the trust dialog", () => {
+  const claudeConfig = () => path.join(home, ".claude-ds", ".claude.json");
+  const readConfig = (): Record<string, unknown> =>
+    JSON.parse(readFileSync(claudeConfig(), "utf-8")) as Record<string, unknown>;
+  /** undefined both when the file is absent and when the key is — "not seeded" either way. */
+  const trustFor = (dir: string): unknown => {
+    if (!existsSync(claudeConfig())) return undefined;
+    return ((readConfig().projects as Record<string, Record<string, unknown>>)?.[dir])?.hasTrustDialogAccepted;
+  };
+
+  it("is pre-answered for the home directory the Coding Agent opens in", () => {
+    expect(runWrapper({}, [], home).status).toBe(0);
+    expect(trustFor(home)).toBe(true);
+  });
+
+  it("is pre-answered for the folder the harness starts in, and only that folder", () => {
+    // A terminal the desktop opens on a project folder must land in Claude
+    // Code, not in a question whose only real answer is "yes".
+    const repoDir = path.join(home, "someones-repo");
+    mkdirSync(repoDir, { recursive: true });
+    expect(runWrapper({}, [], repoDir).status).toBe(0);
+    expect(trustFor(repoDir)).toBe(true);
+    expect(trustFor(home)).toBeUndefined();
+  });
+
+  it("keeps everything else in the config it did not come to change", () => {
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    writeFileSync(claudeConfig(), JSON.stringify({
+      theme: "dark",
+      projects: {
+        [home]: { allowedTools: ["Bash"], projectOnboardingSeenCount: 3 },
+        "/somewhere/else": { hasTrustDialogAccepted: false },
+      },
+    }), "utf-8");
+
+    expect(runWrapper({}, [], home).status).toBe(0);
+
+    const cfg = readConfig();
+    expect(cfg.theme).toBe("dark");
+    const projects = cfg.projects as Record<string, Record<string, unknown>>;
+    expect(projects[home].allowedTools).toEqual(["Bash"]);
+    expect(projects[home].projectOnboardingSeenCount).toBe(3);
+    expect(projects[home].hasTrustDialogAccepted).toBe(true);
+    // Another folder's answer is not ours to change in either direction.
+    expect(projects["/somewhere/else"].hasTrustDialogAccepted).toBe(false);
+  });
+
+  it("leaves a config it cannot parse alone rather than overwriting it", () => {
+    // Losing an owner's MCP servers to save them one keypress would be a bad
+    // trade; a broken config is Claude Code's to repair.
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    writeFileSync(claudeConfig(), "{ not json at all", "utf-8");
+
+    expect(runWrapper({}, [], home).status).toBe(0);
+    expect(readFileSync(claudeConfig(), "utf-8")).toBe("{ not json at all");
+  });
+
+  // Skipped as root, where a read-only directory does not stop a write and the
+  // test would pass without ever reaching the failure path it names. CI and a
+  // developer machine both run this unprivileged.
+  it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
+    "still starts Claude Code when the seed cannot be written",
+    () => {
+      // The harness must never fail to launch over a convenience.
+      mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+      writeFileSync(claudeConfig(), JSON.stringify({ projects: {} }), "utf-8");
+      execFileSync("chmod", ["500", path.join(home, ".claude-ds")]);
+      try {
+        expect(runWrapper({}, [], home).status).toBe(0);
+        expect(existsSync(envDump)).toBe(true);
+      } finally {
+        execFileSync("chmod", ["700", path.join(home, ".claude-ds")]);
+      }
+    },
+  );
+
+  it("does not rewrite the config when the answer is already there", () => {
+    // Compared as BYTES, not by mtime: a filesystem with coarse timestamps can
+    // report the same mtime across a real replacement, and this test would
+    // then pass while the wrapper rewrote the file on every launch. The
+    // indentation is deliberate — a rewrite through json.dump would flatten
+    // it, so the formatting itself is the tell.
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    const pretty = JSON.stringify(
+      { theme: "dark", hasCompletedOnboarding: true, projects: { [home]: { hasTrustDialogAccepted: true } } },
+      null,
+      4,
+    );
+    writeFileSync(claudeConfig(), pretty, "utf-8");
+
+    expect(runWrapper({}, [], home).status).toBe(0);
+
+    expect(readFileSync(claudeConfig(), "utf-8")).toBe(pretty);
+  });
+});
+
+/**
+ * The first-run onboarding, and why the wrapper answers it.
+ *
+ * Seen on a real box: "Open in terminal" on a finished run (`claude-ds
+ * --resume <session>`) showed "Welcome to Claude Code … Choose the text
+ * style" instead of the session. The harness's state directory is written
+ * only by headless runs, which skip the onboarding, so the interactive CLI
+ * treated every first terminal as a first launch. Unlike the trust answer,
+ * this one is global, so it is seeded wherever the wrapper starts.
+ */
+describe("the first-run onboarding", () => {
+  const claudeConfig = () => path.join(home, ".claude-ds", ".claude.json");
+  const readConfig = (): Record<string, unknown> =>
+    JSON.parse(readFileSync(claudeConfig(), "utf-8")) as Record<string, unknown>;
+
+  it("is pre-answered on a fresh state directory, from any folder", () => {
+    const repoDir = path.join(home, "someones-repo");
+    mkdirSync(repoDir, { recursive: true });
+    expect(runWrapper({}, ["--resume", "abc"], repoDir).status).toBe(0);
+    const cfg = readConfig();
+    expect(cfg.hasCompletedOnboarding).toBe(true);
+    expect(cfg.theme).toBe("dark");
+    // The trust answer keeps its scope: the folder it started in, no other.
+    expect(cfg.projects).toEqual({ [repoDir]: { hasTrustDialogAccepted: true } });
+  });
+
+  it("keeps a theme the owner chose", () => {
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    writeFileSync(claudeConfig(), JSON.stringify({ theme: "light" }), "utf-8");
+    expect(runWrapper().status).toBe(0);
+    expect(readConfig()).toMatchObject({ theme: "light", hasCompletedOnboarding: true });
+  });
+
+  it("re-answers an onboarding recorded as false, not only an absent one", () => {
+    // Deliberate: `false` here is not an owner's answer — it is an
+    // interrupted wizard (or Claude Code's own initial write), and on this
+    // box the question has only one answer. Seeding only-when-absent would
+    // put the theme picker back in front of "Open in terminal".
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    writeFileSync(claudeConfig(), JSON.stringify({ hasCompletedOnboarding: false, theme: "light" }), "utf-8");
+    expect(runWrapper().status).toBe(0);
+    expect(readConfig()).toMatchObject({ theme: "light", hasCompletedOnboarding: true });
+  });
+
+  it("does not rewrite a config that already has the answers", () => {
+    // Bytes, not mtime, for the reason the trust test gives. The starting
+    // folder's trust answer is one of the answers, so it is already there.
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    const pretty = JSON.stringify({
+      hasCompletedOnboarding: true,
+      theme: "light",
+      projects: { [REPO]: { hasTrustDialogAccepted: true } },
+    }, null, 4);
+    writeFileSync(claudeConfig(), pretty, "utf-8");
+    expect(runWrapper().status).toBe(0);
+    expect(readFileSync(claudeConfig(), "utf-8")).toBe(pretty);
+  });
+});
+
+/**
+ * CLAUDE_DS_PROVIDER — which account pays, and the isolation that makes it
+ * safe to have two.
+ *
+ * The whole point of the second provider is that the two credentials never
+ * meet. Every one of these runs the SHIPPED wrapper with a hostile parent
+ * environment — the OTHER provider's variables already exported — because
+ * that is exactly what a nested `claude-ds`, a stale shell or an owner's
+ * ~/.bashrc would leave behind, and inherited variables OUTRANK what the
+ * wrapper exports.
+ */
+describe("the provider split", () => {
+  /** Where the Anthropic branch keeps Claude Code's own state. */
+  const anthropicConfig = () => path.join(home, ".claude.json");
+
+  function writeNativeLogin(): void {
+    mkdirSync(path.join(home, ".claude"), { recursive: true });
+    writeFileSync(path.join(home, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "x" } }), "utf-8");
+  }
+
+  it("defaults to ClawBox AI when nothing names a provider", () => {
+    // The whole installed base is on this path; an absent variable must not
+    // move a single box onto the owner's own bill.
+    expect(runWrapper().status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("claw_test_token");
+    expect(env.ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
+  });
+
+  it("refuses a provider it does not know, before reading any credential", () => {
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "bogus" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/unknown CLAUDE_DS_PROVIDER/);
+    // Nothing started: a typo must not silently fall back to spending either
+    // account.
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("gives an anthropic run the owner's stored key and NONE of the proxy wiring", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro", anthropic_api_key: "sk-ant-owner-key-0123456789" });
+    const res = runWrapper({
+      CLAUDE_DS_PROVIDER: "anthropic",
+      // What a nested claude-ds would have left in the environment.
+      ANTHROPIC_AUTH_TOKEN: "claw_test_token",
+      ANTHROPIC_BASE_URL: "https://clawbox.com/api/ai/anthropic",
+      CLAUDE_CODE_API_BASE_URL: "https://clawbox.com/api/ai/anthropic",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-pro[1m]",
+      CLAUDE_CONFIG_DIR: path.join(home, ".claude-ds"),
+    });
+    expect(res.status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-owner-key-0123456789");
+    // The portal token and both proxy bases are GONE — inherited, any one of
+    // them would have sent a run the owner is paying Anthropic for straight
+    // back through the box's plan.
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(env.CLAUDE_CODE_API_BASE_URL).toBeUndefined();
+    // And so are the DeepSeek aliases: against real Anthropic they would
+    // override the account's own models with names it does not have.
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBeUndefined();
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBeUndefined();
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBeUndefined();
+    // No CLAUDE_CONFIG_DIR either: the login the owner made in the Terminal
+    // app lives in Claude Code's DEFAULT state, not in ~/.claude-ds.
+    expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();
+  });
+
+  it("never lets a ClawBox AI run see the owner's Anthropic key", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", anthropic_api_key: "sk-ant-owner-key-0123456789" });
+    // Hostile in both directions: the key is in the config AND already
+    // exported. ANTHROPIC_API_KEY outranks ANTHROPIC_AUTH_TOKEN, so leaving
+    // either in place would bill the owner for the box's own plan's work.
+    expect(runWrapper({ ANTHROPIC_API_KEY: "sk-ant-owner-key-0123456789" }).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("claw_test_token");
+    // And the key is nowhere else in the environment under any name.
+    expect(Object.values(env).some((v) => v.includes("sk-ant-owner-key"))).toBe(false);
+  });
+
+  it("uses the native `claude` login when there is no stored key", () => {
+    writeNativeLogin();
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic" }).status).toBe(0);
+    const env = capturedEnv();
+    // Nothing exported at all: Claude Code then uses the credential it holds.
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(env.ANTHROPIC_MODEL).toBe("claude-opus-5");
+  });
+
+  it("reads an oauthAccount in Claude Code's config as a login too", () => {
+    // Which of the two files holds the answer depends on the CLI version.
+    writeFileSync(anthropicConfig(), JSON.stringify({ oauthAccount: { emailAddress: "owner@example.com" } }), "utf-8");
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic" }).status).toBe(0);
+    expect(capturedEnv().ANTHROPIC_MODEL).toBe("claude-opus-5");
+  });
+
+  it("refuses an anthropic run with neither a key nor a login, and starts nothing", () => {
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/Anthropic is not connected/);
+    expect(res.stderr).toMatch(/Terminal/);
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("takes the model from CLAUDE_DS_MODEL on the anthropic branch", () => {
+    writeNativeLogin();
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_MODEL: "claude-sonnet-5" }).status).toBe(0);
+    expect(capturedEnv().ANTHROPIC_MODEL).toBe("claude-sonnet-5");
+  });
+
+  it("seeds the trust answer but NOT the theme in the owner's own config", () => {
+    // ~/.claude.json is Claude Code's, not this harness's. A headless run
+    // cannot answer the trust dialog, so that one is seeded; the theme picker
+    // is a question the owner's own terminal may still ask them once.
+    writeNativeLogin();
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic" }).status).toBe(0);
+    const cfg = JSON.parse(readFileSync(anthropicConfig(), "utf-8")) as Record<string, unknown>;
+    expect(cfg.projects).toMatchObject({ [REPO]: { hasTrustDialogAccepted: true } });
+    expect(cfg.hasCompletedOnboarding).toBeUndefined();
+    expect(cfg.theme).toBeUndefined();
+  });
+
+  it("does not check the proxy URL for an anthropic run", () => {
+    // The https guard exists because the PORTAL TOKEN would go out in the
+    // clear. An Anthropic run never reads that token, so refusing it over the
+    // shape of a URL it does not use would be a refusal about nothing.
+    writeNativeLogin();
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAWBOX_AI_PROXY_URL: "http://example.invalid/api/ai" });
+    expect(res.status).toBe(0);
+    expect(capturedEnv().ANTHROPIC_BASE_URL).toBeUndefined();
+  });
+
+  it("still refuses a plaintext proxy URL for a ClawBox AI run", () => {
+    const res = runWrapper({ CLAWBOX_AI_PROXY_URL: "http://example.invalid/api/ai" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/non-HTTPS/);
+  });
+
+  it("refuses a plaintext SECOND base URL too — it carries the same token", () => {
+    // CLAUDE_CODE_API_BASE_URL is the account surface and the run exports
+    // ANTHROPIC_AUTH_TOKEN for it as well, so guarding only the proxy left an
+    // unchecked way to put a live credential on the wire in the clear.
+    const res = runWrapper({ CLAUDE_DS_API_BASE_URL: "http://example.invalid/anthropic" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/non-HTTPS/);
+    expect(res.stderr).toMatch(/CLAUDE_DS_API_BASE_URL/);
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("accepts a loopback second base, the way it accepts a loopback proxy", () => {
+    const res = runWrapper({ CLAUDE_DS_API_BASE_URL: "http://127.0.0.1:8080/anthropic" });
+    expect(res.status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_API_BASE_URL).toBe("http://127.0.0.1:8080/anthropic");
+  });
+
+  it("does not check the second base on an anthropic run, which never sets it", () => {
+    writeNativeLogin();
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_API_BASE_URL: "http://example.invalid/x" });
+    expect(res.status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_API_BASE_URL).toBeUndefined();
+  });
+});
+
+/**
+ * The account pool's handoff (TASK-902): the runner picks ONE of the box's
+ * Anthropic accounts per spawn and leaves its credential in a 0600 file named
+ * by CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE. The wrapper must read it, delete it
+ * before Claude Code starts, export the right variable for its kind — and let
+ * it outrank the legacy key, because it is the account the runner CHOSE.
+ */
+describe("the account the runner chose", () => {
+  function handoff(kind: string, secret: string): string {
+    const file = path.join(path.dirname(home), `handoff-${kind}.cred`);
+    writeFileSync(file, `${kind}\n${secret}\n`, { mode: 0o600 });
+    return file;
+  }
+
+  it("exports an OAuth account's token as CLAUDE_CODE_OAUTH_TOKEN, and deletes the file before Claude Code starts", () => {
+    const file = handoff("oauth", "sk-ant-oat01-second-account-token");
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file });
+    expect(res.status).toBe(0);
+    const env = capturedEnv();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat01-second-account-token");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    // Gone from disk, and its path does not travel into the session either.
+    expect(existsSync(file)).toBe(false);
+    expect(env.CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE).toBeUndefined();
+  });
+
+  it("exports an API-key account as ANTHROPIC_API_KEY, over a legacy key still in the config", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", anthropic_api_key: "sk-ant-legacy-key-0123456789" });
+    const file = handoff("api_key", "sk-ant-api03-pool-account-key");
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file }).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-api03-pool-account-key");
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("exports nothing for the `claude` sign-in, so Claude Code uses its own login", () => {
+    mkdirSync(path.join(home, ".claude"), { recursive: true });
+    writeFileSync(path.join(home, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "x" } }));
+    writeDeviceConfig({ clawai_token: "claw_test_token", anthropic_api_key: "sk-ant-legacy-key-0123456789" });
+    const file = handoff("login", "");
+    expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file }).status).toBe(0);
+    const env = capturedEnv();
+    // Not even the legacy key: the runner chose the sign-in.
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+  });
+
+  it("drops an inherited CLAUDE_CODE_OAUTH_TOKEN, which would outrank the account the runner chose", () => {
+    const file = handoff("api_key", "sk-ant-api03-pool-account-key");
+    expect(runWrapper({
+      CLAUDE_DS_PROVIDER: "anthropic",
+      CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file,
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-somebody-elses",
+    }).status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    // And on the ClawBox AI branch too.
+    expect(runWrapper({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-somebody-elses" }).status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+  });
+
+  it("refuses a sign-in handoff when the sign-in is gone, and starts nothing", () => {
+    const file = handoff("login", "");
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/sign-in this run was given is gone/);
+    expect(existsSync(envDump)).toBe(false);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("refuses a handoff it cannot use, never printing what was in it", () => {
+    const file = handoff("mystery", "sk-ant-should-not-print");
+    const res = runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file });
+    expect(res.status).toBe(1);
+    expect(res.stderr).not.toContain("sk-ant-should-not-print");
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("is never read on a ClawBox AI run", () => {
+    const file = handoff("api_key", "sk-ant-api03-pool-account-key");
+    expect(runWrapper({ CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE: file }).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(Object.values(env).some((v) => v.includes("pool-account-key"))).toBe(false);
+  });
+});

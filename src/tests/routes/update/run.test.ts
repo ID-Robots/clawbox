@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 
 vi.mock("@/lib/updater", () => ({
   startUpdate: vi.fn(),
@@ -12,22 +13,27 @@ const mockIsUpdateCompleted = vi.mocked(isUpdateCompleted);
 
 describe("POST /setup-api/update/run", () => {
   let updateRunPost: (req: Request) => Promise<Response>;
+  let session: SessionFixture;
 
   function jsonRequest(body: unknown): Request {
     return new Request("http://localhost/test", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Cookie: session.cookie },
       body: JSON.stringify(body),
     });
   }
 
   function emptyRequest(): Request {
-    return new Request("http://localhost/test", { method: "POST" });
+    return new Request("http://localhost/test", {
+      method: "POST",
+      headers: { Cookie: session.cookie },
+    });
   }
 
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    session = installSessionFixture();
 
     mockStartUpdate.mockReturnValue({ started: true });
     mockIsUpdateCompleted.mockResolvedValue(false);
@@ -38,6 +44,7 @@ describe("POST /setup-api/update/run", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    session.cleanup();
   });
 
   it("starts an update successfully", async () => {
@@ -75,7 +82,7 @@ describe("POST /setup-api/update/run", () => {
   it("handles invalid JSON body gracefully", async () => {
     const req = new Request("http://localhost/test", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Cookie: session.cookie },
       body: "not json",
     });
 

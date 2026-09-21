@@ -1,0 +1,346 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { execFileSync } from "child_process";
+import fs from "fs/promises";
+import os from "os";
+import path from "path";
+
+import {
+  HermesEnvUnreadableError,
+  applyEnvValues,
+  clearHermesEnvValues,
+  envLineDefinesKey,
+  getHermesEnvValue,
+  hermesEnvPath,
+  parseEnvValue,
+  parseHermesEnv,
+  quoteEnvValue,
+  readHermesEnv,
+  setHermesEnvValues,
+  removeEnvValues,
+} from "@/lib/hermes-env";
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+describe("quoteEnvValue", () => {
+  it("leaves plain values unquoted", () => {
+    expect(quoteEnvValue("true")).toBe("true");
+    expect(quoteEnvValue("15551234567")).toBe("15551234567");
+    expect(quoteEnvValue("self-chat")).toBe("self-chat");
+    expect(quoteEnvValue("15551234567,15559876543")).toBe("15551234567,15559876543");
+  });
+
+  it("keeps an empty value empty rather than writing a pair of quotes", () => {
+    expect(quoteEnvValue("")).toBe("");
+  });
+
+  it("quotes anything dotenv would otherwise misread", () => {
+    // A bare # would start a comment and silently truncate the value.
+    expect(quoteEnvValue("a#b")).toBe('"a#b"');
+    expect(quoteEnvValue("two words")).toBe('"two words"');
+    expect(quoteEnvValue(" padded ")).toBe('" padded "');
+    expect(quoteEnvValue("it's")).toBe(`"it's"`);
+  });
+
+  it("escapes backslashes and double quotes", () => {
+    expect(quoteEnvValue('say "hi"')).toBe('"say \\"hi\\""');
+    expect(quoteEnvValue("back\\slash here")).toBe('"back\\\\slash here"');
+  });
+});
+
+describe("parseEnvValue", () => {
+  it("round-trips everything quoteEnvValue produces", () => {
+    for (const value of ["true", "", "a#b", "two words", " padded ", 'say "hi"', "back\\slash here"]) {
+      expect(parseEnvValue(quoteEnvValue(value))).toBe(value);
+    }
+  });
+
+  it("does not unescape inside single quotes", () => {
+    expect(parseEnvValue(`'raw\\value'`)).toBe("raw\\value");
+  });
+});
+
+describe("envLineDefinesKey", () => {
+  it("matches both the plain and the export form", () => {
+    expect(envLineDefinesKey("WHATSAPP_ENABLED=true", "WHATSAPP_ENABLED")).toBe(true);
+    expect(envLineDefinesKey("export WHATSAPP_ENABLED=true", "WHATSAPP_ENABLED")).toBe(true);
+    expect(envLineDefinesKey("  export   WHATSAPP_ENABLED=true", "WHATSAPP_ENABLED")).toBe(true);
+  });
+
+  it("does not match a longer key with the same prefix", () => {
+    expect(envLineDefinesKey("WHATSAPP_ENABLED_EXTRA=true", "WHATSAPP_ENABLED")).toBe(false);
+    expect(envLineDefinesKey("# WHATSAPP_ENABLED=true", "WHATSAPP_ENABLED")).toBe(false);
+  });
+});
+
+describe("applyEnvValues", () => {
+  it("appends a new key and keeps a trailing newline", () => {
+    expect(applyEnvValues("A=1\n", { B: "2" })).toBe("A=1\nB=2\n");
+  });
+
+  it("replaces in place, preserving surrounding lines and comments", () => {
+    const before = "# comment\nA=1\nB=old\nC=3\n";
+    expect(applyEnvValues(before, { B: "new" })).toBe("# comment\nA=1\nB=new\nC=3\n");
+  });
+
+  it("replaces an export-prefixed line rather than appending a duplicate", () => {
+    // Appending a second line here is the upstream bug that made a later
+    // delete resurrect the old exported value.
+    expect(applyEnvValues("export A=1\n", { A: "2" })).toBe("A=2\n");
+  });
+
+  it("deletes a key when the value is null", () => {
+    expect(applyEnvValues("A=1\nB=2\n", { A: null })).toBe("B=2\n");
+    // Deleting the only key leaves an empty file, not a stray newline.
+    expect(applyEnvValues("A=1\n", { A: null })).toBe("");
+  });
+
+  it("is a no-op for deleting a key that was never there", () => {
+    expect(applyEnvValues("A=1\n", { Z: null })).toBe("A=1\n");
+  });
+
+  it("rewrites EVERY definition of a duplicated key, not just the first", () => {
+    // parseHermesEnv (like Hermes' load_env) lets the LAST definition win, so
+    // touching only the first produced a write that read back unchanged.
+    const before = "A=old\nB=keep\nA=newer\n";
+    const after = applyEnvValues(before, { A: "written" });
+    expect(after).toBe("A=written\nB=keep\n");
+    expect(parseHermesEnv(after).A).toBe("written");
+  });
+
+  it("deletes every definition, so a duplicate cannot resurrect the old value", () => {
+    const after = applyEnvValues("A=old\nB=keep\nA=newer\n", { A: null });
+    expect(after).toBe("B=keep\n");
+    expect(parseHermesEnv(after).A).toBeUndefined();
+  });
+
+  it("matches a duplicate written in the export form too", () => {
+    const after = applyEnvValues("A=old\nexport A=newer\n", { A: "written" });
+    expect(after).toBe("A=written\n");
+  });
+
+  it("does not grow blank lines when applied repeatedly", () => {
+    let text = "";
+    for (let i = 0; i < 3; i++) text = applyEnvValues(text, { A: String(i) });
+    expect(text).toBe("A=2\n");
+  });
+
+  it("strips newlines from a value so it cannot forge a second assignment", () => {
+    expect(applyEnvValues("", { A: "one\nADMIN=yes" })).toBe("A=oneADMIN=yes\n");
+  });
+
+  it("normalises CRLF input", () => {
+    expect(applyEnvValues("A=1\r\nB=2\r\n", { B: "3" })).toBe("A=1\nB=3\n");
+  });
+
+  it("rejects an invalid variable name", () => {
+    expect(() => applyEnvValues("", { "BAD-KEY": "1" })).toThrow(/Invalid environment variable name/);
+    expect(() => applyEnvValues("", { "1LEADING": "1" })).toThrow(/Invalid environment variable name/);
+  });
+});
+
+describe("parseHermesEnv", () => {
+  it("skips comments and blanks, strips export, splits on the first =", () => {
+    const env = parseHermesEnv(["# note", "", "A=1", "export B=2", "C=x=y"].join("\n"));
+    expect(env).toEqual({ A: "1", B: "2", C: "x=y" });
+  });
+
+  it("unquotes values", () => {
+    expect(parseHermesEnv('A="two words"\n')).toEqual({ A: "two words" });
+  });
+
+  it("tolerates a BOM", () => {
+    expect(parseHermesEnv("﻿A=1\n")).toEqual({ A: "1" });
+  });
+});
+
+describe("setHermesEnvValues on disk", () => {
+  let dir: string;
+  const originalHome = process.env.HERMES_HOME;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawbox-hermes-env-"));
+    process.env.HERMES_HOME = dir;
+  });
+
+  afterEach(async () => {
+    if (originalHome === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = originalHome;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("creates a missing .env at 0600", async () => {
+    await setHermesEnvValues({ WHATSAPP_ENABLED: "true" });
+    const stat = await fs.stat(hermesEnvPath());
+    expect(stat.mode & 0o777).toBe(0o600);
+    expect(await readHermesEnv()).toEqual({ WHATSAPP_ENABLED: "true" });
+  });
+
+  it("preserves the existing file mode instead of widening it", async () => {
+    // 0640, not 0600: setHermesEnvValues CREATES a missing file at 0600, so a
+    // 0600 fixture passes this assertion even with the mode-preserving code
+    // deleted. The mode has to differ from the default for the test to mean
+    // anything. umask cannot interfere — chmod sets the mode outright.
+    await fs.writeFile(hermesEnvPath(), "A=1\n", { mode: 0o640 });
+    await fs.chmod(hermesEnvPath(), 0o640);
+    await setHermesEnvValues({ B: "2" });
+    expect((await fs.stat(hermesEnvPath())).mode & 0o777).toBe(0o640);
+  });
+
+  it("leaves no temp file behind", async () => {
+    await setHermesEnvValues({ A: "1" });
+    const entries = await fs.readdir(dir);
+    expect(entries.filter((e) => e.includes("tmp"))).toEqual([]);
+  });
+
+  it("serialises concurrent writes so neither is dropped", async () => {
+    await Promise.all([
+      setHermesEnvValues({ A: "1" }),
+      setHermesEnvValues({ B: "2" }),
+      setHermesEnvValues({ C: "3" }),
+    ]);
+    expect(await readHermesEnv()).toEqual({ A: "1", B: "2", C: "3" });
+  });
+
+  it("reads a single value and returns null for an absent key", async () => {
+    await setHermesEnvValues({ A: "1" });
+    expect(await getHermesEnvValue("A")).toBe("1");
+    expect(await getHermesEnvValue("NOPE")).toBeNull();
+  });
+
+  it("treats a missing .env as empty rather than throwing", async () => {
+    expect(await readHermesEnv()).toEqual({});
+    expect(await getHermesEnvValue("A")).toBeNull();
+  });
+
+  it("treats a missing ~/.hermes as empty too", async () => {
+    // ENOTDIR rather than ENOENT: a path component exists but is not a
+    // directory. Still "nothing configured", not a fault.
+    process.env.HERMES_HOME = path.join(dir, "not-a-dir", "hermes");
+    await fs.writeFile(path.join(dir, "not-a-dir"), "");
+    expect(await readHermesEnv()).toEqual({});
+  });
+
+  it("propagates a real read failure instead of reporting an empty env", async () => {
+    // The bug this guards: `catch { return {} }` flattened EVERY failure into
+    // "nothing configured yet", so an unreadable .env made
+    // readHermesWhatsappStatus answer `not_configured` with an empty allowlist
+    // — the panel told the owner his channel was simply not set up while the
+    // real cause was an unreadable file. A fault has to reach the caller.
+    //
+    // A directory at the .env path yields EISDIR on every platform and for
+    // every user, which chmod 0o000 does not: CI containers often run as root,
+    // where the permission bits are ignored and the read would succeed.
+    await fs.mkdir(hermesEnvPath(), { recursive: true });
+    await expect(readHermesEnv()).rejects.toMatchObject({ code: "EISDIR" });
+    await expect(getHermesEnvValue("A")).rejects.toMatchObject({ code: "EISDIR" });
+  });
+
+  // A FIFO at the path is the one shape that must not produce a WRONG kind of
+  // answer: `fs.readFile` opens with plain O_RDONLY, and opening a FIFO that
+  // way parks until someone opens the write end — a request that never
+  // returns. Both paths open O_NONBLOCK for that reason.
+  it("does not hang when the path is a fifo", async () => {
+    // Skipped where the platform cannot make one — Git Bash on Windows exits 0
+    // from `mkfifo` and creates nothing, which would make this test assert the
+    // opposite of what it is for. CI runs on Linux, which has real FIFOs.
+    const isFifo = await (async () => {
+      try {
+        execFileSync("mkfifo", [hermesEnvPath()]);
+        return (await fs.stat(hermesEnvPath())).isFIFO();
+      } catch {
+        return false;
+      }
+    })();
+    if (!isFifo) return;
+    // SETTLING is the property under test, not which way it settles: a
+    // non-blocking read of a writer-less FIFO gives EOF on some kernels and
+    // EAGAIN on others, and either is a fine answer. Hanging is not.
+    const inTime = async (work: Promise<unknown>, what: string) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const hung = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} hung on a fifo`)), 2000);
+      });
+      try {
+        await Promise.race([work, hung]);
+      } finally {
+        clearTimeout(timer!);
+      }
+    };
+    // Neither side may merely settle: a FIFO reads as zero bytes, so "it
+    // resolved empty" would be this module reporting a device whose settings
+    // file is a pipe as a device with no settings.
+    await inTime(
+      expect(readHermesEnv()).rejects.toBeInstanceOf(HermesEnvUnreadableError),
+      "readHermesEnv",
+    );
+    await inTime(
+      expect(setHermesEnvValues({ A: "1" })).rejects.toBeInstanceOf(HermesEnvUnreadableError),
+      "setHermesEnvValues",
+    );
+  });
+
+  // TASK-452 round 2. The READ path has refused to flatten a fault into
+  // "nothing configured" since the WhatsApp panel bug above; the WRITE path was
+  // still doing exactly that, one `catch` further down, and the consequence is
+  // worse. `existing` stayed "" and `applyEnvValues("", …)` then wrote a
+  // two-line file over whatever was there — the whole of ~/.hermes/.env, which
+  // on a real device is Hermes' own 504-line template plus every credential the
+  // email, WhatsApp, Discord, ClawAI and skill-secret settings have stored.
+  //
+  // A file this module cannot read is a file it must not merge into.
+  describe("a base it could not read", () => {
+    it("refuses to write rather than rebuilding the file from nothing", async () => {
+      await fs.mkdir(hermesEnvPath(), { recursive: true });
+
+      await expect(setHermesEnvValues({ A: "1" })).rejects.toBeInstanceOf(HermesEnvUnreadableError);
+      // Still a directory: nothing was renamed over it.
+      expect((await fs.stat(hermesEnvPath())).isDirectory()).toBe(true);
+    });
+
+    it("refuses when the file is larger than it will parse, and changes nothing", async () => {
+      const huge = `# big\n${"# padding padding padding\n".repeat(12_000)}KEEP_ME=yes\n`;
+      await fs.writeFile(hermesEnvPath(), huge, { mode: 0o600 });
+
+      await expect(setHermesEnvValues({ A: "1" })).rejects.toMatchObject({ reason: "too-large" });
+      expect(await fs.readFile(hermesEnvPath(), "utf8")).toBe(huge);
+    });
+
+    it("leaves a clearing write refused too, so a delete cannot empty the file", async () => {
+      await fs.mkdir(hermesEnvPath(), { recursive: true });
+
+      await expect(clearHermesEnvValues(["A"])).rejects.toBeInstanceOf(HermesEnvUnreadableError);
+      expect((await fs.stat(hermesEnvPath())).isDirectory()).toBe(true);
+    });
+
+    it("keeps writing after a refusal — the single-writer chain survives it", async () => {
+      const blocked = hermesEnvPath();
+      await fs.mkdir(blocked, { recursive: true });
+      await expect(setHermesEnvValues({ A: "1" })).rejects.toBeInstanceOf(HermesEnvUnreadableError);
+
+      await fs.rm(blocked, { recursive: true, force: true });
+      await setHermesEnvValues({ A: "1" });
+      expect(await readHermesEnv()).toEqual({ A: "1" });
+    });
+  });
+});
+
+describe("removeEnvValues", () => {
+  it("drops plain and export-prefixed assignments and keeps everything else", () => {
+    const before = [
+      "# EMAIL_ADDRESS=template",
+      "EMAIL_ADDRESS=a@b.com",
+      "export EMAIL_PASSWORD=secret",
+      "TELEGRAM_BOT_TOKEN=keepme",
+      "",
+    ].join("\n");
+    const out = removeEnvValues(before, ["EMAIL_ADDRESS", "EMAIL_PASSWORD"]);
+    expect(out).toBe("# EMAIL_ADDRESS=template\nTELEGRAM_BOT_TOKEN=keepme\n");
+  });
+
+  it("is a no-op when nothing matches", () => {
+    expect(removeEnvValues("FOO=1\n", ["EMAIL_ADDRESS"])).toBe("FOO=1\n");
+  });
+});

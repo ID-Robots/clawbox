@@ -1,0 +1,9 @@
+{
+  "id": "m-04-ambiguity",
+  "projectName": "stockroom",
+  "tier": "M",
+  "title": "Deliberately under-specified brief: does the run state its assumptions?",
+  "timeoutMinutes": 15,
+  "nightly": true,
+  "manual": false
+}

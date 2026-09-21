@@ -7,8 +7,18 @@
 #   sudo bash install.sh --step NAME  — run a single step (used by systemd)
 #
 # Environment variables:
-#   CLAWBOX_BRANCH       — git branch to clone/checkout (default: main)
+#   CLAWBOX_BRANCH       — git branch to clone/checkout (default: main). When
+#                          set explicitly it is also persisted to
+#                          $PROJECT_DIR/.update-branch, so the device keeps
+#                          updating on the branch it was built with.
 #   NETWORK_INTERFACE    — WiFi interface override (default: auto-detect)
+#   CLAWBOX_GIT_RETRIES  — attempts per git network call (default: 3). GitHub
+#                          refuses anonymous fetches from an address that has
+#                          made too many, ~2 in 3 when measured (TASK-655).
+#                          A value that is not a whole number is replaced with
+#                          the default and a line is printed saying so.
+#   CLAWBOX_GIT_RETRY_DELAY — seconds before the first retry, doubling (default: 3).
+#                          Same rule for a value that is not a whole number.
 set -euo pipefail
 
 # ── Require root ─────────────────────────────────────────────────────────────
@@ -18,6 +28,141 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# Retry a git call that talks to a remote.
+#
+# Measured on the dev network 2026-09-02 (TASK-655): GitHub answers git's
+# protocol-v2 POST to /git-upload-pack with `HTTP 401` and a body reading
+# "Repository not found." — for a PUBLIC repository — once an address has used
+# up its anonymous allowance. git reports it as
+# `fatal: could not read Username for 'https://github.com'`, which names
+# credentials no ClawBox has, and roughly one attempt in three got through.
+# One in-app update needs three separate fetches to succeed in a row, so a
+# single refusal ended the update at step 0 with a message about a password.
+#
+# git owns no retry of its own — neither 2.34 (the boxes) nor 2.43 has a
+# `fetch.retry`/`http.retry` knob — so it lives here. GIT_TERMINAL_PROMPT=0
+# IS git's own switch and is used rather than reimplemented: without it the
+# same call blocks on a username prompt whenever a tty is attached.
+#
+# Output is captured and re-emitted at the end of each attempt rather than
+# streamed, so the classification below has the text to read. That costs live
+# progress on a long clone; install.sh's output is read from the journal after
+# the fact, so the trade is the honest message.
+# Is this failure worth asking again? Retrying "destination path already
+# exists" three times helps nobody and costs the step's budget.
+git_retryable_failure() {
+  case "$1" in
+    *"could not read Username"*|*"could not read Password"*|*"Repository not found"*) return 0 ;;
+    *"Authentication failed"*|*"terminal prompts disabled"*) return 0 ;;
+    *"Could not resolve host"*|*"Connection timed out"*|*"Connection reset"*) return 0 ;;
+    *"early EOF"*|*"RPC failed"*|*"unable to access"*) return 0 ;;
+  esac
+  return 1
+}
+
+# ── Who runs git over the checkout ───────────────────────────────────────────
+#
+# Not root, when root does not own the checkout.
+#
+# `git fetch` honours `remote.<name>.uploadpack` and `url.*.insteadOf` (an
+# `ext::` URL is a command line), `git checkout` runs `.git/hooks/post-checkout`,
+# and any checkout — `reset --hard` included — runs `filter.*.smudge`. Every one
+# of those names a program chosen by `.git/config` or by a file under
+# `.git/hooks`, and both live inside /home/clawbox/clawbox, which is
+# clawbox-owned and is deliberately NOT covered by the root-exec manifest: it is
+# runtime state, except that git executes parts of it. So `git` as root over that
+# tree is a second one-step local root beside the one the mirror closes, and it
+# is reachable from `bootstrap_updater`, which the web server can start.
+#
+# Dropping to the account that OWNS the checkout costs nothing — that account
+# could run those hooks itself, so running them as it is no privilege at all —
+# and scripts/force-update.sh has done exactly this since it was written
+# (`run_as_clawbox`). This is install.sh catching up. TASK-733.
+#
+# An operator who cloned the tree as root keeps root's git: it is root's own
+# tree and there is no boundary to cross.
+GIT_RUNNER=()
+
+use_tree_owner_for_git() {
+  local dir="$1" owner=""
+  GIT_RUNNER=()
+  # `runuser` is root-only. install.sh normally IS root, but it is also run
+  # unprivileged by a developer, and there the drop would make both the fetch and
+  # the reset fail while the run carried on with the on-disk copy — a silent
+  # half-bootstrap. A non-root caller owns whatever it can write anyway.
+  [ "$(id -u)" = "0" ] || return 0
+  # Takes the directory rather than reading $PROJECT_DIR: this is also called
+  # from the bootstrap block, before the constants are parsed.
+  owner="$(stat -c %U "$dir" 2>/dev/null || true)"
+  # `id -u` because `stat` prints the raw uid for an account that no longer
+  # exists, and `runuser -u 1001` on a box whose clawbox user was removed would
+  # fail every git call rather than fall back to the caller.
+  [ -n "$owner" ] && [ "$owner" != "root" ] && id -u "$owner" >/dev/null 2>&1 || return 0
+
+  # `env` carries GIT_TERMINAL_PROMPT into the child: `runuser` does not pass a
+  # VAR=… prefix on, and a git with a tty that cannot prompt is the whole point
+  # of that variable (TASK-655). It is part of the PREFIX rather than of every
+  # call site, so an empty runner leaves each call exactly as it was.
+  GIT_RUNNER=(runuser -u "$owner" -- env GIT_TERMINAL_PROMPT=0)
+
+  # ...and make the drop possible. Earlier root steps leave root-owned objects
+  # in .git — FETCH_HEAD above all — which is precisely what makes an
+  # unprivileged fetch fail; step_fix_git_perms and scripts/force-update.sh both
+  # open by repairing it. Best-effort: git says what it could not open.
+  chown -R "$owner":"$(stat -c %G "$dir" 2>/dev/null || echo "$owner")" "$dir/.git" 2>/dev/null || true
+}
+
+git_with_retry() {
+  local attempt=1 max="${CLAWBOX_GIT_RETRIES:-3}" delay="${CLAWBOX_GIT_RETRY_DELAY:-3}"
+  local out rc=0 verb
+  # Both knobs are operator input and both are used as NUMBERS. A non-numeric
+  # `max` makes `[ "$attempt" -ge "$max" ]` fail on every iteration — "integer
+  # expression expected" — so the break is never reached and the loop does not
+  # end on its own; the regression test has to kill it on a wall clock. A
+  # non-numeric `delay` makes `$((delay * 2))` an unbound-variable error under
+  # `set -u` and takes install.sh down mid-update.
+  #
+  # Replaced with the default rather than trusted, and SAID so: a knob that is
+  # silently ignored is the same class of quiet wrong answer this whole change
+  # is about. Only the shape is checked — `0` is a legitimate "do not retry"
+  # and survives, and a numeric-but-large value is the operator's own call.
+  case "$max" in
+    ''|*[!0-9]*) echo "  CLAWBOX_GIT_RETRIES is not a number, using 3" >&2; max=3 ;;
+  esac
+  case "$delay" in
+    ''|*[!0-9]*) echo "  CLAWBOX_GIT_RETRY_DELAY is not a number, using 3" >&2; delay=3 ;;
+  esac
+  # The subcommand, not "$1": every caller here leads with -c/-C, so naming the
+  # first argument produced "git -C attempt 1/3 failed" in the journal.
+  verb="$(printf '%s\n' "$@" | grep -m1 -E '^(fetch|clone|pull|push|ls-remote)$' || true)"
+  while :; do
+    # Output is CAPTURED so the classification below has the text to read, then
+    # re-emitted on stderr — where git puts it — so a caller that captures this
+    # function's stdout cannot mistake git's progress for a result.
+    if out="$(GIT_TERMINAL_PROMPT=0 ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git "$@" 2>&1)"; then
+      [ -z "$out" ] || printf '%s\n' "$out" >&2
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$attempt" -ge "$max" ] && break
+    git_retryable_failure "$out" || break
+    echo "  git ${verb:-remote} attempt $attempt/$max failed, retrying in ${delay}s..." >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+  printf '%s\n' "$out" >&2
+  case "$out" in
+    *"could not read Username"*|*"could not read Password"*|*"Repository not found"*)
+      echo "Error: GitHub refused this ClawBox's anonymous request for the update repository after $attempt attempt(s)." >&2
+      echo "       The repository is public and this device needs no password — GitHub answers 401 to anonymous git" >&2
+      echo "       requests from an address that has made too many. Wait a few minutes and run the update again." >&2
+      ;;
+  esac
+  return "$rc"
+}
+
 # ── Bootstrap: pull latest install.sh and re-exec before parsing constants ───
 # Fixes the race where a stale install.sh (e.g. rsync'd from an out-of-date
 # checkout by flash.sh) parses old EXPECTED_*_SERVICES while step_git_pull
@@ -26,13 +171,65 @@ fi
 # already registers. Pulling and re-exec'ing up-front (before constants are
 # parsed) breaks the race. CLAWBOX_INSTALL_BOOTSTRAPPED prevents recursion.
 
-if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] && [ -d "$(dirname "${BASH_SOURCE[0]}")/.git" ]; then
-  _b="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Only the update family may self-update. The root-owned dispatcher
+# (/usr/local/libexec/clawbox/clawbox-root-step.sh) sets CLAWBOX_ALLOW_SELF_UPDATE
+# for those steps and pins every other one with CLAWBOX_INSTALL_BOOTSTRAPPED=1.
+# A bare `sudo bash install.sh` (no --step) is an operator running a full
+# install and still bootstraps.
+#
+# This block used to run on EVERY invocation, so `--step chpasswd` did
+# `git fetch` + `git reset --hard origin/<branch>` + `chown -R clawbox` + re-exec
+# before it touched /etc/shadow. A password change must not depend on GitHub
+# being reachable, must not mutate the source tree, and must not be a way to
+# pull new code onto the box. The journal showed it firing for chpasswd,
+# set_hostname and validate_services. TASK-445.
+_clawbox_may_self_update() {
+  [ -n "${CLAWBOX_ALLOW_SELF_UPDATE:-}" ] && return 0
+  [ "${1:-}" != "--step" ] && return 0
+  return 1
+}
+
+# Two directories, and after TASK-733 they are not always the same one.
+#
+# $_self is where THIS copy of install.sh was read from; $_b is the CHECKOUT to
+# refresh. They differ on exactly one path: the root dispatcher execs install.sh
+# out of the root-owned mirror, which holds `install.sh scripts config` and no
+# `.git` — so keying this block on "is there a .git beside me" silently switched
+# the whole self-update off for every dispatched update step. The update still
+# converged (step_bootstrap_updater does its own fetch/reset), but the fleet lost
+# the thing this block exists for: a fix to the UPDATER — sync_repo_to_update_target,
+# resolve_update_branch, git_with_retry — being delivered by the update that
+# carries it, instead of one update later. scripts/force-update.sh's closing
+# instruction ("finish from the UI") depends on it.
+#
+# So the checkout is found on its own, and the re-exec below goes back to
+# $_self — never to $_b, which is the clawbox-writable tree this whole change
+# is about.
+# The mirror path as a literal, because this runs before the constants block —
+# the same reason SELFTEST_TOKEN is repeated across these files. Kept in step
+# with MIRROR_DIR in config/clawbox-root-manifest.sh and config/clawbox-root-step.sh;
+# src/tests/unit/root-exec-mirror.test.ts pins all three together.
+#
+# Named exactly rather than inferred from "has no .git beside it": install.sh is
+# also run as `bash <(curl …)`, where that directory is /dev/fd and re-exec'ing
+# it would be a path that does not exist.
+_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P || true)"
+_b="$_self"
+if [ "$_self" = "/var/lib/clawbox/root-exec-mirror" ] && [ -d /home/clawbox/clawbox/.git ]; then
+  _b=/home/clawbox/clawbox
+fi
+
+if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
+  && _clawbox_may_self_update "${1:-}" \
+  && [ -n "$_self" ] \
+  && [ -d "$_b/.git" ]; then
   # Resolve the branch like resolve_update_branch() does below — explicit
   # CLAWBOX_BRANCH, else the pinned .update-branch, else the current branch,
-  # else main. Defaulting straight to main (Gap 1) force-reset a beta (or any
-  # non-main) box toward main on a bare `install.sh`. is_safe_git_ref() isn't
-  # defined this early, so validate inline before the value reaches a git ref.
+  # else (detached) what the box can prove about itself, else nothing at all.
+  # Defaulting straight to main (Gap 1) force-reset a beta (or any non-main) box
+  # toward main on a bare `install.sh`, and the detached-HEAD case defaulted the
+  # same way until TASK-447 round 2. is_safe_git_ref() isn't defined this early,
+  # so validate inline before the value reaches a git ref.
   _br="${CLAWBOX_BRANCH:-}"
   if [ -z "$_br" ] && [ -f "$_b/.update-branch" ]; then
     _br="$(head -n 1 "$_b/.update-branch" | tr -d '[:space:]')"
@@ -40,18 +237,185 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] && [ -d "$(dirname "${BASH_SOURCE[
   if [ -z "$_br" ]; then
     _br="$(git -C "$_b" -c safe.directory="$_b" symbolic-ref --short HEAD 2>/dev/null || true)"
   fi
-  # Empty (no env/file/branch) or unsafe (defends against a malicious
-  # .update-branch — the value is interpolated into a git ref below) → main.
-  case "$_br" in ""|*[!A-Za-z0-9._/-]*) _br="main" ;; esac
-  echo "[bootstrap] Refreshing install.sh from origin/${_br} before running..."
-  git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null || true
-  if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
-    chown -R clawbox:clawbox "$_b" 2>/dev/null || true
-    echo "[bootstrap] Re-executing as $(git -C "$_b" -c safe.directory="$_b" rev-parse --short HEAD)..."
-    exec env CLAWBOX_INSTALL_BOOTSTRAPPED=1 bash "$_b/install.sh" "$@"
+  # Detached HEAD (symbolic-ref failed): recover from the deployed build's own
+  # stamp, then from the local branches that contain HEAD. recover_detached_branch
+  # is defined far below and this block runs before it, so the two cheapest of
+  # its three probes are inlined. Never `main` — see resolve_update_branch: this
+  # block does `reset --hard origin/$_br`, so guessing here IS the retarget.
+  if [ -z "$_br" ]; then
+    for _stamp in "$_b/.next/standalone/.next/build-info.json" "$_b/.next/build-info.json"; do
+      [ -f "$_stamp" ] || continue
+      _br="$(sed -n 's/.*"branch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_stamp" | head -n 1)"
+      [ "$_br" = "HEAD" ] && _br=""
+      [ -n "$_br" ] && break
+    done
   fi
-  echo "[bootstrap] WARN: couldn't reset to origin/${_br}; continuing with on-disk copy."
+  if [ -z "$_br" ]; then
+    _br="$(git -C "$_b" -c safe.directory="$_b" for-each-ref --format='%(refname:short)' \
+             --contains HEAD refs/heads 2>/dev/null | grep -v '^main$' | head -n 1 || true)"
+  fi
+  # Unsafe (defends against a malicious .update-branch — the value is
+  # interpolated into a git ref below) → treat as no answer.
+  case "$_br" in *[!A-Za-z0-9._/-]*) _br="" ;; esac
+  if [ -z "$_br" ]; then
+    # Nothing says which branch this device belongs to. Skip the refresh rather
+    # than reset --hard onto the fleet release channel; the step that follows
+    # resolves the target properly, and refuses just as loudly if it cannot.
+    echo "[bootstrap] WARN: cannot tell which branch this checkout belongs to; running the on-disk copy."
+  else
+    echo "[bootstrap] Refreshing install.sh from origin/${_br} before running..."
+    # git runs as whoever owns this checkout — see use_tree_owner_for_git.
+    use_tree_owner_for_git "$_b"
+    # Fetch #1 of the three an update needs, and the one that decides which
+    # install.sh the rest of the run uses — so it retries like the others.
+    # Still tolerated: the reset below uses whatever refs are on disk. But no
+    # longer SILENT, and no longer 2>/dev/null — the WARN quotes what git said
+    # rather than guessing, because "refreshing install.sh" printed above is
+    # otherwise a claim the run did not keep (TASK-655).
+    if ! _fetchout="$(git_with_retry -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>&1)"; then
+      echo "[bootstrap] WARN: could not refresh from origin; running the refs already on disk."
+      printf '%s\n' "$_fetchout" | tail -n 3
+    fi
+    unset _fetchout
+    if ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
+      chown -R clawbox:clawbox "$_b" 2>/dev/null || true
+      # Re-record what root is allowed to run, BEFORE re-exec'ing into it. The
+      # reset just replaced install.sh, scripts/ and config/ wholesale, so the
+      # manifest the root dispatcher checks is now stale by construction — and a
+      # stale manifest fails every subsequent step of this very update. Paths are
+      # literal because the constants block has not been parsed yet.
+      #
+      # A failure here is NOT a warning. The root dispatcher fails closed on a
+      # stale manifest, so every NON-UPDATE root step is then refused with exit
+      # 65 — openclaw_install, performance_mode, gateway_setup, and the owner's
+      # password change, hostname change, hotspot restart and llama.cpp install
+      # (the update family is deliberately exempt; see SELF_UPDATING_STEPS in
+      # config/clawbox-root-step.sh). Seen live: `--verify` returned 65 and every
+      # root step was refused, and a single line on the stderr of an update
+      # nobody watches was the whole trace. TASK-584.
+      _mf=/usr/local/libexec/clawbox/clawbox-root-manifest.sh
+      _mf_src="$_b/config/clawbox-root-manifest.sh"
+      # Is the installed helper the whole program, or only the first part of it?
+      # Nothing below may read its exit status until this says yes: an empty or
+      # half-copied helper exits 0 for --write, for --verify AND for the
+      # --verify-file the root dispatcher asks about the file it is about to run
+      # as root (see SELFTEST_TOKEN in config/clawbox-root-manifest.sh).
+      # Believing that 0 is worse than the stale manifest this block exists to
+      # fix — it turns the dispatcher from fail-closed into fail-OPEN over a tree
+      # the clawbox user can rewrite. Inlined rather than shared with
+      # root_exec_manifest_helper_alive below, for the same reason the branch
+      # probes above are inlined: this block runs before that function is parsed.
+      _mf_alive() {
+        local out rc=0
+        [ -x "$_mf" ] || return 1
+        out="$("$_mf" --selftest 2>/dev/null)" || rc=$?
+        [ "$out" = "clawbox-root-manifest alive" ] && return 0
+        [ "$rc" -eq 64 ] && return 0
+        return 1
+      }
+      # Replace the installed helper with the one the reset just checked out.
+      # Temp name + rename, NEVER a copy over the live file: a copy that fails
+      # halfway leaves behind exactly the stub described above.
+      _mf_restage() {
+        # ROOT MAY ONLY TAKE THIS FILE OUT OF A TREE IT IS ALREADY EXECUTING.
+        #
+        # $_mf_src is $_b/config/clawbox-root-manifest.sh — the clawbox-writable
+        # checkout — and what follows installs it root-owned 0755 into libexec
+        # and then runs it as root. Where $_self is $_b (an operator's
+        # `sudo bash install.sh`, the flash host, the one-time transition) that
+        # grants nothing new: root is already executing those bytes, which is
+        # root_exec_may_anchor's own first clause. On a DISPATCHED step it is the
+        # whole of TASK-733 by another verb — root came out of the root-owned
+        # mirror, `bootstrap_updater`, `post_update` and `rebuild_reboot` are
+        # startable by the web server through the NOPASSWD launcher, and the copy
+        # does not merely run once: it BECOMES the installed helper, the file
+        # that decides which bytes root executes from then on.
+        #
+        # Refusing fails closed, which is the direction everything here fails
+        # in, and it costs at most one pass: install_root_libexec installs the
+        # helper later out of $SRC_DIR, the copy root vouched for. On the branch
+        # where this refusal actually fires that $SRC_DIR is still the PREVIOUS
+        # build's mirror, so it reinstalls the same helper rather than a newer
+        # one — see the retry note below for why that is the right outcome and
+        # not a deferred repair.
+        if [ "$_self" != "$_b" ]; then
+          echo "[bootstrap] WARN: not restaging the root-exec manifest helper from $_b — root is running out of $_self and will not execute a file the clawbox account can rewrite" >&2
+          return 1
+        fi
+        # Once per run. Both call sites below are reachable in a single pass — a
+        # helper that was not answering is replaced, answers, and then fails
+        # --write — and staging the same bytes a second time cannot change that
+        # outcome. It only widens the window in which a file out of the
+        # clawbox-writable tree is being installed root-owned into libexec.
+        [ "${_mf_staged:-0}" = "0" ] || return 1
+        _mf_staged=1
+        [ -f "$_mf_src" ] || return 1
+        if ! install -o root -g root -m 0755 "$_mf_src" "$_mf.new"; then
+          echo "[bootstrap] WARN: could not stage a fresh root-exec manifest helper" >&2
+          rm -f "$_mf.new" 2>/dev/null || true
+          return 1
+        fi
+        mv -f "$_mf.new" "$_mf" || { echo "[bootstrap] WARN: could not replace $_mf" >&2; return 1; }
+      }
+      if [ "$_b" = "/home/clawbox/clawbox" ] && [ -x "$_mf" ]; then
+        # Best-effort throughout: this is the bootstrap of the boot path and it
+        # must never abort. A helper that cannot answer is replaced first, and
+        # only a helper that answers is asked to record anything.
+        _mf_ok=0
+        if _mf_alive; then
+          _mf_ok=1
+        else
+          echo "[bootstrap] WARN: the installed root-exec manifest helper is not answering" >&2
+          if _mf_restage && _mf_alive; then _mf_ok=1; fi
+        fi
+        if [ "$_mf_ok" = "0" ]; then
+          echo "[bootstrap] WARN: no working root-exec manifest helper; root steps will refuse until an operator runs 'sudo bash $_b/install.sh --step systemd_services'" >&2
+          CLAWBOX_ROOT_MANIFEST_STALE=1
+        # --write AND --verify, never --write alone: the write's own status says
+        # the helper believes it recorded something, not that the record matches.
+        elif ! { "$_mf" --write && "$_mf" --verify >/dev/null; }; then
+          # Repair before reporting, WHERE root may: the most likely reason the
+          # INSTALLED helper failed is that it is the one from before this reset,
+          # so replace it from the tree we just checked out and try once more.
+          # On a dispatched step _mf_restage refuses (root is not running that
+          # checkout) and the retry re-runs the same helper — which is the right
+          # answer there, because a post-transition box's installed helper is the
+          # same generation as the mirror it came out of, so a failing --write is
+          # environmental and a fresh copy would fail identically.
+          echo "[bootstrap] WARN: could not re-record the root-exec manifest" >&2
+          _mf_restage || true
+          if ! { _mf_alive && "$_mf" --write && "$_mf" --verify >/dev/null; }; then
+            # Carried into the re-exec rather than acted on here: the process
+            # that can record it against the run's verdict is the one about to
+            # start. It re-checks before believing this.
+            CLAWBOX_ROOT_MANIFEST_STALE=1
+          fi
+        fi
+      fi
+      # Re-exec the copy ROOT HOLDS, not the one the reset just wrote into the
+      # tree. When this process came out of the mirror, the reset above has made
+      # that mirror a release stale by construction — so restage it first, from
+      # the tree it just checked out and re-recorded, and then run that.
+      # $_self is $_b on every other path, where the two are the same file.
+      if [ "$_self" != "$_b" ] && [ -x "$_mf" ]; then
+        if ! "$_mf" --mirror; then
+          echo "[bootstrap] WARN: could not restage $_self from the new checkout; re-executing the copy already there" >&2
+        fi
+      fi
+      echo "[bootstrap] Re-executing as $(git -C "$_b" -c safe.directory="$_b" rev-parse --short HEAD)..."
+      exec env CLAWBOX_INSTALL_BOOTSTRAPPED=1 \
+        CLAWBOX_ROOT_MANIFEST_STALE="${CLAWBOX_ROOT_MANIFEST_STALE:-0}" \
+        bash "$_self/install.sh" "$@"
+    fi
+    echo "[bootstrap] WARN: couldn't reset to origin/${_br}; continuing with on-disk copy."
+  fi
 fi
+
+# Back to "run git as this process" for everything after the bootstrap. The
+# block above sets it for ONE checkout and normally re-execs, but the path where
+# the reset failed falls through to here — and step_git_pull's `clone` creates
+# $PROJECT_DIR, which is root's to make.
+GIT_RUNNER=()
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -60,6 +424,38 @@ REPO_BRANCH="${CLAWBOX_BRANCH:-main}"
 PROJECT_DIR="/home/clawbox/clawbox"
 CLAWBOX_USER="clawbox"
 CLAWBOX_HOME="/home/clawbox"
+
+# ── Where root READS the code it runs, as opposed to where the box lives ─────
+#
+# $PROJECT_DIR is the checkout: git works on it, the app builds in it, and it is
+# clawbox:clawbox because it has to be. $SRC_DIR is the copy of install.sh,
+# scripts/ and config/ that THIS process was started from — and on the path that
+# matters it is the root-owned mirror
+# (/var/lib/clawbox/root-exec-mirror), because
+# /usr/local/libexec/clawbox/clawbox-root-step.sh execs install.sh out of there
+# rather than out of the tree.
+#
+# Both halves are needed. Moving only install.sh to a root-owned copy would move
+# the hole one file along: this script goes on to `bash` scripts/start-ap.sh,
+# scripts/setup-hermes-edition.sh, scripts/install-voice.sh and friends AS ROOT,
+# and to install config/*.service into /etc/systemd/system and
+# config/clawbox-sudoers into /etc/sudoers.d. Every one of those is a file the
+# clawbox user could rewrite between the manifest check and the open. Reading
+# them from $SRC_DIR means root only ever opens the copy it holds. TASK-733.
+#
+# On every other path — an operator's `sudo bash install.sh`, the flash host's
+# provisioning run, the one-time transition update described in
+# docs/root-exec-mirror.md — $SRC_DIR IS $PROJECT_DIR and nothing changes.
+# The fallback is deliberate rather than defensive: install.sh is also run as
+# `bash <(curl …)`, where BASH_SOURCE is /dev/fd/63 and there is no scripts/
+# next to it.
+_clawbox_src="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P || true)"
+if [ -n "$_clawbox_src" ] && [ -d "$_clawbox_src/scripts" ] && [ -d "$_clawbox_src/config" ]; then
+  SRC_DIR="$_clawbox_src"
+else
+  SRC_DIR="$PROJECT_DIR"
+fi
+unset _clawbox_src
 
 # ── Provisioning-status signal (read by the flash host) ──────────────────────
 # A full install keeps some steps NON-FATAL on purpose — a half-provisioned box
@@ -71,25 +467,180 @@ CLAWBOX_HOME="/home/clawbox"
 # exits non-zero, and a machine-readable marker is left for the flash host.
 PROVISION_FAILURES=()
 PROVISION_STATUS_FILE="${CLAWBOX_PROVISION_STATUS_FILE:-/etc/clawbox/provision-status}"
+# The on-device TTS verdict, written by scripts/install-voice.sh and read by
+# step_validate_services. Exported to that script rather than defaulted twice,
+# so the writer and the reader cannot drift onto two different paths.
+TTS_STATUS_FILE="${CLAWBOX_TTS_STATUS_FILE:-/etc/clawbox/tts-status}"
+# Identifies THIS run. Stamped into the marker and printed on stdout, so a
+# reader holding both can tell whose verdict it is looking at.
+PROVISION_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo unknown)-$$"
+# Set when the marker channel could not be made to describe this run. The final
+# verdict folds this in: a verdict we cannot publish is not a success.
+PROVISION_STATUS_UNPUBLISHED=0
 
 record_provision_failure() {
+  local f
+  # Idempotent. Three sites now record `root_exec_manifest` — the bootstrap's
+  # verdict block, refresh_root_exec_manifest and install_root_libexec — and two
+  # of them can fire in the same run, which put the token in the operator's
+  # "Steps that failed:" line twice and wrote it twice into the marker the flash
+  # host parses. `if`, not `[ … ] &&`: a for loop whose last command fails
+  # returns non-zero, and under `set -e` that would abort the installer here.
+  for f in ${PROVISION_FAILURES[@]+"${PROVISION_FAILURES[@]}"}; do
+    if [ "$f" = "$1" ]; then return 0; fi
+  done
   PROVISION_FAILURES+=("$1")
+}
+
+# Drop a recorded failure that a later step actually repaired. Without this the
+# root-exec manifest below would be reported at the end of a run that fixed it
+# half a minute later — a false failure over an install that is fine.
+clear_provision_failure() {
+  local kept=() f
+  # `${a[@]+"${a[@]}"}` rather than `"${a[@]}"`: bash before 4.4 calls an empty
+  # array unbound under `set -u`, and both arrays here are empty on the common
+  # path (nothing recorded, or nothing kept). Aborting the installer inside the
+  # function whose whole job is to CLEAR a failure would report exactly the
+  # false failure it exists to remove.
+  for f in ${PROVISION_FAILURES[@]+"${PROVISION_FAILURES[@]}"}; do
+    [ "$f" = "$1" ] || kept+=("$f")
+  done
+  PROVISION_FAILURES=(${kept[@]+"${kept[@]}"})
+}
+
+# The step an operator should re-run to repair a recorded failure. Almost every
+# token IS its step, which is what both verdict printers assume — but
+# `root_exec_manifest` is recorded before any step runs and is not dispatchable,
+# so printing `--step root_exec_manifest` would hand the operator an "Unknown
+# step". `systemd_services` is the repair: it re-installs the helper AND the
+# dispatcher and re-records the manifest, which is also the hint
+# config/clawbox-root-step.sh gives when it refuses.
+provision_repair_step() {
+  case "$1" in
+    root_exec_manifest) printf 'systemd_services' ;;
+    root_libexec) printf 'systemd_services' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Does the root-exec manifest helper at $1 actually run, or is it only present?
+#
+# An empty or half-copied helper exits 0 for every verb without doing any of
+# them (see SELFTEST_TOKEN in config/clawbox-root-manifest.sh), so reading that
+# 0 reports "the tree is recorded and matches" over a tree nobody hashed — and
+# config/clawbox-root-step.sh then execs that tree as root.
+#
+# Two answers count, and both prove the same thing — the verb dispatcher at the
+# bottom of the helper ran: the token from a helper that knows --selftest, or
+# exit 64 from an older one rejecting a verb it does not know. A stub does
+# neither: it prints nothing and exits 0.
+#
+# Takes the path as an argument because the block below runs long before
+# $ROOT_EXEC_MANIFEST_HELPER is defined.
+root_exec_manifest_helper_alive() {
+  local out rc=0
+  [ -x "$1" ] || return 1
+  out="$("$1" --selftest 2>/dev/null)" || rc=$?
+  [ "$out" = "clawbox-root-manifest alive" ] && return 0
+  [ "$rc" -eq 64 ] && return 0
+  return 1
+}
+
+# The bootstrap could not re-record the root-exec manifest before re-exec'ing
+# into this process (TASK-584). The dispatcher fails closed on a stale manifest,
+# so every NON-UPDATE root step — openclaw_install, gateway_setup, and the
+# owner's password and hostname changes — is being refused with exit 65.
+#
+# Verified rather than believed: the marker says the bootstrap's write failed,
+# not that the record is still wrong, and reporting a failure over a manifest
+# that verifies would be the opposite defect. install_root_libexec re-records it
+# later in a full run and clears this again on success.
+if [ "${CLAWBOX_ROOT_MANIFEST_STALE:-0}" = "1" ]; then
+  if root_exec_manifest_helper_alive /usr/local/libexec/clawbox/clawbox-root-manifest.sh \
+     && /usr/local/libexec/clawbox/clawbox-root-manifest.sh --verify >/dev/null 2>&1; then
+    echo "[bootstrap] the root-exec manifest verifies after all — continuing"
+  else
+    record_provision_failure root_exec_manifest
+    echo "  ############################################################" >&2
+    echo "  # The root-exec manifest could not be re-recorded." >&2
+    echo "  # Non-update root steps are being REFUSED (exit 65): password" >&2
+    echo "  # change, hostname, hotspot restart, llama.cpp install." >&2
+    echo "  # Repair:  sudo bash $PROJECT_DIR/install.sh --step systemd_services" >&2
+    echo "  ############################################################" >&2
+  fi
+fi
+
+# ── The marker must never speak for a run other than this one ────────────────
+# The flash host reads $PROVISION_STATUS_FILE INSTEAD of parsing stdout, so the
+# file has to satisfy two properties, neither of which "write it at the end and
+# hope" provides:
+#
+#   1. Never stale. A run that cannot write the marker (read-only /etc, a file
+#      owned by another user, a full disk) used to leave the PREVIOUS run's
+#      STATUS=ok sitting there, and the flash host read it as this run's verdict
+#      — the same false-healthy result this whole block exists to prevent. So
+#      the marker is DELETED before provisioning starts: if the file exists at
+#      the end, this run wrote it.
+#   2. Never half-written. Temp file + rename in the same directory, so a reader
+#      sees the whole old marker or the whole new one, and a truncated write
+#      cannot leave "STATUS=ok" with the rest of the record missing.
+#
+# When either cannot be guaranteed, that is itself a reason not to ship the box:
+# the run says so on stdout and its verdict becomes "incomplete". Staying quiet
+# is what produced the false "ok".
+
+# Drop any marker left behind by an earlier run. Called once, before the first
+# provisioning step of a full install.
+invalidate_provision_status() {
+  rm -f "$PROVISION_STATUS_FILE" 2>/dev/null || true
+  # `rm -f` reports success for an already-absent file and failure for one it
+  # could not remove, so test the outcome rather than its exit status.
+  if [ -e "$PROVISION_STATUS_FILE" ]; then
+    PROVISION_STATUS_UNPUBLISHED=1
+    echo "  WARNING: could not clear the previous provisioning marker"
+    echo "           $PROVISION_STATUS_FILE — its contents describe an EARLIER"
+    echo "           run and must not be read as this one's verdict."
+    return 1
+  fi
+  return 0
 }
 
 # Persist the final provisioning verdict where the flash host (or an operator,
 # or the next update) can read it without re-parsing install.sh's stdout.
 write_provision_status() {
   local status="$1"; shift
-  local dir
+  local dir tmp failed=0
   dir="$(dirname "$PROVISION_STATUS_FILE")"
+  tmp="$PROVISION_STATUS_FILE.tmp.$$"
   mkdir -p "$dir" 2>/dev/null || true
-  {
+  if ! {
     echo "# Written by install.sh at the end of a full install. Machine-readable."
+    echo "# One marker per run: the previous one is removed before provisioning"
+    echo "# starts, so this file always describes the run named by RUN_ID."
+    echo "RUN_ID=$PROVISION_RUN_ID"
     echo "STATUS=$status"
     echo "FAILED_STEPS=$*"
     echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
-  } > "$PROVISION_STATUS_FILE" 2>/dev/null || true
-  chmod 644 "$PROVISION_STATUS_FILE" 2>/dev/null || true
+  } > "$tmp" 2>/dev/null; then
+    failed=1
+  else
+    chmod 644 "$tmp" 2>/dev/null || true
+    # Rename last: until this succeeds the live path holds nothing (it was
+    # cleared at the start), never a partial record.
+    mv -f "$tmp" "$PROVISION_STATUS_FILE" 2>/dev/null || failed=1
+  fi
+  # Either half failing means the same thing to the caller and wants the same
+  # answer, so there is one branch for both rather than two that must be kept
+  # saying the same thing.
+  if [ "$failed" -ne 0 ]; then
+    rm -f "$tmp" 2>/dev/null || true
+    PROVISION_STATUS_UNPUBLISHED=1
+    echo "  WARNING: could not publish $PROVISION_STATUS_FILE (status=$status)."
+    echo "           This run has no marker. Use install.sh's exit code or the"
+    echo "           [provision-status] line on stdout instead."
+    return 1
+  fi
+  return 0
 }
 
 # ── Edition (single-harness lock) ────────────────────────────────────────────
@@ -166,8 +717,8 @@ CLAWBOX_EDITION_RAW="${CLAWBOX_EDITION:-}"
 if [ -z "$CLAWBOX_EDITION_RAW" ]; then
   CLAWBOX_EDITION_RAW="$CLAWBOX_RECORDED_EDITION_RAW"
 fi
-if [ -z "$CLAWBOX_EDITION_RAW" ] && [ -f "$PROJECT_DIR/config/edition.txt" ]; then
-  CLAWBOX_EDITION_RAW="$(tr -d '[:space:]' < "$PROJECT_DIR/config/edition.txt" 2>/dev/null || true)"
+if [ -z "$CLAWBOX_EDITION_RAW" ] && [ -f "$SRC_DIR/config/edition.txt" ]; then
+  CLAWBOX_EDITION_RAW="$(tr -d '[:space:]' < "$SRC_DIR/config/edition.txt" 2>/dev/null || true)"
 fi
 # Lower-case to match the TypeScript side (src/lib/edition-source.ts), which has
 # always normalised case — otherwise "Hermes" in edition.txt silently installs
@@ -230,6 +781,15 @@ CLAWBOX_RECORDED_EDITION="$(_normalise_edition "$CLAWBOX_RECORDED_EDITION_RAW")"
 # how an edition is legitimately chosen. Untouched.
 if [ -n "$CLAWBOX_RECORDED_EDITION" ] && [ "$CLAWBOX_RECORDED_EDITION" != "$CLAWBOX_EDITION" ]; then
   if [ "$CLAWBOX_ALLOW_EDITION_CHANGE" = "1" ]; then
+    if [ -n "${CLAWBOX_EDITION_CHANGE_REASON:-}" ]; then
+      # step_harness_swap re-execs this file per sub-step as the target edition
+      # and the swap route carries the sign-in across afterwards, so the
+      # paragraph below — "finish the transition by hand", "no usable model" —
+      # would be untrue in the one journal the owner is watching. One line that
+      # names the caller is the honest version; the paragraph stays for an
+      # operator's own CLAWBOX_ALLOW_EDITION_CHANGE=1, where it is true.
+      echo "[edition] installing '$CLAWBOX_EDITION' over '$CLAWBOX_RECORDED_EDITION' — ${CLAWBOX_EDITION_CHANGE_REASON}" >&2
+    else
     cat >&2 <<EOF
 
 WARNING: CLAWBOX_ALLOW_EDITION_CHANGE=1 — installing '$CLAWBOX_EDITION' over
@@ -241,6 +801,7 @@ WARNING: CLAWBOX_ALLOW_EDITION_CHANGE=1 — installing '$CLAWBOX_EDITION' over
          You are expected to finish the transition by hand.
 
 EOF
+    fi
   else
     cat >&2 <<EOF
 
@@ -300,13 +861,230 @@ if [ -f /etc/clawbox/test-mode.env ]; then
 fi
 CLAWBOX_TEST_MODE="${CLAWBOX_TEST_MODE:-0}"
 is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }
+# CLAWBOX_TEST_NO_GPU=1 is the e2e-install container saying "this host has no
+# GPU by construction". It is deliberately a second knob and not a reading of
+# CLAWBOX_TEST_MODE: the unit tests run the installer's functions under test
+# mode too and pin the real-hardware rule that a Kokoro which declines is a
+# mute box, so test mode alone must not soften that rule. Only the harness
+# entrypoint sets this (e2e-install/entrypoint.sh); a real device never does.
+# Is this a container rather than the board? systemd's own probe first (it
+# knows docker, podman, lxc and systemd-nspawn apart), then the two files every
+# runtime leaves behind, so a box without systemd-detect-virt still answers.
+in_container() {
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    systemd-detect-virt --container --quiet && return 0
+  fi
+  # The marker paths are a variable so a test can point them at its own
+  # sandbox: read from the real filesystem, this probe answers "container" for
+  # every suite that itself runs in one, and the cases it would then skip are
+  # the ones worth exercising.
+  local marker
+  for marker in ${CLAWBOX_CONTAINER_MARKERS:-/.dockerenv /run/.containerenv}; do
+    [ -f "$marker" ] && return 0
+  done
+  return 1
+}
+
+harness_has_no_gpu() {
+  [ "${CLAWBOX_TEST_NO_GPU:-0}" = "1" ]
+}
+
+# ── Waits without deadlines ─────────────────────────────────────────────────
+#
+# Nothing in this installer aborts, skips or downgrades a step because a box was
+# SLOW (owner's decision, 2026-09-14). Every budget this file used to carry was
+# a guess about hardware and links it cannot see: a 900 s apt lock, a 180 s
+# gateway, a 300 s npm, a 600 s download. On a Jetson with a tired SD card and a
+# rural uplink each of those turned a long install into a FAILED one — and a
+# failed install is not cheaper than a slow one, it is a box somebody has to
+# drive out to.
+#
+# So a wait for WORK — an apt lock, a download, a build, a package install —
+# runs until the work happens, or until it becomes IMPOSSIBLE, and never until a
+# clock says so. `timeout` appears nowhere in this file.
+#
+# The loops that WATCH rather than work are the exception, and there are four:
+# wait_for_gateway_port, hermes_dashboard_restart_after_install's pid poll,
+# restore_previous_build's dashboard poll, and step_validate_services' settle.
+# None of them bounds anything — by the time each runs, the thing it is looking
+# at has already succeeded or already failed — they decide when to write a
+# REPORT or when to attempt a REPAIR, and a report cannot be deferred for ever.
+# They are the exception because systemd answers the two halves of "not
+# answering yet" identically: a unit still coming up and a unit that is up and
+# will never bind the port are both `active`. Each says so where it lives.
+#
+# Every one of them, and every wait above, asks a FACT before it asks a clock —
+# the unit stopped trying, the process is gone, the job returned — and every one
+# measures WALL time, not turns round the loop. What stands in for the deadline
+# elsewhere is a line every WAIT_NOTE_EVERY_S seconds naming what is still
+# outstanding, so a long wait reads as a long wait and not as a hang.
+WAIT_NOTE_EVERY_S=30
+
+# One "still waiting" line per WAIT_NOTE_EVERY_S seconds of elapsed time.
+# $1 = seconds elapsed, $2 = what is being waited for.
+#
+# Bucketed rather than `elapsed % WAIT_NOTE_EVERY_S == 0`: a loop whose step is
+# not a divisor of the interval — or whose probe takes a second of its own —
+# steps straight over the exact multiple and then says nothing for the length of
+# the wait. The bucket is keyed by the SUBJECT as well, so two different waits in
+# one run cannot swallow each other's first line.
+WAIT_NOTE_LAST=""
+wait_note() {
+  local elapsed="$1" key
+  [ "$elapsed" -gt 0 ] 2>/dev/null || return 0
+  key="$2|$(( elapsed / WAIT_NOTE_EVERY_S ))"
+  case "$key" in *"|0") return 0 ;; esac
+  [ "$key" != "$WAIT_NOTE_LAST" ] || return 0
+  WAIT_NOTE_LAST="$key"
+  echo "  Still waiting for $2 (${elapsed}s so far)..."
+}
+
+# Is this unit still on its way somewhere, or has it stopped trying?
+#
+# The non-time exit every wait loop in this file uses in place of a deadline.
+# Both halves are needed: `is-active` EXITS 0 for an active unit (and prints the
+# state), and prints `activating` while it exits non-zero — so reading only the
+# status misses a slow start, and reading only the text misses an environment
+# whose systemctl says nothing on stdout.
+unit_is_coming_up() {
+  local state
+  state="$(systemctl is-active "$1" 2>/dev/null)" && return 0
+  case "$state" in
+    active|activating|reloading|deactivating) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# How long a test-mode wait may run, VALIDATED before anybody compares against
+# it. Read raw, a non-numeric override makes `[ … -ge … ]` exit 2 with "integer
+# expression expected" — which reads as "do not give up yet" at every call site,
+# so the one knob that exists to cap these loops would silently uncap them. A
+# zero or a negative is the opposite failure and is refused the same way: a cap
+# of 0 ends a wait before it has begun.
+test_mode_wait_cap_s() {
+  local cap="${CLAWBOX_TEST_MODE_WAIT_CAP_S:-60}"
+  case "$cap" in ''|*[!0-9]*) cap=60 ;; esac
+  { [ "${#cap}" -le 5 ] && [ "$cap" -ge 1 ]; } || cap=60
+  printf '%s' "$cap"
+}
+
+# The ONE exception, and it is not about hardware: the e2e container has no
+# radio, no GPU and no real systemd, so a check that can never pass there has to
+# be able to fail rather than hold CI open until the job's own timeout. A real
+# device never sets CLAWBOX_TEST_MODE, so this is unreachable on the fleet.
+#
+# $1 = seconds elapsed. True when the caller should stop waiting.
+wait_give_up_in_test_mode() {
+  is_test_mode || return 1
+  local elapsed="${1:-0}"
+  case "$elapsed" in ''|*[!0-9]*) elapsed=0 ;; esac
+  [ "$elapsed" -ge "$(test_mode_wait_cap_s)" ]
+}
+# The disk-backed swap step's numbers (see step_swapfile): the file's size, the
+# free space that must remain after it, and its priority — BELOW zram's 5, so
+# the compressed devices stay the kernel's first choice.
+SWAPFILE_SIZE_GB="${CLAWBOX_SWAPFILE_SIZE_GB:-8}"
+SWAPFILE_DISK_RESERVE_GB="${CLAWBOX_SWAPFILE_RESERVE_GB:-20}"
+SWAPFILE_PRIORITY=1
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
-OPENCLAW_VERSION="2026.7.1"
+OPENCLAW_VERSION="2026.9.3"
+
+# Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
+# the fleet runs the build WE chose instead of whatever
+# NousResearch/hermes-agent had on `main` the second a box was flashed.
+# Upstream lands ~150 commits a day and cuts a tag two or three times a week,
+# so every unpinned install lands on a different, untested tree.
+#
+# The value is the 40-char COMMIT the release tag points at — not the tag
+# name, and not the annotated tag object's own SHA. The upstream installer's
+# `--commit` takes a commit only and rejects abbreviated SHAs, while
+# `--branch <tag>` is worse than useless on an existing checkout: it rewrites
+# remote.origin.fetch to a refspec with no matching head and leaves
+# origin/main stale, which breaks the agent's own `hermes update` later.
+#
+# Overridable from the environment so QA can aim one device at another commit
+# without editing the file (`HERMES_PIN_COMMIT=<sha> sudo -E bash install.sh
+# --step hermes_install`), exactly as OPENCLAW_PIN_VERSION does for OpenClaw.
+# Bump the default in a PR, ship it through beta -> main, and the fleet
+# follows on its next update.
+#
+# Current pin: upstream tag v2026.9.7 == "Hermes Agent v0.21.1" (TASK-784).
+HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-2237be355906fbe6065ce1815711eee52b2d646e}"
+
+# WHO OWNS THE GATEWAY SERVICE, said to the core rather than left for it to
+# guess. ClawBox supervises the gateway itself, as the SYSTEM unit
+# clawbox-gateway.service, which the core neither installed nor can claim; the
+# core's own service is a systemd USER unit that does not exist on this box.
+#
+# 2026.9.3 made `doctor --fix` refuse to enter maintenance unless it can see
+# that service as its own, absent, or provably offline
+# (`assertDoctorMaintenanceInspection`). On a ClawBox it is none of the three —
+# `openclaw gateway status --deep` reports ours under "Other gateway-like
+# services detected" — so doctor exited 1 with "Gateway service ownership or
+# shutdown could not be verified" on a box whose gateway this installer had
+# just stopped for it. Measured on two Orin boards: the migration call site in
+# step_openclaw_install exited 1 under 2026.9.3 with the gateway already
+# stopped, exited 0 with this variable set, and had exited 0 under 2026.8.1.
+#
+# This is the core's own knob for it (`resolveServiceRepairPolicy`): doctor
+# repairs the STATE it was pointed at and leaves the service to its supervisor,
+# which is exactly the division of labour here — stopping and restarting the
+# gateway around a migration is `stop_openclaw_gateways_for_migration` and
+# `step_gateway_setup`'s job, and always has been. It is NOT
+# `OPENCLAW_SUPERVISOR_MODE=external`, which is the wider claim: that one also
+# blocks gateway service mutations and the core's self-update, neither of which
+# this needs.
+#
+# Carried under the core's own name so each call site reads as what it passes;
+# `as_clawbox` is `sudo -u`, which resets the environment, so it has to travel
+# through an explicit `env` at every site rather than an export here.
+OPENCLAW_SERVICE_REPAIR_POLICY="external"
+
+# The OpenAI Codex CLI (TASK-439). The pinned version and the digest that
+# authorises it live in config/codex-target.txt; these two are only WHERE the
+# result lands.
+#
+# The binary the vendor's installer links into ~/.local/bin, and the only path
+# this file ever treats as "the native Codex". `command -v codex` is not that
+# test: ~/.bashrc and as_clawbox_login both put ~/.npm-global/bin AHEAD of
+# ~/.local/bin, so while the npm copy survives it answers for `codex`.
+CODEX_NATIVE_BIN="$CLAWBOX_HOME/.local/bin/codex"
+# Where the installer unpacks its standalone package — deliberately NOT its
+# default, which is $CODEX_HOME (~/.codex). A factory reset removes ~/.codex
+# whole (HOME_REMOVE_PATHS in src/app/setup-api/setup/reset/route.ts), and that
+# is right for the credentials and state it holds; it would be wrong for a
+# 117 MB binary, because the reset leaves the box in AP mode with no internet
+# and ~/.local/bin/codex would dangle until an update ran. Only the installer
+# is told this — nothing exports CODEX_HOME at runtime, so the CLI still reads
+# its auth and config from ~/.codex, which is what the auth-sync timer writes.
+CODEX_PACKAGE_HOME="$CLAWBOX_HOME/.local/share/codex"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
+
+# Is the OpenClaw on this box generation 2 (>= 2026.8)? The INSTALLED binary
+# answers when it can — it is the process that parses whatever we write — and
+# the pinned target only fills in before the first install. Used to route the
+# steps that speak different config dialects per generation.
+# The generation rule itself, callable with any version string, so the
+# installed-binary probe below and the freshly-pinned TARGET gate in
+# step_openclaw_install cannot drift apart.
+openclaw_version_is_v2() {
+  [ -n "$1" ] && [ "$(printf '%s\n' 2026.8 "$1" | sort -V | head -1)" = "2026.8" ]
+}
+openclaw_is_v2() {
+  local v=""
+  if [ -x "$NPM_PREFIX/bin/openclaw" ]; then
+    v=$("$NPM_PREFIX/bin/openclaw" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)
+  fi
+  if [ -z "$v" ] && [ -f "$SRC_DIR/config/openclaw-target.txt" ]; then
+    v=$(head -1 "$SRC_DIR/config/openclaw-target.txt" | awk '{print $1}')
+  fi
+  [ -z "$v" ] && v="$OPENCLAW_VERSION"
+  openclaw_version_is_v2 "$v"
+}
 
 # ── Service registry ─────────────────────────────────────────────────────────
 # Authoritative list of clawbox systemd units. Used by step_systemd_services
@@ -329,6 +1107,7 @@ EXPECTED_ACTIVE_SERVICES=(
 EXPECTED_INSTALLED_SERVICES=(
   clawbox-heartbeat.service
   clawbox-browser.service
+  clawbox-embed.service
   clawbox-tunnel.service
   "clawbox-root-update@.service"
   clawbox-ap-watchdog.service
@@ -407,13 +1186,56 @@ if ! has_openclaw_harness; then
   # correctly provisioned Hermes box reports nothing twice.
   FOREIGN_EDITION_UNITS+=(clawbox-gateway.service)
 fi
-
-# Load persisted WiFi interface if available
-IFACE_ENV="$PROJECT_DIR/data/network.env"
-if [ -f "$IFACE_ENV" ]; then
-  # shellcheck disable=SC1090
-  source "$IFACE_ENV"
+# The same registry for the clawbox USER's manager. `hermes gateway install`
+# (no --system) writes hermes-gateway.service under ~/.config/systemd/user —
+# what a box provisioned without a terminal ends up with (the harness swap,
+# this installer's own Hermes step), since the system install needs a sudo
+# that is refused on purpose. It polls the same bot token, the system-scope
+# loop cannot see it, and step_edition_foreign_teardown reaches it through the
+# user's session bus. Built by the same negation, so dual is untouched.
+FOREIGN_EDITION_USER_UNITS=()
+if ! has_hermes_harness; then
+  FOREIGN_EDITION_USER_UNITS+=(hermes-gateway.service)
 fi
+# Read one KEY=VALUE out of a file this script does NOT trust.
+#
+# Everything under $PROJECT_DIR/data is written by the web server, i.e. by the
+# clawbox user — and install.sh runs as root, reached from a NOPASSWD grant. So
+# `source`ing anything in there is arbitrary root code execution for anything
+# with clawbox-level code execution: the web server, the in-UI terminal, the
+# agent's shell. `printf 'x() { :; }; id > /tmp/pwn\n' > data/hostname.env` plus
+# the granted `clawbox-root-update@set_hostname.service` was exactly that, and
+# data/network.env was worse still because it was sourced on EVERY root run of
+# this script, `--step chpasswd` included.
+#
+# Parse instead: first matching assignment, optional single or double quotes
+# stripped, and nothing containing a character that could not have come from the
+# writer we expect. The caller still validates the meaning of the value.
+# TASK-445.
+read_untrusted_env_value() {
+  local file="$1" key="$2" line value
+  [ -f "$file" ] || return 0
+  [ -L "$file" ] && return 0
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null)" || return 0
+  value="${line#*=}"
+  # Strip one layer of matching quotes.
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  case "$value" in
+    ""|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  printf '%s' "$value"
+}
+
+# Load persisted WiFi interface if available.
+IFACE_ENV="$PROJECT_DIR/data/network.env"
+_persisted_iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+if [ -n "$_persisted_iface" ]; then
+  NETWORK_INTERFACE="$_persisted_iface"
+fi
+unset _persisted_iface
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -431,6 +1253,143 @@ as_clawbox_login() {
   su - "$CLAWBOX_USER" -c "export PATH=\"${cuda_prefix}$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $*"
 }
 
+# The marker the third-party cua-driver-rs installer writes above its PATH
+# export, and the fence ClawBox wraps the survivor in. Matched as an ASCII
+# prefix: the vendor's own line ends in an em dash and a URL.
+CUA_BASHRC_MARKER='# Added by cua-driver-rs installer'
+CUA_BASHRC_FENCE_OPEN='# >>> ClawBox: cua-driver-rs PATH (collapsed) >>>'
+CUA_BASHRC_FENCE_CLOSE='# <<< ClawBox: cua-driver-rs PATH (collapsed) <<<'
+
+# Collapse repeated third-party PATH blocks in the clawbox user's ~/.bashrc.
+#
+# NOTHING IN THIS REPOSITORY WRITES THAT BLOCK, which is why there is no writer
+# to make idempotent: the vendor's own `cua-driver` binary appends it, and
+# Hermes' agent keeps invoking that binary on its own
+# (tools/computer_use/cua_backend.py, cua_driver_update_check). Measured
+# read-only on 2026-09-07: 23 copies and 7,049 B on the Hermes box against 1
+# copy and 4,431 B on the OpenClaw box, whose driver was installed once and
+# never updated — so the writer reaches BOTH editions and only the rate differs.
+# Each copy costs every login shell another ~119 B and nothing bounds it.
+#
+# So the fix is at this end, and it runs on EVERY update rather than once,
+# precisely because the writer is not ours and will append again: the copies
+# collapse to one, fenced, and the next append collapses into the same fence.
+#
+# Only a file with a genuine duplicate is rewritten — a box with one copy is
+# left byte-for-byte alone. The vendor's own comment is kept INSIDE the fence:
+# it says who put the path there, and it is what the next collapse matches on.
+# The block's export line is byte-identical to the one inside the Codex
+# installer's fence, so the COMMENT is the key and never the export.
+dedupe_vendor_bashrc_path_blocks() {
+  local BASHRC="$1"
+  [ -f "$BASHRC" ] || return 0
+  # A symlinked ~/.bashrc — a dotfiles checkout — would be read THROUGH the
+  # link as root and then replaced by the `mv` below with a regular file,
+  # silently breaking the owner's link. Not ours to convert.
+  if [ -L "$BASHRC" ]; then
+    return 0
+  fi
+
+  local copies=0
+  copies=$(grep -cF "$CUA_BASHRC_MARKER" "$BASHRC" 2>/dev/null) || copies=0
+  [ "$copies" -gt 1 ] 2>/dev/null || return 0
+
+  # The file as it is about to be read. The `mv` below is an atomic rename, so
+  # no reader ever sees half a file — but a rename replaces the INODE, so an
+  # append that lands between the read and the swap is dropped with the old one.
+  # The known concurrent writer is the vendor's installer appending exactly the
+  # block being deleted, so nothing is lost today; this exists so that stays
+  # true when something else writes here.
+  local snapshot=""
+  snapshot=$(stat -c '%s %y %i' "$BASHRC" 2>/dev/null) || snapshot=""
+
+  local tmp=""
+  tmp=$(mktemp "$BASHRC.clawbox.XXXXXX" 2>/dev/null) || {
+    echo "  Warning: could not collapse duplicate PATH blocks in .bashrc (mktemp failed)"
+    return 0
+  }
+
+  # A blank line belongs to the block that FOLLOWS it (the vendor writes
+  # blank/comment/export), so blanks are buffered and one is dropped with each
+  # block that goes. Our own fence lines are dropped on the way in and written
+  # back out, which is what makes a second run a no-op.
+  if awk \
+      -v MARKER="$CUA_BASHRC_MARKER" \
+      -v FOPEN="$CUA_BASHRC_FENCE_OPEN" \
+      -v FCLOSE="$CUA_BASHRC_FENCE_CLOSE" '
+      function flush(  i) { for (i = 0; i < blanks; i++) print ""; blanks = 0 }
+      BEGIN { kept = 0; blanks = 0 }
+      $0 == FOPEN || $0 == FCLOSE { next }
+      /^$/ { blanks++; next }
+      index($0, MARKER) == 1 {
+        first = $0
+        got = (getline second)
+        if (got > 0 && second ~ /^export PATH=/) {
+          if (kept) { if (blanks > 0) blanks--; next }
+          kept = 1
+          flush()
+          print FOPEN
+          print first
+          print second
+          print FCLOSE
+          next
+        }
+        flush()
+        print first
+        if (got > 0) { if (second == "") blanks++; else print second }
+        next
+      }
+      { flush(); print }
+      END { flush() }
+    ' "$BASHRC" > "$tmp"; then
+    # Judge the OUTCOME, never the attempt. The premise of this whole function
+    # is that the writer is a third party ClawBox does not own and cannot pin,
+    # so the shape it appends WILL change — one extra line between the marker
+    # and the export is enough for every block to fall through the transform.
+    # Reporting a collapse off `mv`'s exit code would then rewrite the file
+    # byte-identical and log a success on every update, for ever, with the
+    # bound silently gone. An empty result means the rewrite lost the file.
+    local collapsed=0
+    collapsed=$(grep -cF "$CUA_BASHRC_MARKER" "$tmp" 2>/dev/null) || collapsed=0
+    if [ "$collapsed" -eq 1 ] 2>/dev/null && [ -s "$tmp" ]; then
+      # Ownership and mode FIRST, so the divergence check below is the last
+      # thing between the look and the rename. There is no atomic
+      # compare-and-rename, so the window cannot be closed — only made as
+      # narrow as one `stat` and one `rename`.
+      chown --reference="$BASHRC" "$tmp" 2>/dev/null \
+        || chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp" 2>/dev/null || true
+      chmod --reference="$BASHRC" "$tmp" 2>/dev/null || chmod 0644 "$tmp" 2>/dev/null || true
+      local now=""
+      now=$(stat -c '%s %y %i' "$BASHRC" 2>/dev/null) || now=""
+      if [ -z "$snapshot" ] || [ "$now" != "$snapshot" ]; then
+        # Somebody wrote to .bashrc while it was being collapsed. The rewrite
+        # describes a file that no longer exists; the next update collapses it.
+        rm -f "$tmp"
+        echo "  Warning: .bashrc changed while it was being collapsed — left untouched"
+        return 0
+      fi
+      # Guarded: this runs under `set -euo pipefail` from a step the dispatcher
+      # calls plainly, so a .bashrc that cannot be replaced must warn, not end
+      # the update at this line.
+      if mv -f "$tmp" "$BASHRC"; then
+        echo "  Collapsed $copies duplicate cua-driver-rs PATH blocks in .bashrc to one"
+        return 0
+      fi
+    else
+      # The live file is left exactly as it is: a copy of itself is not an
+      # improvement, and this line is the only signal anyone gets.
+      rm -f "$tmp"
+      echo "  Warning: .bashrc carries $copies cua-driver-rs PATH blocks and the collapse"
+      echo "           left $collapsed — the vendor's block shape has changed; file untouched"
+      return 0
+    fi
+  fi
+
+  rm -f "$tmp"
+  echo "  Warning: could not collapse duplicate PATH blocks in .bashrc (rewrite failed)"
+  return 0
+}
+
 ensure_clawbox_bashrc_path() {
   # Make ~/.npm-global/bin and ~/.local/bin available in the clawbox user's
   # interactive shells (e.g. the in-UI terminal) so CLIs like openclaw, claude,
@@ -439,7 +1398,7 @@ ensure_clawbox_bashrc_path() {
   if ! grep -q 'npm-global/bin' "$BASHRC" 2>/dev/null; then
     cat >> "$BASHRC" <<'PATHEOF'
 
-# npm global binaries (openclaw, codex, gemini) and user-local binaries (claude, hf, clawkeep)
+# npm global binaries (openclaw, gemini) and user-local binaries (claude, codex, hf, clawkeep)
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 PATHEOF
     chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
@@ -451,21 +1410,106 @@ export PATH="$HOME/.local/bin:$PATH"
 PATHEOF
     chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
   fi
+  # Third-party appends to the same file, bounded here because their writer is
+  # not ours to fix (TASK-758).
+  dedupe_vendor_bashrc_path_blocks "$BASHRC"
 }
 
-node_satisfies_openclaw_engine() {
-  local version major
-  version=$(node -p 'process.versions.node' 2>/dev/null || echo "")
+# The core's `engines.node`, in one place, because two copies of it drift: this
+# sentence is what the failures below print and the case table under it is what
+# they test.
+#
+# It moved with the pin. 2026.8.1 accepted `>=22.22.3 <23 || >=24.15.0 <25 ||
+# >=25.9.0`; 2026.9.3 accepts `>=24.16.0 <25 || >=26.1.0` and nothing else, so
+# Node 22 is now REJECTED rather than merely no longer preferred — every
+# openclaw command exits 1 under it with a requirement banner. The reason is
+# upstream's: `node:sqlite` truncates a TEXT value at an embedded NUL on
+# 22.23.x, 24.15.0, 25.9.0 and 26.0.0, and the first fixed builds are 24.16.0
+# and 26.1.0. ClawBox's own stores (src/lib/openclaw-session-store.ts,
+# src/lib/harness/hermes-turn-record.ts) use `node:sqlite` too, so the box wants
+# that fix regardless of the core.
+OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"
+
+# The table itself, over a VERSION STRING rather than over whatever `node` is on
+# PATH — because two callers need it: the guard below asks about the installed
+# Node, and `node_engine_remedy` asks about each version apt is OFFERING. A
+# Debian revision (`24.21.0-1nodesource1`) compares correctly here: dpkg reads
+# the upstream part first.
+node_version_satisfies_openclaw_engine() {
+  local version="$1" major
   [ -n "$version" ] || return 1
   major="${version%%.*}"
 
   case "$major" in
-    22) dpkg --compare-versions "$version" ge "22.22.3" ;;
-    24) dpkg --compare-versions "$version" ge "24.15.0" ;;
-    25) dpkg --compare-versions "$version" ge "25.9.0" ;;
-    2[6-9]|[3-9][0-9]) return 0 ;;
+    24) dpkg --compare-versions "$version" ge "24.16.0" ;;
+    26) dpkg --compare-versions "$version" ge "26.1.0" ;;
+    # Three digits and up as well: `[3-9][0-9]` alone made the open-ended half
+    # of the range stop at 99, which is a ceiling nobody wrote down.
+    2[7-9]|[3-9][0-9]|[1-9][0-9][0-9]*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+node_satisfies_openclaw_engine() {
+  node_version_satisfies_openclaw_engine "$(node -p 'process.versions.node' 2>/dev/null || echo "")"
+}
+
+# What to do about a Node the apt transaction CANNOT reach, said rather than
+# implied.
+#
+# The old table accepted every major above its floor, so the install line only
+# ever had to move Node UP and apt was always able to. The new one has a ceiling
+# (`<25`), and `apt-get install nodejs` never moves a package DOWN: NodeSource
+# pins its own repository at priority 600, under the 1000 apt wants before it
+# will choose a lower version, so a host already on 25.x or 26.0.x keeps the Node
+# it has and the guard refuses it for ever.
+#
+# A SENTENCE, NOT AN AUTOMATIC DOWNGRADE. No shipped unit is in that state — the
+# whole fleet is on 22 and moves up — so the population this can reach is a dev
+# or demo machine someone moved to a newer channel by hand, and silently
+# replacing the Node runtime of such a machine during an update is not a decision
+# an installer should take on its own. It prints the one command that works
+# instead, with the version apt itself is offering.
+node_engine_remedy() {
+  local version major offered pick
+  version=$(node -p 'process.versions.node' 2>/dev/null || echo "")
+  case "$version" in ""|*[!0-9.]*) return 0 ;; esac
+  major="${version%%.*}"
+  [ "$major" -ge 25 ] 2>/dev/null || return 0
+  echo "       Node $version is ABOVE the range that core accepts, and apt does not move a" >&2
+  echo "       package down (NodeSource pins its repo at priority 600, below the 1000 apt" >&2
+  echo "       needs to pick a lower version), so this host keeps the Node it has until" >&2
+  echo "       somebody chooses one:" >&2
+  if [ "$major" = "26" ]; then
+    echo "         curl -fsSL https://deb.nodesource.com/setup_26.x | bash - && apt-get install -y nodejs" >&2
+    echo "           (26.1.0 and newer are accepted, so moving UP is the cheaper way out here)" >&2
+  fi
+  # `apt-cache madison`, NOT `apt-cache policy`. On this very host the candidate
+  # IS the broken runtime: apt will not select a LOWER version at NodeSource's
+  # priority, so `Candidate:` still reads the installed 25.x and a command built
+  # from it would reinstall exactly what the core refuses. madison lists every
+  # version the configured repositories actually offer — including the Node 24
+  # channel this step has just configured — and each one goes through the same
+  # engine table the guard uses, so what is printed is a version the box will
+  # accept afterwards. Newest acceptable wins.
+  pick=""
+  while read -r offered; do
+    [ -n "$offered" ] || continue
+    node_version_satisfies_openclaw_engine "$offered" || continue
+    if [ -z "$pick" ] || dpkg --compare-versions "$offered" gt "$pick"; then
+      pick="$offered"
+    fi
+  done <<EOF
+$(apt-cache madison nodejs 2>/dev/null | awk -F'|' '{gsub(/ /, "", $2); if ($2 != "") print $2}')
+EOF
+  if [ -n "$pick" ]; then
+    echo "         apt-get install -y --allow-downgrades nodejs=$pick" >&2
+  else
+    # Nothing acceptable is on offer, so naming a version would be inventing
+    # one: say what is missing instead.
+    echo "         (no nodejs version satisfying $OPENCLAW_NODE_ENGINE is on offer on this host —" >&2
+    echo "          configure the NodeSource 24 channel first, then re-run this step)" >&2
+  fi
 }
 
 ensure_openclaw_node_engine() {
@@ -476,16 +1520,29 @@ ensure_openclaw_node_engine() {
 
   local got
   got=$(node --version 2>/dev/null || echo "missing")
-  echo "  Node.js $got does not satisfy OpenClaw 2026.7.1 engine requirements; upgrading Node.js 22..."
+  echo "  Node.js $got does not satisfy the pinned OpenClaw core's engine requirements; installing Node.js 24..."
+  # WHERE THIS SITS IN THE UPDATE, because the major switch only works in this
+  # order: step_openclaw_install calls this BEFORE `npm install -g openclaw@…`,
+  # so the new core's very first invocation (doctor) already runs on the Node
+  # its engines demand. bootstrap_updater has refreshed this script first, so a
+  # box mid-upgrade runs the NEW table here, and the `restart` step rebuilds
+  # node-pty, bun and the Next build under the new Node before the reboot.
+  #
+  # NodeSource's own channel, not a tarball of our own: it is where this box's
+  # nodejs package already comes from (nodistro/main, pinned by
+  # /etc/apt/preferences.d/nodejs) and where OpenClaw's own Linux installer gets
+  # Node, so `apt-get install nodejs` replaces 22 with 24 in place and every
+  # path on the box keeps pointing at one apt-managed /usr/bin/node.
   wait_for_apt
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
 
   if ! node_satisfies_openclaw_engine; then
     got=$(node --version 2>/dev/null || echo "missing")
     echo "Error: Node.js upgrade did not reach an OpenClaw-compatible version — got $got." >&2
-    echo "       OpenClaw 2026.7.1 requires Node >=22.22.3 <23, >=24.15.0 <25, or >=25.9.0." >&2
+    echo "       The pinned OpenClaw core requires Node $OPENCLAW_NODE_ENGINE." >&2
+    node_engine_remedy
     exit 1
   fi
 
@@ -554,6 +1611,31 @@ get_env_setting_or_default() {
   fi
 }
 
+# A Hugging Face repo id or file name read out of .env, checked BEFORE it is
+# spliced into an as_clawbox_login command string. That helper hands its
+# argument to `su -c`, so a value carrying shell syntax would run as the
+# clawbox user the moment a root-invoked step read the pin — and the same
+# value becomes MODEL_PATH and the download's argv, where a `..` segment
+# reaches past the models directory and a leading dash turns into an `hf`
+# option. The allow-list is exactly what a repo id (owner/name) or a GGUF
+# name (with an optional subfolder) is made of; anything else is refused with
+# the key named, since get_env_setting_or_default takes the line as written.
+# Usage: require_safe_hf_ref KEY VALUE
+require_safe_hf_ref() {
+  local key="$1"
+  local value="$2"
+  # ASCII ranges only: in a UTF-8 locale [A-Z] can admit other scripts.
+  local LC_ALL=C
+  if [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+    case "/$value/" in
+      */../*) ;;
+      *) return 0 ;;
+    esac
+  fi
+  echo "Error: ${key}=$(printf '%q' "$value") in .env is not a Hugging Face repo id or file name (letters, digits, . _ / -; no '..' segment; no leading '-'). Refusing to use it — fix the pin and re-run." >&2
+  return 1
+}
+
 ensure_llamacpp_model_cached() {
   local ENV_FILE="$PROJECT_DIR/.env"
   local MODEL_DIR="$PROJECT_DIR/data/llamacpp/models"
@@ -567,6 +1649,9 @@ ensure_llamacpp_model_cached() {
 
   HF_REPO=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_REPO" "google/gemma-4-E2B-it-qat-q4_0-gguf")
   HF_FILE=$(get_env_setting_or_default "$ENV_FILE" "LLAMACPP_HF_FILE" "gemma-4-E2B_q4_0-it.gguf")
+  # Both are about to be interpolated into an as_clawbox_login command string.
+  require_safe_hf_ref "LLAMACPP_HF_REPO" "$HF_REPO" || return 1
+  require_safe_hf_ref "LLAMACPP_HF_FILE" "$HF_FILE" || return 1
   MODEL_PATH="$MODEL_DIR/$HF_FILE"
 
   mkdir -p "$MODEL_DIR"
@@ -727,23 +1812,986 @@ ensure_node_pty() {
 
   if ! as_clawbox_login "$verify_cmd" &>/dev/null; then
     echo "Error: node-pty is still not loadable after rebuild. Check the node-gyp output above." >&2
-    exit 1
+    # `return`, not `exit`: do_rebuild stops clawbox-setup before it calls this
+    # and has a restore path to run before anything may leave the function. A
+    # bare `exit` from here jumped over it and left the box exactly as TASK-709
+    # describes. Callers that want the old behaviour get it for free — a
+    # non-zero return from a bare call still ends the script under `set -e`.
+    return 1
   fi
 
   echo "  node-pty rebuilt and verified"
 }
 
-# Stop the setup service, clear cache, reinstall, and rebuild
+# ── Memory for the build ─────────────────────────────────────────────────────
+
+# MemAvailable in MiB, or 0 when /proc cannot be read.
+#
+# Zero rather than a guess, on the same reasoning as the memory guard in
+# scripts/openclaw/clawbox-tts.sh: on a Jetson an unreadable /proc means
+# something is wrong, and assuming "plenty" is how the OOM killer gets invited
+# in. Here it only makes the log line honest — nothing below is conditional on
+# the number.
+available_mb() {
+  local kb
+  kb=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null)
+  [ -n "$kb" ] || { printf '0'; return 0; }
+  printf '%s' "$((kb / 1024))"
+}
+
+# Print the pid of the llama.cpp server named by ClawBox's own pidfile, and
+# nothing at all unless that process is really it.
+#
+# The pid is checked against /proc/<pid>/cmdline before the caller signals it:
+# the pidfile outlives a crash, pids are recycled, and this runs as root — so
+# an unverified kill from a stale file is a root SIGKILL aimed at whatever
+# inherited the number. The TypeScript sibling (stopLlamaCppServer in
+# src/instrumentation-node.ts) can go straight from the file to the signal
+# because it usually still holds the child handle; from bash there is nothing
+# but the file.
+llamacpp_pid_if_running() {
+  local pidfile="$PROJECT_DIR/data/llamacpp/server.pid" pid
+  [ -f "$pidfile" ] || return 1
+  read -r pid < "$pidfile" 2>/dev/null || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  grep -qa 'llama-server' "/proc/$pid/cmdline" 2>/dev/null || return 1
+  printf '%s' "$pid"
+}
+
+# The engines this run stopped, and that were RUNNING when it stopped them.
+#
+# Only these come back. An engine the owner had already stopped — or that the
+# runtime's own ten-minute idle standby (src/lib/local-ai-runtime.ts) had put
+# away — must stay stopped, or an update would be starting services nobody
+# asked for and holding memory nobody wanted held.
+PAUSED_ENGINE_UNITS=()
+PAUSED_ENGINE_USER_UNITS=()
+PAUSED_ENGINE_UID=""
+
+# Stop an engine, remembering whether it was running.
+#
+# Best-effort in the register of its caller: a box that cannot stop one of its
+# engines should still attempt the build it was asked for, and the log says
+# what happened.
+pause_engine_unit() {
+  local unit="$1"
+  systemctl cat "$unit" >/dev/null 2>&1 || return 0
+  # Asked BEFORE the stop, because after it the answer is always "inactive" and
+  # the pair would have nothing left to be symmetric about.
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    PAUSED_ENGINE_UNITS+=("$unit")
+  fi
+  echo "  Stopping $unit..."
+  systemctl stop "$unit" 2>/dev/null \
+    || echo "  Warning: could not stop $unit" >&2
+}
+
+# The same, for a USER unit reached through the clawbox user's session bus.
+pause_engine_user_unit() {
+  local unit="$1" uid="$2"
+  sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+    systemctl --user cat "$unit" >/dev/null 2>&1 || return 0
+  if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+      systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+    PAUSED_ENGINE_USER_UNITS+=("$unit")
+    PAUSED_ENGINE_UID="$uid"
+  fi
+  echo "  Stopping $unit..."
+  sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+    systemctl --user stop "$unit" 2>/dev/null \
+    || echo "  Warning: could not stop $unit" >&2
+}
+
+# How long a Type=simple unit is given to prove it did not fork and die.
+#
+# systemd calls a Type=simple unit ACTIVE the instant it forks, and every unit
+# in this pair is Type=simple (config/clawbox-embed.service, the kokoro and
+# whisper units scripts/install-voice.sh writes, and ollama's upstream unit).
+# So `is-active` asked immediately after `start` says no more than the exit
+# status does; asked again after a settle it separates a server that came up
+# from one that exited two seconds later — which clawbox-embed.service, with
+# `Restart=no`, will not retry.
+ENGINE_SETTLE_S="${CLAWBOX_ENGINE_SETTLE_S:-3}"
+# A settle that is not a plain number is not a settle: `sleep abc` FAILS, and
+# under errexit that would abort resume_paused_engines after the starts and
+# before the record is cleared — taking do_rebuild or step_post_update with it.
+# Same guard, same reason, as the gateway budget below.
+case "$ENGINE_SETTLE_S" in ''|*[!0-9]*) ENGINE_SETTLE_S=3 ;; esac
+
+# Start back every engine this run stopped, and check each one after a settle.
+#
+# The stop half of this pair has existed since TASK-709; the start half did
+# not. Measured on the OpenClaw box 2026-09-05 and on the Hermes box 2026-09-06:
+# step_post_update stopped ollama.service at 07:44:02, one second before the
+# step finished, and the updater reported the update complete; three hours later
+# the unit was still inactive because nothing had happened to ask for it. These
+# engines are on-demand — the local-AI proxy wakes ollama and the embedder,
+# `tts/warm` and the speak path wake the voice — so what the update leaves
+# behind is not a dead box but a box in a state it was not in before, whose
+# next use pays a cold start it did not have to. An update should hand the box
+# back as it found it, and saying "completed" over an engine it stopped and did
+# not restart is the false-success class (TASK-724).
+#
+# Never fails the update: refusing an otherwise-good update over one engine
+# would strand the box on the old build, which is strictly worse. It
+# deliberately does NOT go through record_provision_failure: that channel turns
+# the step's exit code non-zero, which would paint a whole good update red over
+# a voice engine. The quieter surface this block asked for now exists — a
+# `CLAWBOX-WARN[...]` line, which the updater reads out of the step's journal
+# and raises on the update's own status — so a named [WARN] line here carries
+# the marker beside it and the owner is told, without the update turning red.
+#
+# RESIDUAL, stated rather than hidden: a shell SIGKILLed between the pause and
+# this call resumes nothing. That is not hypothetical — run_next_build's own
+# comment records this shell as a documented OOM-kill target (TASK-709) — and
+# nothing in bash can survive it. The box is then in exactly the pre-fix state
+# for those engines, and a reboot (which starts what is enabled) or the first
+# request through the proxy is what ends it.
+# Engines the RUNTIME wakes behind a memory guard, which a root `systemctl
+# start` would walk straight past.
+#
+# `ensureLocalAiReady("embed")` refuses to wake clawbox-embed.service below
+# EMBED_WAKE_MIN_AVAILABLE_MB (2,300) of MemAvailable, because the unit's own
+# cgroup cap cannot stop a wake from squeezing the gateway or a build. The
+# resume's whole failure arm is by definition the memory-starved path — an
+# OOM-killed build, seconds after restore_previous_build brought the dashboard
+# back — so asking for a ~2 GB embedder there is the one start in this pair that
+# can make things worse. Leave it to the proxy, which asks the guard: the first
+# memory search wakes it, exactly as it would have on a box that was never
+# updated. (This is the harness-first rule inside our own tree:
+# src/lib/local-ai-runtime.ts owns these lifecycles.)
+RUNTIME_WOKEN_UNITS="clawbox-embed.service"
+
+runtime_wakes_unit() {
+  case " $RUNTIME_WOKEN_UNITS " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+resume_paused_engines() {
+  local unit uid_dir
+  if [ "${#PAUSED_ENGINE_UNITS[@]}" -gt 0 ]; then
+    for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
+      if runtime_wakes_unit "$unit"; then
+        echo "  Leaving $unit to the local-AI proxy's own guarded wake"
+        continue
+      fi
+      echo "  Starting $unit again (it was running before)..."
+      systemctl start "$unit" 2>/dev/null || true
+    done
+    # One settle for the whole set rather than one each: they are independent,
+    # and the update has already paid for the starts.
+    sleep "$ENGINE_SETTLE_S"
+    for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
+      if runtime_wakes_unit "$unit"; then continue; fi
+      if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        echo "    [ok] $unit is back"
+      else
+        echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
+        echo "CLAWBOX-WARN[engine-not-resumed]: $unit was running before this update and did not come back; it starts again on the next request that needs it"
+      fi
+    done
+  fi
+  if [ "${#PAUSED_ENGINE_USER_UNITS[@]}" -gt 0 ] && [ -n "$PAUSED_ENGINE_UID" ]; then
+    uid_dir="/run/user/$PAUSED_ENGINE_UID"
+    # The same test the pause side applies. A session that ended during the
+    # build (no linger, the last login closed) leaves nothing to start into, and
+    # a [WARN] about that would be a false failure over a box that is fine.
+    if [ ! -d "$uid_dir" ]; then
+      echo "  The clawbox user has no session bus any more — leaving ${PAUSED_ENGINE_USER_UNITS[*]} to the next login"
+    else
+      for unit in "${PAUSED_ENGINE_USER_UNITS[@]}"; do
+        echo "  Starting $unit again (it was running before)..."
+        sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="$uid_dir" \
+          systemctl --user start "$unit" 2>/dev/null || true
+      done
+      sleep "$ENGINE_SETTLE_S"
+      for unit in "${PAUSED_ENGINE_USER_UNITS[@]}"; do
+        if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="$uid_dir" \
+            systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+          echo "    [ok] $unit is back"
+        else
+          echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
+          echo "CLAWBOX-WARN[engine-not-resumed]: $unit was running before this update and did not come back; it starts again on the next request that needs it"
+        fi
+      done
+    fi
+  fi
+  forget_paused_engines
+  return 0
+}
+
+# Drop the record without acting on it — for the one caller that hands the
+# engines to something else (a reboot).
+forget_paused_engines() {
+  PAUSED_ENGINE_UNITS=()
+  PAUSED_ENGINE_USER_UNITS=()
+  PAUSED_ENGINE_UID=""
+}
+
+# The llama.cpp server is deliberately NOT in that pair. It has no unit: the
+# web server spawns it, holds the child handle and records the pid
+# (src/lib/local-ai-runtime.ts, src/instrumentation-node.ts), and wakes it on
+# the next request that needs it. A root shell starting a second llama-server
+# behind the app's back would be a process the app has no handle on, fighting
+# it over the same pidfile — a new defect in place of the one being fixed.
+
+# Give `bun run build` the board to itself.
+#
+# The rebuild is the most memory-hungry thing this appliance ever does, and on
+# an 8 GB Jetson it shares that memory with whatever the box was doing a minute
+# earlier: ollama keeps a model resident for ten idle minutes after the last
+# chat turn, Kokoro holds its voice on the GPU for five, and a llama.cpp server
+# stays up until something stops it. A `next build` starting underneath 4 GB of
+# resident model does not build slowly — it is OOM-killed, and the update ends
+# with the box on a half-written .next and a step painted red.
+#
+# Called from do_rebuild AFTER clawbox-setup.service is stopped, and that order
+# is what lets the free hold: the gateway reaches ollama and llama.cpp through
+# the web server's own proxy (src/lib/local-ai-runtime.ts), so with the web
+# server down nothing can pull a model back in behind us.
+#
+# "With the web server down" is best-effort, not a guarantee, and it is worth
+# knowing which. The routine breaker was clawbox-gateway.service's
+# `Wants=clawbox-setup.service`, which started the unit do_rebuild had just
+# stopped on every gateway (re)start; that line is gone (TASK-728), so a
+# crash-looping gateway no longer reopens the proxy behind the build — including
+# on the update that DELIVERS the change, because the new unit file is installed
+# and daemon-reloaded before this function runs (step_rebuild_reboot calls
+# step_systemd_services seven lines above do_rebuild, and the updater's
+# gateway_setup step, which cps the same file, is the step immediately before
+# the rebuild). What is still not fenced: `install.sh --step rebuild` run by
+# hand, a box where gateway_setup was skipped (the unit is absent on the hermes
+# SKU) or step_systemd_services failed non-fatally, and an operator or the
+# sudoers grant restarting clawbox-setup inside the window.
+#
+# Stop, never disable — the same rule the idle standby follows, and the reason
+# it is safe: every engine here is meant to come back on demand. An update that
+# quietly un-enabled one would be a box that stopped talking after its next
+# reboot, which is a far worse bug than the one this fixes.
+#
+# Every step is best-effort and this function never fails the update: a box
+# that cannot stop one of its engines should still attempt the build it was
+# asked for, and the log says what happened.
+free_memory_for_build() {
+  local before after uid unit pid waited
+  before=$(available_mb)
+  echo "Freeing memory for the build (${before} MB available)..."
+
+  pause_engine_unit ollama.service
+  # The memory embedder is a system unit of its own (~2 GB on the GPU while
+  # awake) and outlives the web server whose idle timer would otherwise stop
+  # it, so the build has to ask for its memory back explicitly.
+  pause_engine_unit clawbox-embed.service
+
+  # The voice engines are USER units, so they need the clawbox user's session
+  # bus; with no /run/user/<uid> there is no session and nothing to stop.
+  uid=$(id -u "$CLAWBOX_USER" 2>/dev/null || echo "")
+  if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
+    for unit in kokoro-server.service whisper-server.service; do
+      pause_engine_user_unit "$unit" "$uid"
+    done
+  fi
+
+  if pid=$(llamacpp_pid_if_running); then
+    echo "  Stopping llama.cpp server (pid $pid)..."
+    kill -TERM "$pid" 2>/dev/null || true
+    # Three seconds, in the shape of the 1.5 s its TypeScript sibling allows
+    # (stopLlamaCppServer): a server that has not gone by then is not going to,
+    # and the update has a build to get on with. `kill -0` also succeeds for a
+    # process that has died and not yet been reaped, so this loop is written to
+    # fall through rather than to wait for a state it might never observe.
+    waited=0
+    while [ "$waited" -lt 3 ] && kill -0 "$pid" 2>/dev/null; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    # Ask again, with the same question, before escalating.
+    #
+    # Three seconds is long enough for the pid to be freed and handed to
+    # something else, and this is a root SIGKILL — so the identity is
+    # re-established rather than assumed, and the answer also covers a process
+    # that has exited and not yet been reaped (a zombie answers `kill -0`, but
+    # its cmdline is empty, so it cannot pass this check and the log does not
+    # claim it refused to go).
+    #
+    # This narrows the window to the gap between these two lines; it does not
+    # close it. Nothing in bash can: holding a handle across the wait needs a
+    # pidfd, and the shell has no way to open or signal one.
+    if [ "$(llamacpp_pid_if_running || true)" = "$pid" ]; then
+      echo "  llama.cpp did not exit on SIGTERM — killing it"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    # `|| true`: this sits between the engine pauses and the resume, and errexit
+    # is live in do_rebuild. A cosmetic cleanup that cannot be done (EACCES on
+    # the parent) must not kill the shell with every engine stopped.
+    rm -f "$PROJECT_DIR/data/llamacpp/server.pid" || true
+  fi
+
+  # Page cache last, once the engines have released their mappings. It is
+  # reclaimable by definition, so this hands the build nothing the kernel would
+  # not have given it anyway — it just means the build starts without first
+  # reclaiming a cache full of model weights, and that MemAvailable below is
+  # the number a human would recognise.
+  sync || echo "  Warning: could not flush filesystems before dropping the cache" >&2
+  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null \
+    || echo "  Warning: could not drop the page cache" >&2
+
+  after=$(available_mb)
+  echo "  Memory available for the build: ${after} MB (was ${before} MB)"
+}
+
+# Does this build tree carry the entry production-server.js loads?
+#
+# `-e` on its own is not enough: for the nested standalone layout `postbuild`
+# supports, that path is a symlink to an ABSOLUTE path inside `.next`, which
+# dangles while the tree is parked under `.next-old`. `-L` catches it there.
+build_entry_present() {
+  [ -e "$1/standalone/server.js" ] || [ -L "$1/standalone/server.js" ]
+}
+
+# Is there a build on disk that clawbox-setup can actually serve?
+#
+# `bun run build` exiting 0 is not the same thing, and neither is a fresh
+# .next/BUILD_ID: `bun run build` is `next build` PLUS the `postbuild` lifecycle
+# script (scripts/postbuild.sh), and postbuild is what makes the build servable
+# — it writes build-info.json and copies .next/static, public/ and the server
+# entry into the standalone tree. Next writes BUILD_ID before any of that. So a
+# build can be "complete" by BUILD_ID and still leave production-server.js
+# crash-looping on `require("./.next/standalone/server.js")`.
+#
+# postbuild now fails rather than exiting 0 over a copy that did not happen
+# (TASK-725), which closes the case where it copied nothing at all. The check
+# below stays regardless: it is the only one that also answers whether the
+# build on disk came from the checked-out commit.
+#
+# Two questions, and the box already owns the answer to the second:
+#   1. the file the service loads exists  — what step_build has always checked;
+#   2. the build on disk was produced from the commit that is checked out —
+#      scripts/verify-build-identity.sh, the one copy of that logic (CI runs it
+#      too, and its header says why a second copy is a bug). It is also what
+#      catches the half-copied postbuild by name.
+verify_build_present() {
+  local project_dir="$1"
+  if [ ! -f "$project_dir/.next/standalone/server.js" ]; then
+    echo "Error: no $project_dir/.next/standalone/server.js — the build produced nothing the dashboard can load" >&2
+    return 1
+  fi
+  if [ ! -f "$project_dir/scripts/verify-build-identity.sh" ]; then
+    # A script that is not there was not run, which is a warning, not a pass
+    # and not a failure. This is the ONE place the device runs the check now:
+    # the post-reboot update step that used to run it again against HEAD was
+    # removed on 2026-09-17 (post_update self-refreshes the checkout, so a
+    # commit pushed mid-update moved HEAD past the build and failed the run).
+    echo "  WARNING: scripts/verify-build-identity.sh is missing — the build's identity was not checked" >&2
+    return 0
+  fi
+  if ! bash "$project_dir/scripts/verify-build-identity.sh" --project-dir "$project_dir" --quiet; then
+    echo "Error: the build on disk does not match the checked-out commit" >&2
+    return 1
+  fi
+  return 0
+}
+
+# A build parked by a run that never finished is still the box's only build.
+#
+# set_previous_build_aside renames the serving build to `.next-old` and
+# restore_previous_build puts it back — but only if the shell survives to do it.
+# An OOM kill that picks this shell, a power cut mid-build or an operator's
+# Ctrl-C leaves no `.next` at all and the good build under a gitignored
+# directory nothing else in the tree reads. Reclaim it before anything else
+# runs, or the next rename would delete it.
+# Every transient this reclaim can leave behind, and what to do with each.
+#
+# TASK-729's claim is a rename, which is what makes it a mutex — but a rename
+# needs somewhere to move the tree TO, and a process killed mid-claim leaves the
+# box's only build under that name. There are two such names, and BOTH are
+# private per process (`.<pid>` suffixed) so no shared destination can be
+# occupied and latch the reclaim: a stray shared `.next-claim` beside an
+# existing `.next-old` made every later claim fail ENOTEMPTY, on both
+# reclaimers, for ever.
+#
+# So the recovery is one drain over both globs, run before either reclaimer
+# decides anything:
+#   - an orphan with no build entry is junk and goes (a discard is entry-less by
+#     construction — it is the `.next` both reclaimers only ever touch when it
+#     has no entry — so a LIVE one loses nothing here, and its owner already
+#     copes with a discard that is gone);
+#   - an orphan WITH a build is a build, and is adopted under the parked name a
+#     rename at a time. Adopting a live claimer's tree is safe by the same
+#     property the claim rests on: the victim's placement rename then fails, it
+#     stands down, and the build is under `.next-old` for whoever claims next.
+#   - an orphan with a build while `.next-old` already holds one is a duplicate
+#     of a fallback we already have. It is REPORTED and left, never destroyed:
+#     this cannot prove which of the two is wanted, and the next park clears
+#     `.next-old` and adopts it on the run after.
+drain_build_transients() {
+  local root="$1" kept_dir="$2" orphan aside
+  # The private name this function claims into. Same family as the reclaim's
+  # own discard, so it is already drained, gitignored and pruned from the
+  # standalone trace — and a different process has a different one.
+  aside="$root/.next-discard.$$"
+  for orphan in "$root"/.next-claim.* "$root"/.next-discard.*; do
+    [ -e "$orphan" ] || continue
+    if ! build_entry_present "$orphan"; then
+      rm -rf "$orphan" || true
+      continue
+    fi
+    if mv -T "$orphan" "$kept_dir" 2>/dev/null; then
+      echo "  Adopted a build left behind by an interrupted reclaim ($(basename "$orphan"))" >&2
+      continue
+    fi
+    # A rename onto a non-empty destination fails whatever is in it, so
+    # "it failed" is not "there is a build there". An entry-less but non-empty
+    # `.next-old` — an interrupted `rm -rf "$kept_dir"` in
+    # set_previous_build_aside leaves exactly that — is worth nothing and must
+    # not keep a real build stranded for ever.
+    #
+    # But it is CLAIMED before it is destroyed, never probed and then deleted:
+    # those are two syscalls apart, and a concurrent set_previous_build_aside
+    # can rename a real build into `$kept_dir` in between — which a
+    # check-then-delete would then destroy. The claim is a rename to a private
+    # name, the same mutex the whole reclaim rests on, and what was claimed is
+    # asked again before anything is removed.
+    if ! build_entry_present "$kept_dir"; then
+      if mv -T "$kept_dir" "$aside" 2>/dev/null; then
+        if build_entry_present "$aside"; then
+          # It gained a build between the probe and the claim. Put it back and
+          # leave the orphan; the next run has a clear destination.
+          mv -T "$aside" "$kept_dir" 2>/dev/null || true
+          echo "  Note: $(basename "$orphan") holds a build and $kept_dir gained one — leaving it for the next run" >&2
+          continue
+        fi
+        rm -rf "$aside" || true
+      fi
+      if mv -T "$orphan" "$kept_dir" 2>/dev/null; then
+        echo "  Adopted a build left behind by an interrupted reclaim ($(basename "$orphan"))" >&2
+        continue
+      fi
+      echo "  Warning: could not adopt $(basename "$orphan") into $kept_dir" >&2
+      continue
+    fi
+    echo "  Note: $(basename "$orphan") holds a build and $kept_dir already does — leaving it for the next run" >&2
+  done
+}
+
+promote_parked_build() {
+  local build_dir="${1:-$PROJECT_DIR/.next}" kept_dir="${2:-$PROJECT_DIR/.next-old}"
+  local root="${build_dir%/.next}" claim_dir discard_dir
+  claim_dir="$root/.next-claim.$$"
+  discard_dir="$root/.next-discard.$$"
+
+  drain_build_transients "$root" "$kept_dir"
+
+  # `-e`, and `-L` beside it: for the nested standalone layout `postbuild`
+  # supports, `.next/standalone/server.js` is a SYMLINK to an absolute path
+  # inside `.next` — which dangles for as long as the tree is parked, so `-f`
+  # would answer "no build here" about the box's only build.
+  build_entry_present "$kept_dir" || return 0
+  build_entry_present "$build_dir" && return 0
+  echo "  Found a build parked by an interrupted rebuild — putting it back" >&2
+
+  # THE CLAIM, and the whole of TASK-729's fix. There are two reclaimers of
+  # these directories — this one and the boot-time block in
+  # production-server.js — with no lock between them, and both used to run the
+  # same non-atomic pair: `rm -rf .next` then `mv .next-old .next`. Whichever
+  # arrived second destroyed what the first had just restored and then failed
+  # its own rename into a best-effort catch, leaving the box with NEITHER tree
+  # — the exact outcome the park exists to prevent.
+  #
+  # A rename of the SOURCE is atomic and has exactly one winner, so the claim
+  # goes first and nothing is destroyed before it: the loser gets a failed `mv`
+  # and returns having touched nothing. The destination is private, so it can
+  # never be occupied by somebody else's leftovers.
+  if ! mv -T "$kept_dir" "$claim_dir" 2>/dev/null; then
+    # A tree that is no longer there was taken by the other reclaimer — a normal
+    # outcome. One that IS still there could not be moved, which is a real
+    # failure (a read-only rootfs, EACCES, ENOSPC) and reads differently to an
+    # operator. Saying "someone else got there first" over a box that cannot
+    # move its own directories would be a false cause in the line they triage
+    # from.
+    if [ -e "$kept_dir" ]; then
+      echo "  Warning: could not claim the parked build at $kept_dir — leaving it where it is" >&2
+    fi
+    return 0
+  fi
+
+  # Everything from here destroys only PRIVATE names. `.next` is moved aside
+  # rather than deleted, so even if the "it has no build entry" judgement above
+  # was raced by the other reclaimer placing a good one, nothing is lost: the
+  # branch below puts it back, and a kill in between leaves it for the drain.
+  # The move-aside's result is the difference between "somebody took our claim"
+  # and "this filesystem will not let us move a directory". Discarded, an
+  # EACCES/EROFS/EBUSY here left `.next` in place, made the placement fail
+  # ENOTEMPTY, and was then reported as a lost race while the build stayed under
+  # the claim — a false cause on a box that is about to crash-loop for want of
+  # an entry.
+  if ! mv -T "$build_dir" "$discard_dir" 2>/dev/null && [ -e "$build_dir" ]; then
+    echo "  Warning: could not move $build_dir aside, so the parked build stays claimed at $claim_dir" >&2
+    return 0
+  fi
+  if mv -T "$claim_dir" "$build_dir" 2>/dev/null; then
+    rm -rf "$discard_dir" || true
+  else
+    # Our claim was adopted by the other reclaimer's drain, which means it is
+    # placing this same build. Return what we moved aside and get out of its
+    # way; the tree we were carrying is not lost, it is in its hands.
+    mv -T "$discard_dir" "$build_dir" 2>/dev/null || rm -rf "$discard_dir" || true
+    return 0
+  fi
+
+  # The stamp names the run that died (see set_previous_build_aside); it must
+  # not ride into the tree the box is about to serve. `|| true` because a
+  # cosmetic cleanup must never be what aborts a recovery under `set -e`.
+  rm -f "$build_dir/.rebuild-pid" || true
+}
+
+# Keep the build that is serving the box until a new one exists.
+#
+# `rm -rf .next` used to be the first thing do_rebuild did after freeing
+# memory, so any failure past that line left the device with new code and no
+# build: clawbox-setup stopped by the rebuild and never started again, port 80
+# dead — while clawbox-gateway stayed up on 18789 and made the box look
+# half-alive. A rename on the same filesystem costs nothing. `.next-old` is
+# already gitignored, so the updater's `git clean -fd` leaves it alone.
+#
+# Skipped when the filesystem cannot hold two builds at once: on a nearly full
+# eMMC, keeping the old tree would turn an OOM into an ENOSPC, and a build that
+# runs out of disk is a worse outcome than one with no fallback. Said out loud
+# either way, because which of the two happened decides what an operator does
+# next.
+#
+# The real peak is closer to THREE builds, not two, and an operator triaging an
+# ENOSPC here needs to know it: Next's instrumentation trace sweeps the project
+# root, so while `next build` runs it also copies the parked tree into the new
+# standalone output (TASK-725; scripts/postbuild.sh deletes that copy, but only
+# once the build has finished). The threshold is deliberately still `need * 2`.
+# Raising it to 3 would delete the old build on any box between 2x and 3x free
+# — trading a failed update that ROLLS BACK (the ENOSPC build fails, the parked
+# tree goes back, the box serves) for a build with no fallback at all, which is
+# the brick #632 exists to prevent. The fix for the peak is to narrow the sweep,
+# not to park less often.
+#
+# The park also stamps the tree it sets aside — `.rebuild-pid`, holding this
+# script's PID and the boot id — for production-server.js's boot-time reclaim to
+# read. That reclaim fires on a single fact: no `.next/standalone/server.js`,
+# but a `.next-old/standalone/server.js`. That is ALSO the ordinary state of a
+# rebuild in flight, for the whole length of the build, because the rename below
+# happens first and `next build` writes the standalone entry last. The stamp is
+# what separates "the rebuild died and left its build here" — reclaim it — from
+# "a rebuild is running and this is its fallback" — leave it alone.
+#
+# promote_parked_build, the reclaim in THIS file, deliberately does not read it.
+# It runs once at the top of do_rebuild, before any park of its own, so a live
+# stamp there could only mean a second rebuild running concurrently — and the
+# very next thing do_rebuild does is `rm -rf "$kept_dir"`, so a guard there
+# would imply a safety this function cannot provide. Two rebuilds at once are
+# unsupported end to end. It only strips the stamp off the tree it promotes.
+#
+# It takes three fields, because a PID alone identifies nothing. A power cut
+# mid-build — one of the very cases these helpers exist for — leaves the stamp
+# on disk, and the number in it can later belong to some unrelated process:
+# across a reboot, which the boot id settles because no rebuild survives one,
+# and within a boot, because PIDs are reused. Either would make the reclaim
+# refuse forever and re-create the crash loop it was added to end, so the stamp
+# also carries this process's start time and the reader requires all three.
+#
+# The stamp lives INSIDE the parked tree, so it cannot outlive it and needs no
+# entry of its own in .gitignore (`.next-old/` is already there).
+set_previous_build_aside() {
+  local build_dir="$1" kept_dir="$2" need avail
+  # ANSWERS FOR ITSELF, because its caller is now a condition (`elif !`) and a
+  # condition suspends errexit for this whole body. Without these two returns a
+  # failing `rm -rf` fell through to the `mv` below, which with $kept_dir still
+  # present moves the box's only build INSIDE it (`.next-old/.next`) and exits
+  # 0 — a park that did not happen, reported as one, and a dashboard that stays
+  # down when the build then fails and restore_previous_build finds nothing.
+  # On beta the same failure aborted the shell: loud, and the parked tree was
+  # still where promote_parked_build would reclaim it.
+  if ! rm -rf "$kept_dir"; then
+    echo "  Error: could not clear $kept_dir before parking the build" >&2
+    return 1
+  fi
+  [ -d "$build_dir" ] || return 0
+  need="$(du -sk "$build_dir" 2>/dev/null | awk '{print $1}')"
+  avail="$(df -Pk "$build_dir" 2>/dev/null | awk 'NR==2 {print $4}')"
+  # Each on its own: `$need$avail` concatenated also passes when one of the two
+  # is empty and the other is all digits, and the emptiness test below then has
+  # to compensate for it.
+  case "$need"  in ''|*[!0-9]*) need="" ;; esac
+  case "$avail" in ''|*[!0-9]*) avail="" ;; esac
+  if [ -n "$need" ] && [ -n "$avail" ] && [ "$avail" -lt "$((need * 2))" ]; then
+    echo "  Only ${avail}K free for a ${need}K build — clearing the old one instead of keeping it" >&2
+    rm -rf "$build_dir"
+    return 0
+  fi
+  if [ -e "$kept_dir" ]; then
+    echo "  Error: $kept_dir is still there — refusing to park the build inside it" >&2
+    return 1
+  fi
+  echo "Setting the current build aside..."
+  # Before the rename, not after: the stamp and the park then arrive together,
+  # so there is no instant in which a restarting dashboard sees a parked build
+  # with no owner. `$$` is this script's PID — the process whose death is what
+  # "the rebuild died" means.
+  #
+  # A field this shell cannot fill is a stamp no reader can ever match, so it is
+  # the same outcome as no stamp at all — the reclaim behaves exactly as it did
+  # before the stamp existed. That is the safe direction to fail in, but it is
+  # not silent: a guard that is quietly inoperative is worse than one that is
+  # absent, so every half takes the same warning.
+  #
+  # start_time is field 22 of /proc/<pid>/stat, the process's start in clock
+  # ticks since boot — what makes the PID name one process rather than a number
+  # that will be handed out again. Field 2 is the command, parenthesised and
+  # free to contain spaces and parens of its own, so everything up to the LAST
+  # ") " is dropped first; field 3 is then $1 and field 22 is $20.
+  local boot_id="" start_time=""
+  boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || boot_id=""
+  start_time="$(sed -e 's/^.*) //' "/proc/$$/stat" 2>/dev/null | awk '{print $20}')" || start_time=""
+  case "$start_time" in ''|*[!0-9]*) start_time="" ;; esac
+  if [ -z "$boot_id" ] || [ -z "$start_time" ] \
+     || ! printf '%s %s %s\n' "$$" "$boot_id" "$start_time" > "$build_dir/.rebuild-pid"; then
+    echo "  Warning: could not record this rebuild as the owner of the build it is parking — a dashboard restarting mid-build may reclaim it" >&2
+  fi
+  # `-T`, never a bare `mv`: with $kept_dir present a bare `mv` moves the build
+  # INSIDE it and reports success. The guard above makes that unreachable; this
+  # makes it unrepresentable.
+  mv -T "$build_dir" "$kept_dir"
+}
+
+# Bring the dashboard back up, and say exactly which build it came up on.
+#
+# Three outcomes, and they are three different sentences because they send an
+# operator to three different places:
+#   - the parked build was put back;
+#   - nothing was ever parked and the build in place is the one that was
+#     already serving (a failure BEFORE the park — `bun install` that could not
+#     reach the registry, a node-pty rebuild that would not link);
+#   - nothing was parked because the filesystem could not hold two builds, and
+#     the tree in place is the build that just FAILED verification. That one is
+#     still started — a dashboard on a suspect build beats a dead box — but it
+#     must never be called a rollback.
+#
+# $3 is 1 when a build actually ran, which is what separates the last two.
+restore_previous_build() {
+  local build_dir="$1" kept_dir="$2" built="${3:-0}" restored=0 http_code
+  if [ -d "$kept_dir" ]; then
+    rm -rf "$build_dir"
+    mv "$kept_dir" "$build_dir"
+    # This shell is about to stop being a rebuild; the stamp it wrote must not
+    # stay behind inside the build the box serves. `|| true` for the same reason
+    # as in promote_parked_build, and more so: this IS the recovery path.
+    rm -f "$build_dir/.rebuild-pid" || true
+    restored=1
+  fi
+  if ! build_entry_present "$build_dir"; then
+    echo "  No build to fall back on — the dashboard stays down until this is repaired" >&2
+    return 1
+  fi
+
+  local what="Restored the previous build"
+  if [ "$restored" -eq 0 ]; then
+    if [ "$built" -eq 1 ]; then
+      what="No previous build was kept (the filesystem could not hold two) — the tree in place is the build that just FAILED verification"
+    else
+      what="The serving build was never moved aside"
+    fi
+  fi
+
+  # `restart`, not `start`: `start` on a unit that is already active is a no-op,
+  # and the unit CAN be active here. do_rebuild stopped it, and once anything
+  # brings it back the restart loop latches onto whatever tree is in place from
+  # the moment `next build` writes the standalone entry. A `start` would then be
+  # a no-op over a process serving the build that just FAILED verification, curl
+  # would answer 200 from it, and the line below would report a rollback that
+  # never happened.
+  #
+  # What used to bring it back routinely was clawbox-gateway.service's
+  # `Wants=clawbox-setup.service`, removed in TASK-728. This stays `restart`
+  # regardless, because the ways in are fewer rather than none: `install.sh
+  # --step rebuild` by hand, a box where gateway_setup was skipped or
+  # step_systemd_services failed non-fatally, and an operator or the sudoers
+  # grant restarting clawbox-setup inside the window. A rollback that reports
+  # itself wrongly is the expensive failure here; a redundant restart costs
+  # nothing.
+  # `reset-failed` first, as both gateway recovery paths do. The reclaim in
+  # production-server.js is now correctly refused for the length of the build,
+  # so clawbox-setup crash-loops on `require`ing a build that is not there yet;
+  # a unit that has hit its start limit answers `restart` with "Start request
+  # repeated too quickly", and `|| true` would carry that into the poll below
+  # and report the dashboard DOWN over a rollback that had worked.
+  systemctl reset-failed clawbox-setup.service 2>/dev/null || true
+  systemctl restart clawbox-setup.service 2>/dev/null || true
+
+  # `systemctl is-active` is not the question. clawbox-setup is `Type=simple`
+  # with `Restart=always` (config/clawbox-setup.service), so systemd calls the
+  # unit ACTIVE the moment node is forked — before production-server.js has
+  # reached `require("./.next/standalone/server.js")`. A restored tree that
+  # cannot load would be reported as serving on the very first poll and
+  # crash-loop for the rest of the night under a line saying the opposite.
+  #
+  # The honest question is the one step_validate_services already asks: does the
+  # dashboard answer HTTP on :80? Same form, same accepted codes.
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "  $what, and clawbox-setup was started — but curl is missing, so whether the dashboard answers was NOT checked" >&2
+    return 0
+  fi
+  # 20 s was a guess at how long a Next standalone server needs to load a
+  # restored build, and on a loaded Jetson it is routinely short — which reported
+  # a rollback that HAD worked as a box that was DOWN, at the one moment an
+  # operator most needs the truth. So: a fact first (clawbox-setup has stopped
+  # trying, and nothing will arrive by waiting), and a far more patient window
+  # behind it.
+  #
+  # The window stays, unlike the deadlines elsewhere in this file, because this
+  # loop bounds no WORK — the restart has already happened — it decides when to
+  # write the REPORT, and a report is the one thing that cannot be deferred for
+  # ever. A `Type=simple` unit is `active` the instant node forks, whether or not
+  # it can load the build, so "active and silent" is a state that can last all
+  # night.
+  local probe_window="${CLAWBOX_RESTORE_PROBE_WAIT_S:-180}"
+  case "$probe_window" in ''|*[!0-9]*) probe_window=180 ;; esac
+  { [ "${#probe_window}" -le 5 ] && [ "$probe_window" -ge 1 ]; } || probe_window=180
+  if is_test_mode; then probe_window="$(test_mode_wait_cap_s)"; fi
+  # WALL CLOCK, not a count of turns round the loop. Counting iterations reads
+  # as seconds only when every iteration is a second, and this one is the probe's
+  # own `--max-time 5` plus a sleep — so a server that accepts and stalls made a
+  # window that says three minutes run for eighteen. `$SECONDS` is bash's own and
+  # cannot fail the way `date` can; taken as a DELTA rather than reset, so a
+  # caller's clock is never disturbed.
+  local started=$SECONDS
+  while :; do
+    # Asked FIRST: a deadline checked at the bottom is overshot by the length of
+    # whatever the last iteration did.
+    if [ $(( SECONDS - started )) -ge "$probe_window" ]; then
+      echo "  $what, but the dashboard did not answer on :80 (last HTTP ${http_code:-000}) — it is DOWN" >&2
+      return 1
+    fi
+    # `--max-time` on a LOCALHOST LIVENESS PROBE inside a retry loop is the one
+    # class of cap this file keeps: it bounds nothing that downloads, builds or
+    # installs — it is what makes the probe a probe. Without it a server that
+    # accepts the connection and then never answers hangs this loop for ever.
+    # The retry is what absorbs a slow answer, which is the case the owner's
+    # rule is about.
+    http_code="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://localhost/ 2>/dev/null)" || http_code="000"
+    case "$http_code" in
+      2*|3*)
+        echo "  $what; the dashboard answers on :80 again" >&2
+        return 0
+        ;;
+    esac
+    # The fact, which is what ends an ORDINARY failure without spending the
+    # window above on it: `Restart=always` means `activating` and `active` are
+    # both "still coming", but a unit that has hit its start limit, been
+    # stopped, or has no unit file at all is never going to answer.
+    if ! unit_is_coming_up clawbox-setup.service; then
+      echo "  $what, but clawbox-setup is not running (last HTTP $http_code) — the dashboard is DOWN" >&2
+      return 1
+    fi
+    sleep 1
+    wait_note "$(( SECONDS - started ))" "the dashboard to answer on :80 after the rollback (last HTTP $http_code)"
+  done
+}
+
+# `bun run build`, with ONE retry and only for the mid-build file-trace race.
+#
+# WHAT RACES. Next writes a `.nft.json` beside every server entry and then
+# copies every file it lists into `.next/standalone` — after wiping that
+# directory first. The page and app-page copies are `.catch`-wrapped; the
+# MIDDLEWARE and INSTRUMENTATION ones are not (node_modules/next/dist/build/
+# utils.js, still true on 16.3.3), so one `fs.copyFile` ENOENT there aborts
+# `next build` outright. And those two traces carry the project root as an
+# asset directory — measured on the OpenClaw box, beta build of 2026-09-05:
+# every ROUTE trace has 0 entries under data/ and .git/, while
+# middleware.js.nft.json has 27 under data/ and instrumentation.js.nft.json has
+# 32 under data/ plus 701 under .git/. So a web app the agent creates or
+# removes, a coding run writing a screenshot, or the update's own
+# `git reset --hard` between the trace and the copy kills the build over a file
+# the dashboard never needed.
+#
+# WHY NOT A CONFIG. `outputFileTracingExcludes` reaches route entries only — the
+# same measurement is what proves it, and it is why next.config.ts's own
+# `.git/**` key is inoperative for the instrumentation trace. Next exposes no
+# other tracing knob: `outputFileTracingRoot`, `-Excludes` and `-Includes` are
+# the whole surface in its config schema.
+#
+# WHY A RETRY IS THE RIGHT ANSWER. The failure is transient by construction: the
+# next trace cannot list a file that is gone. One retry, gated on the ENOENT the
+# copy throws, so a build that is broken for any other reason still fails on the
+# first attempt and is reported as such rather than hidden behind a second
+# five-minute build. `REBUILD_TAKEOVER_TIMEOUT_MS` in src/lib/updater.ts carries
+# the budget for that second build.
+#
+# The log copy exists ONLY so the gate can read what was printed, and it is
+# best-effort: a `/tmp` that is full or unwritable — a Jetson tmpfs under the
+# memory pressure `free_memory_for_build` exists for — must cost the retry, not
+# the build. The build's own status is the verdict, never the pipeline's, so
+# `tee` can never turn a build that worked into a failed update;
+# `verify_build_present` in both callers is what catches a build that exited 0
+# without producing anything. Output now carries the build's stderr on stdout so
+# the gate can see it, which is the one thing about the step log that changed.
+#
+# Every branch is written the long way — `if`, never `[ … ] && …` — and the
+# build runs as an `if` CONDITION. Both are about errexit: this file is
+# `set -euo pipefail`, `do_rebuild` calls this in a `||` context (errexit
+# suspended for the whole body) and `step_build` calls it bare (errexit live),
+# so a failing pipeline or a false `[ … ] &&` test outside a condition would
+# kill the script on the first attempt in one caller and not the other.
+run_next_build() {
+  local log log_dir rc attempt
+  # A PRIVATE directory from `mktemp -d`, never a predictable path. This script
+  # runs as root: `: > "$TMPDIR/<fixed name>"` follows a symlink a local user
+  # planted there, so root truncates and then `tee`s a build log into whatever
+  # it pointed at. `mktemp -d` creates a 0700 directory with an unguessable
+  # name atomically, so nothing can be waiting inside it. The cost is that an
+  # OOM kill — which this shell is a documented target of (TASK-709) — leaves an
+  # empty directory rather than nothing; a stale 0700 directory in /tmp is the
+  # cheaper of the two problems by a wide margin.
+  log_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-build-XXXXXX" 2>/dev/null || true)"
+  log=""
+  if [ -n "$log_dir" ]; then log="$log_dir/next-build.log"; fi
+  if [ -z "$log" ]; then
+    echo "  Note: could not open a build log; a mid-build trace race will not be retried"
+  fi
+  rc=0
+  for attempt in 1 2; do
+    if [ -n "$log" ]; then
+      if as_clawbox_login "cd $PROJECT_DIR && $BUN run build" 2>&1 | tee "$log"; then
+        rc=0
+        break
+      fi
+      # The BUILD's status, full stop. `pipefail` makes the pipeline non-zero
+      # for a tee that could not write too, and a log this function could not
+      # keep must never be the reason an update is reported failed.
+      rc=${PIPESTATUS[0]}
+      if [ "$rc" -eq 0 ]; then break; fi
+    else
+      if as_clawbox_login "cd $PROJECT_DIR && $BUN run build"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      break
+    fi
+    if [ "$attempt" -eq 2 ]; then break; fi
+    # The FATAL shape only. Next prints the identical `ENOENT … copyfile` node
+    # message inside the `.catch` it wraps the page and app-page copies in,
+    # prefixed with `Failed to copy traced files for` — a warning over a build
+    # that carried on, and no reason to spend a second build. ONE awk rather
+    # than two greps in a pipe: `grep -q` exits on its first match and can
+    # SIGPIPE the producer, which under `pipefail` reads as "no match" and
+    # would silently drop the retry this whole function exists for.
+    awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log" || break
+    echo "  A file this build was tracing changed while it ran (ENOENT during the standalone copy) — building once more"
+  done
+  if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
+  return "$rc"
+}
+
+# Stop the setup service, free memory, reinstall, and rebuild — without ever
+# leaving the box with no build at all.
+# `do_rebuild [--reboot-follows]`. The flag is the caller telling this function
+# that a reboot comes next, which decides one thing only: whether the engines
+# freed for the build are started again here or left to systemd.
 do_rebuild() {
+  local build_dir="$PROJECT_DIR/.next"
+  local kept_dir="$PROJECT_DIR/.next-old"
+  local rc=0 built=0 reboot_follows=0
+  if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
+
+  # Check before stopping the dashboard: zram alone did not prevent TASK-789.
+  ensure_build_swap || return $?
+
   echo "Stopping clawbox-setup.service for rebuild..."
   systemctl stop clawbox-setup.service 2>/dev/null || true
-  echo "Clearing .next cache..."
-  rm -rf "$PROJECT_DIR/.next"
+
+  # A build left parked by a run that was killed — an OOM kill that picked this
+  # shell, a power cut, an operator's Ctrl-C — is the box's only build. Claim it
+  # back before the rename below would delete it. After the stop, never before
+  # it: the rename moves the tree the running server is loading from.
+  #
+  # The stop is what makes that ordering worth having. It did not keep the
+  # dashboard down for the length of the rebuild, because clawbox-gateway.service
+  # carried `Wants=clawbox-setup.service` and started it again on any gateway
+  # (re)start; that line is gone (TASK-728), and it is already gone for THIS
+  # rebuild — step_systemd_services runs seven lines above the do_rebuild in
+  # step_rebuild_reboot. The park still stamps the tree it sets aside and the two
+  # `systemctl` calls that end a rebuild still use `restart` rather than `start`:
+  # a hand-run `--step rebuild`, a skipped gateway_setup and an operator restart
+  # all still land in the window, and neither guard costs anything.
+  promote_parked_build "$build_dir" "$kept_dir"
+
+  # After the stop, never before it — see free_memory_for_build.
+  free_memory_for_build
+
+  # Everything from here to the restore branch runs with the dashboard DOWN, so
+  # no command in the window may leave the function without passing through it —
+  # that is why `ensure_node_pty` returns instead of exiting, and why each step
+  # is a condition rather than a bare statement under `set -e`. `if !` suspends
+  # errexit inside those two, which is safe because each ends in its own
+  # verification: bun install is a single command, and ensure_node_pty finishes
+  # by loading node-pty for real.
   echo "Running bun install..."
-  as_clawbox_login "cd $PROJECT_DIR && $BUN install"
-  ensure_node_pty
-  echo "Running bun build..."
-  as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
+  if ! as_clawbox_login "cd $PROJECT_DIR && $BUN install"; then
+    rc=1
+  elif ! ensure_node_pty; then
+    rc=1
+  # A CONDITION, like its two neighbours above, and for a reason the neighbours
+  # did not have: errexit is live in this function (both callers invoke it
+  # bare), and set_previous_build_aside's `rm -rf` and `mv` can legitimately
+  # fail on a full or busy filesystem. A bare call there killed the shell
+  # between the engine pause and the resume below — leaving every engine
+  # stopped, which is the state this pair exists to prevent, on exactly the
+  # pressured box where it is most likely.
+  elif ! set_previous_build_aside "$build_dir" "$kept_dir"; then
+    echo "Error: could not set the current build aside" >&2
+    rc=1
+  else
+    echo "Running bun build..."
+    built=1
+    run_next_build || rc=$?
+    if [ "$rc" -eq 0 ] && ! verify_build_present "$PROJECT_DIR"; then
+      rc=1
+    fi
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    echo "Error: rebuild failed (exit $rc)" >&2
+    restore_previous_build "$build_dir" "$kept_dir" "$built" || true
+    # AFTER the restore, not before it: restore_previous_build gives the
+    # dashboard a fixed twenty seconds to answer on :80 before it reports the
+    # box DOWN, and this arm is by definition the memory-starved one. Four
+    # model servers asked for at the same moment would make a dashboard that is
+    # merely slow look dead — a false failure on the recovery path.
+    #
+    # Reached on this arm whichever caller we have: `reboot` in
+    # step_rebuild_reboot is BELOW its `do_rebuild`, and errexit ends the step
+    # before it.
+    resume_paused_engines
+    return "$rc"
+  fi
+
+  # `|| echo`, not bare: errexit is live in this function and this is the last
+  # statement between the engine pause and the resume below. An `rm -rf` that
+  # cannot remove the parked tree (EACCES, EBUSY, a mount in the way) would
+  # otherwise kill the shell with every engine stopped and neither the resume
+  # nor the hand-over reached — the exact state this pair exists to remove.
+  # A parked tree left behind is harmless: the next rebuild's
+  # promote_parked_build or set_previous_build_aside deals with it.
+  rm -rf "$kept_dir" || echo "  Warning: could not remove the parked build at $kept_dir" >&2
+  if [ "$reboot_follows" = "1" ]; then
+    # The caller reboots in a moment. Starting ollama, the ~2 GB embedder and
+    # both voice engines seconds before shutdown restores nothing that survives
+    # it, and it lengthens the very shutdown the updater is waiting through
+    # (REBUILD_TAKEOVER_TIMEOUT_MS). systemd starts what is enabled on the way
+    # back up, and the rest are on-demand — which is what the reboot leaves
+    # them as either way.
+    echo "  Leaving the paused engines to the reboot that follows this step"
+    forget_paused_engines
+  else
+    resume_paused_engines
+  fi
+  echo "  Build complete"
 }
 
 # ── Step Functions ───────────────────────────────────────────────────────────
@@ -773,34 +2821,90 @@ recover_dpkg() {
   fi
 }
 
+# Wait for whoever holds the apt locks to finish. No deadline: the holder is
+# almost always unattended-upgrades working through the same mirror this install
+# is about to use, and the old 900 s cap turned "your box was busy" into a failed
+# step — after which the operator's only move was to wait and run it again, which
+# is precisely what this loop does for them. It takes no argument now; the one
+# call site that passed a shorter budget (the ufw backstop) passes none.
 wait_for_apt() {
-  local max_wait="${1:-900}"
   local waited=0
   while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
-    if [ $waited -eq 0 ]; then
+    if [ "$waited" -eq 0 ]; then
       echo "  Waiting for apt lock (another update is running)..."
+    fi
+    if wait_give_up_in_test_mode "$waited"; then
+      echo "Error: apt lock is still held (test mode gives up after ${waited}s)." >&2
+      return 1
     fi
     sleep 5
     waited=$((waited + 5))
-    if [ $waited -ge "$max_wait" ]; then
-      echo "Error: apt lock is still held after $((max_wait / 60)) minutes. Another updater (often unattended-upgrades) is still running; try again shortly." >&2
-      return 1
-    fi
+    wait_note "$waited" "the apt lock (another updater, often unattended-upgrades, still holds it)"
   done
   recover_dpkg
+}
+
+# Best-effort pipx bootstrap. step_apt_update installs pipx as part of the
+# full-install/update sequence, but step_clawkeep_install and (the Hugging
+# Face CLI install inside) step_llamacpp_install can also run standalone via
+# a root-owned standalone step service, outside that sequence — so each calls
+# this first rather than assuming apt_update already ran on this boot.
+#
+# pipx is what keeps these installs working under PEP 668 (the
+# externally-managed-environment policy Ubuntu enforces from 24.04 / JetPack
+# 7 onward); on JetPack 6.2 / Ubuntu 22.04 it is optional polish; pip --user
+# still works there, so callers fall back to it when this returns non-zero.
+ensure_pipx() {
+  as_clawbox_login "command -v pipx" &>/dev/null && return 0
+  wait_for_apt
+  # Refresh package metadata first — a standalone dispatch (see comment
+  # above) may run on a boot where step_apt_update never ran, so the local
+  # apt cache can be stale or empty and "apt-get install pipx" would 404 on
+  # a fresh image. Tolerate failure here (offline JetPack 6.2 hosts still
+  # need to fall through to the pip --user path below) but don't hide it.
+  if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+    echo "  Warning: apt-get update failed (offline?) — trying pipx install from the existing cache" >&2
+  fi
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pipx; then
+    echo "  Warning: apt-get install pipx failed" >&2
+  fi
+  as_clawbox_login "command -v pipx" &>/dev/null
 }
 
 step_apt_update() {
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config
-  # Node.js for production server and OpenClaw. OpenClaw 2026.7.1 tightened
-  # its engines to >=22.22.3; older ClawBox images may have v22.22.2, which
-  # looks like "Node 22" but crashes the OpenClaw CLI after npm install.
+  # poppler-utils is `pdftotext`, and it is the ONLY reason Memory Shard can
+  # index a PDF: OpenClaw's memory indexer reads `.md` and nothing else, so
+  # ClawBox extracts documents itself (src/lib/memory-extract.ts). Without it a
+  # folder of PDFs added as a source would be walked and every file silently
+  # skipped, while the panel reported the folder as indexed. It was already on
+  # the dev box by accident of another package; naming it here is what makes the
+  # feature true on a fresh flash. The same extractor hands .docx, .odt and .rtf
+  # to `libreoffice --headless --convert-to txt`, so the same rule applies:
+  # libreoffice-writer is the smallest package that carries the Writer import
+  # filters those formats need (and pulls in libreoffice-common, which owns the
+  # /usr/bin/libreoffice launcher) — the full `libreoffice` metapackage would add
+  # Calc, Impress, Base and a Java runtime for nothing the box ever converts.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer
+  # Node.js for production server and OpenClaw. The floor is the pinned core's
+  # `engines.node` ($OPENCLAW_NODE_ENGINE): 2026.9.3 refuses Node 22 outright,
+  # so an older ClawBox image — every one of which shipped Node 22 — takes the
+  # major upgrade here on the way through. A version that merely "looks like
+  # Node 24" is not enough either: 24.15.0 is below the floor.
+  #
+  # THIS STEP HAS NO EDITION GATE, DELIBERATELY, so a Hermes box takes the same
+  # Node — and it has its own reason to: the floor exists because `node:sqlite`
+  # truncates a TEXT value at an embedded NUL below 24.16.0 / 26.1.0, and both of
+  # ClawBox's own stores use it (src/lib/openclaw-session-store.ts on every
+  # edition, src/lib/harness/hermes-turn-record.ts on Hermes). A Hermes unit that
+  # cannot reach a satisfying Node fails this step like any other: the Next.js
+  # server it runs is the dashboard, and a dashboard writing truncated turn
+  # records is not a better outcome than a named failure.
   if node_satisfies_openclaw_engine; then
     echo "  Node.js $(node --version) already satisfies OpenClaw engine requirements"
   else
-    echo "  Installing/upgrading Node.js 22..."
+    echo "  Installing/upgrading Node.js 24..."
     # NodeSource's setup script will silently exit 0 even when its inner
     # `apt update` fails because of an apt-lock conflict (e.g. packagekitd on
     # first boot), and apt-get install nodejs then falls back to Ubuntu's
@@ -808,14 +2912,19 @@ step_apt_update() {
     # confusing optional-chaining parse error inside node-gyp. Wait for the
     # lock first, then validate the installed version.
     wait_for_apt
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
     wait_for_apt
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
     if ! node_satisfies_openclaw_engine; then
       local got
       got=$(node --version 2>/dev/null || echo "missing")
       echo "Error: Node.js install failed — \`node --version\` reports $got." >&2
-      echo "       Likely the NodeSource setup script lost a race for the apt lock" >&2
+      echo "       Node $OPENCLAW_NODE_ENGINE is required — by the pinned OpenClaw core on an" >&2
+      echo "       OpenClaw or dual box, and by ClawBox's own node:sqlite stores on every" >&2
+      echo "       edition including Hermes (a TEXT value is truncated at an embedded NUL" >&2
+      echo "       below 24.16.0 / 26.1.0)." >&2
+      node_engine_remedy
+      echo "       Otherwise, likely the NodeSource setup script lost a race for the apt lock" >&2
       echo "       (commonly held by packagekitd or unattended-upgrades on first boot)" >&2
       echo "       or apt kept an older Node.js build. flash.sh's Phase 0 should" >&2
       echo "       mask packagekit.service and unattended-upgrades.service in the" >&2
@@ -884,11 +2993,13 @@ validate_hostname() {
 # Falls back to "clawbox".
 read_configured_hostname() {
   local hostname_env="$PROJECT_DIR/data/hostname.env"
-  local name=""
-  if [ -f "$hostname_env" ]; then
-    # shellcheck source=/dev/null
-    name=$(. "$hostname_env" 2>/dev/null; printf '%s' "${HOSTNAME:-}")
-  fi
+  # PARSED, never sourced. data/ is clawbox-writable and this function runs as
+  # root from the granted clawbox-root-update@set_hostname.service, so `.` on
+  # this file was arbitrary root code execution for anything that can already
+  # run code as clawbox. validate_hostname below still decides whether the value
+  # is usable; this only decides that it is a value and not a program. TASK-445.
+  local name
+  name="$(read_untrusted_env_value "$hostname_env" HOSTNAME)"
   if [ -z "$name" ]; then
     name="clawbox"
   fi
@@ -940,7 +3051,7 @@ apply_hostname() {
   # fresh-install path where the network setup step runs before `git pull`
   # has populated $PROJECT_DIR — the installer is being executed straight
   # out of the cloned tarball at that moment.
-  local clawbox_avahi_src="$PROJECT_DIR/config/avahi-daemon.conf"
+  local clawbox_avahi_src="$SRC_DIR/config/avahi-daemon.conf"
   if [ ! -f "$clawbox_avahi_src" ] && [ -f "$(dirname "$0")/config/avahi-daemon.conf" ]; then
     clawbox_avahi_src="$(dirname "$0")/config/avahi-daemon.conf"
   fi
@@ -971,7 +3082,7 @@ apply_hostname() {
   # Install the NetworkManager dispatcher hook that reloads avahi on
   # every interface state change, so clients' negative caches flush.
   local dispatcher_dir="/etc/NetworkManager/dispatcher.d"
-  local dispatcher_src="$PROJECT_DIR/config/99-clawbox-avahi-reload"
+  local dispatcher_src="$SRC_DIR/config/99-clawbox-avahi-reload"
   if [ ! -f "$dispatcher_src" ] && [ -f "$(dirname "$0")/config/99-clawbox-avahi-reload" ]; then
     dispatcher_src="$(dirname "$0")/config/99-clawbox-avahi-reload"
   fi
@@ -992,15 +3103,234 @@ step_set_hostname() {
   apply_hostname "$(read_configured_hostname)"
 }
 
+# The owner's timezone, as the web server recorded it. TASK-514.
+#
+# PARSED, never sourced — same rule and the same reason as
+# read_configured_hostname: data/ is clawbox-writable and this runs as root from
+# the granted clawbox-root-update@set_timezone.service, so a `.` on this file
+# would be arbitrary root code execution for anything that can already run code
+# as clawbox.
+#
+# read_untrusted_env_value cannot be reused: its character class deliberately
+# excludes `/`, and every IANA zone but `UTC` contains one. The gate here is
+# therefore its own — the same shape rule as src/lib/timezone.ts's
+# canonicalTimeZone (Area/Location over a small alphabet, no `..`, no leading
+# `/`, no leading `-` so nothing reaches `timedatectl` as an option) — and then
+# the ONLY authority worth trusting for "is this a real zone": the zoneinfo
+# database on this device. That is not the same authority the route asked:
+# Node's ICU is case-insensitive and may carry a NEWER tzdata than a Jetson
+# image, so `europe/sofia` or `America/Ciudad_Juarez` can pass there and fail
+# here. The route canonicalises for that reason; this side still refuses, and
+# says so.
+#
+# FOUR outcomes, not two, because "no value", "a value this device refuses" and
+# "the file is not the one the route writes" call for different behaviour and
+# different remedies: 0 with the zone, 1 for "nothing recorded" (a genuine
+# no-op), 2 for "a value was recorded and this device will not take it", 3 for
+# "data/timezone.env is not the plain file the route writes". A step that
+# discards its input must not exit 0, and an operator reading the journal must
+# be able to tell `rm data/timezone.env` from "pick a zone this tzdata has".
+#
+# CLAWBOX_ZONEINFO_DIR is a TEST seam only: it is read in a root step whose
+# environment comes from systemd, never from the clawbox-writable tree, so it
+# cannot be used to widen what this accepts on a device.
+read_configured_timezone() {
+  local tz_env="$PROJECT_DIR/data/timezone.env" line tz
+  local zoneinfo="${CLAWBOX_ZONEINFO_DIR:-/usr/share/zoneinfo}"
+  # NOT A PLAIN FILE, first and loudly. `[ -f ]` FOLLOWS a symlink and is false
+  # for a directory, a FIFO, a socket and a device node, so the old order let
+  # every one of those shapes answer 1 — "nothing recorded", the one outcome
+  # step_set_timezone treats as a legitimate no-op and exits 0 on. data/ is
+  # clawbox-writable and this runs as ROOT: anything but the plain file the
+  # route writes is tampering, not silence. A FIFO matters twice over — the
+  # `grep` below would block on it for ever.
+  if [ -L "$tz_env" ] || { [ -e "$tz_env" ] && [ ! -f "$tz_env" ]; }; then
+    echo "Error: $tz_env is not the plain file the timezone route writes — refusing to read it." >&2
+    return 3
+  fi
+  [ -f "$tz_env" ] || return 1
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?TIMEZONE=" "$tz_env" 2>/dev/null)" || return 1
+  tz="${line#*=}"
+  case "$tz" in
+    \"*\") tz="${tz#\"}"; tz="${tz%\"}" ;;
+    \'*\') tz="${tz#\'}"; tz="${tz%\'}" ;;
+  esac
+  [ -n "$tz" ] || return 1
+  case "$tz" in
+    /*|-*|*..*|*[!A-Za-z0-9._/+-]*) return 2 ;;
+  esac
+  # `timedatectl list-timezones` is systemd's OWN list and the exact set
+  # `set-timezone` will accept, so it is asked first and nothing here maintains
+  # a list of its own. The zoneinfo fallback covers a container without systemd
+  # (and is the seam the guard tests drive) — it needs its own exclusions,
+  # because `/usr/share/zoneinfo` is a directory of files rather than a list of
+  # zones: `zone.tab`, `iso3166.tab`, `leapseconds` and `tzdata.zi` are all
+  # regular files and none is a zone, and `posix/` and `right/` are mirror trees
+  # `timedatectl` refuses by name. Letting one through means a step that fails
+  # on every start for anything that can write data/timezone.env.
+  local list
+  if [ -z "${CLAWBOX_ZONEINFO_DIR:-}" ] && list="$(timedatectl list-timezones 2>/dev/null)" && [ -n "$list" ]; then
+    printf '%s\n' "$list" | grep -qxF -- "$tz" || return 2
+  else
+    case "$tz" in
+      *.*|leapseconds|posix/*|right/*) return 2 ;;
+    esac
+    [ -f "$zoneinfo/$tz" ] || return 2
+  fi
+  printf '%s' "$tz"
+}
+
+apply_timezone() {
+  local tz="${1:-}" out
+  if [ -z "$tz" ]; then
+    # Not an error: a box whose owner has never answered simply keeps the image
+    # default, and this step is a no-op rather than a red line in the update.
+    echo "  No timezone recorded, leaving the system zone alone"
+    return 0
+  fi
+  if [ "$(timedatectl show -p Timezone --value 2>/dev/null)" = "$tz" ]; then
+    echo "  System timezone already $tz"
+    return 0
+  fi
+  # stderr is CAPTURED, not discarded: `timedatectl`'s own refusal is the one
+  # line that says why, and throwing it away leaves a red step with no reason.
+  if out="$(timedatectl set-timezone "$tz" 2>&1)"; then
+    echo "  System timezone set to $tz"
+    return 0
+  fi
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, timedatectl unavailable — skipping"
+    return 0
+  fi
+  echo "  Warning: timedatectl set-timezone $tz failed: $out" >&2
+  return 1
+}
+
+step_set_timezone() {
+  local tz rc=0
+  tz="$(read_configured_timezone)" || rc=$?
+  case "$rc" in
+    0) apply_timezone "$tz" ;;
+    1) echo "  No timezone recorded, leaving the system zone alone" ;;
+    3)
+      # The file itself is wrong — a symlink, a directory, a FIFO. The reader
+      # has already said which path; the remedy is to remove it, which is a
+      # different action from the one below, so it gets its own line.
+      echo "Error: the timezone file was refused — leaving the system zone alone." >&2
+      return 1
+      ;;
+    *)
+      # A value WAS recorded and this device will not take it — a newer zone
+      # name than its tzdata, a spelling its filesystem does not match, or
+      # something that is not a zone at all. Failing loudly is the point: this
+      # used to print "no timezone recorded" and exit 0, so every layer above
+      # reported the change as applied while the box stayed on Etc/UTC.
+      echo "Error: the recorded timezone is not one this device carries — leaving the system zone alone." >&2
+      return 1
+      ;;
+  esac
+}
+
 is_safe_git_ref() {
   local ref="${1:-}"
   [ -n "$ref" ] || return 1
-  git check-ref-format --branch "$ref" >/dev/null 2>&1
+  # Two gates, and both are load-bearing.
+  #
+  # The character class mirrors src/lib/update-branch.ts. It is not redundant
+  # with git's check below: git happily accepts `feat/a+b`, the runtime updater
+  # refuses it, and a pin the updater refuses does not fail the update — it
+  # falls through to `main`. So install.sh must never write a ref the runtime
+  # would reject, or the device drifts while its pin still reads correct.
+  #
+  # git's own grammar check then rejects the names that are spelled with legal
+  # characters but are not branches: `HEAD`, `a..b`, `x/`, `a.lock`.
+  case "$ref" in
+    -*|/*|*[!A-Za-z0-9._/-]*) return 1 ;;
+  esac
+  # `-C /` so the answer depends on the ref and nothing else. check-ref-format
+  # needs no repository, but git still runs repository discovery from the
+  # working directory first, and a broken .git there (a moved worktree, a
+  # half-restored backup) makes it exit 128 for EVERY ref — which would look
+  # exactly like "no valid branch": no pin written, and the device falls back to
+  # main. install.sh is run from whatever directory the operator happened to be
+  # in, so that must not be able to decide this.
+  git -C / check-ref-format --branch "$ref" >/dev/null 2>&1
 }
 
+# Which branch does a DETACHED checkout belong to? Prints it, or nothing.
+#
+# `git symbolic-ref HEAD` fails on a detached HEAD — the state a support
+# engineer leaves behind with `git checkout <sha>` — and that failure used to
+# land on resolve_update_branch's `main` default, so one debugging checkout
+# hard-reset the device onto the fleet release channel. main is never a guess
+# worth making, so the branch is recovered from evidence instead:
+#
+#   1. the deployed build's own stamp (.next/build-info.json "branch"), written
+#      on this device at build time and therefore surviving the checkout;
+#   2. local branches that CONTAIN HEAD — git's own record;
+#   3. name-rev against origin's refs, which is all a re-clone leaves.
+#
+# Mirrors recoverDetachedBranch() in src/lib/updater.ts, including the order and
+# the two filters: `main` is accepted only when it turns up AS evidence and is
+# tried last, and a candidate is used only if origin actually carries it (a
+# branch with no upstream would fail later at `reset --hard origin/<branch>`).
+recover_detached_branch() {
+  [ -d "$PROJECT_DIR/.git" ] || return 0
+
+  local candidates=() stamp branch info others named
+  for stamp in "$PROJECT_DIR/.next/standalone/.next/build-info.json" "$PROJECT_DIR/.next/build-info.json"; do
+    [ -f "$stamp" ] || continue
+    info=$(sed -n 's/.*"branch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$stamp" | head -n 1)
+    if [ -n "$info" ] && [ "$info" != "HEAD" ]; then
+      candidates+=("$info")
+      break
+    fi
+  done
+
+  others=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" \
+    for-each-ref --format='%(refname:short)' --contains HEAD refs/heads 2>/dev/null || true)
+  while IFS= read -r branch; do
+    [ -n "$branch" ] && candidates+=("$branch")
+  done <<< "$others"
+
+  named=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" \
+    name-rev --name-only --refs='refs/remotes/origin/*' HEAD 2>/dev/null || true)
+  if [ -n "$named" ] && [ "$named" != "undefined" ]; then
+    named="${named#remotes/}"
+    named="${named#origin/}"
+    named="${named%%[~^]*}"
+    [ -n "$named" ] && candidates+=("$named")
+  fi
+
+  # Non-main candidates first: a box carrying any other evidence keeps its channel.
+  local pass
+  for pass in other main; do
+    for branch in ${candidates+"${candidates[@]}"}; do
+      [ -n "$branch" ] || continue
+      [ "$branch" != "HEAD" ] || continue
+      if [ "$pass" = "main" ]; then
+        [ "$branch" = "main" ] || continue
+      else
+        [ "$branch" != "main" ] || continue
+      fi
+      is_safe_git_ref "$branch" || continue
+      git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" \
+        rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1 || continue
+      printf '%s\n' "$branch"
+      return 0
+    done
+  done
+}
+
+# Resolve the update target: CLAWBOX_BRANCH > .update-branch > current branch >
+# (detached) recovered branch. Sets UPDATE_TARGET_LOCAL/UPSTREAM, and
+# UPDATE_TARGET_UNRESOLVED=1 when the only remaining answer would be a guess —
+# callers must refuse rather than sync. `main` is still the default for a
+# directory that is not a checkout at all (a fresh install about to clone).
 resolve_update_branch() {
   UPDATE_TARGET_LOCAL="main"
   UPDATE_TARGET_UPSTREAM="origin/main"
+  UPDATE_TARGET_UNRESOLVED=0
 
   # An explicit CLAWBOX_BRANCH (CLI or systemd env) wins over everything else.
   if [ -n "${CLAWBOX_BRANCH:-}" ] && is_safe_git_ref "${CLAWBOX_BRANCH}"; then
@@ -1019,15 +3349,215 @@ resolve_update_branch() {
     fi
   fi
 
-  local current upstream
+  # Not a checkout — nothing to protect; main is the repository's default.
+  [ -d "$PROJECT_DIR/.git" ] || return 0
+
+  local current upstream recovered
   current=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" symbolic-ref --short HEAD 2>/dev/null || true)
-  if [ -n "$current" ] && [ "$current" != "main" ] && is_safe_git_ref "$current"; then
-    upstream=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" rev-parse --abbrev-ref "${current}@{u}" 2>/dev/null || true)
-    if [ -n "$upstream" ] && is_safe_git_ref "$upstream"; then
-      UPDATE_TARGET_LOCAL="$current"
-      UPDATE_TARGET_UPSTREAM="$upstream"
+
+  if [ -n "$current" ]; then
+    if [ "$current" != "main" ] && is_safe_git_ref "$current"; then
+      upstream=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" rev-parse --abbrev-ref "${current}@{u}" 2>/dev/null || true)
+      if [ -n "$upstream" ] && is_safe_git_ref "$upstream"; then
+        UPDATE_TARGET_LOCAL="$current"
+        UPDATE_TARGET_UPSTREAM="$upstream"
+      elif git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" \
+             rev-parse --verify --quiet "refs/remotes/origin/$current" >/dev/null 2>&1; then
+        # The upstream LINK does not survive a re-clone even though the branch
+        # does; origin carrying the branch is the same evidence by another route.
+        UPDATE_TARGET_LOCAL="$current"
+        UPDATE_TARGET_UPSTREAM="origin/$current"
+      fi
     fi
+    return 0
   fi
+
+  # Detached HEAD: evidence, or refuse. Never the main default.
+  recovered="$(recover_detached_branch)"
+  if [ -n "$recovered" ]; then
+    UPDATE_TARGET_LOCAL="$recovered"
+    UPDATE_TARGET_UPSTREAM="origin/$recovered"
+    return 0
+  fi
+
+  UPDATE_TARGET_LOCAL=""
+  UPDATE_TARGET_UPSTREAM=""
+  UPDATE_TARGET_UNRESOLVED=1
+  return 0
+}
+
+# The message a device gets instead of being moved to another channel.
+refuse_unresolved_update_target() {
+  echo "Error: this device is not on a branch (detached HEAD), carries no update pin," >&2
+  echo "       and nothing on it records which branch it was built from." >&2
+  echo "       Refusing to update: the only remaining answer is 'main', the fleet release" >&2
+  echo "       channel, and moving this device there would be a channel change, not an update." >&2
+  echo "       Set the update branch in System Update -> Advanced options (or check out the" >&2
+  echo "       branch this device belongs to) and run the update again." >&2
+  exit 1
+}
+
+# The branch this checkout is already sitting on, when that is worth recording.
+# Prints nothing (and succeeds) when it is not.
+#
+# Deliberately narrow, because this runs without anyone having asked for a
+# branch. Every condition below is a case where writing a pin would be a guess
+# rather than a record:
+#   - not a repo → there is no branch name to record.
+#   - HEAD is detached → no branch name is directly readable, but the box may
+#     still be able to PROVE which branch it belongs to (build stamp, refs that
+#     contain HEAD). recover_detached_branch answers that, and its answer is
+#     evidence, not a guess, so it is worth recording — a detached device that
+#     records nothing has to re-derive the same answer on every future update,
+#     and refuses the update outright the day the evidence goes away.
+#   - `main` → rule 3's fallback is already main, so a pin changes nothing today
+#     and would only freeze a device an operator later moves by hand.
+#   - not a ref both resolvers accept → a pin the updater refuses resolves to
+#     `main`, which is the very drift this function exists to prevent.
+#   - origin does not carry the branch → today such a device falls back to main
+#     and keeps updating. Pinning it would turn that into a hard failure at
+#     `reset --hard origin/<branch>` on every future update.
+adoptable_checkout_branch() {
+  [ -d "$PROJECT_DIR/.git" ] || return 0
+  local current
+  current=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" symbolic-ref --short HEAD 2>/dev/null || true)
+  [ -n "$current" ] || current="$(recover_detached_branch)"
+  [ -n "$current" ] || return 0
+  [ "$current" != "main" ] || return 0
+  is_safe_git_ref "$current" || return 0
+  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" \
+    rev-parse --verify --quiet "refs/remotes/origin/$current" >/dev/null 2>&1 || return 0
+  printf '%s\n' "$current"
+}
+
+# Record the branch this device updates from, so the answer survives.
+#
+# resolve_update_branch() has always READ $PROJECT_DIR/.update-branch and never
+# written it, so the pin existed only if a human created it. Without one, a box
+# falls through to rule 2 — the current branch, and only if that branch tracks a
+# remote. That upstream *link* does not survive a re-clone even though the
+# branch does, so a device built from CLAWBOX_BRANCH=<x> could later resolve to
+# `main` and update itself onto a branch it was never built for. Two freshly
+# provisioned devices reached an operator with no pin at all.
+#
+# Three cases, in precedence order:
+#   - explicit CLAWBOX_BRANCH → write the pin, including OVER a different
+#     existing one. This is the precedence already documented in
+#     resolve_update_branch (CLAWBOX_BRANCH > .update-branch > current > main),
+#     and the repo is about to be hard-reset onto that branch; a pin still
+#     naming the old branch would make the very next unattended update pull the
+#     device straight back off it.
+#   - no CLAWBOX_BRANCH and NO pin at all → adopt the checked-out branch, if
+#     adoptable_checkout_branch vouches for it. This does not move the device;
+#     it records where it already is, before sync_repo_to_update_target
+#     overwrites the only evidence. It also settles a disagreement inside a
+#     single install run: the bootstrap block at the top of this file follows
+#     the checked-out branch with no upstream requirement and resets to it,
+#     while resolve_update_branch's rule 2 would then send the same box to main.
+#   - no CLAWBOX_BRANCH and a pin already present → never rewrite, never delete.
+#     An existing pin is somebody's explicit choice (operator, Settings UI, an
+#     earlier flash); a bare `sudo bash install.sh` and every updater-triggered
+#     `--step` must leave it exactly as found.
+persist_update_branch_pin() {
+  [ -d "$PROJECT_DIR" ] || return 0
+
+  local pin_file="$PROJECT_DIR/.update-branch"
+
+  # $PROJECT_DIR belongs to $CLAWBOX_USER and this function runs as root, so
+  # every path under it is writable by an account the writer outranks. A symlink
+  # left at the pin path would redirect the write, the chown and the chmod onto
+  # whatever it points at, and `[ -f ]` follows one. Refuse instead. The write
+  # goes through a temp file whose name mktemp chooses (see below), and `mv`
+  # replaces the pin's directory entry rather than following it.
+  if [ -L "$pin_file" ]; then
+    echo "  WARN: not pinning update branch — $pin_file is a symlink" >&2
+    return 0
+  fi
+
+  local existing=""
+  if [ -f "$pin_file" ]; then
+    existing=$(head -n 1 "$pin_file" | tr -d '[:space:]')
+  fi
+
+  local branch="${CLAWBOX_BRANCH:-}"
+  local pin_source="explicit CLAWBOX_BRANCH"
+  if [ -n "$branch" ]; then
+    if ! is_safe_git_ref "$branch"; then
+      echo "  WARN: not pinning update branch — '$branch' is not a valid git ref" >&2
+      branch=""
+    fi
+  elif [ -z "$existing" ]; then
+    branch="$(adoptable_checkout_branch)"
+    pin_source="the branch this checkout is on"
+  fi
+
+  if [ -n "$branch" ] && [ "$branch" != "$existing" ]; then
+    if [ -n "$existing" ]; then
+      # Repinning a device is never silent — an operator watching this run has
+      # to be able to see the branch it will follow from here on.
+      echo "  Re-pinning update branch '$existing' -> '$branch' ($pin_source)"
+    else
+      echo "  Pinning update branch to '$branch' ($pin_source)"
+    fi
+    # Stage the write in a directory of our own rather than beside the pin.
+    #
+    # A temp file placed directly in $PROJECT_DIR can be swapped for a symlink
+    # before the printf/chown/chmod land, because $PROJECT_DIR is writable by
+    # $CLAWBOX_USER. With a fixed name that needs no timing at all; the staging
+    # directory means an attacker must instead win a race on the directory
+    # entry between the mkdir and the write. The final step is a rename, which
+    # replaces the pin's directory entry and never follows a symlink left at it.
+    #
+    # It does NOT close that race, and 0700 is not what stops it: unlinking an
+    # entry is governed by the parent's write bit, which $CLAWBOX_USER has, so
+    # $stage can still be rmdir'd and replaced between the two lines below.
+    # Closing it needs descriptor-bound openat/renameat with no-follow
+    # semantics, which POSIX shell cannot express.
+    #
+    # That residual is accepted deliberately, and the reason is three lines
+    # further down: sync_repo_to_update_target runs `git reset --hard` as root
+    # inside this same app-writable tree and then `chown -R` over all of it.
+    # Whoever can win the race below already has a far larger version of the
+    # same primitive in the same step. Hardening the pin write past this point
+    # while that stands would be motion, not progress — if this class is worth
+    # closing it has to be closed for the tree, not for one file in it.
+    local stage="$PROJECT_DIR/.update-branch.stage" tmp_pin
+    rm -rf "$stage"
+    if ! (umask 077 && mkdir "$stage"); then
+      echo "  WARN: could not stage the update-branch pin write" >&2
+      return 0
+    fi
+    tmp_pin="$stage/pin"
+    if printf '%s\n' "$branch" > "$tmp_pin" \
+      && chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp_pin" \
+      && chmod 644 "$tmp_pin" \
+      && mv -f "$tmp_pin" "$pin_file"; then
+      rm -rf "$stage"
+      return 0
+    fi
+    # Never leave the device's working tree holding staging litter.
+    rm -rf "$stage"
+    echo "  WARN: failed to write the update-branch pin" >&2
+    return 0
+  fi
+
+  # Nothing to write. Still re-assert owner and mode on an existing pin, and do
+  # it whether or not a branch was given: the web app runs as $CLAWBOX_USER and
+  # rewrites this file itself through /setup-api/system/update-branch, so a
+  # root-owned pin turns that POST into an EACCES — the same class of bug a
+  # root-owned data/ caused in the config store. Worse, a pin the app user
+  # cannot READ is invisible to the updater, which then resolves to `main` while
+  # this script (running as root) still reads the pin and disagrees. Repairing
+  # it unconditionally is what makes a pin left behind by a hand-written
+  # `sudo sh -c 'echo beta > .update-branch'` heal on the next run. 0644, not
+  # 0600: this is a build record, not a secret, and root reads it during the
+  # bootstrap re-exec before it drops to $CLAWBOX_USER.
+  [ -n "$existing" ] || return 0
+  if [ -n "$branch" ]; then
+    echo "  Update branch already pinned to '$branch'"
+  fi
+  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$pin_file"
+  chmod 644 "$pin_file"
 }
 
 sync_repo_to_update_target() {
@@ -1039,21 +3569,130 @@ sync_repo_to_update_target() {
     exit 1
   fi
 
-  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
+  # Every git below runs as the account that owns the checkout, never as root:
+  # `fetch` honours remote/url config, `checkout` runs .git/hooks/post-checkout,
+  # and any checkout runs filter.*.smudge — all named by files inside the
+  # clawbox-writable tree. See use_tree_owner_for_git.
+  use_tree_owner_for_git "$PROJECT_DIR"
+  local run_git=(${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} \
+    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
+
+  git_with_retry -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
   # Discard local working-tree changes before switching branches. The later
   # `reset --hard` would blow them away anyway; doing it up-front avoids
   # `git checkout` aborting with "local changes would be overwritten" when
   # the user (or test seeding) has uncommitted edits. This is by design —
   # the updater's whole purpose is to align the device with upstream.
-  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" reset --hard HEAD 2>/dev/null || true
-  if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$target_branch" 2>/dev/null; then
-    if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout -b "$target_branch" "$upstream_branch" 2>/dev/null; then
+  "${run_git[@]}" reset --hard HEAD 2>/dev/null || true
+  if ! "${run_git[@]}" checkout "$target_branch" 2>/dev/null; then
+    if ! "${run_git[@]}" checkout -b "$target_branch" "$upstream_branch" 2>/dev/null; then
       echo "Error: failed to checkout branch '$target_branch'" >&2
+      GIT_RUNNER=()
       exit 1
     fi
   fi
-  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" reset --hard "$upstream_branch"
+  "${run_git[@]}" reset --hard "$upstream_branch"
+
+  # ANCHOR FIRST, chown after.
+  #
+  # This run has just put the code in $PROJECT_DIR there — one of the two moments
+  # root may re-record what it will execute (see root_exec_may_anchor), and the
+  # "after the fetch, before any root exec" point the mirror design names. But
+  # the reset ran as the tree's owner, because it must (git executes .git/hooks
+  # and .git/config), so between git's last write and the record there is a
+  # window in which that account can replace install.sh and have BOTH the record
+  # and the mirror describe its file. `chown -R` over a tree with node_modules
+  # is seconds of exactly that window, so it moves below the anchor.
+  #
+  # What closes the rest of it is asking git, which still knows what the commit
+  # should contain. `-uno`: an untracked file under scripts/ is not tampering
+  # (the record does not cover additions either, and root only ever runs files
+  # install.sh names, all of which are tracked), and treating it as such would
+  # refuse to anchor on any box with a stray file.
+  if [ -n "$("${run_git[@]}" status --porcelain -uno -- install.sh scripts config 2>/dev/null)" ]; then
+    echo "  Warning: install.sh, scripts/ or config/ differ from '$upstream_branch' right after the sync — not re-recording what root may run" >&2
+    record_provision_failure root_exec_manifest
+    GIT_RUNNER=()
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
+    return 0
+  fi
+  ROOT_EXEC_TREE_RESYNCED=1
+  # The tree root is allowed to execute just changed. Re-record it here, in the
+  # same function that changed it, so no later step of this update runs against
+  # a manifest describing the previous checkout — or, since TASK-733, out of a
+  # mirror holding the previous checkout.
+  refresh_root_exec_manifest
+  GIT_RUNNER=()
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
+}
+
+# Refresh the running updater before it can replace the core or permissions.
+# The 3.x Node process otherwise keeps its old 330s timeout and raw systemctl
+# launcher even after bootstrap has fetched 4.x scripts (TASK-789).
+legacy_updater_needs_handover() {
+  python3 - "$PROJECT_DIR/.next/standalone/package.json" "$PROJECT_DIR/package.json" <<'PY'
+import json, sys
+try:
+    old, new = (str(json.load(open(p)).get('version', '')) for p in sys.argv[1:])
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if old.startswith('3.') and new.startswith('4.') else 1)
+PY
+}
+
+handover_legacy_updater() {
+  legacy_updater_needs_handover || return 0
+  echo "  Upgrading the legacy updater before changing OpenClaw or its launch permissions..."
+  ensure_build_swap || return 1
+  local previous_id mask_owned=0 gateway_was_active=0 rc=0
+  previous_id=$(cat "$PROJECT_DIR/.next/BUILD_ID") || return 1
+  [ -n "$previous_id" ] || return 1
+  if ! is_hermes_edition; then
+    systemctl is-active --quiet clawbox-gateway.service && gateway_was_active=1
+    # /run masks cannot override the gold image's /etc unit. The root-held
+    # drop-in works before the new launcher has been installed as well.
+    mask_owned=1
+    if ! bash "$SRC_DIR/config/clawbox-gateway-maintenance.sh" enter; then
+      bash "$SRC_DIR/config/clawbox-gateway-maintenance.sh" leave || true
+      return 1
+    fi
+    systemctl stop clawbox-gateway.service || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    # do_rebuild restores the OLD app on failure. Do not revoke that app's
+    # existing authorisation until a new build has actually been verified.
+    do_rebuild || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    ( step_systemd_services ) || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    ( step_polkit_rules ) || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    # A separate atomic marker avoids racing config-store's read/modify/write.
+    # New code resumes ALL update steps, not the normal post-reboot tail:
+    # neither the core nor the OS has been upgraded yet.
+    as_clawbox python3 - "$PROJECT_DIR/data/updater-handover.json" "$previous_id" <<'PY' || rc=$?
+import json, os, sys
+p, previous = sys.argv[1:]
+with open(p + '.tmp', 'w') as f:
+    json.dump({'version': 1, 'previousBuildId': previous}, f)
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(p + '.tmp', p)
+PY
+  fi
+  if [ "$mask_owned" -eq 1 ]; then
+    bash "$SRC_DIR/config/clawbox-gateway-maintenance.sh" leave || rc=$?
+  fi
+  # No reboot needed for the bridge. The normal new-updater flow owns that.
+  systemctl reset-failed clawbox-setup.service 2>/dev/null || true
+  systemctl restart clawbox-setup.service || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$gateway_was_active" -eq 1 ]; then
+    systemctl start clawbox-gateway.service 2>/dev/null || true
+  fi
+  return "$rc"
 }
 
 step_bootstrap_updater() {
@@ -1062,27 +3701,50 @@ step_bootstrap_updater() {
   # next root step will launch a fresh shell against the updated install.sh.
   step_fix_git_perms
   resolve_update_branch
+  [ "${UPDATE_TARGET_UNRESOLVED:-0}" -eq 1 ] && refuse_unresolved_update_target
   echo "  Refreshing updater files on branch '$UPDATE_TARGET_LOCAL'..."
+  # An orphan of the pre-3.9 hand-deploy method that nothing reads. Left in
+  # place it is an untracked file in the project root, which the drift engine
+  # reads as "the code on disk matches no commit" — it raised the About-screen
+  # drift banner on a healthy box and stamped `dirty: true` on clean builds.
+  # It is gitignored now, so `git clean -fd` will not take it: drop it here.
+  rm -f "$PROJECT_DIR/.deployed-sha"
   sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
+  handover_legacy_updater
 }
 
 step_git_pull() {
+  local fresh_clone=0
   if [ ! -d "$PROJECT_DIR/.git" ]; then
     echo "  Cloning from $REPO_URL (branch: $REPO_BRANCH)..."
-    git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
+    git_with_retry clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
-  else
-    # Hard-sync to the resolved update branch (CLAWBOX_BRANCH > .update-branch >
-    # current branch > main) instead of a fast-forward-only merge. The old
-    # `merge --ff-only ... || echo continuing` silently kept stale code whenever
-    # the box had any local divergence, which then pinned config/openclaw-target.txt,
-    # OpenClaw, and the gateway to the old version (issue #202). Reuse the same
-    # robust path the in-app updater takes: fetch, drop local changes, checkout,
-    # and reset --hard to the upstream. sync_repo_to_update_target chowns too.
-    resolve_update_branch
-    echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
-    sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
+    fresh_clone=1
   fi
+
+  # Record the pin BEFORE anything moves the repo. sync_repo_to_update_target
+  # below checks out and hard-resets, so on an unpinned device the checked-out
+  # branch — the only surviving record of what this unit was built from — is
+  # gone by the time it returns. Writing the pin here also feeds
+  # resolve_update_branch's rule 1 on this very run, so the branch the device
+  # keeps is the branch this run installs. Early enough, too, that a later
+  # failed step still leaves a correctly pinned device.
+  persist_update_branch_pin
+
+  [ "$fresh_clone" -eq 0 ] || return 0
+
+  # Hard-sync to the resolved update branch (CLAWBOX_BRANCH > .update-branch >
+  # current branch > main) instead of a fast-forward-only merge. The old
+  # `merge --ff-only ... || echo continuing` silently kept stale code whenever
+  # the box had any local divergence, which then pinned config/openclaw-target.txt,
+  # OpenClaw, and the gateway to the old version (issue #202). Reuse the same
+  # robust path the in-app updater takes: fetch, drop local changes, checkout,
+  # and reset --hard to the upstream. sync_repo_to_update_target chowns too.
+  resolve_update_branch
+  [ "${UPDATE_TARGET_UNRESOLVED:-0}" -eq 1 ] && refuse_unresolved_update_target
+  echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
+  rm -f "$PROJECT_DIR/.deployed-sha"
+  sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
 }
 
 step_install_bun() {
@@ -1099,27 +3761,255 @@ step_install_bun() {
 
 step_build() {
   cd "$PROJECT_DIR"
+  promote_parked_build
   as_clawbox_login "cd $PROJECT_DIR && $BUN install"
   ensure_node_pty
-  as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
-  if [ ! -f "$PROJECT_DIR/.next/standalone/server.js" ]; then
-    echo "Error: Build failed — .next/standalone/server.js not found"
-    exit 1
-  fi
+  # Through do_rebuild's helper, for do_rebuild's reason: `--step build` is
+  # dispatchable on a live box, where the agent can create or remove a web app
+  # while the trace is being copied.
+  run_next_build
+  # The same two questions do_rebuild asks, through the same helper: an install
+  # that leaves a box unable to load the server is the defect this file already
+  # tested for, and the identity half is the one the box already owns.
+  verify_build_present "$PROJECT_DIR" || exit 1
   echo "  Build complete"
 }
 
 step_openclaw_setup() {
+  # Bash locals are visible to nested steps; defer their standalone restart
+  # until all required config/patch/voice work in this composite step succeeds.
+  local _oc_defer_gateway_start=1 _oc_gateway_restore_pending=0
   # NOTE (here and at every other early-return below): plain `echo`, never
   # `log`. log() is only defined at the very bottom of this file, AFTER the
   # `--step` dispatch block exits — so a `log` call inside a step function is a
   # guaranteed 127 whenever the in-app updater invokes that step, and under
   # `set -e` an AND-list like `guard && { log …; return 0; }` takes the whole
   # shell down with it.
-  is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw install"; return 0; }
-  step_openclaw_install
-  step_openclaw_patch
-  step_openclaw_config
+  # The hermes SKU skips the OpenClaw TRIO — there is no gateway on it — but no
+  # longer the whole step. step_openclaw_tts below is the on-device voice, and
+  # a blanket `return 0` here is what left a freshly flashed Hermes box with no
+  # speech engine at all: the step's own edition guard was removed, and this
+  # one silently kept it alive on the fresh-install path.
+  if is_hermes_edition; then
+    echo "  [hermes edition] skipping OpenClaw install"
+  else
+    step_openclaw_install
+    step_openclaw_patch
+    step_openclaw_config
+  fi
+  # step_openclaw_tts installs NOTHING here: it deploys the voice scripts,
+  # refreshes the units of the engines that are present, and on a box whose
+  # owner has not pressed Install in Settings → Local AI it publishes `absent`
+  # and returns 0 — a plain state, not a warning. What it CAN still return:
+  # 12 (an installed Kokoro that cannot speak — the phonemiser, the unit), 14
+  # ("the voice scripts did not deploy; Kokoro's own verdict stands"), and 13
+  # ("this board declines the only engine"), which only the install mode
+  # step_voice_kokoro_install runs can publish but is kept in this table
+  # because the two share one function. Each is tolerated only because the
+  # step has already recorded it with record_provision_failure, so the summary,
+  # the exit status, the provisioning marker and step_validate_services' TTS
+  # probe all carry it. A box whose voice refresh failed must still finish
+  # provisioning and come up reachable — that is how it gets fixed.
+  #
+  # They are three DIFFERENT facts and they are kept apart on purpose. Folding
+  # 14 into 13 would print "this box has NO working on-device TTS engine" over a
+  # box whose Kokoro is running perfectly and has merely lost its script deploy
+  # — a failure report over something that actually succeeded, which is the same
+  # class of untrue status line this whole block exists to stop.
+  #
+  # Every OTHER non-zero return stays FATAL, exactly as it was before this
+  # tolerance existed. Those are the provider-configuration failures — no
+  # clawbox-tts.sh, a tts-local-cli plugin that will not resolve, a config write
+  # that never landed — and they mean the box has no working speech path at all,
+  # not a downgraded one. Blanket-swallowing them here would recreate this PR's
+  # own bug one layer up: a successful-looking flash over a box that cannot
+  # speak, with nothing in the marker to say so.
+  local TTS_STEP_RC=0
+  step_openclaw_tts || TTS_STEP_RC=$?
+  case "$TTS_STEP_RC" in
+    0) ;;
+    12) echo "  Warning: Kokoro GPU TTS did not install (recorded above; provisioning continues)" ;;
+    13) echo "  Warning: this box has NO working on-device TTS engine (recorded above; provisioning continues)" ;;
+    14) echo "  Warning: the TTS install did not complete (recorded above; provisioning continues)" ;;
+    *) return "$TTS_STEP_RC" ;;
+  esac
+  if [ "$_oc_gateway_restore_pending" -eq 1 ]; then
+    systemctl start clawbox-gateway.service 2>/dev/null || true
+  fi
+
+}
+
+# One [WARN] line plus the marker the updater raises on the update's own status.
+#
+# Deliberately NOT the step's exit code. `resume_paused_engines` above records
+# the rule for exactly this class (install.sh:1720-1728): `record_provision_failure`
+# and a non-zero return paint a whole good update red, and `optional_step` would
+# report `hermes_install` as "failed and were skipped" over an install that ran
+# and succeeded. The quieter surface exists for this — `CLAWBOX-WARN[<code>]:`,
+# which src/lib/updater.ts (STEP_WARNING_LINE) reads out of the step's journal —
+# so the owner is told without the update turning red, and the agent install's
+# own answer (`_hermes_off_pin`) stays the step's return contract.
+hermes_dashboard_restart_warn() {
+  echo "    [WARN] $1 $2" >&2
+  echo "CLAWBOX-WARN[hermes-dashboard-not-restarted]: $1 $2 — it may still be serving the Hermes agent this step replaced; 'sudo systemctl restart $1' puts it on the new one"
+}
+
+# Put the Hermes dashboard back onto the agent the step above just replaced.
+#
+# A pinned upgrade is a move-aside plus a FRESH CLONE, and the tree it moved
+# aside is deleted a few lines later — while clawbox-hermes-dashboard is a
+# long-lived Python process holding the OLD files open. Measured on the Hermes
+# box (TASK-784) right after an upgrade from v0.20.5 to v0.21.1: the dashboard
+# was still the pid it had been more than two hours earlier, `grep -c
+# "(deleted)" /proc/<pid>/maps` returned 83, and `journalctl -u clawbox-hermes-dashboard`
+# had NO entries — nothing had signalled it at all. Python imports lazily, so
+# such a process keeps answering until it reaches a module it had not yet
+# imported, which is now unreachable. A full chat battery PASSED on that box in
+# that state — three turns, correct answers, all of it served by an agent that
+# no longer existed on disk. That is the false green this exists to close.
+#
+# `Restart=always` is not a mechanism here: nothing stops the process, so
+# nothing restarts it, and neither unit has an ExecStop.
+#
+# `try-restart`, never `restart`: `restart` STARTS a stopped unit, and a box
+# whose Hermes units are stopped and disabled — the openclaw direction of
+# step_edition_foreign_teardown, or a fresh install where step_hermes_edition
+# has not installed them yet — must never have them resurrected by an agent
+# upgrade. Same invariant src/lib/hermes-dashboard-control.ts is built around
+# and the same call refresh_agent_coding_tools makes, for the same reason.
+#
+# HARNESS-FIRST. Hermes owns a STOP — `hermes dashboard --stop`, its own
+# SIGTERM-grace-SIGKILL path, which this unit already runs as an ExecStartPre —
+# but `hermes dashboard --help` at this pin offers only `--stop` and `--status`
+# and no restart, and Hermes supervises nothing. The only thing upstream offers
+# around an upgrade is `hermes update`, which reattaches a detached checkout to
+# main (hermes_cli/update_cmd.py), the exact outcome the pin exists to prevent.
+# The proxy is not Hermes's at all: scripts/hermes-dashboard-proxy.js is our
+# node process. systemd owns both units here, so systemd is what gets asked.
+#
+# What DOES already exist in this tree is `bounceHermesDashboard()`
+# (src/lib/hermes-dashboard-control.ts) — but it is shaped for the WEB SERVER,
+# which has no root: it asks Hermes to stop itself and lets `Restart=always`
+# do the rest, precisely because a `systemctl restart` grant would let an
+# openclaw box resurrect a torn-down dashboard. Root here needs no such
+# indirection. Its VERDICT rule is borrowed wholesale, though: "systemd says a
+# DIFFERENT process is now the unit's main one, and the socket says that
+# process is serving. Neither alone is the bounce."
+hermes_dashboard_restart_after_install() {
+  local unit state before after settled budget settle restart_rc
+
+  # NOTHING bounds the restart itself any more (owner's decision, 2026-09-14).
+  # `systemctl try-restart` without `--no-block` waits for the job to finish, and
+  # systemd is already what bounds that job: the unit declares
+  # TimeoutStartSec=300 and takes systemd's default 90 s stop, so the call
+  # returns on its own. The `timeout 120` that used to wrap it was a SECOND,
+  # shorter deadline laid over systemd's, and on a cold clone — which forces a
+  # web-dist build measured at 60-90 s — it fired first: the step then reported a
+  # bounce that had not settled over a dashboard that came up perfectly.
+  #
+  # What is still bounded is the LOOK AFTER IT, and that is not a limit on any
+  # work. The restart has already happened or already failed by then; this budget
+  # only says how long to watch for the replacement main process before writing
+  # the warning line. Both outcomes are a warning, the step returns 0 either way,
+  # and no install is failed or skipped by it — while an unbounded look would
+  # hang step_post_update on a unit whose pid never moves.
+  budget="${HERMES_DASHBOARD_RESTART_WAIT_S:-120}"
+  # Digits, at most four of them, and at least one second. The hazard is not
+  # errexit — the `-lt` below is the left side of a `||`, which errexit never
+  # sees — it is the two values that make the wait meaningless: a 20-digit
+  # number, which `[` rejects with "integer expression expected" once per probe
+  # and which is then printed back at the owner as a budget, and 0, which asks
+  # for the proof without waiting for it. read_configured_harness_swap caps a
+  # length for the same reason.
+  case "$budget" in ''|*[!0-9]*) budget=120 ;; esac
+  { [ "${#budget}" -le 4 ] && [ "$budget" -ge 1 ]; } || budget=120
+  # The same settle resume_paused_engines uses, and for the same reason.
+  settle="${CLAWBOX_ENGINE_SETTLE_S:-3}"
+  case "$settle" in ''|*[!0-9]*) settle=3 ;; esac
+  { [ "${#settle}" -le 3 ] && [ "$settle" -ge 1 ]; } || settle=3
+
+  # The dashboard first, then the proxy that fronts it — never the other way
+  # round: the proxy brokers a session AGAINST the dashboard, so bouncing it
+  # while the replacement dashboard is still coming up would have it fail a
+  # login and sit out LOGIN_RETRY_COOLDOWN_MS (scripts/hermes-dashboard-proxy.js).
+  # The proxy holds no deleted files of its own — it is our node process, not
+  # Hermes's — and it does recover a rejected session by itself on a 401. It is
+  # bounced anyway because the pair is provisioned and restarted together
+  # everywhere else (scripts/setup-hermes-edition.sh), and a node start is
+  # sub-second; the ordering is what makes that free.
+  for unit in clawbox-hermes-dashboard.service clawbox-hermes-dashboard-proxy.service; do
+    state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    if [ "$state" != "active" ]; then
+      # SAY the state rather than promise a restart. `Restart=always` brings
+      # back `inactive` and `activating`; it does not promise anything for
+      # `failed`, and there is nothing at all behind an absent unit — which is
+      # the ordinary fresh-install case, before step_hermes_edition has
+      # installed either of them.
+      echo "  $unit is ${state:-not installed} — nothing to bounce here"
+      continue
+    fi
+
+    before="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+
+    restart_rc=0
+    # Unwrapped, and blocking: systemd's own TimeoutStartSec is what bounds this
+    # job. There used to be a `timeout` over it; see the header.
+    systemctl try-restart "$unit" >/dev/null 2>&1 || restart_rc=$?
+    # systemd saying no. There is nothing left to verify.
+    if [ "$restart_rc" -ne 0 ]; then
+      hermes_dashboard_restart_warn "$unit" "could not be restarted (systemctl exit $restart_rc)"
+      continue
+    fi
+
+    # bash's own second counter, reset here and read in the poll below: the
+    # elapsed time has to survive a `date` that is missing or fails, and an
+    # external command that answers 0 on failure would make the check below never
+    # arrive. Started AFTER the blocking call, which it no longer measures.
+    SECONDS=0
+    while :; do
+      after="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+      # Empty (no systemd, a failed query), 0 (stopped, or still in an
+      # ExecStartPre) and the pid we started with are all "not yet".
+      case "$after" in
+        ''|0|"$before") ;;
+        *) break ;;
+      esac
+      # A unit that is no longer active or activating is not on its way to a new
+      # main process, and nothing will change by waiting for one. Asked first, so
+      # the ordinary failure is answered by a fact rather than by the clock.
+      unit_is_coming_up "$unit" || break
+      [ "$SECONDS" -lt "$budget" ] || break
+      sleep 1
+    done
+
+    # A new main process is HALF the answer. Both units are Type=simple, so
+    # systemd calls them active the instant ExecStart forks — before the
+    # dashboard binds its socket, and long before a fresh clone finishes the
+    # web-dist build it forces (60-90 s measured, which is why the unit allows
+    # itself TimeoutStartSec=300). A clone that cannot start hands over a new
+    # pid and then dies into `Restart=always`, so claiming the bounce on the
+    # pid alone would be this step's own false success moved one notch down.
+    # Ask again after a settle: a server that came up and one that exited two
+    # seconds later look identical until then.
+    sleep "$settle"
+    state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    settled="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+
+    if [ "$state" = "active" ] && [ -n "$after" ] && [ "$after" != "0" ] \
+      && [ "$after" != "$before" ] && [ "$settled" = "$after" ]; then
+      echo "  Restarted $unit on the new agent (main pid ${before:-unknown} -> $after, still up ${settle}s later)"
+    else
+      # One sentence carrying what was actually observed, rather than a single
+      # asserted diagnosis: `inactive` means somebody stopped it and it is
+      # serving nothing, `activating` means it is still coming, a pid that
+      # moved again means it is crash-looping. They are different problems and
+      # the owner is told which.
+      hermes_dashboard_restart_warn "$unit" \
+        "did not settle on a new main process (systemd says ${state:-unknown}, main pid ${settled:-unknown}, was ${before:-unknown})"
+    fi
+  done
+  # ALWAYS 0 — see hermes_dashboard_restart_warn.
+  return 0
 }
 
 # Install the Hermes agent (git-based install into ~/.hermes). Needed by every
@@ -1132,9 +4022,29 @@ step_hermes_install() {
   local agent_dir="$CLAWBOX_HOME/.hermes/hermes-agent"
   local venv_python="$agent_dir/venv/bin/python"
   local installed=""
+  local pin="$HERMES_PIN_COMMIT"
+  # Whether an upgrade this step performed landed somewhere other than the pin.
+  # `local`, so a second call in one shell cannot inherit the first one's
+  # answer.
+  local _hermes_off_pin=0
+
+  # The pin is spliced into a URL below and the file that URL returns is piped
+  # into bash, so it is validated before it is used. A malformed value — a tag
+  # name, a truncated SHA, an env override carrying a slash — would otherwise
+  # fetch some other path from the same host and run it. Refuse, and leave
+  # whatever agent the device already has alone.
+  if ! printf '%s' "$pin" | grep -Eq '^[0-9a-fA-F]{40}$'; then
+    echo "  Warning: the Hermes pin is not a 40-char commit SHA — leaving the existing agent untouched" >&2
+    return 0
+  fi
+
   # One constant so the reachability precheck and the install itself can never
-  # drift onto different hosts.
-  local installer_url="https://hermes-agent.nousresearch.com/install.sh"
+  # drift onto different hosts — and it is served FROM the pinned tree, so the
+  # installer that runs is the one that shipped with the commit being asked
+  # for. The vanity host (hermes-agent.nousresearch.com/install.sh) serves
+  # main's copy of the same file: identical today, free to change its flags
+  # under us tomorrow.
+  local installer_url="https://raw.githubusercontent.com/NousResearch/hermes-agent/$pin/scripts/install.sh"
 
   # `$shim` alone is NOT evidence of an install: it is a 4-line wrapper in
   # ~/.local/bin that execs $venv_python, and the agent it points at lives
@@ -1162,13 +4072,72 @@ step_hermes_install() {
     # right here — before the reachability check, before any repair, printing
     # nothing — taking `install.sh --step hermes_install` (the documented
     # repair command) and every later step of a full install down with it.
-    installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
-      "$shim" --version 2>/dev/null | head -1) || installed=""
+    #
+    # Runnability stays THE SHIM'S to prove, and is asked first. `--help` goes
+    # through the same shim -> `<agent_dir>/hermes` -> `hermes_cli.main` path
+    # `--version` does, so a shim whose interpreter or entry script is gone
+    # still fails it — but unlike `--version` it runs no update check. Still
+    # true at the v0.21.1 pin, re-read at 2237be35 rather than assumed:
+    # `_startup_fast.py` calls `check_for_updates(passive=True)` from
+    # `print_fast_version_info`, and the interactive welcome banner is the
+    # other caller. (On 0.20.5 the same two, without the passive flag.) Asking the
+    # venv interpreter directly instead would only prove the PACKAGE IMPORTS,
+    # which is not the question this guard exists to answer: a box whose
+    # `hermes` command is dead would read as "already installed" and the
+    # documented repair would do nothing. Measured on a Hermes box: 0.82 s.
+    if runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      "$shim" --help >/dev/null 2>&1; then
+      # The agent runs; this is only the version STRING for the log line.
+      # TASK-613: remove once hermes-agent#104275 lands
+      # (HERMES_DISABLE_UPDATE_CHECK / updates.check). `hermes --version` also
+      # runs that update check — `git fetch origin main` plus an
+      # unauthenticated GitHub compare, 10 s each — and on a box being
+      # installed or repaired the six-hour cache is always cold, so this step
+      # paid for a network round trip whose only output `head -1` throws away.
+      # Upstream's own printer takes `check_updates=False`
+      # (hermes_cli/_startup_fast.py) and no CLI flag or env var reaches it, so
+      # ask the interpreter the shim just proved it execs. Fails OPEN: anything
+      # wrong here leaves `installed` empty and the `--version` probe below
+      # answers exactly as it always did.
+      installed=$(runuser -u "$CLAWBOX_USER" -- env -u PYTHONHOME HOME="$CLAWBOX_HOME" \
+        PYTHONSAFEPATH=1 PYTHONPATH="$agent_dir" "$venv_python" -c \
+        'from hermes_cli._startup_fast import print_fast_version_info as v; v(check_updates=False)' \
+        2>/dev/null | head -1) || installed=""
+      [ -n "$installed" ] || installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+        "$shim" --version 2>/dev/null | head -1) || installed=""
+    fi
   fi
 
+  # A version string cannot answer "is this the pinned build?": upstream prints
+  # the same `v0.21.1` for the tag and for every untagged commit after it, and
+  # there are hundreds of those a week. The checkout's HEAD is the only proof,
+  # so HEAD is what decides. Read as the clawbox user for the same reason the
+  # probe is: git refuses to operate on a repository owned by somebody else
+  # ("detected dubious ownership"), and root reading a clawbox-owned tree is
+  # exactly that case. `|| at_commit=""` for the errexit reason above — a
+  # checkout that is not a git repository must fall through, not abort.
+  local at_commit=""
   if [ -n "$installed" ]; then
-    echo "  Hermes already installed ($installed)"
-    return 0
+    at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
+    if [ "$at_commit" = "$pin" ]; then
+      echo "  Hermes already installed at the pinned commit ($installed)"
+      return 0
+    fi
+    # A working agent on the wrong commit takes the SAME path the unrunnable
+    # one takes — reachability precheck, current checkout moved aside,
+    # install, and the move undone if no working agent comes back. An upgrade
+    # that dies halfway must leave the owner with the agent they already had,
+    # which is the whole reason this step is built the way it is.
+    echo "  Hermes runs but is not on the pinned commit — upgrading"
+    echo "    have: ${at_commit:-unknown (not a git checkout)}"
+    echo "    want: $pin"
+    # The box is off the pin from here until the post-install check says
+    # otherwise. Set BEFORE the attempt rather than after a failed one, because
+    # the interesting failure restores the old off-pin agent and never reaches
+    # the post-install branch at all — the upgrade did not happen and the step
+    # would have answered success over it.
+    _hermes_off_pin=1
   fi
 
   # NOTHING above this line has modified the disk, and nothing below it does
@@ -1176,8 +4145,13 @@ step_hermes_install() {
   # this step on EVERY update on EVERY hermes/dual box, so a false-negative
   # probe on a device with no internet must not be able to turn a healthy agent
   # into no agent — the very outcome this file exists to prevent.
+  # `--connect-timeout`, not `--max-time`: this probe answers "is the installer
+  # REACHABLE", and the only thing it must not do is hang forever on a black
+  # hole. A transfer cap would have it answer "unreachable" for a link that is
+  # merely slow — and that answer costs the box its agent upgrade, silently, on
+  # every update. See the wait-note block near the top of this file.
   if ! runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
-    curl -fsS --max-time 30 -o /dev/null "$installer_url"; then
+    curl -fsS --connect-timeout 15 --retry 3 --retry-connrefused -o /dev/null "$installer_url"; then
     echo "  Warning: cannot reach the Hermes installer — leaving the existing agent untouched" >&2
     return 0
   fi
@@ -1193,7 +4167,21 @@ step_hermes_install() {
   # diagnosis costs nothing. Renaming as ROOT is also required — the root-owned
   # __pycache__ above is not movable by the clawbox user the installer runs as.
   if [ -e "$agent_dir" ]; then
-    echo "  Hermes is present but not runnable — reinstalling the agent"
+    # One noun for whatever is being moved, set on the same arm that announces
+    # it. The move block below is shared by two very different devices — an
+    # agent that does not run, and an agent that runs fine and is merely on the
+    # wrong commit — and it used to call both of them "the unusable agent" one
+    # line after announcing "Moving the working agent aside". An owner reading
+    # that log on a healthy box has every reason to think the upgrade found
+    # something wrong with their device.
+    local moved_what
+    if [ -n "$installed" ]; then
+      moved_what="working agent"
+      echo "  Moving the $moved_what aside so the pinned install can be undone"
+    else
+      moved_what="unusable agent"
+      echo "  Hermes is present but not runnable — reinstalling the agent"
+    fi
     if [ -e "$agent_dir.broken" ]; then
       # An existing husk means an earlier repair was interrupted between the
       # move and the restore: the husk is the owner's original checkout and
@@ -1207,9 +4195,9 @@ step_hermes_install() {
         return 0
       fi
     elif mv "$agent_dir" "$agent_dir.broken"; then
-      echo "  Moved the unusable agent to $agent_dir.broken"
+      echo "  Moved the $moved_what to $agent_dir.broken"
     else
-      echo "  Warning: could not move the unusable agent aside — leaving it in place" >&2
+      echo "  Warning: could not move the $moved_what aside — leaving it in place" >&2
       return 0
     fi
     # The husk MUST be deletable by the clawbox user: the factory-reset route
@@ -1223,16 +4211,28 @@ step_hermes_install() {
       || echo "  Warning: could not give $agent_dir.broken to $CLAWBOX_USER" >&2
   fi
 
-  echo "  Installing Hermes agent (NousResearch)..."
+  echo "  Installing Hermes agent (NousResearch) at $pin..."
   # Official installer clones NousResearch/hermes-agent + builds a venv. Runs as
   # the clawbox user so it lands in ~/.hermes and ~/.local/bin. The URL is
   # passed as an argument rather than spliced into the -c string, so it stays a
   # single source of truth without shell-quoting exposure. `-o pipefail`
   # because `curl | bash` otherwise exits 0 when the fetch fails (bash just
-  # reads empty stdin) and the warning below could never fire; the timeouts
-  # because the caller is a systemd unit with TimeoutStartSec=7200.
+  # reads empty stdin) and the warning below could never fire. `--connect-timeout`
+  # with `--retry` bounds a black hole without bounding a slow transfer; there is
+  # deliberately no `--max-time`, because a clone-and-venv install killed
+  # half-way is how a box ends up with the husk the block above exists to clear.
+  #
+  # `--force-commit` is not optional. For an existing checkout the upstream
+  # installer fetches, checks out and fast-forwards its branch (main) FIRST
+  # and only then applies `--commit`, skipping it with "Ignoring --commit …:
+  # the checkout is already newer" whenever the pin is an ancestor of what it
+  # just pulled — which is always, a tag being older than the main it was cut
+  # from. Without the flag the pin is a silent no-op on every install,
+  # including fresh ones, and boxes keep landing on random main commits.
+  # `bash -s --` is what gets the flags through the pipe to the script.
   runuser -u "$CLAWBOX_USER" -- bash -o pipefail -c \
-    'curl -fsSL --connect-timeout 15 --max-time 600 "$1" | bash' _ "$installer_url" \
+    'curl -fsSL --connect-timeout 15 --retry 3 --retry-connrefused "$1" | bash -s -- --commit "$2" --force-commit' \
+    _ "$installer_url" "$pin" \
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
 
   # Verify rather than assume. The installer is fetched over the network and is
@@ -1240,14 +4240,104 @@ step_hermes_install() {
   # the owner as a crash-looping dashboard. `|| installed=""` for the same
   # errexit reason as the first probe: when the install laid down nothing, this
   # runs a shim that does not exist and exits 127.
-  installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
-    "$shim" --version 2>/dev/null | head -1) || installed=""
+  #
+  # Shaped like the probe above and for the same reasons: the SHIM answers
+  # whether the agent this install just laid down actually runs, and only then
+  # is the version string read without the update check — which here has
+  # nothing cached and everything to fetch. TASK-613: remove once
+  # hermes-agent#104275 lands (HERMES_DISABLE_UPDATE_CHECK / updates.check).
+  installed=""
+  if runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+    "$shim" --help >/dev/null 2>&1; then
+    installed=$(runuser -u "$CLAWBOX_USER" -- env -u PYTHONHOME HOME="$CLAWBOX_HOME" \
+      PYTHONSAFEPATH=1 PYTHONPATH="$agent_dir" "$venv_python" -c \
+      'from hermes_cli._startup_fast import print_fast_version_info as v; v(check_updates=False)' \
+      2>/dev/null | head -1) || installed=""
+    [ -n "$installed" ] || installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      "$shim" --version 2>/dev/null | head -1) || installed=""
+  fi
   if [ -n "$installed" ]; then
-    echo "  Hermes installed ($installed)"
+    at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
+    if [ "$at_commit" = "$pin" ]; then
+      # The upgrade landed. Whatever this step found on arrival, the box is on
+      # the build we ship.
+      _hermes_off_pin=0
+      echo "  Hermes installed ($installed) at the pinned commit"
+    else
+      # An upgrade that did not reach the pin is a fixup that did not do its
+      # job, and the warning below is stderr — which reaches the journal and
+      # nothing else. `optional_step` reads the RETURN, so record it there too
+      # and let the update's own status carry it. Not a rollback and not fatal:
+      # the agent RUNS, and the copy moved aside was unpinned as well.
+      _hermes_off_pin=1
+      # The agent RUNS, so it is NOT rolled back: a working unpinned agent is
+      # worth more than the copy moved aside, which was unpinned too. Loud,
+      # because it means the pin did not take — upstream dropping
+      # `--force-commit` would look exactly like this — and the next update
+      # will pay for the whole upgrade again.
+      echo "  Warning: Hermes installed ($installed) but HEAD is ${at_commit:-unknown}, not the pin $pin" >&2
+    fi
     # Diagnosis confirmed, so the insurance copy goes: it costs ~1.9 GB
     # (checkout plus venv) on a disk-constrained device and is one more
     # directory a later factory reset has to be able to delete.
     rm -rf "$agent_dir.broken"
+
+    # BEFORE the bridge warm-up below, not after it. The tree the dashboard is
+    # executing has just been deleted; the warm-up is allowed 300 s and has
+    # nothing to do with the dashboard, so running it first would hold the
+    # box's chat backend on files that are gone for five more minutes.
+    #
+    # The cost of that order, stated rather than discovered: the replacement
+    # dashboard does its post-clone web-dist build while the warm-up's npm
+    # install runs, so two heavy jobs now overlap on a device this file already
+    # documents as an OOM-kill target during updates (run_next_build). The
+    # settle inside the restart serialises the first seconds of it, and serving
+    # deleted code for five more minutes is the worse trade.
+    hermes_dashboard_restart_after_install
+
+    # The upgrade above is a move-aside plus a FRESH clone, and the bridge's
+    # ~80 MB node_modules is untracked — so every pinned upgrade deletes it.
+    # Nothing is broken by that: the pairing manager runs this same `npm
+    # install` the first time somebody asks for a WhatsApp QR, and it was
+    # watched doing so on hardware (bridgeReady false→true, QRs rotating).
+    # But it moves the cost to the worst possible moment — the owner has just
+    # clicked Pair and is waiting on a code — and a box that happens to be
+    # OFFLINE right then gets a pairing FAILURE where the same box would have
+    # paired before the upgrade. So pay for it here instead, while the updater
+    # demonstrably has the network and nobody is waiting.
+    #
+    # From the registry, NOT from the husk we just deleted. The husk's
+    # node_modules belongs to a DIFFERENT commit; moving it across would carry
+    # the old release's dependency tree into the new one's package.json.
+    #
+    # This runs only on the update that actually re-clones — a box already on
+    # the pin returns above and never reaches here — so a warm-up that fails
+    # falls back to the on-demand path, not to the next update.
+    #
+    # Best-effort in every direction, and deliberately so: skipped when there
+    # is nothing to warm (no bridge in this release, or its node_modules
+    # survived), time-boxed, and its failure is a WARNING. A successful Hermes
+    # install must never be reported as a failed step because an npm mirror was
+    # down — the on-demand path is still there and still works.
+    #
+    # No time box on it any more (owner's decision, 2026-09-14): an 80 MB npm
+    # install on a slow link is a long install, not a broken one, and killing it
+    # at 300 s left the bridge's node_modules half-written — which the on-demand
+    # path then had to clear before it could do the same work again. npm's own
+    # retry backoff is what used to consume the difference; it now runs to its
+    # own conclusion, and the WARNING below still covers a registry that is down.
+    local bridge_dir="$agent_dir/scripts/whatsapp-bridge"
+    if [ -d "$bridge_dir" ] && [ ! -d "$bridge_dir/node_modules" ]; then
+      echo "  Warming up the WhatsApp bridge so the first pairing does not pay for it..."
+      # `env -C` gives the install its working directory without a wrapper
+      # shell to quote the path into. HOME is explicit for the same reason as
+      # every other command in this step: npm caches under $HOME/.npm and this
+      # function's HOME is /root, which the clawbox user cannot write.
+      runuser -u "$CLAWBOX_USER" -- env -C "$bridge_dir" HOME="$CLAWBOX_HOME" \
+        npm install --no-fund --no-audit --progress=false \
+        || echo "  Warning: WhatsApp bridge warm-up failed (non-fatal) — the first pairing will install it on demand" >&2
+    fi
   else
     echo "  Warning: Hermes still does not run after install — the dashboard will not start" >&2
     # The diagnosis may simply have been wrong — an empty probe on a loaded
@@ -1265,9 +4355,29 @@ step_hermes_install() {
       fi
     fi
   fi
-  # Explicit: the last command above is a test that is FALSE on the happy path,
-  # and step_post_update reports any non-zero return as a failed step.
-  return 0
+  # THE OUTCOME, not the last test's exit code. The line above is a test that is
+  # FALSE on the happy path, so this used to be an unconditional `return 0` —
+  # and `step_post_update` then reported "completed" over a box whose agent
+  # repair had failed, which is the exact population this call was added for
+  # (the pre-fix factory reset). `optional_step` records a non-zero return as a
+  # skipped fixup and cannot fail the update with it, so the honest answer is
+  # now safe to give: the shim has to be runnable.
+  # The same two-part test the step's own probe makes (a shim alone is a
+  # four-line wrapper and proves nothing about the agent under ~/.hermes).
+  if [ -x "$shim" ] && [ -x "$venv_python" ]; then
+    # Runnable — and `$_hermes_off_pin` is the second half of the answer: an
+    # install that landed off the pin leaves the box working on a build we do
+    # not ship, which the fleet has to hear about even though nothing here is
+    # broken. Default 0, so every path that never attempted an upgrade returns
+    # 0 exactly as before.
+    #
+    # A dashboard that could not be bounced is deliberately NOT folded in here:
+    # it rides the CLAWBOX-WARN channel instead, so an install that worked is
+    # never reported as a failed step. See hermes_dashboard_restart_warn.
+    return "$_hermes_off_pin"
+  fi
+  echo "  Warning: the Hermes agent is still not runnable after this step" >&2
+  return 1
 }
 
 # Re-cache ONLY the offline Gemma GGUF.
@@ -1294,6 +4404,78 @@ step_llamacpp_model() {
     return 0
   fi
   ensure_llamacpp_model_cached
+}
+
+# Where the memory-search GGUF lives on this box, for the readers that only
+# need to know whether it is THERE (ensure_local_embeddings). The pin is read
+# the way ensure_embed_model_cached reads it, with the same default, so the two
+# cannot look for two files — src/tests/unit/install-opt-in-engines.test.ts
+# pins the literals together.
+embed_model_path() {
+  local HF_FILE
+  HF_FILE=$(get_env_setting_or_default "$PROJECT_DIR/.env" "EMBED_HF_FILE" "Qwen3-Embedding-0.6B-Q8_0.gguf")
+  printf '%s/data/embed/models/%s' "$PROJECT_DIR" "$HF_FILE"
+}
+
+# Cache the memory-search embedder's GGUF (data/embed/models) so the unit never
+# has to download it inside a proxied request: OpenClaw gives a document batch
+# 120 s and a query 60 s, and a 640 MB fetch on a slow link fits neither.
+# Fast no-op when the file is there. Reached ONLY through `--step embed_model`
+# — the Local AI tab's Install (/setup-api/embed/install) — since 2026-09-15:
+# neither the main install flow nor an update downloads this model any more.
+ensure_embed_model_cached() {
+  local ENV_FILE="$PROJECT_DIR/.env"
+  local MODEL_DIR="$PROJECT_DIR/data/embed/models"
+  local HF_REPO HF_FILE MODEL_PATH
+  # Keep the defaults in step with src/lib/embed-server.ts.
+  HF_REPO=$(get_env_setting_or_default "$ENV_FILE" "EMBED_HF_REPO" "Qwen/Qwen3-Embedding-0.6B-GGUF")
+  HF_FILE=$(get_env_setting_or_default "$ENV_FILE" "EMBED_HF_FILE" "Qwen3-Embedding-0.6B-Q8_0.gguf")
+  # Both are about to be interpolated into an as_clawbox_login command string.
+  require_safe_hf_ref "EMBED_HF_REPO" "$HF_REPO" || return 1
+  require_safe_hf_ref "EMBED_HF_FILE" "$HF_FILE" || return 1
+  MODEL_PATH="$MODEL_DIR/$HF_FILE"
+  mkdir -p "$MODEL_DIR"
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/embed"
+  if [ -f "$MODEL_PATH" ]; then
+    echo "  Memory-search model already cached (${HF_FILE})"
+    return 0
+  fi
+  echo "  Downloading the memory-search model (${HF_FILE}, ~639 MB)..."
+  if ! as_clawbox_login "hf download \"$HF_REPO\" \"$HF_FILE\" --local-dir \"$MODEL_DIR\""; then
+    echo "Error: failed to download the memory-search model" >&2
+    return 1
+  fi
+  if [ ! -f "$MODEL_PATH" ]; then
+    echo "Error: download completed but ${MODEL_PATH} was not found" >&2
+    return 1
+  fi
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/embed"
+  echo "  Memory-search model cached for offline use"
+}
+
+# Cache the memory-search GGUF.
+#
+# NO HARNESS GATE HERE, deliberately, and the gate moved to the CALL SITES
+# rather than away: `/setup-api/embed/install` dispatches this very step as
+# `--step embed_model`, and on the SKU with no OpenClaw that is the Memory
+# Shard wizard's own provisioning click — ClawBox owns the index there
+# (src/lib/memory-index-local.ts) and the model is what it embeds with. What
+# must NOT happen is a flash spending 639 MB on a box that may never switch
+# the feature on, so the main install flow keeps asking `has_openclaw_harness`
+# before it calls this.
+step_embed_model() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the memory-search model cache"
+    return 0
+  fi
+  # `hf` is installed by step_llamacpp_install. Without it there is nothing
+  # this step can do — say so instead of failing on a missing binary; the
+  # unit's start script fetches the model on first use once it exists.
+  if ! as_clawbox_login "command -v hf" &>/dev/null; then
+    echo "  Hugging Face CLI not installed — skipping the memory-search model cache"
+    return 0
+  fi
+  ensure_embed_model_cached
 }
 
 # The OpenClaw gateway is an UNAUTHENTICATED agent control surface on
@@ -1413,7 +4595,34 @@ step_edition_foreign_teardown() {
     brought_down+=("$funit (was active=$f_active enabled=$f_enabled)")
   done
 
-  if [ "${#brought_down[@]}" -eq 0 ]; then
+  # The clawbox USER's units belonging to the other edition
+  # (FOREIGN_EDITION_USER_UNITS, built beside the list above by the same
+  # negation): reached through the user's session bus, the way
+  # pause_engine_user_unit reaches the voice units. Stopped and disabled, not
+  # removed: `hermes gateway install` puts the unit back on the next swap.
+  if [ "${#FOREIGN_EDITION_USER_UNITS[@]}" -gt 0 ] && [ "${CLAWBOX_KEEP_FOREIGN_UNITS:-0}" != "1" ]; then
+    local uunit u_user u_uid u_state
+    u_user="${CLAWBOX_USER:-clawbox}"
+    u_uid="$(id -u "$u_user" 2>/dev/null || true)"
+    for uunit in "${FOREIGN_EDITION_USER_UNITS[@]}"; do
+      [ -n "$u_uid" ] || break
+      sudo -u "$u_user" XDG_RUNTIME_DIR="/run/user/$u_uid" \
+        systemctl --user cat "$uunit" >/dev/null 2>&1 || continue
+      u_state="$(sudo -u "$u_user" XDG_RUNTIME_DIR="/run/user/$u_uid" systemctl --user is-active "$uunit" 2>/dev/null || true)"
+      # Never reported as brought down on faith: a unit the user's manager
+      # would not disable is still the second poller, and the owner has to be
+      # told so with the command that finishes the job.
+      if sudo -u "$u_user" XDG_RUNTIME_DIR="/run/user/$u_uid" \
+          systemctl --user disable --now "$uunit" >/dev/null 2>&1; then
+        brought_down+=("$uunit (the clawbox user's unit; was active=${u_state:-unknown})")
+      else
+        echo "  Warning: could not disable the clawbox user's $uunit (was active=${u_state:-unknown});" >&2
+        echo "    it goes on polling the Telegram bot beside the OpenClaw gateway until it is stopped:" >&2
+        echo "    sudo -u $u_user XDG_RUNTIME_DIR=/run/user/$u_uid systemctl --user disable --now $uunit" >&2
+      fi
+    done
+  fi
+if [ "${#brought_down[@]}" -eq 0 ]; then
     return 0
   fi
 
@@ -1448,16 +4657,85 @@ step_edition_foreign_teardown() {
 # stale hermes lock forever, because this step only ever wrote and never
 # reconciled. All three editions are baked now; "dual" used to return early
 # here, which is why the premium SKU could not be provisioned at all.
+# BOTH RECORDS ARE WRITTEN ATOMICALLY, through the same `install_root_file`
+# every other root-owned file goes through (TASK-584). `> file` is
+# open(O_TRUNC) + write + close, so for the length of the write every reader on
+# the box sees a zero-length or half-written lock — and `readEditionSource()`
+# turns that into `{edition: "openclaw", defaulted: true}`. This step runs on
+# EVERY in-app update, while the middleware, `openclawIsAbsent()`, the updater's
+# own `hasHermesHarness()`, the gateway catch-all and the MCP server are all
+# reading that file: a Hermes box briefly answers as an OpenClaw one, which is
+# how the flagship SKU's gateway-only paths stop 404-ing and the updater skips
+# `--step hermes_edition`. A rename cannot be observed half-done.
 step_edition_lock() {
   install -d -o root -g root -m 0755 /etc/clawbox
-  printf '# ClawBox edition lock — written by install.sh (step_edition_lock).\n# Root-owned on purpose: this is the authority for the device SKU.\nCLAWBOX_EDITION=%s\n' \
-    "$CLAWBOX_EDITION" > "$CLAWBOX_EDITION_FILE"
-  chown root:root "$CLAWBOX_EDITION_FILE"
-  chmod 0644 "$CLAWBOX_EDITION_FILE"
+  local _edition_tmp
+  _edition_tmp="$(mktemp)"
+  # The STAGING write is checked too. `install_root_file` copies whatever is in
+  # the temp and answers 0 for a copy that worked, so a `printf` that failed
+  # after writing a prefix — a full /tmp is the ordinary way — would be
+  # published atomically as a TRUNCATED lock, which `readEditionSource()` reads
+  # as `{edition: "openclaw", defaulted: true}`: the exact answer this step
+  # exists to stop the box giving. Errexit is off for this whole function on
+  # the update path, so nothing else would have caught it.
+  if ! printf '# ClawBox edition lock — written by install.sh (step_edition_lock).\n# Root-owned on purpose: this is the authority for the device SKU.\nCLAWBOX_EDITION=%s\n' \
+    "$CLAWBOX_EDITION" > "$_edition_tmp"; then
+    rm -f "$_edition_tmp"
+    echo "  Error: could not stage the edition lock for $CLAWBOX_EDITION_FILE" >&2
+    return 1
+  fi
+  # BOTH RECORDS ARE STAGED BEFORE EITHER IS COMMITTED. They are two files and
+  # no rename can cover both, but staging is where the ordinary failure lives
+  # (a full /tmp, an EIO) — and committing the lock and then failing to stage
+  # the drop-in would leave the two naming DIFFERENT editions until a later
+  # update: readers of the lock and readers of the systemd unit disagreeing
+  # about the SKU, which is the state this step exists to prevent. What is left
+  # after this is a failing rename of the second file, immediately after a
+  # successful copy of it into the same directory; the step answers non-zero,
+  # so the update reports it and the next run rewrites both from the top.
+  # The drop-in's DIRECTORY counts as part of staging it: created after the
+  # lock was committed, a failure here would leave the same split the ordering
+  # above exists to prevent.
+  if ! mkdir -p /etc/systemd/system/clawbox-setup.service.d; then
+    rm -f "$_edition_tmp"
+    echo "  Error: could not create the drop-in directory for $LEGACY_EDITION_DROPIN" >&2
+    return 1
+  fi
+  local _dropin_tmp
+  _dropin_tmp="$(mktemp)"
+  if ! printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" > "$_dropin_tmp"; then
+    rm -f "$_edition_tmp" "$_dropin_tmp"
+    echo "  Error: could not stage the edition drop-in for $LEGACY_EDITION_DROPIN" >&2
+    return 1
+  fi
 
-  mkdir -p /etc/systemd/system/clawbox-setup.service.d
-  printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" \
-    > "$LEGACY_EDITION_DROPIN"
+  # The return value is CHECKED, and it has to be on this step specifically.
+  # `install_root_file` answers 1 when the copy or the rename did not land, and
+  # the update path calls this step from an OR-list — for the whole body of
+  # which bash switches errexit OFF (the same trap `install_root_libexec`
+  # records above). Dropped, a failed write was followed by successful commands,
+  # the function returned the LAST step's status, the non-fatal warning never
+  # printed, and the update reported success over a lock that still names the
+  # previous SKU — with the two records free to disagree.
+  if ! install_root_file "$_edition_tmp" "$CLAWBOX_EDITION_FILE" 0644; then
+    rm -f "$_edition_tmp" "$_dropin_tmp"
+    echo "  Error: could not write the edition lock at $CLAWBOX_EDITION_FILE" >&2
+    return 1
+  fi
+  rm -f "$_edition_tmp"
+
+  if ! install_root_file "$_dropin_tmp" "$LEGACY_EDITION_DROPIN" 0644; then
+    rm -f "$_dropin_tmp"
+    # The lock landed and this one did not, so the two records name different
+    # editions until the next run. Said in those words rather than as a generic
+    # write failure: /etc/clawbox/edition.env is the AUTHORITY (every reader in
+    # src/ and the updater unit take the SKU from it) and this drop-in is the
+    # mirror kept for tooling that still reads it, so the box behaves as the
+    # lock says while an operator reading the unit would be told otherwise.
+    echo "  Error: the edition lock now says $CLAWBOX_EDITION but the drop-in at $LEGACY_EDITION_DROPIN could not be rewritten — the two records disagree until the next update" >&2
+    return 1
+  fi
+  rm -f "$_dropin_tmp"
   systemctl daemon-reload 2>/dev/null || true
 
   step_edition_gateway_state
@@ -1478,19 +4756,666 @@ step_edition_lock() {
 # Hermes appliance.
 step_hermes_edition() {
   has_hermes_harness || return 0
-  if [ ! -f "$PROJECT_DIR/scripts/setup-hermes-edition.sh" ]; then
+  if [ ! -f "$SRC_DIR/scripts/setup-hermes-edition.sh" ]; then
     echo "  Warning: scripts/setup-hermes-edition.sh missing — Hermes not provisioned"
     return 1
   fi
-  CLAWBOX_EDITION="$CLAWBOX_EDITION" bash "$PROJECT_DIR/scripts/setup-hermes-edition.sh"
+  # CLAWBOX_SRC_DIR carries the mirror across the script boundary: that script
+  # installs unit files into /etc/systemd/system as root, and without it the
+  # mirror would stop at install.sh's own edge. TASK-733.
+  CLAWBOX_EDITION="$CLAWBOX_EDITION" CLAWBOX_SRC_DIR="$SRC_DIR" \
+    bash "$SRC_DIR/scripts/setup-hermes-edition.sh"
+}
+
+# ── The harness swap: OpenClaw ↔ Hermes on a box that is already provisioned ──
+#
+# Settings → Harness's button (the owner, 2026-09-07). The route writes
+# $PROJECT_DIR/data/harness-swap.env and starts this step through the granted
+# launcher; everything below runs as ROOT off a file the clawbox ACCOUNT can
+# write — the web server, the Terminal app, the agent's shell and a coding run
+# all can, and each can start the step too. So, as with data/timezone.env, the
+# VALUE gate is the boundary and not who asked: the file is parsed and never
+# sourced, the target has to be exactly one of the two single editions, the
+# request has to be recent, and the worst thing the account can obtain is a
+# swap the owner did not ask for — loud in the journal and on the desktop, and
+# reversible with the same button.
+#
+# The sub-steps are the installer's own edition steps, RE-EXECUTED one at a
+# time as the target edition (`bash "$SRC_DIR/install.sh" --step <s>` with
+# CLAWBOX_EDITION=<target>). Calling the step functions in THIS process would
+# run them against this process's edition globals, which were computed at
+# parse time for the edition the box still IS: the predicates, the service
+# lists and FOREIGN_EDITION_UNITS all carry the old answer, so
+# step_edition_lock would tear down the wrong harness. A fresh parse is the
+# only way to get them for the target. The re-exec is safe by construction:
+# nothing on the --step path takes a lock, the child's own EXIT trap turns a
+# recorded provisioning failure into a non-zero exit this process reads, and
+# its output inherits the unit's journal so the route's tail sees it.
+#
+# ORDER is the whole safety story: the harness being SWAPPED TO is installed
+# and PROVED to run before the lock flips, so an install that fails — no
+# network, a mirror down, a broken installer — leaves the box exactly what it
+# was. Only after the proof does anything irreversible happen.
+
+# What the route wrote, parsed and gated. Prints the target edition on 0.
+#   1  no request on disk (a genuine no-op)
+#   2  TARGET_EDITION is not exactly `openclaw` or `hermes`
+#   3  data/harness-swap.env is not the plain file the route writes
+#   4  REQUESTED_AT is missing, not a number, older than an hour or in the future
+read_configured_harness_swap() {
+  local req="$PROJECT_DIR/data/harness-swap.env" line target at now
+  # Same shape rule as read_configured_timezone, for the same reason: `[ -f ]`
+  # follows a symlink and is false for a directory or a FIFO, so every planted
+  # shape would otherwise read as "no request" and exit 0 — and a FIFO would
+  # park the grep below for ever.
+  if [ -L "$req" ] || { [ -e "$req" ] && [ ! -f "$req" ]; }; then
+    echo "Error: $req is not the plain file the harness-swap route writes — refusing to read it." >&2
+    return 3
+  fi
+  [ -f "$req" ] || return 1
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?TARGET_EDITION=" "$req" 2>/dev/null)" || return 2
+  target="${line#*=}"
+  case "$target" in
+    \"*\") target="${target#\"}"; target="${target%\"}" ;;
+    \'*\') target="${target#\'}"; target="${target%\'}" ;;
+  esac
+  # Exactly the two single editions, case-sensitive: this value becomes
+  # CLAWBOX_EDITION for a root re-exec of this file, and `dual` is a SKU, not
+  # a swap target.
+  case "$target" in
+    openclaw|hermes) ;;
+    *) return 2 ;;
+  esac
+  # A request is an INTENT with a time on it, not a standing order: the route
+  # deletes the file when its stream ends, but one that outlived a crashed web
+  # server must not swap the box on some later, unrelated start of this step.
+  # An hour is longer than any swap takes; the five minutes forward is clock
+  # skew, not a grant.
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?REQUESTED_AT=" "$req" 2>/dev/null)" || return 4
+  at="${line#*=}"
+  case "$at" in
+    \"*\") at="${at#\"}"; at="${at%\"}" ;;
+    \'*\') at="${at#\'}"; at="${at%\'}" ;;
+  esac
+  case "$at" in ''|*[!0-9]*) return 4 ;; esac
+  # Twelve digits outlast the epoch by centuries; anything longer is not a
+  # time and must not reach the arithmetic below.
+  [ "${#at}" -le 12 ] || return 4
+  now="$(date +%s)"
+  [ "$at" -le $((now + 300)) ] || return 4
+  [ "$at" -ge $((now - 3600)) ] || return 4
+  printf '%s' "$target"
+}
+
+# One installer step, run as the TARGET edition, out of the copy of install.sh
+# root is already executing ($SRC_DIR — the mirror on a dispatched step).
+#
+# CLAWBOX_ALLOW_EDITION_CHANGE=1 is what the top-level refusal requires while
+# the lock still names the edition being left; CLAWBOX_EDITION_CHANGE_REASON
+# turns its "finish the transition by hand" paragraph into one line naming
+# this step, because that paragraph is untrue here and this is the one journal
+# the owner is watching. CLAWBOX_INSTALL_BOOTSTRAPPED=1 pins the child to the
+# on-disk copy: a swap must not fetch or reset the tree, and this process was
+# itself pinned by the dispatcher.
+harness_swap_substep() {
+  local name="$1" target="$2"
+  echo "  -> install.sh --step $name (as the $(harness_swap_label "$target") edition)"
+  CLAWBOX_EDITION="$target" CLAWBOX_ALLOW_EDITION_CHANGE=1 \
+    CLAWBOX_EDITION_CHANGE_REASON="harness swap in progress (install.sh --step harness_swap)" \
+    CLAWBOX_INSTALL_BOOTSTRAPPED=1 \
+    bash "$SRC_DIR/install.sh" --step "$name"
+}
+
+# The harness as the Settings page names it. The swap route's own sentences
+# say "Hermes" and "OpenClaw" (HARNESSES[target].label), and the one line of
+# this journal the owner reads is drawn beside them in the same modal — so it
+# must not be the one place that spells the SKU ids.
+harness_swap_label() {
+  case "$1" in
+    hermes) echo "Hermes" ;;
+    openclaw) echo "OpenClaw" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# A failure is TWO lines, and the split is a contract with the swap route:
+# failureReason (src/lib/root-step-follow.ts) hands the owner's modal the LAST
+# journal line that says "error", verbatim. So the sentence carries what the
+# owner needs — which phase failed, what the box now is, what is missing, the
+# harness by its name — and nothing that is an operator's: no path, no account
+# name, no command (the voice route's rule: the stated reason reaches the
+# owner, never the install hint). The repair goes on a second line worded so
+# that it never contains "error" and is never the one picked; the journal
+# keeps it. Only prints — the caller's `return 1` is the failure, so `set -e`
+# cannot cut the sentence off between the two lines.
+harness_swap_say_failed() {
+  local phase="$1" sentence="$2" repair="${3:-}"
+  echo "Error: the $phase phase failed — $sentence" >&2
+  if [ -n "$repair" ]; then
+    echo "  Repair: $repair" >&2
+  fi
+}
+
+# ": <last non-empty line>" of a probe's captured stderr, or nothing when it
+# said nothing — the one line that says WHY, for the sentence above.
+harness_swap_last_line() {
+  local last
+  last="$(printf '%s\n' "$1" | sed -e '/^[[:space:]]*$/d' | tail -n 1)"
+  if [ -n "$last" ]; then
+    printf ': %s' "$last"
+  fi
+}
+
+# Why the harness being swapped to does not run, for the failure sentence;
+# set by the two probes below, read only after one of them returned 1.
+HARNESS_SWAP_PROBE_SAID=""
+
+# Does Hermes RUN on this box? step_hermes_install is non-fatal by design — a
+# box with no network must not lose the agent it has — so its exit status says
+# nothing, and this proof is the swap's own. The same three facts that step
+# checks: the shim, the interpreter it execs, and the shim answering as the
+# clawbox user (a root probe leaves root-owned __pycache__ in a clawbox tree).
+# The probe's stderr is CAPTURED, not discarded — the way apply_timezone keeps
+# timedatectl's refusal — because its last line is the one that says why, and
+# thrown away it left the owner a red modal with no reason on it.
+harness_swap_hermes_runnable() {
+  local shim="$CLAWBOX_HOME/.local/bin/hermes"
+  local venv_python="$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python"
+  local said
+  HARNESS_SWAP_PROBE_SAID=""
+  if [ ! -x "$shim" ]; then
+    HARNESS_SWAP_PROBE_SAID="its launcher is missing"
+    return 1
+  fi
+  if [ ! -x "$venv_python" ]; then
+    HARNESS_SWAP_PROBE_SAID="its Python environment is missing"
+    return 1
+  fi
+  if said="$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" "$shim" --help 2>&1 >/dev/null)"; then
+    return 0
+  fi
+  harness_swap_print_probe "$said"
+  HARNESS_SWAP_PROBE_SAID="its launcher does not start$(harness_swap_last_line "$said")"
+  return 1
+}
+
+harness_swap_openclaw_runnable() {
+  local said
+  HARNESS_SWAP_PROBE_SAID=""
+  if [ ! -x "$OPENCLAW_BIN" ]; then
+    HARNESS_SWAP_PROBE_SAID="its command is missing"
+    return 1
+  fi
+  if said="$("$OPENCLAW_BIN" --version 2>&1 >/dev/null)"; then
+    return 0
+  fi
+  harness_swap_print_probe "$said"
+  HARNESS_SWAP_PROBE_SAID="its command does not answer --version$(harness_swap_last_line "$said")"
+  return 1
+}
+
+# The whole of what a failed probe said, indented, for the journal — BEFORE
+# the sentence, so a line of its own that happens to say "error" is never the
+# one the modal picks.
+harness_swap_print_probe() {
+  [ -n "$1" ] || return 0
+  printf '%s\n' "$1" | sed -e 's/^/    | /'
+}
+
+harness_swap_to_hermes() {
+  local from="$1" was
+  was="$(harness_swap_label "$from")"
+  echo "[harness-swap] phase=install"
+  if ! harness_swap_substep hermes_install hermes; then
+    harness_swap_say_failed install "the Hermes install step did not finish. This box is still the $was edition and nothing was changed." \
+      "nothing to undo; the install step's own lines are above — swap again from Settings → Harness"
+    return 1
+  fi
+  if ! harness_swap_hermes_runnable; then
+    harness_swap_say_failed install "Hermes does not run on this box after its install step ($HARNESS_SWAP_PROBE_SAID). This box is still the $was edition and nothing was changed." \
+      "nothing to undo; swap again from Settings → Harness once that is answered"
+    return 1
+  fi
+  echo "  Hermes runs"
+  echo "[harness-swap] phase=lock"
+  # step_edition_lock can only fail at the lock or drop-in write itself (its
+  # two state steps return 0 unconditionally), so the lock may still name the
+  # edition being left, and a repair has to re-bake it AS THE TARGET before
+  # any provisioning step can do anything: run as the recorded edition,
+  # hermes_edition hits `has_hermes_harness || return 0` and exits clean
+  # having provisioned nothing.
+  if ! harness_swap_substep edition_lock hermes; then
+    harness_swap_say_failed lock "the edition lock step did not finish. This box may now be the Hermes edition with the OpenClaw gateway gone and no Hermes dashboard." \
+      "sudo CLAWBOX_EDITION=hermes CLAWBOX_ALLOW_EDITION_CHANGE=1 bash $PROJECT_DIR/install.sh --step edition_lock && sudo bash $PROJECT_DIR/install.sh --step hermes_edition"
+    return 1
+  fi
+  echo "[harness-swap] phase=provision"
+  if ! harness_swap_substep hermes_edition hermes; then
+    harness_swap_say_failed provision "the Hermes provisioning step did not finish. This box is now the Hermes edition without a working dashboard." \
+      "sudo bash $PROJECT_DIR/install.sh --step hermes_edition"
+    return 1
+  fi
+  local unit what
+  for unit in clawbox-hermes-dashboard.service clawbox-hermes-dashboard-proxy.service; do
+    if [ "$(systemctl is-enabled "$unit" 2>/dev/null || true)" != "enabled" ]; then
+      case "$unit" in
+        *-proxy.service) what="the Hermes dashboard's proxy" ;;
+        *) what="the Hermes dashboard" ;;
+      esac
+      harness_swap_say_failed provision "$what is not enabled after provisioning. This box is now the Hermes edition with its dashboard not enabled." \
+        "sudo systemctl enable --now $unit"
+      return 1
+    fi
+  done
+  echo "  Hermes dashboard units enabled"
+}
+
+# openclaw_install before the lock (a pinned core that will not install leaves
+# the box what it was), gateway_setup after it (the lock unmasks the unit that
+# setup copies back — the other order writes the unit file into /dev/null),
+# openclaw_patch because it is idempotent on both generations, and deliberately
+# NO openclaw_config: gateway-pre-start.sh owns the gateway auth on every start,
+# the unit runs --allow-unconfigured, and the sign-in and the bot are carried
+# across by the route afterwards. On OpenClaw 2 that step seeds nothing a swap
+# needs — the model is left unset for onboarding, compaction is the
+# generation's own, and its ClawBox AI fallback comes only from the CI-only
+# CLAWBOX_AI_API_KEY — while an `openclaw config set` after gateway_setup would
+# restart the gateway under the listener wait below, which reads a restart as
+# a crash loop; and over an owner's existing openclaw.json it would re-seed
+# what they chose.
+harness_swap_to_openclaw() {
+  local from="$1" was
+  was="$(harness_swap_label "$from")"
+  echo "[harness-swap] phase=install"
+  if ! harness_swap_substep openclaw_install openclaw; then
+    harness_swap_say_failed install "the OpenClaw install step did not finish. This box is still the $was edition and nothing was changed." \
+      "nothing to undo; the install step's own lines are above — swap again from Settings → Harness"
+    return 1
+  fi
+  if ! harness_swap_openclaw_runnable; then
+    harness_swap_say_failed install "OpenClaw does not run on this box after its install step ($HARNESS_SWAP_PROBE_SAID). This box is still the $was edition and nothing was changed." \
+      "nothing to undo; swap again from Settings → Harness once that is answered"
+    return 1
+  fi
+  echo "  OpenClaw runs"
+  echo "[harness-swap] phase=lock"
+  # As above: the lock may still say the edition being left, and run that way
+  # `--step gateway_setup` copies the unit into the mask at /dev/null — the
+  # exact case step_edition_gateway_state's own comment warns about — so the
+  # repair re-bakes the lock as the target first.
+  if ! harness_swap_substep edition_lock openclaw; then
+    harness_swap_say_failed lock "the edition lock step did not finish. This box may now be the OpenClaw edition with the Hermes units down and no gateway unit." \
+      "sudo CLAWBOX_EDITION=openclaw CLAWBOX_ALLOW_EDITION_CHANGE=1 bash $PROJECT_DIR/install.sh --step edition_lock && sudo bash $PROJECT_DIR/install.sh --step gateway_setup"
+    return 1
+  fi
+  echo "[harness-swap] phase=provision"
+  if ! harness_swap_substep gateway_setup openclaw; then
+    harness_swap_say_failed provision "the gateway setup step did not finish. This box is now the OpenClaw edition with its gateway not installed." \
+      "sudo bash $PROJECT_DIR/install.sh --step gateway_setup"
+    return 1
+  fi
+  if ! harness_swap_substep openclaw_patch openclaw; then
+    harness_swap_say_failed provision "the gateway patch step did not finish. This box is now the OpenClaw edition with its gateway unpatched." \
+      "sudo bash $PROJECT_DIR/install.sh --step openclaw_patch"
+    return 1
+  fi
+  # The box's own wait, not a private one: wait_for_gateway_port gives the
+  # listener 180 s in 3 s polls and stops the moment the unit stops trying or
+  # RESTARTS (a crash loop spends its time `activating`, which a state check
+  # alone reads as "still starting"). The brief said "retry <= 60 s", and a
+  # 60 s loop is what shipped first — but the listener came 14 s after
+  # `Started` behind an ExecStartPre measured at 31, 86 and 120 s on this box
+  # (2026-09-06), so on the slower half of its own starts the swap was
+  # reported failed — lock flipped, carry-over skipped — over a gateway that
+  # listened a minute later. This is the one budget install.sh keeps, and the
+  # header of wait_for_gateway_port says why no fact can replace it. The budget
+  # is this step's alone: GATEWAY_READY_SPENT is 0 in a fresh dispatch and
+  # nothing before this spent any of it.
+  if ! wait_for_gateway_port; then
+    harness_swap_say_failed provision "the OpenClaw gateway did not start listening on port ${GATEWAY_PORT:-18789} (it stopped, is restarting, or took longer than ${CLAWBOX_GATEWAY_READY_BUDGET_S:-180} s). This box is now the OpenClaw edition with its gateway down." \
+      "journalctl -u clawbox-gateway.service"
+    return 1
+  fi
+  echo "  OpenClaw gateway is listening"
+}
+
+# Every phase is announced on ONE line of exactly this shape, because the swap
+# route reads them out of the journal to draw its progress: request → install
+# → lock → provision → done. The `done` here ends the ROOT STEP, not the swap —
+# the route relays it as a plain line, carries the credentials across, and
+# prints its own `carry` and `done`. Nothing here prints a credential.
+step_harness_swap() {
+  local req="$PROJECT_DIR/data/harness-swap.env" target rc=0
+  target="$(read_configured_harness_swap)" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) echo "  No harness swap requested — nothing to do"; return 0 ;;
+    2) echo "Error: data/harness-swap.env does not name an edition this box can be swapped to (openclaw or hermes) — refusing." >&2; return 1 ;;
+    3) echo "Error: the harness-swap request was refused — leaving the edition alone." >&2; return 1 ;;
+    4) echo "Error: the harness-swap request is stale (older than an hour, or dated in the future) — ask for the swap again." >&2; return 1 ;;
+    *) echo "Error: could not read the harness-swap request (rc=$rc) — leaving the edition alone." >&2; return 1 ;;
+  esac
+  echo "[harness-swap] phase=request"
+  local recorded="${CLAWBOX_RECORDED_EDITION:-}"
+  case "$recorded" in
+    dual)
+      echo "Error: a dual box switches harness at runtime — refusing to swap its edition." >&2
+      return 1
+      ;;
+    "")
+      # No lock and no legacy drop-in: nothing on the box says what it IS, so
+      # there is nothing to swap FROM. The route never asks in this state
+      # (its target is null while the edition is defaulted); refusing here
+      # keeps that true for the account that can write the file directly.
+      echo "Error: this box has no edition lock — refusing to swap an edition it never recorded." >&2
+      return 1
+      ;;
+  esac
+  local name
+  name="$(harness_swap_label "$target")"
+  if [ "$recorded" = "$target" ]; then
+    rm -f "$req"
+    echo "  Already the $name edition — nothing to do"
+    return 0
+  fi
+  echo "  Swapping this box from the $(harness_swap_label "$recorded") edition to $name"
+  case "$target" in
+    hermes) harness_swap_to_hermes "$recorded" ;;
+    openclaw) harness_swap_to_openclaw "$recorded" ;;
+  esac
+  echo "[harness-swap] phase=done"
+  # Only now: a request left on disk is how a failed swap stays tellable from
+  # a finished one, and deleting it after a failure is the route's to do.
+  rm -f "$req"
+  echo "  This box is now the $name edition"
+}
+
+openclaw_migration_complete() {
+  [ "$1" -eq 0 ] || return 1
+  if printf '%s\n' "$2" | grep -qiE 'requires stopped-writer maintenance|Legacy session store requires migration|startup migrations did not complete|Skipped historical transcript directive migration'; then
+    return 1
+  fi
+  return 0
+}
+
+# Stop a gateway through the supplied service manager and verify it is quiescent.
+# A failed query is not evidence that the unit is absent; systemctl can fail
+# while a live service still owns the state we are about to migrate.
+stop_openclaw_unit_for_migration() {
+  local unit="$1"; shift
+  local status rc=0 load active
+  status="$("$@" show "$unit" -p LoadState -p ActiveState)" || rc=$?
+  load="$(printf '%s\n' "$status" | sed -n 's/^LoadState=//p')"
+  active="$(printf '%s\n' "$status" | sed -n 's/^ActiveState=//p')"
+  # systemctl may return nonzero for a missing unit, but still reports its
+  # explicit state. Only that known absent/inactive combination is a no-op.
+  if [ "$load" = not-found ] && [ "$active" = inactive ]; then
+    return 0
+  fi
+  if [ "$rc" -ne 0 ] || { [ "$load" != loaded ] && [ "$load" != masked ]; }; then
+    echo "Error: cannot inspect $unit before OpenClaw maintenance" >&2
+    return 1
+  fi
+  if ! "$@" stop "$unit"; then
+    echo "Error: cannot stop $unit; refusing OpenClaw maintenance" >&2
+    return 1
+  fi
+  if ! active="$("$@" show "$unit" -p ActiveState --value)"; then
+    echo "Error: cannot verify $unit stopped; refusing OpenClaw maintenance" >&2
+    return 1
+  fi
+  case "$active" in
+    inactive|failed) return 0 ;;
+    *) echo "Error: $unit is still $active; refusing OpenClaw maintenance" >&2; return 1 ;;
+  esac
+}
+
+stop_openclaw_gateways_for_migration() {
+  stop_openclaw_unit_for_migration clawbox-gateway.service systemctl || return 1
+  local uid manager_state
+  uid="$(id -u "$CLAWBOX_USER")" || return 1
+  # A stopped user manager has no user services to stop. Do not treat an
+  # inaccessible bus on an ACTIVE manager as an absent legacy gateway.
+  if ! manager_state="$(systemctl show "user@$uid.service" -p ActiveState --value)"; then
+    echo "Error: cannot inspect the legacy gateway's user manager" >&2
+    return 1
+  fi
+  case "$manager_state" in
+    inactive|failed) return 0 ;;
+    active)
+      stop_openclaw_unit_for_migration openclaw-gateway.service \
+        as_clawbox -H env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user || return 1
+      ;;
+    *) echo "Error: user manager is $manager_state; refusing OpenClaw maintenance" >&2; return 1 ;;
+  esac
+}
+
+# Everything under a path is on the disk before the caller goes on. A function
+# rather than a bare `sync`, so the bash-driven suites can stub the flush.
+flush_core_to_disk() {
+  sync -f "$1" || { echo "Error: could not flush $1 to disk" >&2; return 1; }
+}
+
+# Put a STAGED OpenClaw core in front of the gateway: flush it, set the live
+# tree aside, rename the staged tree into its place, move the launchers over,
+# flush again, drop the old tree. The live core is untouched until the first
+# rename and whole after the last one, so a box that stops at any point in
+# between has a runnable core of one version or the other — never the third
+# thing the 2026-09-16 boxes were left with (see step_openclaw_install).
+# What a promotion that stopped between its two renames leaves: the live tree
+# gone and the old one parked as `.openclaw-previous`. Put it back — the box
+# then has the core it had — and, when the live tree IS there, drop whatever a
+# finished promotion did not get to remove. Called before the core is probed,
+# so a parked core is never mistaken for an absent one.
+recover_parked_openclaw_core() {
+  local live="$NPM_PREFIX/lib/node_modules/openclaw"
+  local previous="$NPM_PREFIX/lib/node_modules/.openclaw-previous"
+  local stage="$NPM_PREFIX/.openclaw-stage"
+  if ! { [ -e "$live" ] || [ -L "$live" ]; }; then
+    if [ -e "$previous" ] || [ -L "$previous" ]; then
+      echo "  An earlier core swap was cut short with the previous OpenClaw core set aside — putting it back"
+      mv "$previous" "$live" || echo "  Warning: could not put the previous OpenClaw core back ($previous)" >&2
+    fi
+    return 0
+  fi
+  if [ -e "$previous" ] || [ -L "$previous" ] || [ -e "$stage" ]; then
+    echo "  Removing what an earlier core swap left behind"
+    rm -rf "$previous" "$stage"
+  fi
+}
+
+promote_staged_openclaw_core() {
+  local stage="$1"
+  local live="$NPM_PREFIX/lib/node_modules/openclaw"
+  local previous="$NPM_PREFIX/lib/node_modules/.openclaw-previous"
+  local entry name
+  # This is called as `promote … || return 1`, which switches errexit OFF for
+  # its whole body: every step below that can fail is checked by hand.
+  # THE FLUSH IS THE POINT. npm's writes sit in the page cache until the kernel
+  # gets round to them (ext4's delayed allocation, seconds to tens of seconds):
+  # on 2026-09-16 npm exited 0 at 21:31:02, the box stopped at ~21:31:07-35,
+  # and 5,346 of the 35,025 files it had just written — openclaw.mjs and
+  # package.json among them — came back zero-length: a complete tree in shape
+  # and a gateway that could not exec its own launcher.
+  flush_core_to_disk "$stage" || return 1
+  mkdir -p "$NPM_PREFIX/lib/node_modules" "$NPM_PREFIX/bin"
+  rm -rf "$previous"
+  if [ -e "$live" ] || [ -L "$live" ]; then
+    mv "$live" "$previous" || { echo "Error: could not set the current OpenClaw core aside ($live)" >&2; return 1; }
+  fi
+  if ! mv "$stage/lib/node_modules/openclaw" "$live"; then
+    echo "Error: could not move the staged OpenClaw core into place; putting the previous one back" >&2
+    { [ -e "$previous" ] || [ -L "$previous" ]; } && mv "$previous" "$live"
+    return 1
+  fi
+  # The launchers npm linked in the stage: relative symlinks into
+  # ../lib/node_modules/<pkg>/…, which resolve the same from the live bin dir.
+  for entry in "$stage"/bin/*; do
+    { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
+    name="$(basename "$entry")"
+    rm -f "$NPM_PREFIX/bin/$name"
+    if ! mv "$entry" "$NPM_PREFIX/bin/$name"; then
+      echo "Error: could not move the launcher $name into $NPM_PREFIX/bin" >&2
+      return 1
+    fi
+  done
+  if ! { [ -e "$NPM_PREFIX/bin/openclaw" ] || [ -L "$NPM_PREFIX/bin/openclaw" ]; }; then
+    echo "Error: the staged core came with no openclaw launcher; the new tree is in place but nothing starts it" >&2
+    return 1
+  fi
+  # The renames too, before doctor's migration runs on the new core: a stop in
+  # the seconds that follow must find it whole AND in place.
+  flush_core_to_disk "$NPM_PREFIX" || true
+  rm -rf "$previous" "$stage"
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX" 2>/dev/null || true
+}
+
+# A SECOND OpenClaw core, outside $NPM_PREFIX, that nothing on the box updates.
+# The distro's npm has /usr as its default prefix, so one `sudo npm install -g
+# openclaw` — a support session, a README followed by hand — leaves a root-owned
+# core at /usr/lib/node_modules/openclaw with its launcher at /usr/bin/openclaw,
+# and every update after that moves the MANAGED core forward and leaves that one
+# where it was. The web server runs on /usr/bin/node and used to look for the
+# CLI beside its own node first, so it ran the stale core for every `config
+# set`, every `doctor --fix` and every version probe while the gateway ran the
+# managed one. On 2026-09-18 that was 2026.7.1-2 against 2026.9.3: the new core
+# had migrated openclaw.json and the state database, the old CLI refused both,
+# and Settings answered "Credential migration failed" to every ClawBox AI
+# sign-in — with advice to run a command that works from the owner's Terminal,
+# whose PATH has the managed prefix first. `findOpenclawBin` asks the managed
+# prefix first now; this takes the second core off the box, so nothing else that
+# walks PATH as root or as a service (secure_path has no ~/.npm-global) can
+# meet it either.
+#
+# Deliberately narrow, because this is root deleting under /usr:
+#   - only once the managed core is THERE and executable — a box whose own
+#     install just failed keeps whatever core it has;
+#   - only an npm global install: a real directory whose package.json names
+#     `openclaw`, plus the bin symlinks that resolve INTO it. A hand-written
+#     wrapper, or a launcher pointing anywhere else, is left alone and said so;
+#   - never a path a package owns (`dpkg -S`), never $NPM_PREFIX, never a tree
+#     the managed launcher itself resolves into.
+# Never fails the step: a core that cannot be removed is a WARN, and the
+# resolver order already keeps it from being run by ClawBox.
+#
+# The prefixes are ARGUMENTS (default /usr and /usr/local) rather than an
+# environment variable: the suites hand it a tmp dir, and nothing a caller
+# exports can point a root `rm -rf` somewhere new.
+remove_shadowing_system_openclaw() {
+  local prefix tree tree_real parked launcher entry target version managed_real removed
+  if [ ! -x "$OPENCLAW_BIN" ]; then
+    echo "  The managed OpenClaw core is not in place ($OPENCLAW_BIN) — leaving any system-wide install alone"
+    return 0
+  fi
+  managed_real="$(readlink -f "$OPENCLAW_BIN" 2>/dev/null || true)"
+  [ "$#" -gt 0 ] || set -- /usr /usr/local
+  for prefix in "$@"; do
+    tree="$prefix/lib/node_modules/openclaw"
+    parked="$prefix/lib/node_modules/.openclaw-shadow-removed"
+    launcher="$prefix/bin/openclaw"
+    [ "$prefix" = "$NPM_PREFIX" ] && continue
+    # A removal that was cut short — the box stopped inside the `rm -rf` below —
+    # is FINISHED here, not disowned. `rm -rf` unlinks package.json long before
+    # the bulk of the tree (measured on the box's ext4: 4th, ahead of the 187 MB
+    # dist/ and the 323 MB node_modules/), so a half-deleted tree left under its
+    # own name would fail the identity check below on every later run and sit
+    # under /usr for good. The tree is therefore PARKED under a name only this
+    # function writes — one rename, after every check has passed — and deleted
+    # from there.
+    if [ -d "$parked" ] && [ ! -L "$parked" ]; then
+      echo "  Finishing an earlier removal of a second OpenClaw core under $prefix"
+      rm -rf "$parked" || echo "  WARN: could not remove $parked" >&2
+    fi
+    # What a tree removed by hand leaves: a launcher that points into an install
+    # that is no longer there. `readlink -f` cannot resolve it — the tree is
+    # gone — so the target is normalised WITHOUT requiring it to exist
+    # (`readlink -m`) and must fall under THIS prefix's own tree. The link's
+    # text alone is not evidence: `/opt/vendor/lib/node_modules/openclaw/…` on a
+    # volume that is not mounted right now carries the same words and is
+    # somebody else's install. Never a launcher a package owns, and where
+    # `readlink -m` is not to be had the launcher is left alone.
+    if [ -L "$launcher" ] && [ ! -e "$launcher" ] && [ ! -e "$tree" ]; then
+      target="$(readlink -m "$launcher" 2>/dev/null || true)"
+      tree_real="$(readlink -m "$tree" 2>/dev/null || true)"
+      if [ -n "$target" ] && [ -n "$tree_real" ]; then
+        case "$target" in
+          "$tree_real"/*)
+            if command -v dpkg >/dev/null 2>&1 && dpkg -S "$launcher" >/dev/null 2>&1; then
+              echo "  NOTE: a package owns $launcher — leaving it to the package manager"
+            else
+              echo "  Removing a dangling OpenClaw launcher left behind at $launcher"
+              rm -f "$launcher" || echo "  WARN: could not remove $launcher" >&2
+            fi
+            ;;
+        esac
+      fi
+    fi
+    [ -d "$tree" ] && [ ! -L "$tree" ] || continue
+    if ! grep -Eq '"name"[[:space:]]*:[[:space:]]*"openclaw"' "$tree/package.json" 2>/dev/null; then
+      echo "  NOTE: $tree does not look like an npm install of openclaw — leaving it alone"
+      continue
+    fi
+    # LIKE WITH LIKE. `readlink -f` answers canonical paths, and the prefix as
+    # typed is not one wherever a component of it is a link (/usr/local moved
+    # to another disk). Compared against the typed tree, the managed launcher's
+    # target never matched — so a box hand-wired onto that core lost its only
+    # one — and neither did the launchers below.
+    tree_real="$(readlink -f "$tree" 2>/dev/null || true)"
+    [ -n "$tree_real" ] || tree_real="$tree"
+    case "$managed_real" in
+      "$tree_real"/*)
+        echo "  NOTE: the managed launcher resolves into $tree — leaving it alone"
+        continue
+        ;;
+    esac
+    if command -v dpkg >/dev/null 2>&1 \
+      && { dpkg -S "$tree/package.json" >/dev/null 2>&1 || dpkg -S "$launcher" >/dev/null 2>&1; }; then
+      echo "  NOTE: a package owns the OpenClaw install under $prefix — leaving it to the package manager"
+      continue
+    fi
+    # `|| true`: the step runs with errexit and pipefail ON, and `head` closing
+    # the pipe on a manifest with a second "version" key is a SIGPIPE for sed —
+    # a log line's detail must never be what ends an update.
+    version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tree/package.json" 2>/dev/null | head -1 || true)"
+    echo "  Removing a second OpenClaw core (${version:-unknown version}) under $prefix: it shadows the managed one at $NPM_PREFIX for everything that runs without ~/.npm-global on its PATH, and no update ever moves it"
+    removed=1
+    # The launchers first, and only the symlinks that resolve into THIS tree:
+    # they are what shadows, and once the tree has moved they dangle, which
+    # `readlink -f` cannot resolve and `[ -e ]` cannot see.
+    for entry in "$prefix"/bin/*; do
+      [ -L "$entry" ] || continue
+      target="$(readlink -f "$entry" 2>/dev/null || true)"
+      case "$target" in
+        "$tree_real"/*) rm -f "$entry" || removed=0 ;;
+      esac
+    done
+    if mv "$tree" "$parked"; then
+      rm -rf "$parked" || removed=0
+    else
+      removed=0
+    fi
+    if [ "$removed" -ne 1 ] || [ -e "$tree" ] || [ -e "$parked" ]; then
+      echo "  WARN: could not remove the second OpenClaw core under $prefix; ClawBox itself runs the managed one, but a root shell still finds this one first" >&2
+    elif [ -e "$launcher" ] || [ -L "$launcher" ]; then
+      # Only after a removal that WORKED: a launcher still there then is one the
+      # loop above judged not to be a link into that install.
+      echo "  NOTE: $launcher is not a link into that install — leaving it alone" >&2
+    fi
+  done
+  return 0
 }
 
 step_openclaw_install() {
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw npm install"; return 0; }
-  # Always re-assert the .bashrc PATH stanza before any early-return. The
+  # Re-assert the .bashrc PATH stanza before the early-returns BELOW. The
   # function is idempotent (greps before appending), and skipping it here
   # was the root cause of the recurring `bash: openclaw: command not found`
   # regression in the in-UI terminal after update runs.
+  #
+  # NOT before the Hermes return on the line above — that SKU never reaches
+  # this line. Both the stanza and the `.bashrc` collapse reach a Hermes box
+  # through step_post_update -> step_coding_harness, which is why that chain is
+  # pinned by src/tests/unit/install-bashrc-vendor-path-dedupe.test.ts.
   ensure_clawbox_bashrc_path
 
   # Pinned OpenClaw version comes from config/openclaw-target.txt — ClawBox
@@ -1502,7 +5427,7 @@ step_openclaw_install() {
   # pin file (e.g. `OPENCLAW_PIN_VERSION=2026.5.24-beta.2 sudo bash install.sh`).
   # Falls back to the hardcoded $OPENCLAW_VERSION if the pin file is missing,
   # so a corrupted/partial install still has something to install.
-  local PIN_FILE="$PROJECT_DIR/config/openclaw-target.txt"
+  local PIN_FILE="$SRC_DIR/config/openclaw-target.txt"
   local PINNED=""
   if [ -n "${OPENCLAW_PIN_VERSION:-}" ]; then
     PINNED="${OPENCLAW_PIN_VERSION}"
@@ -1513,18 +5438,40 @@ step_openclaw_install() {
     # would concat tokens on a hypothetical multi-field line — keeping the
     # two parsers identical avoids subtle UI ↔ install.sh desync if the file
     # format ever grows.
-    PINNED=$(head -1 "$PIN_FILE" | awk '{print $1}')
-    echo "  Pinned OpenClaw target from $PIN_FILE: $PINNED"
+    # `|| true`: this step is dispatched with errexit deliberately ON, so an
+    # unreadable pin file (permissions, a truncated mount) would abort the
+    # installer here. The `else` branch below already reports an unknown pin and
+    # falls back to the hardcoded version — that is the defined answer, and an
+    # aborted update is not. TASK-657, same shape as gateway-pre-start.sh:45.
+    PINNED=$(head -1 "$PIN_FILE" 2>/dev/null | awk '{print $1}' || true)
+    if [ -n "$PINNED" ]; then
+      echo "  Pinned OpenClaw target from $PIN_FILE: $PINNED"
+    else
+      # The `|| true` above turns an unreadable pin file into an empty PINNED,
+      # and a file that is empty (or whose first line is blank) gets there with
+      # `head` and `awk` both SUCCEEDING -- so this arm cannot claim the file
+      # could not be read. The fallback below is correct either way, but the
+      # unconditional line printed "Pinned OpenClaw target from ...: " and
+      # asserted a pin had been read when none had. The `else` branch's WARN is
+      # not reached from here, so say it here.
+      echo "  WARN: $PIN_FILE is empty or could not be read — falling back to hardcoded $OPENCLAW_VERSION" >&2
+    fi
   else
     echo "  WARN: $PIN_FILE not found — falling back to hardcoded $OPENCLAW_VERSION" >&2
   fi
   local TARGET="${PINNED:-$OPENCLAW_VERSION}"
   local CORE_NEEDS_INSTALL=1
+  local _oc_gateway_stopped=0
 
   # Keep this guard inside the OpenClaw step too, not only in apt_update:
-  # update retries can start from this step, and old images with Node v22.22.2
-  # otherwise install the npm package but fail as soon as the OpenClaw CLI runs.
+  # update retries can start from this step, and EVERY Node 22 — not just the
+  # v22.22.2 this comment was written for — otherwise installs the npm package
+  # and fails as soon as the OpenClaw CLI runs, because 2026.9.3 refuses the
+  # whole major.
   ensure_openclaw_node_engine
+
+  # A core an earlier swap parked is a core, not an absence.
+  recover_parked_openclaw_core
 
   if [ -x "$OPENCLAW_BIN" ]; then
     local INSTALLED INSTALLED_VER
@@ -1539,16 +5486,123 @@ step_openclaw_install() {
       CORE_NEEDS_INSTALL=0
     fi
   fi
+  stop_openclaw_gateways_for_migration || return 1
+  _oc_gateway_stopped=1
   if [ "$CORE_NEEDS_INSTALL" -eq 1 ]; then
     mkdir -p "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
-    as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
-    if [ ! -x "$OPENCLAW_BIN" ]; then
-      echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
+    # INTO A STAGING PREFIX, never over the live core. `npm install -g` reifies
+    # in place: it retires the old package tree first and removes it last, so
+    # for the length of the install — 33 s on an Orin over WiFi — the box has
+    # no core, and a stop anywhere in that window leaves it none. Then it
+    # answers before the kernel has written what it extracted. On 2026-09-16
+    # (see promote_staged_openclaw_core) three field boxes stopped seconds
+    # after npm exited 0 and came back with a core whose launcher and
+    # package.json were zero-length files. Staged, the live core is not
+    # touched until the new one is complete, gated AND on the disk, and the
+    # swap is two renames. The stage sits inside $NPM_PREFIX so those renames
+    # never cross a filesystem.
+    local _oc_stage="$NPM_PREFIX/.openclaw-stage"
+    rm -rf "$_oc_stage"
+    mkdir -p "$_oc_stage"
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$_oc_stage"
+    as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$_oc_stage"
+    if [ ! -x "$_oc_stage/bin/openclaw" ]; then
+      echo "Error: OpenClaw installation failed — npm left no openclaw launcher in $_oc_stage (the core already on the box is untouched)"
       exit 1
     fi
-    echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
+    # THE CORE IS THE AUTHORITY ON ITS OWN ENGINES, so its first word is a GATE
+    # and not a log line. `|| echo 'unknown version'` swallowed exactly the
+    # banner that says a runtime is unacceptable ("Node.js >=24.16.0 <25, or
+    # >=26.1.0 is required (current: v22.23.2)", exit 1 on every subcommand), and
+    # the step then walked on into a `doctor --fix` whose failure is a WARN and a
+    # `gateway_setup` that cannot come up — a box reporting a finished update with
+    # no assistant. The table above is OUR copy of `engines.node`; this is the
+    # core's own answer, and it is the one that decides.
+    #
+    # Asked of the STAGED launcher, before anything is swapped: a core that
+    # refuses this Node never reaches the live prefix, and the one already there
+    # keeps serving.
+    local _oc_version_out _oc_engines
+    if ! _oc_version_out="$("$_oc_stage/bin/openclaw" --version 2>&1)"; then
+      printf '%s\n' "$_oc_version_out" >&2
+      # python3, not node: this arm exists because the Node on this box is the
+      # problem, and asking it to read the file that says so is how a diagnosis
+      # disappears. python3 is a dependency of this step already (the plugin
+      # refresh below parses `plugins list --json` with it).
+      _oc_engines="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("engines") or {}).get("node") or "")' \
+        "$_oc_stage/lib/node_modules/openclaw/package.json" 2>/dev/null || true)"
+      echo "Error: openclaw@$TARGET is installed but refuses to run on $(node --version 2>/dev/null || echo 'this Node')." >&2
+      echo "       The line above is the core's own answer. It declares engines.node ${_oc_engines:-<unreadable>};" >&2
+      echo "       this installer was holding the box to $OPENCLAW_NODE_ENGINE, so the two disagree and" >&2
+      echo "       the table in install.sh is what needs correcting for this pin." >&2
+      node_engine_remedy
+      # `return 1`, not `exit 1`, and the gateway is LEFT STOPPED — the same
+      # shape as the migration blocker below, which this step's own
+      # `_oc_gateway_stopped` bookkeeping was built for: starting a gateway whose
+      # core refuses to run would only produce a restart loop, and `set -e` makes
+      # this return abort the run either way. Said out loud so the operator knows
+      # the box is parked rather than guessing.
+      echo "       The gateway is left stopped. Fix the Node, then Retry this step." >&2
+      rm -rf "$_oc_stage"
+      return 1
+    fi
+    # …and it answers. An empty answer is what a launcher with no bytes in it
+    # gives — exit 0, nothing printed — and that must never go live, whatever
+    # the target was.
+    if [ -z "$(printf '%s' "$_oc_version_out" | tr -d '[:space:]')" ]; then
+      echo "Error: the staged openclaw answers nothing to --version — leaving the core on the box as it is" >&2
+      rm -rf "$_oc_stage"
+      return 1
+    fi
+    # …and it is the core that was asked for. A pinned VERSION must come back
+    # as itself; a dist-tag (`OPENCLAW_PIN_VERSION=beta`) resolves to whatever
+    # npm chose and is not compared.
+    case "$TARGET" in
+      [0-9]*)
+        if [ "$(printf '%s\n' "$_oc_version_out" | awk 'NR==1 {print $2}')" != "$TARGET" ]; then
+          echo "Error: the staged openclaw answers '${_oc_version_out:-<nothing>}' to --version, not $TARGET — leaving the core on the box as it is" >&2
+          rm -rf "$_oc_stage"
+          return 1
+        fi
+        ;;
+    esac
+    promote_staged_openclaw_core "$_oc_stage" || return 1
+    echo "  OpenClaw installed: $_oc_version_out"
+  fi
+
+  # The managed core is in place on BOTH paths here — already at the pin, or
+  # just promoted — which is the one moment a second core under /usr can go
+  # without leaving the box with none. Before doctor, so the migrations below
+  # and everything after them run on a box that has exactly one OpenClaw.
+  remove_shadowing_system_openclaw
+
+  # OpenClaw 2 (>= 2026.8) refuses gateway readiness while legacy state is
+  # present: the sessions/transcripts move into SQLite and stale config keys
+  # fail validation, and BOTH migrations are doctor's to run. A box upgraded
+  # without this step boots into a gateway that never comes up. A failed or
+  # incomplete migration is fatal: later steps cannot make it complete by
+  # racing another writer. Non-interactive so an update never parks on a prompt.
+  if openclaw_version_is_v2 "$TARGET"; then
+    echo "  Running openclaw doctor --fix (OpenClaw 2 config + session migrations)..."
+    # The sessions-to-SQLite move must not race a still-running v1 gateway
+    # writing the very files being migrated; gateway_setup restarts it later.
+    stop_openclaw_gateways_for_migration || return 1
+    _oc_gateway_stopped=1
+    local _oc_doctor_out
+    local _oc_doctor_rc=0
+    _oc_doctor_out="$(as_clawbox -H env \
+      OPENCLAW_STATE_DIR="$CLAWBOX_HOME/.openclaw" \
+      OPENCLAW_CONFIG_PATH="$CLAWBOX_HOME/.openclaw/openclaw.json" \
+      OPENCLAW_SERVICE_REPAIR_POLICY="$OPENCLAW_SERVICE_REPAIR_POLICY" \
+      "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)" || _oc_doctor_rc=$?
+    printf '%s\n' "$_oc_doctor_out"
+    if ! openclaw_migration_complete "$_oc_doctor_rc" "$_oc_doctor_out"; then
+      echo "Error: OpenClaw migration did not complete; leaving the gateway stopped. Resolve the reported blocker and Retry before rebuilding." >&2
+      return 1
+    fi
+
   fi
 
   # Force-reinstall every externally-installed plugin so they're bumped
@@ -1602,20 +5656,84 @@ for p in d.get("plugins", []):
       case "$pkg" in
         @openclaw/*) spec="$pkg@$TARGET" ;;
       esac
+      # Matched on the NORMALISED id: the registry can key a plugin as
+      # `openclaw-discord` or `@openclaw/discord`. Hoisted above the refresh so
+      # the pin repair below and the consent whitelist further down ask about
+      # the same name.
+      local PLUGIN_KEY="${plugin#@openclaw/}"
+      PLUGIN_KEY="${PLUGIN_KEY#openclaw-}"
+      # Rebuild the pin when the package could not be derived (TASK-602). A
+      # plugin whose payload a core upgrade orphaned is listed by `plugins list
+      # --json` with no rootDir/source, so `$pkg` is empty, `$spec` stays the
+      # BARE id and npm resolves it as @latest — the exact drift this block was
+      # written to prevent, on the boxes that most need the refresh. For the
+      # plugins ClawBox installs from the @openclaw scope the package name IS
+      # the id, so the pinned spec can be rebuilt from it; anything else keeps
+      # the bare id, which is the caller's own plugin and its owner's business.
+      if [ "$spec" = "$plugin" ] && [ -n "$TARGET" ]; then
+        case "$PLUGIN_KEY" in
+          codex|discord|whatsapp) spec="@openclaw/$PLUGIN_KEY@$TARGET" ;;
+        esac
+      fi
       echo "    - $spec"
-      if ! as_clawbox -H "$OPENCLAW_BIN" plugins install "$spec" --force >/dev/null 2>&1; then
+      # --accept-capabilities, for the plugins CLAWBOX installs and only those.
+      #
+      # OpenClaw 2 refuses to install a managed plugin whose declared capability
+      # surface has not been consented to, and a refresh to a new core target is
+      # exactly when that surface changes. Without the flag this loop's only
+      # outcome on a widened plugin is the WARN below, and the gateway then
+      # refuses readiness with 'Plugin "<id>" requires capability consent' until
+      # somebody runs the CLI by hand (TASK-603).
+      #
+      # But the flag consents to the NEW surface, not to the one already on the
+      # box, so passing it for a plugin the owner installed himself would answer
+      # a widened-capabilities question in his name. Same whitelist and same
+      # reason as CLAWBOX_MANAGED_PLUGIN_IDS in src/lib/updater.ts; anything
+      # else is refreshed without it and says so, so he can rerun the CLI.
+      #
+      # Gated on the INSTALLED generation the way the codex install in
+      # gateway-pre-start.sh is: a v1 pin (OPENCLAW_PIN_VERSION, a documented
+      # rollback override) gives a CLI that rejects the unknown option, and
+      # every iteration would then fail behind the WARN below with no plugin
+      # refreshed at all.
+      #
+      # Matched on the NORMALISED id: the registry can key a plugin as
+      # `openclaw-discord` or `@openclaw/discord`, and the raw name would then
+      # fall through to the default arm and be refreshed without consent —
+      # silently, behind the WARN below. `$spec` keeps the raw name, which is
+      # what the CLI has to be given.
+      local CAP_ARGS=()
+      case "$PLUGIN_KEY" in
+        codex|deepseek|discord|whatsapp|clawbox-email-directives)
+          openclaw_is_v2 && CAP_ARGS=(--accept-capabilities)
+          ;;
+        *)
+          echo "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)"
+          ;;
+      esac
+      if ! as_clawbox -H "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" >/dev/null 2>&1; then
         echo "      WARN: refresh failed (non-fatal; gateway-pre-start will retry on next boot)"
       fi
     done <<< "$INSTALLED_PLUGINS"
   else
     echo "  No external plugins to refresh"
   fi
+  # Standalone installs restore only after plugin refresh. The composite setup
+  # step owns restoration after its remaining patch/config/voice operations.
+  if [ "$_oc_gateway_stopped" -eq 1 ]; then
+    if [ "${_oc_defer_gateway_start:-0}" -eq 1 ]; then
+      _oc_gateway_restore_pending=1
+    else
+      systemctl start clawbox-gateway.service 2>/dev/null || true
+    fi
+  fi
+
 }
 
 step_clawkeep_install() {
   # Install (or refresh) the device-side ClawKeep Python package from the
   # in-tree source. The user-runtime CLI lives at ~/.local/bin/clawkeep
-  # and ~/.local/bin/clawkeepd; without --force-reinstall, an existing
+  # and ~/.local/bin/clawkeepd; without a forced reinstall, an existing
   # install with the same version string ("0.1.0") would skip the upgrade
   # and leave stale code on disk after a `git pull`.
   if [ ! -d "$PROJECT_DIR/clawkeep" ]; then
@@ -1623,6 +5741,45 @@ step_clawkeep_install() {
     return 0
   fi
 
+  # pipx builds into its own isolated venv, which sidesteps PEP 668
+  # (externally-managed-environment, enforced on Ubuntu 24.04+ / JetPack 7)
+  # and, as a side effect, the Jetson UNKNOWN-0.0.0 wheel failure the pip
+  # fallback below works around — pipx's venv bootstraps its own pip rather
+  # than reusing the stock L4T pip 22.0.2 + setuptools 59.6.0 combination
+  # that triggers it. Prefer pipx; fall back to the pip --user path — still
+  # correct on JetPack 6.2 / Ubuntu 22.04, where PEP 668 does not apply —
+  # only when pipx could not be provisioned.
+  if ! ensure_pipx; then
+    echo "  Warning: pipx unavailable — falling back to pip --user (blocked by PEP 668 on Ubuntu 24.04+)" >&2
+    step_clawkeep_install_pip_user_fallback
+    return $?
+  fi
+
+  echo "  Installing ClawKeep CLI via pipx"
+  # A device upgraded from a pre-pipx install has real pip-installed scripts
+  # at these paths; pipx refuses to overwrite files it did not create, so the
+  # stale scripts would keep running after every future `git pull` unless
+  # removed first.
+  as_clawbox_login "rm -f $CLAWBOX_HOME/.local/bin/clawkeep $CLAWBOX_HOME/.local/bin/clawkeepd" \
+    2>/dev/null || true
+  if ! as_clawbox_login "pipx install --force '$PROJECT_DIR/clawkeep'"; then
+    echo "  Warning: clawkeep pipx install failed (non-fatal — restore/scheduler will be unavailable)" >&2
+    return 0
+  fi
+
+  local CLAWKEEPD_BIN="$CLAWBOX_HOME/.local/bin/clawkeepd"
+  if [ ! -x "$CLAWKEEPD_BIN" ]; then
+    echo "Error: clawkeep pipx install completed but $CLAWKEEPD_BIN is missing." >&2
+    echo "       Try: pipx uninstall clawkeep && sudo bash install.sh" >&2
+    return 1
+  fi
+  echo "  ClawKeep CLI installed: $(as_clawbox_login 'clawkeep --help' 2>&1 | head -n1 || echo 'verify failed')"
+}
+
+# Legacy path, used only when pipx could not be provisioned. Still the
+# expected path on JetPack 6.2 / Ubuntu 22.04 hosts where apt could not
+# install pipx (e.g. offline) — PEP 668 does not block pip --user there.
+step_clawkeep_install_pip_user_fallback() {
   # Jetson L4T ships pip 22.0.2 + setuptools 59.6.0. setuptools 59
   # predates PEP 621 ([project] in pyproject.toml), and pip 22's build
   # isolation is patched on Debian/Ubuntu in a way that lets the legacy
@@ -1689,6 +5846,15 @@ step_clawkeep_install() {
 
 step_openclaw_patch() {
   is_hermes_edition && return 0
+  # OpenClaw 2 rewrote the connect handler this step used to sed: the scope
+  # regex now matches sites where the injected identifiers do not exist (a
+  # broken bundle), and the device-identity bypass it papered over is retired
+  # outright — ClawBox implements the REAL device identity client-side now
+  # (src/lib/gateway-device-identity.ts). Nothing here applies to gen 2.
+  if openclaw_is_v2; then
+    echo "  Gateway patches: not needed on OpenClaw 2 (device identity implemented client-side)"
+    return 0
+  fi
   # Patcher restricts file searches to .js (runtime bundles) — newer openclaw
   # releases ship .d.ts declaration files alongside bundled JS, and literal
   # type strings would otherwise match files we cannot patch.
@@ -1797,13 +5963,30 @@ step_openclaw_config() {
   local CURRENT_PRIMARY
   CURRENT_PRIMARY=$(as_clawbox "$OPENCLAW_BIN" config get agents.defaults.model.primary 2>/dev/null || echo "")
   if [ -z "$CURRENT_PRIMARY" ] || [ "$CURRENT_PRIMARY" = "null" ]; then
-    oc_config_set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
-    echo "  Default model set"
+    if openclaw_is_v2; then
+      # OpenClaw 2 VALIDATES model refs at config set, and this v1-era seed
+      # names a model no fresh box can resolve (the anthropic provider is not
+      # configured yet), so the write failed three times and aborted every
+      # fresh 2026.8.1 install (caught by e2e-install on PR #565). A fresh
+      # gen-2 box needs no placeholder at all: the gateway runs
+      # --allow-unconfigured and onboarding/the configure route write the
+      # real primary the moment the owner picks a provider.
+      echo "  Default model left unset (OpenClaw 2 validates refs; onboarding sets it)"
+    else
+      oc_config_set agents.defaults.model.primary "anthropic/claude-sonnet-4-20250514"
+      echo "  Default model set"
+    fi
   else
     echo "  Default model already set ($CURRENT_PRIMARY) — preserving"
   fi
-  oc_config_set agents.defaults.compaction.reserveTokensFloor 24000
-  echo "  Compaction reserve floor set"
+  if openclaw_is_v2; then
+    # Gen 2 replaced the reserve-tuning keys with compaction.mode and fails
+    # validation on the old one; its own safeguard default needs no seeding.
+    echo "  Compaction reserve floor: managed by OpenClaw 2 (compaction.mode)"
+  else
+    oc_config_set agents.defaults.compaction.reserveTokensFloor 24000
+    echo "  Compaction reserve floor set"
+  fi
 
   if [ -z "$CLAWBOX_AI_KEY" ] && [ -f "$CLAWBOX_AI_ENV" ]; then
     CLAWBOX_AI_KEY=$(grep '^CLAWBOX_AI_API_KEY=' "$CLAWBOX_AI_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -1811,12 +5994,35 @@ step_openclaw_config() {
   if [ -n "$CLAWBOX_AI_KEY" ]; then
     local CLAWBOX_AI_PROVIDER_JSON
     CLAWBOX_AI_PROVIDER_JSON=$(node -e 'const key=process.argv[1]; process.stdout.write(JSON.stringify({baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}));' "$CLAWBOX_AI_KEY")
-    mkdir -p "$(dirname "$AUTH_PROFILES")"
-    CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
+    if openclaw_is_v2; then
+      # OpenClaw 2 keeps credentials in its sqlite auth store, and recreating
+      # the legacy auth-profiles.json poisons it (the gateway refuses with
+      # AuthProfileMigrationRequiredError until doctor runs — the exact defect
+      # PR #565 chased through the configure route). The CLI owns the store's
+      # schema on every generation; the key rides stdin, never argv.
+      printf '%s\n' "$CLAWBOX_AI_KEY" | as_clawbox -H "$OPENCLAW_BIN" models auth paste-api-key --provider deepseek --profile-id deepseek:default \
+        || echo "  WARN: models auth paste-api-key failed; ClawBox AI fallback credential not stored"
+    else
+      mkdir -p "$(dirname "$AUTH_PROFILES")"
+      CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
+    fi
     oc_config_set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
     oc_config_set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
     oc_config_set agents.defaults.model.fallback "deepseek/deepseek-chat"
     echo "  ClawBox AI fallback model configured"
+    # Deliberately no image provider here, unlike configureClawboxAi() in
+    # src/app/setup-api/ai-models/configure/route.ts and the migration in
+    # scripts/gateway-pre-start.sh. CLAWBOX_AI_API_KEY is a raw DeepSeek key
+    # pointed straight at api.deepseek.com (see the baseUrl above) — there is
+    # no ClawBox AI subscription behind it and therefore no monthly image
+    # allowance to wire up. Adding one would send a DeepSeek key to
+    # clawbox.com and 401 on every image request. This path is also
+    # effectively CI-only: CLAWBOX_AI_API_KEY is commented out in
+    # .env.example and set only by .github/workflows/e2e-install.yml.
+    #
+    # A box provisioned this way is skipped by the boot migration too, which
+    # keys off a `claw_`-prefixed portal token in models.providers.deepseek
+    # .apiKey. That is correct, not an oversight — do not "fix" it here.
   fi
 
   # gateway.auth.mode/token and gateway.controlUi.{allowInsecureAuth,
@@ -1859,18 +6065,1054 @@ try {
 }
 if (!cfg.channels) cfg.channels = {};
 const { dmPolicy: _dm, allowFrom: _af, ...rest } = cfg.channels.telegram || {};
-cfg.channels.telegram = { ...rest, enabled: true, botToken };
+// OpenClaw's OWN value wins. This block exists to re-register the channel on a
+// fresh ~/.openclaw (a factory reset, a new image) out of the only copy that
+// survived it. ClawBox's data/config.json is a MIRROR its configure route
+// happens to write, and channels.telegram.botToken is what the gateway polls
+// and what every ClawBox panel now reads (src/lib/telegram-bot-identity.ts) —
+// so copying the mirror over a bot the owner re-pointed with `openclaw config
+// set` silently restored an older one at the next update. The
+// dmPolicy/allowFrom strip above still runs either way.
+// A channel may carry its credential as an env REFERENCE under `token`
+// ({source:"env",…}) instead of a literal botToken — the shape
+// src/lib/telegram-bot-identity.ts recognises and refuses to guess at. Writing
+// the mirror as a botToken BESIDE that reference restores an older bot under a
+// re-pointed one exactly as overwriting botToken did.
+const existingToken = typeof rest.botToken === "string" ? rest.botToken.trim() : "";
+// `token: null` and `token: ""` are an UNSET reference, not a credential: the
+// control UI and `openclaw config set --json` both write null for a cleared
+// value. Counting them as a bot made the installer skip the restore on the one
+// path this block exists for - a factory reset, where ClawBox's mirror is the
+// only surviving copy - and print that it kept a bot, leaving the channel
+// enabled with nothing behind it for the gateway to poll.
+const openclawHasBot =
+  existingToken !== "" || (rest.token !== undefined && rest.token !== null && rest.token !== "");
+cfg.channels.telegram = openclawHasBot ? { ...rest, enabled: true } : { ...rest, enabled: true, botToken };
 fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+// `rename` replaces the INODE, so the temp file's mode is the one that
+// survives. openclaw.json holds channels.telegram.botToken and the gateway's
+// auth token and is 0600 on a box; the service user's umask is 0002, so a plain
+// writeFileSync left it 0664 — world-readable, silently, on every install and
+// every update. 0600 unconditionally rather than the mode it happens to have,
+// so a box already sitting at that 0664 is repaired instead of preserved; this
+// is also what OpenClaw's own CLI created the file with, and what
+// src/lib/openclaw-config.ts writeConfig now forces on the same file. The stale
+// temp is removed first and chmod'ed after, because `mode` is ignored for a
+// file that already exists (a .tmp from a crashed run).
 const tmp = `${cfgPath}.tmp`;
-fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+fs.rmSync(tmp, { force: true });
+fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+try {
+  fs.chmodSync(tmp, 0o600);
+} catch {
+  // best-effort; a failed chmod must not fail the install
+}
 fs.renameSync(tmp, cfgPath);
+process.stderr.write(
+  openclawHasBot
+    ? "  Telegram channel registered (kept the bot OpenClaw already holds)\n"
+    : "  Telegram channel registered from ClawBox's saved token\n",
+);
 NODE
-      echo "  Telegram channel registered"
     fi
   fi
 
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.openclaw" 2>/dev/null || true
   echo "  OpenClaw config updated"
+}
+
+# Point OpenClaw's speech output at the box's own engine (TASK-383).
+#
+# Two halves, and both have to run on updates as well as fresh installs:
+#   1. Install Kokoro, the box's only on-device voice, and deploy the scripts
+#      it runs from. There is no CPU fallback behind it any more — the owner
+#      removed Piper (2026-08). A Kokoro that is missing is reported by
+#      scripts/openclaw/clawbox-tts.sh as an exit-1 failure with reasons,
+#      which the gateway hands to its cloud voice, rather than hidden behind
+#      a second engine.
+#   2. Point the built-in `tts-local-cli` provider at clawbox-tts.sh.
+#
+# The command is the REPO copy, not a copy deployed into the workspace: the
+# repo path is refreshed by `git pull` on every update, so the box can never
+# end up speaking through a stale fallback chain.
+#
+# Placeholder casing is load-bearing. OpenClaw's applyTemplate normalizes a
+# token to Firstupper+restlower and only falls back to the raw key, so
+# `{{OutputPath}}` works and `{{outputPath}}` silently substitutes an EMPTY
+# STRING — the command would then be handed no output path at all. `{{Text}}`
+# is also what stops OpenClaw piping the text to stdin instead of argv.
+# The literal `--` guards against a reply that itself begins with `--` being
+# parsed as an option by the script.
+#
+# outputFormat wav is deliberate: Kokoro emits WAV natively, so the happy path
+# needs no ffmpeg at all, and OpenClaw transcodes to Opus itself when a
+# channel wants a voice note.
+# Configuring the provider is not the same as OpenClaw HAVING it, and the gap
+# between those two is silent. `tts-local-cli` ships inside OpenClaw as a
+# bundled extension, but the gateway resolves plugins through a PERSISTED
+# registry rather than by scanning dist/extensions, and that index goes stale
+# whenever the extension set on disk changes — `openclaw plugins registry`
+# calls the reason `source-changed`, which is every OpenClaw upgrade. A stale
+# index simply does not contain tts-local-cli: the gateway comes up without it
+# and every spoken reply dies with
+#     TTS conversion failed: tts-local-cli: no provider registered
+# while this step, openclaw.json and `capability tts status` all still say the
+# box is configured correctly.
+#
+# Measured on the freshly flashed Orin used for the TASK-383 hardware proof
+# (2026-08-19): persisted 32/33 plugins against 49/67 current, the gateway
+# loading only memory-core and ollama, and no on-device speech at all —
+# `plugins doctor` reported no issues and `plugins enable tts-local-cli`
+# answered "Plugin not found". Rebuilding the index was the whole fix.
+#
+# A failed refresh is only a warning: what decides the outcome is whether the
+# provider resolves, not how it got there, so an OpenClaw without the
+# subcommand must not cost a box its voice.
+tts_ensure_provider_registered() {
+  if ! as_clawbox "$OPENCLAW_BIN" plugins registry --refresh >/dev/null 2>&1; then
+    echo "  Warning: could not refresh the plugin registry — the provider may not be visible to the gateway" >&2
+  fi
+  as_clawbox "$OPENCLAW_BIN" plugins info tts-local-cli >/dev/null 2>&1
+}
+
+# The name of the ClawBox AI cloud voice entry, when this box has one.
+#
+# Its PRESENCE is the subscription test, and deliberately so rather than a
+# second read of the plan: `scripts/gateway-pre-start.sh` writes this entry only
+# on a box whose tier stamp equals CLAWBOX_SPEECH_DEVICE_TIER and withdraws it
+# again on a downgrade, so the gate has already been applied by the one place
+# that owns it. Asking the tier a second time here would be a copy of that rule
+# free to drift from it.
+#
+# `clawboxManaged` is our own stamp on the entry, not the provider's name: an
+# owner's own `openai` speech route carries no stamp and is never mistaken for
+# ours. The apiKey comes back redacted from `config get`, which does not matter
+# — the flag and the key's NAME are all this needs.
+#
+# A DELIBERATELY weaker test than pre-start's `_clawai_route_is_ours`, which
+# requires the stamp AND a base URL still pointing at our proxy, because
+# `openclaw config set` edits in place and a stale stamp can outlive an entry
+# the owner has re-aimed elsewhere. The difference is safe here and is not there:
+# pre-start uses that predicate to decide whether to REWRITE or WITHDRAW an
+# entry, where being wrong edits somebody else's provider; this only decides
+# which of two already-present voices is selected FIRST on a box that has not
+# chosen, and the owner can change it in Settings → Voice. Tightening this to
+# the same predicate would mean re-deriving ownership in a second language —
+# the thing the paragraph above declines to do with the tier.
+# Can openclaw.json be READ at all right now?
+#
+# `openclaw config get` exits 1 for an unset key AND for a config it could not
+# read — measured on the box, both give rc=1 with empty output — so the exit code
+# cannot tell "the owner has chosen nothing" from "we cannot see what the owner
+# chose". Seed-if-unset acts on the first and must never act on the second: an
+# unreadable config would otherwise be overwritten with our own selection, which
+# is how an owner's ElevenLabs pick disappears on an update.
+#
+# So ask the FILE. A config that parses means an empty `config get` really is an
+# unset key. A config that is absent is also genuinely unset — that is a fresh
+# box, which must still be seeded — and only a file that exists and does not
+# parse is the case this refuses to write over. Mirrors the discipline the
+# Hermes arm above already applies through HERMES_TTS_READ_FAILED.
+# Runs through `as_clawbox`, exactly like every `oc_config_set` in this step, and
+# that correspondence is the point: the probe must resolve the SAME config the
+# writes will land in. Pinning HOME here alone would break it — the probe could
+# then vet one file while the writes touched another. (Measured on the box:
+# sudoers sets `env_reset`, so `sudo -u clawbox` already gives
+# HOME=/home/clawbox. A box where that did not hold would send this step's reads
+# AND its writes to the same wrong place, which is a property of the whole file
+# rather than of this helper.)
+tts_config_readable() {
+  local rc=0
+  as_clawbox python3 - <<'PY' >/dev/null 2>&1 || rc=$?
+import json, os, sys
+# 3, not 1: an uncaught Python exception exits 1, and so does a sudo that was
+# refused, so 1 cannot mean "this config does not parse" — it is the code every
+# kind of plumbing failure already speaks. A verdict needs a code nothing else
+# uses, or the caller cannot tell an answer from an accident.
+VERDICT_UNREADABLE = 3
+try:
+    home = os.path.expanduser("~")
+    base = os.environ.get("CLAWBOX_OPENCLAW_HOME") or os.path.join(home, ".openclaw")
+    path = os.path.join(base, "openclaw.json")
+    if not os.path.exists(path):
+        sys.exit(0)                  # fresh box: genuinely unset, seed it
+    with open(path) as fh:
+        json.load(fh)
+except SystemExit:
+    raise
+except OSError:
+    # Could not even look (permissions, a path that vanished): not a verdict.
+    sys.exit(1)
+except Exception:
+    sys.exit(VERDICT_UNREADABLE)     # there IS a config and it does not parse
+sys.exit(0)
+PY
+  # ONLY the probe's own verdict refuses. Everything else — no python3, a sudo
+  # that was denied, a test harness that does not carry this function, an
+  # unreadable directory — means the question could not be ASKED, and refusing
+  # then would cost a box its voice over something never established.
+  #
+  # Fail OPEN, because the two mistakes do not cost the same: seeding over a
+  # config we could not read loses one setting the owner can set again, while
+  # refusing to seed leaves a fresh device with no TTS provider at all.
+  [ "$rc" -ne 3 ]
+}
+
+tts_managed_cloud_provider() {
+  local home="$1"
+  as_clawbox "$OPENCLAW_BIN" config get "$home.providers" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    providers = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(providers, dict):
+    for name, entry in providers.items():
+        if isinstance(entry, dict) and entry.get("clawboxManaged") is True:
+            print(name)
+            break
+' 2>/dev/null
+}
+
+# The on-device voice, for EVERY edition.
+#
+# This step used to open with
+#   is_hermes_edition && { echo "  [hermes edition] skipping on-device TTS"; return 0; }
+# so a Hermes box never ran scripts/install-voice.sh at all: no Kokoro, no
+# kokoro-server unit, and nothing for step_validate_services to verify. The
+# owner's decision is that Hermes runs the SAME on-device engine as OpenClaw,
+# so the skip is gone and the two harnesses are registered separately below —
+# each through its own native mechanism, neither one standing in for the other.
+# Write the `tts-local-cli` provider DEFINITION — command, args, format and
+# the timeout the script derives from its own engine slices — into $1 (the
+# speech block's home: `tts` on OpenClaw 2, `messages.tts` before). Never
+# selects it: that is the caller's decision. src/lib/voice-local-wiring.ts
+# writes the same entry from the tts route; keep the two in step.
+#
+# timeoutMs bounds the WHOLE clawbox-tts.sh process, engine chain included.
+# It used to be a hardcoded 120000 while the script's own Kokoro timeout was
+# also 120s, so OpenClaw killed the process at the instant Kokoro gave up and
+# not even the reasons reached the gateway — a hung GPU was silence with no
+# diagnostic, which is the failure this whole feature exists to remove. Ask
+# the script for the number instead of keeping a second copy of it here: it
+# derives the value from its own engine slices, so re-tuning one of them
+# moves this with it.
+tts_write_local_provider_definition() {
+  # Two paths to the same script, and they must not be the same one.
+  #
+  # $2 is what gets REGISTERED with the harness — a long-lived value the gateway
+  # spawns for years — so it is the tree copy: the mirror is torn down and
+  # rebuilt on every root dispatch, and a provider pointing into it would find
+  # nothing mid-restage. $3 is the copy ROOT EXECUTES for the timeout probe
+  # below, which must be the root-owned one: this runs as root inside
+  # step_openclaw_tts, `openclaw_tts` is on WEB_ROOT_STEPS, and the dispatcher's
+  # verify is long past by the time the step gets here — so `bash` on the tree
+  # copy is a foothold's payload with seconds to spare. Defaults to $2 for
+  # callers that are not inside a root step. TASK-733.
+  local TTS_HOME="$1" TTS_SCRIPT="$2" TTS_PROBE="${3:-$2}"
+  local TTS_TIMEOUT_MS
+  TTS_TIMEOUT_MS=$(bash "$TTS_PROBE" --provider-timeout-ms 2>/dev/null || echo "")
+  # Decimal digits, and more than zero: a 0 would let OpenClaw kill the
+  # script the instant it starts. src/lib/voice-local-wiring.ts applies the
+  # same rule when it writes this entry from the tts route.
+  case "$TTS_TIMEOUT_MS" in
+    ''|*[!0-9]*)
+      echo "  ERROR: $TTS_PROBE did not report a usable provider timeout (got '${TTS_TIMEOUT_MS}')" >&2
+      return 1
+      ;;
+  esac
+  if [ "$TTS_TIMEOUT_MS" -le 0 ] 2>/dev/null; then
+    echo "  ERROR: $TTS_PROBE reported a provider timeout of ${TTS_TIMEOUT_MS} ms, which would kill it at once" >&2
+    return 1
+  fi
+  local TTS_PROVIDER_JSON
+  TTS_PROVIDER_JSON=$(node -e 'process.stdout.write(JSON.stringify({command:process.argv[1],args:["--","{{Text}}","{{OutputPath}}"],outputFormat:"wav",timeoutMs:Number(process.argv[2])}));' "$TTS_SCRIPT" "$TTS_TIMEOUT_MS")
+  oc_config_set "$TTS_HOME.providers.tts-local-cli" "$TTS_PROVIDER_JSON" --json
+}
+
+# ffmpeg, because a channel voice note is Opus and Kokoro speaks WAV.
+#
+# The on-device engine's happy path needs no ffmpeg — Kokoro emits WAV, the
+# provider entry below is configured for WAV, and the desktop chat plays WAV.
+# A CHANNEL is the exception: OpenClaw's Local CLI provider FORCES the `opus`
+# format for a voice-note target and converts the script's WAV with
+# `ffmpeg -c:a libopus`, and Hermes hands a command provider an .mp3 path
+# unless output_format says otherwise. So on a box without ffmpeg the local
+# attempt throws for every Telegram voice note and the gateway falls through
+# to the cloud voice: the box's own voice cannot reach a channel at all,
+# silently, whatever this step and `capability tts status` report.
+#
+# It is asked for HERE rather than only in the main install flow because this
+# step is what /setup-api/tts/install and every update run (step_post_update)
+# invoke, and those are the only routes a box already in a customer's hands
+# has to the fix.
+#
+# Never fatal: a box that cannot reach an apt mirror still has a working chat
+# voice and a cloud voice for its channels, and losing the whole voice install
+# over one download would be the worse outcome by far.
+tts_ensure_ffmpeg() {
+  # The probe is a variable so the contract test can exercise both sides of it
+  # on a machine that happens to have ffmpeg already.
+  local ffmpeg_bin="${TTS_FFMPEG_BIN:-ffmpeg}"
+  if command -v "$ffmpeg_bin" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "  Installing ffmpeg (a channel voice note is Opus; without it this box's own voice cannot send one)"
+  step_ffmpeg_install || true
+  if command -v "$ffmpeg_bin" >/dev/null 2>&1; then
+    echo "  ffmpeg installed"
+  else
+    echo "  Warning: ffmpeg is NOT installed — spoken replies on Telegram and the other channels will come from the cloud voice, not from this box" >&2
+  fi
+  return 0
+}
+
+step_openclaw_tts() {
+  # WHAT install-voice.sh is asked for. `--scripts-only` (the default, and what
+  # step_openclaw_setup and step_post_update run) deploys the voice scripts and
+  # the units of the engines that are PRESENT, and publishes the Kokoro
+  # verdict from what is on disk — it installs nothing. `--kokoro` is the
+  # INSTALL: step_voice_kokoro_install (the Local AI tab's Install button,
+  # through /setup-api/tts/install) calls this same function with it, so the
+  # verdict reading, the tolerance codes and the registration with every
+  # harness below are written once and cannot drift between "installed on a
+  # click" and "refreshed on an update".
+  #
+  # The update used to run `--tts-only`, which had grown from "the Kokoro
+  # stack" into Kokoro + faster-whisper + a from-source CTranslate2 build: 15
+  # minutes of a 35-minute update on engines nobody asked for (measured
+  # 2026-09-15). The owner's ruling is that install.sh force-installs no model
+  # or engine but the llama.cpp runtime and Gemma 4; everything else is the
+  # owner's click in Settings → Local AI.
+  local VOICE_MODE="${1:---scripts-only}"
+  # The step an operator re-runs for the same outcome: the install for an
+  # install that failed, this step for a refresh that did.
+  local TTS_RERUN="openclaw_tts"
+  [ "$VOICE_MODE" = "--kokoro" ] && TTS_RERUN="voice_kokoro_install"
+
+  # Registered with the harness: the tree copy, which outlives every restage.
+  local TTS_SCRIPT="$PROJECT_DIR/scripts/openclaw/clawbox-tts.sh"
+  # Run by root: the copy root holds. See tts_write_local_provider_definition.
+  local TTS_SCRIPT_SRC="$SRC_DIR/scripts/openclaw/clawbox-tts.sh"
+
+  # Before the engine itself, because this is the half that decides whether
+  # the engine can ever reach a channel — and because it has to run on the
+  # Hermes arm below too, which returns before the OpenClaw registration.
+  tts_ensure_ffmpeg
+
+  # Its exit code is the contract (the table in install-voice.sh's header): it
+  # never fails the install over the GPU path, it reports whether Kokoro is
+  # actually there so the summary below can tell the truth instead of
+  # asserting it. The flag this mode dispatch replaced installed only the CPU
+  # fallback of the time and nothing else, so every box we shipped ran on that
+  # fallback while this step printed "Kokoro GPU" (TASK-420). That fallback is
+  # gone; Kokoro is the only on-device engine, and now an opt-in one.
+  local VOICE_RC=0
+  CLAWBOX_TTS_STATUS_FILE="$TTS_STATUS_FILE" \
+    bash "$SRC_DIR/scripts/install-voice.sh" "$VOICE_MODE" || VOICE_RC=$?
+
+  # WHETHER this box has its engine is a fact the run just PUBLISHED; $VOICE_RC
+  # only says how far it got. Reading the first off the second is the defect
+  # this step was built around and then reproduced one line lower: exit 1 means
+  # "the voice scripts did not deploy; Kokoro's own verdict stands", and the
+  # engine line below printed "Kokoro GPU TTS NOT installed" over a box whose
+  # GPU engine had installed, warmed up and written KOKORO=ready — while
+  # step_validate_services, reading the same file, scored that engine as
+  # present. One run, two mutually exclusive facts.
+  #
+  # `tr -d '\r'` for the same reason install.sh's own probe does it: the file
+  # is also restored from tarballs and edited by hand, and a CRLF `ready\r` is
+  # not `ready`. Absent or unreadable leaves it empty, and every claim below
+  # then falls back to what the exit code carries — nothing to read is not
+  # licence to invent.
+  #
+  # KOKORO= is the only key read. An older release's second key is ignored:
+  # install-voice.sh no longer writes it, and a stale line left in the file by
+  # an earlier run is never read as an engine.
+  local KOKORO_VERDICT=""
+  if [ -r "$TTS_STATUS_FILE" ]; then
+    KOKORO_VERDICT=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
+  fi
+
+  # KOKORO_ABSENT: the run published `absent` — a box that never installed the
+  # engine and was not asked to. A plain state of the box, graded 0, and the
+  # one verdict an install mode can never publish.
+  local KOKORO_READY=false KOKORO_REASON="" KOKORO_ABSENT=false
+  # The status this STEP returns, separate from whether TTS could be configured.
+  # A Kokoro that was asked for and did not arrive is a failure of this step
+  # (12), and so is a board that declines the engine it was asked to install
+  # (13): either way the box has no on-device voice until it is fixed. This
+  # installer cannot know whether the cloud voice exists — that needs the
+  # ClawBox AI link, which happens after install — so neither is graded clean;
+  # both are recorded. Neither can come out of a `--scripts-only` run over a
+  # box that simply has no engine: that is `absent`, exit 0, and the summary
+  # says where the engine is installed from.
+  local TTS_RC=0
+  case "$VOICE_RC" in
+    0)  KOKORO_READY=true ;;
+    13)
+        # An older install-voice.sh used 10 and 11 for the same fact; the
+        # current one emits only 13, and only from an INSTALL mode.
+        #
+        # ——— This board declines the only on-device engine ————————————
+        # Kokoro published `skipped:<reason>` — no CUDA toolkit, no Jetson
+        # build for this CPU architecture — and there is no second engine to
+        # carry the box, so NO on-device engine can speak. Every shipped
+        # ClawBox is a Jetson a Kokoro build exists for, so a skipped Kokoro
+        # on real hardware means something is wrong: it is recorded as a
+        # provisioning failure, never graded clean. "The cloud voice speaks
+        # for it" is not a fact this installer can check — that voice needs
+        # the ClawBox AI link, which happens after install.
+        #
+        # It used to arrive as a bare `exit 1` from the removed second
+        # engine's guard, which overwrote whatever Kokoro had reported and
+        # landed in the 1 arm below — a warning, TTS_RC left at 0,
+        # PROVISION_FAILURES left empty, and "=== ClawBox Setup Complete ==="
+        # printed over a mute box.
+        #
+        # Non-fatal, for the same reason 12 is: a box that cannot speak must
+        # still finish provisioning and come up reachable so it can be fixed.
+        #
+        # The engine is named with the reason it is absent. "No engine" is not
+        # an actionable report on its own — a board that declined for want of
+        # CUDA and one whose download failed lead to different fixes. The
+        # verdict is what the run published, so it is what gets printed.
+        case "$KOKORO_VERDICT" in
+          skipped:?*) KOKORO_REASON="this board declines Kokoro: ${KOKORO_VERDICT#skipped:}" ;;
+          *)          KOKORO_REASON="the voice install reported no working engine (Kokoro: ${KOKORO_VERDICT:-no verdict published}), see the log above" ;;
+        esac
+        TTS_RC=13
+        echo "  ############################################################" >&2
+        echo "  # This box has NO working on-device TTS engine." >&2
+        echo "  # Kokoro (GPU), the only on-device engine, is absent: ${KOKORO_VERDICT:-no verdict published}" >&2
+        echo "  # The cloud voice speaks for this box once it is linked to" >&2
+        echo "  # ClawBox AI on a plan that includes cloud speech; until then" >&2
+        echo "  # spoken requests go unanswered." >&2
+        echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step $TTS_RERUN" >&2
+        echo "  ############################################################" >&2
+        # The e2e-install container has no GPU by construction (it says so
+        # with CLAWBOX_TEST_NO_GPU=1 — see e2e-install/README.md, which lists
+        # every CUDA step it skips for that reason), so a board that declines
+        # Kokoro there is the harness's documented state, not a provisioning
+        # failure to file. The verdict still stands in $TTS_STATUS_FILE and
+        # the step still returns 13; only the failure record is withheld, and
+        # only for that host, so a real device that declines the engine fails
+        # exactly as before.
+        if harness_has_no_gpu; then
+          echo "  CLAWBOX_TEST_NO_GPU=1, not recording the missing engine as a provisioning failure (no GPU in the harness)"
+        else
+          record_provision_failure "$TTS_RERUN"
+        fi
+        ;;
+    12) KOKORO_REASON="the Kokoro GPU install failed, see the log above"
+        # ── A hard failure must stop arriving as a soft fallback ─────────────
+        # This is the branch that made a shipped defect invisible. Kokoro's
+        # model pre-download died on a shell syntax error, this step printed one
+        # ERROR line, returned 0, and the flash reported "Setup: 1/1 succeeded"
+        # — so every box installed in that window ran the removed second
+        # engine while the install claimed GPU TTS, and nobody noticed because
+        # speech still worked. 13 deliberately does NOT come through here:
+        # "this board declines Kokoro" is recorded too, but it is a different
+        # fact from "the GPU engine you asked for did not install" and leads
+        # to a different fix.
+        #
+        # Non-fatal stays non-fatal — the caller decides, the provider is still
+        # configured below, and the box's spoken replies fall back to the
+        # gateway's cloud voice — but the failure now reaches the run's exit
+        # status, the provisioning summary, the marker the flash host reads,
+        # and step_validate_services' checks.
+        TTS_RC=12
+        echo "  ############################################################" >&2
+        echo "  # Kokoro GPU TTS was REQUESTED and did NOT install." >&2
+        echo "  # This box has no on-device voice; spoken replies fall back" >&2
+        echo "  # to the gateway's cloud voice until it is fixed." >&2
+        echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step $TTS_RERUN" >&2
+        echo "  ############################################################" >&2
+        record_provision_failure "$TTS_RERUN"
+        ;;
+    1)  KOKORO_REASON="the voice scripts did not deploy"
+        # Kokoro's own verdict stands (install-voice.sh returns 12, not 1, when
+        # the engine itself failed): this is the workspace copy of the voice
+        # scripts — kokoro-server.py and the entrypoint — not landing. That is
+        # a provisioning failure, not a log line: this branch once recorded
+        # NOTHING, which is how a broken voice install reached a customer under
+        # an "All checks healthy" banner.
+        #
+        # 14 rather than 1, because step_openclaw_setup treats 1 as fatal and a
+        # failed script deploy must not abort an otherwise good install; and
+        # rather than 13, because 13 means the box has no engine and saying
+        # that about a box with a working Kokoro would be its own false report.
+        TTS_RC=14
+        # Named in terms of what failed, without asserting what the engine's
+        # state is: install.sh cannot read that from a status code.
+        # $TTS_STATUS_FILE can, and it is what step_validate_services reads a
+        # moment later.
+        echo "  Warning: the voice install did not complete — the voice scripts did not deploy to the workspace" >&2
+        echo "  Whether this box has its engine is recorded in $TTS_STATUS_FILE" >&2
+        echo "  Re-run:  sudo bash $PROJECT_DIR/install.sh --step $TTS_RERUN" >&2
+        record_provision_failure "$TTS_RERUN"
+        ;;
+    *)  KOKORO_REASON="install-voice.sh exited $VOICE_RC"
+        # An exit code nobody wrote a branch for is not evidence of health. The
+        # `*)` case used to leave TTS_RC at 0, so a status outside the contract
+        # — a future code, a crashed interpreter — scored exactly like success.
+        # It is 14 ("something did not complete") rather than 13 ("there is no
+        # engine") because an unknown status is not evidence of a mute box
+        # either; it is recorded, and the verdict file is what says which.
+        TTS_RC=14
+        echo "  Warning: install-voice.sh exited $VOICE_RC, which is not in its contract — treating the TTS install as failed" >&2
+        record_provision_failure "$TTS_RERUN"
+        ;;
+  esac
+  # The GPU engine, named from the verdict where there is one. KOKORO_READY (an
+  # inference from $VOICE_RC) is only the answer when the run published nothing.
+  local KOKORO_HAVE="$KOKORO_READY"
+  case "$KOKORO_VERDICT" in
+    ready) KOKORO_HAVE=true ;;
+    absent)
+           # Not installed, not asked for. The exit code (0) already said
+           # "clean"; the verdict says WHAT is on the box, and the reason is
+           # worded for the two arms below that name it — the Hermes note,
+           # and a deploy failure (VOICE_RC=1) that keeps its own reason.
+           KOKORO_HAVE=false
+           KOKORO_ABSENT=true
+           [ -n "$KOKORO_REASON" ] || KOKORO_REASON="it is not installed; Settings → Local AI installs it"
+           ;;
+    ?*)    KOKORO_HAVE=false
+           # Reached by every non-zero exit that published a verdict, and by a
+           # clean exit only if the verdict contradicts it, which the contract
+           # does not allow — but "the file says the engine is not there"
+           # beats "the status code implied it was", and the reason has to
+           # come from somewhere when the exit code named none.
+           [ -n "$KOKORO_REASON" ] || KOKORO_REASON="the voice install published KOKORO=$KOKORO_VERDICT"
+           ;;
+  esac
+  if [ "$KOKORO_ABSENT" = true ] && [ "$VOICE_RC" -eq 0 ]; then
+    # ONE line, informational, and the step's whole verdict on an engineless
+    # box: no banner, no record_provision_failure, no 12/13. Nothing is wrong
+    # with a box whose owner has not pressed Install.
+    echo "  On-device voice is not installed — install it from Settings → Local AI"
+  elif [ "$KOKORO_HAVE" != true ]; then
+    # No engine claim here: on VOICE_RC=1 with no verdict on file Kokoro's
+    # state is unknown, so naming an engine would be a guess. The summary at
+    # the end of the step says what is actually known.
+    echo "  Kokoro GPU TTS NOT installed: $KOKORO_REASON"
+  elif [ "$VOICE_RC" -eq 0 ]; then
+    echo "  Kokoro GPU TTS installed"
+  else
+    # The engine is there and the run still did not finish clean, so what is
+    # missing is the deploy behind it — say that rather than deny the engine.
+    echo "  Kokoro GPU TTS installed, but the voice install did not complete ($KOKORO_REASON)"
+  fi
+
+  # ── The Hermes harness gets the same engine, through Hermes' own mechanism ──
+  #
+  # Hermes has a native TTS block — `tts:` in ~/.hermes/config.yaml — whose
+  # `tts.providers.<name>` entries can be `type: command`. Its tool substitutes
+  # {voice}, {input_path} and {output_path} into the command string and then
+  # runs it through a shell. {input_path} is a FILE HOLDING THE TEXT, which is
+  # why clawbox-tts.sh grew --text-file: see the block at the top of that
+  # script for why the file is read there rather than `cat`-ed into an argument
+  # here. `hermes config set` is the harness's own writer for this, so nothing
+  # in ClawBox edits config.yaml behind its back.
+  #
+  # has_hermes_harness, NEVER is_hermes_edition: the premium `dual` SKU runs
+  # both harnesses, and a box keyed off the hermes SKU alone would get a voice
+  # on OpenClaw and silence on Hermes.
+  #
+  # WHY AN ALREADY-SHIPPED BOX GETS THIS WITHOUT A FACTORY RESET: the in-app
+  # updater dispatches `post_update`, and step_post_update calls
+  # step_openclaw_tts directly and unconditionally — there is no edition guard
+  # anywhere between the updater's dispatch and this function — so one update
+  # brings an existing Hermes box up. (On a FRESH install the caller is
+  # step_openclaw_setup, which is why step_hermes_install now runs before it:
+  # this block needs the Hermes CLI to exist.)
+  if has_hermes_harness; then
+    local HERMES_TTS_BIN="${HERMES_BIN:-$CLAWBOX_HOME/.local/bin/hermes}"
+    # HOME EXPLICITLY, on every call. `as_clawbox` is `sudo -u`, and whether
+    # that resets HOME to the target user's home or preserves root's depends on
+    # the sudoers `always_set_home`/`env_reset` configuration — not something a
+    # provisioning step should be resting on. With root's HOME preserved the
+    # CLI would read and write /root/.hermes/config.yaml while the dashboard
+    # serves /home/clawbox/.hermes/config.yaml: every write "succeeds", and the
+    # box never speaks. `runHermesCli` pins HOME for the same reason.
+    hermes_tts_cli() { as_clawbox env HOME="$CLAWBOX_HOME" "$HERMES_TTS_BIN" "$@"; }
+    local HERMES_TTS_PROVIDER="clawbox-local"
+    # The command Hermes will run. The placeholders are Hermes' own; the
+    # example in its tool ships them unquoted, so they are unquoted here too.
+    # NO `--voice`. Two reasons, both verified:
+    #
+    #  1. clawbox-tts.sh's resolve_voice gives --voice precedence over the saved
+    #     voice file, and an UNKNOWN --voice falls back to the script default
+    #     rather than to that file. Hermes substitutes its own per-provider
+    #     voice (or nothing) for {voice}, and ClawBox writes no voice key for
+    #     this provider — so passing it would make the Voice tab's own voice
+    #     dropdown a no-op: the owner picks af_bella, gets a 200 and a panel
+    #     showing af_bella, and the box keeps speaking af_heart.
+    #  2. The OpenClaw provider passes no --voice either, for exactly that
+    #     reason. `POST /setup-api/tts {action:"voice",engine:"local"}` writes
+    #     $CLAWBOX_TTS_VOICE_FILE and the script reads it on every utterance;
+    #     that is the mechanism, and both harnesses now share it.
+    #
+    # `=` spelling. Hermes shell-quotes each placeholder for its context
+    # (_quote_command_tts_placeholder → shlex.quote), so an empty value renders
+    # as '' and the separated form would NOT collapse into the next token — an
+    # earlier comment here claimed it would, and that was wrong. The `=` form
+    # is kept anyway because it cannot be misread whatever the quoting does,
+    # and because it says at a glance that the value belongs to the flag.
+    local HERMES_TTS_COMMAND="$TTS_SCRIPT --text-file={input_path} -- {output_path}"
+    local HERMES_TTS_FAIL="" HERMES_TTS_READ_FAILED=false
+    # Rule (a), the same one the OpenClaw arm applies below: never point a
+    # harness at a command that is not executable. It looks like a working
+    # install right up until someone asks the box to speak.
+    if [ ! -x "$TTS_SCRIPT" ]; then
+      HERMES_TTS_FAIL="$TTS_SCRIPT is missing or not executable"
+    elif [ ! -x "$HERMES_TTS_BIN" ]; then
+      HERMES_TTS_FAIL="the Hermes CLI is not runnable at $HERMES_TTS_BIN"
+    fi
+    if [ -z "$HERMES_TTS_FAIL" ]; then
+      # Read the CURRENT selection before writing anything, so the seed
+      # decision below is made against what the owner actually has. An unset
+      # key exits 1 with `Config key not set: <key>` on stderr and prints
+      # nothing, so a failed read and an unset key both arrive here as "".
+      # AN UNSET KEY IS NOT A FAILED READ, and the difference decides whether
+      # the owner keeps their voice. `hermes config get` exits non-zero for
+      # both, and treating the two alike is the defect hermes-config-cache.ts
+      # documents at length for the TypeScript side ("storing '' for it …
+      # remembers a failed QUESTION as a negative ANSWER"). An owner who chose
+      # ElevenLabs, plus one OOM-killed Python start on a loaded Jetson, would
+      # otherwise have that choice silently replaced — on every update.
+      #
+      # So only the "not set" wording, or a clean exit, counts as an answer.
+      # Anything else leaves tts.provider alone and says so.
+      local CURRENT_HERMES_TTS="" HERMES_TTS_READ_OUT HERMES_TTS_READ_RC=0
+      HERMES_TTS_READ_OUT=$(hermes_tts_cli config get tts.provider 2>&1) || HERMES_TTS_READ_RC=$?
+      if [ "$HERMES_TTS_READ_RC" -eq 0 ]; then
+        CURRENT_HERMES_TTS=$(printf '%s' "$HERMES_TTS_READ_OUT" | tr -d '\r' | tail -1)
+      elif printf '%s' "$HERMES_TTS_READ_OUT" | grep -qi "config key not set"; then
+        CURRENT_HERMES_TTS=""
+      else
+        HERMES_TTS_READ_FAILED=true
+      fi
+
+      # Rule (b): the DEFINITION lands before the provider is selected, and a
+      # definition that did not land is never selected — pointing the harness
+      # at a provider that does not exist is strictly worse than leaving
+      # tts.provider alone, because then every spoken reply fails while the box
+      # looks configured.
+      #
+      # `command` first, `type` last: `type: command` is what makes Hermes
+      # treat the entry as a command provider at all, so writing it second
+      # means a half-written provider is never a runnable-looking one.
+      #
+      # `output_format wav`, and it is load-bearing rather than cosmetic.
+      #
+      # An earlier version of this block wrote no format key at all, on the
+      # reasoning that nothing established a command provider reads one. That
+      # was wrong, and verified wrong on the box: tts_tool.py's
+      # _get_command_tts_output_format reads `format` or `output_format` and
+      # falls back to DEFAULT_COMMAND_TTS_OUTPUT_FORMAT, which is "mp3". With
+      # the key unset Hermes therefore hands clawbox-tts.sh an .mp3 output
+      # path on EVERY utterance — and that is the one path the script cannot
+      # walk alone: it synthesises WAV and then shells out to
+      # `ffmpeg -codec:a libmp3lame`, refusing the whole run when ffmpeg is
+      # absent rather than write WAV bytes into an .mp3. `tts_ensure_ffmpeg`
+      # now installs it from `step_openclaw_tts`, but it only warns when the
+      # install fails, so an image without ffmpeg still reaches this arm and
+      # the box's own voice fails every time; where it IS present it is a
+      # libmp3lame encode per reply inside a 12 s budget.
+      #
+      # wav matches the OpenClaw arm's deliberate `outputFormat: "wav"` a
+      # screen below — same script, same reason ("Kokoro emits WAV natively,
+      # so the happy path needs no ffmpeg at all"). The two harnesses must not
+      # be configured to disagree about one script.
+      if hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.command" "$HERMES_TTS_COMMAND" \
+        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.output_format" wav \
+        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.type" command; then
+        echo "  Hermes on-device TTS provider defined ($HERMES_TTS_PROVIDER)"
+        # ── Seed-if-unset, with ONE extra value counted as unset: `edge` ──────
+        #
+        # This is the non-obvious rule in this step. Hermes ships
+        # `tts.provider: edge` as its FACTORY default — Microsoft's cloud
+        # voice. A ClawBox must not default to sending its owner's speech to a
+        # cloud service: the product's whole claim is that the box speaks for
+        # itself, on-device. So `edge` is treated as the factory setting it is
+        # and replaced. Anything ELSE — elevenlabs, openai, a provider the
+        # owner added by hand — is the owner's own choice and is preserved
+        # untouched, exactly as the OpenClaw arm below preserves theirs, and
+        # this step re-runs on every update.
+        # SKIP THE SELECTION, never the rest of the step. This was a `return`,
+        # which on the DUAL SKU walked out of the function before the OpenClaw
+        # registration below — so one transient Hermes CLI hiccup left a box
+        # whose OpenClaw harness still needs `tts-local-cli` without it. The
+        # two harnesses are configured independently here and a failure in one
+        # is not a reason to abandon the other.
+        if [ "$HERMES_TTS_READ_FAILED" = true ]; then
+          # The provider definition above still landed, which is the half that
+          # is safe to repeat. What is refused here is CHOOSING for an owner
+          # whose current choice could not be read.
+          echo "  Warning: could not read tts.provider from Hermes — leaving the selection alone rather than overwriting a choice we could not read" >&2
+          # ...and say what "alone" can mean here. This is the one arm of this
+          # step that can leave `tts.provider` UNSET on a first install, and an
+          # unset key is not silence: `tools/tts_tool.py` resolves
+          # `(tts_config.get("provider") or DEFAULT_PROVIDER)` with
+          # DEFAULT_PROVIDER = "edge", so it is Microsoft's cloud voice.
+          #
+          # Said whatever the ENGINE did, because the Edge risk does not depend
+          # on it: a box with a perfectly good Kokoro whose selection could not
+          # be read is equally on Edge, and equally fixed by re-running this
+          # step. Only the engine clause below is conditional.
+          echo "           If that selection is in fact unset, Hermes falls back to its factory Edge cloud rather than staying silent. Re-run once the CLI answers:" >&2
+          echo "           sudo bash $PROJECT_DIR/install.sh --step $TTS_RERUN" >&2
+          if [ "$KOKORO_HAVE" != true ]; then
+            echo "           This box also has no on-device engine ($KOKORO_REASON)." >&2
+          fi
+        else
+        case "$CURRENT_HERMES_TTS" in
+          ""|null|edge|"$HERMES_TTS_PROVIDER")
+            # ── What this box speaks with, when nothing has chosen yet ───────
+            #
+            # The CLOUD voice is deliberately not chosen here. It needs the
+            # box's `claw_` token, and the ClawBox AI link happens AFTER
+            # install — so that choice belongs to the link path
+            # (src/lib/hermes-clawai.ts), which owns the credential and makes
+            # it the moment there is one. TASK-699.
+            #
+            # AND THE SELECTION IS MADE WHATEVER THE ENGINE ANSWERED, which is
+            # the opposite of what this card first asked for, because to Hermes
+            # an unset `tts.provider` is not "no voice": measured read-only on
+            # the then-pinned 0.20.5 package on the Hermes box —
+            # `tools/tts_tool.py:211` `DEFAULT_PROVIDER = "edge"` and `:661`
+            # `provider = (tts_config.get("provider") or DEFAULT_PROVIDER)` —
+            # an ABSENT key resolves to Microsoft's Edge cloud, and the harness
+            # offers no "off" value at all. So withholding or clearing the
+            # selection on an engineless box would move it from honestly mute
+            # to speaking through a third party the customer never chose, which
+            # is the one outcome `HERMES_FACTORY_TTS_PROVIDER` exists to
+            # prevent. A command provider whose engine is missing FAILS, and
+            # measured on the same package: the command-provider branch resolves
+            # BEFORE the built-in dispatch (`tts_tool.py:3184`) and a non-zero
+            # exit is turned into `RuntimeError("TTS provider '<name>' exited
+            # with code …")` (`:1376-1386`) — there is no fall-through to another
+            # provider, so nothing leaves the box. And no panel is fooled by it:
+            # `hermesSpeaksReplies` asks for the stamp, the unit AND a runnable
+            # script before it will say this box speaks.
+            #
+            # What was missing was never the selection — it was SAYING SO, and
+            # the cloud voice the box is entitled to. Both are below.
+            if hermes_tts_cli config set tts.provider "$HERMES_TTS_PROVIDER"; then
+              if [ "$CURRENT_HERMES_TTS" = "edge" ]; then
+                echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER (replacing Hermes' factory 'edge' cloud default)"
+              else
+                echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER"
+              fi
+              # KOKORO_HAVE, never KOKORO_READY. The first is the reconciled
+              # fact — the verdict the run PUBLISHED, with the exit code as its
+              # fallback; the second is the inference from the exit code alone,
+              # and reading one off the other is the defect this step was built
+              # around. VOICE_RC=1 with `KOKORO=ready` on file is a working
+              # engine (the OpenClaw arm below says so too), and VOICE_RC=0 with
+              # any other verdict is not one.
+              if [ "$KOKORO_ABSENT" = true ]; then
+                # The opt-in case, said without the alarm the two below carry:
+                # nothing failed. The selection is kept for the same reason
+                # they keep it — an unset key is Microsoft's cloud, not
+                # silence — and the install is one click away.
+                echo "  Note: this box has no on-device engine yet (install it from Settings → Local AI); until then, or until ClawBox AI is linked on a plan that includes cloud speech, its Hermes voice stays SILENT. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud."
+              elif [ "$KOKORO_HAVE" != true ]; then
+                # Qualified by SKU. `applyClawaiToHermes` — the only writer of
+                # the Hermes cloud voice — runs where `getActiveHarness()`
+                # answers "hermes". On a hermes box that is always; on a dual
+                # box it is whichever harness the owner has switched to (a
+                # LICENSED dual box unlocks the switcher, so `getActiveHarness`
+                # answers the stored value, and an unlicensed one degrades to
+                # openclaw), so the link wires the Hermes voice there only while
+                # Hermes is the one running. Promising it unconditionally would
+                # be a false success in an install log.
+                if is_hermes_edition; then
+                  echo "  Note: this box has no on-device engine ($KOKORO_REASON), so its Hermes voice stays SILENT until ClawBox AI is linked on a plan that includes cloud speech. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud." >&2
+                else
+                  echo "  Note: this box has no on-device engine ($KOKORO_REASON), so its Hermes voice stays SILENT. On a dual box it is wired when ClawBox AI is linked while Hermes is the active harness, and can always be set from Settings -> Voice. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud." >&2
+                fi
+              fi
+            else
+              HERMES_TTS_FAIL="could not select the $HERMES_TTS_PROVIDER provider"
+            fi
+            ;;
+          *)
+            echo "  Hermes TTS provider already set ($CURRENT_HERMES_TTS) — preserving; the $HERMES_TTS_PROVIDER definition is up to date either way"
+            ;;
+        esac
+        fi
+      else
+        HERMES_TTS_FAIL="could not write the $HERMES_TTS_PROVIDER provider definition"
+      fi
+    fi
+    if [ -n "$HERMES_TTS_FAIL" ]; then
+      # Loud, recorded, and carried in the exit status — but NOT a `return 1`.
+      # On the dual SKU the OpenClaw arm below is a separate harness's voice
+      # and must still be configured; and on the hermes SKU a box that cannot
+      # speak must still finish provisioning and come up reachable, which is
+      # how it gets fixed. 14 is this step's "the TTS install did not
+      # complete", which step_openclaw_setup and step_post_update both report
+      # and neither treats as fatal.
+      echo "  ERROR: the on-device voice was NOT registered with Hermes — $HERMES_TTS_FAIL" >&2
+      echo "         Hermes will not speak on this box until it is. Re-run:" >&2
+      echo "         sudo bash $PROJECT_DIR/install.sh --step $TTS_RERUN" >&2
+      record_provision_failure "$TTS_RERUN"
+      [ "$TTS_RC" -eq 0 ] && TTS_RC=14
+    fi
+  fi
+
+  # ── The OpenClaw gateway's own provider registration ────────────────────────
+  # The hermes SKU removes that gateway entirely (step_openclaw_install
+  # early-returns, clawbox-gateway.service is stopped, disabled and masked), so
+  # there is no `openclaw` CLI to write to: every oc_config_set below would
+  # retry three times, fail, and turn a perfectly good voice install into a
+  # failed step. Spelled with is_hermes_edition because that is exactly
+  # has_openclaw_harness's own definition — `dual` keeps the gateway and takes
+  # the path below like any openclaw box.
+  if is_hermes_edition; then
+    return "$TTS_RC"
+  fi
+
+  # Seed-if-unset, same contract as the primary model above: an owner who has
+  # chosen ElevenLabs (or turned TTS off) must not have it silently reset by
+  # every update, and rebuild_reboot re-invokes this step.
+  local CURRENT_TTS
+  # OpenClaw 2 moved the speech block from messages.tts to a top-level tts
+  # object; writing the old home there fails config validation and a fresh
+  # v2 box would never get its local voice.
+  local TTS_HOME="messages.tts"
+  openclaw_is_v2 && TTS_HOME="tts"
+  CURRENT_TTS=$(as_clawbox "$OPENCLAW_BIN" config get "$TTS_HOME.provider" 2>/dev/null || echo "")
+  if [ -n "$CURRENT_TTS" ] && [ "$CURRENT_TTS" != "null" ]; then
+    # An owner who chose ElevenLabs keeps it. But when the box is already on
+    # OUR provider, preserving the selection is not enough: the update that
+    # just replaced OpenClaw is the very thing that invalidates the plugin
+    # registry (`source-changed`), so returning here is how an ALREADY-SHIPPED
+    # box keeps a provider selected that its gateway can no longer resolve.
+    # That is the population this step is in step_post_update for, so the
+    # verification has to happen on this path too, not only on first setup.
+    if [ "$CURRENT_TTS" = "tts-local-cli" ]; then
+      if ! tts_ensure_provider_registered; then
+        echo "  ERROR: messages.tts.provider is tts-local-cli but the plugin does not resolve," >&2
+        echo "         even after refreshing the registry. The box cannot speak until it does." >&2
+        echo "         Diagnose with: openclaw plugins registry; openclaw plugins doctor" >&2
+        return 1
+      fi
+      echo "  TTS provider already set (tts-local-cli) — preserved, plugin registry verified"
+      return "$TTS_RC"
+    fi
+    echo "  TTS provider already set ($CURRENT_TTS) — preserving"
+    # Preserving the SELECTION is not the same as leaving the box's own voice
+    # undefined. This branch used to return here, so a box whose provider was
+    # the cloud voice (seeded by gateway-pre-start, or the owner's pick) never
+    # got a tts-local-cli entry at all — and with Kokoro installed, the Local
+    # AI tab's "Make primary" answered "not available on this box". Define the
+    # provider (never select it); the tts route repairs the same entry on
+    # demand, and this keeps an update from leaving it missing. Only behind an
+    # engine the box HAS, or has at least been asked for: a definition on an
+    # `absent` box is a provider that fails every utterance, and the Voice
+    # tab's "This box" pick writes it the moment Kokoro is installed.
+    if [ "$KOKORO_ABSENT" != true ] && [ -x "$TTS_SCRIPT" ]; then
+      tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT" "$TTS_SCRIPT_SRC" \
+        || echo "  Warning: could not define the on-device voice provider; Settings → Voice can repair it" >&2
+    fi
+    return "$TTS_RC"
+  fi
+
+  # An EMPTY read is only "the owner has chosen nothing" if the config could be
+  # read at all — `config get` returns the same rc=1 and the same empty string
+  # either way. Refuse to seed over a config we cannot see, and say so; the
+  # provider DEFINITION below is skipped with it, because writing into a file
+  # that does not parse is how a broken config becomes a lost one.
+  if ! tts_config_readable; then
+    echo "  Warning: openclaw.json exists and could not be read — leaving $TTS_HOME.provider alone rather than overwriting a choice we cannot see" >&2
+    echo "           Diagnose with: openclaw config get $TTS_HOME.provider" >&2
+    return "$TTS_RC"
+  fi
+
+  # No engine on this box and nothing asked for one: the on-device provider is
+  # neither defined nor selected — `tts-local-cli` is registered only behind a
+  # Kokoro that is present (or was at least asked for, which the 12/13 arms
+  # above record and then still configure, so the box comes up fixable). The
+  # CLOUD voice, when the box has one, is still chosen for an unset selection:
+  # gateway-pre-start.sh writes that entry and never selects it, and this step
+  # is the one place the default voice is decided (owner's ruling, 2026-09-09).
+  # Seed-if-unset governs here as below — this branch is only reached when
+  # `tts.provider` was unset.
+  if [ "$KOKORO_ABSENT" = true ]; then
+    local CLOUD_ONLY
+    CLOUD_ONLY=$(tts_managed_cloud_provider "$TTS_HOME")
+    if [ -n "$CLOUD_ONLY" ]; then
+      if oc_config_set "$TTS_HOME.provider" "$CLOUD_ONLY"; then
+        echo "  ClawBox AI cloud voice selected ($CLOUD_ONLY); the box's own voice can be installed from Settings → Local AI"
+      else
+        echo "  Warning: could not select the $CLOUD_ONLY cloud voice — Settings → Voice can" >&2
+      fi
+    fi
+    return "$TTS_RC"
+  fi
+
+  # Never point OpenClaw at a command that is not there: that configures the
+  # exact silent failure this task removes, and it would look like a working
+  # install until someone asked the box to speak.
+  if [ ! -x "$TTS_SCRIPT" ]; then
+    echo "  ERROR: $TTS_SCRIPT is missing or not executable — refusing to configure TTS against it" >&2
+    return 1
+  fi
+
+  # Order matters and so does the gate. oc_config_set retries three times and
+  # then gives up; if the provider definition did not land, naming it as THE
+  # provider leaves the box pointing at a provider that does not exist, and
+  # every spoken reply fails — strictly worse than not having run at all.
+  if ! tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT" "$TTS_SCRIPT_SRC"; then
+    echo "  ERROR: could not write the tts-local-cli provider — leaving messages.tts.provider unset" >&2
+    return 1
+  fi
+
+  # Refuse to select a provider that is not there. Same rule already applied to
+  # the script path above: never leave the box configured to speak through
+  # something that does not exist, because that configures exactly the silent
+  # failure this task removes. Leaving messages.tts.provider unset is the
+  # better outcome — OpenClaw then reports TTS as unconfigured instead of
+  # accepting spoken requests it cannot answer.
+  if ! tts_ensure_provider_registered; then
+    echo "  ERROR: the tts-local-cli plugin is not registered even after refreshing the registry." >&2
+    echo "         Leaving messages.tts.provider unset rather than pointing the box at a provider" >&2
+    echo "         that cannot answer. Diagnose with: openclaw plugins registry; openclaw plugins doctor" >&2
+    return 1
+  fi
+
+  # WHICH voice speaks first on a box that has both.
+  #
+  # Kokoro is installed either way — that is the step above, and it stays the
+  # box's own voice, one click away in Settings → Voice. What is decided here is
+  # only the DEFAULT, and on a box with a ClawBox AI subscription the default is
+  # the cloud voice (owner's ruling, 2026-09-09): it answers immediately, while
+  # Kokoro's server stops itself after five idle minutes and the first utterance
+  # after a quiet spell pays a 13-19 s cold start on this hardware.
+  #
+  # This is not the `edge` case the Hermes arm above refuses. That refusal is
+  # about defaulting an owner's speech to MICROSOFT — a third party the box
+  # merely happens to ship a client for. This is ClawBox AI: our own service, on
+  # a plan the owner is already paying for, reached through our own proxy. The
+  # principle that a ClawBox must not hand speech to someone else's cloud is
+  # kept; what is narrowed is the assumption that every cloud is someone else's.
+  #
+  # Seed-if-unset still governs: this whole branch is only reached when
+  # `tts.provider` was unset, so an owner's explicit pick — including an
+  # explicit pick of the local voice — is never overwritten by an update.
+  local TTS_SELECTED="tts-local-cli"
+  local CLOUD_TTS
+  CLOUD_TTS=$(tts_managed_cloud_provider "$TTS_HOME")
+  if [ -n "$CLOUD_TTS" ]; then
+    TTS_SELECTED="$CLOUD_TTS"
+  fi
+
+  if ! oc_config_set "$TTS_HOME.provider" "$TTS_SELECTED"; then
+    echo "  ERROR: could not select the $TTS_SELECTED provider" >&2
+    # Falling back to the local voice rather than leaving the box mute: the
+    # tts-local-cli entry is written and its plugin verified directly above, so
+    # it is the one provider this step KNOWS can answer. A cloud entry that
+    # could not be selected leaves the box with a working engine and no
+    # selection, which is the silent failure the checks above exist to prevent.
+    if [ "$TTS_SELECTED" = "tts-local-cli" ] || ! oc_config_set "$TTS_HOME.provider" "tts-local-cli"; then
+      return 1
+    fi
+    echo "  Fell back to the on-device voice after the cloud voice could not be selected" >&2
+    TTS_SELECTED="tts-local-cli"
+  fi
+  if [ "$TTS_SELECTED" != "tts-local-cli" ]; then
+    echo "  ClawBox AI cloud voice selected ($TTS_SELECTED); Kokoro is installed and can be made primary in Settings → Voice"
+  fi
+  # Only claim Kokoro when Kokoro is genuinely there. This line asserting
+  # "Kokoro GPU" unconditionally is what kept TASK-420 invisible: three
+  # freshly flashed boxes printed it while running entirely on the CPU
+  # fallback of the time. Claimed from the VERDICT, not the exit code, and only
+  # on a clean exit: a ready Kokoro behind a failed script deploy is named in
+  # the 1 arm below, in those words.
+  if [ "$KOKORO_HAVE" = true ] && [ "$VOICE_RC" -eq 0 ]; then
+    echo "  On-device TTS configured (Kokoro GPU)"
+  else
+    # Each arm names only what its exit code actually carries. 12 and 13 both
+    # mean Kokoro is not on this box — by defect, or because the board declines
+    # it — and with no second engine that means no on-device voice at all; the
+    # line says so instead of naming an engine the box does not have.
+    case "$VOICE_RC" in
+      12)
+        echo "  On-device TTS configured, but Kokoro is not available on this box ($KOKORO_REASON) — spoken replies fall back to the gateway's cloud voice"
+        ;;
+      1)
+        # Kokoro's verdict stands here — install-voice.sh returns 12, not 1,
+        # when the engine itself failed — so "NO engine is confirmed
+        # installed", which is where this case used to land, would be a
+        # failure report over something that may well have succeeded. The
+        # exit code says nothing about the engine's state, but the VERDICT
+        # does, and an operator reading this line is about to be told by
+        # step_validate_services what it says — so when the file names a
+        # ready Kokoro, say it here too. NOT by setting KOKORO_READY: that
+        # would route into the "(Kokoro GPU)" line above and claim a clean
+        # install over a deploy that did not land.
+        if [ "$KOKORO_VERDICT" = "ready" ]; then
+          echo "  On-device TTS configured — Kokoro GPU is ready, but the voice install did not complete ($KOKORO_REASON)"
+        else
+          echo "  On-device TTS configured, but the voice install did not complete ($KOKORO_REASON)"
+        fi
+        ;;
+      13)
+        # "on a plan that includes cloud speech", because gateway-pre-start.sh
+        # gates the OpenClaw cloud voice on exactly that device tier
+        # (CLAWBOX_SPEECH_DEVICE_TIER) and refuses to write it below one — the
+        # same tier the Hermes Note above names. Promising it on the link alone
+        # had the two harnesses answering differently about one box.
+        echo "  On-device TTS configured, but this box has NO working on-device TTS engine ($KOKORO_REASON) — the cloud voice speaks for it once the box is linked to ClawBox AI on a plan that includes cloud speech"
+        ;;
+      *)
+        echo "  On-device TTS configured, but NO engine is confirmed installed ($KOKORO_REASON)"
+        ;;
+    esac
+  fi
+  # Configuring the provider succeeded; whether the ENGINE the owner asked for
+  # arrived is a separate verdict, and it is this one that leaves the function.
+  return "$TTS_RC"
+}
+
+# The Local AI tab's Install for the box's own voice: /setup-api/tts/install
+# starts this as root (`voice_kokoro_install` is on WEB_ROOT_STEPS, and
+# deliberately not on the UI list install/run-step serves to the MCP bearer —
+# a root install is the person's decision). It is step_openclaw_tts in its
+# INSTALL mode: the same verdict reading, the same registration with every
+# harness the box runs, the same tolerance codes, so a box installed from here
+# is exactly the box an update produced back when updates installed engines.
+# The one difference is what install-voice.sh is asked for — `--kokoro`, the
+# CUDA stack and its model — and the name the failure is recorded under.
+step_voice_kokoro_install() {
+  step_openclaw_tts --kokoro
+}
+
+# The Local AI tab's Install for on-device speech-to-text: POST
+# /setup-api/whisper {action:"install-engine"} streams this root step.
+# faster-whisper, the CTranslate2 CUDA build (about five minutes on an Orin,
+# pinned to the board's own architecture) and the `base` weights — the STT
+# half the update used to run on every box. Graded by install-voice.sh's
+# `--whisper` contract, in the codes step_openclaw_tts uses for Kokoro so a
+# reader of the journal meets one vocabulary: 13 a board with no CUDA, 12 an
+# install that did not arrive, 14 the engine landed and the scripts did not.
+# Each one is the route's own error line. NOT recorded as a provisioning
+# failure: nothing about the box's provisioning asked for this engine, and the
+# marker the flash host reads must not go red over an owner's click.
+step_voice_whisper_install() {
+  local STT_RC=0
+  bash "$SRC_DIR/scripts/install-voice.sh" --whisper || STT_RC=$?
+  case "$STT_RC" in
+    0)  echo "  On-device speech-to-text installed (faster-whisper)" ;;
+    13) echo "  ERROR: faster-whisper does not apply to this board (no CUDA toolkit) — speech is transcribed in the cloud" >&2; return 13 ;;
+    12) echo "  ERROR: faster-whisper was requested and did NOT install — see the log above" >&2; return 12 ;;
+    1)  echo "  ERROR: faster-whisper is installed, but the voice scripts did not deploy to the workspace" >&2; return 14 ;;
+    *)  echo "  ERROR: install-voice.sh --whisper exited $STT_RC, which is not in its contract" >&2; return 14 ;;
+  esac
 }
 
 step_setup_config() {
@@ -1883,7 +7125,7 @@ step_captive_portal_dns() {
   # Remove old captive portal DNS hijack (breaks internet for hotspot clients)
   rm -f "$DNSMASQ_DIR/captive-portal.conf"
   # Install upstream DNS forwarding for hotspot clients
-  cp "$PROJECT_DIR/config/dnsmasq-upstream.conf" "$DNSMASQ_DIR/upstream-dns.conf"
+  cp "$SRC_DIR/config/dnsmasq-upstream.conf" "$DNSMASQ_DIR/upstream-dns.conf"
   echo "  Removed captive portal DNS, installed upstream DNS forwarding"
 }
 
@@ -1942,7 +7184,146 @@ step_directories_permissions() {
   ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_K" "q4_0"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_CACHE_TYPE_V" "q4_0"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_MAX_TOKENS" "131072"
+  # The memory-search embedder (config/clawbox-embed.service). Keep in step
+  # with src/lib/embed-server.ts and scripts/start-embed-server.sh —
+  # src/tests/unit/embed-server-pin.test.ts fails if they disagree.
+  ensure_env_setting "$ENV_FILE" "EMBED_BASE_URL" "http://127.0.0.1:8081/v1"
+  ensure_env_setting "$ENV_FILE" "EMBED_MODEL" "qwen3-embedding-0.6b"
+  ensure_env_setting "$ENV_FILE" "EMBED_HF_REPO" "Qwen/Qwen3-Embedding-0.6B-GGUF"
+  ensure_env_setting "$ENV_FILE" "EMBED_HF_FILE" "Qwen3-Embedding-0.6B-Q8_0.gguf"
+  # -c/-b/-ub as one number; 1024 covers every measured document twice over
+  # and the proxy trims the rare longer one. 2048 for a box whose notes are
+  # mostly CJK (a 1,600-character chunk can be 1,600 tokens) — ~0.6 GB more.
+  ensure_env_setting "$ENV_FILE" "EMBED_BATCH" "1024"
+  # 99 = the whole model on the GPU (a query answers in ~50 ms, a document
+  # chunk in ~53 ms). 0 = CPU only: 1.4 GB RSS of which only 0.7 GB is
+  # anonymous, queries FASTER (27 ms), but indexing 13x slower (692 ms/chunk).
+  ensure_env_setting "$ENV_FILE" "EMBED_N_GPU_LAYERS" "99"
+  ensure_env_setting "$ENV_FILE" "EMBED_CACHE_TYPE_K" "q8_0"
+  ensure_env_setting "$ENV_FILE" "EMBED_CACHE_TYPE_V" "q8_0"
   echo "  Done"
+}
+
+step_swapfile() {
+  # Disk-backed swap, beside the zram the Jetson image already configures.
+  #
+  # WHY BOTH. `nvzramconfig` gives the board one compressed swap device per
+  # core, half of RAM in total. zram is a compression ratio, never capacity:
+  # its pages live IN RAM (measured on an Orin Nano, 2026-09-06: 1.12 GB of
+  # pages held in 0.35 GB, 3.47x). It is the right first tier and it cannot
+  # save a box that genuinely needs more memory than it has. On 2026-09-05 a
+  # `next build` was OOM-killed on an owner's box at 4.6 GB resident with the
+  # desktop session and an agent also resident; the update ended on a restored
+  # previous build and a red step. A file on the disk is the tier that has an
+  # answer for that, and at priority 1 against zram's 5 the kernel still fills
+  # the compressed devices first — the file stays at 0 bytes used until
+  # something big actually arrives.
+  #
+  # Idempotent: an existing /swapfile is swapped on (never re-created, never
+  # resized — the owner may have chosen their own size), and an fstab line is
+  # written once.
+  local file=/swapfile size_gb avail_gb
+
+  # A container cannot swapon at all, and the CI harness is only one kind of
+  # container: check the machine, not just our own test flag, BEFORE anything
+  # touches the disk — an 8 GB file written and then refused is 8 GB wasted.
+  if is_test_mode; then
+    echo "  Skipping swapfile: test mode (a container cannot swapon)"
+    return 0
+  fi
+  if in_container; then
+    echo "  Skipping swapfile: running in a container (swap belongs to the host)"
+    return 0
+  fi
+
+  if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$file"; then
+    echo "  Swapfile already active: $(swapon --show=NAME,SIZE --noheadings 2>/dev/null | awk -v f="$file" '$1 == f {print $2}')"
+    ensure_swapfile_fstab "$file" || return 1
+    return 0
+  fi
+
+  if [ -e "$file" ]; then
+    # Left from an earlier install or a reboot that has not mounted it yet.
+    if swapon --priority "$SWAPFILE_PRIORITY" "$file" 2>/dev/null; then
+      echo "  Swapfile re-enabled: $file"
+      ensure_swapfile_fstab "$file" || return 1
+      return 0
+    fi
+    echo "  Warning: $file exists but could not be enabled; leaving it alone"
+    return 0
+  fi
+
+  # A box whose disk is nearly full must not be handed a swapfile instead of
+  # room to update itself. The reserve is deliberately larger than the file.
+  avail_gb="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+  [ -n "$avail_gb" ] || avail_gb=0
+  size_gb=0
+  for candidate in "$SWAPFILE_SIZE_GB" 4; do
+    if [ "$avail_gb" -ge $((candidate + SWAPFILE_DISK_RESERVE_GB)) ]; then
+      size_gb="$candidate"
+      break
+    fi
+  done
+  if [ "$size_gb" = "0" ]; then
+    echo "  Skipping swapfile: only ${avail_gb}G free on / (want ${SWAPFILE_SIZE_GB}G plus a ${SWAPFILE_DISK_RESERVE_GB}G reserve)"
+    return 0
+  fi
+
+  echo "  Creating a ${size_gb}G swapfile at $file..."
+  # `fallocate` is instant on ext4; `dd` is the fallback for a filesystem whose
+  # allocation swapon would refuse (and for one without fallocate at all).
+  if ! fallocate -l "${size_gb}G" "$file" 2>/dev/null; then
+    if ! dd if=/dev/zero of="$file" bs=1M count=$((size_gb * 1024)) status=none 2>/dev/null; then
+      rm -f "$file"
+      echo "  Warning: could not write $file; leaving the box on zram alone"
+      return 0
+    fi
+  fi
+  chmod 600 "$file"
+  chown root:root "$file"
+  if ! mkswap "$file" >/dev/null 2>&1; then
+    rm -f "$file"
+    echo "  Warning: mkswap failed; leaving the box on zram alone"
+    return 0
+  fi
+  if ! swapon --priority "$SWAPFILE_PRIORITY" "$file" 2>/dev/null; then
+    rm -f "$file"
+    echo "  Warning: swapon failed; leaving the box on zram alone"
+    return 0
+  fi
+  ensure_swapfile_fstab "$file" || return 1
+  echo "  Swap is now $(free -h | awk '/^Swap:/{print $2}') ($(swapon --show=NAME --noheadings | wc -l) devices)"
+}
+
+# An 8 GB appliance must not enter a known OOM-prone build with zram only.
+# Provisioning can deliberately skip on low disk; verify the outcome, not its
+# exit code. Bigger development hosts and container builds do not need this.
+ensure_build_swap() {
+  is_test_mode && return 0
+  in_container && return 0
+  local ram_kb disk_swap_kb
+  ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+  [ "${ram_kb:-0}" -ge 12000000 ] && return 0
+  step_swapfile || return 1
+  disk_swap_kb=$(swapon --show=NAME,SIZE --bytes --noheadings | awk '$1 !~ /^\/dev\/zram/ {sum += $2} END {printf "%.0f", sum / 1024}') || return 1
+  if [ "${disk_swap_kb:-0}" -lt 4194304 ]; then
+    echo "Error: build requires at least 4 GiB active disk-backed swap on this low-memory device; free disk space or repair swap and Retry. Dashboard has not been stopped." >&2
+    return 1
+  fi
+}
+
+# One fstab line, written once, so the file comes back after a reboot.
+ensure_swapfile_fstab() {
+  local file="$1"
+  grep -qs "^$file[[:space:]]" /etc/fstab && return 0
+  # A read-only or full /etc is the case that matters: the swap is live now and
+  # would vanish at the next boot with nothing said. The append's status is the
+  # step's, and the step's is a warning at the caller — never a failed install.
+  if ! printf '%s none swap sw,pri=%s 0 0\n' "$file" "$SWAPFILE_PRIORITY" >> /etc/fstab; then
+    echo "  Warning: could not record $file in /etc/fstab — the swap is active now but will not survive a reboot" >&2
+    return 1
+  fi
+  echo "  Recorded $file in /etc/fstab"
 }
 
 step_system_config() {
@@ -1950,6 +7331,601 @@ step_system_config() {
   step_polkit_rules
   step_nm_dispatcher
   step_sysctl_linkdown
+  # Non-fatal: a box that cannot take a swapfile still installs and runs, it
+  # just keeps the zram it came with.
+  step_swapfile || echo "  Warning: swapfile step failed (non-fatal)"
+  # Non-fatal here too, matching step_post_update. This runs under install.sh's
+  # `set -euo pipefail` on the fresh-flash path, so an unguarded failure would
+  # abort a first install before ollama, llama.cpp, Chromium, VNC and
+  # start_services ever ran. A hardening step must never brick a flash.
+  step_firewall || echo "  Warning: firewall step failed (non-fatal)"
+  step_persistent_journal
+}
+
+step_persistent_journal() {
+  # Make the journal survive a reboot.
+  #
+  # Shipped devices ran journald with `Storage=auto` and no /var/log/journal,
+  # which means volatile: the entire journal lived in /run/log/journal (tmpfs),
+  # was charged to RAM (72 MB measured on a QA box), and was destroyed on every
+  # reboot. "What happened before it rebooted?" — the first question of every
+  # support case — had no answer on any ClawBox ever shipped, and there was
+  # nowhere durable for the web tier's access log to land either.
+  #
+  # Idempotent: cp + mkdir + a journald restart that flushes /run into /var.
+  local drop_in_dir="/etc/systemd/journald.conf.d"
+  local drop_in="$drop_in_dir/10-clawbox.conf"
+  local src="$SRC_DIR/config/journald-clawbox.conf"
+
+  if [ ! -f "$src" ]; then
+    echo "  Warning: $src missing, skipping persistent journal setup"
+    return 0
+  fi
+
+  mkdir -p "$drop_in_dir"
+  cp "$src" "$drop_in"
+  chmod 644 "$drop_in"
+
+  # journald creates /var/log/journal itself when Storage=persistent, but only
+  # on its next start — and systemd-tmpfiles is what applies the correct
+  # ownership and the systemd-journal ACL, so do it explicitly rather than
+  # leaving a root-only directory behind.
+  mkdir -p /var/log/journal
+  systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+
+  # Restart rather than reload: Storage= is only read at start. This also
+  # flushes what is currently in /run into /var, so the CURRENT boot's log is
+  # the first one that survives, not the next one.
+  systemctl restart systemd-journald >/dev/null 2>&1 || true
+  journalctl --flush >/dev/null 2>&1 || true
+
+  if [ -d /var/log/journal ]; then
+    echo "  Journal is persistent (/var/log/journal), capped at 200M"
+  else
+    echo "  Warning: /var/log/journal was not created — journal stays volatile"
+  fi
+
+  # NOT fixed here, and not fixable from userspace: the first ~10 s of every
+  # boot (~888 kernel lines) are stamped ~361 days early, because the Jetson has
+  # no battery-backed RTC and nvvrs-pseq-rtc only sets the system clock at
+  # monotonic ~10 s. `journalctl -b` timestamps before that handoff are bogus and
+  # `--list-boots` shows one "boot" spanning the gap. This is a hardware/BSP
+  # property of the Orin Nano dev kit, not something install.sh can correct.
+}
+
+# ── Root-owned entrypoints ───────────────────────────────────────────────────
+#
+# Anything root executes on behalf of the unprivileged clawbox web server must
+# live somewhere clawbox cannot write, or the privilege boundary is decorative.
+# /home/clawbox/clawbox and /home/clawbox/clawbox/scripts are both
+# clawbox-owned and group-writable, and install.sh's own bootstrap hands the
+# tree back with `chown -R clawbox:clawbox` on every root run — so a NOPASSWD
+# grant on a script in there is a one-step local root for anything with
+# clawbox-level code execution (the web server itself, the in-UI terminal, the
+# agent's shell). Copy them here instead, root:root, under root-owned dirs.
+# TASK-445.
+ROOT_LIBEXEC_DIR="/usr/local/libexec/clawbox"
+
+ROOT_EXEC_MANIFEST_HELPER="$ROOT_LIBEXEC_DIR/clawbox-root-manifest.sh"
+
+# Set once this run has hard-reset $PROJECT_DIR to the update branch. See
+# root_exec_may_anchor below: that reset is one of the two moments at which
+# "the tree" and "the code this device is supposed to run" are the same thing.
+ROOT_EXEC_TREE_RESYNCED=0
+
+# May this run RE-ANCHOR the root-exec record and mirror on the current tree?
+#
+# Re-anchoring is the one operation here that can hand root a file the clawbox
+# user wrote, so it is not something every caller may do. It is legitimate at
+# exactly two moments:
+#
+#   * install.sh is itself running OUT of the tree ($SRC_DIR = $PROJECT_DIR) —
+#     an operator's `sudo bash install.sh`, the flash host's provisioning run,
+#     the one-time transition update. Root is already executing that tree, so
+#     recording it grants nothing root does not already have. This is also what
+#     makes `sudo bash install.sh --step systemd_services` the documented repair
+#     for a stale manifest.
+#   * this run has just hard-reset the tree to the update branch, which is the
+#     moment the update mechanism defines as "this is the new code".
+#
+# Anywhere else — step_systemd_services reached through `post_update`, above all,
+# because that step is web-startable and runs install.sh out of the ROOT-OWNED
+# mirror — a re-anchor over an unverified tree would take a rewritten install.sh,
+# copy it into the mirror, and hand it to root on the next step: the whole of
+# TASK-733, restored through the back door.
+#
+# Outside those two moments the record is not re-written AT ALL. It used to be,
+# over a tree that still verified, on the argument that rewriting a record which
+# already matches is a no-op — but `--verify` is asked about $PROJECT_DIR and the
+# answer is stale the instant it returns, and `--write` then walks the tree AGAIN
+# and records whatever is there by then. A foothold that restores the tree,
+# starts `post_update` and swaps install.sh between the two walks got its bytes
+# into the record, and from the record into the mirror, whose staged-copy check
+# compares against that same record. write_root_exec_manifest keeps the no-op
+# without the second walk instead: it requires the record to still describe the
+# tree, and writes nothing.
+root_exec_may_anchor() {
+  [ "$SRC_DIR" = "$PROJECT_DIR" ] && return 0
+  [ "$ROOT_EXEC_TREE_RESYNCED" = "1" ] && return 0
+  return 1
+}
+
+# Does the installed helper know about the mirror at all?
+#
+# Asked, not inferred: `--mirror-path` is a pure question with no side effect, so
+# a helper that answers it has the verb and a helper that exits 64 predates it.
+root_exec_helper_knows_mirror() {
+  "$ROOT_EXEC_MANIFEST_HELPER" --mirror-path >/dev/null 2>&1
+}
+
+# Record the tree root is allowed to execute, and restage the root-owned copy it
+# executes. Strict: a non-zero return means the record is NOT current, and the
+# caller must treat that as a failure.
+write_root_exec_manifest() {
+  root_exec_manifest_helper_alive "$ROOT_EXEC_MANIFEST_HELPER" || return 1
+  if root_exec_may_anchor; then
+    "$ROOT_EXEC_MANIFEST_HELPER" --write || return 1
+  elif ! "$ROOT_EXEC_MANIFEST_HELPER" --verify >/dev/null 2>&1; then
+    # Not one of the two anchoring moments, so the record is brought FORWARD
+    # rather than rewritten — and that is only defensible while it still
+    # describes the tree. When it does not, this run cannot say what root should
+    # execute and must not guess. See root_exec_may_anchor.
+    echo "  Error: refusing to re-record the root-exec manifest — $PROJECT_DIR does not match what root recorded, and this run did not put it there" >&2
+    return 1
+  fi
+  # VERIFY, then clear — never the other way round. `--write` returning 0 says
+  # the helper believes it wrote a manifest, not that the record now matches the
+  # tree; a write that landed somewhere else, or a tree that moved while it ran,
+  # both end here. And this function's success is read as "the bootstrap's
+  # failure is repaired": install_root_libexec installs the root dispatcher on
+  # it, and that dispatcher refuses every pinned root step while the manifest
+  # does not verify. So prove the record before dropping the failure. TASK-584.
+  "$ROOT_EXEC_MANIFEST_HELPER" --verify >/dev/null || return 1
+  # ...and the copy root actually runs, from the tree that was just verified.
+  #
+  # Part of the SAME success, deliberately, because install_root_libexec installs
+  # the new dispatcher only when this function returns 0 and that dispatcher will
+  # not fall back to the tree: a box that got the dispatcher without a mirror
+  # would refuse every root step it has no console to repair. Ordering the fleet
+  # transition is exactly this line — mirror first, dispatcher second, never the
+  # other way round. See docs/root-exec-mirror.md. TASK-733.
+  #
+  # A helper from BEFORE this release has no `--mirror` verb, and its 64 means
+  # "I do not know that word", not "the staging failed". Two populations reach
+  # that state legitimately — a box on its first update to this release, and a
+  # box being rolled BACK to a build from before it — and both are fine: the
+  # dispatcher such a build installs reads the tree and wants no mirror.
+  # Reporting it as a provisioning failure would be a false failure over an
+  # update that is converging. So ASK the helper rather than read its exit
+  # status, the same discipline root_exec_manifest_helper_alive uses.
+  if root_exec_helper_knows_mirror; then
+    "$ROOT_EXEC_MANIFEST_HELPER" --mirror || return 1
+  else
+    echo "  The installed root-exec helper predates the mirror — nothing to stage yet"
+  fi
+  # This is exactly the repair for what the bootstrap could not do, so the run's
+  # verdict must stop reporting it. TASK-584.
+  clear_provision_failure root_exec_manifest
+}
+
+# Best-effort variant for the update paths that legitimately change the tree. A
+# device that has not installed the helper yet has no manifest to keep in step,
+# and warning about that on every sync would be noise; a helper that IS present
+# and fails is worth a line, because the next root step refuses until the record
+# is current again.
+refresh_root_exec_manifest() {
+  [ -x "$ROOT_EXEC_MANIFEST_HELPER" ] || return 0
+  # The helper installed in libexec is deliberately NOT replaced here.
+  #
+  # It is tempting: the tree under us has just been replaced wholesale, so the
+  # installed helper can be the previous release's and can be missing a verb —
+  # `--mirror` is the first, and on the transition update it is missing on every
+  # box in the field. But copying it out of $PROJECT_DIR into
+  # /usr/local/libexec/clawbox and then RUNNING it as root is the exact
+  # primitive this whole change removes, on the one path the web server can
+  # start; the tree is clawbox's throughout, and the reset that preceded it now
+  # runs as clawbox too. install_root_libexec does that copy later in the same
+  # update, out of $SRC_DIR, after the record exists.
+  #
+  # So an old helper simply cannot stage a mirror this pass, and
+  # write_root_exec_manifest says so instead of failing over it. That costs
+  # nothing: a box whose helper predates the mirror has a dispatcher that
+  # predates it too, and that dispatcher reads the tree.
+  # RECORDED, not just warned. This is the second place install.sh re-records the
+  # manifest after a `git reset --hard` (sync_repo_to_update_target), and it had
+  # the same defect the bootstrap did: a failure here left the step exiting 0
+  # with a stale manifest, and the operator then met it as an opaque exit-65 on
+  # some later step instead. Non-fatal on purpose — the update should finish —
+  # but the run's verdict says so. TASK-584.
+  write_root_exec_manifest && return 0
+  echo "  Warning: could not re-record the root-exec manifest; root steps will refuse until an operator runs 'sudo bash $PROJECT_DIR/install.sh --step systemd_services'" >&2
+  record_provision_failure root_exec_manifest
+}
+
+# Install one root-owned file WITHOUT ever leaving a prefix of it behind.
+#
+# `install` writes into the destination inode with O_TRUNC, so a copy that dies
+# part way through — a full or read-only /usr — leaves an executable PREFIX of
+# the file at the destination. For every script this function installs that
+# prefix is silently PERMISSIVE rather than noisy, because each one's dispatch
+# is at the bottom: a truncated clawbox-root-manifest.sh exits 0 for --write and
+# --verify without looking at anything (TASK-584, which is why every caller now
+# probes it first), and a truncated clawbox-root-step.sh reaches EOF and exits 0
+# without exec'ing the step at all — which `Type=oneshot` reports to the updater
+# as a step that SUCCEEDED.
+#
+# So: temp name in the same directory, then rename. `rename(2)` within a
+# directory is atomic, so the live file is either the whole old one or the whole
+# new one and never a prefix of either — and a failed copy leaves the working
+# file it was replacing untouched. Same shape as the bootstrap's _mf_restage,
+# which had this and the path that runs on every install did not. TASK-584.
+install_root_file() {
+  local src="$1" dst="$2" mode="${3:-0755}"
+  if ! install -o root -g root -m "$mode" "$src" "$dst.new"; then
+    rm -f "$dst.new" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -f "$dst.new" "$dst"; then
+    rm -f "$dst.new" 2>/dev/null || true
+    return 1
+  fi
+}
+
+# Returns non-zero when ANY root-owned copy did not land, and records
+# `root_libexec` in the run's verdict. Every copy is still attempted — the
+# failures are COLLECTED rather than returned at the first one — because
+# install_root_file is atomic (a failed copy leaves the previous file untouched)
+# so the copies are independent of each other, and a return before the manifest
+# block below would leave a stale manifest behind, and the dispatcher then
+# refuses every pinned root step: a wider outage than one missing copy.
+#
+# The check matters on the update path specifically. step_post_update runs its
+# fixups through `optional_step`, whose `if "$@"` switches errexit OFF for the
+# whole body of the function it calls exactly as the `|| echo` before it did —
+# so without this check a copy that
+# failed here was followed by successful commands, the function returned 0, and
+# the units and grants installed after it pointed at a copy that was not there
+# (a fresh libexec on the first update carrying it) or was stale.
+install_root_libexec() {
+  install -d -o root -g root -m 0755 /usr/local/libexec
+  install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
+  local src failed=0
+  # The integrity helper first: the dispatcher installed at the END of this
+  # function refuses to run any step unless the manifest this writes verifies.
+  for src in clawbox-root-manifest.sh clawbox-run-root-step.sh clawbox-gateway-maintenance.sh; do
+    if [ -f "$SRC_DIR/config/$src" ]; then
+      install_root_file "$SRC_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src" || {
+        echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
+        failed=1
+      }
+    fi
+  done
+  # Everything the web server may invoke as root via a NOPASSWD grant. Same
+  # rule as above: the copy that runs must not be the one clawbox can rewrite.
+  # gateway-restart-when-online.sh is launched BY ROOT from the NetworkManager
+  # dispatcher on every network event, so it belongs here for exactly the reason
+  # this block exists: the copy that runs must not be the one clawbox can
+  # rewrite. See scripts/nm-dispatcher-failover.sh.
+  #
+  # start-ap.sh, stop-ap.sh and ap-watchdog.sh are what clawbox-ap.service and
+  # clawbox-ap-watchdog.service ExecStart as ROOT (neither has a User=), the
+  # watchdog on a 20-second timer for the life of the box; and
+  # ensure-vnc-on-first-boot.sh is what clawbox-firstboot-vnc.service runs as
+  # root after the first reboot. The units used to name the tree copies, which
+  # `chown -R clawbox` above makes clawbox-writable after every git reset — so
+  # a clawbox-level foothold was root inside twenty seconds, with no grant and
+  # no manifest check on the path (the manifest is consulted only inside the
+  # root-step dispatcher, never before systemd's own ExecStart). The tree
+  # copies STAY, executable, for the unprivileged callers: src/lib/network.ts
+  # and the hotspot route run them as clawbox through NetworkManager's polkit
+  # grants. Security scan #21 (the TASK-445 follow-up clawbox-root-step.sh's
+  # "residual" note pointed at). On the first in-app update carrying the
+  # change there is a window between the updater's git reset (new units and
+  # scripts in the tree) and post_update's first call here (the copies in
+  # libexec): the old unit runs the new ap-watchdog.sh and it stands down
+  # rather than fall back to the tree — written down in that script.
+  for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
+             clawbox-resource-limits.sh gateway-restart-when-online.sh \
+             start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
+    if [ -f "$SRC_DIR/scripts/$src" ]; then
+      install_root_file "$SRC_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src" || {
+        echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
+        failed=1
+      }
+    fi
+  done
+  # The limits the scripts above read. Root-owned for the same reason they are.
+  install -d -o root -g root -m 0755 /etc/clawbox
+  if [ -f "$SRC_DIR/config/clawbox-resource-limits.env" ]; then
+    install_root_file "$SRC_DIR/config/clawbox-resource-limits.env" \
+      /etc/clawbox/resource-limits.env 0644 || {
+      echo "  Error: could not install /etc/clawbox/resource-limits.env (the copy already there, if any, is untouched)" >&2
+      failed=1
+    }
+  fi
+
+  # Manifest, THEN dispatcher — never the other way round. The dispatcher fails
+  # closed on a missing or stale manifest, so installing it first would leave a
+  # window (and, if the manifest write failed, a permanent state) in which every
+  # root step refuses: no password change, no hostname change, no hotspot
+  # restart, on an appliance with no console. If the record cannot be written we
+  # keep whatever dispatcher is already installed and say so — the same rule
+  # install_sudoers_dropin follows for the allow-list. TASK-445.
+  if write_root_exec_manifest; then
+    if [ -f "$SRC_DIR/config/clawbox-root-step.sh" ]; then
+      install_root_file "$SRC_DIR/config/clawbox-root-step.sh" \
+        "$ROOT_LIBEXEC_DIR/clawbox-root-step.sh" || {
+        echo "  Error: could not install $ROOT_LIBEXEC_DIR/clawbox-root-step.sh (the dispatcher already there, if any, is untouched)" >&2
+        failed=1
+      }
+    fi
+  else
+    echo "  Warning: could not record the root-exec manifest; leaving the existing root dispatcher in place" >&2
+    record_provision_failure "root_exec_manifest"
+  fi
+  # A copy that did not land is a fact about the box (a full or read-only /usr),
+  # not about this step, so it goes in the verdict like the manifest failure
+  # above; provision_repair_step names step_systemd_services as its repair,
+  # the step that installs these copies and everything that points at them.
+  if [ "$failed" -ne 0 ]; then
+    record_provision_failure "root_libexec"
+    return 1
+  fi
+}
+
+# ── sudoers ────────────────────────────────────────────────────────────────
+SUDOERS_DIR="/etc/sudoers.d"
+# Copies of drop-ins we removed, kept so a device can be forensically explained
+# (and a removal undone by hand) instead of the file simply vanishing. Root-only:
+# the clawbox user must not be able to read a rule back out and re-plant it.
+SUDOERS_QUARANTINE_DIR="/var/lib/clawbox/sudoers-quarantine"
+# Where a candidate drop-in is staged while it is validated. Root-owned and
+# NOT under /etc/sudoers.d — see install_sudoers_dropin().
+#
+# A subdirectory of its own, not /var/lib/clawbox itself: that directory is
+# shared (clawbox-power-mode.sh keeps its clock snapshot there, the first-boot
+# VNC marker lives there), and install_sudoers_dropin creates its staging dir
+# 0700 root:root. Applying that to the shared parent would stop every non-root
+# reader from even traversing it.
+SUDOERS_STAGING_DIR="/var/lib/clawbox/sudoers-staging"
+# The drop-ins this installer owns. Nothing else in /etc/sudoers.d is ours, and
+# quarantine_overbroad_sudoers() below is the only code that touches the rest.
+CLAWBOX_SUDOERS_MANAGED=(clawbox clawbox-ollama)
+
+# Install a sudoers drop-in only if it VALIDATES FIRST.
+#
+# The old order was cp -> visudo -cf -> rm + exit 1 on failure, which turned a
+# typo in the repo into a device with no drop-in at all: every systemctl the web
+# server needs (updater, power, wifi hand-off, factory reset, desktop toggle)
+# then fails on a password prompt nobody can answer, on an appliance with no
+# console. So: validate a staged copy, install only if it parses, and on failure
+# leave whatever is already installed exactly where it is and say so. TASK-445.
+#
+# The staging copy deliberately does NOT live in /etc/sudoers.d — sudo parses
+# every file in that directory, so a candidate staged there is live the moment
+# it lands, valid or not.
+install_sudoers_dropin() {
+  local src="$1" name="$2"
+  local dest="$SUDOERS_DIR/$name"
+
+  if [ ! -f "$src" ]; then
+    echo "  Warning: $src is missing; leaving $dest as it is" >&2
+    return 1
+  fi
+
+  install -d -o root -g root -m 0755 "$SUDOERS_DIR" || return 1
+  install -d -o root -g root -m 0700 "$SUDOERS_STAGING_DIR" || return 1
+
+  local staged
+  staged="$(mktemp "$SUDOERS_STAGING_DIR/.sudoers-candidate.XXXXXX")" || return 1
+  # Checked, not assumed. Both call sites invoke this function in a CONDITION
+  # context (`if install_sudoers_dropin …`, `… || echo`), and bash disables
+  # `set -e` for the whole dynamic extent of a command being tested. So every
+  # step in here has to carry its own `|| return 1`: an unchecked failure does
+  # not abort the script, it falls through to the next line and reports success.
+  # A truncated-but-parseable candidate — a `cat` that hit ENOSPC halfway down
+  # the allow-list — validates under visudo and installs cleanly. TASK-445.
+  if ! cat "$src" > "$staged"; then
+    rm -f "$staged"
+    echo "Error: could not stage $src; keeping the existing $dest" >&2
+    return 1
+  fi
+  if ! cmp -s "$src" "$staged"; then
+    rm -f "$staged"
+    echo "Error: staged copy of $src is truncated; keeping the existing $dest" >&2
+    return 1
+  fi
+  chown root:root "$staged" || { rm -f "$staged"; return 1; }
+  chmod 0440 "$staged" || { rm -f "$staged"; return 1; }
+
+  if ! visudo -cf "$staged" >/dev/null 2>&1; then
+    rm -f "$staged"
+    echo "Error: $src failed visudo validation; keeping the existing $dest" >&2
+    return 1
+  fi
+
+  # Byte-identical to what is already installed: nothing to do. Keeps repeat
+  # updates from opening a window where the file is momentarily replaced.
+  if [ -f "$dest" ] && cmp -s "$staged" "$dest"; then
+    rm -f "$staged"
+    return 0
+  fi
+
+  local backup=""
+  if [ -f "$dest" ]; then
+    backup="$(mktemp "$SUDOERS_STAGING_DIR/.sudoers-previous.XXXXXX")" || { rm -f "$staged"; return 1; }
+    if ! cat "$dest" > "$backup" || ! cmp -s "$dest" "$backup"; then
+      rm -f "$staged" "$backup"
+      echo "Error: could not back up $dest; leaving it as it is" >&2
+      return 1
+    fi
+  fi
+
+  # install(1) writes to a temp file and renames, so sudo never sees a
+  # half-written drop-in.
+  #
+  # POSITIVE PROOF, not a return code. The caller uses this function's result to
+  # decide whether it is safe to quarantine the blanket `NOPASSWD: ALL` drop-in,
+  # and the `visudo -c` below cannot tell it: when `install` fails, visudo
+  # happily validates whatever is STILL on disk and answers 0. On a device whose
+  # only grant is the blanket one, that sequence ends with the narrow file never
+  # written and the blanket file removed — no working sudo at all, on an
+  # appliance with no console. So compare the bytes that actually landed.
+  if ! install -o root -g root -m 0440 "$staged" "$dest" 2>/dev/null || ! cmp -s "$staged" "$dest"; then
+    if [ -n "$backup" ]; then
+      # `install` may have left a partial/renamed file behind; put the previous
+      # content back rather than trusting that it never got that far.
+      install -o root -g root -m 0440 "$backup" "$dest" 2>/dev/null \
+        || echo "Error: could not restore $dest from its backup at $backup" >&2
+    else
+      rm -f "$dest"
+    fi
+    rm -f "$staged" "$backup"
+    echo "Error: could not install $name into $dest; leaving the existing grants alone" >&2
+    return 1
+  fi
+  rm -f "$staged"
+
+  # Re-check the WHOLE set: a fragment can be valid on its own and still collide
+  # with another drop-in (duplicate alias, bad include order).
+  if ! visudo -c >/dev/null 2>&1; then
+    if [ -n "$backup" ]; then
+      # The "rolled back" message used to print whether or not the rollback
+      # worked. Say what actually happened — a device that is now missing its
+      # drop-in entirely has to be distinguishable in the install log from one
+      # that is safely back on its previous rules.
+      if install -o root -g root -m 0440 "$backup" "$dest" 2>/dev/null; then
+        echo "Error: installing $name broke /etc/sudoers validation; rolled $dest back" >&2
+      else
+        rm -f "$dest"
+        echo "Error: installing $name broke /etc/sudoers validation AND the rollback failed; removed $dest" >&2
+      fi
+    else
+      rm -f "$dest"
+      echo "Error: installing $name broke /etc/sudoers validation; removed $dest" >&2
+    fi
+    rm -f "$backup"
+    return 1
+  fi
+
+  rm -f "$backup"
+  return 0
+}
+
+# Does this drop-in hand the clawbox service user unrestricted passwordless root?
+#
+# Deliberately narrow. Only a rule whose user spec is `clawbox` or `%clawbox`
+# AND whose Cmnd is a bare `ALL` under an active NOPASSWD tag counts. An
+# operator's own `%sudo`/`%admin` rule, and the distro default in /etc/sudoers,
+# are never inspected and never touched: removing those could lock the only
+# administrator out of a device that is 3000 km away.
+#
+# ACCEPTED RESIDUAL, recorded so the next reader does not mistake it for an
+# oversight. Three shapes are knowingly out of scope, all for the same reason —
+# each would mean this installer silently rewriting rules a human wrote:
+#
+#   1. A blanket line inside /etc/sudoers itself. Only /etc/sudoers.d is walked.
+#      e2e-install/06-sudoers.spec.ts catches this behaviourally instead: it runs
+#      `sudo -n` probes for commands no grant names and requires DENIED.
+#   2. A grant that reaches clawbox through a User_Alias rather than by name.
+#   3. Over-broad but not blanket — e.g. `clawbox ALL=(ALL) NOPASSWD: /bin/bash`,
+#      which is root in one move but is not a bare `ALL`.
+#
+# Widening the detector to any of these means an installer that can delete an
+# operator's deliberate rule on an appliance with no console; the behavioural
+# probes in CI are the compensating control. TASK-445.
+sudoers_grants_blanket_nopasswd() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  awk '
+    function check(l,   eq, rest, n, parts, i, item, tag, nopass) {
+      if (l !~ /^[ \t]*(clawbox|%clawbox)[ \t]/) return 0
+      eq = index(l, "=")
+      if (eq == 0) return 0
+      rest = substr(l, eq + 1)
+      nopass = 0
+      n = split(rest, parts, ",")
+      for (i = 1; i <= n; i++) {
+        item = parts[i]
+        gsub(/^[ \t]+|[ \t]+$/, "", item)
+        sub(/^\([^)]*\)[ \t]*/, "", item)
+        while (match(item, /^(NOPASSWD|PASSWD|NOEXEC|EXEC|SETENV|NOSETENV|LOG_INPUT|NOLOG_INPUT|LOG_OUTPUT|NOLOG_OUTPUT|MAIL|NOMAIL|FOLLOW|NOFOLLOW|INTERCEPT|NOINTERCEPT):[ \t]*/)) {
+          tag = substr(item, 1, RLENGTH)
+          if (tag ~ /^NOPASSWD:/) nopass = 1
+          else if (tag ~ /^PASSWD:/) nopass = 0
+          item = substr(item, RLENGTH + 1)
+          gsub(/^[ \t]+|[ \t]+$/, "", item)
+        }
+        if (nopass && item == "ALL") return 1
+      }
+      return 0
+    }
+    {
+      line = $0
+      sub(/#.*$/, "", line)
+      if (line ~ /\\[ \t]*$/) { sub(/\\[ \t]*$/, "", line); pending = pending line; next }
+      line = pending line
+      pending = ""
+      if (check(line)) { found = 1; exit }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$file"
+}
+
+# Move any /etc/sudoers.d drop-in that hands clawbox unrestricted passwordless
+# root out of sudo's way.
+#
+# Why the installer has to do this rather than just shipping a narrow file: sudo
+# takes the UNION of every drop-in. QA and factory provisioning left
+# `/etc/sudoers.d/90-clawbox-nopasswd` containing `clawbox ALL=(ALL) NOPASSWD: ALL`
+# on shipped devices, and while that file exists every narrowing in
+# config/clawbox-sudoers is decorative — the revalidation of TASK-445 measured
+# exactly that on the QA box. Narrowing what we ship without removing what is
+# already there changes nothing on a device that has both. TASK-445 round 2.
+quarantine_overbroad_sudoers() {
+  [ -d "$SUDOERS_DIR" ] || return 0
+
+  local f base m managed
+  local -a moved_from=() moved_to=()
+  for f in "$SUDOERS_DIR"/*; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    managed=0
+    for m in "${CLAWBOX_SUDOERS_MANAGED[@]}"; do
+      [ "$base" = "$m" ] && managed=1 && break
+    done
+    [ "$managed" = "1" ] && continue
+    sudoers_grants_blanket_nopasswd "$f" || continue
+
+    install -d -o root -g root -m 0700 "$SUDOERS_QUARANTINE_DIR"
+    local stamp dest
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    dest="$SUDOERS_QUARANTINE_DIR/$base.$stamp"
+    if mv "$f" "$dest" 2>/dev/null; then
+      chown root:root "$dest"
+      chmod 0400 "$dest"
+      moved_from+=("$f")
+      moved_to+=("$dest")
+      echo "  Removed over-broad sudoers drop-in $base (clawbox had passwordless root on everything); copy kept at $dest"
+    else
+      echo "  Warning: could not remove over-broad sudoers drop-in $base" >&2
+    fi
+  done
+
+  [ "${#moved_to[@]}" -eq 0 ] && return 0
+
+  # Removing a file can still break the set — a quarantined drop-in may have
+  # defined an alias another one uses. Put everything back rather than leave a
+  # device where sudo refuses every command.
+  if ! visudo -c >/dev/null 2>&1; then
+    local i
+    for i in "${!moved_to[@]}"; do
+      mv "${moved_to[$i]}" "${moved_from[$i]}" 2>/dev/null || true
+    done
+    echo "Error: removing the over-broad sudoers drop-in(s) broke /etc/sudoers validation; restored them" >&2
+    return 1
+  fi
+  return 0
 }
 
 step_systemd_services() {
@@ -1970,7 +7946,7 @@ step_systemd_services() {
   # ClawBox — the in-Next.js scheduler in src/lib/clawkeep-scheduler.ts
   # drives backups on this device.)
   local found_unit
-  for found_unit in "$PROJECT_DIR/config"/*.service "$PROJECT_DIR/config"/*.timer; do
+  for found_unit in "$SRC_DIR/config"/*.service "$SRC_DIR/config"/*.timer; do
     [ -f "$found_unit" ] || continue
     local basename
     basename="$(basename "$found_unit")"
@@ -1988,9 +7964,29 @@ step_systemd_services() {
     fi
   done
 
+  # Root-owned copies of everything root executes on clawbox's behalf — and of
+  # everything the units copied BELOW ExecStart as root. This has to come first:
+  # clawbox-ap.service and clawbox-ap-watchdog.service name
+  # /usr/local/libexec/clawbox/{start-ap,stop-ap,ap-watchdog}.sh, and on the
+  # first in-app update carrying that change the watchdog timer (already live,
+  # firing every 20 s) would otherwise run the new unit against a copy that is
+  # not there yet. It must also run before the sudoers drop-in further down,
+  # which points at these copies. Security scan #21.
+  #
+  # And it must SUCCEED first: the units copied below and the sudoers drop-in
+  # name these copies, so installing them over a copy that did not land is a
+  # unit that points at nothing. On a fresh install errexit stops here anyway;
+  # on the update path, where step_post_update tolerates this step's failure,
+  # the return leaves the units and grants already on the box in place —
+  # still working, still pointing at the copies that ARE there.
+  install_root_libexec || {
+    echo "  Error: the root-owned copies under $ROOT_LIBEXEC_DIR are not all current; not installing the units and grants that point at them" >&2
+    return 1
+  }
+
   local svc
   for svc in "${ALL_SERVICES[@]}"; do
-    local src="$PROJECT_DIR/config/$svc"
+    local src="$SRC_DIR/config/$svc"
     if [ ! -f "$src" ]; then
       echo "Error: Service file not found: $src"
       exit 1
@@ -2014,6 +8010,10 @@ step_systemd_services() {
   for svc in "${ALL_SERVICES[@]}"; do
     [[ "$svc" == *@* ]] && continue
     [[ "$svc" == "clawbox-browser.service" ]] && continue
+    # On demand only: the local-AI proxy starts the memory embedder on the
+    # first search and stops it ten idle minutes later. It has no [Install]
+    # section, and enabling it would mean 2 GB resident from boot for nothing.
+    [[ "$svc" == "clawbox-embed.service" ]] && continue
     [[ "$svc" == "clawbox-tunnel.service" ]] && continue
     [[ "$svc" == "clawbox-heartbeat.service" ]] && continue
     # Timer-driven one-shot (no [Install]); enabled via its .timer below.
@@ -2045,18 +8045,52 @@ step_systemd_services() {
   if [ ! -x /usr/local/bin/cloudflared ]; then
     systemctl disable --now clawbox-tunnel.service >/dev/null 2>&1 || true
   fi
-  # Install sudoers rules so the clawbox user can manage services (systemctl restart, reboot, etc.)
-  if [ -f "$PROJECT_DIR/config/clawbox-sudoers" ]; then
-    cp "$PROJECT_DIR/config/clawbox-sudoers" /etc/sudoers.d/clawbox
-    chmod 0440 /etc/sudoers.d/clawbox
-    chown root:root /etc/sudoers.d/clawbox
-    if ! visudo -cf /etc/sudoers.d/clawbox >/dev/null; then
-      rm -f /etc/sudoers.d/clawbox
-      echo "Error: sudoers drop-in failed visudo validation; removed to keep sudo functional" >&2
-      exit 1
-    fi
+  # (install_root_libexec ran at the top of this step, before the unit copies —
+  # the sudoers drop-in below points at the same root-owned copies.)
+  # Install the narrow allow-list FIRST, then remove any blanket grant. In that
+  # order the device is never, even briefly, without the rules the web server
+  # needs: if the drop-in fails to validate we keep the old one and skip the
+  # quarantine entirely rather than strand the box with neither.
+  # The ollama optimiser grant is a SECOND drop-in and it belongs here, next to
+  # the first one — not in step_performance_mode where it used to live. That
+  # step returns early under CLAWBOX_TEST_MODE and is Jetson-only in spirit, so
+  # the grant silently never landed on any box that took the early return: the
+  # e2e-install container installed cleanly and still had no
+  # `optimize-ollama.sh` grant, which is the same "the narrowing is invisible on
+  # the device" shape TASK-445 exists to close. step_systemd_services is the one
+  # step both a fresh install and the in-app updater (step_post_update) always
+  # run, unconditionally. TASK-445.
+  #
+  # Called plainly, never as the tested command of an `if`: bash suspends
+  # `set -e` for the entire dynamic extent of a command run in a condition
+  # context, so that spelling disarmed every unchecked command inside the
+  # function body too. The function now checks its own steps, and the status
+  # comes back through an explicit variable.
+  local sudoers_status=0
+  set +e
+  install_sudoers_dropin "$SRC_DIR/config/clawbox-sudoers" clawbox
+  sudoers_status=$?
+  set -e
+
+  # Two independent gates before the blanket grant is removed: the installer
+  # reported success, AND the bytes on the device are the allow-list we shipped.
+  # The second one is the load-bearing half — it is proof about the device, not
+  # about a code path, and it is what makes "installed the narrow rules" a
+  # precondition of "removed the wide ones" instead of an assumption.
+  if [ "$sudoers_status" -eq 0 ] \
+    && cmp -s "$SRC_DIR/config/clawbox-sudoers" "$SUDOERS_DIR/clawbox"; then
     echo "  Sudoers rules installed"
+    # Gated on the PRIMARY allow-list only. That file is what keeps the box
+    # operable (wizard, updater, power, hotspot); the ollama grant is one
+    # feature's tuning. Letting a missing feature grant block the quarantine
+    # would leave a device on blanket passwordless root to protect a KV-cache
+    # setting — the wrong trade in the wrong direction.
+    quarantine_overbroad_sudoers || true
+  else
+    echo "  Warning: sudoers rules NOT updated; leaving the existing grants alone" >&2
   fi
+  install_sudoers_dropin "$SRC_DIR/config/sudoers-clawbox-ollama" clawbox-ollama || \
+    echo "  Warning: clawbox-ollama sudoers rules NOT updated; leaving the existing grant alone" >&2
   echo "  Services installed and enabled"
 }
 
@@ -2076,22 +8110,149 @@ SYSCTL_EOF
   echo "  Linkdown routing sysctl installed"
 }
 
+step_firewall() {
+  # Default-deny inbound. See scripts/clawbox-firewall.sh for the policy and the
+  # reasoning behind every rule in it; this step only decides WHEN it runs.
+  #
+  # Called from step_system_config (fresh installs) AND step_post_update
+  # (in-app updates), because a box already in the field is exactly the box the
+  # 2026-07-28 review was written about — a fresh-install-only firewall would
+  # leave every shipped device exactly as exposed as it is today.
+  local SRC="$SRC_DIR/scripts/clawbox-firewall.sh"
+  if [ ! -f "$SRC" ]; then
+    echo "  Skipping firewall: $SRC missing"
+    return 0
+  fi
+
+  # A CI container has no netfilter to program and `ufw enable` fails there.
+  # The e2e-install job runs this installer for real on every PR, so the step
+  # has to stand down rather than take the whole run red.
+  if is_test_mode; then
+    echo "  Skipping firewall: test mode"
+    return 0
+  fi
+
+  # step_apt_update installs ufw and runs before this on both paths. This is
+  # only a backstop for a box that got here with it missing (an update that
+  # skipped apt because it was offline).
+  #
+  # Neither half is time-bounded any more (owner's decision, 2026-09-14). They
+  # both used to be, to keep a stalled mirror from eating step_post_update's
+  # budget — but the cure was worse than the disease on a slow link: the ufw
+  # install was killed mid-dpkg often enough that boxes carried a half-configured
+  # package, and `wait_for_apt 60` gave up on a lock that would have cleared.
+  # Both stay best-effort (`|| true`), which is what keeps a firewall this step
+  # could not install from failing the update.
+  if ! command -v ufw >/dev/null 2>&1; then
+    wait_for_apt || true
+    env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw || true
+  fi
+
+  bash "$SRC"
+}
+
 step_nm_dispatcher() {
   local DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
-  local SRC="$PROJECT_DIR/scripts/nm-dispatcher-failover.sh"
+  local SRC="$SRC_DIR/scripts/nm-dispatcher-failover.sh"
   local DEST="$DISPATCHER_DIR/90-clawbox-failover"
   if [ ! -f "$SRC" ]; then
     echo "  Skipping NM dispatcher: $SRC missing"
     return
   fi
-  mkdir -p "$DISPATCHER_DIR"
-  cp "$SRC" "$DEST"
-  chown root:root "$DEST"
-  chmod 0755 "$DEST"
+  # Every line below claims only what it has just done. step_post_update calls
+  # this step as `step_nm_dispatcher || echo "  Warning: …"`, and bash suspends
+  # `set -e` for the whole dynamic extent of a function run in a condition
+  # context — so on the in-app update path, the one every field box takes, an
+  # unchecked failure here would print "installed" over a file that never
+  # landed, and the `||` warning would never fire because the function still
+  # returned 0 from its last echo. Same rule step_systemd_services states for
+  # itself, for the same reason.
+  #
+  # install_root_file, not `cp` + `chown` + `chmod`: NetworkManager may execute
+  # this dispatcher at any instant, including mid-update, and `cp` writes the
+  # LIVE inode with O_TRUNC — which on an existing 0755 file means NM can run a
+  # truncated, still-executable dispatcher that silently does less than half its
+  # job. That is the prefix hazard install_root_file was written for (TASK-584).
+  # It stages `$DEST.new` in the same directory and renames, so NM sees either
+  # the whole old file or the whole new one. The staged name is briefly visible
+  # to NM's scan — `.new` is not one of the suffixes it skips — but the worst
+  # that costs is one extra run of a COMPLETE dispatcher, which the waiter's
+  # lock collapses anyway; a truncated one has no such floor.
+  if ! mkdir -p "$DISPATCHER_DIR" \
+     || ! install_root_file "$SRC" "$DEST" 0755; then
+    echo "  Warning: could not install the NetworkManager failover dispatcher at $DEST" >&2
+    record_provision_failure nm_dispatcher
+    return 1
+  fi
+  # The dispatcher is useless without the waiter it defers the gateway restart
+  # to, and the waiter must be the ROOT-OWNED copy — root runs it. Installed
+  # here as well as in install_root_libexec so an in-app UPDATE, which runs
+  # step_nm_dispatcher from step_post_update, gets both halves together rather
+  # than a new dispatcher pointing at nothing.
+  local WAITER_SRC="$SRC_DIR/scripts/gateway-restart-when-online.sh"
+  if [ -f "$WAITER_SRC" ]; then
+    # install_root_file returns 1 on both its failure paths and leaves the
+    # PREVIOUS copy in place, so an unreported failure is not "no waiter" but a
+    # STALE one — worse, and invisible until a network event logs the
+    # dispatcher's own "missing or not executable" line.
+    if install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR" \
+       && install_root_file "$WAITER_SRC" "$ROOT_LIBEXEC_DIR/gateway-restart-when-online.sh"; then
+      echo "  Deferred gateway-restart helper installed"
+    else
+      echo "  Warning: could not install the deferred gateway-restart helper — the failover will not restart the gateway" >&2
+      record_provision_failure nm_dispatcher
+      return 1
+    fi
+  else
+    # A checkout without the script is degraded, not broken: the dispatcher
+    # still fails over to WiFi. Reported, and not claimed as installed.
+    echo "  Warning: $WAITER_SRC missing — the failover will not restart the gateway"
+  fi
   echo "  NetworkManager failover dispatcher installed"
 }
 
+# NON-FATAL, BUT NOT SILENT.
+#
+# Every fixup in `step_post_update` is deliberately non-fatal — refusing to
+# finish an update because a VNC unit refresh failed would be the worse outcome
+# — and each one used to say so with `|| echo "  Warning: … (non-fatal)"`,
+# which reaches the journal and nothing else. The step still exits 0, so the
+# updater reports "Applying system fixups" as completed and the owner is told
+# an update worked in full when part of it did not: the false-success shape,
+# spelled nineteen times in one function.
+#
+# So the failures are COLLECTED and re-stated at the end in a line the updater
+# parses (`CLAWBOX-WARN:`), which turns them into a warning on the update's own
+# status — where the owner reads it — while the step still exits 0.
+POST_UPDATE_FAILED_STEPS=""
+
+# Run one fixup. Never fails the step; always records.
+optional_step() {
+  local name="$1"
+  shift
+  if "$@"; then
+    return 0
+  fi
+  echo "  Warning: $name step failed (non-fatal)"
+  POST_UPDATE_FAILED_STEPS="$POST_UPDATE_FAILED_STEPS $name"
+  return 0
+}
+
+# The one line the updater reads back out of the journal. Printed only when
+# something failed, so a healthy update stays silent.
+report_optional_step_failures() {
+  [ -n "$POST_UPDATE_FAILED_STEPS" ] || return 0
+  # The CODE is stable across runs and does not name the failing set: the
+  # updater de-duplicates by it, and a key that changed with the list would be
+  # a new card every time one more fixup failed.
+  echo "CLAWBOX-WARN[post-update-fixups]: these system fixups failed and were skipped:$POST_UPDATE_FAILED_STEPS"
+}
+
 step_post_update() {
+  # Reset per RUN, not per shell: the file-scope initialiser above is for
+  # `set -u`, and a second call in one shell would otherwise re-report the
+  # first call's failures.
+  POST_UPDATE_FAILED_STEPS=""
   # Re-apply system-level fixups that aren't covered by `git pull && build`.
   # Triggered by the in-app updater so existing devices pick up new dispatcher
   # scripts, sysctls, etc. without a full reinstall. Keep this list small and
@@ -2107,14 +8268,31 @@ step_post_update() {
   # LATER updater step (and the web server, and the next update) resolves the
   # SKU correctly instead of silently defaulting to openclaw. It also re-asserts
   # the Hermes gateway removal, which an older update could have undone.
-  step_edition_lock || echo "  Warning: edition_lock step failed (non-fatal)"
-  step_set_hostname || echo "  Warning: set_hostname step failed (non-fatal)"
-  step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
-  step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
+  optional_step edition_lock step_edition_lock
+  optional_step set_hostname step_set_hostname
+  optional_step nm_dispatcher step_nm_dispatcher
+  optional_step sysctl_linkdown step_sysctl_linkdown
+  # Without this call the swapfile would be fresh-install-only, and every box
+  # already in the field would keep facing a rebuild with zram alone — which is
+  # the box the 2026-09-05 OOM happened on.
+  optional_step swapfile step_swapfile
+  # Without this call the firewall would be fresh-install-only and every box
+  # already in the field would keep its wide-open INPUT policy — which is the
+  # entire finding. Idempotent: the script converges its own rules on each run.
+  optional_step firewall step_firewall
+  # Without this call the persistent journal would be fresh-install-only, and
+  # every already-shipped box would keep losing its whole log on each reboot.
+  optional_step persistent_journal step_persistent_journal
+  # Re-assert the cgroup memory guards and re-sync /etc/clawbox/resource-limits.env
+  # from the repo. Without this the guards would be fresh-install-only and every
+  # already-shipped box would keep running an unbounded ollama. Idempotent.
+  # NOTE: there is deliberately no step_desktop_mode call here — the desktop
+  # toggle is the owner's decision and an update must never flip it.
+  optional_step resource_limits step_resource_limits
   # step_vnc_refresh is a tiny idempotent refresh of the clawbox-vnc.service
   # unit + autocutsel package. Devices installed before the display-:99 move
   # and the clipboard-sync addition get both here without needing a reinstall.
-  step_vnc_refresh || echo "  Warning: vnc_refresh step failed (non-fatal)"
+  optional_step vnc_refresh step_vnc_refresh
   # Reinstall the unit files from config/ + daemon-reload. Without this, unit
   # changes only ever reached FRESH installs: the in-app update runs
   # bootstrap_updater -> ... -> post_update and never re-copies
@@ -2124,20 +8302,71 @@ step_post_update() {
   # Gemma 4" from being killed mid-build, and would swallow any future unit or
   # sudoers change the same way. The step is idempotent — cp, daemon-reload,
   # enable — and is exactly what fresh installs already run.
-  step_systemd_services || echo "  Warning: systemd_services step failed (non-fatal)"
+  optional_step systemd_services step_systemd_services
   # Refresh the device-side ClawKeep CLI from the repo. The Python package
   # has the same version string ("0.1.0") across releases, so a plain
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
   # we have to force-reinstall.
-  step_clawkeep_install || echo "  Warning: clawkeep_install step failed (non-fatal)"
+  optional_step clawkeep_install step_clawkeep_install
+  # The coding harness. WITHOUT this call TASK-378 would be fresh-install-only:
+  # step_post_update never ran step_ai_tools_install, which is exactly why no
+  # already-shipped box has `claude` on it today. Idempotent — a present
+  # `claude` short-circuits after one `command -v`, and the wrapper is a copy.
+  optional_step coding_harness step_coding_harness
+  # The Codex CLI. Without this call the pinned native binary would be
+  # fresh-install-only — step_post_update does not run step_ai_tools_install —
+  # and every box in the field would keep the unpinned, unverified npm copy for
+  # good. Idempotent: a box already on the pin does one `codex --version` and
+  # stops.
+  optional_step codex_cli step_codex_cli
+  # On-device TTS: refreshes the voice scripts and the units of the engines
+  # that are PRESENT, and seeds the tts-local-cli provider behind an installed
+  # Kokoro. It installs NOTHING — the update used to spend a quarter of an
+  # hour here on Kokoro, faster-whisper and a from-source CTranslate2 build
+  # nobody asked for (measured 2026-09-15), and the owner's ruling is that no
+  # engine or model but the llama.cpp runtime and Gemma 4 is force-installed.
+  # A box with no Kokoro is a plain state on this path (verdict `absent`, exit
+  # 0, one informational line); the engines are the Local AI tab's Install
+  # buttons (voice_kokoro_install, voice_whisper_install).
+  # The SAME tolerance table step_openclaw_setup applies to this step, and for
+  # the same reason: 12, 13 and 14 are three different facts about a box's
+  # speech and the update path has to keep them apart too. A single
+  # one generic wrapper line — indistinguishable from the fixups around
+  # it — reported "this box has no working TTS engine" in the same words as a
+  # skipped VNC refresh, on the very path that reaches ALREADY-SHIPPED boxes.
+  # ── The Hermes agent FIRST, for the same reason the fresh-install path was
+  # reordered ──────────────────────────────────────────────────────────────
+  # step_openclaw_tts registers the on-device voice with every harness the box
+  # runs, and the Hermes half of that is written through ~/.local/bin/hermes.
+  # The repair below is exactly the population that needs it: a box whose
+  # factory reset (pre-fix build) deleted ~/.hermes/hermes-agent still HAS the
+  # executable shim, so the `-x` guard passes, the `hermes config set` calls
+  # fail against the missing venv, and the update ends with a recorded
+  # provisioning failure and a scary "Hermes will not speak on this box" — over
+  # a box that step_hermes_install repairs perfectly forty lines later, and
+  # which would then have no voice registered until the NEXT update.
+  #
+  # Idempotent and self-gated on has_hermes_harness (a no-op on openclaw), so
+  # moving it up costs nothing on any other SKU.
+  optional_step hermes_install step_hermes_install
+
+  local TTS_UPDATE_RC=0
+  step_openclaw_tts || TTS_UPDATE_RC=$?
+  case "$TTS_UPDATE_RC" in
+    0) ;;
+    12) echo "  Warning: Kokoro GPU TTS did not install (recorded above; the update continues)" ;;
+    13) echo "  Warning: this box has NO working on-device TTS engine (recorded above; the update continues)" ;;
+    14) echo "  Warning: the TTS install did not complete (recorded above; the update continues)" ;;
+    *)  echo "  Warning: openclaw_tts returned $TTS_UPDATE_RC, which is not in its contract (non-fatal)" ;;
+  esac
   # Re-assert the gateway service after an in-app update. The full update
   # syncs repo files and rebuilds before this continuation runs; older devices
   # can therefore reach the new UI while the gateway is still using stale
   # service/drop-in state or is simply down from the reboot handoff. Run the
   # same idempotent setup used by fresh installs so a completed update leaves
   # clawbox-gateway as the active single source of truth.
-  step_gateway_setup || echo "  Warning: gateway_setup step failed (non-fatal)"
-  step_gateway_legacy_state_recovery || echo "  Warning: gateway_legacy_state_recovery step failed (non-fatal)"
+  optional_step gateway_setup step_gateway_setup
+  optional_step gateway_legacy_state_recovery step_gateway_legacy_state_recovery
   # Repair the two assets a factory reset performed by a pre-fix build deleted:
   # the Hermes agent install (~/.hermes/hermes-agent) and the offline Gemma
   # GGUF (data/llamacpp). Neither `git pull && build` nor any fixup above put
@@ -2151,15 +8380,40 @@ step_post_update() {
   # ~/.local/bin/hermes is not runnable — so the agent has to be repaired first
   # or the repair and the provisioning would fight each other.
   #
-  # Both are fast no-ops on a healthy box: step_hermes_install returns after a
-  # `--version` probe, step_llamacpp_model after a single `[ -f ]` test.
-  # step_hermes_install self-gates on has_hermes_harness; step_llamacpp_model
-  # deliberately does not (see its comment).
-  step_hermes_install || echo "  Warning: hermes_install step failed (non-fatal)"
-  step_llamacpp_model || echo "  Warning: llamacpp_model step failed (non-fatal)"
+  # Both are fast no-ops on a box that is already where it should be:
+  # step_hermes_install returns after a `--version` probe plus one
+  # `git rev-parse`, step_llamacpp_model after a single `[ -f ]` test. The one
+  # exception is a box whose agent predates $HERMES_PIN_COMMIT (or was moved
+  # off it by a hand-run `hermes update`, which reattaches to main): that box
+  # takes the reversible pinned upgrade ONCE — a clone plus venv build, ~90s
+  # measured — and is a no-op on every update after it.
+  # step_hermes_install has already run ABOVE, before step_openclaw_tts, because
+  # the voice registration writes through the Hermes CLI — see the comment
+  # there. It is idempotent, so the move is a reordering and not a second run.
+  # step_llamacpp_model deliberately does not self-gate (see its comment).
+  # The embedder is NOT downloaded here: ensure_local_embeddings wires memory
+  # search to the GGUF only when the GGUF is already on the box (the Local AI
+  # tab's Install, `--step embed_model`, is what fetches it) and says so in one
+  # line otherwise. Non-fatal in the register of its neighbours.
+  # After step_systemd_services and step_resource_limits above: the helper
+  # reaches the embedder through the proxy, which starts clawbox-embed.service
+  # through a sudoers grant those two steps install.
+  optional_step local_embeddings_check ensure_local_embeddings
+  # The embedder used to live inside ollama, which may still be holding the
+  # old copy (2.8 GB). `stop`, never `disable`: the runtime's own standby
+  # convention, and the chat path can still wake it on demand. After the
+  # helper, so nothing re-embeds through ollama on the way out.
+  #
+  # Through the pause helper so this stop has a start too (TASK-724). It is the
+  # SECOND of the two an update performs — free_memory_for_build owns the
+  # first, in the rebuild step, and pairs it there — and it is the one whose
+  # missing start left local AI dead under a `completed` update, because
+  # nothing runs after post_update that would have woken it.
+  pause_engine_unit ollama.service
+  optional_step llamacpp_model step_llamacpp_model
   # Hermes re-provisioning is deliberately NOT called here. The in-app updater
   # dispatches `hermes_edition` as its own step immediately after this one, so a
-  # failure is reported instead of swallowed by `|| echo "(non-fatal)"`.
+  # failure fails the STEP rather than being recorded as a skipped fixup.
   # Ordering is unchanged (still after step_systemd_services). Fresh installs
   # call step_hermes_edition directly and are unaffected.
   # Deliberately NO `systemctl restart clawbox-setup` here. The web server reads
@@ -2167,7 +8421,16 @@ step_post_update() {
   # (src/lib/edition-source.ts stats the file per call and caches by mtime), so
   # the re-baked lock above is live immediately — while restarting the server
   # mid-update would kill the very process the updater is polling for progress.
-  step_update_smoke || echo "  Warning: update_smoke reported issues (non-fatal)"
+  optional_step update_smoke step_update_smoke
+  # LAST, and after the smokes: ollama was stopped above to make it drop the
+  # stale embedder copy, and the memory stays free for step_llamacpp_model's
+  # download until here. A stopped-then-started ollama holds no model, so the
+  # 2.8 GB the stop was for is still released — what comes back is the idle
+  # server the box had before the update, which is the whole point of the pair.
+  resume_paused_engines
+  # LAST WORD: the failures collected above, in the line the updater turns into
+  # a warning on the update's status. Silent on a healthy run.
+  report_optional_step_failures
 }
 
 gateway_port_listening() {
@@ -2175,23 +8438,142 @@ gateway_port_listening() {
   ss -ltn 2>/dev/null | grep -qE "[:.]${gw_port}[[:space:]]"
 }
 
+# Is the gateway RUNNING, or at least still trying to be?
+#
+# Under `Restart=always` a crash loop spends most of its time in `activating`,
+# so this deliberately does not separate "starting for the first time" from
+# "restarting again". What it DOES separate is a unit that is not trying at all
+# — stopped, masked, or past its start limit — which is the case the recovery
+# below exists for and the one that must not be made to wait.
+gateway_unit_running_or_starting() {
+  case "$(systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null || echo unknown)" in
+    activating|active|reloading) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The same question as gateway_port_listening, asked with a budget.
+#
+# `gateway_port_listening` asks ONCE. That is the right question for
+# step_validate_services' Hermes probe, which asserts that nothing is listening;
+# it is the wrong question for "is this gateway broken", because the listener
+# arrives long after systemd says the unit started. Measured on the OpenClaw box
+# 2026-09-06: `Started ClawBox OpenClaw Gateway` at 07:53:43 and
+# `[gateway] http server listening (18 plugins; 7.2s)` at 07:53:57, with the
+# ExecStartPre ahead of it taking 31 s, 86 s and 120 s across the same boot's
+# three restarts. The recovery fired in the same second as `Started`; the
+# `openclaw doctor --fix` it then ran FAILED — "the Gateway or another SQLite
+# maintenance command owns this state directory", which is the gateway proving
+# it was alive — and the box paid a full extra cold start on every update.
+# Probe-once, and a false failure on top of it.
+#
+# Returns as soon as the port answers, and as soon as the unit stops trying, so
+# a healthy box costs a second or two and a genuinely dead one costs nothing.
+# ONE OF THE THREE CLOCKS THIS FILE KEEPS, and none of them is an install
+# deadline. (The others: the look for a restarted Hermes dashboard's new main
+# pid, and step_validate_services' settle window before it writes its report.)
+#
+# Everywhere else a clock was removed (see the wait-note block near the top): a
+# slow box must never fail. Here the clock is the switch between "keep waiting"
+# and "attempt the repair", and it cannot be replaced by a fact, because the fact
+# does not exist. Both halves of the answer look identical to systemd: the unit
+# is `active` while its ExecStart has forked and is still coming up, AND while it
+# is up and will never bind the port at all — a plugin awaiting capability
+# consent is the documented case, and it holds that state for ever. An unbounded
+# wait here would therefore hang install.sh in exactly the situation the recovery
+# below exists to fix, which is worse than waiting three minutes for it.
+#
+# Timing out is not a failure on either caller's side: step_gateway_legacy_state
+# _recovery runs `openclaw doctor` next, and the harness swap reports a gateway
+# that did not come up. Nothing here aborts an install over a slow download or a
+# tired disk, which is what the owner's rule is about.
+#
+# Seconds this STEP has already spent waiting. The budget is the step's, not
+# each call's: the recovery asks up to four times, and four independent
+# 180-second budgets would turn a genuinely broken gateway from an 8-second
+# path into a six-minute one inside post_update's advisory budget — where
+# an overrun is reported `completed`, which is the false-success class at the
+# report level.
+GATEWAY_READY_SPENT=0
+
+wait_for_gateway_port() {
+  local budget="${CLAWBOX_GATEWAY_READY_BUDGET_S:-180}" waited=0 restarts_before restarts_now
+  # A budget that is not a plain number is not a budget; fall back rather than
+  # letting arithmetic below fail the update over an operator's typo.
+  case "$budget" in ''|*[!0-9]*) budget=180 ;; esac
+  budget=$(( budget > GATEWAY_READY_SPENT ? budget - GATEWAY_READY_SPENT : 0 ))
+  # A unit that RESTARTS while we wait is looping, not starting. Under
+  # `Restart=always` a crash loop spends most of its time `activating`, so the
+  # state alone cannot tell the two apart and the wait would run its whole
+  # budget over a gateway that is failing every few seconds.
+  restarts_before="$(systemctl show clawbox-gateway.service -p NRestarts --value 2>/dev/null || echo "")"
+  while :; do
+    if gateway_port_listening; then
+      return 0
+    fi
+    if ! gateway_unit_running_or_starting; then
+      return 1
+    fi
+    if [ "$waited" -ge "$budget" ]; then
+      return 1
+    fi
+    sleep 3
+    waited=$((waited + 3))
+    GATEWAY_READY_SPENT=$((GATEWAY_READY_SPENT + 3))
+    restarts_now="$(systemctl show clawbox-gateway.service -p NRestarts --value 2>/dev/null || echo "")"
+    if [ -n "$restarts_before" ] && [ -n "$restarts_now" ] && [ "$restarts_now" != "$restarts_before" ]; then
+      echo "  The gateway restarted while we waited for it ($restarts_before -> $restarts_now) — it is looping, not starting" >&2
+      return 1
+    fi
+    wait_note "$waited" "the gateway to start listening on port ${GATEWAY_PORT:-18789}"
+  done
+}
+
 step_gateway_legacy_state_recovery() {
+  if [ -d /run/clawbox-gateway-maintenance ]; then
+    echo "  Gateway recovery deferred until updater maintenance ends"
+    return 0
+  fi
   # No gateway on the Hermes SKU — "not listening on 18789" is the CORRECT
   # state there, and running `openclaw doctor` + restarting a masked unit would
   # just churn (and, before the mask, resurrect it).
   is_hermes_edition && { echo "  [hermes edition] skipping gateway recovery"; return 0; }
   local gw_port="${GATEWAY_PORT:-18789}"
-  if gateway_port_listening; then
+  # WITH the budget, not a single `ss`: see wait_for_gateway_port. A gateway
+  # still in its ExecStartPre is not a gateway in legacy state.
+  if wait_for_gateway_port; then
     echo "  Gateway is listening on ${gw_port}, skipping legacy state recovery"
     return 0
   fi
 
   echo "  Gateway is not listening on ${gw_port}; running OpenClaw doctor recovery"
-  as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  local doctor_out=""
+  doctor_out=$(as_clawbox env OPENCLAW_SERVICE_REPAIR_POLICY="$OPENCLAW_SERVICE_REPAIR_POLICY" \
+    "$OPENCLAW_BIN" doctor --fix --yes --non-interactive 2>&1) || true
+  printf '%s\n' "$doctor_out"
+  # `doctor` refusing BECAUSE the gateway holds its own state directory is
+  # positive evidence that the gateway is alive — it is the loser of a lock the
+  # gateway owns. Restarting on the strength of that is restarting over a
+  # working gateway, which is what cost a cold start per update. Wait for the
+  # listener instead and report honestly if it never comes.
+  if printf '%s\n' "$doctor_out" | grep -qiE 'owns this state directory|another (Gateway|SQLite maintenance command)'; then
+    echo "  openclaw doctor could not take the state directory because the gateway holds it — the gateway is alive, not in legacy state"
+    if wait_for_gateway_port; then
+      echo "  Gateway is listening on ${gw_port}"
+      return 0
+    fi
+    # The same observable state as the tail of this function — alive and not
+    # listening — so the same status. `step_post_update` calls this step through
+    # `optional_step`, so a non-zero return is a RECORDED warning — on the
+    # update's own status, not only in the log — and never a failed update;
+    # returning 0 here made a gateway that never binds its port produce a clean
+    # step.
+    echo "  Warning: the gateway holds its state directory but is not listening on ${gw_port}; not restarting over a live gateway" >&2
+    return 1
+  fi
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
   systemctl restart clawbox-gateway.service || true
-  sleep 8
-  if gateway_port_listening; then
+  if wait_for_gateway_port; then
     echo "  Gateway recovered after doctor --fix"
     return 0
   fi
@@ -2224,12 +8606,22 @@ step_gateway_legacy_state_recovery() {
     echo "  No known legacy migration blocker files found to quarantine"
   fi
 
-  as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  as_clawbox env OPENCLAW_SERVICE_REPAIR_POLICY="$OPENCLAW_SERVICE_REPAIR_POLICY" \
+    "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
-  systemctl start clawbox-gateway.service || true
-  sleep 12
+  # `restart`, as the first attempt above already does. The stop before the
+  # quarantine loop does NOT make `start` safe here: `doctor --fix` on the line
+  # above writes config and brings the gateway back itself, so by this point the
+  # unit can be up again — and up without binding is the very symptom this
+  # function exists for. `start` over that is a no-op, the files just
+  # quarantined are never re-read, and the port check below reports a failure
+  # over a recovery that was never attempted.
+  systemctl restart clawbox-gateway.service || true
 
-  if gateway_port_listening; then
+  # Budgeted, for the same reason as the probe at the top: a `sleep 12` and one
+  # `ss` reported a healthy box as still offline whenever the pre-start took
+  # longer than twelve seconds, which on this hardware is the normal case.
+  if wait_for_gateway_port; then
     echo "  Gateway recovered after legacy state quarantine"
     return 0
   fi
@@ -2239,6 +8631,24 @@ step_gateway_legacy_state_recovery() {
 }
 
 step_update_smoke() {
+  # These probes read OpenClaw's gateway and Telegram configuration. Hermes-only
+  # boxes deliberately have neither; their services are checked separately by
+  # validate_services. Do not turn that absence into a failed update fixup.
+  # Dual still ships OpenClaw and must keep all of these checks.
+  if ! has_openclaw_harness; then
+    echo "    [skip] OpenClaw post-update smokes (Hermes-only edition)"
+    return 0
+  fi
+  # WHAT THE SMOKES FOUND, in a return code the caller can report.
+  #
+  # Every finding below is a `[WARN]` line and the step returned 0 either way,
+  # so a gateway that was not reachable after an update, or an auth token the
+  # update left weak, reached the journal and nothing else — while the run said
+  # "Applying system fixups: completed". `optional_step` records a non-zero
+  # return as a skipped fixup and re-states it on the marker line the updater
+  # turns into a warning; it still cannot fail the update, which is what
+  # "ALWAYS non-fatal" meant and still means.
+  local SMOKE_FINDINGS=0
   # Advisory post-update smokes (#151). The rest of post_update only confirms
   # services are *running* — these confirm two flows that can silently break
   # across an update while health still looks green: gateway auth continuity
@@ -2254,10 +8664,13 @@ step_update_smoke() {
   #    value the Control UI authenticates with; weak/missing = LAN bypass risk).
   local gw_code
   gw_code=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "http://127.0.0.1:${GW_PORT}/" 2>/dev/null || echo "000")
-  if [ "$gw_code" = "200" ]; then
+  if [ -d /run/clawbox-gateway-maintenance ]; then
+    echo "    [skip] gateway reachability deferred to the updater's gateway_verify step"
+  elif [ "$gw_code" = "200" ]; then
     echo "    [ok] gateway reachable"
   else
     echo "    [WARN] gateway not reachable (HTTP $gw_code) — Control UI/chat may be down"
+    SMOKE_FINDINGS=1
   fi
   local tok_state
   tok_state=$(as_clawbox python3 -c '
@@ -2287,7 +8700,7 @@ else:
 ' "$OPENCLAW_CONFIG" 2>/dev/null || echo "missing")
   case "$tok_state" in
     strong|secretref|interp) echo "    [ok] gateway auth token is strong ($tok_state)" ;;
-    *) echo "    [WARN] gateway auth token is weak/missing ($tok_state) — LAN auth may be bypassable" ;;
+    *) echo "    [WARN] gateway auth token is weak/missing ($tok_state) — LAN auth may be bypassable"; SMOKE_FINDINGS=1 ;;
   esac
 
   # 2) Telegram bot identity (getMe) — only when a bot token is configured.
@@ -2302,7 +8715,9 @@ except Exception:
 ' "$OPENCLAW_CONFIG" 2>/dev/null || echo "")
   if [ -z "$TG_TOKEN" ]; then
     echo "    [skip] no Telegram bot configured"
-    return 0
+    # A box with no bot is not a finding, but the gateway smokes above may
+    # already have made one.
+    return "$SMOKE_FINDINGS"
   fi
   local getme
   getme=$(curl -s -m 8 "https://api.telegram.org/bot${TG_TOKEN}/getMe" 2>/dev/null \
@@ -2313,6 +8728,7 @@ except Exception: print("no")' 2>/dev/null || echo "no")
     echo "    [ok] Telegram bot identity verified (getMe)"
   else
     echo "    [WARN] Telegram getMe failed — bot token may be invalid/revoked, or network unavailable"
+    SMOKE_FINDINGS=1
   fi
 
   # 3) Real delivery smoke — QA only, gated behind a chat id so production
@@ -2330,17 +8746,31 @@ except Exception: print("")' 2>/dev/null || echo "")
       echo "    [ok] Telegram delivery smoke sent (message_id=$msg_id)"
     else
       echo "    [WARN] Telegram delivery smoke failed to send"
+      SMOKE_FINDINGS=1
     fi
   fi
-  return 0
+  return "$SMOKE_FINDINGS"
 }
 
 step_polkit_rules() {
   local POLKIT_PKLA_DIR="/etc/polkit-1/localauthority/50-local.d"
   mkdir -p "$POLKIT_PKLA_DIR"
-  cp "$PROJECT_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
-  rm -f /etc/polkit-1/rules.d/49-clawbox-updates.rules
-  echo "  Polkit rule installed (allows clawbox to trigger root update steps)"
+  cp "$SRC_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
+  # Remove the manage-units authorisation from devices that already have it.
+  # The .pkla shipped above no longer contains that stanza, but `cp` only
+  # replaces the file — a box provisioned before TASK-539 keeps whatever polkit
+  # already cached until this runs, and there is no other remover.
+  #
+  # The scoped .rules twin is INSTALLED now rather than deleted. polkit 0.105
+  # (JetPack's) ignores rules.d entirely, so on the appliance it is inert
+  # documentation; on polkit >= 0.106 it is the correct narrow grant. Deleting
+  # it was how the unscoped .pkla ended up as the only authority.
+  local POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
+  if [ -d "$POLKIT_RULES_DIR" ] && [ -f "$SRC_DIR/config/49-clawbox-updates.rules" ]; then
+    install_root_file "$SRC_DIR/config/49-clawbox-updates.rules" \
+      "$POLKIT_RULES_DIR/49-clawbox-updates.rules" 0644
+  fi
+  echo "  Polkit rules installed (NetworkManager only; root steps go through sudo)"
 }
 
 step_start_services() {
@@ -2383,11 +8813,11 @@ step_cloudflared_install() {
     echo "  CLAWBOX_TEST_MODE=1, skipping cloudflared install"
     return 0
   fi
-  if [ ! -f "$PROJECT_DIR/scripts/setup-tunnel.sh" ]; then
+  if [ ! -f "$SRC_DIR/scripts/setup-tunnel.sh" ]; then
     echo "  setup-tunnel.sh missing — skipping cloudflared install"
     return 0
   fi
-  bash "$PROJECT_DIR/scripts/setup-tunnel.sh" || {
+  bash "$SRC_DIR/scripts/setup-tunnel.sh" || {
     echo "  WARNING: cloudflared install failed; remote control will be unavailable until reinstalled"
     return 0
   }
@@ -2404,32 +8834,144 @@ step_nvidia_jetpack() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-jetpack
 }
 
+# Does the in-app updater own the box right now? It writes `update_in_progress`
+# into data/config.json before its first root step and re-asserts it at every
+# step boundary (src/lib/update-lock.ts), so a dispatched step can ask. Read as
+# a HINT and nothing more: the file is clawbox-writable, and the one thing a
+# false answer can buy here is clocks left unpinned until the next boot.
+update_owns_the_box() {
+  local store="$PROJECT_DIR/data/config.json"
+  [ -f "$store" ] || return 1
+  python3 - "$store" <<'PY' 2>/dev/null
+import json, sys
+try:
+    sys.exit(0 if json.load(open(sys.argv[1])).get("update_in_progress") is True else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+# The boot unit that applies the persisted (or default) profile, installed and
+# enabled — never started here: `--apply` is the caller's decision.
+install_performance_unit() {
+  if [ -f "$SRC_DIR/config/clawbox-performance.service" ]; then
+    cp "$SRC_DIR/config/clawbox-performance.service" /etc/systemd/system/
+    systemctl daemon-reload
+    systemctl enable clawbox-performance.service
+  fi
+}
+
 step_performance_mode() {
+  # Install the root-owned copies the sudoers rules point at FIRST — both the
+  # unit below and the ollama optimiser are now invoked through them.
+  install_root_libexec
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping nvpmodel/jetson_clocks"
     return 0
   fi
-  # Find the highest MAXN mode (MAXN_SUPER > MAXN); fall back to mode 0
-  local MAXN_LINE MAXN_ID MAXN_NAME
-  MAXN_LINE=$(grep -oP 'POWER_MODEL ID=\K\d+\s+NAME=\S+' /etc/nvpmodel.conf | grep 'NAME=MAXN' | tail -1)
-  MAXN_ID="${MAXN_LINE%% *}"
-  MAXN_ID="${MAXN_ID:-0}"
-  MAXN_NAME="${MAXN_LINE#*NAME=}"
-  echo "  Setting power mode to $MAXN_ID (${MAXN_NAME:-unknown})"
-  nvpmodel -m "$MAXN_ID"
-  jetson_clocks
-  # Ensure persistent service is installed and enabled for next boot
-  if [ -f "$PROJECT_DIR/config/clawbox-performance.service" ]; then
-    cp "$PROJECT_DIR/config/clawbox-performance.service" /etc/systemd/system/
-    systemctl daemon-reload
-    systemctl enable clawbox-performance.service
+  # NOT UNDER AN IN-APP UPDATE. Until 2026-09-17 the update dispatched this
+  # step itself (second, ahead of the apt transaction, the OpenClaw npm
+  # install, the rebuild's `next build` and post_update), and `--apply` there
+  # pinned every core to 1,728 MHz, the GPU to 1,020 MHz with railgate off and
+  # EMC to 3,199 MHz for all of them. On 2026-09-16 three field boxes went dark
+  # within a minute of that, seconds after `npm install -g openclaw` had
+  # finished on six pinned cores over WiFi — no shutdown in any log, syslog and
+  # npm's own log NUL-padded where they stop — and stayed dark until they were
+  # power-cycled, each left with a core whose files had never reached the disk
+  # (see promote_staged_openclaw_core).
+  # Whatever the last straw was on that hardware, the pin bought nothing: every
+  # full update ends in rebuild_reboot, and clawbox-performance.service applies
+  # the persisted or default profile at that boot anyway. So the step is OFF
+  # the update list (src/lib/updater.ts UPDATE_STEPS, owner's ruling
+  # 2026-09-17): an in-app update does not touch the power profile at all, and
+  # the box keeps the profile it booted with. The guard below is what remains
+  # of the in-between hours when the update still dispatched the step and it
+  # UNPINNED for the update's length — `--restore`, the unit's own ExecStop
+  # verb: the clock snapshot back or the EMC lock cleared, the balanced
+  # nvpmodel cap, cpuidle on, and NOTHING persisted — and it stays for a
+  # hand-run `sudo bash install.sh --step performance_mode` while an update
+  # is in flight, which must not pin the clocks under the update's heaviest
+  # work either. The ollama tuning and the cgroup guards this step also used
+  # to apply are step_ollama_install's and post_update's after the reboot. A
+  # full install, and a hand-run step with no update running, apply here
+  # exactly as they always did.
+  if [ -n "${CLAWBOX_DISPATCHED_STEP:-}" ] && update_owns_the_box; then
+    echo "  An in-app update owns the box: unpinning the clocks for the length of the update — clawbox-performance.service applies the power profile again at the reboot that ends it"
+    "$ROOT_LIBEXEC_DIR/clawbox-power-mode.sh" --restore || \
+      echo "  Warning: could not unpin the clocks for the update (non-fatal)"
+    install_performance_unit
+    return 0
   fi
+  # Apply whatever profile is persisted in /etc/clawbox/power-mode. On a fresh
+  # box nothing is persisted, so this resolves to PERFORMANCE — the script's
+  # DEFAULT_MODE since the owner's ruling of 2026-09-15 — and because
+  # clawbox-performance.service applies the same resolution at every boot, the
+  # reboot that ends every in-app update included, that default reaches a box
+  # already in the field that never chose. An owner's persisted `balanced` is
+  # read back as such and kept.
+  #
+  # Before TASK-455 this was an unconditional `nvpmodel -m MAXN && jetson_clocks`,
+  # which pinned all six CPUs to 1,728 MHz and the GPU to 1,020 MHz at 4% load
+  # and disabled the cpuidle states — 7.21 W / ~58 C at idle, and 74.8 C median
+  # Tj under sustained 3B inference, over the 74 C passive-cooling trip. That
+  # measurement is why balanced exists and stays one toggle away (Settings ->
+  # System -> Performance mode) as the owner's opt-out: TASK-455 made it the
+  # default, and 2026-09-15 made performance the default again with the same
+  # numbers stated on the switch.
+  "$ROOT_LIBEXEC_DIR/clawbox-power-mode.sh" --apply || \
+    echo "  Warning: power profile apply failed (non-fatal)"
+  # Ensure persistent service is installed and enabled for next boot
+  install_performance_unit
   # snapd is kept running — required for snap-based Chromium on Ubuntu 22.04
   # Optimize Ollama for 8GB Jetson
-  bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
-  # Install sudoers rule so the web UI can run optimize-ollama.sh as root
-  cp "$PROJECT_DIR/config/sudoers-clawbox-ollama" /etc/sudoers.d/clawbox-ollama
-  chmod 440 /etc/sudoers.d/clawbox-ollama
+  # Run the ROOT-OWNED copy, not the one in the clawbox-writable project tree:
+  # it is the copy the sudoers grant points at, so running it here is also the
+  # check that install_root_libexec actually put it there. A device whose
+  # /usr/local/libexec/clawbox/optimize-ollama.sh is missing is a device where
+  # saving a local Ollama model silently skips the q8_0 KV-cache / flash-attention
+  # tuning, which is exactly what the TASK-445 revalidation found. TASK-445.
+  #
+  # The grant that names this path is installed by step_systemd_services, not
+  # here: everything below this point is behind the is_test_mode early return
+  # above, so installing a sudoers drop-in here meant it never landed on a box
+  # that took that return. TASK-445.
+  "$ROOT_LIBEXEC_DIR/optimize-ollama.sh"
+  # The cgroup memory guards. Deliberately AFTER the ollama optimiser, so the
+  # unit it just restarted picks the limits up on the daemon-reload below.
+  step_resource_limits
+}
+
+step_resource_limits() {
+  # cgroup v2 MemoryHigh/MemoryMax for ollama, the automation browser and the
+  # GNOME session. Every number comes from
+  # config/clawbox-resource-limits.env — see that file. Idempotent: it only
+  # ever writes three files called 50-clawbox-memory.conf.
+  #
+  # The root-owned copy of the env file is what the script prefers at runtime;
+  # the repo copy is only a fallback, because /home/clawbox/clawbox is
+  # clawbox-writable and this runs as root.
+  install -d -o root -g root -m 0755 /etc/clawbox
+  if [ -f "$SRC_DIR/config/clawbox-resource-limits.env" ]; then
+    install_root_file "$SRC_DIR/config/clawbox-resource-limits.env" \
+      /etc/clawbox/resource-limits.env 0644
+  fi
+  install_root_libexec
+  "$ROOT_LIBEXEC_DIR/clawbox-resource-limits.sh" --apply || \
+    echo "  Warning: resource limits apply failed (non-fatal)"
+}
+
+step_desktop_mode() {
+  # DELIBERATELY DOES NOTHING to the boot target.
+  #
+  # The desktop is shipped and default-ON (Krasi's ruling, 2026-08-24) and the
+  # headless toggle is a SETTING, not an install-time or update-time decision:
+  # an owner who switched their box to console-only must not silently get GNOME
+  # back on the next `git pull`. So install/update only make the mechanism
+  # available (the root-owned script + its sudoers grant, both handled by
+  # install_root_libexec and step_systemd_services) and report where the box
+  # currently stands. TASK-455.
+  install_root_libexec
+  "$ROOT_LIBEXEC_DIR/clawbox-desktop-mode.sh" --check || true
 }
 
 step_jtop_install() {
@@ -2446,6 +8988,205 @@ step_jtop_install() {
   echo "  jtop installed"
 }
 
+# ── Local embedding model ────────────────────────────────────────────────────
+
+
+# Make sure this box's memory search runs on the embedder it ships, on an
+# UPDATE as well as on a fresh install.
+#
+# The model comes first, as root (step_embed_model — a fast no-op when it is on
+# disk): the helper below runs under a 600 s ceiling and reaches the embedder
+# THROUGH the web server's proxy, and a first request that had to download
+# 640 MB would not fit OpenClaw's own timeouts either. Then the helper points
+# OpenClaw at the proxy and reindexes. It waits for the web server itself, so
+# on a fresh install this runs AFTER step_start_services; gateway-pre-start.sh
+# launches the same helper detached on every gateway start, so a box that
+# misses this pass still self-heals.
+#
+# Bounded and non-fatal by construction. post_update holds a 900 s budget of
+# its own, so the helper gets ten minutes here and no more; its own retry
+# rules and the detached run at gateway start remain the long tail. It returns
+# 0 on every path — it is called bare under `set -euo pipefail`, and a missing
+# embedding model must never be the reason an update stops.
+#
+# The verdict afterwards is asked of the CORE — `openclaw memory status --deep
+# --json`, the call src/lib/clawkeep-memory.ts makes — never re-derived from
+# openclaw.json (TASK-659): a config read can only prove what was WRITTEN, not
+# what the core does with it. One thing the status does not carry is the
+# provider's URL, and `openai-compatible` is one id for two things: our own
+# embedder behind the loopback proxy, and a server across the room the owner
+# chose. So that one case reads memory.search.remote.baseUrl from the config,
+# by the same loopback rule providerLocation() applies in clawkeep-memory.ts,
+# and the installer and the Memory Shard panel cannot disagree about "local".
+ensure_local_embeddings() {
+  local helper="$PROJECT_DIR/scripts/ensure-local-embeddings.sh"
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the local embedding model"
+    return 0
+  fi
+  # A hermes box has no core to point at the model it would spend 639 MB on.
+  if ! has_openclaw_harness; then
+    echo "  Memory search is an OpenClaw feature; this edition does not include it."
+    return 0
+  fi
+  if [ ! -x "$helper" ]; then
+    echo "  Warning: $helper is missing or not executable - semantic memory stays on lexical FTS" >&2
+    # Non-zero, and `optional_step` is what makes that safe: the helper being
+    # absent from the checkout is this installer's own gap, not a state of the
+    # box, and reporting it as a completed fixup is the false success this
+    # whole change removes.
+    return 1
+  fi
+  # NO DOWNLOAD, on any path that reaches here (the main flow after the web
+  # server is up, and every post_update). The GGUF is the owner's click in
+  # Settings → Local AI (`--step embed_model`); this only WIRES memory search
+  # to an embedder that is already on disk, and on a box without one it says so
+  # in one line and is done — the core is not asked about an embedder nobody
+  # installed, because "could not read an embedder" over that box would be a
+  # finding about nothing.
+  local MODEL_PATH
+  MODEL_PATH="$(embed_model_path)"
+  if [ ! -f "$MODEL_PATH" ]; then
+    echo "  The memory-search embedder is not installed on this box — install it from Settings → Local AI (Memory search); semantic memory keeps its current provider"
+    return 0
+  fi
+  # No `timeout` on the helper. It runs `memory index --force`, and 600 s was
+  # a guess: killed at the cap it left a half-built index, which the next run
+  # had to redo from the start. The helper has its OWN internal wait for the
+  # proxy and exits 0 on every soft failure, so it ends by itself; `|| true`
+  # covers the rest. `--no-download` is what keeps it to wiring: with the file
+  # checked above it is belt-and-braces, and it is the same flag
+  # gateway-pre-start.sh passes, so the two callers cannot drift.
+  as_clawbox_login "$helper" --no-download </dev/null || true
+  # The helper exits 0 on every soft failure by design, so its exit code says
+  # nothing about the outcome; ask the core. Best-effort: "could not read an
+  # embedder" is reported as itself, never as a verdict. The status is the
+  # verdict, not just the bytes: assignment in if-condition position, so a
+  # non-zero exit discards output that describes nothing anyone should vouch
+  # for, and errexit stays suppressed.
+  local EMBED_JSON EMBED_STATE
+  # `</dev/null`, and no clock. The CLI is what decides how long this takes —
+  # `--deep` walks the whole index, so the 60 s cap this used to carry reported
+  # "could not read an embedder" about a healthy one on a box whose index was
+  # merely large, which is the false verdict the block below exists not to
+  # invent. What IS closed off is the one way a non-interactive CLI hangs
+  # without doing anything: a prompt on stdin, which it would otherwise inherit
+  # from the root step and wait on for ever.
+  if ! EMBED_JSON="$(as_clawbox "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null </dev/null)"; then
+    EMBED_JSON=""
+  fi
+  # `command -v` first, and a state of its own: without the interpreter the
+  # parse below fails and the catch-all would tell the operator the CORE did
+  # not answer, about a core that answered perfectly.
+  if ! command -v python3 >/dev/null 2>&1; then
+    EMBED_STATE="noparser"
+  else
+    EMBED_STATE="$(python3 - "$EMBED_JSON" "$CLAWBOX_HOME/.openclaw/openclaw.json" <<'PY' 2>/dev/null || true
+import json, sys
+from urllib.parse import urlparse
+try:
+    doc = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(0)
+rows = doc if isinstance(doc, list) else [doc]
+row = {}
+for entry in rows:
+    if isinstance(entry, dict) and entry.get("agentId") == "main":
+        row = entry
+        break
+if not row and rows and isinstance(rows[0], dict):
+    row = rows[0]
+status = row.get("status")
+status = status if isinstance(status, dict) else {}
+provider = status.get("provider")
+# .strip() so the classification cannot drift from cleanString() in
+# src/lib/clawkeep-memory.ts, which trims before comparing.
+provider = provider.strip() if isinstance(provider, str) else ""
+model = status.get("model")
+model = model.strip() if isinstance(model, str) else ""
+if not provider:
+    raise SystemExit(0)
+if provider == "none":
+    print("disabled")
+elif provider in ("ollama", "local"):
+    print("local:%s" % model)
+elif provider == "openai-compatible":
+    base = ""
+    try:
+        node = json.load(open(sys.argv[2]))
+        for part in ("memory", "search", "remote", "baseUrl"):
+            node = node.get(part) if isinstance(node, dict) else None
+        base = node if isinstance(node, str) else ""
+    except Exception:
+        base = ""
+    if not base:
+        # The same answer providerLocation() gives: no address is not "on this
+        # box", and not "cloud" either — it is a state nobody should vouch for.
+        print("unknown")
+    elif (urlparse(base).hostname or "") in ("127.0.0.1", "localhost", "::1"):
+        print("local:%s" % model)
+    else:
+        print("cloud:%s" % provider)
+else:
+    print("cloud:%s" % provider)
+PY
+)"
+  fi
+  # Which of the states below are FINDINGS — something this run could not do or
+  # could not read — as opposed to facts about a box that is configured the way
+  # its owner configured it. Only the findings answer non-zero, because
+  # `optional_step` renders a non-zero return as "this fixup failed and was
+  # skipped": saying that over a deliberate cloud embedder, or over memory
+  # search the owner switched off, would be a false failure in place of the
+  # false success.
+  local EMBED_FINDINGS=0
+  case "$EMBED_STATE" in
+    unknown)
+      EMBED_FINDINGS=1
+      echo "  WARN: memory search is on an OpenAI-compatible embedder with no address recorded, so this run cannot say whether it is on this box; the Memory Shard app shows the real state"
+      ;;
+    local:qwen3-embedding-0.6b)
+      echo "  Local embeddings ready (qwen3-embedding-0.6b via llama.cpp, semantic memory needs no API key)"
+      ;;
+    local:)
+      # On-device and keyless, which is true and worth saying, but the core
+      # named no model: "ready on , not qwen3-embedding-0.6b" is a sentence
+      # with a hole in it that still claims READY over an index that cannot
+      # be matched to anything.
+      echo "  Local embeddings are on-device and keyless, but the core named no model, so this run cannot say whether the index matches qwen3-embedding-0.6b"
+      ;;
+    local:*)
+      # On-device and keyless, so not a warning -- but the index belongs to a
+      # different model than ClawBox provisions.
+      echo "  Local embeddings ready on ${EMBED_STATE#local:}, not qwen3-embedding-0.6b (on-device, no API key; the index belongs to that model)"
+      ;;
+    cloud:*)
+      echo "  WARN: semantic memory is on a CLOUD embedder (${EMBED_STATE#cloud:}) — every indexed note is embedded off the box and it needs that provider's key; the Memory Shard app can move it onto this box"
+      ;;
+    noparser)
+      # Named as the installer's own gap, not the core's.
+      EMBED_FINDINGS=1
+      echo "  WARN: python3 is not installed on this box, so this run cannot read the embedder answer the core gave; the Memory Shard app shows the real state"
+      ;;
+    disabled)
+      echo "  WARN: memory search is switched off on this box (the core reports provider \"none\"); semantic memory stays on lexical FTS (the Memory Shard app can switch it on)"
+      ;;
+    *)
+      # Three states share this line, and only two of them are "did not
+      # answer": the CLI was missing, failed or timed out; its output could
+      # not be parsed; or the core answered and named no provider at all --
+      # providerLocation()'s own "unknown".
+      EMBED_FINDINGS=1
+      echo "  WARN: could not read an embedder from the core (openclaw memory status did not answer, or named no provider), so this run puts no verdict on semantic memory; the Memory Shard app shows the real state"
+      ;;
+  esac
+  # A cloud embedder and a switched-off memory search are deliberately NOT
+  # findings: both are states an owner chose and the Memory Shard app can
+  # change, and an update that called them failed fixups would cry wolf on
+  # every run.
+  return "$EMBED_FINDINGS"
+}
+
 step_ollama_install() {
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping Ollama install (400MB+ download, not needed for install flow tests)"
@@ -2460,23 +9201,14 @@ step_ollama_install() {
   # Ensure the service is enabled and running
   systemctl enable ollama 2>/dev/null || true
   systemctl start ollama 2>/dev/null || true
-  # Apply Jetson memory optimizations
-  bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
+  # Apply Jetson memory optimizations. Root-owned copy again, same reason as in
+  # step_performance_mode: this runs as root, and /home/clawbox/clawbox/scripts
+  # is clawbox-writable, so sourcing the repo copy here would be a root path
+  # through a file the web server can rewrite. TASK-445.
+  install_root_libexec
+  "$ROOT_LIBEXEC_DIR/optimize-ollama.sh"
   echo "  Ollama installed and running"
 
-  # Local embedding model for semantic memory. OpenClaw's memory search
-  # defaults to OpenAI embeddings, which need an OPENAI_API_KEY the box often
-  # doesn't have (ChatGPT-OAuth / DeepSeek users) — surfacing after updates as
-  # "Semantic memory search is still offline ... missing OpenAI provider
-  # auth/API-key access". Pull a small local embedding model so semantic
-  # recall works with zero API key; gateway-pre-start.sh points memorySearch
-  # at it once present. Best-effort: a failed pull must not abort the install
-  # (memory falls back to lexical FTS).
-  if ollama pull qwen3-embedding:0.6b >/dev/null 2>&1; then
-    echo "  Pulled local embedding model qwen3-embedding:0.6b (semantic memory, no API key)"
-  else
-    echo "  WARN: could not pull qwen3-embedding:0.6b; semantic memory falls back to lexical FTS until available (non-fatal)"
-  fi
 }
 
 # Install a prebuilt llama.cpp build, but only if it is genuinely usable here.
@@ -2518,7 +9250,7 @@ install_prebuilt_llamacpp() {
       ;;
     https://*)
       echo "  Fetching prebuilt llama.cpp from $src"
-      curl -fsSL --proto '=https' --max-time 600 -o "$archive" "$src" \
+      curl -fsSL --proto '=https' --connect-timeout 15 --retry 3 --retry-connrefused -o "$archive" "$src" \
         || { echo "  Prebuilt download failed."; return 1; }
       ;;
     *)
@@ -2626,11 +9358,30 @@ step_llamacpp_install() {
     apt-get install -y -qq git curl python3 python3-pip python-is-python3 build-essential cmake ninja-build pkg-config
   fi
 
-  if ! as_clawbox_login "command -v hf" &>/dev/null; then
-    echo "  Installing Hugging Face CLI..."
-    as_clawbox_login "python3 -m pip install --user --upgrade 'huggingface_hub[cli]'"
+  # Run the pipx migration whether or not `hf` already resolves: a device
+  # upgraded from a pre-pipx install has a real pip --user-installed `hf` on
+  # PATH already, and gating this on "hf missing" (as before) would leave
+  # that stale shim running forever instead of migrating it to pipx. Only
+  # fall back to "leave it alone" / pip --user when pipx could not be
+  # provisioned at all.
+  if ensure_pipx; then
+    echo "  Installing Hugging Face CLI via pipx"
+    # A device upgraded from a pre-pipx install may have a real pip-
+    # installed `hf` at these paths; pipx refuses to overwrite files it
+    # did not create, so remove them first or the stale scripts keep
+    # running after every future update.
+    as_clawbox_login "rm -f $CLAWBOX_HOME/.local/bin/hf $CLAWBOX_HOME/.local/bin/huggingface-cli" \
+      2>/dev/null || true
+    as_clawbox_login "pipx install --force 'huggingface_hub[cli]'" \
+      || echo "  Warning: pipx install of huggingface_hub failed" >&2
+  elif as_clawbox_login "command -v hf" &>/dev/null; then
+    echo "  Hugging Face CLI already installed (pipx unavailable — leaving existing install as-is)"
   else
-    echo "  Hugging Face CLI already installed"
+    # pipx unavailable (e.g. offline apt) — pip --user still works on
+    # JetPack 6.2 / Ubuntu 22.04, where PEP 668 does not apply.
+    echo "  Warning: pipx unavailable — falling back to pip --user (blocked by PEP 668 on Ubuntu 24.04+)" >&2
+    as_clawbox_login "python3 -m pip install --user --upgrade 'huggingface_hub[cli]'" \
+      || echo "  Warning: Hugging Face CLI install failed (pipx unavailable, pip blocked by PEP 668 on newer bases)" >&2
   fi
 
   # Determine if a rebuild is needed. Rebuild when:
@@ -2697,20 +9448,95 @@ step_llamacpp_install() {
   echo "  llama.cpp runtime ready"
 }
 
+# Set the appliance owner's system password.
+#
+# The record arrives in a file the web server wrote, and the web server runs as
+# the clawbox user — so $PROJECT_DIR/data is clawbox-writable and this input is
+# attacker-choosable by anything with clawbox-level code execution. Until
+# TASK-445 every guard on the record lived on the UNPRIVILEGED side, in
+# src/lib/chpasswd.ts; the root side piped whatever it found straight into
+# chpasswd. Dropping `root:<new>` into that path and starting the granted unit
+# therefore set ROOT's password.
+#
+# So validate here, where the boundary actually is. chpasswd's format is
+# `<user>:<password>` per line and it happily takes a list, so all three of
+# "which user", "how many records" and "what may the record contain" have to be
+# pinned:
+#
+#   * exactly one record, so a second line cannot smuggle in another account;
+#   * the user field is exactly $CLAWBOX_USER — never root, never anything else;
+#   * a non-empty password with no CR or NUL, matching the checks the route
+#     already makes (src/lib/chpasswd.ts::chpasswdRecord).
+#
+# Residual, recorded deliberately: clawbox is in the `sudo` group, so being able
+# to set the CLAWBOX user's own password is still a route from clawbox code
+# execution to an interactive root shell. That is the owner's own administrator
+# account and removing it would lock the only administrator out of a console-less
+# appliance (see config/clawbox-sudoers and e2e-install/06-sudoers.spec.ts). What
+# this closes is the part that was never intended: changing a DIFFERENT account's
+# password, root's included.
 step_chpasswd() {
   local INPUT_FILE="$PROJECT_DIR/data/.chpasswd-input"
+  # -f follows symlinks; -L rejects the link itself. A symlink here would be a
+  # way to make root read a file the clawbox user could not otherwise feed in.
+  if [ -L "$INPUT_FILE" ]; then
+    rm -f "$INPUT_FILE"
+    echo "Error: password input file is a symlink; refusing" >&2
+    exit 64
+  fi
   if [ ! -f "$INPUT_FILE" ]; then
     echo "Error: password input file not found" >&2
     exit 1
   fi
-  /usr/sbin/chpasswd < "$INPUT_FILE"
+
+  # Read the file ONCE and validate the value actually used — re-reading it
+  # after the checks would leave a window to swap the contents. Command
+  # substitution strips trailing newlines, so a well-formed single record has no
+  # embedded newline left and a second record is visible as one. It also drops
+  # NUL bytes, and it is the stripped value that is piped to chpasswd below, so
+  # no NUL can reach it either.
+  local record user
+  record="$(cat "$INPUT_FILE")"
   rm -f "$INPUT_FILE"
+
+  case "$record" in
+    *$'\n'*)
+      echo "Error: password input must be exactly one record" >&2
+      exit 64
+      ;;
+    *$'\r'*)
+      echo "Error: password input contains a carriage return" >&2
+      exit 64
+      ;;
+  esac
+  user="${record%%:*}"
+  if [ "$user" != "$CLAWBOX_USER" ]; then
+    echo "Error: password input names '$user'; only $CLAWBOX_USER may be changed here" >&2
+    exit 64
+  fi
+  if [ "$record" = "$user" ] || [ -z "${record#*:}" ]; then
+    echo "Error: password input has no password" >&2
+    exit 64
+  fi
+
+  printf '%s\n' "$record" | /usr/sbin/chpasswd
 }
 
 step_rebuild() {
   do_rebuild
-  echo "Starting clawbox-setup.service..."
-  systemctl start clawbox-setup.service
+  # `restart`, not `start`, for the reason spelled out in
+  # restore_previous_build: the unit can already be active, latched by its own
+  # `Restart=always` onto the tree that existed the moment `next build` wrote
+  # the standalone entry — which is BEFORE postbuild copied .next/static,
+  # public/ and build-info.json beside it. `start` is a no-op over that process
+  # and would leave the box serving a half-copied build. step_rebuild_reboot is
+  # saved by the reboot that follows it; this step is not.
+  echo "Restarting clawbox-setup.service..."
+  # `reset-failed` for the same reason as in restore_previous_build: the unit
+  # crash-loops for the length of every rebuild now, and a latched start limit
+  # would turn this restart into a failure over a build that is fine.
+  systemctl reset-failed clawbox-setup.service 2>/dev/null || true
+  systemctl restart clawbox-setup.service
 }
 
 step_restart() {
@@ -2719,13 +9545,27 @@ step_restart() {
 }
 
 step_restart_ap() {
+  # The unit ExecStarts the root-owned libexec copy of start-ap.sh, so this
+  # restart never opens the tree copy as root — the manifest --verify the
+  # dispatcher ran before this step covers the tree, and a rewrite of
+  # scripts/start-ap.sh between that check and the restart changes nothing
+  # root runs. Security scan #21.
   echo "Restarting clawbox-ap.service..."
   systemctl restart clawbox-ap.service
 }
 
 step_recover() {
   echo "Running ClawBox recovery..."
-  bash "$PROJECT_DIR/scripts/start-ap.sh"
+  # The root-owned copy, with the tree copy as the fallback ONLY when the
+  # libexec one is absent: recovery is the operator's last resort and must work
+  # on a box mid-migration (new tree, root step not yet run). Same rule as
+  # scripts/recover.sh. Security scan #21.
+  local start_ap="$ROOT_LIBEXEC_DIR/start-ap.sh"
+  if [ ! -x "$start_ap" ]; then
+    echo "  $start_ap missing — falling back to the tree copy (run --step systemd_services to install it)"
+    start_ap="$SRC_DIR/scripts/start-ap.sh"
+  fi
+  bash "$start_ap"
   systemctl restart clawbox-setup.service
   echo "Recovery complete"
 }
@@ -2743,7 +9583,7 @@ step_gateway_setup() {
   # The same applies to the guards in step_openclaw_install / step_openclaw_patch
   # and to `install.sh --step <name>`, which can be run by hand on any edition.
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw gateway setup"; return 0; }
-  cp "$PROJECT_DIR/config/clawbox-gateway.service" /etc/systemd/system/
+  cp "$SRC_DIR/config/clawbox-gateway.service" /etc/systemd/system/
 
   # Mask any leftover user-level openclaw-gateway.service. Standalone
   # OpenClaw (and some older `openclaw gateway install` paths) dropped a
@@ -2826,11 +9666,21 @@ step_chromium_install() {
     # Ensure snapd is running, install chromium, then continue.
     systemctl enable --now snapd snapd.socket 2>/dev/null || true
 
-    # Wait for snapd to be ready (can take a few seconds after enable)
+    # Wait for snapd to be ready (it can take a while after enable, and on a
+    # cold SD card a good deal longer than the 30 tries this used to allow —
+    # after which `snap install chromium` ran against a socket that was not
+    # there yet and the step failed for being early rather than broken). The
+    # exit is a fact, not a clock: snapd answering, or snapd no longer trying.
     local retries=0
-    while ! snap version &>/dev/null && [ $retries -lt 30 ]; do
+    while ! snap version &>/dev/null; do
+      if ! unit_is_coming_up snapd.socket; then
+        echo "  snapd is not running — installing Chromium anyway and letting snap report" >&2
+        break
+      fi
+      wait_give_up_in_test_mode "$retries" && break
       sleep 1
       retries=$((retries + 1))
+      wait_note "$retries" "snapd to come up before installing Chromium"
     done
 
     # Clean up any leftover Debian repo config from earlier install attempts
@@ -2844,6 +9694,457 @@ step_chromium_install() {
 }
 
 
+# Claude Code, via Anthropic's NATIVE installer (Yanko, 2026-08-22 — not npm).
+#
+# Anthropic GEO-BLOCKS some regions and serves an HTML "App unavailable in
+# region" page with HTTP 200, so `curl -f` does NOT catch it. Piping that HTML
+# into `bash` yields `syntax error near unexpected token '<'`, and under
+# `set -euo pipefail` that aborted the ENTIRE reinstall — the later steps that
+# (re)start the gateway never ran and the box came up as an nginx 404 (Discord
+# "broke my clawbox", step [18/23]). Guard it: download to a file, verify it
+# looks like a shell script and not an HTML/region-block page, only then run
+# it, and never let failure escape.
+#
+# Runs AS the clawbox user, never under sudo: the installer installs into
+# $HOME and refuses to run as root from a user shell. It also wants ~512MB
+# free, so exit 137 on a Jetson means the OOM killer rather than a broken
+# install.
+#
+# Returns 0 when `claude` is present afterwards, 1 otherwise. Callers decide
+# whether that is fatal — for every caller today it is not.
+ensure_claude_code() {
+  # A LOGIN shell, like the two probes below it and like the in-UI terminal.
+  # `sudo -u clawbox bash -c` is non-interactive and non-login: it reads
+  # neither ~/.profile nor ~/.bashrc, so ~/.local/bin is not on its PATH and it
+  # answers "not installed" on a box where Claude Code works perfectly. That
+  # made this fast path dead — every install and every update re-downloaded the
+  # CLI — and it is the same false negative the task warns about for ssh.
+  if as_clawbox_login "command -v claude" &>/dev/null; then
+    echo "  Claude Code already installed"
+    return 0
+  fi
+
+  local installer rc=1
+  installer="$(mktemp)"
+  # `--connect-timeout` with `--retry`, and deliberately no `--max-time`: the
+  # transfer cap used to turn a slow link into "the CLI could not be downloaded",
+  # and the box then had no `claude` at all. A black-holed connection is still
+  # bounded, because that is a connect failure rather than a slow download.
+  # --proto-redir keeps a redirect from stepping down to plain HTTP on the way to
+  # something we then execute as the clawbox user.
+  if curl -fsSL --proto '=https' --proto-redir '=https' \
+       --connect-timeout 15 --retry 3 --retry-connrefused \
+       https://claude.ai/install.sh -o "$installer" 2>/dev/null \
+     && [ -s "$installer" ] \
+     && ! head -c 512 "$installer" | grep -qiE '<!doctype|<html|unavailable in region' \
+     && chown "$CLAWBOX_USER" "$installer"; then
+    # The chown is why this ever works, and it has to be HERE — after the
+    # download, before the run.
+    #
+    # mktemp makes the file root:root 0600 and the installer is executed AS the
+    # clawbox user, so without it every run on every box answered
+    # "bash: /tmp/tmp.XXXX: Permission denied" and then "installer ran but
+    # failed". That is the other half of why no ClawBox in the field has
+    # `claude`: the missing post_update caller was only the first half.
+    #
+    # And it cannot move earlier. /tmp is sticky and world-writable, and these
+    # devices run fs.protected_regular=2 (verified on .65), under which even
+    # root may not write a file in such a directory that it does not own — a
+    # chown before the download turns the curl into
+    # "(23) Failure writing output to destination". Both failure modes were
+    # observed on hardware on 2026-08-22, one after the other.
+    if sudo -u "$CLAWBOX_USER" bash "$installer" </dev/null; then
+      echo "  Claude Code installed"
+      rc=0
+    else
+      echo "  WARN: Claude Code installer ran but failed; skipping (optional, continuing)"
+    fi
+  else
+    echo "  WARN: Claude Code installer unavailable or region-blocked (non-script response); skipping (optional, continuing)"
+  fi
+  rm -f "$installer"
+  return "$rc"
+}
+
+# The `claude-ds` wrapper — Claude Code pointed at ClawBox AI (TASK-378).
+#
+# COPIED out of the checkout rather than symlinked. A symlink would break the
+# harness for as long as any update leaves the repo mid-checkout, and the copy
+# is refreshed on every install and every in-app update, so it cannot drift.
+install_claude_ds_wrapper() {
+  local src="$SRC_DIR/scripts/claude-ds"
+  local dest="$CLAWBOX_HOME/.local/bin/claude-ds"
+
+  if [ ! -f "$src" ]; then
+    echo "  WARN: $src missing; claude-ds not installed"
+    return 1
+  fi
+
+  install -d -o "$CLAWBOX_USER" -g "$CLAWBOX_USER" -m 755 "$CLAWBOX_HOME/.local/bin"
+  install -o "$CLAWBOX_USER" -g "$CLAWBOX_USER" -m 755 "$src" "$dest"
+  echo "  claude-ds installed at $dest"
+}
+
+# The ClawBox coding harness: Claude Code plus the claude-ds wrapper that
+# drives it through ClawBox AI.
+#
+# Split out of step_ai_tools_install and dispatchable on its own because
+# step_post_update calls THIS and not the bigger step: an in-app update should
+# deliver the harness without also reinstalling the Codex and Gemini CLIs on
+# every box that updates.
+# Tell a RUNNING agent that the coding harness exists now.
+#
+# The agent offers coding_agent_run / _status / _stop only when the ClawBox MCP
+# server says the harness is ready, and it asks exactly ONCE — in
+# `buildContext` while it boots (mcp/lib/context.ts probes
+# /setup-api/coding-agent/status; mcp/tools/coding-agent.ts returns without
+# declaring anything when the answer is no). The server is then a long-lived
+# stdio child of the agent, so a harness installed underneath it is invisible
+# until something respawns the server.
+#
+# The web server already covers the two paths where readiness flips from ITS
+# side — see src/lib/coding-agent-mcp-refresh.ts, hung off the enable route and
+# the ClawBox AI connect path. This step is the third path, and it had nothing:
+# a full install and step_post_update both happen to restart the agent shortly
+# afterwards (step_start_services / step_gateway_setup), and the STANDALONE
+# `--step coding_harness` — the repair checkReadiness() itself tells the owner
+# to run — did not.
+#
+# ONLY units that are ALREADY ACTIVE are touched. An agent that is stopped, or
+# masked by the edition lock, re-probes when it next starts; starting one here
+# would resurrect a unit the owner or the SKU deliberately put down, which is
+# the whole reason the Hermes edition masks clawbox-gateway.
+refresh_agent_coding_tools() {
+  local unit failed=false found=false
+  for unit in clawbox-gateway.service clawbox-hermes-dashboard.service; do
+    systemctl is-active --quiet "$unit" 2>/dev/null || continue
+    found=true
+    # try-restart, not restart. The probe above and the action below are two
+    # commands, and a unit that stops in between would be STARTED by `restart` —
+    # exactly the thing this function must never do. `try-restart` acts only on a
+    # unit that is running at the moment it runs, and exits 0 when there is
+    # nothing to do, so the invariant does not depend on the gap being small.
+    if systemctl try-restart "$unit" >/dev/null 2>&1; then
+      # "Asked", not "Restarted". try-restart exits 0 both when it restarted the
+      # unit and when the unit had stopped in the meantime and it did nothing —
+      # so claiming a restart here would be this PR's own bug in miniature. What
+      # is true in both cases is that the request was made and the agent will
+      # re-probe, now or at its next start.
+      echo "  Asked $unit to restart so the agent re-probes and offers the coding tools"
+    else
+      echo "  WARN: could not restart $unit — the agent will keep answering that it has no coding tools" >&2
+      failed=true
+    fi
+  done
+  if [ "$found" = false ]; then
+    echo "  No agent running; it will probe the harness when it next starts"
+    return 0
+  fi
+  # EVERY running agent, not "at least one". On the dual edition both units are
+  # up, and one that could not be restarted is one harness still blind — a
+  # partial refresh reported as a whole one is the shape this whole change is
+  # about.
+  [ "$failed" = false ]
+}
+
+step_coding_harness() {
+  # Whether the harness was ALREADY usable decides two things below: nothing
+  # needs telling if nothing changed, and a step that changed nothing and fixed
+  # nothing must not report that it did.
+  local was_ready=false
+  if [ -x "$CLAWBOX_HOME/.local/bin/claude-ds" ] && as_clawbox_login "command -v claude" &>/dev/null; then
+    was_ready=true
+  fi
+
+  # Test mode has no network for claude.ai and no reason to download a binary,
+  # but the wrapper is a file copy — install it so e2e-install exercises the
+  # real delivery path instead of skipping the whole step.
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the Claude Code download"
+  else
+    # Still swallowed here: a download that failed is not the verdict, the
+    # probe below is. What changed is that the verdict is now the EXIT STATUS
+    # as well as a line of text.
+    ensure_claude_code || true
+  fi
+  install_claude_ds_wrapper || true
+  ensure_clawbox_bashrc_path
+
+  if is_test_mode; then
+    return 0
+  fi
+
+  # Say plainly whether the harness can actually run — and MEAN it in the exit
+  # status. This step is what src/lib/coding-agent.ts tells the owner to run
+  # when the Coding app refuses ("Run: sudo bash install.sh --step
+  # coding_harness"), and it used to exit 0 whatever happened: on a box where
+  # the CLI install failed (no network, or Anthropic geo-blocking the region)
+  # the owner ran the documented repair, was told nothing had gone wrong, and
+  # went back to an app refusing in exactly the same words. A repair that
+  # cannot repair has to SAY so.
+  # BOTH halves are reported, then one return. An early return after the first
+  # would hide the second, and this step exists to tell an owner what is wrong —
+  # sending them back for a second run to discover the other half is the same
+  # repair loop in slower motion.
+  local harness_missing=false
+  if ! as_clawbox_login "command -v claude" &>/dev/null; then
+    echo "  WARN: Claude Code is NOT installed — the Coding app will refuse until it is" >&2
+    echo "  Claude Code is downloaded from https://claude.ai/install.sh, so check this" >&2
+    echo "  box's internet access (and whether the installer is available in this" >&2
+    echo "  region), then run the step again." >&2
+    harness_missing=true
+  fi
+  if [ ! -x "$CLAWBOX_HOME/.local/bin/claude-ds" ]; then
+    echo "  WARN: the claude-ds wrapper is NOT at $CLAWBOX_HOME/.local/bin/claude-ds — the Coding app will refuse until it is" >&2
+    harness_missing=true
+  fi
+  if [ "$harness_missing" = true ]; then
+    echo "  This step did NOT repair the coding harness." >&2
+    return 1
+  fi
+
+  echo "  Coding harness ready: claude-ds -> Claude Code -> ClawBox AI"
+
+  # Only on the transition. A reload respawns every MCP child and invalidates
+  # the model's prompt cache, and this step runs on every install and every
+  # in-app update — the same rule, and the same reason for it, as the guard in
+  # refreshCodingAgentToolsIfReadinessChanged.
+  if [ "$was_ready" = false ]; then
+    # A refusal here is REPORTED (on stderr, inside the helper) and does not
+    # fail the step: the harness itself IS repaired and the Coding app works,
+    # so a non-zero exit would be the opposite lie. The agent re-probes at its
+    # next start either way.
+    if ! refresh_agent_coding_tools; then
+      echo "  The agent will offer the coding tools after its next restart" >&2
+    fi
+  fi
+}
+
+# ── The OpenAI Codex CLI (TASK-439) ──────────────────────────────────────────
+#
+# One field of config/codex-target.txt: 1 = the pinned version, 2 = the sha256
+# of that release's own installer. Comment lines are skipped, and a file that
+# carries no `<version> <sha256>` line answers nothing — which every caller
+# treats as "install nothing", never as a default.
+codex_pin_field() {
+  local file="${CODEX_PIN_FILE:-$SRC_DIR/config/codex-target.txt}"
+  [ -f "$file" ] || return 1
+  awk -v n="$1" '
+    /^[[:space:]]*#/ { next }
+    NF >= 2 { print $n; found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$file"
+}
+
+# Is the pinned native Codex the binary at $CODEX_NATIVE_BIN?
+#
+# Asked of the FILE, never through `command -v`: while the npm copy survives it
+# comes first on the login shell's PATH, so a PATH probe answers "not the
+# native one" on a box where the native one is installed and current — and this
+# step would then re-download OpenAI's package on every single update until the
+# npm removal finally succeeded.
+codex_native_is_current() {
+  local want="$1" reported
+  [ -x "$CODEX_NATIVE_BIN" ] || return 1
+  # `|| true` because `set -euo pipefail` is in force and this may be reached
+  # from a PLAIN call (`--step codex_cli` runs "step_${name}" unguarded): a
+  # binary that will not exec makes the pipeline fail, the assignment fail, and
+  # errexit end the run silently — over the very case this line is here to
+  # detect and report.
+  reported="$(as_clawbox_login "'$CODEX_NATIVE_BIN' --version" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+  # A whole token, so 0.153.40 is not read as 0.153.4, and tolerant of whatever
+  # else the vendor puts on that line.
+  case " $reported " in *" $want "*) return 0 ;; esac
+  return 1
+}
+
+npm_codex_present() {
+  # -e alone is false for a DANGLING symlink, which is what a half-finished npm
+  # uninstall leaves behind. Such a link shadows nothing (it is not executable),
+  # but it is still something left over, and reporting it beats calling the
+  # removal a success over it.
+  [ -e "$NPM_PREFIX/bin/codex" ] || [ -L "$NPM_PREFIX/bin/codex" ]
+}
+
+# Take the npm-installed Codex away, so exactly one codex is on PATH.
+#
+# Called ONLY over a native install that has been verified — never before one,
+# and never over an installer that merely exited 0. A box left with no codex at
+# all is worse than a box still running the old one.
+remove_npm_codex() {
+  npm_codex_present || return 0
+  local rc=0
+  as_clawbox_login "npm uninstall -g @openai/codex --prefix '$NPM_PREFIX'" >/dev/null 2>&1 || rc=$?
+  # That exit code is a DIAGNOSTIC, not the verdict: npm exits non-zero for a
+  # package it never had, and zero for one it failed to unlink. The re-probe is
+  # the verdict.
+  if npm_codex_present; then
+    echo "  WARN: npm uninstall exited $rc and $NPM_PREFIX/bin/codex is still there;" >&2
+    echo "  it comes before ~/.local/bin on PATH, so it still shadows the native Codex." >&2
+    return 1
+  fi
+  echo "  Removed the npm-installed Codex"
+}
+
+# What the box is left running when an install did not happen. Said out loud,
+# because "could not install Codex" and "this box now has no Codex" are
+# different facts and only one of them needs anybody's attention.
+#
+# The login shell is asked, rather than the two files being tested in some
+# order: on the commonest failure BOTH are present — every shipped box has the
+# npm copy, and a previous partial run may have left a native binary — and PATH
+# order decides which one the owner gets. Naming the other one would state the
+# opposite of what this line is for.
+codex_left_as_is() {
+  local resolved
+  resolved="$(as_clawbox_login "command -v codex" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+  if [ -n "$resolved" ]; then
+    echo "  Keeping the Codex this box resolves today: $resolved" >&2
+  else
+    echo "  This box has no Codex CLI" >&2
+  fi
+}
+
+# Install the pinned Codex CLI with OpenAI's own installer, and leave exactly
+# one codex on PATH.
+#
+# The vendor's documented installer is `curl -fsSL https://chatgpt.com/codex/
+# install.sh | sh`, which always serves `latest` and cannot be checksummed. The
+# SAME script is attached to every release as an immutable asset, so that is
+# what is fetched, verified against config/codex-target.txt and then run with
+# `--release` pinned. The installer itself resolves the release from
+# releases.openai.com (GitHub Releases is its own fallback), checks the package
+# archive against OpenAI's published codex-package_SHA256SUMS, unpacks it and
+# links ~/.local/bin/codex at it — none of which is reimplemented here.
+#
+# Returns 0 only when `codex` on the owner's PATH IS the pinned native binary.
+ensure_codex_cli() {
+  local version sha url installer actual resolved rc
+
+  version="$(codex_pin_field 1 2>/dev/null || true)"
+  sha="$(codex_pin_field 2 2>/dev/null || true)"
+  if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    || ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+    echo "  WARN: config/codex-target.txt carries no '<version> <sha256>' pin; not installing Codex" >&2
+    codex_left_as_is
+    return 1
+  fi
+
+  if codex_native_is_current "$version"; then
+    echo "  OpenAI Codex $version already installed"
+    # Still converge on ONE codex: an earlier run may have installed the binary
+    # and failed to take the npm copy away, and until it goes the owner's
+    # `codex` is still the old one.
+    remove_npm_codex || return 1
+    return 0
+  fi
+
+  url="https://github.com/openai/codex/releases/download/rust-v$version/install.sh"
+  # `|| true` for the errexit reason above: `--step codex_cli` calls this
+  # plainly, so a full or read-only /tmp would end install.sh at this line with
+  # nothing said. Empty, it falls into the download-failed branch, which reports.
+  installer="$(mktemp || true)"
+  # `--connect-timeout` with `--retry` bounds a black hole; there is no
+  # `--max-time`, because a transfer cap answers "could not download" for a link
+  # that is merely slow. --proto-redir stops a redirect stepping down to plain
+  # HTTP on the way to something we then execute.
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+      --connect-timeout 15 --retry 3 --retry-connrefused "$url" -o "$installer" 2>/dev/null \
+    || [ ! -s "$installer" ]; then
+    echo "  WARN: could not download OpenAI's Codex installer from $url" >&2
+    codex_left_as_is
+    rm -f "$installer"
+    return 1
+  fi
+
+  # `|| true` for the same reason: an unusable sha256sum must reach the
+  # refusal below (which already words an empty digest), not end the run.
+  actual="$(sha256sum "$installer" 2>/dev/null | cut -d' ' -f1 || true)"
+  if [ "$actual" != "$sha" ]; then
+    echo "  WARN: the Codex installer for rust-v$version does not match its pinned sha256 — not running it" >&2
+    echo "  expected $sha, got ${actual:-<none>}" >&2
+    codex_left_as_is
+    rm -f "$installer"
+    return 1
+  fi
+
+  # AFTER the download and before the run — both halves paid for on hardware by
+  # the sibling coding CLI (TASK-378). mktemp makes the file root:root 0600 and
+  # it is executed AS the clawbox user, so without this every run answers
+  # "Permission denied"; moved before the curl, fs.protected_regular=2 stops
+  # even root writing a file it does not own in sticky world-writable /tmp and
+  # curl exits 23, "Failure writing output to destination".
+  if ! chown "$CLAWBOX_USER" "$installer"; then
+    echo "  WARN: could not hand the Codex installer to $CLAWBOX_USER; not running it" >&2
+    codex_left_as_is
+    rm -f "$installer"
+    return 1
+  fi
+
+  # CODEX_NON_INTERACTIVE=true is load-bearing, and </dev/null is not a
+  # substitute for it: the installer's prompt opens /dev/tty directly, so only
+  # the variable stops an unattended update being asked a question nobody can
+  # answer. It DOES notice the npm copy and offer to remove it; that offer is
+  # what non-interactive declines, which is why the removal below is ours to do
+  # — and ours is the honest order, since the vendor's would take the working
+  # Codex away before knowing whether the new one runs.
+  #
+  # Two side effects of the vendor's, recorded rather than fought:
+  #   * having seen the npm copy it also appends its own marked block
+  #     (`# >>> Codex installer >>>`) to the clawbox user's ~/.bashrc, putting
+  #     ~/.local/bin first. Marker-guarded, so it cannot duplicate, and it does
+  #     not disturb ensure_clawbox_bashrc_path (whose guard greps the export
+  #     line, not the comment). It makes the native binary win sooner, which is
+  #     the direction this step is going in anyway.
+  #   * it downloads a ~117 MB package. That download used to be wrapped in
+  #     `timeout -k 30 1800`; it no longer is (owner's decision, 2026-09-14),
+  #     because 117 MB over a rural uplink is a long download and not a stalled
+  #     one, and a killed install left the vendor's staging directory behind for
+  #     the next run to trip over. systemd's TimeoutStartSec=7200 on the root
+  #     step is the only ceiling left, and the verification below is what decides
+  #     whether anything usable landed.
+  if ! as_clawbox_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' sh '$installer'" </dev/null; then
+    echo "  WARN: OpenAI's Codex installer ran but failed" >&2
+    codex_left_as_is
+    rm -f "$installer"
+    return 1
+  fi
+  rm -f "$installer"
+
+  # Its exit code is not the outcome. Ask the binary.
+  if ! codex_native_is_current "$version"; then
+    echo "  WARN: the Codex installer exited 0 but $CODEX_NATIVE_BIN does not report $version" >&2
+    codex_left_as_is
+    return 1
+  fi
+  echo "  OpenAI Codex $version installed at $CODEX_NATIVE_BIN"
+
+  rc=0
+  remove_npm_codex || rc=1
+
+  # The acceptance this card is about: what the owner gets when they type
+  # `codex` in the box's own terminal, which is PATH order and not the presence
+  # of a file.
+  resolved="$(as_clawbox_login "command -v codex" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+  if [ "$resolved" != "$CODEX_NATIVE_BIN" ]; then
+    echo "  WARN: \`codex\` still resolves to ${resolved:-nothing}, not $CODEX_NATIVE_BIN" >&2
+    rc=1
+  fi
+  return "$rc"
+}
+
+# Dispatchable on its own and called from step_post_update — the same shape
+# step_coding_harness has, and for the same reason: an in-app update has to
+# deliver this without also reinstalling the Gemini CLI on every box that
+# updates, and every box in the field today carries the npm Codex it replaces.
+step_codex_cli() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the Codex CLI install"
+    return 0
+  fi
+  ensure_codex_cli
+}
+
 step_ai_tools_install() {
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping Claude/Codex/Gemini CLI install"
@@ -2855,41 +10156,12 @@ step_ai_tools_install() {
   # `set -euo pipefail`, so every risky command is guarded inside an `if`
   # (where errexit is suspended) and failures only log a WARN.
 
-  # Claude Code — Anthropic GEO-BLOCKS some regions and serves an HTML
-  # "App unavailable in region" page with HTTP 200 (so `curl -f` does NOT
-  # catch it). Piping that HTML into `bash` yields
-  # `syntax error near unexpected token '<'`, and under `set -euo pipefail`
-  # that aborted the ENTIRE reinstall right here — so the later steps that
-  # (re)start the gateway never ran and the box came up as an nginx 404
-  # (Discord "broke my clawbox", step [18/23]). Guard it: download to a file,
-  # verify it looks like a shell script and not an HTML/region-block page,
-  # only then run it, and never let failure escape this step.
-  if sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
-    echo "  Claude Code already installed"
-  else
-    _claude_installer="$(mktemp)"
-    if curl -fsSL https://claude.ai/install.sh -o "$_claude_installer" 2>/dev/null \
-       && [ -s "$_claude_installer" ] \
-       && ! head -c 512 "$_claude_installer" | grep -qiE '<!doctype|<html|unavailable in region'; then
-      if sudo -u "$CLAWBOX_USER" bash "$_claude_installer" </dev/null; then
-        echo "  Claude Code installed"
-      else
-        echo "  WARN: Claude Code installer ran but failed; skipping (optional, continuing)"
-      fi
-    else
-      echo "  WARN: Claude Code installer unavailable or region-blocked (non-script response); skipping (optional, continuing)"
-    fi
-    rm -f "$_claude_installer"
-  fi
+  ensure_claude_code || true
 
-  # OpenAI Codex CLI (optional)
-  if as_clawbox_login "command -v codex" &>/dev/null; then
-    echo "  OpenAI Codex already installed"
-  elif as_clawbox_login "npm i -g @openai/codex --prefix $NPM_PREFIX"; then
-    echo "  OpenAI Codex installed"
-  else
-    echo "  WARN: OpenAI Codex CLI install failed; skipping (optional, continuing)"
-  fi
+  # OpenAI Codex CLI (optional): the pinned native binary, never an npm global.
+  # Swallowed here for the same reason as the CLI above — this step must not
+  # abort over an optional tool — and reported honestly inside the function.
+  ensure_codex_cli || true
 
   # Google Gemini CLI (optional)
   if as_clawbox_login "command -v gemini" &>/dev/null; then
@@ -2900,9 +10172,27 @@ step_ai_tools_install() {
     echo "  WARN: Gemini CLI install failed; skipping (optional, continuing)"
   fi
 
-  # Make claude / codex / gemini resolvable in the in-UI terminal's interactive
-  # shell (covers the standalone `step_ai_tools_install` invocation path where
-  # step_openclaw_install hasn't run).
+  # GitHub Copilot CLI (optional): the Copilot provider on the Hermes edition
+  # signs in and runs through this tool (`copilot login`, `copilot --acp`);
+  # without it the provider panel can only say the tool is missing.
+  if as_clawbox_login "command -v copilot" &>/dev/null; then
+    echo "  Copilot CLI already installed"
+  elif as_clawbox_login "npm i -g @github/copilot --prefix $NPM_PREFIX" \
+    && as_clawbox_login "command -v copilot" &>/dev/null; then
+    # Checked by presence, not by npm's exit code: the provider panel gates
+    # the Copilot sign-in on this very binary being there.
+    echo "  Copilot CLI installed"
+  else
+    echo "  WARN: Copilot CLI install failed; skipping (optional, continuing)"
+  fi
+
+  # The claude-ds wrapper is deliberately NOT installed here. step_coding_harness
+  # owns it, and this step early-returns in test mode — which is exactly the
+  # environment e2e-install proves the delivery path in.
+
+  # Make claude / claude-ds / codex / gemini resolvable in the in-UI terminal's
+  # interactive shell (covers the standalone `step_ai_tools_install` invocation
+  # path where step_openclaw_install hasn't run).
   ensure_clawbox_bashrc_path
 }
 
@@ -2919,8 +10209,24 @@ step_vnc_install() {
 
   chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
+  # ensure-vnc-on-first-boot.sh runs as ROOT from clawbox-firstboot-vnc.service
+  # below, so the unit names the root-owned libexec copy. The `chown root:root`
+  # of the tree file that used to sit here protected nothing: `chown -R clawbox`
+  # undid it after every git reset, and the directory is clawbox-writable so a
+  # rename replaced the file regardless. Security scan #21.
   chmod +x "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
-  chown root:root "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
+  if [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+    install_root_libexec || return 1
+  fi
+  # The firstboot unit written below names this copy, and a root unit pointing
+  # at nothing is exactly the failure to avoid — so the gate is the FILE, not
+  # the function's word. Not `[ -x ] || install_root_libexec`: in an OR-list a
+  # failed copy inside the function was followed by successful commands and
+  # came back as 0, and the unit was written regardless.
+  if [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+    echo "  Error: $ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh is not installed; not writing clawbox-firstboot-vnc.service to point at it" >&2
+    return 1
+  fi
 
   # Systemd service for VNC — force virtual display mode. On headless
   # Jetsons, :0 is GDM's greeter; apps launched into it are covered by
@@ -2981,7 +10287,7 @@ ConditionPathExists=/var/lib/clawbox/ensure-vnc-on-first-boot.pending
 [Service]
 Type=oneshot
 ExecStartPre=/bin/sleep 10
-ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh
+ExecStart=$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh
 
 [Install]
 WantedBy=multi-user.target
@@ -2989,7 +10295,7 @@ FIRSTBOOTVNC
 
   # Browser CDP service (launched on demand, not auto-started)
   chmod +x "$PROJECT_DIR/scripts/launch-browser.sh"
-  cp "$PROJECT_DIR/config/clawbox-browser.service" /etc/systemd/system/
+  cp "$SRC_DIR/config/clawbox-browser.service" /etc/systemd/system/
 
   systemctl daemon-reload
   systemctl enable clawbox-vnc.service clawbox-websockify.service clawbox-firstboot-vnc.service
@@ -3019,6 +10325,46 @@ step_vnc_refresh() {
   wait_for_apt
   if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autocutsel; then
     echo "  Warning: autocutsel install failed (non-fatal; continuing with unit refresh)"
+  fi
+
+  # A box installed before security scan #21 has a clawbox-firstboot-vnc.service
+  # whose ExecStart is the TREE copy of ensure-vnc-on-first-boot.sh, and on a box
+  # whose first-boot marker never cleared that unit still runs as root at every
+  # boot. Repoint just that line at the root-owned libexec copy. The copy is
+  # made sure of HERE (the same guard step_vnc_install uses) rather than relied
+  # on from post_update's ordering — step_resource_limits happens to run
+  # install_root_libexec before this step today, but a reorder would otherwise
+  # leave the `[ -x ]` below silently skipping the repoint for another update
+  # cycle, with root still running the tree copy at every boot. Only the
+  # ExecStart line, nothing else in the unit: the marker and the enable state
+  # are deliberately left alone, as the comment above says.
+  #
+  # A copy that does not land is not swallowed and not fatal either: the
+  # repoint below is gated on the copy being THERE, so the unit keeps running
+  # the tree copy it ran before (the pre-fix state, which works) rather than
+  # pointing at nothing; the clawbox-vnc.service refresh further down has
+  # nothing to do with the copy and still happens; and the step returns
+  # non-zero at its end so step_post_update's warning line and the
+  # `root_libexec` record install_root_libexec leaves both say what happened.
+  # The `[ -x ] || install_root_libexec` this replaces reported nothing: an
+  # OR-list runs the function with errexit off, so a failed copy came back 0.
+  local firstboot_unit=/etc/systemd/system/clawbox-firstboot-vnc.service
+  local firstboot_rc=0
+  if [ -f "$firstboot_unit" ] \
+     && grep -q "^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$" "$firstboot_unit" \
+     && [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+    install_root_libexec || firstboot_rc=1
+  fi
+  if [ -f "$firstboot_unit" ] \
+     && grep -q "^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$" "$firstboot_unit"; then
+    if [ -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+      sed -i "s#^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$#ExecStart=$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh#" "$firstboot_unit"
+      systemctl daemon-reload
+      echo "  clawbox-firstboot-vnc.service repointed at $ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh"
+    else
+      echo "  Warning: clawbox-firstboot-vnc.service still runs the tree copy of ensure-vnc-on-first-boot.sh as root; the repoint waits for the next update" >&2
+      firstboot_rc=1
+    fi
   fi
 
   local unit_path=/etc/systemd/system/clawbox-vnc.service
@@ -3056,6 +10402,7 @@ VNCSVC
     echo "  VNC service already up-to-date, skipping restart"
   fi
   rm -f "$unit_tmp"
+  return "$firstboot_rc"
 }
 
 step_desktop_theme() {
@@ -3134,9 +10481,26 @@ step_rebuild_reboot() {
   # Refresh the in-tree ClawKeep CLI before the rebuild so the next boot
   # sees the new restore.py / scheduler logic.
   step_clawkeep_install || echo "  Warning: clawkeep_install during rebuild failed (non-fatal)"
-  do_rebuild
+  # The flag, on the arm that really reboots: see do_rebuild. In test mode
+  # nothing reboots, so the engines this rebuild stopped are this function's to
+  # give back and do_rebuild is called without it.
+  if is_test_mode; then
+    do_rebuild
+  else
+    do_rebuild --reboot-follows
+  fi
   if is_test_mode; then
     echo "CLAWBOX_TEST_MODE=1, restarting clawbox-setup.service in lieu of reboot"
+    # `reset-failed` first, as the other two rebuild-ending restarts already do
+    # (step_rebuild, restore_previous_build). With no start dependency left,
+    # nothing starts clawbox-setup DURING a rebuild any more, so it can no
+    # longer crash-loop on the missing standalone entry from that source — but a
+    # hand restart or the sudoers grant can still land in the window and latch
+    # the unit's inherited 5-in-10 s start limit, and a latched limit would turn
+    # this restart into a failure over a build that is fine. This is the branch
+    # e2e-install takes, and it is bare under `set -euo pipefail`, so that
+    # failure would end the step.
+    systemctl reset-failed clawbox-setup.service 2>/dev/null || true
     systemctl restart clawbox-setup.service
     return 0
   fi
@@ -3146,21 +10510,36 @@ step_rebuild_reboot() {
 
 step_browser_launch() {
   # Launch Chromium with CDP remote debugging — runs as root then drops to clawbox via runuser
-  DISPLAY=:99 bash "$PROJECT_DIR/scripts/launch-browser.sh"
+  DISPLAY=:99 bash "$SRC_DIR/scripts/launch-browser.sh"
 }
 
 step_validate_services() {
-  # Polls expected units + functional probes for up to 30 s. Exits 1 if any
-  # check fails by the deadline, after printing a per-failure table with a
-  # systemctl status snippet for unit failures and a one-line reason for
-  # probe failures.
+  # Polls expected units + functional probes until they all pass, or until the
+  # settle window below is up — then prints a per-failure table with a systemctl
+  # status snippet for unit failures and a one-line reason for probe failures.
+  #
+  # THE ONE REMAINING RETRY WINDOW, and it is not a limit on any work: every
+  # install step has already run by the time this is reached, nothing here
+  # downloads, builds or configures anything, and no step is aborted or skipped
+  # by it. It is the time a service is given to finish coming up before the
+  # installer writes its REPORT — and a report is the one thing that cannot be
+  # deferred for ever. Most of what it can find (a missing unit file, a foreign
+  # edition's harness still enabled, a desynced dashboard auth, a mute TTS
+  # verdict on disk) will never change by waiting, so an unbounded loop here
+  # would simply never tell anybody, which is worse than telling them late.
+  #
+  # 180 s rather than the 30 s it used to be: the old window was a guess that a
+  # tired SD card routinely missed, and a service that was 40 s from ready got
+  # the box reported as broken. The gateway's own patience is the same number.
 
   # step_network_setup persists NETWORK_INTERFACE to network.env but doesn't
-  # export it, so on a fresh install our process still has it unset. Reload
-  # the file before probing.
-  if [ -f "$IFACE_ENV" ]; then
-    # shellcheck disable=SC1090
-    source "$IFACE_ENV"
+  # export it, so on a fresh install our process still has it unset. Reload the
+  # value before probing — PARSED from the clawbox-writable copy, sourced only
+  # from the root-owned one. See read_untrusted_env_value. TASK-445.
+  local _iface
+  _iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+  if [ -n "$_iface" ]; then
+    NETWORK_INTERFACE="$_iface"
   elif [ -f /etc/clawbox/network.env ]; then
     # shellcheck disable=SC1091
     source /etc/clawbox/network.env
@@ -3179,7 +10558,13 @@ step_validate_services() {
     active_services+=("$s")
   done
 
-  local deadline=$(( $(date +%s) + 30 ))
+  local settle="${CLAWBOX_VALIDATE_SETTLE_S:-180}"
+  case "$settle" in ''|*[!0-9]*) settle=180 ;; esac
+  # The e2e container cannot satisfy some of these by construction, and CI has
+  # to be able to report a failure rather than hold the job open.
+  if is_test_mode; then settle="$(test_mode_wait_cap_s)"; fi
+  local started_at; started_at=$(date +%s)
+  local deadline=$(( started_at + settle ))
   local -a failed_active=() failed_installed=() failed_probe=()
 
   while :; do
@@ -3228,6 +10613,121 @@ step_validate_services() {
       *) failed_probe+=("ClawBox: dashboard at http://localhost/ returned HTTP $http_code (expected 2xx or 3xx)") ;;
     esac
 
+    # Probe: on-device TTS delivered the engine it was asked for.
+    #
+    # scripts/install-voice.sh publishes its verdict to $TTS_STATUS_FILE for
+    # exactly this check. The distinction the file carries tells an operator
+    # WHAT to fix, and here it decides the wording, not the outcome: `ready`
+    # passes, and so does `absent` — the engine was never installed and never
+    # asked for, which is every fresh box now that Kokoro is the owner's click
+    # in Settings → Local AI; a check that failed every one of those would
+    # teach everyone to ignore it. `skipped:*` means this board declines
+    # Kokoro (no CUDA, no Jetson build for its architecture), and with one
+    # engine that is a box with NO on-device voice — a mute box, recorded and
+    # named the way step_openclaw_tts records its 13. It does not pass:
+    # whether the cloud voice exists is not a fact this installer can check
+    # (that needs the ClawBox AI link, which happens after install), and every
+    # shipped ClawBox is a Jetson a Kokoro build exists for, so a skipped
+    # Kokoro on real hardware means something is wrong. `failed:*` means the
+    # GPU engine was requested and did not arrive, and someone has to fix it.
+    #
+    # Kokoro is the ONLY engine this probe reads. An older release's second
+    # key is ignored: install-voice.sh no longer writes it, and a stale line
+    # left in the file by an earlier run is never read as an engine that
+    # exists.
+    #
+    # An ABSENT verdict fails too. The TTS step runs before this check on both
+    # the install and the update path, so nothing here can assert "Kokoro is
+    # fine" from a file that is not there; the codebase has been bitten enough
+    # times by a missing signal reading as a healthy one (a gateway restart
+    # returning success after failing, an email batch reporting success having
+    # sent nothing) that "no answer" is not allowed to score as a pass.
+    #
+    # Every edition, Hermes included. This probe used to sit behind
+    # `if ! is_hermes_edition`, with the comment "Hermes has no on-device TTS
+    # step at all, so it has nothing to verify." It runs the same
+    # step_openclaw_tts as every other SKU now, so it has exactly the same
+    # verdict to verify — and a health check that skips the one engine a box
+    # depends on is how "All N checks healthy" gets printed over a mute box.
+    # Read fresh from the file on every pass, never from an earlier answer.
+    local tts_state=""
+    if [ -r "$TTS_STATUS_FILE" ]; then
+      # `tr -d '\r'`: the file is written by a shell on the device, but it is
+      # also restored from tarballs and edited by hand, and a CRLF line ends
+      # the verdict as `ready\r` — a value that is neither `ready` nor any
+      # other word in the vocabulary. Parse the line rather than merely
+      # refusing it; what a garbled value must NOT do is score a pass, and
+      # that is what the `*)` arm below is for.
+      tts_state=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
+    fi
+    # `ready` is the only verdict that means "this engine can speak".
+    # `skipped:*` is a board that declines it — with one engine, a box with
+    # no voice — `failed:*` is one that was asked and could not, and an
+    # EMPTY string is a step that reported nothing at all; all three fail.
+    # ONE line about this box's speech, so the check probe_count counts as
+    # one contributes at most one.
+    #
+    # The vocabulary is closed: `ready`, `absent`, `skipped:<reason>`,
+    # `failed:<reason>`, or nothing at all. Anything else — a truncated write (tts_status_publish
+    # truncates the file with `>` rather than writing-then-renaming, so a box
+    # that lost power mid-publish can leave one), a typo, a stray line — used
+    # to match no arm and fall out of the chain as a silent PASS, while the
+    # strictly LESS informative absent verdict correctly failed. Unparseable
+    # is at least as suspicious as absent, so it lands in the `*)` arm and
+    # fails — without asserting an engine state it could not read.
+    #
+    # `?*`, not `*`: a bare `skipped:` or `failed:` carries no reason, and a
+    # truncated write is exactly how one appears. "This board declines the
+    # engine" is a claim, and a claim with its reason cut off is not evidence
+    # for it either.
+    #
+    # Unreadable is decided FIRST, before any arm names an engine state:
+    # "this box has NO working on-device TTS engine" is a claim about an
+    # engine that may be running perfectly, and a verdict this probe could
+    # not parse is no evidence for it.
+    local tts_fix="Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts"
+    local tts_verdict_unreadable=false
+    case "$tts_state" in ""|ready|absent|skipped:?*|failed:?*) ;; *) tts_verdict_unreadable=true ;; esac
+    if [ "$tts_verdict_unreadable" = true ]; then
+      failed_probe+=("TTS: unrecognised on-device TTS verdict at $TTS_STATUS_FILE (Kokoro: $tts_state) — a verdict outside the ready/skipped:<reason>/failed:<reason> vocabulary is not evidence of an engine. $tts_fix")
+    else
+      case "$tts_state" in
+        "")
+          failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has an engine cannot be asserted either way. $tts_fix")
+          ;;
+        ready)
+          ;;
+        absent)
+          # Not a failed probe, and not silent either: an operator reading the
+          # report should learn where the engine comes from, in the words the
+          # install step used.
+          echo "  On-device TTS: not installed on this box (a plain state — Settings → Local AI installs it), not a failed probe"
+          ;;
+        skipped:?*)
+          # The mute box: the same recorded, named, non-fatal fact as
+          # step_openclaw_tts's 13, checked again here from the file.
+          #
+          # Except in the e2e-install container, which says it has no GPU by
+          # construction with CLAWBOX_TEST_NO_GPU=1 (e2e-install/README.md
+          # lists every CUDA step it skips for the same reason): a Kokoro
+          # that declines there is the documented state of that host, not a
+          # defect in it — and failing every harness run would teach
+          # everyone to ignore this check on the hardware where it matters.
+          # Not keyed on test mode itself: the unit tests run this probe in
+          # test mode and pin the real-hardware rule. Real devices never set
+          # either; on them a skipped Kokoro fails exactly as before.
+          if harness_has_no_gpu; then
+            echo "  CLAWBOX_TEST_NO_GPU=1, on-device TTS declined ($tts_state) — expected without a GPU, not a failed probe"
+          else
+            failed_probe+=("TTS: this box has NO working on-device TTS engine — Kokoro, the only on-device engine, does not apply to this board ($tts_state). The cloud voice speaks for it once the box is linked to ClawBox AI on a plan that includes cloud speech. $tts_fix")
+          fi
+          ;;
+        failed:?*)
+          failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box has no on-device voice; spoken replies fall back to the gateway's cloud voice until it is fixed. $tts_fix")
+          ;;
+      esac
+    fi
+
     # Probe 3 (hermes only): the OpenClaw gateway must be GONE. This is the only
     # automated guard that the Hermes SKU never ships an unauthenticated agent
     # gateway on :18789 — a regression anywhere in the install path (a stray
@@ -3273,7 +10773,7 @@ step_validate_services() {
     # ExecStartPre re-mints a coherent pair within this loop's retry window)
     # passes honestly, because by then the invariant genuinely holds.
     if has_hermes_harness; then
-      local auth_script="$PROJECT_DIR/scripts/setup-hermes-dashboard-auth.sh"
+      local auth_script="$SRC_DIR/scripts/setup-hermes-dashboard-auth.sh"
       local auth_rc=0
       if [ -f "$auth_script" ]; then
         HERMES_CONFIG="$CLAWBOX_HOME/.hermes/config.yaml" CLAWBOX_ROOT="$PROJECT_DIR" \
@@ -3321,12 +10821,27 @@ step_validate_services() {
     [ ${#failed_active[@]} -eq 0 ] && [ ${#failed_installed[@]} -eq 0 ] && [ ${#failed_probe[@]} -eq 0 ] && break
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 2
+    wait_note "$(( $(date +%s) - started_at ))" "${#failed_active[@]} unit(s) and ${#failed_probe[@]} probe(s) still short of healthy"
   done
 
   local probe_count=2
   if is_test_mode; then probe_count=1; fi
-  # +3: gateway-inactive, gateway-port-silent, dashboard-proxy-answers.
-  if is_hermes_edition; then probe_count=$(( probe_count + 3 )); fi
+  # +1 on EVERY edition: the on-device TTS verdict. Counted even when it passes,
+  # so the total the healthy line prints is the number of checks that actually
+  # ran.
+  #
+  # This used to be the `else` arm of the hermes branch below — Hermes got the
+  # three gateway probes INSTEAD of the TTS verdict, because Hermes had no
+  # on-device TTS step to verify. It runs the same step_openclaw_tts as every
+  # other SKU now and the probe above is no longer gated, so an either/or would
+  # make the installer's own summary lie: it would print one fewer check than it
+  # ran on hermes, and the count is the only thing standing between "All N
+  # checks healthy" and a check that silently stopped running.
+  probe_count=$(( probe_count + 1 ))
+  if is_hermes_edition; then
+    # +3: gateway-inactive, gateway-port-silent, dashboard-proxy-answers.
+    probe_count=$(( probe_count + 3 ))
+  fi
   # +1 (hermes AND dual): the dashboard auth provider actually verifies.
   if has_hermes_harness; then probe_count=$(( probe_count + 1 )); fi
   # One per foreign unit. Counted even when the unit is absent: "the other
@@ -3369,18 +10884,36 @@ step_validate_services() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install llamacpp_model
-  chromium_install ai_tools_install vnc_install vnc_refresh
-  openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models
+  embed_model
+  chromium_install ai_tools_install coding_harness codex_cli vnc_install vnc_refresh
+  openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models openclaw_tts
+  # The Local AI tab's two engine installs, since 2026-09-15: Kokoro and
+  # faster-whisper are opt-in now, and these are the only two steps that
+  # install either. On WEB_ROOT_STEPS, never on the UI/MCP list. No
+  # parenthesis in this comment: root-steps.test.ts parses the array up to
+  # the first closing one.
+  voice_kokoro_install voice_whisper_install
   # Edition steps must be dispatchable or no in-app update can ever re-bake the
   # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes
   # box ended up running edition-blind updates that reinstalled OpenClaw.
   edition_lock edition_foreign_teardown hermes_install hermes_edition
-  network_setup set_hostname setup_config system_config
+  # `harness_swap` is the owner's Settings → Harness button: value-gated by
+  # data/harness-swap.env, it re-execs the edition steps above as the target.
+  harness_swap
+  network_setup set_hostname set_timezone setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch cloudflared_install
-  nm_dispatcher sysctl_linkdown post_update update_smoke validate_services
+  nm_dispatcher sysctl_linkdown persistent_journal resource_limits desktop_mode
+  # `firewall` is dispatchable so support can re-assert the policy by hand with
+  # `sudo bash install.sh --step firewall`. It is not added to
+  # clawbox-root-step.sh's ALLOWED_STEPS because it does not need to be — the
+  # updater reaches it transitively via post_update. Note this is NOT an
+  # isolation boundary: system_config and post_update are both allow-listed and
+  # both call step_firewall, so the web server can already cause it to run.
+  firewall
+  post_update update_smoke validate_services
 )
 
 if [ "${1:-}" = "--step" ]; then
@@ -3398,15 +10931,61 @@ if [ "${1:-}" = "--step" ]; then
     echo "Available steps: ${DISPATCH_STEPS[*]}" >&2
     exit 1
   fi
+  # ── A dispatched step's recorded failures must not die with it ─────────────
+  # `"step_x"; exit 0` threw away everything record_provision_failure collected.
+  # step_post_update returns 0 whatever its fixups reported, so an in-app update
+  # whose TTS step left the box MUTE — exit 13, recorded inside
+  # step_openclaw_tts precisely so it would be carried — finished as a
+  # successful update with nothing in $PROVISION_STATUS_FILE, the marker the
+  # dashboard and the flash host read. The full-install path has printed this
+  # summary since the marker existed; the dispatch path never reached it.
+  #
+  # An EXIT trap, not `"step_x" || rc=$?`: the OR-list form would switch set -e
+  # OFF for the entire body of the dispatched step, so every guard inside it
+  # that relies on errexit to stop would run on instead. The trap also catches
+  # the step that dies mid-way under errexit, which is the case that reported
+  # nothing at all.
+  #
+  # Only `incomplete` is ever published here. One dispatched step finishing
+  # cleanly is not evidence that the whole box provisioned, so a clean run
+  # writes nothing and leaves the marker to the full install that owns it.
+  dispatch_provision_verdict() {
+    local rc=$?
+    trap - EXIT
+    if [ "${#PROVISION_FAILURES[@]}" -gt 0 ]; then
+      echo "  ############################################################"
+      echo "  # PROVISIONING INCOMPLETE — step $local_step reported errors."
+      echo "  # Steps that failed: ${PROVISION_FAILURES[*]}"
+      echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step $(provision_repair_step "${PROVISION_FAILURES[0]}")"
+      echo "  ############################################################"
+      write_provision_status incomplete "${PROVISION_FAILURES[*]}" || true
+      # Same stdout contract as the full install: the flash host greps these
+      # two lines, and the prefix and the verdict word are byte-identical.
+      echo "[provision-status] INCOMPLETE (${PROVISION_FAILURES[*]})"
+      echo "[provision-run] $PROVISION_RUN_ID"
+      if [ "$rc" -eq 0 ]; then rc=1; fi
+    fi
+    exit "$rc"
+  }
+  trap dispatch_provision_verdict EXIT
+  # Which step this shell was dispatched for, readable by the step itself. A
+  # step that must behave differently inside an in-app update than in a full
+  # install (step_performance_mode, which must not pin the clocks under the
+  # update's own heaviest work) asks this together with the update lock, rather
+  # than guessing from its surroundings.
+  CLAWBOX_DISPATCHED_STEP="$local_step"
   "step_${local_step}"
   exit 0
 fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-# Upper bound (the Hermes provisioning step only runs on hermes/dual), so the
-# progress counter never prints "[26/23]".
-TOTAL_STEPS=26
+# 26 unconditional steps, plus the Hermes provisioning step below, which runs
+# only on the hermes and dual editions. Edition-aware rather than a constant:
+# the openclaw constant made those editions print "[27/26]" on their last step,
+# and an upper bound would leave openclaw finishing at "[26/27]".
+TOTAL_STEPS=28
+if has_hermes_harness; then TOTAL_STEPS=$((TOTAL_STEPS + 1)); fi
 step=0
 log() {
   step=$((step + 1))
@@ -3415,6 +10994,12 @@ log() {
 }
 
 echo "=== ClawBox Installer ==="
+
+# Clear the previous run's verdict BEFORE provisioning anything. From here until
+# the summary at the bottom there is deliberately no marker on disk, so a run
+# that dies mid-way (or cannot write its own marker at the end) leaves the flash
+# host with "no verdict" rather than with the last run's "ok".
+invalidate_provision_status || true
 
 log "Ensuring clawbox user exists..."
 step_ensure_user
@@ -3440,11 +11025,42 @@ step_install_bun
 log "Building ClawBox..."
 step_build
 
+# BEFORE step_openclaw_setup, deliberately. That step ends in step_openclaw_tts,
+# which registers the on-device voice with EVERY harness the box runs — and the
+# Hermes half of that needs ~/.local/bin/hermes to exist to be written through.
+# With the old order a fresh hermes/dual box reached the registration before the
+# agent it was registering with, and every first install would have recorded a
+# provisioning failure for a box that was fine. step_hermes_install self-gates on
+# has_hermes_harness (a no-op on openclaw), needs nothing OpenClaw provides, and
+# is idempotent, so moving it up costs nothing on any other SKU.
+log "Installing Hermes (on the hermes and dual editions)..."
+# NOT BARE. This step answers non-zero now — for an agent it could not make
+# runnable, and for an upgrade that landed off the pin — and errexit is live at
+# this call site (`set -euo pipefail`, line 22, with no EXIT trap armed on the
+# full-install path: the only `trap dispatch_provision_verdict EXIT` is inside
+# the `--step` block, which exits before this line is ever reached). Bare, a
+# fresh hermes or dual box whose Hermes fetch failed — a region block, a network
+# flake, the population this step's guard exists for — would abort the whole
+# installer here, before the services, VNC and the provisioning verdict: no
+# PROVISIONING INCOMPLETE banner and no [provision-status] sentinel, with the
+# marker already invalidated, so the flash host would see no verdict at all.
+# The step prints its own reason; on this path that report is the outcome, and a
+# box that is otherwise fully provisioned is worth more than an aborted install.
+# RECORDED, not only printed: on the hermes and dual SKUs the agent IS the
+# product, so a box that finished provisioning without a runnable one — or on a
+# build we do not ship — is not a complete install, and `record_provision_failure`
+# is the channel this file already has for saying so. It reaches the operator's
+# "Steps that failed:" line and the `[provision-status]` marker the flash host
+# parses, which is exactly what the bare call was destroying by aborting before
+# either could be written. Idempotent, and never reached on openclaw (the step
+# returns 0 immediately where there is no Hermes harness).
+if ! step_hermes_install; then
+  record_provision_failure hermes_install
+  echo "  Warning: Hermes is not runnable after this step — install it manually, then re-run install.sh (non-fatal)" >&2
+fi
+
 log "Installing and configuring OpenClaw..."
 step_openclaw_setup
-
-log "Installing Hermes (on the hermes and dual editions)..."
-step_hermes_install
 
 log "Installing ClawKeep CLI..."
 step_clawkeep_install
@@ -3476,6 +11092,16 @@ step_ollama_install
 log "Installing llama.cpp runtime..."
 step_llamacpp_install
 
+log "Memory-search model (the owner's click in Settings → Local AI)..."
+# NOT DOWNLOADED HERE, on any edition. The one model a flash fetches is Gemma 4,
+# through step_llamacpp_install above (owner's ruling, 2026-09-15: "we are not
+# force installing any models in install.sh except gemma4"); this 639 MB GGUF
+# is `--step embed_model`, dispatched by /setup-api/embed/install when the
+# owner presses Install in Settings → Local AI or runs the Memory Shard wizard.
+# The step is still announced, because the progress counter counts one line
+# per step and every edition runs this one.
+echo "  Deferred: Settings → Local AI (Memory search) fetches it on the owner's click (639 MB)."
+
 log "Installing Chromium..."
 step_chromium_install
 
@@ -3484,6 +11110,17 @@ step_cloudflared_install
 
 log "Installing AI coding tools (Claude Code, Codex, Gemini)..."
 step_ai_tools_install
+
+log "Installing the ClawBox coding harness (claude-ds)..."
+# Guarded, and it has to be. The step now FAILS when the harness did not end up
+# usable — that is the whole point of the change, because this step is the
+# repair src/lib/coding-agent.ts tells the owner to run and it must not report
+# success while the Coding app still refuses. But the harness is OPTIONAL: a box
+# with no Claude Code boots, serves its dashboard and runs its agent. Under the
+# `set -euo pipefail` at the top of this file an unguarded call would turn a
+# region-blocked download into an ABORTED INSTALL, which is the opposite defect.
+step_coding_harness \
+  || echo "  Warning: the coding harness did not install; the Coding app will refuse until it does"
 
 log "Installing VNC server..."
 step_vnc_install
@@ -3501,6 +11138,11 @@ ensure_clawbox_bashrc_path
 
 log "Starting services..."
 step_start_services
+
+# After the web server is up: the helper reaches the embedder through its
+# proxy, which is what wakes the unit, and it waits for that proxy itself.
+log "Pointing memory search at the on-box embedder..."
+ensure_local_embeddings || echo "  Warning: local embeddings check failed (non-fatal)"
 
 # Hermes harness editions (hermes + dual): seed shared identity, configure the
 # dashboard auth provider, (re)start the dashboard + auth proxy. Runs after
@@ -3533,10 +11175,13 @@ step_validate_services || VALIDATE_RC=$?
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
-# Re-read persisted interface for summary
-if [ -f "$IFACE_ENV" ]; then
-  source "$IFACE_ENV"
+# Re-read the persisted interface for the summary. Parsed, not sourced — this
+# file is clawbox-writable and we are root. TASK-445.
+_summary_iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+if [ -n "$_summary_iface" ]; then
+  NETWORK_INTERFACE="$_summary_iface"
 fi
+unset _summary_iface
 
 echo ""
 echo "=== ClawBox Setup Complete ==="
@@ -3557,7 +11202,9 @@ echo ""
 # success by the caller (the flash host's "Setup: N/N succeeded"). The marker
 # file carries the same verdict for a caller that reads a file instead of the
 # exit code, and the sentinel line ([provision-status] ...) for one that greps
-# stdout. Keep all three in agreement.
+# stdout. Keep all three in agreement — including when the marker cannot be
+# written at all, in which case the other two must report "incomplete" rather
+# than a success no reader of the file can see.
 FINAL_RC=0
 if [ "${#PROVISION_FAILURES[@]}" -gt 0 ] || [ "${VALIDATE_RC:-0}" -ne 0 ]; then
   FINAL_RC=1
@@ -3569,17 +11216,35 @@ if [ "$FINAL_RC" -ne 0 ]; then
   echo "  # reported errors. Do NOT ship this box as healthy."
   if [ "${#PROVISION_FAILURES[@]}" -gt 0 ]; then
     echo "  # Steps that failed: ${PROVISION_FAILURES[*]}"
-    echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step ${PROVISION_FAILURES[0]}"
+    echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step $(provision_repair_step "${PROVISION_FAILURES[0]}")"
   fi
   if [ "${VALIDATE_RC:-0}" -ne 0 ]; then
     echo "  # Service validation FAILED (see the checks listed above)."
   fi
   echo "  ############################################################"
-  write_provision_status incomplete "${PROVISION_FAILURES[*]:-}"
+  write_provision_status incomplete "${PROVISION_FAILURES[*]:-}" || true
+  # The sentinel lines below are a stdout contract with the flash host: keep the
+  # prefix and the verdict word byte-identical. The run id goes on its own line.
   echo "[provision-status] INCOMPLETE${PROVISION_FAILURES[*]:+ (${PROVISION_FAILURES[*]})}"
+  echo "[provision-run] $PROVISION_RUN_ID"
 else
-  write_provision_status ok ""
-  echo "[provision-status] OK"
+  write_provision_status ok "" || true
+  if [ "$PROVISION_STATUS_UNPUBLISHED" -ne 0 ]; then
+    # Every step passed, but the channel the flash host reads cannot be made to
+    # say so for THIS run. Reporting success here is how a stale marker gets
+    # read as a fresh verdict, so downgrade instead: an install whose result
+    # cannot be published is not an install anyone should ship.
+    FINAL_RC=1
+    echo "  ############################################################"
+    echo "  # PROVISIONING INCOMPLETE — every step passed, but this run"
+    echo "  # could not publish its verdict to $PROVISION_STATUS_FILE."
+    echo "  # Do NOT ship this box as healthy; fix the path and re-run."
+    echo "  ############################################################"
+    echo "[provision-status] INCOMPLETE (marker unwritable)"
+  else
+    echo "[provision-status] OK"
+  fi
+  echo "[provision-run] $PROVISION_RUN_ID"
 fi
 
 exit "$FINAL_RC"

@@ -5,23 +5,47 @@ import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
 import { getAll, setMany } from "@/lib/config-store";
+import { readSetupGateFacts } from "@/lib/route-auth";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
+  runOpenclawDoctorFix,
+  type OpenclawDoctorFixOutcome,
   findOpenclawBin,
   runOpenclawConfigSet,
+  runOpenclawConfigSetBatch,
+  runOpenclawConfigUnset,
+  type OpenclawConfigSetArgs,
   compactionReserveFloorForContext,
   inferConfiguredLocalModel,
   readConfig as readOpenClawConfig,
+  spawnOpenclawCli,
+  readConfigStrict as readOpenClawConfigStrict,
+  setPrimaryModelWithoutCatalogValidation,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
   setProviderPlugins,
   openclawIsAbsent,
   OpenclawUnavailableError,
+  type OpenClawConfig,
+  GatewayNotReadyError,
+  gatewayReadyWaitMs,
 } from "@/lib/openclaw-config";
+import { waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
+import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
+import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { applyLocalAiToHermes, HermesLocalApplyError } from "@/lib/hermes-local-ai";
 import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
+// The PLAN this account pays for, recorded in the same store write as the
+// badge: both boot scripts decide the cloud-voice entitlement from the pair and
+// one of them DELETES on it, so neither may outlive the credential (TASK-744).
+import {
+  CLAWAI_PLAN_TIER_KEY,
+  clawaiPlanTierForStore,
+  type ClawaiPortalPlan,
+} from "@/lib/clawai-plan-tier";
+import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
 import { applyCloudProviderKeyToHermes, HermesCloudApplyError } from "@/lib/hermes-cloud-provider";
 import {
   getDefaultLlamaCppModel,
@@ -29,7 +53,9 @@ import {
   getLlamaCppMaxTokens,
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
-import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { activateLocalAiProvider, getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { HERMES_MINIMUM_CONTEXT_TOKENS, probeOllamaModel } from "@/lib/ollama-model-context";
+import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
 import { unpairLocal as unpairClawKeep } from "@/lib/clawkeep";
 import { getLocalAiToken, markLocalAiTokenMigrated } from "@/lib/local-ai-token";
 import { getOrGenerateGatewayToken } from "@/lib/gateway-proxy";
@@ -38,38 +64,112 @@ import {
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_PRO_MODEL_ID,
   CLAWBOX_AI_MODEL_BY_TIER,
+  CLAWBOX_AI_MODEL_ID_BY_TIER,
   CLAWBOX_AI_DEFAULT_TIER,
+  CLAWBOX_AI_PROXY_URLS,
+  CLAWBOX_AI_IMAGE_PROVIDER,
+  CLAWBOX_AI_LEGACY_IMAGE_PROVIDER,
+  CLAWBOX_AI_IMAGE_MODEL,
+  CLAWBOX_AI_IMAGE_MODEL_ID,
+  clawboxAiNonChatModelReason,
+  isClawboxAiImageModelRef,
+  isClawboxAiNonChatModelRef,
+  CLAWBOX_AI_VISION_MODEL_ID,
+  clawboxAiVisionModelRef,
+  CLAWBOX_AI_VISION_MODEL_LABEL,
+  CLAWBOX_AI_VISION_INPUT_MODALITIES,
+  CLAWBOX_AI_VISION_MAX_TOKENS,
   normalizeClawboxAiTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
-import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
-import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
+import { chatgptDefaultModelId, chatgptUpgradeCandidates } from "@/lib/chatgpt-surface";
+import {
+  CHATGPT_AGENT_RUNTIME_ID,
+  CHATGPT_DEFAULT_MODEL_ID,
+  CHATGPT_PROFILE_KEY,
+  CHATGPT_PROVIDER,
+  chatgptModelRef,
+  chatgptRuntimeArmOp,
+  chatgptRuntimeEntryPath,
+  isOauthProfile,
+  openaiAuthOrder,
+} from "@/lib/chatgpt-subscription";
+import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
+import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
+import { clawaiCredentialRefusalOnRecord } from "@/lib/clawai-credential-refusal";
+import {
+  isValidModelId,
+  GOOGLE_MODELS,
+  ANTHROPIC_DEFAULT_MODEL_ID,
+  GOOGLE_DEFAULT_MODEL_ID,
+  OPENAI_DEFAULT_MODEL_ID,
+  ANTHROPIC_MODELS,
+  extractProviderModelId,
+  routesSubscriptionNatively,
+} from "@/lib/provider-models";
+import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
+import { setProviderEnabled } from "@/lib/provider-enablement";
+import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
+import { forgetProviderEnumerations } from "@/lib/provider-runnable";
+import {
+  EXPLICIT_MODEL_PICKS_KEY,
+  decideClawboxAiModelId,
+  explicitPicksFrom,
+} from "@/lib/explicit-model-pick";
+import {
+  isClaudeSubscriptionOnly,
+  offSurfaceClaudeModelMessage,
+  offSurfaceCodexModelMessage,
+  readKnownModelIds,
+} from "@/lib/subscription-surface";
 // The model name on this route arrives in the request body. For a local
 // provider it is the whole of `apiKey`, which nothing further constrains, and
 // it reaches the lines below both directly and inside a subprocess error that
 // quotes the command it ran. Bound every such field before logging it — see
 // src/lib/log-safe.ts.
 import { logSafe } from "@/lib/log-safe";
+import { installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
+import { clawboxDisabledEntryId, clearPluginRepair } from "@/lib/plugin-repair";
+import { installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
-  process.env.OPENCLAW_HOME || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
+  process.env.CLAWBOX_OPENCLAW_HOME
+  || process.env.OPENCLAW_HOME
+  || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
 const CLAWBOX_HOME_DIR = process.env.HOME ?? "/home/clawbox";
+/**
+ * The agent whose LEGACY credential file ClawBox writes, pre-v2.
+ *
+ * `main` is the core's implicit agent (`LEGACY_IMPLICIT_AGENT_ID`) and the
+ * directory it resolves for a config with no roster, which is every box that
+ * still has a legacy `auth-profiles.json` to write. Deliberately NOT used for
+ * the `models auth …` calls any more — see `pasteAuthApiKey`.
+ */
+const LEGACY_AGENT_ID = "main";
 const AUTH_PROFILES_PATH = path.join(
   OPENCLAW_HOME_DIR,
   "agents",
-  "main",
+  LEGACY_AGENT_ID,
   "agent",
   "auth-profiles.json",
 );
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
 const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://clawbox.com/api/ai";
+/** Portal-token prefix — the entitlement marker both writers gate on. */
+const CLAWBOX_AI_TOKEN_PREFIX = "claw_";
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
+/**
+ * Config-store marker: ClawBox has written an explicit OpenAI auth order that
+ * a later save may need to clear. Without it the clear is a CLI cold start
+ * spent against a store that has no order — see `applyOpenAiAuthOrder`.
+ */
+const OPENAI_AUTH_ORDER_KEY = "openai_auth_order_written";
 const CLAWBOX_AI_MODEL = CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER];
 
 // Ollama pre-allocates KV cache for the full context window. The default 128K
@@ -95,21 +195,32 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     profileKey: CLAWBOX_AI_PROFILE_KEY,
   },
   anthropic: {
-    defaultModel: "anthropic/claude-sonnet-4-6",
+    defaultModel: `anthropic/${ANTHROPIC_DEFAULT_MODEL_ID}`,
     profileKey: "anthropic:default",
   },
   openai: {
-    defaultModel: "openai/gpt-5",
+    defaultModel: `openai/${OPENAI_DEFAULT_MODEL_ID}`,
     profileKey: "openai:default",
     subscriptionOverride: {
-      // Newest model every ChatGPT tier can run, Free included. Entitled
-      // accounts are moved up to gpt-5.6 by the sign-in probe below.
-      defaultModel: "codex/gpt-5.5",
-      profileKey: "codex:default",
+      // The ChatGPT sign-in is an OAuth profile of the SAME provider, under a
+      // key of its own so it coexists with the API-key one, and the model is
+      // `openai/<id>` — OpenClaw 2 has no `codex/` namespace and never
+      // consults a `codex:*` profile for an openai route. Evidence in
+      // src/lib/chatgpt-subscription.ts.
+      //
+      // A SEED that never reaches the config: the subscription branch below
+      // overwrites `config.defaultModel` with `chatgptDefaultModelId()` before
+      // the entitlement probe, and the explicit-pick branch overwrites it with
+      // what the owner named — so this constant is what the table needs to be
+      // shaped like, not what a box is written with. Which model the floor
+      // actually is, and what the probe is offered above it, are the installed
+      // core's answer now (src/lib/chatgpt-surface.ts), not this line's.
+      defaultModel: chatgptModelRef(CHATGPT_DEFAULT_MODEL_ID),
+      profileKey: CHATGPT_PROFILE_KEY,
     },
   },
   google: {
-    defaultModel: "google/gemini-2.5-flash",
+    defaultModel: `google/${GOOGLE_DEFAULT_MODEL_ID}`,
     profileKey: "google:default",
   },
   openrouter: {
@@ -132,6 +243,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
 
 const PROFILE_KEY_RE = /^[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)*$/;
 const COMMAND_TIMEOUT_MS = 30_000;
+const BATCH_COMMAND_TIMEOUT_MS = 60_000;
 
 interface AuthProfilesFile {
   version: number;
@@ -197,6 +309,76 @@ function runCommand(cmd: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS)
   });
 }
 
+/**
+ * Apply `config set` assignments in as few `openclaw` invocations as possible
+ * WITHOUT merging their error boundaries.
+ *
+ * Every invocation of the CLI costs ~8 s of Node startup on a Jetson (see
+ * `runOpenclawConfigSetBatch`), which is where first-run setup's silent
+ * two-and-a-half minutes came from (TASK-483). Batching is the fix, but this
+ * route deliberately treats some writes as fatal and others as not — a chat
+ * provider that works is worth more than an image tool, so a failure to
+ * provision images must not fail "Connect ClawBox AI" — and one batch is
+ * atomic, so a single combined call would make every failure fatal to
+ * everything.
+ *
+ * So: try the combined call first, and only if it fails re-issue each group on
+ * its own, which is exactly the old one-boundary-per-group behaviour. A batch
+ * that fails wrote nothing, so re-applying the same values group by group is
+ * safe. The slow path costs one extra invocation per group and is only reached
+ * when something is already wrong.
+ */
+interface ConfigSetGroup {
+  /** `config set` argvs, minus the leading `config set`. */
+  ops: OpenclawConfigSetArgs[];
+  /** Called instead of throwing when this group alone fails. Absent = fatal. */
+  onError?: (err: unknown) => void;
+  /** Called once this group's ops are known to have been applied. */
+  onApplied?: () => void;
+}
+
+function runConfigSetBatch(ops: OpenclawConfigSetArgs[]): Promise<void> {
+  return runOpenclawConfigSetBatch(ops, {
+    // A batch is one CLI start-up regardless of size, so the per-attempt budget
+    // stays in the same order as a single set; the extra headroom is because a
+    // batch that times out costs every write in it, not one.
+    timeoutMs: BATCH_COMMAND_TIMEOUT_MS,
+    uid: CLAWBOX_UID,
+    gid: CLAWBOX_GID,
+  });
+}
+
+async function applyConfigSetGroups(groups: (ConfigSetGroup | null)[]): Promise<void> {
+  const present = groups.filter((group): group is ConfigSetGroup => !!group && group.ops.length > 0);
+  if (present.length === 0) return;
+
+  if (present.length > 1) {
+    try {
+      await runConfigSetBatch(present.flatMap((group) => group.ops));
+      for (const group of present) group.onApplied?.();
+      return;
+    } catch (err) {
+      // Fall through: re-issue per group so each keeps its own fatal/non-fatal
+      // boundary. Logged because the combined failure names the real cause,
+      // while the per-group retry may only reproduce part of it.
+      console.warn(
+        "[AI Config] Combined config write failed; retrying one group at a time:",
+        err instanceof Error ? logSafe(err.message) : err,
+      );
+    }
+  }
+
+  for (const group of present) {
+    try {
+      await runConfigSetBatch(group.ops);
+      group.onApplied?.();
+    } catch (err) {
+      if (!group.onError) throw err;
+      group.onError(err);
+    }
+  }
+}
+
 async function readAuthProfiles(): Promise<AuthProfilesFile> {
   try {
     const raw = await fs.readFile(AUTH_PROFILES_PATH, "utf-8");
@@ -225,34 +407,396 @@ async function writeAuthProfiles(authProfiles: AuthProfilesFile) {
   await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
 }
 
+/**
+ * Store an API-key credential the way the installed CLI does it.
+ *
+ * OpenClaw 2 keeps credentials in its sqlite auth store and refuses to hydrate
+ * a recreated legacy auth-profiles.json (AuthProfileMigrationRequiredError
+ * kills the gateway until a doctor migration). `models auth paste-api-key`
+ * owns the store's schema on every generation — legacy json on v1, sqlite on
+ * v2 — and updates the openclaw.json metadata itself. The key rides stdin,
+ * never argv.
+ */
+/**
+ * `models.mode` as openclaw.json carries it, or null when there is none to read.
+ *
+ * Null on the Hermes SKU (no OpenClaw config at all) and on an unreadable one,
+ * which is why the caller compares two reads rather than testing a value: two
+ * nulls are "nothing changed", the honest answer in both cases.
+ */
+async function readModelsMode(): Promise<string | null> {
+  if (openclawIsAbsent()) return null;
+  try {
+    const mode = (await readOpenClawConfig())?.models?.mode;
+    return typeof mode === "string" ? mode : null;
+  } catch {
+    return null;
+  }
+}
+
+async function pasteAuthApiKey(provider: string, profileId: string, key: string): Promise<void> {
+  // The sign-in guard is NOT here, deliberately: see `assertNoSignInAt`. By
+  // the time this runs the request has already written its own
+  // `auth.profiles.<key>` metadata, and on the ClawBox AI lane that metadata
+  // says `oauth` — a guard reading the box at this point would refuse the very
+  // save that wrote it. It is asked once, of the store as it was BEFORE this
+  // request touched anything.
+  await spawnOpenclawCli(
+    [
+      "models", "auth", "paste-api-key",
+      // NO `--agent`. ClawBox used to pin `main` here — and in the sign-in
+      // guard and the order write — on the argument that the CLI resolves a
+      // READ and a WRITE differently, so an unpinned pair could address two
+      // stores. Measured against the installed core (2026.8.1) with a sole
+      // `pro-agent` roster and the flag omitted, that is not what happens:
+      //
+      //   models auth list --json     -> "agentId": "pro-agent"
+      //   paste-api-key …             -> agents/pro-agent/agent/openclaw-agent.sqlite
+      //
+      // The two resolvers only diverge on a roster with SEVERAL agents, and
+      // there `main` was never the right answer either. What the pin actually
+      // did was write this device's ClawBox AI credential into an agent store
+      // the gateway does not read — leaving whatever the real store held,
+      // however stale, to keep serving turns, which is TASK-730 — or, when
+      // `main` is not in the roster at all, fail the whole save outright:
+      //
+      //   $ openclaw models auth paste-api-key --agent main …
+      //   Unknown agent id "main". Use "openclaw agents list" to see configured agents.
+      //
+      // So the target is the harness's to choose, and this asks it to.
+      "--provider", provider,
+      "--profile-id", profileId,
+    ],
+    { stdinData: key + "\n", timeoutMs: 60_000 },
+  );
+}
+
+/** A pasted API key would have replaced a subscription sign-in. */
+class SignInWouldBeLostError extends Error {
+  constructor(readonly profileId: string) {
+    super(`auth profile ${profileId} holds a sign-in`);
+    this.name = "SignInWouldBeLostError";
+  }
+}
+
+/**
+ * Refuse a save whose API key would delete a subscription sign-in.
+ *
+ * `models auth paste-api-key` REPLACES whatever sits at `--profile-id`; there
+ * is no merge and no refusal of its own. The CLI's default id is
+ * `<provider>:manual`, chosen so a pasted key never lands on another
+ * credential — ClawBox overrides it to `<provider>:default`, and that override
+ * is what makes a collision possible at all. Measured with `openclaw models
+ * auth list --json` on an OpenClaw box: `anthropic:default` is `oauth` there
+ * TODAY, because this route's own subscription lane writes the OAuth bundle to
+ * it (PROVIDERS has no `subscriptionOverride` for anthropic) and its API-key
+ * lane pastes to the same id. The OpenAI shape needs a migration —
+ * `doctor --fix` renames an OpenClaw 1 `openai-codex:*` profile to
+ * `openai:<suffix>`, landing the ChatGPT sign-in where the key lane targets
+ * (TASK-662, the #584 follow-up).
+ *
+ * ASKED OF THE STORE, not of openclaw.json's `auth.profiles` metadata. The
+ * metadata is a false negative for the one credential most worth protecting:
+ * `models auth login` — the Terminal sign-in — persists to the agent
+ * credential store and never calls `applyAuthProfileConfig`, so a profile
+ * created that way is invisible in the config. `models auth list --json` is
+ * the store's own reader and is what `models auth logout` — the verb this
+ * refusal names — acts on, so the guard and its remedy cannot disagree. It
+ * costs one CLI cold start, which is why it is skipped for the providers that
+ * have no sign-in lane at all.
+ *
+ * ASKED ONCE, BEFORE ANY WRITE. Later in the same request the save writes
+ * `auth.profiles.<key>` itself — `{mode: "oauth"}` on the ClawBox AI lane —
+ * so a guard consulted at paste time would refuse the save that wrote it.
+ *
+ * REFUSED rather than written under a second id. `applyAuthProfileConfig` does
+ * record an order preferring a newly pasted peer, so a second profile is not
+ * the false success it first looked like; the reason to refuse anyway is
+ * narrower and worth stating plainly. A second id silently changes which
+ * credential answers, on a box where ClawBox writes a STORE-level order for
+ * openai (`applyOpenAiAuthOrder`) that outranks the config one and names only
+ * the ids it knows about — so "both survive" would be true for anthropic and
+ * argued for openai. One sentence the owner can act on beats a credential
+ * shuffle he was not shown.
+ *
+ * Fails OPEN: a store that cannot be read does not refuse a save the owner
+ * asked for. The failure is logged, and the paste that follows is the same one
+ * beta performed unconditionally.
+ */
+async function assertNoSignInAt(profileId: string): Promise<void> {
+  // Nothing to lose where there is no OpenClaw auth store: the Hermes SKU
+  // keeps its credentials in the harness's own config and never reaches
+  // `paste-api-key` at all.
+  if (openclawIsAbsent()) return;
+  let raw: string;
+  try {
+    // Unpinned, like the paste this guards and the auth order beside it: all
+    // three let the core pick the agent, so all three address one store on
+    // every box where a save can succeed (see `pasteAuthApiKey`). The response
+    // names the agent it answered for (`agentId`, `agentDir`), so a box that
+    // disagrees can still be told apart in a log.
+    //
+    // KNOWN LIMIT, measured: before an agent has a store of its own the core
+    // answers from the shared one (`authStatePath` pointed at `agents/main/`
+    // while `agentId` was `pro-agent`), so this can see an inherited profile
+    // the paste would only have shadowed. It refuses in that case, which is
+    // the safe direction — and strictly better than what it replaces, since
+    // the same box previously failed the whole save with
+    // `Unknown agent id "main"`.
+    raw = await spawnOpenclawCli(
+      ["models", "auth", "list", "--json"],
+      { captureStdout: true, timeoutMs: 60_000 },
+    );
+  } catch (err) {
+    console.warn(
+      "[configure] could not read the auth profiles before pasting a key:",
+      err instanceof Error ? logSafe(err.message) : err,
+    );
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.warn("[configure] `models auth list --json` was not JSON; the key paste is unguarded");
+    return;
+  }
+  // `JSON.parse("null")` succeeds and `null.profiles` throws, which the
+  // handler's own catch would turn into a 500 — the opposite of the fail-open
+  // this guard promises, over a save that is perfectly good.
+  if (!parsed || typeof parsed !== "object") return;
+  const profiles = (parsed as { profiles?: unknown }).profiles;
+  if (!Array.isArray(profiles)) return;
+  // The store's own shape, measured on 2026.8.1:
+  // `{profiles: [{id, provider, type, label, expiresAt}]}`, `type` being
+  // `oauth` or `api_key`. Any OAuth row AT THIS ID counts, whatever provider it
+  // names: the paste replaces the row, so what it would destroy is the
+  // question, not who owns it.
+  const holdsSignIn = profiles.some((row) => {
+    if (!row || typeof row !== "object") return false;
+    const entry = row as { id?: unknown; type?: unknown };
+    return entry.id === profileId && isOauthProfile({ mode: String(entry.type ?? "") });
+  });
+  if (holdsSignIn) throw new SignInWouldBeLostError(profileId);
+}
+
+/**
+ * Record the box's OpenAI auth preference with the core's own per-provider
+ * order (`openclaw models auth order`, docs/cli/models.md) — or clear it.
+ *
+ * The order is only ever set when there is something to disambiguate: TWO
+ * openai profiles, the ChatGPT sign-in and an API key. With one profile the
+ * core already selects it — and since the image credential moved off that
+ * provider entry there is nothing else on it to outrank — while a one-entry
+ * explicit order
+ * is a trap — the core REPLACES the candidate list with it
+ * (`baseOrder = explicitOrder ?? …`), so the next credential the owner adds is
+ * invisible, and when the named profile is present but ineligible (an expired
+ * OAuth credential) every openai turn is refused with "Explicit auth order for
+ * openai has no usable profiles" over a working key in the same store.
+ *
+ * So: two profiles → name both, preferred first, and the preference is
+ * revised by whichever save happened last. Fewer → clear, which also undoes a
+ * one-entry order an earlier ClawBox left behind.
+ *
+ * Best effort, and the failure is NAMED in the answer rather than swallowed:
+ * the credential is stored either way, and the chat route arms the Codex
+ * runtime on the model, which only an OAuth profile satisfies.
+ *
+ * The `clear` is skipped entirely unless ClawBox itself has written an order
+ * (a marker in the config store, set beside every `set`). On the ordinary
+ * single-profile box — a ChatGPT sign-in only, or an API key only — the clear
+ * would be a no-op against a store that has no order, and this codebase prices
+ * a CLI cold start at about ten seconds on a Jetson, on the wizard's critical
+ * path behind the sign-in overlay. It also leaves an order the OWNER set by
+ * hand from the Terminal alone, which is the better default anyway.
+ *
+ * `preferred` is taken as present without looking for it — this save wrote it.
+ * Only the OTHER openai profiles come from the config, and `readConfig`
+ * answers `{}` rather than throwing for an unreadable or half-written file, so
+ * a bad read looks like "one profile" and CLEARS. That is the deliberate
+ * fail-safe direction: clearing hands selection back to the core, which still
+ * has both credentials as candidates, while the alternative — writing the
+ * one-entry order — is the trap described above.
+ */
+async function applyOpenAiAuthOrder(
+  preferred: string,
+  config: OpenClawConfig | null,
+  clawboxWroteOrder: boolean,
+): Promise<string | undefined> {
+  const order = openaiAuthOrder(
+    config?.auth?.profiles,
+    preferred,
+    (key) => PROFILE_KEY_RE.test(key),
+  );
+  const shouldSet = order.length > 1;
+  if (!shouldSet && !clawboxWroteOrder) return undefined;
+  const args = shouldSet
+    ? ["models", "auth", "order", "set", "--provider", CHATGPT_PROVIDER, ...order]
+    : ["models", "auth", "order", "clear", "--provider", CHATGPT_PROVIDER];
+  try {
+    await spawnOpenclawCli(args, { timeoutMs: 60_000 });
+    // The marker follows the write that succeeded, so a later save knows
+    // whether there is anything of ours to clear.
+    await setMany({ [OPENAI_AUTH_ORDER_KEY]: shouldSet ? true : undefined });
+    return undefined;
+  } catch (orderErr) {
+    console.warn(
+      "[configure] models auth order failed for the OpenAI profiles:",
+      orderErr instanceof Error ? JSON.stringify(logSafe(orderErr.message)) : orderErr,
+    );
+    return "Saved, but OpenClaw did not record which OpenAI credential to prefer; "
+      + "if chat answers with an authentication error, run "
+      + `'openclaw ${args.join(" ")}' from the Terminal.`;
+  }
+}
+
+/**
+ * Take the Codex runtime OFF `modelRef` when the save is the API-key lane, or
+ * return the sentence that says it is still on.
+ *
+ * The arm used to be write-only — two routes added it, and the only remover is
+ * `gateway-pre-start.sh`'s v1-gated cleanup, so on the pinned core nothing on
+ * the box ever cleared it. Harmless while it could only sit on a `codex/<id>`
+ * key no other lane could name; not harmless now that both OpenAI lanes write
+ * `openai/<id>`. Without this, an owner who signs in with ChatGPT, later
+ * switches OpenAI to API-key mode and saves the SAME model keeps every turn on
+ * the ChatGPT account while Settings says "Configured" — and once the sign-in
+ * is removed, the app-server has no credential and every turn dies on the
+ * Cloudflare challenge with no ClawBox surface that can undo it.
+ *
+ * `config unset` rather than a `null` in the batch: batch entries carry only
+ * `value`/`ref`/`provider` (no delete), and a null is refused by the schema —
+ * `Invalid input: expected object, received null`, measured on 2026.8.1. Its
+ * own spawn, and only when the entry is actually there, so the ordinary save
+ * costs nothing.
+ */
+async function clearChatgptRuntimeArm(
+  modelRef: string,
+  config: OpenClawConfig | null,
+): Promise<string | undefined> {
+  const models = (config?.agents?.defaults as
+    { models?: Record<string, { agentRuntime?: { id?: unknown } }> } | undefined)?.models;
+  if (models?.[modelRef]?.agentRuntime?.id !== CHATGPT_AGENT_RUNTIME_ID) return undefined;
+  const path = chatgptRuntimeEntryPath(modelRef);
+  try {
+    await runOpenclawConfigUnset(path, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
+    return undefined;
+  } catch (unsetErr) {
+    console.error(
+      "[configure] failed to clear the Codex runtime entry:",
+      unsetErr instanceof Error ? JSON.stringify(logSafe(unsetErr.message)) : unsetErr,
+    );
+    return `Saved, but this box still routes ${modelRef} through your ChatGPT account: `
+      + `clearing the Codex runtime setting failed. Run 'openclaw config unset ${path}' `
+      + "from the Terminal, or chat may answer on the subscription instead of the API key.";
+  }
+}
+
+/**
+ * Whether the installed binary uses OpenClaw 2's SQLite credential store.
+ * Ask the binary itself rather than the repository pin: a partially completed
+ * update can leave those two versions different, and the installed process is
+ * the one that must be able to consume the credential we just wrote.
+ */
+async function installedOpenclawUsesSqliteAuthStore(): Promise<boolean> {
+  const output = await spawnOpenclawCli(["--version"], {
+    captureStdout: true,
+    timeoutMs: 30_000,
+  });
+  const match = /\b(20\d{2})\.(\d+)\.(\d+)\b/.exec(output);
+  if (!match) throw new Error("Could not determine the installed OpenClaw version");
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  return year > 2026 || (year === 2026 && month >= 8);
+}
+
+/** The ClawBox AI token this box has on record, or "" — never a supplied one. */
+async function storedClawboxAiToken(): Promise<string> {
+  try {
+    const config = await getAll();
+    return typeof config[CLAWBOX_AI_TOKEN_CONFIG_KEY] === "string"
+      ? config[CLAWBOX_AI_TOKEN_CONFIG_KEY].trim()
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * `getCodingAgentStatus().ready`, or `undefined` when the probe could not answer.
+ *
+ * IMPORTED LAZILY, the same move `hermes-clawai.ts` makes for the reason it
+ * states: `coding-agent` owns the runs store and captures `DATA_DIR`,
+ * `CODE_PROJECTS_DIR` and `RUNS_PATH` at module evaluation, and it drags
+ * `child_process`, the app proxy, the git helpers and the browser-session
+ * machinery in behind it. A static import here would put all of that in the
+ * graph of every route that statically imports THIS one — `clawai/poll` and
+ * `llamacpp/install` — and on the Hermes SKU it would be paid on a path that
+ * returns long before this code can run.
+ *
+ * `undefined` on a throw, never `false`: "we could not find out" must not read
+ * as "the coding agent is not ready", which would buy a reload on a save that
+ * changed nothing.
+ */
+async function codingAgentReady(): Promise<boolean | undefined> {
+  try {
+    const { getCodingAgentStatus } = await import("@/lib/coding-agent");
+    return (await getCodingAgentStatus()).ready;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Forget a remembered coding-harness fault, if there is one.
+ *
+ * Dynamically imported, like `codingAgentReady` above and for the same
+ * reason: `@/lib/coding-agent` is a heavy graph — it captures stores at
+ * evaluation and pulls in child_process, the app proxy, git and the browser
+ * sessions — and this route must not pay for it on every save of every
+ * provider. Never throws: the credential has already landed, and a fault that
+ * survives this still expires on its own and still has its own button.
+ */
+async function forgetCodingHarnessFault(): Promise<void> {
+  try {
+    const { clearHarnessFault } = await import("@/lib/coding-agent");
+    await clearHarnessFault();
+  } catch (err) {
+    console.warn("[ai-models/configure] could not clear the coding harness fault:", err instanceof Error ? err.message : err);
+  }
+}
+
 async function getConfiguredClawboxAiToken(preferredToken?: string) {
   const trimmedPreferred = preferredToken?.trim();
   if (trimmedPreferred) {
     return trimmedPreferred;
   }
 
-  try {
-    const config = await getAll();
-    const storedToken = typeof config[CLAWBOX_AI_TOKEN_CONFIG_KEY] === "string"
-      ? config[CLAWBOX_AI_TOKEN_CONFIG_KEY].trim()
-      : "";
-    if (storedToken) {
-      return storedToken;
-    }
-  } catch {
-    // Fall through to the empty-token return below.
-  }
-
-  return "";
+  return storedClawboxAiToken();
 }
 
-function buildClawboxAiProviderDefinition(apiKey: string) {
-  // Only emit fields that override defaults: the proxy URL, our auth, and
-  // per-tier identity/branding/reasoning. contextWindow, maxTokens, and
-  // input modalities are intentionally omitted — OpenClaw's bundled
-  // provider catalog (2026.4.24+) already knows the canonical V4 specs
-  // (1M context, 384K output, text-in/text-out), so duplicating them
-  // here just creates drift the next time DeepSeek bumps a number.
+// Canonical DeepSeek V4 limits. Declared explicitly on every model entry
+// rather than left to OpenClaw's bundled catalog: a configured provider in
+// openclaw.json overrides the plugin catalog entirely, so an omitted
+// contextWindow does NOT inherit the canonical spec — it falls through to the
+// generic 200,000-token default. Verified on a real device running OpenClaw
+// 2026.7.1 (2026-08-17): with these fields absent, `openclaw models list`
+// resolved both V4 models to 200K; with them present it reports 1M.
+const CLAWBOX_AI_CONTEXT_WINDOW = 1_000_000;
+// 393,216 (384 x 1024) is the ceiling the upstream actually enforces, measured
+// against the live proxy on 2026-08-18: max_tokens=393216 is accepted, 400000
+// comes back 400 "the valid range of max_tokens is [1, 393216]". The previous
+// 384,000 was a round number that left 9,216 tokens of output unusable for no
+// reason.
+const CLAWBOX_AI_MAX_TOKENS = 393_216;
+// V4 is text-in/text-out upstream. Stated rather than inferred so the picker
+// never offers image attachments the proxy would reject.
+const CLAWBOX_AI_INPUT_MODALITIES = ["text"] as const;
+
+function buildClawboxAiProviderDefinition(apiKey: string, visionModelId: string = CLAWBOX_AI_VISION_MODEL_ID) {
+  // Emit the proxy URL, our auth, per-tier identity/branding/reasoning, and
+  // the context/output/modality limits above.
   // `cost` stays zero to mark these as included-in-subscription so the
   // gateway doesn't surface DeepSeek's real per-token prices in the UI.
   return JSON.stringify({
@@ -280,6 +824,9 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
         id: CLAWBOX_AI_FLASH_MODEL_ID,
         name: "ClawBox AI Flash",
         reasoning: true,
+        input: [...CLAWBOX_AI_INPUT_MODALITIES],
+        contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+        maxTokens: CLAWBOX_AI_MAX_TOKENS,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
           supportsReasoningEffort: true,
@@ -290,53 +837,862 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
         id: CLAWBOX_AI_PRO_MODEL_ID,
         name: "ClawBox AI Pro",
         reasoning: true,
+        input: [...CLAWBOX_AI_INPUT_MODALITIES],
+        contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+        maxTokens: CLAWBOX_AI_MAX_TOKENS,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
           supportsReasoningEffort: true,
           supportedReasoningEfforts: ["off", "high", "xhigh"],
         },
       },
+      // Image understanding. Not a chat tier and never selectable as one —
+      // the device model picker reads CLAWAI_STATIC_MODELS, not this array —
+      // it exists so `agents.defaults.imageModel` has something to resolve to
+      // when the user attaches a picture and the text-only session model
+      // cannot look at it. See the CLAWBOX_AI_VISION_* block in
+      // src/lib/clawbox-ai-models.ts for why it lives under this provider.
+      //
+      // No `reasoning`/`compat`: the media-understanding path issues a
+      // one-shot describe and never negotiates a thinking level.
+      {
+        id: visionModelId,
+        name: CLAWBOX_AI_VISION_MODEL_LABEL,
+        input: [...CLAWBOX_AI_VISION_INPUT_MODALITIES],
+        maxTokens: CLAWBOX_AI_VISION_MAX_TOKENS,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
     ],
   });
 }
 
-async function configureClawboxAi(setFallback: boolean, preferredToken?: string) {
+/**
+ * How the ClawBox AI image endpoint is registered, and why there is no
+ * `models[]` row in it any more.
+ *
+ * The entry is `models.providers.litellm` — `{ apiKey, baseUrl }`, nothing else
+ * — and the core's bundled `litellm` image provider reads exactly those two
+ * fields: `resolveApiKeyForProvider({ provider: "litellm" })` for the bearer and
+ * `models.providers.litellm.baseUrl` for the endpoint, then posts
+ * `POST {baseUrl}/images/generations`. See the long note on
+ * `CLAWBOX_AI_IMAGE_PROVIDER` in src/lib/clawbox-ai-models.ts for why the
+ * `openai` provider entry this used to live on is now forbidden: on the pinned
+ * core an `apiKey` there is enough, on its own, to take the ChatGPT (Codex)
+ * subscription lane off its own sign-in.
+ *
+ * NO `models[]` ROW, deliberately, and it is the one thing this move gets for
+ * free. The old `openai` row existed so that the image provider could find a
+ * per-model `baseUrl`; the generic factory takes the provider-level one, so the
+ * row has no job left. It did have a cost — a configured row is exempt from the
+ * core's picker hide rule, so `openai/gpt-image-1-mini` stayed offerable in
+ * OpenClaw's OWN chat pickers whatever ClawBox did (the `models.mode: "replace"`
+ * and `configuredKeys` gaps recorded in src/lib/clawbox-ai-models.ts). Writing
+ * no row at all closes that for the new id instead of re-opening it.
+ *
+ * `litellm` is a bundled overlay id, so the schema does not require `models[]`
+ * or reject the entry for omitting it (`isBuiltInModelProviderOverlayId`); a
+ * CUSTOM provider id would be refused for exactly that ("custom model providers
+ * must declare models"), which is one more reason the id has to be a bundled
+ * one that already ships an image provider.
+ */
+type OpenAiProviderConfig = NonNullable<
+  NonNullable<NonNullable<OpenClawConfig["models"]>["providers"]>[string]
+>;
+type OpenAiModelEntry = NonNullable<OpenAiProviderConfig["models"]>[number];
+
+/**
+ * Every host ClawBox has ever written as the ClawBox AI proxy.
+ *
+ * Seeded from the same source the boot migration uses — the LIVE
+ * `models.providers.deepseek.baseUrl` this box was provisioned against — plus
+ * the build-time `CLAWBOX_AI_PROXY_URL` and the shared historical list.
+ *
+ * Taking the live value matters: the two writers previously disagreed whenever
+ * they disagreed about the env. A staging box whose web app was restarted
+ * without `CLAWBOX_AI_PROXY_URL` stopped recognising its own staging image row
+ * — `foreignOpenAiRoute` then called it foreign and backed the ENTIRE image
+ * and token write off, with a single `console.warn` as the only signal.
+ *
+ * But the live value is only a ClawBox host when the deepseek entry is a
+ * ClawBox AI one. `install.sh`'s `CLAWBOX_AI_API_KEY` branch provisions a RAW
+ * DeepSeek key at `api.deepseek.com`, and on the first pairing the snapshot
+ * still says that — admitting it would make a genuine third party "not
+ * foreign" and write the portal token as the bearer for a route that leaves
+ * for DeepSeek, which is the exact harm `foreignOpenAiRoute` exists to
+ * prevent. So the live host is admitted only behind the same `claw_`
+ * entitlement test the boot migration gates its whole block on.
+ */
+function clawboxProxyHosts(deepseekProvider: OpenAiProviderConfig | undefined): ReadonlySet<string> {
+  const apiKey = deepseekProvider?.apiKey;
+  const liveProxyUrl = typeof apiKey === "string" && apiKey.startsWith(CLAWBOX_AI_TOKEN_PREFIX)
+    ? deepseekProvider?.baseUrl
+    : undefined;
+  return new Set(
+    [CLAWBOX_AI_PROXY_URL, liveProxyUrl, ...CLAWBOX_AI_PROXY_URLS]
+      .map((url) => (typeof url === "string" && url.trim() ? hostOfUrl(url.trim()) : null))
+      .filter((host): host is string => host !== null),
+  );
+}
+
+/**
+ * Is this `models[]` row the one WE wrote?
+ *
+ * The id cannot answer it on its own. `gpt-image-1-mini` is a real OpenAI model
+ * id, so an owner running their own image endpoint — Azure OpenAI, LiteLLM,
+ * vLLM, any self-hosted OpenAI-compatible gateway — can have a row of exactly
+ * that id. Claiming it repoints their route at our proxy, overwrites their
+ * `api`, and puts the portal token on the provider block as the credential for
+ * a route we do not own.
+ *
+ * So ownership is positive, not negative: the row's own `baseUrl` must name a
+ * host ClawBox itself has written. "Not api.openai.com" is the wrong test —
+ * api.openai.com is the LEAST likely place for a power user's private row.
+ * The set includes the retired hosts, so the documented retarget of an entry
+ * left on an old proxy still recognises it as ours.
+ *
+ * A row with no `baseUrl` of its own is not ours either: ClawBox has always
+ * written one, and an inherited provider-level URL is the owner's choice.
+ *
+ * One question, asked identically by the four places that decide ownership:
+ * `foreignOpenAiRoute`'s skip and this upsert here, and their two siblings in
+ * scripts/gateway-pre-start.sh.
+ */
+function isOurImageRow(row: unknown, proxyHosts: ReadonlySet<string>): boolean {
+  if (typeof row !== "object" || row === null) return false;
+  const entry = row as OpenAiModelEntry;
+  if (entry.id !== CLAWBOX_AI_IMAGE_MODEL_ID) return false;
+  if (typeof entry.baseUrl !== "string" || !entry.baseUrl.trim()) return false;
+  const host = hostOfUrl(entry.baseUrl.trim());
+  return host !== null && proxyHosts.has(host);
+}
+
+/**
+ * Whatever is left of a legacy `models.providers.openai.models[]` once our own
+ * image row is taken out of it, or `null` when there was nothing of ours there.
+ *
+ * The inverse of the upsert this file used to carry. Boxes in the field have
+ * our row on the `openai` provider, and it has to come off: it is the reason
+ * that provider entry exists at all on a ClawBox, and an `openai` entry is what
+ * takes the ChatGPT lane down (see `CLAWBOX_AI_IMAGE_PROVIDER`).
+ *
+ * OURS, positively, never "every row with that id" — `isOurImageRow` is the
+ * same question the upsert asked, for the same reason: `gpt-image-1-mini` is a
+ * real OpenAI model id and an owner may have a row of it pointing at their own
+ * gateway. Removing that one would delete their configuration to fix ours.
+ */
+function withoutOurLegacyImageRows(
+  existing: unknown,
+  proxyHosts: ReadonlySet<string>,
+): OpenAiModelEntry[] | null {
+  if (!Array.isArray(existing)) return null;
+  const kept = existing.filter((row) => !isOurImageRow(row, proxyHosts));
+  return kept.length === existing.length ? null : (kept as OpenAiModelEntry[]);
+}
+
+/**
+ * True when it is safe for us to own `models.providers.litellm.apiKey`.
+ *
+ * That entry is the ClawBox AI image endpoint's whole configuration, and the
+ * credential slot the core's bundled `litellm` image provider reads
+ * (`resolveApiKeyForProvider({ provider: "litellm" })`). Unlike the `openai`
+ * slot it replaces, it is not also the auth of a provider anything else on the
+ * box chats through: nothing ClawBox writes names a `litellm/*` chat model, and
+ * a box whose owner DID set one up is exactly the case refused below.
+ *
+ * The one case we refuse is a box that already has some *other* literal key
+ * sitting there — an owner running a real LiteLLM proxy. ClawBox has never
+ * written one before this change, so a value that is not a `claw_` token was
+ * put there by hand, and overwriting a hand-placed credential to enable a
+ * feature nobody asked for is not ours to do. Those boxes get no image provider
+ * and a log line saying why; the legacy `openai` cleanup still runs, because
+ * that key is a defect on its own and is not conditional on this write landing.
+ */
+function canOwnClawboxAiImageApiKey(existingKey: unknown): boolean {
+  if (existingKey === undefined || existingKey === null) return true;
+  if (typeof existingKey !== "string") return false;
+  const trimmed = existingKey.trim();
+  return trimmed === "" || trimmed.startsWith(CLAWBOX_AI_TOKEN_PREFIX);
+}
+
+/**
+ * Where a request for a `litellm` model goes when nothing names a host:
+ * `LITELLM_BASE_URL` in `extensions/litellm/onboard.ts`, the loopback proxy
+ * that provider is built around.
+ *
+ * Used only to answer "where would a row with no baseUrl of its own send our
+ * token", which is the question `foreignImageProviderRoute` exists to ask. The
+ * legacy `openai` entry needs no such default: the cleanup only ever REMOVES
+ * what is positively ours from it and writes nothing there.
+ */
+const LITELLM_DEFAULT_BASE_URL = "http://localhost:4000";
+
+function hostOfUrl(url: string): string | null {
+  try {
+    return new URL(url).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The baseUrl an already-configured route on `provider` would send our token
+ * to, or `null` when every configured route stays on the ClawBox AI proxy.
+ *
+ * `models.providers.<id>.apiKey` is a PROVIDER-WIDE credential — the image path
+ * is the only reason we write one, but nothing scopes it to the image model. So
+ * before writing the portal token onto a provider entry we have to know that
+ * every route already configured under that id stays on our own proxy.
+ *
+ * Two configured shapes send it off-proxy, and both are the owner's own work
+ * (ClawBox writes neither):
+ *   - a `models[]` row. Its endpoint is
+ *     `row.baseUrl ?? provider.baseUrl ?? <provider default>` — so a row with no
+ *     baseUrl resolves straight to the provider's default host and would go out
+ *     bearing the portal token.
+ *   - a provider-level `baseUrl` that is not ours, which is the fallback for
+ *     every row that sets none — on `litellm` that means a real LiteLLM proxy
+ *     the owner runs.
+ * Either one means the box has a setup we did not build and cannot reason
+ * about, so the caller backs the image write off rather than half-configure it:
+ * an image tool is not worth mailing the subscription token to a third party.
+ *
+ * A malformed URL counts as foreign. We cannot show where it points, and
+ * guessing in the permissive direction is the wrong way to be wrong here.
+ *
+ * `defaultBaseUrl` is the provider's own no-host default, because the two ids
+ * this is asked about have different ones. It is also asked of the LEGACY
+ * `openai` entry before that entry is cleaned up, so a box with an owner's own
+ * OpenAI setup keeps it untouched.
+ */
+function foreignImageProviderRoute(
+  provider: OpenAiProviderConfig | undefined,
+  proxyHosts: ReadonlySet<string>,
+  defaultBaseUrl: string,
+): string | null {
+  if (!provider) return null;
+  // The SAME set `isOurImageRow` uses, not the build-time `CLAWBOX_AI_PROXY_URL`
+  // alone. The boot migration asks this question with its own
+  // `_clawbox_proxy_hosts`, built from the same three sources, and its
+  // `_is_foreign` tests membership of that set exactly as this does — so the
+  // two writers cannot disagree about a host, and neither can the two
+  // questions asked here.
+  //
+  // With the build-time value alone, a staging box whose web app restarted
+  // without the env var called its own staging host foreign while the
+  // migration called it ours — and a foreign route backs the ENTIRE image and
+  // token write off with one `console.warn`. Both were single-host once; both
+  // now carry the retired hosts too, so a row left on an old proxy is not
+  // mistaken for a third party's.
+  const isForeign = (baseUrl: string) => {
+    const host = hostOfUrl(baseUrl);
+    return host === null || !proxyHosts.has(host);
+  };
+
+  const providerBaseUrl = typeof provider.baseUrl === "string" ? provider.baseUrl.trim() : "";
+  if (providerBaseUrl && isForeign(providerBaseUrl)) return providerBaseUrl;
+
+  const rows = Array.isArray(provider.models) ? provider.models : [];
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null) continue;
+    // OUR row is skipped — not every row that happens to share its id. See
+    // `isOurImageRow`: a `gpt-image-1-mini` row on a host we have never
+    // written is the owner's, and skipping it by id here was what let the
+    // upsert downstream claim it and repoint it at our proxy.
+    if (isOurImageRow(row, proxyHosts)) continue;
+    const rowBaseUrl = typeof row.baseUrl === "string" && row.baseUrl.trim()
+      ? row.baseUrl.trim()
+      : providerBaseUrl || defaultBaseUrl;
+    if (isForeign(rowBaseUrl)) return rowBaseUrl;
+  }
+  return null;
+}
+
+/**
+ * True when an `agents.defaults.<tool>Model` slot already names a model.
+ *
+ * The same test OpenClaw applies, through the same two steps it applies it in:
+ * `hasExplicitToolModelConfig` COERCES the value first
+ * (`coerceFactoryToolModelConfig` → `resolvePrimaryStringValue`, which answers a
+ * bare string with itself) and then asks `hasToolModelConfig`
+ * (`primary?.trim() || (fallbacks ?? []).some(entry => entry.trim().length > 0)`).
+ * So fallbacks count, and so does a bare string — this file used to test only
+ * the dict half, which is TASK-755. A box carrying only
+ * `{ fallbacks: ["replicate/flux-pro"] }` has a working image setup its owner
+ * chose, and since the write below replaces the whole object, testing
+ * `primary` alone would delete those fallbacks.
+ *
+ * Connecting ClawBox AI is not by itself a request to change where images come
+ * from — `configureClawboxAi` also runs from `ensureFallbackModel`, i.e. when
+ * the user is configuring some *other* provider entirely and ClawBox AI is
+ * only the fallback. Claiming an occupied slot there would silently overrule a
+ * choice the user made elsewhere, so we claim only what is empty. Mirrors the
+ * same guard in the boot migration in scripts/gateway-pre-start.sh.
+ *
+ * Shared by `imageGenerationModel` (where images come from) and `imageModel`
+ * (what looks at an image the user sent). Different slots, identical
+ * don't-clobber rule, and OpenClaw reads both through the same helper.
+ */
+function hasToolModelConfig(existing: unknown): boolean {
+  // A BARE STRING IS A MODEL (TASK-755). The core reaches these slots through
+  // `hasExplicitToolModelConfig` → `coerceFactoryToolModelConfig` →
+  // `resolvePrimaryStringValue`, which returns the string ITSELF when the value
+  // is one — so `mediaModels.image: "replicate/flux-pro"` is a configured model
+  // and `openclaw config validate` answers `valid:true` with no warnings
+  // (measured on 2026.8.1, for this slot and for `imageModel`). Reading it as an
+  // empty slot is how an owner-authored model was replaced, silently, on a save
+  // about some other provider entirely.
+  if (typeof existing === "string") return existing.trim().length > 0;
+  if (typeof existing !== "object" || existing === null) return false;
+  const cfg = existing as { primary?: unknown; fallbacks?: unknown };
+  if (typeof cfg.primary === "string" && cfg.primary.trim()) return true;
+  return Array.isArray(cfg.fallbacks)
+    && cfg.fallbacks.some((ref) => typeof ref === "string" && ref.trim().length > 0);
+}
+
+/**
+ * Is this `agents.defaults.<tool>Model` slot the one WE wrote into an empty one?
+ *
+ * Exactly `{ primary: <our image ref> }` and nothing else, or the bare string
+ * the core resolves as a model. An owner who added fallbacks beside our primary
+ * OWNS the object now, and moving it would take their fallbacks with it.
+ *
+ * `isClawboxAiImageModelRef` answers for BOTH refs, which is what makes this the
+ * migration's claim: a box in the field names `openai/gpt-image-1-mini` here,
+ * and a box that has already migrated names the new one, so re-running this is
+ * a no-op rather than a second claim.
+ *
+ * The same rule as `_slot_is_ours` in scripts/gateway-pre-start.sh, which is
+ * where the take-back arm applies it — the two writers have to agree about what
+ * "ours" means or a box repaired at boot and a box configured through this
+ * route end up different.
+ */
+function imageSlotIsOurs(existing: unknown): boolean {
+  if (typeof existing === "string") return isClawboxAiImageModelRef(existing);
+  if (typeof existing !== "object" || existing === null) return false;
+  const keys = Object.keys(existing as Record<string, unknown>);
+  if (keys.length !== 1 || keys[0] !== "primary") return false;
+  return isClawboxAiImageModelRef((existing as { primary?: unknown }).primary);
+}
+
+/**
+ * What the legacy `openai` entry needs to give up our image setup.
+ *
+ * TWO LISTS, and NEITHER is batchable, which is a property of the CLI rather
+ * than a style choice:
+ *  - `unsets` go through `config unset`, the CLI's only removal verb —
+ *    `config set` cannot remove a key, and a present-but-empty
+ *    `models.providers.openai` is still a provider entry the core reads.
+ *  - `replaceOps` are the one shape that is not a removal: a `models[]` with
+ *    the owner's rows still in it. `models.providers.<id>.models` is a
+ *    PROTECTED path (docs/cli/config.md: "refuse replacements that would remove
+ *    existing entries unless you pass `--replace`"), and `--batch-json` drops
+ *    per-entry flags, so this has to be its own `config set … --replace` call
+ *    or the write is refused and the caller reads the refusal as a failed image
+ *    write.
+ */
+type LegacyImageCleanup = { replaceOps: OpenclawConfigSetArgs[]; unsets: string[] };
+
+const NO_LEGACY_IMAGE_CLEANUP: LegacyImageCleanup = { replaceOps: [], unsets: [] };
+
+/**
+ * Take the ClawBox AI image setup off the legacy `models.providers.openai`.
+ *
+ * THE POINT OF THE WHOLE CHANGE, not a tidy-up. On the pinned core a literal
+ * `apiKey` on that entry makes `prepareAgentRuntimeAuth` infer an `api-key`
+ * route requirement for the provider and filter every subscription profile out
+ * of it, so a box that keeps this key cannot run its own ChatGPT sign-in — see
+ * `CLAWBOX_AI_IMAGE_PROVIDER` for the measured chain. It therefore runs
+ * INDEPENDENTLY of whether the new write lands: a box whose `litellm` entry we
+ * refuse to touch still has this key removed.
+ *
+ * Only what is OURS, and only positively:
+ *   - the apiKey, when it is absent, blank or a `claw_` portal token. A literal
+ *     key that is none of those is the owner's own OpenAI credential — ClawBox
+ *     never wrote one — and touching it would break their setup to fix ours. A
+ *     non-string is refused for the same reason: we cannot say what it is.
+ *   - our own image rows, by `isOurImageRow`, never every row sharing the id.
+ *
+ * When nothing of the owner's would be left, the WHOLE entry goes in one
+ * `config unset` — a present but empty `models.providers.openai` is still a
+ * provider entry `resolveMergedModelProviderConfig` answers, which is what
+ * decides whether the codex runtime may use its own native auth on a single
+ * route. Otherwise the removals are done leaf by leaf, which is also the only
+ * form the CLI's protected-path guard accepts (see `LegacyImageCleanup`).
+ */
+function buildLegacyImageProviderCleanup(
+  legacy: unknown,
+  proxyHosts: ReadonlySet<string>,
+): LegacyImageCleanup {
+  if (typeof legacy !== "object" || legacy === null) return NO_LEGACY_IMAGE_CLEANUP;
+  const entry = legacy as OpenAiProviderConfig;
+  const existingKey = entry.apiKey;
+  if (!canOwnClawboxAiImageApiKey(existingKey)) return NO_LEGACY_IMAGE_CLEANUP;
+  const removesKey = typeof existingKey === "string" && existingKey.trim().length > 0;
+  const keptRows = withoutOurLegacyImageRows(entry.models, proxyHosts);
+  if (!removesKey && keptRows === null) return NO_LEGACY_IMAGE_CLEANUP;
+
+  const path = `models.providers.${CLAWBOX_AI_LEGACY_IMAGE_PROVIDER}`;
+  // What would survive: every key that is not ours, and the rows that are not
+  // ours. `apiKey` counts as ours only because `canOwnClawboxAiImageApiKey`
+  // already said so.
+  const rest: Record<string, unknown> = { ...(entry as Record<string, unknown>) };
+  delete rest.apiKey;
+  const survivingRows = keptRows ?? (Array.isArray(entry.models) ? entry.models : undefined);
+  if (survivingRows && survivingRows.length > 0) rest.models = survivingRows;
+  else delete rest.models;
+  if (Object.keys(rest).length === 0) return { replaceOps: [], unsets: [path] };
+
+  const unsets: string[] = [];
+  if (removesKey) unsets.push(`${path}.apiKey`);
+  const replaceOps: OpenclawConfigSetArgs[] = [];
+  if (keptRows !== null) {
+    if (keptRows.length > 0) {
+      // `--replace`, and on its own: see `LegacyImageCleanup`.
+      replaceOps.push([`${path}.models`, JSON.stringify(keptRows), "--json", "--replace"]);
+    } else {
+      unsets.push(`${path}.models`);
+    }
+  }
+  return { replaceOps, unsets };
+}
+
+/**
+ * Point OpenClaw's `image_generate` tool at the ClawBox AI image proxy.
+ *
+ * Without this a provisioned ClawBox cannot generate images at all, even
+ * though the subscription pays for 5/50/200 of them a month: OpenClaw only
+ * registers `image_generate` when an image-generation provider is configured,
+ * and ClawBox provisioning configured none.
+ *
+ * Registration is gated twice and the gates are asymmetric, which is why the
+ * `agents.defaults.imageGenerationModel` write below is not optional:
+ *   - Gate 1 (`resolveOptionalMediaToolFactoryPlan`) plans the tool only if
+ *     `agents.defaults.imageGenerationModel` has a non-empty primary/fallback
+ *     OR a plugin capability snapshot reports an available provider — and for
+ *     the provider that snapshot only accepts an auth profile or the provider's
+ *     canonical environment variable. It never reads
+ *     `models.providers.<id>.apiKey`.
+ *   - Gate 2 (inside `createImageGenerateTool`) does accept the config key.
+ * So a box with only the provider block would satisfy gate 2, fail gate 1, and
+ * never see the tool. It is also what ENABLES the bundled image plugin at
+ * gateway start — `collectConfiguredGenerationProviderIds` reads the provider
+ * id out of this slot. Naming a model in the slot is the deterministic path — hence the write below on every box that does not
+ * already name one (see `hasToolModelConfig` for why "already" includes
+ * fallbacks).
+ *
+ * Note the key name: `imageGenerationModel`, *not* `imageModel`. They are two
+ * independent config keys with no aliasing between them — `imageModel` selects
+ * the image *understanding* (vision) model and is what `openclaw models
+ * set-image` writes, which is why that CLI command is not used here.
+ */
+async function buildClawboxAiImageOps(
+  clawboxAiToken: string,
+  snapshot: OpenClawConfig | null,
+): Promise<OpenclawConfigSetArgs[]> {
+  let existingImageProvider: OpenAiProviderConfig | undefined =
+    snapshot?.models?.providers?.[CLAWBOX_AI_IMAGE_PROVIDER];
+  // OpenClaw 2 home first (agents.defaults.mediaModels.image); the legacy
+  // key is still honoured as "already configured" so a box the loader has
+  // not migrated yet is not double-claimed.
+  const defaults = snapshot?.agents?.defaults as
+    | { imageGenerationModel?: unknown; mediaModels?: { image?: unknown } }
+    | undefined;
+  const existingImageModel: unknown = defaults?.mediaModels?.image ?? defaults?.imageGenerationModel;
+  if (typeof existingImageProvider !== "object" || existingImageProvider === null) {
+    existingImageProvider = undefined;
+  }
+  // Same seed the boot migration uses: the proxy this box was actually
+  // provisioned against, off the deepseek entry the configure route wrote.
+  const proxyHosts = clawboxProxyHosts(snapshot?.models?.providers?.[CLAWBOX_AI_PROVIDER]);
+
+  if (!canOwnClawboxAiImageApiKey(existingImageProvider?.apiKey)) {
+    console.warn(
+      `[AI Config] Skipped ClawBox AI image provider: models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.apiKey holds a non-ClawBox key we will not overwrite`,
+    );
+    return [];
+  }
+
+  const foreignRoute = foreignImageProviderRoute(
+    existingImageProvider,
+    proxyHosts,
+    LITELLM_DEFAULT_BASE_URL,
+  );
+  if (foreignRoute) {
+    console.warn(
+      // The host only: an owner-configured URL can carry user-info or query
+      // credentials, and the journal keeps what is logged.
+      `[AI Config] Skipped ClawBox AI image provider: models.providers.${CLAWBOX_AI_IMAGE_PROVIDER} already routes to ${logSafe(hostOfUrl(foreignRoute) ?? "an unparseable URL")}, and the apiKey we would write there is the credential for that route too`,
+    );
+    return [];
+  }
+
+  // Leaf-path writes, not a whole-provider `config set`: replacing the object
+  // would drop any other settings the box carries under this id. Two leaves and
+  // no `models[]` — see the note above `OpenAiProviderConfig` for why the row
+  // the `openai` entry used to need has no job on this provider.
+  const ops: OpenclawConfigSetArgs[] = [
+    [`models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.apiKey`, clawboxAiToken],
+    [`models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.baseUrl`, CLAWBOX_AI_PROXY_URL],
+  ];
+  // OURS is not "occupied": a slot naming the ref THIS BOX was provisioned with
+  // — `openai/gpt-image-1-mini`, or the new one on a box that has already
+  // migrated — is the one we wrote into an empty slot, and moving it is the
+  // whole migration. Anything else is the owner's choice and is left alone.
+  if (hasToolModelConfig(existingImageModel) && !imageSlotIsOurs(existingImageModel)) {
+    console.log(
+      "[AI Config] Left the image-generation model alone: it already names one (mediaModels.image or the legacy imageGenerationModel)",
+    );
+    return ops;
+  }
+  // STAND DOWN while a legacy `agents.defaults.imageGenerationModel` is still
+  // on the box (TASK-743) — the same guard `scripts/gateway-pre-start.sh`
+  // carries, gate and all, and this is the half an owner reaches by pressing
+  // Save rather than by rebooting.
+  //
+  // WHAT IT BUYS, measured against 2026.8.1 rather than assumed: the core's own
+  // `migrateFinalLayoutRenames` moves the legacy value into `mediaModels.image`
+  // when that home is EMPTY and merely deletes it when the home is taken. So
+  // claiming the home first does not strand the box — `agents.defaults` is
+  // `.strict()`, so the legacy key alone is already `Unrecognized key` and
+  // gateway exit 78 before this route runs — it throws away what the OWNER had.
+  // The shapes this covers are the ones `hasToolModelConfig` reads as empty
+  // (`{}`, `{"primary": ""}`, `{"fallbacks": []}`, `null`, and a bare string,
+  // which the core resolves as a model even though that test does not).
+  //
+  // ON THE KEY, NOT ITS CONTENTS: `Object.hasOwn`, because a key whose value is
+  // `null` is present and is refused just the same. `!= null` on `defaults`
+  // rather than `!== undefined`, because `"defaults": null` would otherwise
+  // reach `Object.hasOwn(null, …)`, which throws — and the caller's catch would
+  // then discard the provider key and the model row this function is still
+  // allowed to write.
+  //
+  // Not permanent, and not a rescue either: the next gateway start runs the
+  // core's `doctor --fix` over a config it refuses and the save after that
+  // writes the slot as usual — EXCEPT on a box whose doctor is itself blocked,
+  // which stays refused with this guard and without it.
+  //
+  // AND ONLY ON A v2 CORE (TASK-755). The whole justification above is a
+  // migration that only OpenClaw 2 performs; on a v1 core
+  // `agents.defaults.imageGenerationModel` is not a legacy key at all, it is
+  // the slot's ONLY home, and standing down over it means the box never gets
+  // an image path while the boot script — whose sibling guard is gated
+  // (`_image_move_in_flight = _clawbox_v2 and …`) — writes it at the next
+  // start. Two writers disagreeing about one config is the thing this card
+  // exists to stop, so the generation is asked BEFORE this arm, not after it.
+  const generation = await installedOpenclawCoreGeneration();
+  if (generation === "v2" && defaults != null && Object.hasOwn(defaults, "imageGenerationModel")) {
+    console.log(
+      "[AI Config] Left the image-generation model alone: a legacy agents.defaults.imageGenerationModel key is still waiting for the core's own migration",
+    );
+    return ops;
+  }
+  // WHICH HOME, decided by the INSTALLED core (TASK-755). This function wrote
+  // OpenClaw 2's home on every core while its sibling in
+  // `scripts/gateway-pre-start.sh` has carried a `_clawbox_v2` arm all along —
+  // harmless while the pin is 2026.8.x and wrong the day a box mid-update saves
+  // against a v1 core, which `src/lib/subscription-surface.ts` and the boot
+  // script's own warning both say exists. `agents.defaults` is `.strict()` on
+  // both generations, so the wrong name is `Unrecognized key` and gateway exit
+  // 78 — not a key that is quietly ignored.
+  //
+  // Asked above rather than at the top, so the ordinary save pays nothing for
+  // it: a slot that is already configured and a foreign route have both
+  // returned already.
+  if (generation === "unknown") {
+    // The boot script's rule, in the other language: a core that cannot be
+    // identified is not a licence to guess, because the state that hides it —
+    // a half-finished update — is the state in which the guess is wrong. The
+    // provider and the model row are still written; the next boot, or the next
+    // save once the update has finished, claims the slot.
+    console.warn(
+      "[AI Config] Left the image-generation slot alone: the installed OpenClaw core could not be identified, and each of its two homes is refused by the other generation",
+    );
+    return ops;
+  }
+  ops.push([
+    generation === "v2" ? "agents.defaults.mediaModels.image" : "agents.defaults.imageGenerationModel",
+    JSON.stringify({ primary: CLAWBOX_AI_IMAGE_MODEL }),
+    "--json",
+  ]);
+  return ops;
+}
+
+/**
+ * Provision ClawBox AI: the auth profile, the provider definition, image
+ * understanding, image generation, and optionally the fallback slot.
+ *
+ * All of it lands in ONE `openclaw config set --batch-json` on the happy path.
+ * It used to be six to seven separate invocations at ~8 s of CLI startup each,
+ * and on the ClawBox AI wizard path this function ran TWICE — see the caller
+ * (TASK-483).
+ *
+ * The three groups below exist because their failures mean different things,
+ * and `applyConfigSetGroups` is what keeps them apart while still writing them
+ * together. Every conditional here reads `snapshot`, one config read taken
+ * before any of this request's writes, because each of those decisions is about
+ * what the owner had BEFORE we started — nothing we write in this pass changes
+ * the answer.
+ */
+async function configureClawboxAi(
+  setFallback: boolean,
+  preferredToken?: string,
+  extra?: {
+    /** Ops to write in the same must-succeed group. */
+    requiredOps?: OpenclawConfigSetArgs[];
+    /** Extra groups to write in the same batch, with their own boundaries. */
+    groups?: ConfigSetGroup[];
+    /**
+     * Did the SAVE that led here actually change this box's ClawBox AI
+     * credential?
+     *
+     * THE CALLER'S QUESTION, and it cannot be answered here. By the time this
+     * function runs, the handler has already written the new token into
+     * `data/config.json` — so a read taken here answers with the value it is
+     * being asked about, and every re-link would look like a re-paste. The
+     * handler holds the only honest answer: `previousClawaiToken`, captured
+     * before its own `setMany`. (The same trap `/setup-api/hermes/clawai`
+     * documents for `codingAgentReadyBefore`, one file over.)
+     *
+     * Defaults to false, which is right for the path that does not pass it:
+     * `ensureFallbackModel` calls this with no token whenever a box with no
+     * local model saves ANY provider, and there the paste re-writes the bytes
+     * the box already held.
+     */
+    credentialChanged?: boolean;
+  },
+) {
   const clawboxAiToken = await getConfiguredClawboxAiToken(preferredToken);
   if (!clawboxAiToken) {
     return false;
   }
 
-  const authProfiles = await readAuthProfiles();
-  authProfiles.profiles[CLAWBOX_AI_PROFILE_KEY] = {
-    type: "api_key",
-    provider: CLAWBOX_AI_PROVIDER,
-    key: clawboxAiToken,
-  };
-  await writeAuthProfiles(authProfiles);
+  const credentialChanged = extra?.credentialChanged === true;
 
-  await runCommand(OPENCLAW_BIN, [
-    "config",
-    "set",
-    `auth.profiles.${CLAWBOX_AI_PROFILE_KEY}`,
-    JSON.stringify({ provider: CLAWBOX_AI_PROVIDER, mode: "api_key" }),
-    "--json",
-  ]);
-  await runCommand(OPENCLAW_BIN, [
-    "config",
-    "set",
-    `models.providers.${CLAWBOX_AI_PROVIDER}`,
-    buildClawboxAiProviderDefinition(clawboxAiToken),
-    "--json",
-  ]);
+  // ClawBox AI uses the portal token generated by the user; stored through
+  // the CLI so the credential lands in the auth store of the running
+  // generation (see pasteAuthApiKey).
+  await pasteAuthApiKey(CLAWBOX_AI_PROVIDER, CLAWBOX_AI_PROFILE_KEY, clawboxAiToken);
+  // The credential is now on disk, so any memory that the PROXY refused the
+  // previous one is about a token this box no longer holds. AFTER the write,
+  // not before it: a paste that threw would otherwise have re-enabled requests
+  // against the very token that was refused. This is what makes "re-link the
+  // device" — the instruction every refusal prints — take effect on the next
+  // call rather than after a timer. See src/lib/harness/credentials.ts.
+  //
+  // ONLY when the credential changed. Re-pasting the same refused bytes is not
+  // a re-link, and clearing on one would let any other provider's save undo the
+  // boot script's stand-down and start the storm again — the mark is about the
+  // CREDENTIAL, so only a different credential retires it.
+  if (credentialChanged) await forgetClawaiCredentialRefusal();
 
-  if (setFallback) {
-    await runCommand(OPENCLAW_BIN, [
-      "config",
-      "set",
-      "agents.defaults.model.fallbacks",
-      JSON.stringify([CLAWBOX_AI_MODEL]),
+  let snapshot: OpenClawConfig | null = null;
+  try {
+    snapshot = await readOpenClawConfig();
+  } catch {
+    // No readable config yet (fresh box) — nothing to preserve.
+    snapshot = null;
+  }
+
+  // Which vision id may this box name? The DeepSeek model when the proxy
+  // serves it, the previous one until then — asked live, never assumed. When
+  // the QUESTION failed (timeout, 5xx — not a refusal), keep whichever of
+  // OUR ids the box already runs: a bad network moment must not downgrade a
+  // box the proxy already upgraded.
+  const vision = await resolveVisionModelId({ token: clawboxAiToken });
+  // NARROWED, not cast (TASK-755). The slot can hold a bare string — the core
+  // coerces one — and the MOVE arm below spreads this value into a new object,
+  // which over a string would build `{0:"o",1:"p",…}` and hand the gateway
+  // nonsense. The `typeof` here is what keeps that arm unreachable for a
+  // string, and it is stated rather than left two derivations away.
+  const currentImageModelSlot = snapshot?.agents?.defaults?.imageModel;
+  const currentImageModel = typeof currentImageModelSlot === "object" && currentImageModelSlot !== null
+    ? currentImageModelSlot
+    : undefined;
+  // COERCED the way the core coerces it, so the managed-slot move below can see
+  // a bare string. Leaving a string alone is right when it names the OWNER's
+  // model; it is wrong when it names one of OURS, because that arm exists to
+  // carry our own previous vision id to the resolved one in both directions,
+  // and a slot it cannot read keeps pointing at an id the provider block no
+  // longer defines. `currentImageModel` stays object-only: the move spreads it.
+  const currentPrimary = typeof currentImageModelSlot === "string"
+    ? currentImageModelSlot.trim()
+    : typeof currentImageModel?.primary === "string" ? currentImageModel.primary.trim() : "";
+  const currentBareId = currentPrimary.startsWith(`${CLAWBOX_AI_PROVIDER}/`)
+    ? currentPrimary.slice(CLAWBOX_AI_PROVIDER.length + 1)
+    : currentPrimary;
+  const visionId = vision.reason === "probe-failed" && currentPrimary && isClawboxAiVisionId(currentPrimary)
+    ? currentBareId
+    : vision.id;
+  const visionRef = clawboxAiVisionModelRef(visionId);
+  console.log(`[AI Config] Vision model resolved to ${visionId} (${vision.reason})`);
+
+  const requiredOps: OpenclawConfigSetArgs[] = [
+    [
+      `auth.profiles.${CLAWBOX_AI_PROFILE_KEY}`,
+      JSON.stringify({ provider: CLAWBOX_AI_PROVIDER, mode: "api_key" }),
+      "--json",
+    ],
+    [
+      `models.providers.${CLAWBOX_AI_PROVIDER}`,
+      buildClawboxAiProviderDefinition(clawboxAiToken, visionId),
+      "--json",
+    ],
+    ...(extra?.requiredOps ?? []),
+  ];
+
+  // Point image *understanding* at the vision entry the provider definition
+  // above just wrote. Without this the device accepts an attached picture and
+  // then cannot look at it: the ClawBox AI chat models are `input: ["text"]`,
+  // so OpenClaw hands the turn a media path instead of inline image parts, and
+  // the `image` tool that would read that path resolves its model through
+  // `agents.defaults.imageModel` — which ClawBox provisioning never set, making
+  // `runWithImageModelFallback` throw "No image model configured"
+  // (`dist/model-fallback-CvSRhgYr.js` on 2026.7.1). Reproduced on a real box
+  // on 2026-08-21; see TASK-417.
+  //
+  // Same don't-clobber rule as image generation, for the same reason: this
+  // function also runs when ClawBox AI is merely being added as a *fallback*
+  // for some other provider, and a slot the owner filled is their choice.
+  // Non-fatal for the same reason too.
+  const visionOps: OpenclawConfigSetArgs[] = [];
+  if (!hasToolModelConfig(snapshot?.agents?.defaults?.imageModel)) {
+    visionOps.push([
+      "agents.defaults.imageModel",
+      JSON.stringify({ primary: visionRef }),
       "--json",
     ]);
+  } else if (currentPrimary && isClawboxAiVisionId(currentPrimary) && currentPrimary !== visionRef) {
+    // The slot names one of OUR vision ids — the previous default is ours to
+    // move to the resolved one (both directions: the DeepSeek upgrade when
+    // the proxy starts serving it, and the fall-back if it stops). A value
+    // the owner set themselves never matches and is never touched — and the
+    // move changes ONLY `primary`: fallbacks the owner added ride along.
+    console.log(`[AI Config] Moving agents.defaults.imageModel ${currentPrimary} -> ${visionRef}`);
+    visionOps.push([
+      "agents.defaults.imageModel",
+      // `...currentImageModel` is `undefined` for a bare string, which spreads
+      // nothing — the fallbacks a string cannot carry are not lost, because
+      // there were none. Never `...currentImageModelSlot`: spreading a string
+      // builds `{0:"d",1:"e",…}`.
+      JSON.stringify({ ...currentImageModel, primary: visionRef }),
+      "--json",
+    ]);
+  } else {
+    console.log(
+      "[AI Config] Left agents.defaults.imageModel alone: it already names a vision model",
+    );
+  }
+
+  // Images ride on the same token and the same proxy, so they are provisioned
+  // here rather than behind a separate opt-in — a box that has ClawBox AI has
+  // image generation whether or not ClawBox AI is also the chat provider.
+  // Non-fatal: a chat provider that works is worth more than an image tool, so
+  // a failure here must not fail the whole "Connect ClawBox AI" flow.
+  let imageOps: OpenclawConfigSetArgs[] = [];
+  // Computed OUTSIDE the refusal gate below and outside `buildClawboxAiImageOps`
+  // itself, because taking the portal token off `models.providers.openai` is not
+  // conditional on anything: the key breaks the ChatGPT lane whether or not this
+  // box may be given an image provider, and a box whose credential the proxy has
+  // refused needs it gone most of all.
+  const legacyImageCleanup = buildLegacyImageProviderCleanup(
+    snapshot?.models?.providers?.[CLAWBOX_AI_LEGACY_IMAGE_PROVIDER],
+    clawboxProxyHosts(snapshot?.models?.providers?.[CLAWBOX_AI_PROVIDER]),
+  );
+  // The other half of the boot script's stand-down, and the reason it needs one
+  // here at all: `buildClawboxAiImageOps` writes the SAME row and the SAME slot
+  // that `scripts/gateway-pre-start.sh` takes back when the proxy has refused
+  // this box's credential, and this function runs on saves that have nothing to
+  // do with ClawBox AI. Without this gate, configuring any other provider on a
+  // refused box re-armed the image path and restarted the gateway on top of it.
+  // Read AFTER the clear above, so a genuine re-link arms as it always did.
+  if (await clawaiCredentialRefusalOnRecord()) {
+    console.log(
+      "[AI Config] Left the ClawBox AI image model alone: the proxy has refused this box's credential",
+    );
+  } else {
+    try {
+      imageOps = await buildClawboxAiImageOps(clawboxAiToken, snapshot);
+    } catch (err) {
+      console.warn(
+        "[AI Config] Failed to configure ClawBox AI image provider:",
+        err instanceof Error ? logSafe(err.message) : err,
+      );
+    }
+  }
+
+  await applyConfigSetGroups([
+    { ops: requiredOps },
+    {
+      ops: visionOps,
+      onApplied: () =>
+        console.log(
+          `[AI Config] Set ClawBox AI vision model ${visionRef} via proxy ${CLAWBOX_AI_PROXY_URL}`,
+        ),
+      onError: (err) =>
+        console.warn(
+          "[AI Config] Failed to configure ClawBox AI vision model:",
+          err instanceof Error ? logSafe(err.message) : err,
+        ),
+    },
+    {
+      ops: imageOps,
+      onApplied: () =>
+        console.log(
+          `[AI Config] Set ClawBox AI image provider ${CLAWBOX_AI_IMAGE_MODEL} via proxy ${CLAWBOX_AI_PROXY_URL}`,
+        ),
+      // `logSafe`, not the raw message: this one is built from a subprocess
+      // failure, so it carries whatever `openclaw` wrote to stderr — a value
+      // that reached the CLI from this route's request body, control characters
+      // and all. Unbounded and un-escaped, it would be the caller deciding how
+      // many journal records one API call produces. The command line itself is
+      // already safe: the batch label names the config paths and elides every
+      // value, which here includes the portal token (see
+      // `configSetBatchLabelArgs`).
+      onError: (err) =>
+        console.warn(
+          "[AI Config] Failed to configure ClawBox AI image provider:",
+          err instanceof Error ? logSafe(err.message) : err,
+        ),
+    },
+    ...(extra?.groups ?? []),
+    setFallback
+      ? {
+          ops: [[
+            "agents.defaults.model.fallbacks",
+            JSON.stringify([CLAWBOX_AI_MODEL]),
+            "--json",
+          ]],
+        }
+      : null,
+  ]);
+
+  // AFTER the batch, and each on its own — see `LegacyImageCleanup` for why
+  // neither list can ride in it. Both are guarded by the snapshot rather than
+  // run unconditionally, because `config unset` exits 1 on a path that is
+  // already absent. Non-fatal for the same reason the image group is: a chat
+  // provider that works is worth more than a tidy config, and the next boot's
+  // migration removes the entry again. The ROWS go first: a `models[]` whose
+  // last row is ours is removed by an unset, and doing that after the entry-wide
+  // unset would 404.
+  for (const op of legacyImageCleanup.replaceOps) {
+    try {
+      await runOpenclawConfigSet(op, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
+    } catch (err) {
+      console.warn(
+        `[AI Config] Failed to remove the legacy ClawBox AI image provider entry (${op[0]}):`,
+        err instanceof Error ? logSafe(err.message) : err,
+      );
+    }
+  }
+  for (const path of legacyImageCleanup.unsets) {
+    try {
+      await runOpenclawConfigUnset(path, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
+    } catch (err) {
+      console.warn(
+        `[AI Config] Failed to remove the legacy ClawBox AI image provider entry (${path}):`,
+        err instanceof Error ? logSafe(err.message) : err,
+      );
+    }
   }
 
   return true;
@@ -374,31 +1730,83 @@ async function getStoredLocalFallbackModel(): Promise<string | null> {
   }
 }
 
+/**
+ * The providers the owner has switched off. The fallback slot honours the
+ * switch too: a provider the gateway would quietly route to when the primary
+ * fails is exactly what "switched off" promises cannot happen.
+ */
+/**
+ * The local model that should back up `primaryModel`, or null when there is
+ * none to use.
+ *
+ * Split out of `ensureFallbackModel` so a caller that is about to write a pile
+ * of config can learn the answer BEFORE it writes, and fold the fallback into
+ * the same batch instead of paying another CLI start-up for it (TASK-483).
+ */
+/** The switched-off providers, read from the store this route already loads. */
+async function readDisabledProviders(): Promise<Set<string>> {
+  return parseDisabledProviders((await getAll())[DISABLED_PROVIDERS_KEY]);
+}
+
+/**
+ * An Ollama model that only embeds is no fallback for a CHAT. `chat/model`
+ * already refuses one for the picker through Ollama's own capability list;
+ * this slot has to ask the same question, because the writer took the store's
+ * `local_ai_model` and `inferConfiguredLocalModel` at their word, and the name
+ * rule both apply cannot see an embedder with no "embed" in its tag (bge-m3,
+ * all-minilm) — which then went into `agents.defaults.model.fallbacks`, where
+ * a cloud outage would route the chat to a model that cannot produce a word
+ * (the review of the 2026-09-07 sweep batch). A llama.cpp model is never
+ * asked: the probe is Ollama's `/api/show`, and where Ollama cannot be asked
+ * the probe itself falls back to the name, so a stopped unit refuses nothing.
+ */
+async function localFallbackCanChat(model: string): Promise<boolean> {
+  const ollamaPrefix = "ollama/";
+  if (!model.startsWith(ollamaPrefix)) return true;
+  return ollamaModelCanChat(model.slice(ollamaPrefix.length));
+}
+
+async function pickLocalFallbackModel(
+  primaryModel?: string | null,
+  preferredLocalModel?: string,
+): Promise<string | null> {
+  const disabled = await readDisabledProviders();
+  const fallbackCandidates = [preferredLocalModel, await getStoredLocalFallbackModel()]
+    .filter((model): model is string => !!model && model !== primaryModel)
+    .filter((model) => !disabled.has(normalizeProviderId(model.split("/")[0]) ?? ""));
+  for (const candidate of fallbackCandidates) {
+    if (await localFallbackCanChat(candidate)) return candidate;
+  }
+  return null;
+}
+
 async function ensureFallbackModel(
   primaryModel?: string | null,
   preferredLocalModel?: string,
   preferredClawboxAiToken?: string,
 ) {
-  const fallbackCandidates = [preferredLocalModel, await getStoredLocalFallbackModel()]
-    .filter((model): model is string => !!model && model !== primaryModel);
+  const localFallback = await pickLocalFallbackModel(primaryModel, preferredLocalModel);
 
-  if (fallbackCandidates.length > 0) {
-    await setFallbackModels([fallbackCandidates[0]]);
-    console.log(`[AI Config] Configured local fallback model: ${logSafe(fallbackCandidates[0])}`);
+  if (localFallback) {
+    await setFallbackModels([localFallback]);
+    console.log(`[AI Config] Configured local fallback model: ${logSafe(localFallback)}`);
     return;
   }
 
   try {
-    const fallbackConfigured = await configureClawboxAi(true, preferredClawboxAiToken);
+    // ClawBox AI is the last resort, and the owner's switch reaches it too.
+    const clawaiSwitchedOff = (await readDisabledProviders()).has("clawai");
+    const fallbackConfigured = !clawaiSwitchedOff
+      && await configureClawboxAi(true, preferredClawboxAiToken);
     if (fallbackConfigured) {
       console.log("[AI Config] Configured ClawBox AI as fallback model");
       return;
     }
 
     await setFallbackModels([]);
-    console.log("[AI Config] Cleared stale fallback (no local or ClawBox AI backup available)");
+    console.log("[AI Config] Cleared stale fallback (no enabled local or ClawBox AI backup available)");
   } catch (err) {
-    console.warn("[AI Config] Failed to configure fallback model:", err instanceof Error ? err.message : err);
+    console.warn("[AI Config] Failed to configure fallback model:", err instanceof Error ? logSafe(err.message) : err);
   }
 }
 
@@ -435,18 +1843,218 @@ async function writeOpenAICompatProvider(opts: {
     apiKey: opts.apiKey,
     models: Array.from(modelIds).map((id) => ({ id, name: id })),
   });
-  await runCommand(OPENCLAW_BIN, [
-    "config", "set", `models.providers.${opts.provider}`, providerDef, "--json",
+  await applyConfigSetGroups([
+    { ops: [[`models.providers.${opts.provider}`, providerDef, "--json"]] },
+    {
+      ops: [["models.mode", "merge"]],
+      // Non-fatal: merge is the default behavior anyway
+      onError: () => {},
+    },
   ]);
-  try {
-    await runCommand(OPENCLAW_BIN, ["config", "set", "models.mode", "merge"]);
-  } catch {
-    // Non-fatal: merge is the default behavior anyway
-  }
   await ensureFallbackModel(opts.defaultModel);
 }
 
+/**
+ * Which providers route a SUBSCRIPTION credential through their own OpenClaw
+ * plugin instead of through a `models.providers.<p>` openai-compat override
+ * is decided by `SUBSCRIPTION_SURFACE` in provider-models.ts, and
+ * {@link routesSubscriptionNatively} is imported from there.
+ *
+ * It used to be a `NATIVE_SUBSCRIPTION_ROUTING` Set right here, next to the
+ * transport it selects — which read as the tidy choice and was the bug. The
+ * model picker's `availableOnSubscription` stamp answers a question that only
+ * has an answer once you know the transport ("which models can this
+ * credential run?"), and it was computed from a separate table in a separate
+ * file. When #532 moved anthropic's subscription onto the native route, the
+ * stamp kept describing the override that had just been removed and greyed
+ * out three models the box had started being able to run. One table, so the
+ * next transport change moves the stamp with it.
+ */
+
+/**
+ * Take a `models.providers.<p>` openai-compat override back out.
+ *
+ * Only ever called on the subscription path, and only when the device actually
+ * has one: `openclaw config unset` exits 1 with "Config path not found" on an
+ * absent path (verified on 2026.7.1-2), and a removal that genuinely fails must
+ * stay loud — reporting success while the poisoned override is still on disk is
+ * the failure mode this whole fix exists to remove.
+ */
+async function clearOpenAICompatProvider(provider: string): Promise<void> {
+  const configPath = `models.providers.${provider}`;
+  // STRICT read, because this check can only ever decide to do NOTHING. The
+  // ordinary `readConfig` answers `{}` to an EACCES or a half-written file just
+  // as it does to a clean config, and `{}` here reads as "no override to
+  // remove" — so an unreadable config would skip the repair, return 200, and
+  // leave the poisoned override exactly where it was. That is the failure this
+  // whole fix exists to remove, so an unreadable config throws instead.
+  const config = await readOpenClawConfigStrict();
+  if (!config.models?.providers?.[provider]) return;
+  await runOpenclawConfigUnset(configPath, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
+  console.log(`[AI Config] Removed stale openai-compat override ${logSafe(configPath)}`);
+}
+
+/**
+ * Decide how a cloud provider's turns leave the box, and write that decision.
+ *
+ * Every caller of {@link writeOpenAICompatProvider} goes through here, because
+ * that helper is an API-KEY construction and nothing in its signature says so:
+ * it pins the provider to `api: "openai-completions"` and inlines the
+ * credential, so each turn goes out as `POST <baseUrl>/chat/completions` with a
+ * bearer token and none of the provider-native headers.
+ *
+ * A Claude Pro/Max subscription credential is not an API key, and that surface
+ * does not accept one. Anthropic answers 429 to an OAuth access token on
+ * `/chat/completions` no matter how much quota is left — proven on a device
+ * against one token inside one minute: `/v1/chat/completions` 429,
+ * `/v1/messages` with `anthropic-beta: oauth-2025-04-20` 200 with a real
+ * completion, `/v1/messages` without that header 429. The override made the
+ * subscription look permanently rate-limited on the OpenClaw edition while the
+ * same sign-in worked on Hermes, which routes natively.
+ *
+ * The override also FREEZES the credential. `apiKey` is written inline at save
+ * time, and a subscription access token is short-lived — so even a save that
+ * worked for a while expired within hours and never self-healed, because an
+ * inline key never goes back through the auth profile that holds the refresh
+ * token. An affected device was found with an inline token six hours dead.
+ *
+ * So on an anthropic subscription save the override is not written, and any
+ * override the device already had is removed — the second half matters as much
+ * as the first, because a box configured with an API key and later switched to
+ * a subscription kept the old entry (nothing here ever deleted one) and stayed
+ * broken. Routing then belongs to the anthropic plugin, which the primary
+ * batch switches on ahead of the reference it validates (step 3) and
+ * `setProviderPlugins` keeps on at step 8b while the credential exists.
+ */
+/**
+ * True when the save wrote the openai-compat override, false when it handed the
+ * provider to its native plugin.
+ *
+ * A boolean, and reported by the CALLER rather than logged here, because both
+ * halves are needed to keep the log line clean under CodeQL: `opts` carries the
+ * request body's apiKey and authMode, so anything read back off it — or
+ * returned from a function that took it — is taint-tracked to `request.json()`
+ * and trips js/log-injection, which does not recognise `logSafe` as a barrier.
+ * A boolean carries no text into the line; the caller picks between two string
+ * literals and names its own provider, which is a literal there too.
+ */
+async function applyCloudProviderTransport(opts: {
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  authMode: string;
+  defaultModel: string;
+  curatedModels: readonly { id: string }[];
+}): Promise<boolean> {
+  if (!routesSubscriptionNatively(opts.provider, opts.authMode)) {
+    await writeOpenAICompatProvider(opts);
+    return true;
+  }
+
+  await clearOpenAICompatProvider(opts.provider);
+  // Same two writes the non-provider `else` branch below makes: cloud providers
+  // auto-detect their catalog in merge mode, and the primary still needs a
+  // fallback behind it.
+  await applyConfigSetGroups([
+    {
+      ops: [["models.mode", "merge"]],
+      // Non-fatal: merge is the default behavior anyway
+      onError: () => {},
+    },
+  ]);
+  await ensureFallbackModel(opts.defaultModel);
+  return false;
+}
+
+/**
+ * Where the OpenClaw branch of one request has left clawbox-gateway.
+ *
+ * `runOpenclawDoctorFix` stops the unit before `doctor --fix` migrates the
+ * auth store the gateway holds open, and the matching restart is step 9 at
+ * the very end of the save. systemd does not start a unit again after an
+ * explicit `stop`, so every error exit between the two — the 502 rollback when
+ * doctor fails, the 400 profile-key refusal, any 500 from the config-set batch
+ * — used to answer with the gateway down: chat and every channel stayed dead
+ * until a reboot or a later save that happened to succeed (F-07).
+ */
+type GatewayState =
+  /** Nothing touched it: every early exit, and the API-key path before step 9. */
+  | "untouched"
+  /** Stopped for `doctor --fix`; no later step has restarted it. */
+  | "stopped-for-doctor"
+  /**
+   * Step 9 issued its restart. It came up; or it had not finished coming up and
+   * step 9 answered its own 200 with a warning; or the restart was refused and
+   * step 9 answered its own 502. Either way the gateway is not left stopped, so
+   * the wrapper below has nothing to restore.
+   */
+  | "restart-issued";
+
+/** Shared by reference: `configureModel` has too many exits to return it. */
+type GatewayTracker = { state: GatewayState };
+
+/** Folded into the error the owner sees when the restore itself fails. */
+const GATEWAY_OFFLINE_HINT =
+  "The assistant is offline until the gateway restarts — use Restart in the system tray.";
+
 export async function POST(request: Request) {
+  const gateway: GatewayTracker = { state: "untouched" };
+  let response: Response;
+  try {
+    response = await configureModel(request, gateway);
+  } catch (err) {
+    // `configureModel` answers a Response for every failure it can classify, so
+    // reaching here means its own catch block threw. Restoring only off the
+    // returned value would leave the gateway stopped on exactly that path —
+    // the failure this whole tracker exists to prevent. Restore, then let the
+    // original throw become Next's generic 500.
+    if (gateway.state === "stopped-for-doctor") {
+      // No readiness wait: this answer is logged and dropped — the original
+      // throw becomes Next's 500 either way — so waiting out the budget would
+      // only add blocking time to a request that has already failed.
+      await restartGateway({ awaitReady: false }).catch((restartErr) => {
+        console.error(
+          "[configure] Gateway restart after an unhandled save failure also failed:",
+          restartErr instanceof Error ? logSafe(restartErr.message) : restartErr,
+        );
+      });
+    }
+    throw err;
+  }
+  if (gateway.state !== "stopped-for-doctor") return response;
+  // An error exit between the doctor stop and step 9. Only `restart` is
+  // granted to the clawbox user (config/clawbox-sudoers has no `start`), and
+  // it runs AFTER the rollback archived the legacy file, so the gateway does
+  // not boot straight into the AuthProfileMigrationRequired it would have hit.
+  try {
+    // No readiness wait: the only question this restore asks is "did systemd
+    // take the restart", which is what the hint below turns on. Waiting for the
+    // port would widen that hint to "the gateway did not bind inside 30 s" —
+    // the ordinary case on a cold box — and tell the owner to go press Restart
+    // on a gateway that is already coming back, while adding the whole budget
+    // to a request that has already failed.
+    await restartGateway({ awaitReady: false });
+    return response;
+  } catch (err) {
+    // A runtime mask (an update in flight) refuses the restart; never unmask
+    // from here. The save already failed — tell the owner what is left to do.
+    console.error(
+      "[configure] Gateway restart after the failed save also failed:",
+      err instanceof Error ? logSafe(err.message) : err,
+    );
+    return withGatewayOfflineHint(response);
+  }
+}
+
+async function withGatewayOfflineHint(response: Response): Promise<Response> {
+  const body = (await response.json().catch(() => ({}))) as { error?: unknown };
+  const error = typeof body.error === "string"
+    ? `${body.error} ${GATEWAY_OFFLINE_HINT}`
+    : GATEWAY_OFFLINE_HINT;
+  return NextResponse.json({ ...body, error }, { status: response.status });
+}
+
+async function configureModel(request: Request, gateway: GatewayTracker): Promise<Response> {
   // Hoisted so the catch can classify the failure without re-parsing the body —
   // a local-model or wrong-edition failure must not be reported as a credential
   // problem (there is no credential to check).
@@ -567,10 +2175,23 @@ export async function POST(request: Request) {
     }
 
     const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
+    // The storage mode is the documented client contract (api-key vs OAuth
+    // bundle) — but only these four spellings exist ("local" is what the
+    // Ollama hook and the llama.cpp installer send; the route treats it as
+    // key mode), and everything below branches on the value, so an unknown
+    // one is refused before any write (CodeQL js/user-controlled-bypass
+    // wants the guard value constrained).
+    if (authMode !== "token" && authMode !== "api_key" && authMode !== "subscription" && authMode !== "local") {
+      return NextResponse.json({ error: "Unsupported authMode" }, { status: 400 });
+    }
     requestProvider = provider;
     requestScope = scope;
     const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
+    // Normalized once, like the key above: this handler reads the `model`
+    // field in four branches, and inlining the same ternary in each let the
+    // copies drift.
+    const normalizedModel = typeof bodyModel === "string" ? bodyModel.trim() : "";
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
     const isClawAI = provider === "clawai";
@@ -584,6 +2205,31 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+    // A `claw_…` key authenticates to the ClawBox AI proxy and to nothing else.
+    // Stored as another provider's api_key profile it becomes that provider's
+    // credential and 401s on every turn: measured on a box, `openai:default`
+    // held one and turns on `openai/gpt-5.5` came back from api.openai.com with
+    // `Incorrect API key provided: claw_***`. Worse, an eligible api_key profile
+    // is a candidate ahead of nothing — it is tried, spends the request, and the
+    // gateway then falls back to another model — so the owner sees a provider
+    // that saved cleanly and answers as something else. Refuse the save rather
+    // than store a credential that cannot work. The prefix is a build-time
+    // constant and the message echoes no user input.
+    //
+    // This is about the AUTH PROFILE only. The image setup used to put the same
+    // token on `models.providers.openai.apiKey`; it no longer does, and no
+    // longer may — see `CLAWBOX_AI_IMAGE_PROVIDER` in
+    // src/lib/clawbox-ai-models.ts for what an apiKey there does to a ChatGPT
+    // sign-in on the pinned core.
+    // Not the local providers: for ollama / llamacpp this field carries a MODEL
+    // ID, not a credential (see the branch below), so a model whose name began
+    // with the prefix would be refused as if it were a key.
+    if (!isClawAI && !isOllama && !isLlamaCpp && normalizedApiKey.startsWith(CLAWBOX_AI_TOKEN_PREFIX)) {
+      return NextResponse.json(
+        { error: "That is a ClawBox AI key. Select ClawBox AI as the provider, or paste this provider's own key." },
+        { status: 400 }
+      );
+    }
     if (isLocalScope && !isOllama && !isLlamaCpp) {
       return NextResponse.json(
         { error: "Local AI scope is only supported for Ollama and llama.cpp" },
@@ -591,7 +2237,13 @@ export async function POST(request: Request) {
       );
     }
 
-    const baseConfig = PROVIDERS[provider];
+    // `Object.hasOwn` rather than a bare index: `provider` is the caller's
+    // string, and a plain object answers for every name on Object.prototype
+    // too — `PROVIDERS["toString"]` is a truthy function, so the guard below
+    // never fired and the handler carried on with a config that spreads to
+    // `{}`. Same rule as the KV route's RESERVED_KEYS and the apps/settings
+    // writer table.
+    const baseConfig = Object.hasOwn(PROVIDERS, provider) ? PROVIDERS[provider] : undefined;
     if (!baseConfig) {
       return NextResponse.json(
         { error: `Unknown provider: ${provider}` },
@@ -635,9 +2287,51 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+    // A local provider borrows the `apiKey` slot to carry its MODEL id — there
+    // is no key for a service on this box. On the OAuth-handoff path, though,
+    // that same slot is filled from a token file on disk a few lines above,
+    // and the recorded provider only overwrites `body.provider` when it is
+    // present. A handoff whose provider field is missing, against a body that
+    // says `ollama`, would therefore make an access token the model id — and
+    // send it to the local model server in a request body. A local provider
+    // never has a handoff, so the slot is simply not read when one was
+    // consumed; `model` still names the model. (Found by CodeQL
+    // js/file-access-to-http, which was right about the flow.)
+    const localModelSlot = pendingHandoffTokensPath ? "" : normalizedApiKey;
     const llamaCppContextWindow = getLlamaCppContextWindow();
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
+    // The ChatGPT subscription shares `ocProvider === "openai"` with the API
+    // key; the auth mode is what tells the two apart from here on.
+    const isChatgptSubscription = authMode === "subscription" && ocProvider === CHATGPT_PROVIDER;
+
+    // `models.mode` as it was BEFORE this save. Six branches below write it —
+    // the ClawBox AI pass, the two local-model passes, the cloud-transport
+    // paths — and under `replace` the core skips the authenticated catalogue
+    // for EVERY provider, so a flip changes what the gateway will route far
+    // beyond the provider being saved. Captured once here and compared once at
+    // step 8d rather than threaded through each branch, so a branch added
+    // later cannot forget it (TASK-668).
+    const modelsModeBefore = await readModelsMode();
+
+    // BEFORE anything is written, and before this request has put anything of
+    // its own in the store — a refusal is not a failure and must not leave a
+    // trail, and by the time the save reaches the paste it has unpaired
+    // ClawKeep on an account switch, enabled provider plugins and written the
+    // profile metadata. The throw is mapped to a 409 by this handler's own
+    // catch.
+    //
+    // Skipped where no sign-in lane exists: the two local providers have none,
+    // OpenRouter is deliberately absent from OAUTH_PROVIDERS (see the
+    // openrouter branch below — every save that reaches it is key-based), and
+    // the ClawBox AI profile is written by this route alone. It is one CLI cold
+    // start, and this is the wizard's critical path.
+    if (
+      authMode !== "subscription"
+      && !isOllama && !isLlamaCpp && !isClawAI && !isOpenRouter
+    ) {
+      await assertNoSignInAt(config.profileKey);
+    }
 
     // Codex (OpenAI subscription) authenticates with a JWT id_token, and the
     // gateway synthesizes ~/.codex/auth.json from `id` (falling back to
@@ -646,11 +2340,7 @@ export async function POST(request: Request) {
     // the save here so the failure surfaces at config time, not in the chat.
     const normalizedIdToken = typeof idToken === "string" ? idToken.trim() : "";
     const isJwtLike = (value: string) => value.split(".").length === 3;
-    if (
-      authMode === "subscription" &&
-      ocProvider === "codex" &&
-      !isJwtLike(normalizedIdToken || normalizedApiKey)
-    ) {
+    if (isChatgptSubscription && !isJwtLike(normalizedIdToken || normalizedApiKey)) {
       return NextResponse.json(
         {
           error:
@@ -662,33 +2352,228 @@ export async function POST(request: Request) {
 
     // A fresh device promotes its first local model automatically; an existing
     // device only promotes when the user explicitly asked to switch to it.
+    // A device that was ON the local model when it was switched off promotes it
+    // again, so off -> on round-trips instead of leaving the box on nothing:
+    // `local_ai_was_default` is the flag POST /setup-api/local-ai leaves behind
+    // when it clears a `model.provider` that pointed at the local model.
+    const localWasDefaultBeforeDisable = isLocalScope && configStore.local_ai_was_default === true;
+    /**
+     * Forget that the local model used to be the default, because the owner has
+     * now chosen a cloud provider on purpose and re-enabling local later must
+     * not evict that choice.
+     *
+     * Called where the cloud save LANDS, not here. It used to run the moment
+     * the request was parsed, so a save the route went on to REFUSE — an
+     * off-surface Claude or ChatGPT id, a Hermes provider that needs its own
+     * panel — still changed how a later local re-enable behaves. A rejection
+     * that has already had a side effect is not a rejection: the same rule the
+     * subscription-surface guards below are placed to obey.
+     *
+     * Reading `configStore`, the snapshot taken at the top of the request, so
+     * it stays the same question it was then; `shouldPromoteLocalToPrimary`
+     * below reads that snapshot too and is unaffected by when this runs.
+     */
+    const forgetLocalWasDefault = async () => {
+      if (isLocalScope || configStore.local_ai_was_default !== true) return;
+      await setMany({ local_ai_was_default: undefined });
+    };
     const shouldPromoteLocalToPrimary =
-      isLocalScope && (!configStore.ai_model_configured || body.activate === true);
+      isLocalScope && (!configStore.ai_model_configured || body.activate === true || localWasDefaultBeforeDisable);
+
+    // Bring the runtime up BEFORE anything is registered. Registering a model
+    // whose service is down produces exactly the device this task exists to fix:
+    // Settings says "configured", the picker offers the model, and the first
+    // message 502s. For Ollama that also ENABLES the unit, so the choice
+    // survives a reboot — an unprivileged `systemctl start` had been failing
+    // silently, which is why toggling Local AI off and on left ollama.service
+    // dead (TASK-446).
+    if (isLocalScope && (isOllama || isLlamaCpp)) {
+      try {
+        await activateLocalAiProvider(isOllama ? "ollama" : "llamacpp");
+      } catch (err) {
+        console.error("[AI Config] Local AI runtime did not come up:", err instanceof Error ? logSafe(err.message) : err);
+        if (isOllama) {
+          return NextResponse.json(
+            {
+              error: "Could not start the on-device model service, so Local AI was not switched on.",
+              code: "local_ai_runtime_unavailable",
+            },
+            { status: 503 },
+          );
+        }
+        // llama.cpp keeps the behaviour it always had: the proxy provisions and
+        // wakes it on the first request, so a failed pre-wake is a slower first
+        // message, not a failed save.
+      }
+    }
     // Resolve the ClawBox AI tier once and reuse it for both the primary
     // model selection (below) and the config-store write (further down).
     // Inlining the same `?? storedTier ?? DEFAULT_TIER` chain in two
     // places previously let the two sites drift on a half-applied edit;
     // a single source of truth keeps them in lockstep.
-    const resolvedClawboxTier: ClawboxAiTier | null = isClawAI
-      ? (requestedClawboxAiTier
+    //
+    // `requestedClawboxAiTier` is the wizard's plan PICKER, and during a first
+    // pairing that is whatever the card defaulted to before anyone had an
+    // account to look at — "flash" (Pro). Trusting it wrote the €9 model onto
+    // boxes paired with a €49 Max token, with no way to reach the frontier
+    // model afterwards: the picker had already been consulted and the account
+    // never was (TASK-481). We hold the token and the portal will answer
+    // truthfully, so ask it, exactly as the Codex branch below asks ChatGPT
+    // for entitlement and for the same reason.
+    //
+    // Only a definitive PAID answer overrides the picker. `unreachable`
+    // (offline, timeout, 401/403 — deliberately ambiguous, see fetchPortalTier)
+    // and a Free/unrecognised verdict both leave the existing chain alone, so
+    // a portal outage can never downgrade a paying box mid-setup. The portal's
+    // own `deviceTier` stamp is honoured inside mapPortalTier, which is what
+    // keeps "Max subscriber who deliberately runs Flash on this device"
+    // working rather than being force-promoted here.
+    let portalConfirmedTier: ClawboxAiTier | null = null;
+    // The PLAN this same lookup answered, or ABSENT for "it did not answer" —
+    // a third state the badge does not need and the plan does, because a
+    // RECORDED plan is what both boot scripts read as having been told, and one
+    // of them deletes a working cloud voice over it (TASK-744).
+    //
+    // WHY HERE AS WELL AS IN `/setup-api/ai-models/status`: that route is the
+    // 30-second poll, and every caller of it is a BROWSER — the wizard step,
+    // the Settings panel, the login hook. Nothing on the box asks it on its
+    // own. A customer who pairs and closes the tab would never have a plan on
+    // record, both scripts would fall back to the device badge for good, and
+    // that IS the state this card is about. This route holds a portal answer
+    // for the credential it is writing, at the moment it writes it.
+    let portalPlan: ClawaiPortalPlan | undefined;
+    if (isClawAI && clawboxAiToken) {
+      try {
+        const lookup = await fetchPortalTier(clawboxAiToken);
+        // On ANY portal answer, including the Free one that leaves `tier` null:
+        // "this account pays for nothing" is an answer, and it is the one that
+        // has to retire a previous account's Max plan rather than leave it
+        // standing over the token this save is writing — and the one that lets
+        // a CANCELLED subscription's cloud voice be withdrawn at all.
+        // `planVerdict`, not `planTier`: that one answers `null` to a
+        // genuinely unpaid account, to an absent `tier` and to a plan word this
+        // build has never seen alike, and only the first of the three is a
+        // downgrade something may later be deleted over.
+        if (lookup.source === "portal") portalPlan = { verdict: lookup.planVerdict };
+        if (lookup.source === "portal" && lookup.tier) {
+          portalConfirmedTier = lookup.tier;
+          if (requestedClawboxAiTier && requestedClawboxAiTier !== lookup.tier) {
+            console.log(
+              `[configure] ClawBox AI plan picker said "${requestedClawboxAiTier}", portal says "${lookup.tier}" — using the account`,
+            );
+          }
+        }
+      } catch (err) {
+        // Never let a tier probe break pairing; fall through to the picker.
+        console.warn("[configure] ClawBox AI portal tier probe failed:", err);
+      }
+    }
+  const resolvedClawboxTier: ClawboxAiTier | null = isClawAI
+      ? (portalConfirmedTier
+          ?? requestedClawboxAiTier
           ?? normalizeClawboxAiTier(configStore[CLAWBOX_AI_TIER_CONFIG_KEY])
           ?? CLAWBOX_AI_DEFAULT_TIER)
       : null;
+    // Set by the branch below in which the OWNER named a model, rather than one
+    // that filled a default in for them. Written to the store after the save
+    // succeeds, beside the other facts about what was configured.
+    let explicitPickToRecord: string | null = null;
+    // True when the ClawBox AI branch kept the owner's own model instead of the
+    // one the badge implies. Reported in the answer so the plan card can say the
+    // plan moved and the model deliberately did not, rather than returning 200
+    // over a screen where nothing appears to have happened.
+    let explicitPickKept = false;
+    // The picks map minus the ClawBox AI entry, when this save links a DIFFERENT
+    // ClawBox AI account. Written in the same batch as the new token below.
+    let clawaiPicksToStore: Record<string, string> | null = null;
+
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
-      const modelName = normalizedApiKey || "llama3.2:3b";
+      // `model` is honoured too: every cloud provider sends its pick there, so
+      // an API caller who wrote { model: "qwen2.5:3b" } used to have the field
+      // silently ignored and llama3.2:3b saved in its place — a "success" that
+      // configured a model this box does not have.
+      const modelName = localModelSlot || normalizedModel || "llama3.2:3b";
+
+      // Ask Ollama about the id BEFORE anything is written. Both refusals below
+      // used to be discovered by the customer one dead chat turn at a time: an
+      // id that names nothing on this machine, and — on Hermes — a model whose
+      // window is under the agent's floor (qwen2.5:3b reports 32K against
+      // Hermes' 64K minimum, so every turn 502s while Settings says
+      // "configured", and no config override can widen a model's trained
+      // window). An unreachable Ollama keeps the old behaviour and saves: on
+      // the local-scope path the service was already started (and 503'd above
+      // when it could not be), so a dead probe here is the primary-scope case
+      // where the runtime starts Ollama on demand — "we could not ask" must
+      // not brick that flow.
+      const probe = await probeOllamaModel(modelName);
+      // The id came off the wire and both messages below quote it back. Bound
+      // and strip it the same way anything request-derived is bounded before it
+      // reaches a log line — an unbounded echo is a response the caller sized.
+      const quotedModel = logSafe(modelName, 120);
+      if (probe.status === "not-installed") {
+        return NextResponse.json(
+          { error: `Ollama does not have "${quotedModel}" on this device. Pull the model first, then save it.` },
+          { status: 400 },
+        );
+      }
+      if (
+        probe.status === "ok"
+        && probe.contextLength !== null
+        && probe.contextLength < HERMES_MINIMUM_CONTEXT_TOKENS
+        && (await getActiveHarness()) === "hermes"
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              `"${quotedModel}" offers a ${probe.contextLength.toLocaleString("en-US")}-token context window; `
+              + `the assistant needs at least ${HERMES_MINIMUM_CONTEXT_TOKENS.toLocaleString("en-US")}. `
+              + "Pick a larger model.",
+          },
+          { status: 400 },
+        );
+      }
       config.defaultModel = `ollama/${modelName}`;
     } else if (isLlamaCpp) {
-      const modelName = normalizedApiKey || getDefaultLlamaCppModel();
+      // Same two slots as the Ollama branch above, for the same reason.
+      const modelName = localModelSlot || normalizedModel || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
     } else if (isClawAI && resolvedClawboxTier) {
-      config.defaultModel = CLAWBOX_AI_MODEL_BY_TIER[resolvedClawboxTier];
-    } else if (
-      authMode === "subscription"
-      && ocProvider === "codex"
-      && !(typeof bodyModel === "string" && bodyModel.trim())
-    ) {
+      // The badge fills in a DEFAULT, and a default never overwrites a choice
+      // (TASK-713). A re-pair arrives here carrying `clawaiTier` exactly like a
+      // plan-card press does — `clawai/poll` sends the session's tier — so the
+      // request cannot say which this is. What settles it is whether the owner
+      // has ever picked a ClawBox AI model, which is what the marker records.
+      //
+      // A pick belongs to the ACCOUNT that made it. On a token change — the same
+      // signal that unpairs ClawKeep at step 8 — it is not read, so the previous
+      // owner's Max choice is not imposed on a Pro plan the new one is paying
+      // for; and it is CLEARED in the same `setMany` that stores the new token,
+      // so the two cannot come apart. A separate delete could fail on its own
+      // and leave account A's pick beside account B's token, waiting for the
+      // next re-pair to apply it.
+      const clawaiAccountChanged = Boolean(
+        previousClawaiToken && clawboxAiToken && previousClawaiToken !== clawboxAiToken,
+      );
+      const storedPicks = explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY]);
+      if (clawaiAccountChanged && storedPicks.clawai) {
+        delete storedPicks.clawai;
+        clawaiPicksToStore = storedPicks;
+      }
+      const clawaiDecision = decideClawboxAiModelId({
+        picks: clawaiAccountChanged ? {} : storedPicks,
+        tierModelId: CLAWBOX_AI_MODEL_ID_BY_TIER[resolvedClawboxTier],
+      });
+      explicitPickKept = clawaiDecision.explicit;
+      if (clawaiDecision.explicit) {
+        console.log(
+          `[configure] ClawBox AI: keeping the owner's own model ${clawaiDecision.modelId}`
+          + ` over the ${resolvedClawboxTier} badge default`,
+        );
+      }
+      config.defaultModel = `${CLAWBOX_AI_PROVIDER}/${clawaiDecision.modelId}`;
+    } else if (isChatgptSubscription && !normalizedModel) {
       // ChatGPT sign-in with no explicit pick. The hardcoded default is
       // gpt-5.5, so a Pro account used to land a generation behind and had
       // to know to change it. We can't read entitlement from a catalog — the
@@ -700,40 +2585,49 @@ export async function POST(request: Request) {
       // gpt-5.5, which every tier can use. Defaulting a non-entitled account
       // onto a gpt-5.6 model would be far worse than being conservative: the
       // upstream 400 is a surface error with no failover, so every turn fails.
+      // The FLOOR first, asked of the same surface that judges the result 90
+      // lines below (`offSurfaceCodexModelMessage`). `CHATGPT_DEFAULT_MODEL_ID`
+      // is a constant, and the day a core retires gpt-5.5 from the ChatGPT
+      // route a sign-in would 400 on its own default with no other door — see
+      // `chatgptDefaultModelId`. It answers gpt-5.5 on every core measured so
+      // far, so this is a no-op today and a floor that cannot be refused
+      // tomorrow.
+      config.defaultModel = chatgptModelRef(chatgptDefaultModelId());
       try {
         const entitled = await resolveEntitledCodexModel({
           accessToken: normalizedApiKey,
+          // The surface's own rows above the floor, newest first, instead of a
+          // second hand-kept list: on the pinned core that IS
+          // `CODEX_MODEL_PREFERENCE`, and on a core that adds a model the probe
+          // can now reach it — without one, a fresh sign-in would keep landing
+          // on gpt-5.5 while the picker offered something newer.
+          candidates: chatgptUpgradeCandidates(),
           onDiagnostic: (message) => console.log(`[configure] ${message}`),
         });
         if (entitled) {
-          config.defaultModel = `codex/${entitled}`;
+          config.defaultModel = chatgptModelRef(entitled);
         }
       } catch (err) {
         // Never let model selection break sign-in.
         console.warn("[configure] codex entitlement probe failed:", err);
       }
-    } else if (typeof bodyModel === "string" && bodyModel.trim()) {
+    } else if (normalizedModel) {
       // User picked a specific model in the wizard (curated list or
       // custom ID). Validate shape to stop empty strings / obvious typos
       // from silently saving a broken primary. We don't check against
       // the curated list — users can type newer model IDs we haven't
       // added yet.
       //
-      // Provider namespace differs between auth modes:
-      //   openai + token        → openai/<id>       (api.openai.com)
-      //   openai + subscription → codex/<id>        (chatgpt.com backend)
-      // The two catalogs are NOT the same — `gpt-5.4` only exists on
-      // codex; `gpt-5` only exists on openai direct. The
-      // `config.defaultModel` was already set to the correct namespace
-      // above by applying subscriptionOverride, so we derive the
-      // target provider from the existing default instead of `provider`.
-      const requestedModel = bodyModel.trim();
+      // Both OpenAI auth modes write `openai/<id>`; which catalogue applies
+      // is the subscription surface's business (offSurfaceCodexModelMessage
+      // below), not the namespace's. `config.defaultModel` already carries
+      // the provider the override chose, so derive the target from it.
+      const requestedModel = normalizedModel;
       const targetProvider = config.defaultModel.split("/", 1)[0];
       const supportedProviders = new Set([
         "openrouter",
         "anthropic",
         "openai",
-        "codex",
         "google",
       ]);
       if (supportedProviders.has(targetProvider)) {
@@ -745,6 +2639,11 @@ export async function POST(request: Request) {
           );
         }
         config.defaultModel = `${targetProvider}/${requestedModel}`;
+        // The owner named this model. Remembered for the same reason the chat
+        // picker's pick is (TASK-713): a default may fill a gap, never
+        // overwrite a choice — and the marker holds the LAST choice, whichever
+        // provider it was about.
+        explicitPickToRecord = config.defaultModel;
       }
     }
 
@@ -767,6 +2666,9 @@ export async function POST(request: Request) {
             local_ai_provider: ocProvider,
             local_ai_model: config.defaultModel,
             local_ai_configured_at: new Date().toISOString(),
+            // Consumed by shouldPromoteLocalToPrimary above; leaving it set
+            // would re-promote the local model on every later save.
+            local_ai_was_default: undefined,
           });
           await applyLocalAiToHermes({
             provider: ocProvider as "llamacpp" | "ollama",
@@ -777,8 +2679,36 @@ export async function POST(request: Request) {
           return NextResponse.json({ success: true });
         }
         if (isClawAI) {
-          await applyClawaiToHermes(clawboxAiToken, resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER);
-          return NextResponse.json({ success: true });
+          // No harness-fault clear here, deliberately: on this SKU the apply
+          // below is what WRITES the credential, so it is the only place that
+          // knows the write landed, and it clears the fault itself the moment
+          // it does — inside its own before/after readiness pair, which is
+          // where the clear has to happen for the MCP refresh to notice. A
+          // clear here would fire even when the apply throws, taking the
+          // refusal away over a save that never happened. See
+          // `applyClawaiToHermes`; the OpenClaw/dual branch further down keeps
+          // its own clear because there the ROUTE writes the credential and
+          // the apply may never be called at all.
+          const applied = await applyClawaiToHermes(
+            clawboxAiToken,
+            resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER,
+            // The apply writes the store on this SKU, so the plan travels with
+            // the badge from there. (The two batches below also carry it on any
+            // save that reaches them — the same value, harmlessly.)
+            { portalPlan },
+          );
+          await forgetLocalWasDefault();
+          // Reported from the apply's OWN decision rather than the one taken
+          // above for the OpenClaw shape: on this SKU that helper is what reads
+          // the store and writes the model, so its answer is the one that
+          // happened. Same field as the OpenClaw branch, so the plan card does
+          // not have to know which edition it is on.
+          return NextResponse.json({
+            success: true,
+            ...(applied.explicitPickKept
+              ? { explicitPickKept: true, model: applied.model }
+              : {}),
+          });
         }
         if (authMode !== "subscription" && normalizedApiKey) {
           // Cloud API-key providers Hermes supports (anthropic, google→gemini,
@@ -789,8 +2719,12 @@ export async function POST(request: Request) {
             apiKey: normalizedApiKey,
           });
           if (result.activated) {
+            await forgetLocalWasDefault();
             return NextResponse.json({ success: true });
           }
+          // 409, not success: the key is stored but no model is picked, so this
+          // save has not chosen a provider yet and must not evict the local
+          // model's claim on the primary slot.
           return NextResponse.json(
             { error: "Key saved. Open the Hermes provider panel to pick a model for it." },
             { status: 409 },
@@ -808,10 +2742,124 @@ export async function POST(request: Request) {
           || err instanceof HermesLocalApplyError
           || err instanceof ClawaiApplyError
         ) {
-          // Author-controlled, non-credential message — safe to echo.
+          // Safe to echo because each of these classes now CLEANS its message
+          // before constructing itself — `safeHermesFailureMessage` for a
+          // `hermes` stream, `sanitizeErrorMessage` for an fs error — and falls
+          // back to a fixed sentence when nothing survives.
+          //
+          // The comment here used to read "Author-controlled, non-credential
+          // message — safe to echo", and it was false for all three: every one
+          // of them was built from a raw `hermes` stderr or a raw Node fs
+          // error, and this line published it to the save banner. The claim is
+          // now an invariant the throw sites keep rather than an assumption
+          // this one makes.
           return NextResponse.json({ error: err.message }, { status: 502 });
         }
         throw err; // unexpected — fall to the outer catch, which classifies it
+      }
+    }
+
+    // ── The subscription surfaces ───────────────────────────────────────────
+    // This route is the SECOND write path to `agents.defaults.model.primary`;
+    // /setup-api/chat/model is the first, and the guards there exist "for ids
+    // that arrive some other way". This is that other way. The shape check
+    // above deliberately does not consult the curated list ("users can type
+    // newer model IDs we haven't added yet"), and the wizard's picker exempts
+    // a typed custom id from its own greying-out rule, so without these a
+    // subscription box can be pinned from Settings to exactly the model the
+    // chat header refuses — one its subscription cannot route.
+    //
+    // Judged on the SETTLED `config.defaultModel`, after every branch above
+    // has had its say, so the PROVIDERS-table default is covered as well as a
+    // typed id: one check for every value this save can write to primary.
+    // Split once, so both rules judge the same value and cannot disagree about
+    // what this save is going to write.
+    //
+    // AFTER the Hermes branch, because the questions they ask are about
+    // `openclaw.json` and a Hermes box has none — and that branch refuses a
+    // subscription save outright anyway. BEFORE `writeAuthProfiles` below,
+    // because a refusal that has already persisted a credential is not a
+    // refusal, it is a half-applied save. Nothing between here and there
+    // writes anything (the OAuth handoff file is consumed only on success).
+    const settledSlash = config.defaultModel.indexOf("/");
+    const settledProvider = settledSlash > 0 ? config.defaultModel.slice(0, settledSlash) : null;
+    const settledModelId = config.defaultModel.slice(settledSlash + 1);
+
+    // ChatGPT: the same gap as the Claude one below, on the other
+    // subscription — and the one that ARMS it, because an off-surface id has
+    // to reach `agents.defaults.model.primary` before the chat header can
+    // restore it, and this save is the only way in. `isValidModelId` above
+    // checks SHAPE only and `resolveEntitledCodexModel` runs solely in the
+    // nothing-was-typed branch, so `gpt-5.4-pro` typed into the custom-model
+    // field was written as the subscription's primary — precisely the id
+    // /setup-api/chat/model has refused since it was written. Every turn
+    // afterwards fails upstream.
+    //
+    // Gated on the auth MODE: both OpenAI modes write `openai/<id>`, and only
+    // the subscription is confined to the ChatGPT surface — an API-key save
+    // routes the -pro tiers fine, which is exactly the switch the refusal
+    // recommends.
+    const offSurfaceCodex = offSurfaceCodexModelMessage(settledProvider, settledModelId, isChatgptSubscription);
+    if (offSurfaceCodex) {
+      return NextResponse.json({ error: offSurfaceCodex }, { status: 400 });
+    }
+
+    // The ClawBox AI image LANE, judged on the same settled value —
+    // `isClawboxAiNonChatModelRef` answers for the image ref on the current
+    // AND the legacy provider id, and for any other model on the current one.
+    // `isValidModelId` is shape-only, so `gpt-image-1-mini` typed into the
+    // OpenAI panel's custom-model field was written as
+    // `openai/gpt-image-1-mini` and every turn afterwards failed. The entry
+    // declares no `models[]` row of its own, but the bundled litellm plugin
+    // ships a chat catalog on that id whatever we write (see the docblock in
+    // src/lib/clawbox-ai-models.ts), so this door and /setup-api/chat/model's
+    // are ClawBox's whole wall — for ids that arrive ANY way: typed here,
+    // pinned by an older build, or picked from OpenClaw's own surfaces.
+    if (isClawboxAiNonChatModelRef(config.defaultModel)) {
+      // Names the fix, not just the refusal: this id can reach here from a box
+      // an older build pinned to it, and an owner who never typed it needs to
+      // be told which control to change.
+      return NextResponse.json(
+        {
+          error: `${clawboxAiNonChatModelReason(config.defaultModel)} Pick a chat model from the Model list and save again.`,
+        },
+        { status: 400 },
+      );
+    }
+
+    // Claude: only a SUBSCRIPTION save can create the hazard here. An API-key
+    // save writes the anthropic key, so after it lands the box is not
+    // subscription-only and there is nothing to refuse. That mattered more
+    // when the surface was narrower than the API catalogue and the refusal
+    // recommended switching to a key; since #532 the subscription routes
+    // natively on the same catalogue, and what is left to refuse is an id no
+    // Anthropic catalogue on this box carries at all.
+    if (authMode === "subscription") {
+      const offSurface = await offSurfaceClaudeModelMessage(
+        settledProvider,
+        settledModelId,
+        async () => {
+          // Ask about the profiles this save is ABOUT TO leave behind, not the
+          // ones already on disk: this sign-in is what writes the OAuth
+          // profile that makes the box subscription-only, so disk alone would
+          // wave the very first Claude sign-in straight through. A key held
+          // under some other profile key still counts, and still allows.
+          let existing: OpenClawConfig | null = null;
+          try {
+            existing = await readOpenClawConfig();
+          } catch {
+            // No readable config yet (fresh box). The projected profile below
+            // still answers the question on its own.
+          }
+          return isClaudeSubscriptionOnly({
+            ...(existing?.auth?.profiles ?? {}),
+            // Exactly what `baseOps` writes for this profile key below.
+            [config.profileKey]: { provider: ocProvider, mode: "oauth" },
+          });
+        },
+      );
+      if (offSurface) {
+        return NextResponse.json({ error: offSurface }, { status: 400 });
       }
     }
 
@@ -834,7 +2882,7 @@ export async function POST(request: Request) {
     //
     //   * anthropic     → --auth-choice apiKey --anthropic-api-key
     //   * openai (api)  → --auth-choice openai-api-key --openai-api-key
-    //   * codex         → ChatGPT app-server auth (~/.codex/auth.json, written by gateway-pre-start.sh)
+    //   * openai (ChatGPT) → `models auth login --provider openai` (the OAuth bundle below is its output)
     //   * google        → --auth-choice gemini-api-key --gemini-api-key
     //   * openrouter    → --auth-choice openrouter-api-key --openrouter-api-key
     //   * deepseek      → no canonical onboard equivalent today; we use
@@ -845,39 +2893,37 @@ export async function POST(request: Request) {
     //                     but we set baseUrl/model server-side from
     //                     env-derived runtime config; not a 1:1 mapping.
     //
-    // For now: keep the inline write but DO NOT add new fields here
-    // without first checking the gateway's auth-profile schema. If
+    // API-key credentials now DO go through the CLI (`models auth
+    // paste-api-key`, see pasteAuthApiKey) — only the OAuth bundle below
+    // still writes the file inline, because no paste command carries a
+    // refresh token. DO NOT add new fields to it without first checking
+    // the gateway's auth-profile schema. If
     // OpenClaw bumps the schema and we see profile-rejected errors in
     // production, the migration target is `openclaw onboard`.
-    {
+    if (authMode !== "subscription") {
+      // Every API-key credential goes through `models auth paste-api-key`
+      // (stdin): on OpenClaw 2 a hand-written auth-profiles.json is a LEGACY
+      // store the gateway refuses to hydrate — AuthProfileMigrationRequired
+      // killed it after every provider save until doctor ran. The CLI writes
+      // the store of the running generation and the openclaw.json metadata
+      // itself. `type: "api_key"` semantics are the CLI's own (a token-mode
+      // profile stopped authenticating on 2026.6.8 — see git history).
+      const apiKeyValue = isClawAI
+        ? clawboxAiToken
+        : isOllama || isLlamaCpp
+          ? getLocalAiToken()
+          : normalizedApiKey;
+      if (isOllama || isLlamaCpp) {
+        // Ollama/llama.cpp run locally — the auth-profile key must match the
+        // per-install bearer token the local-ai proxy validates (see
+        // src/lib/local-ai-token.ts). Stamp the migration flag so legacy
+        // "ollama-local" / "llamacpp-local" sentinels stop authenticating.
+        markLocalAiTokenMigrated();
+      }
+      await pasteAuthApiKey(ocProvider, config.profileKey, apiKeyValue);
+    } else {
       const authProfiles = await readAuthProfiles();
-      if (isClawAI) {
-        // ClawBox AI uses the portal token generated by the user.
-        authProfiles.profiles[config.profileKey] = {
-          type: "api_key",
-          provider: ocProvider,
-          key: clawboxAiToken,
-        };
-      } else if (isOllama) {
-        // Ollama runs locally — auth-profile key must match the per-install
-        // bearer token the local-ai proxy validates (see src/lib/local-ai-token.ts).
-        authProfiles.profiles[config.profileKey] = {
-          type: "api_key",
-          provider: ocProvider,
-          key: getLocalAiToken(),
-        };
-        // Stamp the migration flag so legacy "ollama-local" / "llamacpp-local"
-        // sentinels stop authenticating on this device — the new per-install
-        // token is now the only valid credential.
-        markLocalAiTokenMigrated();
-      } else if (isLlamaCpp) {
-        authProfiles.profiles[config.profileKey] = {
-          type: "api_key",
-          provider: ocProvider,
-          key: getLocalAiToken(),
-        };
-        markLocalAiTokenMigrated();
-      } else if (authMode === "subscription") {
+      if (authMode === "subscription") {
         // OAuth credential format expected by OpenClaw:
         // { type: "oauth", provider, access, id?, refresh, expires, projectId? }
         // `id` is the OAuth id_token (a JWT). The Codex app-server authenticates
@@ -895,22 +2941,106 @@ export async function POST(request: Request) {
             : Date.now() + 8 * 60 * 60 * 1000, // default 8h
           ...(projectId ? { projectId } : {}),
         };
-      } else {
-        // API-key providers (anthropic, openai, google, openrouter) authenticate
-        // with a bearer key. OpenClaw <=2026.6.6 tolerated a `type: "token"`
-        // profile here, but 2026.6.8 reworked auth resolution and no longer
-        // turns a token-mode profile into an Authorization header — the request
-        // goes out unauthenticated and the provider returns "401 Missing
-        // Authentication header". Write the same `type: "api_key"` shape the
-        // working providers above use (clawai/ollama/llamacpp) so the gateway
-        // applies the key on every release.
-        authProfiles.profiles[config.profileKey] = {
-          type: "api_key",
-          provider: ocProvider,
-          key: normalizedApiKey,
-        };
       }
       await writeAuthProfiles(authProfiles);
+      // OpenClaw 2 refuses to hydrate this LEGACY file: run the doctor
+      // migration IMMEDIATELY, before the config-set batch, catalog refresh
+      // and session sweep execute against a poisoned shared auth store (it
+      // also backs the CLI itself, so those calls would start failing too).
+      // Fail closed on a v2 box: archiving the file we just wrote and answering
+      // 502 beats "success" with a dead agent. A migrated sibling is sufficient
+      // proof; an early doctor failure may create none, so the installed binary
+      // version is the second authority. An explicit v1 keeps its legitimate
+      // legacy file and the old best-effort behavior.
+      // The stop inside is unconditional; POST restores the unit if no later
+      // step restarts it.
+      gateway.state = "stopped-for-doctor";
+      // WHAT KIND of doctor failure this was (TASK-741). It still FAILS — the
+      // migration provably did not happen, and a legacy auth-profiles.json left
+      // in place is what stops an OpenClaw 2 gateway from starting — so the
+      // rollback below is unchanged. What changes is the sentence: telling the
+      // owner to "run `openclaw doctor --fix` from the Terminal" is advice for
+      // the command that is blocked, and he can do nothing with it.
+      let doctorBlockedBy: OpenclawDoctorFixOutcome | null = null;
+      try {
+        // TWO rules at once, and they pull in opposite directions.
+        //
+        // Fail closed on anything that is not a completed doctor, named
+        // outcomes or not: a value this branch has never heard of is not proof
+        // that the migration ran, and a legacy auth-profiles.json left behind
+        // is what stops an OpenClaw 2 gateway from starting. A future outcome
+        // added to the union therefore rolls back by default and gets the
+        // generic sentence, rather than silently answering 200.
+        //
+        // But `undefined` is EXEMPT, and deliberately. `undefined` is not in
+        // the type: it is what an omitted member answers under the hand-written
+        // factories that dozens of suites replace `@/lib/openclaw-config` with,
+        // and treating it as a refusal turns every one of their ordinary saves
+        // into this 502. That inertness is the whole reason these outcomes are
+        // returned rather than thrown, and it is load-bearing for the suite.
+        const outcome: OpenclawDoctorFixOutcome | undefined = await runOpenclawDoctorFix();
+        if (outcome !== undefined && outcome !== "completed") {
+          doctorBlockedBy = outcome;
+          // Into the SAME failure path, deliberately: the v1/v2 decision below
+          // is what says whether the legacy file may stay, and a second copy of
+          // that judgement here is how the two would come to disagree.
+          throw new Error(`openclaw doctor --fix is ${outcome}`);
+        }
+      } catch (doctorErr) {
+        const siblings = await fs.readdir(path.dirname(AUTH_PROFILES_PATH)).catch(() => [] as string[]);
+        const migratedStore = siblings.some((name) => name.startsWith("auth-profiles.json.migrated-"));
+        console.error(
+          "[configure] doctor --fix failed after the OAuth store write:",
+          doctorErr instanceof Error ? JSON.stringify(logSafe(doctorErr.message)) : doctorErr,
+        );
+        let mustRollBack = migratedStore;
+        if (!mustRollBack) {
+          try {
+            mustRollBack = await installedOpenclawUsesSqliteAuthStore();
+          } catch (versionErr) {
+            // An unknown generation cannot prove that the legacy file is safe.
+            // Credential writes fail closed; the owner can retry once the CLI
+            // is healthy instead of receiving success with a dead gateway.
+            mustRollBack = true;
+            console.error(
+              "[configure] could not verify OpenClaw generation after doctor failure:",
+              versionErr instanceof Error ? JSON.stringify(logSafe(versionErr.message)) : versionErr,
+            );
+          }
+        }
+        if (mustRollBack) {
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          await fs.rename(AUTH_PROFILES_PATH, `${AUTH_PROFILES_PATH}.failed-${stamp}`).catch(() => {});
+          return NextResponse.json(
+            {
+              // Both outcomes named, in the order the owner meets them. The
+              // boot path moves a clearable blocker aside on the next start —
+              // but a file that provably holds approvals of HIS is left alone
+              // by design (TASK-737), and for that box a restart changes
+              // nothing. Leading with "restart and retry" alone would send
+              // exactly those owners round a loop.
+              error: doctorBlockedBy === "blocked-by-legacy-exec-approvals"
+                ? "Credential migration is blocked by a legacy exec-approvals file, so the subscription sign-in"
+                  + " was rolled back. Restart the device and sign in again: the gateway moves that file aside on"
+                  + " its next start unless it holds approvals of yours. If the sign-in is refused again, the"
+                  + " gateway boot log names the file to move aside by hand."
+                // The third outcome, and the one this box's owner met: doctor
+                // refused to start because it could not confirm who owns the
+                // gateway service. ClawBox now tells it, so reaching this
+                // sentence means the declaration did not arrive — an older
+                // core that has no such setting. A device update is the fix,
+                // and it is the one thing the Terminal advice never said.
+                : doctorBlockedBy === "blocked-by-service-ownership"
+                ? "Credential migration could not start: this device's OpenClaw could not confirm that ClawBox"
+                  + " manages the gateway service, so the subscription sign-in was rolled back. Restart the device"
+                  + " and sign in again. If it is refused again, install the latest device update — older OpenClaw"
+                  + " versions cannot be told that ClawBox owns the gateway."
+                : "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal.",
+            },
+            { status: 502 },
+          );
+        }
+      }
     }
 
     // 2. Validate profileKey before interpolating into config path
@@ -921,47 +3051,96 @@ export async function POST(request: Request) {
       );
     }
 
-    // 3. Set auth profile and primary model sequentially (parallel writes cause
-    //    ConfigMutationConflictError because openclaw config set reads/writes the
-    //    same file).
-    await runCommand(OPENCLAW_BIN, [
-      "config",
-      "set",
-      `auth.profiles.${config.profileKey}`,
-      // Subscription → "oauth"; every key-based provider → "api_key". The old
-      // "token" mode 401s on 2026.6.8+ (see the auth-profile write above).
-      JSON.stringify(authMode === "subscription"
-        ? { provider: ocProvider, mode: "oauth" }
-        : { provider: ocProvider, mode: "api_key" }),
-      "--json",
-    ]);
+    // 2b. The ChatGPT sign-in and the OpenAI API key are two profiles of ONE
+    //     provider on OpenClaw 2, and whichever the owner saved last is the
+    //     one chat must prefer. That preference is the core's own
+    //     `models auth order` (docs/cli/models.md), stored in the agent's auth
+    //     store with precedence over config — asked, not re-implemented — and
+    //     it is revised on BOTH saves. Set once and never revisited, it hid
+    //     the credential the owner added afterwards.
+    //
+    //     After the validation above, not before it: the profile ids reach the
+    //     CLI as argv.
+    let chatgptOrderWarning: string | undefined;
+    // Set when the primary was written past the CLI's catalog check AND the id
+    // is in no list this box has. It used to be a console.warn and nothing
+    // else: the box answered a clean `{success:true}`, Settings said
+    // "Configured", and the owner found out on the first turn. That is how
+    // `openai/gpt-5` — an id no openai catalogue on the pinned core carries —
+    // sat in the PROVIDERS table unnoticed. The id is fixed below; this is what
+    // makes the NEXT one visible.
+    //
+    // On the REFUSAL alone it would be noise, because the refusal is a
+    // documented normal state: a placeholder key (the wizard's "save the
+    // profile without validating the key" contract), a provider plugin on its
+    // first boot, and `models.providers.llamacpp` written later in this same
+    // request all produce it over an id that is perfectly right. Warning there
+    // is the false failure this route already knows not to raise, and a warning
+    // on the happy path is a warning nobody reads.
+    //
+    // Reaches a human only from Settings today: the ClawBox AI device-login
+    // poll, the llama.cpp install route, the Ollama hook and the first-run
+    // wizard branch all discard the field. Recorded rather than widened here.
+    let unvalidatedPrimaryWarning: string | undefined;
+    if (ocProvider === CHATGPT_PROVIDER) {
+      // ONE config read for both OpenAI decisions this save makes: which
+      // credential to prefer, and whether the previous lane left the Codex
+      // runtime armed on the reference this lane is about to write.
+      const openAiConfig = await readOpenClawConfig().catch(() => null);
+      chatgptOrderWarning = await applyOpenAiAuthOrder(
+        config.profileKey,
+        openAiConfig,
+        configStore[OPENAI_AUTH_ORDER_KEY] === true,
+      );
+      if (!isChatgptSubscription && (!isLocalScope || shouldPromoteLocalToPrimary)) {
+        chatgptOrderWarning = await clearChatgptRuntimeArm(config.defaultModel, openAiConfig)
+          ?? chatgptOrderWarning;
+      }
+    }
+
+    // 3. Auth profile, primary model, compaction reserve and the local-access
+    //    gateway settings. These are seven independent leaf writes with no
+    //    reads between them, so they go out as ONE `config set --batch-json`.
+    //    Issued one at a time they cost seven CLI cold starts — about a minute
+    //    on a Jetson, for seven keys (TASK-483). They still must not be
+    //    *parallel* writes: concurrent `openclaw config set` processes race on
+    //    the same file and lose to ConfigMutationConflictError. One batched
+    //    process is not concurrency, it is one validated read-modify-write.
+    const baseOps: OpenclawConfigSetArgs[] = [
+      [
+        `auth.profiles.${config.profileKey}`,
+        // Subscription → "oauth"; every key-based provider → "api_key". The old
+        // "token" mode 401s on 2026.6.8+ (see the auth-profile write above).
+        JSON.stringify(authMode === "subscription"
+          ? { provider: ocProvider, mode: "oauth" }
+          : { provider: ocProvider, mode: "api_key" }),
+        "--json",
+      ],
+    ];
     if (!isLocalScope || shouldPromoteLocalToPrimary) {
-      await runCommand(OPENCLAW_BIN, [
-        "config",
-        "set",
-        "agents.defaults.model.primary",
-        config.defaultModel,
-      ]);
+      // The plugin the new primary resolves through rides in the SAME batch,
+      // ahead of the reference: OpenClaw 2 validates every model reference a
+      // batch touches against the enabled plugins' catalogs after applying
+      // the whole batch to one snapshot, so this is what lets a Claude save on
+      // a box whose plugin an earlier gate switched off validate at all — in
+      // one spawn, and atomically: a refused batch leaves the flag as it was
+      // (src/lib/provider-plugin-ops.ts).
+      baseOps.unshift(...enableProviderPluginOps([config.defaultModel]));
+      baseOps.push(["agents.defaults.model.primary", config.defaultModel]);
+      // The reference is `openai/<id>` for both OpenAI auth modes; this entry
+      // is what says the turn belongs to the ChatGPT account and runs on the
+      // Codex app-server — the key the core itself keeps when it migrates a
+      // `codex/*` reference (src/lib/chatgpt-subscription.ts).
+      if (isChatgptSubscription) {
+        baseOps.push(chatgptRuntimeArmOp(config.defaultModel));
+      }
       if (shouldPromoteLocalToPrimary) {
         console.log(`[AI Config] Promoted local model to active primary: ${logSafe(config.defaultModel)}`);
       }
     }
-    // Reserve sized to the active model's context window. Local models run on
-    // small windows (Ollama 32K) where the flat default leaves no room for the
-    // agent's heavy system prompt + tools; cloud models (unbounded window)
-    // fall through to the full default.
-    const activeContextWindow = isOllama
-      ? OLLAMA_CONTEXT_WINDOW
-      : isLlamaCpp
-        ? llamaCppContextWindow
-        : Number.POSITIVE_INFINITY;
-    const compactionReserveFloor = compactionReserveFloorForContext(activeContextWindow);
-    await runCommand(OPENCLAW_BIN, [
-      "config",
-      "set",
-      "agents.defaults.compaction.reserveTokensFloor",
-      `${compactionReserveFloor}`,
-    ]);
+    // No compaction write any more: OpenClaw 2 replaced the reserve-tuning
+    // keys with compaction.mode (whose safeguard default needs no seeding)
+    // and fails validation on the retired reserveTokensFloor.
 
     // 4c. Local device gateway setup: keep token auth enabled for LAN binding,
     // but relax Control UI browser checks because the setup surface runs over
@@ -975,22 +3154,153 @@ export async function POST(request: Request) {
     // WS connections, and rotates legacy "clawbox" tokens automatically.
     console.log(`[AI Config] Configuring gateway for local access (provider: ${provider})`);
     const gatewayToken = await getOrGenerateGatewayToken();
-    await runCommand(OPENCLAW_BIN, [
-      "config", "set", "gateway.auth.mode", "token",
-    ]);
+    baseOps.push(["gateway.auth.mode", "token"]);
     // A null result means the token is externally managed. Preserve the
     // SecretRef/interpolation instead of replacing it with plaintext.
     if (gatewayToken !== null) {
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "gateway.auth.token", gatewayToken,
-      ]);
+      baseOps.push(["gateway.auth.token", gatewayToken]);
     }
-    await runCommand(OPENCLAW_BIN, [
-      "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
-    ]);
-    await runCommand(OPENCLAW_BIN, [
-      "config", "set", "gateway.controlUi.dangerouslyDisableDeviceAuth", "true", "--json",
-    ]);
+    // OpenClaw 2 retired gateway.controlUi.allowInsecureAuth and
+    // dangerouslyDisableDeviceAuth — a config carrying either fails
+    // validation outright. Browsers authenticate with the gateway token plus
+    // a device identity now (src/lib/gateway-device-identity.ts), so there
+    // is nothing to write here any more.
+    // ClawBox AI rides the deepseek provider, which OpenClaw 2 unbundled
+    // into its own plugin — without it the catalog resolves zero models and
+    // the primary write below is refused even with a VALID token (the fresh
+    // e2e container reproduced exactly that). gateway-pre-start heals this on
+    // boot, but only once a deepseek provider already exists in the config —
+    // which is what THIS route is in the middle of creating — so the first
+    // configure has to bring the plugin itself, pinned to the running core
+    // the same way (src/lib/openclaw-deepseek-plugin.ts says why). Best
+    // effort: a failed install falls through to the direct primary write
+    // below and the gateway's own readiness report names the missing plugin
+    // loudly.
+    if (isClawAI) {
+      try {
+        await fs.access(path.join(OPENCLAW_HOME_DIR, "extensions", "deepseek", "openclaw.plugin.json"));
+      } catch {
+        console.log("[AI Config] Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it)...");
+        const plugin = await installDeepseekProviderPlugin();
+        if (plugin.installed) {
+          console.log(`[AI Config] deepseek provider plugin installed (${plugin.installed})`);
+          // The plugin the boot script may have marked for repair is on disk
+          // again, and this route goes on to write the provider itself — so
+          // this IS the outcome, and the "Needs repair" badge on the ClawBox AI
+          // row has to go with it. Deliberately here rather than inside
+          // `installDeepseekProviderPlugin`: the Retry route calls that same
+          // helper and clears the marker only after `plugins inspect --runtime`
+          // says the plugin actually loaded, and a clear inside the installer
+          // would have thrown the badge away before that question was asked.
+          // PUT THE ENTRY BACK FIRST. `plugins install` leaves an entry that
+          // is explicitly `false` alone, and the boot script's boot-without
+          // wrote exactly that — so clearing here on the install alone would
+          // take the badge off a plugin still switched off, and this route's
+          // installer is a bare `plugins install` with no enable step of its
+          // own. Only for a row that says CLAWBOX disabled it.
+          const switchedOff = await clawboxDisabledEntryId("deepseek").catch(() => null);
+          let backOn = true;
+          if (switchedOff) {
+            try {
+              await runOpenclawConfigSet(
+                [`plugins.entries["${switchedOff}"].enabled`, "true", "--strict-json"],
+                { uid: CLAWBOX_UID, gid: CLAWBOX_GID },
+              );
+            } catch (err) {
+              // The badge STAYS: it is the only true thing left on screen, and
+              // the Retry it offers runs the same write again.
+              backOn = false;
+              console.warn(
+                "[AI Config] the deepseek plugin was installed but could not be switched back on;"
+                + " leaving its repair record in place:",
+                err instanceof Error ? err.message : err,
+              );
+            }
+          }
+          // SAID, not swallowed. The install succeeded and this route's own
+          // answer is about the provider, so a failed clear must not fail it —
+          // but a badge left on a row that works is a false failure the owner
+          // cannot act on, and the log is where it is looked for.
+          if (backOn) {
+            await clearPluginRepair("deepseek").catch((err: unknown) => {
+              console.warn(
+                "[AI Config] the deepseek repair marker could not be cleared; Settings may still show a Retry:",
+                err instanceof Error ? err.message : err,
+              );
+            });
+          }
+        } else {
+          console.warn(
+            "[AI Config] deepseek provider plugin install did not complete:",
+            JSON.stringify(logSafe(plugin.failures.join("; "))),
+          );
+        }
+      }
+    }
+
+    const primaryIdx = baseOps.findIndex((op) => op[0] === "agents.defaults.model.primary");
+    try {
+      await runConfigSetBatch(baseOps);
+    } catch (batchErr) {
+      const message = batchErr instanceof Error ? batchErr.message : String(batchErr);
+      // Only the OpenClaw 2 catalog-validation refusal of the primary falls
+      // through — anything else keeps its existing failure path. v2 checks a
+      // model reference against a freshly refreshed provider catalog, so a
+      // placeholder key (the wizard's documented "save the profile without
+      // validating the key" contract) or a provider plugin on its first boot
+      // resolves ZERO models and the whole batch was refused with it.
+      if (primaryIdx === -1 || !/Cannot set model reference/i.test(message)) {
+        throw batchErr;
+      }
+      const remaining = baseOps.filter((_, index) => index !== primaryIdx);
+      if (remaining.length > 0) {
+        await runConfigSetBatch(remaining);
+      }
+      // Direct atomic write for the primary alone, the same way this route
+      // already writes provider entries the CLI's schema lags behind. The
+      // gateway tolerates an unresolvable primary at rest; the model is
+      // proven the first time it speaks, exactly as before OpenClaw 2.
+      const primaryModel = String(baseOps[primaryIdx][1]);
+      // The narrow helper performs a strict read under the same cross-process
+      // sidecar lock OpenClaw's CLI/gateway use. That prevents a complete-file
+      // write from overwriting a concurrent auth/provider/gateway mutation and
+      // refuses malformed input instead of rebuilding the config from a fragment.
+      //
+      // Three routes write `agents.defaults.model.primary` and they hold three
+      // different policies on this same CLI refusal, deliberately, because they
+      // are asked three different questions:
+      //   * here (a credential save)   — write past it, and warn below if the
+      //     id is in no catalogue: refusing would make a placeholder key or a
+      //     plugin's first boot unable to finish setup at all;
+      //   * chat/model (a model PICK)  — refuse it (`refuseUnresolvableModel`):
+      //     the owner chose from a list and can choose again;
+      //   * local-ai/exclusive         — let it throw.
+      // Said here so a fourth writer does not invent a fourth policy.
+      await setPrimaryModelWithoutCatalogValidation(primaryModel);
+      // The retry above re-lands the plugin enable with the rest of the
+      // batch (it is not the primary), so the refusal here is the catalog's.
+      console.warn(
+        "[AI Config] Primary written directly — the CLI refused the reference (empty catalog for this key/plugin):",
+        // JSON-quoted: the modeled sanitizer for js/log-injection (see 3ef684a1).
+        JSON.stringify(logSafe(message)),
+      );
+      // …and only NOW decide whether a human needs to hear about it: is the id
+      // one this box has? `readKnownModelIds` is the picker's own list — the
+      // catalog route's cached enumeration unioned with the curated catalogue,
+      // read-only and spawn-free. Null is UNKNOWN (no enumeration yet, or a
+      // provider with no curated catalogue at all: llamacpp, ollama, deepseek)
+      // and stays silent, because the whole point is to name an id that exists
+      // NOWHERE, not to report a cold cache.
+      const primaryProvider = primaryModel.includes("/") ? primaryModel.split("/", 1)[0] : "";
+      const primaryId = extractProviderModelId(primaryModel, primaryProvider) ?? "";
+      const knownIds = primaryProvider && primaryId ? await readKnownModelIds(primaryProvider) : null;
+      if (knownIds && !knownIds.has(primaryId)) {
+        unvalidatedPrimaryWarning =
+          `Saved, but ${primaryModel} is in no model list this box has for ${primaryProvider}, `
+          + "and OpenClaw refused to validate it. Chat turns on it will fail. "
+          + "Pick a model in Settings to change it.";
+      }
+    }
 
     // 5. Ensure openclaw config files are owned by clawbox
     await Promise.all(
@@ -1002,14 +3312,84 @@ export async function POST(request: Request) {
     // computed earlier so the value stored alongside the token always
     // matches the tier that drove `agents.defaults.model.primary` above.
     const clawboxAiTierForStore = resolvedClawboxTier;
+    // The PLAN entry for the batches below, and whether there is one at all.
+    //
+    // A writer with NO portal answer retires the plan only when the ACCOUNT
+    // changed. A save on the same token — the owner switching model, nudging
+    // the plan pill, re-saving anything on this page — is not a change, and a
+    // portal that happened to be unreachable during it is no reason to throw
+    // away a plan that is still that account's. Deleting there puts the box
+    // back on its device badge, which is the default TASK-744 exists to stop
+    // deciding things: the Voice panel would tell a Max subscriber his plan has
+    // no cloud voice while the box speaks through one, and `register-mcp.sh`
+    // would stop arming it, until the next successful poll. `applyClawaiToHermes`
+    // keeps the same rule for the batch it owns.
+    // NOT `previousClawaiToken && …`: a box with no token on record is one we
+    // cannot vouch for either, so a plan sitting there belongs to nobody this
+    // save knows about and goes with the rest. Deleting a key that is not there
+    // is a no-op; leaving one that outlived its account is not.
+    const clawaiPlanIsForAnotherAccount = isClawAI && previousClawaiToken !== clawboxAiToken;
+    const clawaiPlanForStore = isClawAI && (portalPlan || clawaiPlanIsForAnotherAccount)
+      ? { [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(portalPlan) }
+      : {};
+    // The coding agent's three tools — `coding_agent_run`, `_status`, `_stop` —
+    // are registered CONDITIONALLY by the ClawBox MCP server, from a probe it
+    // makes ONCE while it boots; it is then a long-lived stdio child of the
+    // agent. `getCodingAgentStatus().ready` is `enabled` AND the coding harness
+    // installed AND ClawBox AI connected, and "connected" IS the `clawai_token`
+    // the batches below write. So this route can flip readiness, and until now
+    // it was the one writer of that key that never said so: the panel went
+    // "ready" and the running agent still had none of the three tools.
+    //
+    // `/setup-api/hermes/clawai` closes the same gap by sampling the verdict
+    // ahead of its own write, and `coding-agent-mcp-refresh`'s docblock states
+    // the invariant as "every Hermes connect entry point funnels through
+    // `applyClawaiToHermes`". THIS path is the counter-example, and it is
+    // reachable: `openclawIsAbsent()` is `readEdition() === "hermes"`, so an
+    // `edition=dual` box running the Hermes harness comes down here rather than
+    // through the Hermes branch above (TASK-577).
+    //
+    // BEFORE the write, for the reason that route spells out: read it a line
+    // later and the answer is always true, the before/after guard sees no
+    // change, and nothing is refreshed. Only for a save that can write the key
+    // — `undefined` everywhere else, so no other save pays for two status
+    // reads — and `undefined` again on a probe that threw, which must not turn
+    // a save into a 500 or buy a reload nobody asked for.
+    const codingAgentReadyBefore = isClawAI ? await codingAgentReady() : undefined;
+    // Set when the dual arm below has already told Hermes — and with it, done
+    // every refresh this route would otherwise ask for.
+    let appliedToHermes = false;
+    // What the owner is told when that arm did NOT land. The apply is a
+    // sequence of independent `hermes config set` calls that throws on the
+    // first failing one, so it can stop with Hermes pointed at the clawai
+    // provider and the previous provider's `model.default` still in place —
+    // every turn then fails with "Model not allowed" while this route answers
+    // 200. The save itself did land (OpenClaw is configured, the credential is
+    // on disk), so this is a warning and not an error, but silence over it is
+    // the false-success shape: an outcome reported before it happened.
+    let hermesWarning: string | undefined;
     if (isLocalScope) {
       await setMany({
         local_ai_configured: true,
         local_ai_provider: ocProvider,
         local_ai_model: config.defaultModel,
         local_ai_configured_at: new Date().toISOString(),
+        // Consumed by shouldPromoteLocalToPrimary above.
+        local_ai_was_default: undefined,
+        // UNREACHABLE today, and it must stay that way or be given the pick
+        // clear its sibling batch below carries: `isLocalScope` with neither
+        // Ollama nor llama.cpp is refused with a 400 long before this, so
+        // `isClawAI && isLocalScope` cannot happen. If that guard ever loosens,
+        // this becomes a ClawBox AI token write with no `ai_model_explicit_picks`
+        // beside it — the previous account's model choice surviving into the
+        // next account's box (TASK-713).
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
+        // The PLAN beside the badge, in the SAME batch so the pair the boot
+        // scripts read cannot come apart — see `clawaiPlanForStore` above for
+        // when it is written, when it is retired, and when the key is left
+        // exactly as it is.
+        ...clawaiPlanForStore,
       });
       // Everything above configures OpenClaw. On a Hermes device that left the
       // model running and unreachable: Settings said "configured" while the
@@ -1044,17 +3424,208 @@ export async function POST(request: Request) {
         ai_model_configured_at: new Date().toISOString(),
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
+        // The PLAN beside the badge, in the SAME batch so the pair the boot
+        // scripts read cannot come apart — see `clawaiPlanForStore` above for
+        // when it is written, when it is retired, and when the key is left
+        // exactly as it is.
+        ...clawaiPlanForStore,
+        // The owner named a model in this save (TASK-713), or this save linked a
+        // different ClawBox AI account and the previous owner's pick goes with
+        // it. Either way in the SAME batch as the other facts about the save, so
+        // a token that landed and a pick that was remembered — or forgotten —
+        // cannot come apart.
+        ...(explicitPickToRecord
+          ? {
+            [EXPLICIT_MODEL_PICKS_KEY]: {
+              ...(clawaiPicksToStore ?? explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY])),
+              [normalizeProviderId(ocProvider) ?? ocProvider]: explicitPickToRecord,
+            },
+          }
+          : clawaiPicksToStore
+            ? { [EXPLICIT_MODEL_PICKS_KEY]: clawaiPicksToStore }
+            : {}),
       });
+      // The cloud save has landed — see `forgetLocalWasDefault`.
+      await forgetLocalWasDefault();
+      // A ClawBox AI save is the owner doing the thing a harness fault told
+      // them to do.
+      //
+      // When a run dies because the harness could not get a model to answer,
+      // the device remembers it and refuses new runs for a while so they do
+      // not die the same way — and the message sent the owner HERE ("check
+      // ClawBox AI is connected and that your plan covers the model the
+      // harness asks for"). Landing back on a box that still refuses runs,
+      // over a clock they were never shown, would make this route the one
+      // place its own advice does not work. The fault is only evidence, and a
+      // fresh credential is newer evidence.
+      //
+      // HERE, and not beside the refresh further down, because of the Hermes
+      // hand-off immediately below: `applyClawaiToHermes` takes its OWN
+      // before/after readiness pair and does its own refresh, and a fault
+      // still standing when it reads "after" keeps readiness false — so it
+      // asks for no reload, and `appliedToHermes` then suppresses the fallback
+      // refresh as well. The save would report a ready box whose agent has
+      // none of the three coding_agent_* tools. Clearing first means both
+      // paths see the same box.
+      if (isClawAI) await forgetCodingHarnessFault();
+      // THE DUAL SKU, where OpenClaw exists and HERMES is the harness actually
+      // answering. Everything above configured OpenClaw, exactly as it does on
+      // the flagship box — and on this one that left the credential invisible
+      // to the agent the owner is talking to: Hermes keeps its own provider
+      // catalogue, its own image backend and its own speech slot, so
+      // `ai_set_provider("clawai")` went on answering "That provider is not set
+      // up on this device" over a token the owner had just pasted. The Hermes
+      // branch above cannot cover it — `openclawIsAbsent()` is
+      // `readEdition() === "hermes"`, so a dual box never reaches it (TASK-577)
+      // — and this is the same shape the LOCAL model case above already carries
+      // through `applyLocalAiToHermes`, for the same SKU and the same reason.
+      //
+      // Non-fatal: OpenClaw is configured either way and the credential is on
+      // disk, so a Hermes write that fails must not turn a save that landed
+      // into an error. It is LOUD, though — the agent's own view is what the
+      // owner will judge the save by.
+      if (isClawAI && (await getActiveHarness()) === "hermes") {
+        try {
+          await applyClawaiToHermes(
+            clawboxAiToken,
+            resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER,
+            {
+              // The token was written in the batch above, so the apply's own
+              // reads of both facts would answer about THIS save rather than
+              // the state before it: `ready` would be true whatever the box
+              // looked like a moment ago (no reload), and `accountChanged`
+              // false on every real link (the previous owner's model pick
+              // applied to the new account). Both are the snapshots this route
+              // already holds — the same pair `/setup-api/hermes/clawai`
+              // passes, for the same reason.
+              codingAgentReadyBefore,
+              previousClawaiToken,
+              // The PORTAL's answer, which only this route has; the plan is
+              // written beside the tier and deleted with it.
+              portalPlan,
+              // NOT the voice. `applyClawaiToHermes` picks Hermes' cloud voice
+              // for a box that has none, which is right when the box's own
+              // harness is being linked — it is how a hermes box gets one — and
+              // wrong to decide HERE: on the dual SKU the cloud-voice question
+              // is open with the owner, and a save made for the credential must
+              // not settle it as a side effect. Before this arm existed a dual
+              // box could not reach that writer from this route at all, and it
+              // still cannot.
+              selectCloudVoice: false,
+            },
+          );
+          // The apply performs the coding-agent, provider and image refreshes
+          // itself, from ITS before/after pair — so the block below must not
+          // ask for a second global reload, which respawns every MCP child and
+          // invalidates the model's prompt cache again.
+          appliedToHermes = true;
+        } catch (err) {
+          console.error(
+            "[ai-models/configure] ClawBox AI is configured for OpenClaw but Hermes did not take it:",
+            err instanceof ClawaiApplyError ? err.message : err,
+          );
+          hermesWarning =
+            "Saved, but the on-device agent has not taken the credential yet — open Settings → AI Models and save again.";
+        }
+      }
+    }
+
+    // The credential is on disk, so ask the agent to rebuild its tool list if
+    // — and only if — this save is what made the coding agent usable. Only that
+    // direction is live here: `getConfiguredClawboxAiToken` falls back to the
+    // stored token and an empty one is refused with a 400 long before this, so
+    // a ClawBox AI save can never CLEAR `clawaiConnected`. The guard is the
+    // helper's either way: a reload respawns every
+    // MCP child and invalidates the model's prompt cache, so a re-save of a
+    // token the box already held must not buy one. Best effort by design; the
+    // owner's save has already landed and an edition with no dashboard to ask
+    // re-probes at the next respawn on its own.
+    if (codingAgentReadyBefore !== undefined && !appliedToHermes) {
+      const readyAfter = await codingAgentReady();
+      if (readyAfter !== undefined) {
+        await refreshCodingAgentToolsIfReadinessChanged(codingAgentReadyBefore, readyAfter);
+      }
+    }
+
+    // Connecting a provider is the owner saying "use this one": a provider the
+    // switch had turned off comes back on, or the save below would route the
+    // chat to something the provider list still shows as switched off.
+    // Non-fatal — the switch is bookkeeping, the credential write is the save.
+    try {
+      // It ANSWERS rather than throwing when the provider list has no such row
+      // (`readProviderStatus` on Hermes asks the dashboard, which the apply
+      // above may have just restarted), so the result has to be read or a
+      // provider the owner just connected stays on the disabled list in
+      // silence.
+      const reEnabled = await setProviderEnabled(ocProvider, true);
+      if (!reEnabled.ok) {
+        console.error(`[ai-models/configure] could not re-enable ${ocProvider}: ${reEnabled.kind}`);
+      }
+    } catch (err) {
+      console.error("[ai-models/configure] could not re-enable the provider:", err instanceof Error ? err.message : err);
     }
 
     // 7. For ClawBox AI (DeepSeek) or Ollama, define a custom provider in openclaw.json
     // and set models.mode=replace so the gateway uses our definition.
     if (isClawAI) {
-      await configureClawboxAi(false, clawboxAiToken);
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.mode", "merge",
-      ]);
-      await ensureFallbackModel(config.defaultModel, undefined, clawboxAiToken);
+      // ONE provisioning pass, not two. This used to call configureClawboxAi()
+      // and then ensureFallbackModel(), which — with no local model to fall
+      // back to, which is the normal case — called configureClawboxAi() a
+      // SECOND time for the sole purpose of writing
+      // `agents.defaults.model.fallbacks`. Every write in it therefore paid the
+      // CLI's ~8 s cold start twice. Decide the fallback first and hand both
+      // that decision and `models.mode` to the single pass, so the whole
+      // ClawBox AI provisioning is one `config set --batch-json` (TASK-483).
+      const localFallback = await pickLocalFallbackModel(config.defaultModel, undefined);
+      // The two fallback outcomes keep the fatality they had when they lived in
+      // ensureFallbackModel: a local fallback was written before its try block
+      // and so was fatal, while the ClawBox AI one was written inside it and so
+      // only warned. Inherited, not chosen — batching them must not quietly
+      // change either.
+      const fallbackGroup: ConfigSetGroup = localFallback
+        ? {
+            ops: [[
+              "agents.defaults.model.fallbacks",
+              JSON.stringify([localFallback]),
+              "--json",
+            ]],
+            onApplied: () =>
+              console.log(`[AI Config] Configured local fallback model: ${logSafe(localFallback)}`),
+          }
+        : {
+            ops: [[
+              "agents.defaults.model.fallbacks",
+              JSON.stringify([CLAWBOX_AI_MODEL]),
+              "--json",
+            ]],
+            onApplied: () => console.log("[AI Config] Configured ClawBox AI as fallback model"),
+            onError: (err) =>
+              console.warn(
+                "[AI Config] Failed to configure fallback model:",
+                err instanceof Error ? logSafe(err.message) : err,
+              ),
+          };
+      const clawboxAiConfigured = await configureClawboxAi(
+        false,
+        clawboxAiToken,
+        {
+          requiredOps: [["models.mode", "merge"]],
+          groups: [fallbackGroup],
+          // Answered HERE, from the snapshot taken before this request's own
+          // `setMany` — see the field's docblock. `previousClawaiToken` is the
+          // same value the ClawKeep account-switch guard below reads, so a
+          // re-link cannot be a credential change for one of them and not the
+          // other.
+          credentialChanged: clawboxAiToken !== previousClawaiToken,
+        },
+      );
+      if (!clawboxAiConfigured) {
+        // Unreachable in practice — the handler already 400s when ClawBox AI
+        // has no token — but keep the old shape rather than silently leave a
+        // stale fallback naming a provider this box no longer has.
+        await runConfigSetBatch([["models.mode", "merge"]]);
+        await ensureFallbackModel(config.defaultModel, undefined, clawboxAiToken);
+      }
       console.log(`[AI Config] Set ClawBox AI provider in openclaw.json via proxy ${CLAWBOX_AI_PROXY_URL}`);
 
       // Account-switch safety: ClawKeep pairs separately and is bound to its
@@ -1091,19 +3662,17 @@ export async function POST(request: Request) {
           maxTokens: OLLAMA_MAX_TOKENS,
         }],
       });
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.providers.ollama", providerDef, "--json",
-      ]);
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.mode", isLocalScope ? "merge" : "replace",
+      await runConfigSetBatch([
+        ["models.providers.ollama", providerDef, "--json"],
+        ["models.mode", isLocalScope ? "merge" : "replace"],
       ]);
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
       try {
-        await runCommand("sudo", ["/home/clawbox/clawbox/scripts/optimize-ollama.sh"]);
+        await runCommand("sudo", ["/usr/local/libexec/clawbox/optimize-ollama.sh"]);
       } catch (err) {
         // Non-fatal: Ollama will still work, just use more memory
-        console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? err.message : err);
+        console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? logSafe(err.message) : err);
       }
       console.log(`[AI Config] Set ollama provider in openclaw.json: ${logSafe(modelName)} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
     } else if (isLlamaCpp) {
@@ -1122,50 +3691,61 @@ export async function POST(request: Request) {
           maxTokens: llamaCppMaxTokens,
         }],
       });
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.providers.llamacpp", providerDef, "--json",
-      ]);
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.mode", isLocalScope ? "merge" : "replace",
+      await runConfigSetBatch([
+        ["models.providers.llamacpp", providerDef, "--json"],
+        ["models.mode", isLocalScope ? "merge" : "replace"],
       ]);
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${logSafe(modelName)} (context=${llamaCppContextWindow}, mode=replace)`);
     } else if (isOpenRouter) {
       // OpenRouter has no native OpenClaw adapter, so without this explicit
-      // provider entry the chat turn silently returns usage 0/0/0.
-      await writeOpenAICompatProvider({
+      // provider entry the chat turn silently returns usage 0/0/0 — and no
+      // OAuth flow either (it is absent from OAUTH_PROVIDERS), so every save
+      // that reaches here is key-based and keeps the override.
+      const openrouterWroteOverride = await applyCloudProviderTransport({
         provider: "openrouter",
         baseUrl: "https://openrouter.ai/api/v1",
         apiKey: normalizedApiKey,
+        authMode,
         defaultModel: config.defaultModel,
         curatedModels: OPENROUTER_CURATED_MODELS,
       });
-      console.log(`[AI Config] Set openrouter provider (openai-compat): ${logSafe(config.defaultModel)}`);
+      console.log(`[AI Config] Set openrouter provider (${openrouterWroteOverride ? "openai-compat" : "native plugin, subscription auth"}): ${logSafe(config.defaultModel)}`);
     } else if (isGoogle) {
       // Native google plugin registers Gemini models but its 2026.6.8 auth
       // fails at call time (runs fall back with reason=auth). Route through
-      // Google's OpenAI-compat endpoint instead.
-      await writeOpenAICompatProvider({
+      // Google's OpenAI-compat endpoint instead — for the SUBSCRIPTION
+      // (Gemini Code Assist OAuth) sign-in too. Google is the one sibling of
+      // the anthropic bug fixed here, and it is deliberately left alone: see
+      // `routesSubscriptionNatively` for why taking its override away without
+      // a device to prove the native route on would repeat the same mistake.
+      const googleWroteOverride = await applyCloudProviderTransport({
         provider: "google",
         baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
         apiKey: normalizedApiKey,
+        authMode,
         defaultModel: config.defaultModel,
         curatedModels: GOOGLE_MODELS,
       });
-      console.log(`[AI Config] Set google provider (openai-compat): ${logSafe(config.defaultModel)}`);
+      console.log(`[AI Config] Set google provider (${googleWroteOverride ? "openai-compat" : "native plugin, subscription auth"}): ${logSafe(config.defaultModel)}`);
     } else if (isAnthropic) {
-      // Native anthropic plugin reads a per-agent sqlite auth store that
-      // ClawBox's file auth profile doesn't populate, so it fails with
-      // "No API key found" at call time. Route through Anthropic's OpenAI-compat
-      // endpoint with the key inline instead.
-      await writeOpenAICompatProvider({
+      // With an API KEY: the native anthropic plugin reads a per-agent sqlite
+      // auth store that ClawBox's file auth profile doesn't populate, so it
+      // fails with "No API key found" at call time — route through Anthropic's
+      // OpenAI-compat endpoint with the key inline instead.
+      //
+      // With a Claude Pro/Max SUBSCRIPTION: that same override is what made
+      // every turn 429. applyCloudProviderTransport keeps the two apart; see
+      // its doc comment for the transport proof.
+      const anthropicWroteOverride = await applyCloudProviderTransport({
         provider: "anthropic",
         baseUrl: "https://api.anthropic.com/v1",
         apiKey: normalizedApiKey,
+        authMode,
         defaultModel: config.defaultModel,
         curatedModels: ANTHROPIC_MODELS,
       });
-      console.log(`[AI Config] Set anthropic provider (openai-compat): ${logSafe(config.defaultModel)}`);
+      console.log(`[AI Config] Set anthropic provider (${anthropicWroteOverride ? "openai-compat" : "native plugin, subscription auth"}): ${logSafe(config.defaultModel)}`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
@@ -1194,29 +3774,78 @@ export async function POST(request: Request) {
     //    Only sweep when this configure call actually set a new primary
     //    (skip for local-only local-AI setups that leave the primary
     //    alone).
-    if (!isLocalScope || shouldPromoteLocalToPrimary) {
-      const parsedPrimary = parseFullyQualifiedModel(config.defaultModel);
-      if (parsedPrimary) {
-        try {
-          await applyModelOverrideToAllAgentSessions({
-            provider: parsedPrimary.provider,
-            modelId: parsedPrimary.modelId,
-            source: "user",
-          });
-        } catch (err) {
-          // Non-fatal: the default change above still takes effect for
-          // brand-new sessions; worst case the user resets the open chat.
-          console.error("[configure] Failed to sweep session overrides:", err);
+    //
+    //    NOT while the gateway is stopped. A sign-in that went through the
+    //    auth-profile migration stopped the gateway for `doctor` above and
+    //    nothing restarts it before step 9, so this sweep used to run into
+    //    "Gateway not reachable (ECONNREFUSED)" and be swallowed as non-fatal
+    //    — on a box (2026-09-18) the main session kept its old ClawBox AI pin
+    //    while the box default became GPT-6 Astra, and every turn ran on the
+    //    pin under a header that said Astra. The sweep is deferred past the
+    //    restart, and past the gateway ANSWERING, not merely listening.
+    //
+    //    Decided HERE, outside the closure, because the deferral decision below
+    //    has to know it: a save that will sweep nothing must not hold Settings
+    //    for the readiness budget, and must never report a failed sweep about
+    //    one that was never going to run.
+    const sweepTarget = isLocalScope && !shouldPromoteLocalToPrimary
+      ? null
+      : parseFullyQualifiedModel(config.defaultModel);
+    const sweepSessionsToPrimary = async (): Promise<boolean> => {
+      if (!sweepTarget) return true;
+      try {
+        const result = await applyModelOverrideToAllAgentSessions({
+          provider: sweepTarget.provider,
+          modelId: sweepTarget.modelId,
+          source: "user",
+        });
+        // An absent exception is NOT an outcome. On an OpenClaw 2 agent — the
+        // sqlite store, which is every current box — a session the gateway
+        // refuses is caught inside `patchChunk`, counted into `sessionsSkipped`
+        // and logged, and the call returns normally; reading the `try` alone
+        // answered 200 with no warning over chats that kept their old pin.
+        //
+        // `sessionsUpdated === 0` is deliberately NOT a failure: with nothing
+        // skipped it means the box had no session to repoint (a fresh box, or
+        // every candidate deliberately left alone), which is the ordinary case
+        // and not something to warn an owner about.
+        if (result.sessionsSkipped > 0) {
+          console.warn(
+            `[configure] The gateway would not re-point ${result.sessionsSkipped} session(s); they keep their previous model`,
+          );
+          return false;
         }
+        return true;
+      } catch (err) {
+        // The default change above still takes effect for brand-new sessions;
+        // an open chat keeps its pin until the owner picks again. Said in the
+        // answer (step 9), never only here.
+        console.error("[configure] Failed to sweep session overrides:", err);
+        return false;
+      }
+    };
+    let sessionSweepDeferred = false;
+    let sessionSweepFailed = false;
+    if (sweepTarget) {
+      if (gateway.state === "stopped-for-doctor") {
+        sessionSweepDeferred = true;
+      } else {
+        sessionSweepFailed = !(await sweepSessionsToPrimary());
       }
     }
 
-    // 8b. Gate the anthropic plugin to only when the active primary provider
-    //     actually needs it. The plugin's tool schemas otherwise add several
-    //     seconds to every agent prep — see setProviderPlugins.
+    // 8b. The OFF half of the gate: switch the anthropic plugin off only when
+    //     nothing on the box could use it — the primary is elsewhere AND no
+    //     usable Anthropic credential remains (the ON half rode in the primary
+    //     batch at step 3). See setProviderPlugins for the catalog measurement
+    //     behind the rule.
     if (!isLocalScope || shouldPromoteLocalToPrimary) {
       const primaryProvider = config.defaultModel.split("/", 1)[0];
-      await setProviderPlugins(primaryProvider);
+      // Same gate, same rule: it returns the provider whose plugin it flipped,
+      // which is a catalogue change for THAT provider — not for the one this
+      // save is about, which step 8c counts below.
+      const flippedProvider = await setProviderPlugins(primaryProvider);
+      if (flippedProvider) notifyProviderSetChanged(flippedProvider);
     }
 
     // 8c. Kick off a catalog refresh for the just-configured provider so
@@ -1229,14 +3858,24 @@ export async function POST(request: Request) {
     //     flight guarded inside refreshInBackground, so concurrent configure
     //     calls collapse to one openclaw fork.
     //
-    //     `ocProvider` is the openclaw-side provider id (e.g. "anthropic",
-    //     "openai", "codex", "google", "deepseek"). The catalog uses
-    //     "clawai" for ClawBox AI rather than "deepseek", so map that case.
-    //     Skip providers that aren't part of the catalog (local-only, llamacpp).
-    const catalogProvider = ocProvider === "deepseek" ? "clawai" : ocProvider;
-    if (isCatalogProvider(catalogProvider)) {
-      refreshCatalogInBackground(catalogProvider);
-    }
+    //     `notifyProviderSetChanged` owns the openclaw-id mapping and the
+    //     catalogue-membership test, so this call site does not repeat them.
+    //     It COUNTS the change — the plugin was switched on and the credential
+    //     written one step above, so any earlier pre-auth enumeration and any
+    //     backoff it recorded describe a box that no longer exists. A client's
+    //     `?refresh=1` cannot count it; only a write can.
+    notifyProviderSetChanged(ocProvider);
+
+    // 8d. Did this save flip `models.mode`? Then every recorded model COUNT was
+    //     taken under a rule that no longer holds — under `replace` the core
+    //     serves the configured rows alone, which is how google goes from ten
+    //     models to none — so none of them may keep a Providers row hidden.
+    //     Forgetting them shows every row again at once, at the cost of one
+    //     small file write and no enumeration at all; each provider records the
+    //     new truth on the next refresh that happens for its own reasons.
+    //     Compared against the config as it is NOW, so a write that did not
+    //     land counts for nothing.
+    if ((await readModelsMode()) !== modelsModeBefore) await forgetProviderEnumerations();
 
     // Codex 2026.6.x reads its ChatGPT session from the Codex CLI's own
     // ~/.codex/auth.json, which gateway-pre-start.sh synthesizes from this
@@ -1244,32 +3883,250 @@ export async function POST(request: Request) {
     // stale file so the restart below regenerates it with the fresh token —
     // afterward the Codex app-server owns its own refresh, so we don't touch
     // it again.
-    if (ocProvider === "codex") {
-      await fs
-        .rm(path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"), { force: true })
-        .catch(() => {});
-    }
-
-    // 9. Restart OpenClaw gateway so it picks up the new auth profile and model
-    try {
-      await restartGateway();
-    } catch (err) {
-      console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? err.message : err);
-      return NextResponse.json(
-        { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
-        { status: 502 },
+    //
+    // Every agent's `codex-home/auth.json` goes with it. That file is the
+    // Codex app-server's own CODEX_HOME copy, and scripts/codex-auth-mirror.js
+    // deliberately refuses to overwrite one holding a refresh token core does
+    // not have: overwriting a live app-server rotation with core's spent copy
+    // is what burnt the token family in #278. On a 2026.8 box that script can
+    // no longer write core's store back (the per-agent `auth_profile_store`
+    // row holds zero profiles after `doctor --fix`), so a diverged file never
+    // leaves that state — it keeps the PREVIOUS account's token for the life of
+    // the box and the sync timer warns about it every ten minutes, advising a
+    // re-login that did not clear it. A sign-in is the one moment the account
+    // genuinely changes, which makes it the only place the divergence can be
+    // settled without guessing.
+    if (isChatgptSubscription) {
+      const agentsRoot = path.join(OPENCLAW_HOME_DIR, "agents");
+      const agentIds = await fs.readdir(agentsRoot).catch((err: unknown) => {
+        // Not fatal — the sign-in itself succeeded — but a box that could not
+        // be enumerated keeps its stale codex-home mirrors, and that state is
+        // otherwise invisible: `force: true` swallows ENOENT, not EACCES.
+        console.warn("[configure] Could not enumerate agent dirs to clear stale Codex mirrors:", err instanceof Error ? logSafe(err.message) : err);
+        return [] as string[];
+      });
+      const staleMirrors = [
+        path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"),
+        ...agentIds.map((id) => path.join(agentsRoot, id, "agent", "codex-home", "auth.json")),
+      ];
+      await Promise.all(
+        staleMirrors.map((file) =>
+          fs.rm(file, { force: true }).catch((err: unknown) => {
+            console.warn("[configure] Could not clear a stale Codex mirror:", logSafe(file), err instanceof Error ? logSafe(err.message) : err);
+          }),
+        ),
       );
     }
 
+    // (The OAuth doctor migration runs right after the store write in step 1
+    // — see the subscription branch — so nothing here executes against an
+    // un-migrated auth store.)
+
+    // 9. Restart OpenClaw gateway so it picks up the new auth profile and model
+    gateway.state = "restart-issued";
+    let gatewayWarning: string | undefined;
+    // `setup_complete` flips at the very end of the wizard
+    // (/setup-api/setup/complete), so "not true" is exactly "the first-run
+    // wizard is still driving this box".
+    //
+    // Read through route-auth, NOT through the config-store snapshot above.
+    // `readConfig()` there is fail-OPEN — a damaged config.json reads as `{}` —
+    // and route-auth exists precisely to say that must not decide this key: it
+    // fails CLOSED, so an unreadable config is "provisioned", which is also
+    // what `/setup-api/setup/status` and middleware serve. Fail open here and a
+    // box whose config.json is truncated renders Settings while this route
+    // treats it as the wizard and silently drops the notice Settings is the one
+    // branch that renders. Re-read per request; nothing is cached.
+    const firstRunWizard = !readSetupGateFacts().setupComplete;
+    // The sweep that follows the gateway with NOBODY waiting on its answer: the
+    // wizard, and a Settings save whose own budget ran out. One definition for
+    // both, so they cannot drift, and `.catch` on it — this file's own rule for
+    // every detached call (see the two restores in the POST wrapper and the
+    // cloud-defaults applier below), and under Node an unhandled rejection is a
+    // dead process.
+    //
+    // Twice the port budget, because nothing is holding a request open for it:
+    // the whole point of detaching is that the answer may take longer than a
+    // person will wait. Derived from the same operator knob (`gatewayReadyWaitMs`,
+    // `GATEWAY_READY_WAIT_MS`) so a box that needs longer gets longer here too.
+    const scheduleDeferredSweep = () => {
+      void waitForGatewayRpcReady(gatewayReadyWaitMs() * 2)
+        .then((ready) => (ready ? sweepSessionsToPrimary() : false))
+        .catch((err) => {
+          // The save has LANDED by the time this runs, and its answer has gone
+          // out. A rejection here must not take the web server down over a
+          // sweep whose failure the owner has already been told about.
+          console.warn(
+            "[configure] the deferred session sweep could not run:",
+            err instanceof Error ? logSafe(err.message) : err,
+          );
+        });
+    };
+    try {
+      // The readiness answer is worth waiting for only where something reads
+      // it, and in the wizard nothing does: AIModelsStep's wizard branch logs
+      // `warning` and calls onNext() (Settings is the branch that renders it),
+      // and llamacpp/install, clawai/poll and useOllamaModels all drop it too.
+      // The cost is not theoretical — e2e-install measured THIS request at
+      // 52 894 ms on a cold first boot: ~23 s of config writes and `systemctl
+      // restart`, then the whole 30 s budget, expired. So first boot pays the
+      // full budget for a value with no consumer, on the one path where the
+      // budget is not even enough to answer. Skip the port poll there, exactly
+      // as /setup-api/system/hostname does for its own discarded answer.
+      //
+      // Only the poll is skipped, never the restart: a REFUSED restart still
+      // throws from the exec below and still 502s, in the wizard too. And a
+      // gateway that never comes back is not silent either — the chat the
+      // wizard hands off to cannot open a session without one.
+      await restartGateway({ awaitReady: !firstRunWizard });
+      if (sessionSweepDeferred) {
+        // The port is open once `awaitReady` returns; the RPC is not. In the
+        // wizard the answer has no consumer and no session to speak of, so the
+        // sweep follows readiness in the background; in Settings it is waited
+        // for, because the chat the owner returns to is the one being re-pointed.
+        //
+        // BOUNDED by the same budget the port wait above uses, and no longer:
+        // this box is reachable through the Cloudflare tunnel, whose origin
+        // gives up at ~100 s, and a save that landed reported as "Failed to
+        // configure" is the false failure this wait must not create. Past the
+        // budget the answer goes out saying the pins are still there, and the
+        // sweep follows the gateway on its own — "slow" is not "never".
+        if (firstRunWizard) {
+          scheduleDeferredSweep();
+        } else if (await waitForGatewayRpcReady(gatewayReadyWaitMs())) {
+          sessionSweepFailed = !(await sweepSessionsToPrimary());
+        } else {
+          sessionSweepFailed = true;
+          scheduleDeferredSweep();
+        }
+      }
+    } catch (err) {
+      console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? logSafe(err.message) : err);
+      // A gateway that has not finished coming back is NOT a failed configure.
+      // The provider, the credential and the model are all written by the time
+      // this runs; only the wait gave up. This 502 predates the readiness wait,
+      // when it could fire only if `systemctl restart` itself failed — the wait
+      // widened it to "the port did not open inside 30 s", which is a state the
+      // box recovers from on its own, and reporting it as a failure stops the
+      // first-boot wizard dead at the AI step and tells the owner to reboot a
+      // box that needed ten more seconds.
+      //
+      // A restart that was REFUSED is a different fact: nothing is coming, and
+      // the owner does have to act. That one keeps the 502.
+      if (!(err instanceof GatewayNotReadyError)) {
+        return NextResponse.json(
+          { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
+          { status: 502 },
+        );
+      }
+      gatewayWarning = "Saved, but the gateway has not finished restarting — the new model applies once it is serving again.";
+      // The port never came back inside the budget, so the deferred sweep
+      // has not run either: say so now, and still let it follow the gateway
+      // when it does come back rather than leaving the pins for good.
+      if (sessionSweepDeferred) {
+        sessionSweepFailed = true;
+        scheduleDeferredSweep();
+      }
+    }
+
+    // THE CLOUD DEFAULTS (the owner's decision of 2026-09-14). A ClawBox AI
+    // save is the moment the box either gains a subscription or changes the one
+    // it has, and the cloud voice, cloud transcription and cloud embeddings all
+    // follow from what that subscription covers. Asked for HERE, after the
+    // gateway restart above, because two of the three writes go through the
+    // openclaw CLI and the entry for the cloud voice is written by
+    // `gateway-pre-start.sh` on the way back up.
+    //
+    // Best effort, and never awaited for its answer: the save has landed, and
+    // the applier's own contract is that it never rejects and never demotes.
+    // The boot hook runs the same pass 45 s into every start, so a box this
+    // misses is put right by its next restart rather than left behind.
+    //
+    // DETACHED, which is what the paragraph above always claimed and the code
+    // did not do: it `await`ed. The applier walks three capabilities in series —
+    // the embedder probe waits up to 8 s on its own, and each openclaw CLI write
+    // behind it costs 10–12 s normally against a 30 s timeout — so the full
+    // timeout path held this response for minutes while the first-boot wizard
+    // sat on a save that had already landed. Nothing in the answer depends on
+    // it, and the boot hook re-runs the same pass 45 s into every start.
+    if (isClawAI) {
+      void import("@/lib/clawai-cloud-defaults")
+        .then(({ applyClawaiCloudDefaults }) =>
+          applyClawaiCloudDefaults({
+            trigger: "link",
+            // The credential may be a different account's, so anything this box
+            // has learned about what the last one could reach is about somebody
+            // else.
+            credentialChanged: previousClawaiToken !== clawboxAiToken,
+          }),
+        )
+        .catch((err) => {
+          // The save has LANDED by the time this runs. An unhandled rejection
+          // here would report a box that is configured as one that is not.
+          console.warn(
+            "[configure] could not apply the ClawBox AI cloud defaults:",
+            err instanceof Error ? logSafe(err.message) : err,
+          );
+        });
+    }
+
     // Configuration fully applied — now consume the OAuth handoff file (if any).
-    // Deferring the unlink to here means a transient failure above returned
-    // early with the file intact, so the client can retry within the TTL.
+    // Deferring the unlink to here means a failure that returned EARLY left the
+    // file intact, so the client can retry within the TTL. A gateway that has
+    // not finished restarting is not one of those: it falls through to here and
+    // consumes the file, which is right — the configure landed, and a retry
+    // would redo a completed save.
     if (pendingHandoffTokensPath) {
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    return NextResponse.json({ success: true });
+    // A sweep that could not run is said, never swallowed: the box default IS
+    // the new model, but a chat already open keeps the model it was pinned to
+    // until the owner picks again in its header.
+    const sessionSweepWarning = sessionSweepFailed
+      ? "Saved, but a chat that was already open keeps its previous model — pick the model again in its header."
+      : undefined;
+    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, gatewayWarning, sessionSweepWarning]
+      .filter(Boolean)
+      .join(" ");
+    return NextResponse.json({
+      success: true,
+      ...(warning ? { warning } : {}),
+      // The plan may have moved while the model deliberately did not (TASK-713).
+      // Reported so the plan card can say so, rather than answering 200 over a
+      // screen where nothing appears to have happened.
+      ...(explicitPickKept ? { explicitPickKept: true, model: config.defaultModel } : {}),
+    });
   } catch (err) {
+    // The one refusal that is not a failure: the save was REFUSED before
+    // anything was written, and the owner can act on it. Its own status and
+    // code, and the sentence names the credential slot so the Terminal
+    // instruction can be followed literally. Answered before the sanitising
+    // branch below, which would otherwise turn it into "check your
+    // credentials" over a key that is perfectly good (TASK-662).
+    if (err instanceof SignInWouldBeLostError) {
+      console.warn(
+        `[configure] refused an API key that would replace the sign-in at ${err.profileId}`,
+      );
+      return NextResponse.json(
+        {
+          error: "This box is signed in to that provider, and the sign-in is stored in the same "
+            + `credential slot (${err.profileId}). Saving an API key here would delete it. `
+            + "Remove the sign-in first — in the Terminal: "
+            // Unpinned, exactly as the guard read and the paste wrote: the
+            // core resolves the same agent for all three, and naming one here
+            // would send the owner at a store none of them touched. Argument
+            // order is the command's own
+            // (`models auth logout [options] <profileId>`, read from its
+            // --help on 2026.8.1).
+            + `openclaw models auth logout ${err.profileId}`
+            + " — then paste the key.",
+          code: "sign_in_would_be_lost",
+          profileId: err.profileId,
+        },
+        { status: 409 },
+      );
+    }
     // Never surface the raw error: it can carry CLI internals and filesystem
     // paths. Log it server-side for diagnosis and return a generic, actionable
     // message (mirrors the sanitized gateway-restart branch above).

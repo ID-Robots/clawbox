@@ -1,0 +1,362 @@
+[
+  {
+    "id": 1,
+    "name": "Sensor unit 001",
+    "kind": "lidar",
+    "firmware": "2.1.1"
+  },
+  {
+    "id": 2,
+    "name": "Sensor unit 002",
+    "kind": "imu",
+    "firmware": "2.2.2"
+  },
+  {
+    "id": 3,
+    "name": "Sensor unit 003",
+    "kind": "gps",
+    "firmware": "2.3.0"
+  },
+  {
+    "id": 4,
+    "name": "Sensor unit 004",
+    "kind": "thermal",
+    "firmware": "2.4.1"
+  },
+  {
+    "id": 5,
+    "name": "Sensor unit 005",
+    "kind": "lidar",
+    "firmware": "2.5.2"
+  },
+  {
+    "id": 6,
+    "name": "Sensor unit 006",
+    "kind": "imu",
+    "firmware": "2.6.0"
+  },
+  {
+    "id": 7,
+    "name": "Sensor unit 007",
+    "kind": "gps",
+    "firmware": "2.0.1"
+  },
+  {
+    "id": 8,
+    "name": "Sensor unit 008",
+    "kind": "thermal",
+    "firmware": "2.1.2"
+  },
+  {
+    "id": 9,
+    "name": "Sensor unit 009",
+    "kind": "lidar",
+    "firmware": "2.2.0"
+  },
+  {
+    "id": 10,
+    "name": "Sensor unit 010",
+    "kind": "imu",
+    "firmware": "2.3.1"
+  },
+  {
+    "id": 11,
+    "name": "Sensor unit 011",
+    "kind": "gps",
+    "firmware": "2.4.2"
+  },
+  {
+    "id": 12,
+    "name": "Sensor unit 012",
+    "kind": "thermal",
+    "firmware": "2.5.0"
+  },
+  {
+    "id": 13,
+    "name": "Sensor unit 013",
+    "kind": "lidar",
+    "firmware": "2.6.1"
+  },
+  {
+    "id": 14,
+    "name": "Sensor unit 014",
+    "kind": "imu",
+    "firmware": "2.0.2"
+  },
+  {
+    "id": 15,
+    "name": "Sensor unit 015",
+    "kind": "gps",
+    "firmware": "2.1.0"
+  },
+  {
+    "id": 16,
+    "name": "Sensor unit 016",
+    "kind": "thermal",
+    "firmware": "2.2.1"
+  },
+  {
+    "id": 17,
+    "name": "Sensor unit 017",
+    "kind": "lidar",
+    "firmware": "2.3.2"
+  },
+  {
+    "id": 18,
+    "name": "Sensor unit 018",
+    "kind": "imu",
+    "firmware": "2.4.0"
+  },
+  {
+    "id": 19,
+    "name": "Sensor unit 019",
+    "kind": "gps",
+    "firmware": "2.5.1"
+  },
+  {
+    "id": 20,
+    "name": "Sensor unit 020",
+    "kind": "thermal",
+    "firmware": "2.6.2"
+  },
+  {
+    "id": 21,
+    "name": "Sensor unit 021",
+    "kind": "lidar",
+    "firmware": "2.0.0"
+  },
+  {
+    "id": 22,
+    "name": "Sensor unit 022",
+    "kind": "imu",
+    "firmware": "2.1.1"
+  },
+  {
+    "id": 23,
+    "name": "Sensor unit 023",
+    "kind": "gps",
+    "firmware": "2.2.2"
+  },
+  {
+    "id": 24,
+    "name": "Sensor unit 024",
+    "kind": "thermal",
+    "firmware": "2.3.0"
+  },
+  {
+    "id": 25,
+    "name": "Sensor unit 025",
+    "kind": "lidar",
+    "firmware": "2.4.1"
+  },
+  {
+    "id": 26,
+    "name": "Sensor unit 026",
+    "kind": "imu",
+    "firmware": "2.5.2"
+  },
+  {
+    "id": 27,
+    "name": "Sensor unit 027",
+    "kind": "gps",
+    "firmware": "2.6.0"
+  },
+  {
+    "id": 28,
+    "name": "Sensor unit 028",
+    "kind": "thermal",
+    "firmware": "2.0.1"
+  },
+  {
+    "id": 29,
+    "name": "Sensor unit 029",
+    "kind": "lidar",
+    "firmware": "2.1.2"
+  },
+  {
+    "id": 30,
+    "name": "Sensor unit 030",
+    "kind": "imu",
+    "firmware": "2.2.0"
+  },
+  {
+    "id": 31,
+    "name": "Sensor unit 031",
+    "kind": "gps",
+    "firmware": "2.3.1"
+  },
+  {
+    "id": 32,
+    "name": "Sensor unit 032",
+    "kind": "thermal",
+    "firmware": "2.4.2"
+  },
+  {
+    "id": 33,
+    "name": "Sensor unit 033",
+    "kind": "lidar",
+    "firmware": "2.5.0"
+  },
+  {
+    "id": 34,
+    "name": "Sensor unit 034",
+    "kind": "imu",
+    "firmware": "2.6.1"
+  },
+  {
+    "id": 35,
+    "name": "Sensor unit 035",
+    "kind": "gps",
+    "firmware": "2.0.2"
+  },
+  {
+    "id": 36,
+    "name": "Sensor unit 036",
+    "kind": "thermal",
+    "firmware": "2.1.0"
+  },
+  {
+    "id": 37,
+    "name": "Sensor unit 037",
+    "kind": "lidar",
+    "firmware": "2.2.1"
+  },
+  {
+    "id": 38,
+    "name": "Sensor unit 038",
+    "kind": "imu",
+    "firmware": "2.3.2"
+  },
+  {
+    "id": 39,
+    "name": "Sensor unit 039",
+    "kind": "gps",
+    "firmware": "2.4.0"
+  },
+  {
+    "id": 40,
+    "name": "Sensor unit 040",
+    "kind": "thermal",
+    "firmware": "2.5.1"
+  },
+  {
+    "id": 41,
+    "name": "Sensor unit 041",
+    "kind": "lidar",
+    "firmware": "2.6.2"
+  },
+  {
+    "id": 42,
+    "name": "Sensor unit 042",
+    "kind": "imu",
+    "firmware": "2.0.0"
+  },
+  {
+    "id": 43,
+    "name": "Sensor unit 043",
+    "kind": "gps",
+    "firmware": "2.1.1"
+  },
+  {
+    "id": 44,
+    "name": "Sensor unit 044",
+    "kind": "thermal",
+    "firmware": "2.2.2"
+  },
+  {
+    "id": 45,
+    "name": "Sensor unit 045",
+    "kind": "lidar",
+    "firmware": "2.3.0"
+  },
+  {
+    "id": 46,
+    "name": "Sensor unit 046",
+    "kind": "imu",
+    "firmware": "2.4.1"
+  },
+  {
+    "id": 47,
+    "name": "Sensor unit 047",
+    "kind": "gps",
+    "firmware": "2.5.2"
+  },
+  {
+    "id": 48,
+    "name": "Sensor unit 048",
+    "kind": "thermal",
+    "firmware": "2.6.0"
+  },
+  {
+    "id": 49,
+    "name": "Sensor unit 049",
+    "kind": "lidar",
+    "firmware": "2.0.1"
+  },
+  {
+    "id": 50,
+    "name": "Sensor unit 050",
+    "kind": "imu",
+    "firmware": "2.1.2"
+  },
+  {
+    "id": 51,
+    "name": "Sensor unit 051",
+    "kind": "gps",
+    "firmware": "2.2.0"
+  },
+  {
+    "id": 52,
+    "name": "Sensor unit 052",
+    "kind": "thermal",
+    "firmware": "2.3.1"
+  },
+  {
+    "id": 53,
+    "name": "Sensor unit 053",
+    "kind": "lidar",
+    "firmware": "2.4.2"
+  },
+  {
+    "id": 54,
+    "name": "Sensor unit 054",
+    "kind": "imu",
+    "firmware": "2.5.0"
+  },
+  {
+    "id": 55,
+    "name": "Sensor unit 055",
+    "kind": "gps",
+    "firmware": "2.6.1"
+  },
+  {
+    "id": 56,
+    "name": "Sensor unit 056",
+    "kind": "thermal",
+    "firmware": "2.0.2"
+  },
+  {
+    "id": 57,
+    "name": "Sensor unit 057",
+    "kind": "lidar",
+    "firmware": "2.1.0"
+  },
+  {
+    "id": 58,
+    "name": "Sensor unit 058",
+    "kind": "imu",
+    "firmware": "2.2.1"
+  },
+  {
+    "id": 59,
+    "name": "Sensor unit 059",
+    "kind": "gps",
+    "firmware": "2.3.2"
+  },
+  {
+    "id": 60,
+    "name": "Sensor unit 060",
+    "kind": "thermal",
+    "firmware": "2.4.0"
+  }
+]

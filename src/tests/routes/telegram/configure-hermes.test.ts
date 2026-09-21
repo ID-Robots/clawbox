@@ -9,16 +9,53 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  */
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn(), set: vi.fn() }));
-vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
+// `getActiveHarnessSource` answers from the same mock this suite drives, so the
+// routes' one resolution says what these cases set. The single-read contract
+// itself is pinned in harness-edition-read-once / harness-status, not here.
+vi.mock("@/lib/harness", () => {
+  const getActiveHarness = vi.fn();
+  const getEdition = vi.fn(() => "hermes");
+  return {
+    getActiveHarness,
+    getEdition,
+    getActiveHarnessSource: async () => ({
+      active: await getActiveHarness(),
+      defaulted: false,
+      edition: getEdition(),
+      locked: true,
+    }),
+  };
+});
+// The route also refuses the approvals bot's own token; mocked at the reader so
+// this suite does not drag in the email-approval module's config-store surface.
+vi.mock("@/lib/email-approval", () => ({
+  readApprovalBotToken: vi.fn(async () => ({ token: null, known: true })),
+}));
 vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class: the route narrows on `err instanceof GatewayNotReadyError`
+  // to tell a gateway that is still binding apart from one that refused the
+  // restart, and `instanceof undefined` throws a TypeError. Unreachable on the
+  // Hermes path this file covers — `ensureHermesGateway()` never raises it —
+  // but the module is replaced wholesale, so the export has to exist.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   setTelegramToken: vi.fn(),
   restartGateway: vi.fn(),
   clearTelegramPairingState: vi.fn(),
+  // The Telegram bot the OpenClaw gateway actually polls lives in the harness's
+  // own config, and the route now reads it through the STRICT reader so an
+  // unreadable openclaw.json cannot pass for "no bot configured".
+  readConfigStrict: vi.fn(async () => ({})),
 }));
 vi.mock("@/lib/hermes-telegram", () => ({
   setHermesTelegramToken: vi.fn(),
   ensureHermesGateway: vi.fn(),
   clearHermesTelegramPairingState: vi.fn(),
+  readHermesTelegramToken: vi.fn(),
 }));
 
 import { get, set } from "@/lib/config-store";
@@ -28,6 +65,7 @@ import {
   setHermesTelegramToken,
   ensureHermesGateway,
   clearHermesTelegramPairingState,
+  readHermesTelegramToken,
 } from "@/lib/hermes-telegram";
 
 const mockGet = vi.mocked(get);
@@ -39,6 +77,7 @@ const mockClearOpenclawPairing = vi.mocked(clearTelegramPairingState);
 const mockSetHermesToken = vi.mocked(setHermesTelegramToken);
 const mockEnsureGateway = vi.mocked(ensureHermesGateway);
 const mockClearHermesPairing = vi.mocked(clearHermesTelegramPairingState);
+const mockHermesToken = vi.mocked(readHermesTelegramToken);
 
 const TOKEN = "123456789:ABCDefGHIjklMNOpqrsTUVwxyz";
 const NEW_TOKEN = "987654321:ZYXwvuTSRqponMLKjihGFEdcba";
@@ -46,11 +85,12 @@ const NEW_TOKEN = "987654321:ZYXwvuTSRqponMLKjihGFEdcba";
 describe("POST /setup-api/telegram/configure — harness routing", () => {
   let POST: (req: Request) => Promise<Response>;
 
-  function req(body: unknown): Request {
+  function req(body: unknown, signal?: AbortSignal): Request {
     return new Request("http://localhost/setup-api/telegram/configure", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
     });
   }
 
@@ -65,7 +105,8 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
     mockClearOpenclawPairing.mockResolvedValue();
     mockSetHermesToken.mockResolvedValue();
     mockClearHermesPairing.mockResolvedValue();
-    mockEnsureGateway.mockResolvedValue({ installed: true, running: true, scope: "system" });
+    mockHermesToken.mockResolvedValue({ token: null, known: true });
+    mockEnsureGateway.mockResolvedValue({ installed: true, running: true, scope: "system", applied: true });
 
     POST = (await import("@/app/setup-api/telegram/configure/route")).POST;
   });
@@ -82,7 +123,9 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
       expect(res.status).toBe(200);
       expect(body).toMatchObject({ success: true, restarted: true });
       expect(mockSet).toHaveBeenCalledWith("telegram_bot_token", TOKEN);
-      expect(mockSetHermesToken).toHaveBeenCalledWith(TOKEN, expect.anything());
+      // One argument, deliberately: no abort signal — see the split-brain test
+      // at the bottom of this describe.
+      expect(mockSetHermesToken).toHaveBeenCalledWith(TOKEN);
       expect(mockEnsureGateway).toHaveBeenCalled();
     });
 
@@ -96,6 +139,7 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
 
     it("clears Hermes' pairing state when the bot token changes", async () => {
       mockGet.mockResolvedValue(TOKEN);
+      mockHermesToken.mockResolvedValue({ token: TOKEN, known: true });
       const res = await POST(req({ botToken: NEW_TOKEN }));
       const body = await res.json();
 
@@ -106,6 +150,7 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
 
     it("keeps approvals when the same token is saved again", async () => {
       mockGet.mockResolvedValue(TOKEN);
+      mockHermesToken.mockResolvedValue({ token: TOKEN, known: true });
       const res = await POST(req({ botToken: TOKEN }));
       const body = await res.json();
 
@@ -113,25 +158,136 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
       expect(mockClearHermesPairing).not.toHaveBeenCalled();
     });
 
+    // The approvals in Hermes' pairing store belong to the bot HERMES holds, and
+    // on a box paired out of band ClawBox has no copy of that token at all.
+    // Asking its own store therefore saw no previous bot, skipped the reset, and
+    // left the old bot's approved senders able to talk to the new one.
+    it("clears the old bot's approvals when only Hermes knew the previous token", async () => {
+      mockGet.mockResolvedValue(undefined);
+      mockHermesToken.mockResolvedValue({ token: TOKEN, known: true });
+
+      const body = await (await POST(req({ botToken: NEW_TOKEN }))).json();
+
+      expect(body.reset).toBe(true);
+      expect(mockClearHermesPairing).toHaveBeenCalled();
+      expect(mockSet).toHaveBeenCalledWith("telegram_approved_names", undefined);
+    });
+
+    // A store that could not be READ is not a box with no previous bot — and it
+    // is not a bot change either. Reading only the token treated it as a first
+    // save (`{success: true, reset: false}` over a new bot that inherited every
+    // sender approved for the old one). Refusing instead would be worse still:
+    // this route is the only path on the device to a Telegram bot, so a 503 on
+    // an EACCES is a permanent lockout of the feature. It is decided on the one
+    // piece of evidence that survives — ClawBox's own mirror, which is the last
+    // value this route wrote — and resets when nothing proves the bot is the same.
+    it("saves and resets when the harness store cannot be read and nothing matches", async () => {
+      mockGet.mockResolvedValue(undefined);
+      mockHermesToken.mockResolvedValue({ token: null, known: false });
+
+      const res = await POST(req({ botToken: NEW_TOKEN }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.reset).toBe(true);
+      expect(mockClearHermesPairing).toHaveBeenCalled();
+      expect(mockSet).toHaveBeenCalledWith("telegram_approved_names", undefined);
+    });
+
+    it("keeps the approvals through an unreadable store when the mirror names this exact token", async () => {
+      mockGet.mockResolvedValue(NEW_TOKEN);
+      mockHermesToken.mockResolvedValue({ token: null, known: false });
+
+      const res = await POST(req({ botToken: NEW_TOKEN }));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.reset).toBe(false);
+      expect(mockClearHermesPairing).not.toHaveBeenCalled();
+    });
+
+    it("does not let a browser that walked away cancel the half it has already committed to", async () => {
+      // A phone locking during the ~1-3 s the CLI takes on a Jetson aborts the
+      // fetch. By then ClawBox's own store holds the new token and, on a token
+      // change, the previous bot's approvals are gone. `runHermesCli` refuses a
+      // call whose signal is already aborted, so handing `request.signal` any
+      // further made that a RELIABLE split: token here, absent from
+      // ~/.hermes/.env, approvals lost, and a 500 on the way out.
+      const controller = new AbortController();
+      controller.abort();
+      // Model the real library: it goes through `runHermesCli`, which refuses.
+      mockSetHermesToken.mockImplementation(async (_token: string, signal?: AbortSignal) => {
+        if (signal?.aborted) throw new Error("hermes call cancelled");
+      });
+      mockEnsureGateway.mockImplementation(async (signal?: AbortSignal) => {
+        if (signal?.aborted) throw new Error("hermes call cancelled");
+        return { installed: true, running: true, scope: "system" as const, applied: true };
+      });
+
+      const res = await POST(req({ botToken: TOKEN }, controller.signal));
+      const body = await res.json();
+
+      // The owner is not told the save failed over a box he cannot see.
+      expect(res.status).toBe(200);
+      expect(body).toMatchObject({ success: true, restarted: true });
+      // And both halves of the box agree: ClawBox's store and Hermes' .env.
+      expect(mockSet).toHaveBeenCalledWith("telegram_bot_token", TOKEN);
+      expect(mockSetHermesToken).toHaveBeenCalledWith(TOKEN);
+    });
+
+    it("fails the save with the old token in place when the pairing reset throws", async () => {
+      mockGet.mockResolvedValue(TOKEN);
+      mockHermesToken.mockResolvedValue({ token: TOKEN, known: true });
+      mockClearHermesPairing.mockRejectedValue(new Error("store refused"));
+      const res = await POST(req({ botToken: NEW_TOKEN }));
+
+      expect(res.status).toBe(500);
+      expect(mockSet).not.toHaveBeenCalledWith("telegram_bot_token", expect.anything());
+      expect(mockSetHermesToken).not.toHaveBeenCalled();
+      expect(mockEnsureGateway).not.toHaveBeenCalled();
+    });
+
     // The token is already persisted by then, so a gateway that won't come up
     // is a warning about delivery, not a failed save.
-    it("still reports the save when the gateway cannot be started", async () => {
+    it("still reports the save when the gateway cannot be started, at 502", async () => {
       mockEnsureGateway.mockRejectedValue(new Error("systemd said no"));
       const res = await POST(req({ botToken: TOKEN }));
       const body = await res.json();
 
-      expect(res.status).toBe(200);
+      // Both editions answer the same status for the same fact: the token is
+      // stored (`success: true`) and nothing is serving it yet. A 200 here made
+      // the panel say "configured successfully" over a bot that was not
+      // receiving — the OpenClaw leg of this route no longer does that, and
+      // this SKU must not be the one left saying it.
+      expect(res.status).toBe(502);
       expect(body.success).toBe(true);
       expect(body.restarted).toBe(false);
       expect(body.warning).toBeTruthy();
     });
 
-    it("warns when the gateway install returned but nothing is running", async () => {
-      mockEnsureGateway.mockResolvedValue({ installed: true, running: false, scope: "system" });
-      const body = await (await POST(req({ botToken: TOKEN }))).json();
+    // The false success this route used to answer. A restart that sudo refused
+    // leaves the OLD gateway process up, and `hermes gateway status` runs
+    // unprivileged — so `running` was true, the route said {restarted: true},
+    // and the owner's new bot token silently kept not working.
+    it("does not claim restarted:true when the restart was refused", async () => {
+      mockEnsureGateway.mockResolvedValue({
+        installed: true,
+        running: true,
+        scope: "system",
+        applied: false,
+      });
+      const res = await POST(req({ botToken: TOKEN }));
 
-      expect(body).toMatchObject({ success: true, restarted: false });
-      expect(body.warning).toBeTruthy();
+      expect(res.status).toBe(502);
+      expect(await res.json()).toMatchObject({ success: true, restarted: false });
+    });
+
+    it("warns when the gateway install returned but nothing is running", async () => {
+      mockEnsureGateway.mockResolvedValue({ installed: true, running: false, scope: "system", applied: false });
+      const res = await POST(req({ botToken: TOKEN }));
+
+      expect(res.status).toBe(502);
+      expect(await res.json()).toMatchObject({ success: true, restarted: false });
     });
 
     it("fails the save when Hermes rejects the token", async () => {

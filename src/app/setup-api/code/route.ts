@@ -13,6 +13,7 @@ import {
   deleteFile,
   searchFiles,
   buildProject,
+  projectPath,
   validateProjectId,
   NotFoundError,
   ValidationError,
@@ -54,19 +55,24 @@ export async function POST(request: NextRequest) {
         if (!name) return err("Project name required");
         // Also checked in initProject, before anything is written.
         const meta = await initProject(projectId, name, { color, description, template });
-        return ok({ success: true, project: meta });
+        // `path` is ABSOLUTE on purpose: whoever edits these files next (the
+        // agent's own file tools, a terminal) has a different working directory
+        // than this route, so a relative path resolves somewhere else entirely.
+        return ok({ success: true, project: meta, path: projectPath(projectId) });
       }
 
       case "list-projects": {
         const projects = await listProjects();
-        return ok({ projects });
+        return ok({
+          projects: projects.map((p) => ({ ...p, path: projectPath(p.projectId) })),
+        });
       }
 
       case "get-project": {
         const { projectId } = body;
         if (!projectId || !validateProjectId(projectId)) return err("Invalid project ID");
         const meta = await getProject(projectId);
-        return ok({ project: meta });
+        return ok({ project: meta, path: projectPath(projectId) });
       }
 
       case "delete-project": {
@@ -82,7 +88,7 @@ export async function POST(request: NextRequest) {
         const { projectId, directory } = body;
         if (!projectId || !validateProjectId(projectId)) return err("Invalid project ID");
         const files = await listFiles(projectId, directory);
-        return ok({ files });
+        return ok({ files, path: projectPath(projectId) });
       }
 
       case "file-read": {
@@ -126,12 +132,30 @@ export async function POST(request: NextRequest) {
       case "search": {
         const { projectId, pattern, regex, caseSensitive, maxResults } = body;
         if (!projectId || !validateProjectId(projectId)) return err("Invalid project ID");
+        // A string, checked BEFORE the empty check: `!pattern` lets `{}` and
+        // `42` through, and searchFiles then calls `.toLowerCase()` on them —
+        // a caller's typo answered as a 500 from the box rather than a 400
+        // naming the field.
+        if (pattern !== undefined && typeof pattern !== "string") {
+          return NextResponse.json(
+            { error: "Search pattern must be a string", code: "invalid_pattern" },
+            { status: 400 },
+          );
+        }
         if (!pattern) return err("Search pattern required");
-        const matches = await searchFiles(projectId, pattern, {
-          regex,
-          caseSensitive,
-          maxResults,
-        });
+        // The regex branch is gone (see searchFiles): a pattern like "(a+)+$"
+        // pinned the whole web server for as long as the longest line took to
+        // backtrack. Refused rather than quietly matched as text, because a
+        // caller that asked for a regex would otherwise read the wrong lines
+        // as the right ones. Any truthy value, not only `true`: the old code
+        // treated "false" as on, and that caller deserves the same honesty.
+        if (regex) {
+          return NextResponse.json(
+            { error: "Regex search is not supported — use a plain-text pattern", code: "regex_unsupported" },
+            { status: 400 },
+          );
+        }
+        const matches = await searchFiles(projectId, pattern, { caseSensitive, maxResults });
         return ok({ matches, total: matches.length });
       }
 

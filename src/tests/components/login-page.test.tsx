@@ -43,4 +43,29 @@ describe("LoginPage", () => {
       expect(replaceMock).toHaveBeenCalledWith("/setup");
     });
   });
+
+  // Once a password exists, middleware puts /setup behind the session gate, so
+  // bouncing there unauthenticated would 307 straight back to /login — the two
+  // redirects loop forever and the owner can never reach the form to log in.
+  it("shows the login form when a password exists but setup is unfinished", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ setup_complete: false, password_configured: true }),
+    }));
+    const replaceMock = vi.fn();
+    vi.stubGlobal("location", {
+      ...window.location,
+      href: "http://localhost/login?redirect=%2Fsetup",
+      pathname: "/login",
+      search: "?redirect=%2Fsetup",
+      replace: replaceMock,
+    });
+
+    const { container } = render(<LoginPage />);
+
+    await waitFor(() => {
+      expect(container.querySelector("#login-password")).not.toBeNull();
+    });
+    expect(replaceMock).not.toHaveBeenCalled();
+  });
 });

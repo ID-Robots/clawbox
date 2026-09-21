@@ -87,7 +87,7 @@ Export the same names the route + UI already call.
 const RESTIC = "/usr/local/bin/restic";
 const SOURCE_DIR = path.join(process.env.HOME || "/home/clawbox", ".openclaw");
 const LOCAL_REPO_DEFAULT = path.join(process.env.HOME || "/home/clawbox", "Backups/clawkeep");
-const PORTAL_BASE = process.env.CLAWKEEP_PORTAL_BASE || "https://openclawhardware.dev";
+const PORTAL_BASE = process.env.CLAWKEEP_PORTAL_BASE || "https://clawbox.com";
 
 async function fetchCloudCredentials(token: string) {
   const res = await fetch(`${PORTAL_BASE}/api/clawkeep/credentials`, {

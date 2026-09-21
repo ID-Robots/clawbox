@@ -14,7 +14,10 @@ vi.mock("@/lib/openclaw-config", () => ({
   openclawIsAbsent: () => mockOpenclawIsAbsent(),
 }));
 
-vi.mock("@/lib/config-store", () => ({ DATA_DIR: "/tmp/clawbox-catalog-edition-test" }));
+// A per-PROCESS data root. A fixed `/tmp/<name>` is shared by every vitest
+// worker on the machine and by every checkout of this repo on it — the same
+// reason `vitest.config.ts` suffixes `CLAWBOX_ROOT` and `OPENCLAW_HOME`.
+vi.mock("@/lib/config-store", () => ({ DATA_DIR: `/tmp/clawbox-catalog-edition-test-${process.pid}` }));
 
 import { refreshInBackground } from "@/app/setup-api/ai-models/catalog/route";
 

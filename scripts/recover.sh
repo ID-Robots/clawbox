@@ -3,9 +3,21 @@ set -euo pipefail
 
 echo "[Recovery] Starting ClawBox recovery..."
 
-# Restart the WiFi access point
+# Restart the WiFi access point.
+#
+# This runs as root (it is the operator's console recovery), so it prefers the
+# root-owned copy install_root_libexec installs — the tree under
+# /home/clawbox/clawbox is clawbox-writable. The tree copy is the fallback ONLY
+# when the libexec one is absent: recovery has to work on a box mid-migration
+# that has the new tree and not yet the new root step, and a box that cannot
+# raise its hotspot is a box nobody can reach. Security scan #21.
 echo "[Recovery] Restarting WiFi hotspot..."
-bash /home/clawbox/clawbox/scripts/start-ap.sh
+START_AP="/usr/local/libexec/clawbox/start-ap.sh"
+if [ ! -x "$START_AP" ]; then
+  echo "[Recovery] $START_AP missing — falling back to the tree copy (run 'sudo bash /home/clawbox/clawbox/install.sh --step systemd_services' to install it)"
+  START_AP="/home/clawbox/clawbox/scripts/start-ap.sh"
+fi
+bash "$START_AP"
 
 # Restart the web server
 echo "[Recovery] Restarting web server..."

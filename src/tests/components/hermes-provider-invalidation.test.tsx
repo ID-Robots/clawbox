@@ -125,8 +125,43 @@ const HOOK = read("src", "hooks", "useHermesModelOptions.ts");
 
 describe("who emits the signal and who listens", () => {
   it("has the chat re-seed its provider list on the shared event", () => {
-    expect(CHAT).toMatch(/window\.addEventListener\(HERMES_MODEL_STATE_EVENT, onChanged\)/);
-    expect(CHAT).toMatch(/const onChanged = \(\) => \{ void seedHermesHeader\(controller\.signal\) \}/);
+    // Subscribed through the union rather than to the Hermes name alone: the
+    // same news reaches the chat whichever vocabulary the emitter used.
+    expect(CHAT).toMatch(
+      /const unsubscribe = onProvidersChanged\(\(\) => \{ void seedHermesHeader\(controller\.signal\) \}\)/,
+    );
+    expect(CHAT).toMatch(/return onProvidersChanged\(\(\) => \{ refreshChatModelState\(\) \}\)/);
+  });
+
+  it("has every listener span all three signal names", () => {
+    // A listener that took only one name went deaf on the other edition — the
+    // strip sat on "Not connected" after a sign-in that had plainly worked.
+    const EVENTS = read("src", "lib", "ui-events.ts");
+    expect(EVENTS).toMatch(/const PROVIDER_SIGNAL_EVENTS = \[/);
+    for (const name of ["PROVIDERS_CHANGED_EVENT", "HERMES_MODEL_STATE_EVENT", "CHAT_MODEL_STATE_EVENT"]) {
+      expect(between(EVENTS, "const PROVIDER_SIGNAL_EVENTS = [", "] as const;")).toContain(name);
+    }
+  });
+
+  it("has the Settings status card re-read on the signal too", () => {
+    // It names the ACTIVE provider and model, directly under the strip. Without
+    // this the two disagreed on screen after a default was chosen from the
+    // strip — new default above, old one still named below — until the section
+    // was left and re-entered.
+    const SETTINGS = read("src", "components", "SettingsApp.tsx");
+    expect(between(SETTINGS, 'fetch("/setup-api/ai-models/status"', "}, [section, isMobile]);")).toContain(
+      "return onProvidersChanged(load);",
+    );
+  });
+
+  it("emits the edition-neutral signal from every configure success", () => {
+    expect(PANEL).toContain("notifyProvidersChanged()");
+    // OpenClaw's single choke point — pasted key, provider OAuth and the
+    // ClawBox AI device login all pass through it, in wizard and Settings alike.
+    const STEP = read("src", "components", "AIModelsStep.tsx");
+    expect(between(STEP, "const showSuccessAndContinue", "completeConfiguring();")).toContain(
+      "notifyProvidersChanged()",
+    );
   });
 
   /** The source between two markers — line-ending agnostic, unlike a regex. */
@@ -150,7 +185,7 @@ describe("who emits the signal and who listens", () => {
 
   it("keeps the hook's listener off the expensive path", () => {
     // Bumping the nonce re-asks; setting pendingRefreshRef would add `refresh=1`.
-    expect(HOOK).toMatch(/const onChanged = \(\) => setNonce\(\(n\) => n \+ 1\);/);
+    expect(HOOK).toMatch(/onProvidersChanged\(\(\) => setNonce\(\(n\) => n \+ 1\)\)/);
     expect(HOOK).toMatch(/const fresh = provider && loaded\?\.provider === provider \? loaded : null/);
   });
 });

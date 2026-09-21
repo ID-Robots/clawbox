@@ -4,15 +4,22 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import { get, set } from "@/lib/config-store";
-import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
+import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, CHPASSWD_STEP, chpasswdRecord } from "@/lib/chpasswd";
 import { getSystemUsername, verifyPassword, isSafePasswordChars, bumpSessionGeneration, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
 import { checkRateLimit, clientIp, resetRateLimit } from "@/lib/rate-limit";
+import { hasOwnerPassword } from "@/lib/system-password";
+import { requireSession } from "@/lib/route-auth";
+import { startRootStep } from "@/lib/root-step-runner";
 
 export const dynamic = "force-dynamic";
 
 const execFile = promisify(execFileCb);
 
 const PASSWORD_RATE_LIMIT = { windowMs: 15 * 60 * 1000, max: 5 };
+
+// Lifetime of the session minted on the first-boot password set. 24h matches
+// the default the login page offers and the fallback the change path uses.
+const INITIAL_SESSION_SECONDS = 86400;
 
 // Cookies are marked Secure only over HTTPS (tunnel); plain-HTTP LAN must stay
 // non-Secure or the browser would never send the cookie back.
@@ -78,8 +85,37 @@ export async function POST(request: Request) {
     // After the initial setup, require the current password to make a change.
     // During first-boot setup (no password configured yet), CredentialsStep
     // calls this without `currentPassword` to set the initial value.
-    const passwordAlreadyConfigured = !!(await get("password_configured"));
+    //
+    // /etc/shadow is consulted as well as the config flag, and either one
+    // saying "there is an owner's password" is enough (TASK-444a). The flag
+    // alone is a cache that a factory reset wipes and a partial restore can
+    // drop; on a box where config.json says "no password" but the account
+    // really has one, the old check skipped `currentPassword` entirely and let
+    // an unauthenticated caller take the OS account over.
+    //
+    // "Owner's password" deliberately excludes the factory default: the shipped
+    // image and a factory reset both leave `clawbox` on the account, and this
+    // very route is what the wizard uses to replace it on first boot. Treating
+    // that hash as an owner 401'd the initial set on every new device.
+    // `hasOwnerPassword()` returns null when it cannot read /etc/shadow at all,
+    // in which case the config flag alone decides.
+    //
+    // Short-circuit on the flag: once it says "owned" the shadow answer cannot
+    // change the outcome, and asking anyway would spawn unix_chkpwd with the
+    // factory default on every legitimate password change — a "password check
+    // failed" line in auth.log for an attempt nobody made.
+    const flagSaysConfigured = !!(await get("password_configured"));
+    const passwordAlreadyConfigured = flagSaysConfigured || (await hasOwnerPassword()) === true;
+
     if (passwordAlreadyConfigured) {
+      // Defence in depth behind middleware: changing the owner's password is
+      // never part of onboarding once an owner exists, so it needs a session
+      // even if the middleware gate is somehow bypassed. Re-proving
+      // `currentPassword` below is necessary but not sufficient — without this
+      // the route is also an unauthenticated password oracle.
+      const unauthorized = await requireSession(request);
+      if (unauthorized) return unauthorized;
+
       if (!currentPassword) {
         return NextResponse.json({ error: "Current password is required" }, { status: 400 });
       }
@@ -97,12 +133,11 @@ export async function POST(request: Request) {
       mode: 0o600,
     });
     try {
-      await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", CHPASSWD_SERVICE_NAME], {
-        timeout: 10_000,
-      }).catch(() => {});
-      await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", CHPASSWD_SERVICE_NAME], {
-        timeout: 30_000,
-      });
+      // Through the root-owned launcher: it clears a previous failure itself
+      // and builds the unit name from a step it validates, so the allow-list
+      // needs one grant for the whole root-step surface instead of a pair per
+      // instance. TASK-539.
+      await startRootStep(CHPASSWD_STEP, { timeoutMs: 30_000 });
     } catch (err) {
       // Clean up the input file on failure
       await fs.unlink(CHPASSWD_INPUT_PATH).catch(() => {});
@@ -142,7 +177,31 @@ export async function POST(request: Request) {
       }
     }
 
-    return NextResponse.json({ success: true });
+    // First-boot initial set: mint the owner's session here.
+    //
+    // This is what lets the bootstrap allow-list stay as small as it is. The
+    // wizard's remaining steps (AI models, Telegram, setup/complete) and even
+    // the hotspot write CredentialsStep makes immediately after this call now
+    // run authenticated, so none of them needs a pre-auth carve-out — and the
+    // window in which the device answers anything unauthenticated ends the
+    // moment it has an owner. Best-effort, exactly like the re-issue path
+    // above: the password is already set, so failing to mint the cookie must
+    // not 500. Worst case the user sees /login and signs in with the password
+    // they just chose. TASK-443.
+    try {
+      const secret = await getSessionSigningSecret();
+      const res = NextResponse.json({ success: true, authenticated: true });
+      res.cookies.set("clawbox_session", createSessionCookie(INITIAL_SESSION_SECONDS, secret, 0), {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: INITIAL_SESSION_SECONDS,
+        secure: requestIsHttps(request),
+      });
+      return res;
+    } catch {
+      return NextResponse.json({ success: true });
+    }
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to set password" },

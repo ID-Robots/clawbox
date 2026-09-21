@@ -1,0 +1,842 @@
+/**
+ * The Coding Agent app: the owner's switch for letting the assistant delegate
+ * coding work to a headless Claude Code run, what a run needs, and the recent
+ * runs.
+ *
+ * `terminalHint` exists because this icon used to open a terminal already
+ * running the harness. An owner who relied on that should be told where it
+ * went, once, at the top of the window that replaced it.
+ */
+export const codingAgentEn: Record<string, string> = {
+  "codingAgent.title": "Coding agent",
+
+  // Shown in the chat while a delegated run is actually in flight — the tool
+  // pill for `coding_agent_run` is long gone by then.
+  "codingAgent.chatWorking": "Coding agent working",
+  "codingAgent.chatWorkingOwner": "Your coding run is working",
+  "codingAgent.chatFinished": "Coding agent finished",
+  "codingAgent.chatFailed": "Coding agent did not finish",
+  "codingAgent.chatStopped": "Coding agent stopped",
+  // A template the chat's run card fills in — "{n} agents" — shown when a
+  // delegated run fans out to sub-agents.
+  "codingAgent.chatAgents": "{n} agents",
+  // The chat card's live-work panel: what one progress line means, in the
+  // owner's words rather than the harness's ("Screenshot", never
+  // "mcp__clawbox__browser_screenshot" — see src/lib/coding-agent-progress.ts),
+  // and the counted words after a number: "3 files touched", "12 turns".
+  "codingAgent.chatLiveWork": "Live work",
+  "codingAgent.chatScreenshot": "Screenshot",
+  "codingAgent.chatLookingAtPage": "Looking at the page",
+  "codingAgent.chatOpeningPage": "Opening a page",
+  "codingAgent.chatDrivingPage": "Driving the page",
+  "codingAgent.chatClosingPage": "Closing the page",
+  "codingAgent.chatWrite": "Writing",
+  "codingAgent.chatEdit": "Editing",
+  "codingAgent.chatRead": "Reading",
+  "codingAgent.chatFilesTouched": "files touched",
+  "codingAgent.chatTurns": "turns",
+  // The run's own plan (its TodoWrite list) on the card: the checklist's
+  // heading, the counted word after "3 of 7", the line that names the item
+  // it is on now, the overflow of a long list, and the word beside the
+  // three moving dots that say a live run is still working.
+  "codingAgent.chatPlan": "Plan",
+  "codingAgent.chatDone": "done",
+  "codingAgent.chatNow": "Now",
+  "codingAgent.chatMore": "+{n} more",
+  "codingAgent.chatBusy": "working",
+  // The × on the chat card, and the one small round 🤖 chip at the bottom of
+  // the transcript that brings every put-away card back where it was. Count-
+  // neutral on purpose: one chip stands in for however many cards.
+  "codingAgent.chatDismiss": "Hide this card",
+  "codingAgent.chatRestore": "Show the coding run again",
+
+  // The desktop card a finished run raises, top-right with the others.
+  "codingAgent.noticeOpen": "Open the coding agent",
+  "codingAgent.noticeDismiss": "Dismiss",
+
+  "codingAgent.switchLabel": "Let the assistant delegate coding work",
+  // The app's header, now that the switch lives in Settings: a read-only
+  // chip saying what the route said, and the link to where it is changed.
+  "codingAgent.stateOn": "On",
+  "codingAgent.stateOff": "Off",
+  "codingAgent.openSettings": "Settings",
+
+  "codingAgent.folderLabel": "Project folder",
+  "codingAgent.folderPlaceholder": "/home/clawbox/Projects",
+  "codingAgent.folderSave": "Save",
+  "codingAgent.folderFailed": "Could not save the default folder.",
+  "codingAgent.commitAuthorTitle": "Commit author",
+  "codingAgent.commitAuthorNameLabel": "Commit author name",
+  "codingAgent.commitAuthorEmailLabel": "Commit author e-mail",
+  "codingAgent.commitAuthorNamePlaceholder": "Your name",
+  "codingAgent.commitAuthorEmailPlaceholder": "you@example.com",
+  "codingAgent.commitAuthorSave": "Save author",
+  "codingAgent.commitAuthorHint": "Who the box signs its own commits as when a project has no git identity of its own. The e-mail must belong to a GitHub account that can deploy the project, or a host’s deployment check rejects the commit. Leave both blank to use the project's own git settings.",
+  "codingAgent.commitAuthorFailed": "Could not save the commit author.",
+  "codingAgent.claudeCode": "Claude Code",
+  "codingAgent.wrapper": "claude-ds",
+  "codingAgent.clawai": "ClawBox AI",
+  "codingAgent.missing": "missing",
+  "codingAgent.notConnected": "not connected",
+
+  // The fourth readiness row, and the one an owner can be staring at with
+  // every other row ticked: Claude Code installed, wrapper in place, token
+  // saved — and runs dying on arrival because the model the harness asks
+  // for is not one this plan can have.
+  "codingAgent.harness": "Coding harness",
+  "codingAgent.harnessNotReady": "not ready",
+  "codingAgent.harnessNotReadyDetail": "The coding harness on this ClawBox could not get a model to answer. This is a problem with the device, not with your task — check in Settings → AI Models that ClawBox AI is connected and that your plan covers the model the harness asks for, then start the run again.",
+  "codingAgent.harnessRetry": "Try again",
+  "codingAgent.harnessRetrying": "Checking…",
+  "codingAgent.harnessRetryFailed": "The ClawBox could not be asked to try the harness again.",
+  // WHICH ACCOUNT PAYS for a run: the box's own ClawBox AI plan, or the
+  // owner's Anthropic access. The two provider names are product names and
+  // stay as they are in every locale; everything around them is translated.
+  "codingAgent.providerLabel": "Runs on",
+  "codingAgent.providerName.clawboxAi": "ClawBox AI",
+  "codingAgent.providerName.anthropic": "Anthropic",
+  "codingAgent.providerHintClawbox": "Runs are paid for by this ClawBox's own plan, and the plan chooses the model.",
+  "codingAgent.providerHintAnthropic": "Runs are paid for by your own Anthropic account, using Claude's models.",
+  "codingAgent.providerNotConnected": "Your Anthropic account is not connected yet, so runs cannot start. Add a key below, or sign in with `claude` in the Terminal app.",
+  "codingAgent.providerFailed": "Could not change which account runs are paid for by.",
+  "codingAgent.anthropicTitle": "Anthropic account",
+  "codingAgent.anthropicOff": "not connected",
+  // While the first read is in flight, or after one that failed. NOT "not
+  // connected": that would be a claim about the owner's account the card is
+  // in no position to make.
+  "codingAgent.anthropicUnknown": "checking…",
+  "codingAgent.anthropicViaKey": "connected with an API key",
+  "codingAgent.anthropicViaLogin": "signed in with Claude Code",
+  "codingAgent.anthropicHint": "Your own Anthropic access, for runs set to Anthropic. Paste an API key, or sign in by running `claude` in the Terminal app. The key is kept on this ClawBox and is never shown again.",
+  "codingAgent.anthropicKeyLabel": "Anthropic API key",
+  "codingAgent.anthropicKeyPlaceholder": "sk-ant-…",
+  "codingAgent.anthropicSave": "Save",
+  "codingAgent.anthropicSaving": "Saving…",
+  "codingAgent.anthropicSaveFailed": "Could not save the Anthropic API key.",
+  "codingAgent.anthropicSavedUnchecked": "Saved. This ClawBox could not reach Anthropic to check the key, so it has not been tested yet.",
+  "codingAgent.anthropicRemove": "Remove key",
+  "codingAgent.anthropicRemoveConfirm": "Remove — tap again",
+  "codingAgent.anthropicRemoveFailed": "Could not remove the Anthropic API key.",
+  "codingAgent.anthropicLoginNote": "This comes from the Claude Code sign-in on this ClawBox, not from a key saved here — sign out with `claude` in the Terminal app to end it.",
+  "codingAgent.runProvider": "paid for by {provider}",
+
+  // Real Claude Code settings: --effort, and whether the Task tool is in
+  // --tools at all. "Ultracode" is the CLI's own name for its xhigh-plus-
+  // workflow-orchestration mode (`--effort ultracode` since 2.1.x), kept as
+  // is so the label matches what the terminal says.
+  "codingAgent.effortLabel": "Effort",
+  "codingAgent.effort.low": "Low",
+  // The picker offers four levels, but a box that stored "medium" or "high"
+  // before it narrowed still has to name what is in force.
+  "codingAgent.effort.medium": "Medium",
+  "codingAgent.effort.high": "High",
+  "codingAgent.effort.xhigh": "Very high",
+  "codingAgent.effort.max": "Max",
+  "codingAgent.effort.ultracode": "Ultracode",
+  "codingAgent.effortFailed": "Could not change the thinking effort.",
+  // The ceilings a run stops at. Neither has a time or a price behind it.
+  "codingAgent.turnsLabel": "Steps per run",
+  "codingAgent.turnsFailed": "Could not change the step limit.",
+  "codingAgent.tokensLabel": "Token limit (optional)",
+  "codingAgent.tokensPlaceholder": "no limit",
+  "codingAgent.tokensFailed": "Could not change the token limit.",
+  "codingAgent.thinking": "thinking · {n} tokens",
+  "codingAgent.tokensWord": "tokens",
+  "codingAgent.updated": "updated",
+  "codingAgent.githubOff": "not connected",
+  "codingAgent.githubUnreachable": "GitHub unreachable",
+  "codingAgent.githubNotRunnable": "gh installed but will not start — check its permissions",
+  "codingAgent.githubConnect": "Connect",
+  "codingAgent.githubReconnect": "Change",
+  "codingAgent.githubOut": "Sign out",
+  "codingAgent.githubOutConfirm": "Sign out — tap again",
+  "codingAgent.githubOutFailed": "Could not disconnect GitHub.",
+  "codingAgent.backup": "Back up",
+  "codingAgent.backupBusy": "Backing up…",
+  "codingAgent.backupDone": "Backed up to {repo}",
+  "codingAgent.backupFailed": "Could not back up to GitHub.",
+  "codingAgent.recentRuns": "Recent runs",
+  "codingAgent.more": "Show more",
+  "codingAgent.clearRuns": "Clear history",
+  "codingAgent.clearRunsHint": "Removes finished runs and their evidence folders from the list. Runs that are live, paused or drafted are kept — they still hold a session you can resume.",
+  "codingAgent.clearConfirm": "Clear — tap again",
+  "codingAgent.clearFailed": "Could not clear the run history.",
+  "codingAgent.noRuns": "No runs yet. Ask your assistant to build or change something in a code project.",
+  "codingAgent.statusRunning": "Running",
+  "codingAgent.statusCompleted": "Finished",
+  "codingAgent.statusFailed": "Did not finish",
+  "codingAgent.statusStopped": "Stopped",
+  "codingAgent.startedByAgent": "started by the assistant",
+  "codingAgent.startedByOwner": "started by you",
+  "codingAgent.runMeta": "{turns} turns · {files} files changed · {duration}",
+  "codingAgent.denials": "{n} actions were not allowed",
+  "codingAgent.deniedTitle": "Not allowed",
+  "codingAgent.artifactsTitle": "Evidence from this run",
+  "codingAgent.timelineTitle": "Timeline",
+  "codingAgent.agentsTitle": "Agents",
+  "codingAgent.stepWhen": "When",
+  "codingAgent.stepKind": "Kind",
+  "codingAgent.stepLine": "Line",
+  "codingAgent.stepKind.tool": "Tool",
+  "codingAgent.stepKind.file": "File",
+  "codingAgent.stepKind.command": "Command",
+  "codingAgent.stepKind.text": "Message",
+  "codingAgent.agentMain": "This run",
+  "codingAgent.agentModel": "Model",
+  "codingAgent.agentState": "State",
+  "codingAgent.agentAsked": "Asked to",
+  "codingAgent.agentStillWorking": "Still working",
+  "codingAgent.agentFinished": "Finished",
+  "codingAgent.statNone": "none yet",
+  "codingAgent.helperFor": "for {t}",
+  "codingAgent.helperRefused": "refused",
+  "codingAgent.artifactsShowAll": "Show all {n}",
+  "codingAgent.artifactsShowFewer": "Show fewer",
+  // The report dialog: a run's report.md (or any .md it wrote) drawn as
+  // markdown over the app. {name} is the artifact's file name.
+  "codingAgent.githubDeviceIntro": "Enter this code on github.com to connect your account:",
+  "codingAgent.githubDeviceOpen": "Open github.com/login/device",
+  "codingAgent.githubDeviceWaiting": "Waiting for the code to be entered…",
+  "codingAgent.githubDeviceCancel": "Cancel",
+  "codingAgent.githubDeviceTerminal": "Use the Terminal instead",
+  "codingAgent.githubStartFailed": "Could not start the GitHub login",
+  "codingAgent.harnessTest": "Test harness",
+  "codingAgent.harnessTestTitle": "Test harness",
+  "codingAgent.harnessTestHint": "Starts one small, real run in a scratch project to prove the delegated shell works end to end: Claude Code launches, writes a file, drives the browser and reports back. It costs a run like any other, and it needs the agent switched on and ready.",
+  "codingAgent.harnessTestFailed": "Could not start the harness test",
+  // The test runs in a folder inside the owner's project folder, so it has
+  // nowhere to go until one is chosen (src/lib/coding-agent-harness-test.ts).
+  "codingAgent.harnessTestNoFolder": "Choose a project folder first.",
+  "codingAgent.deniedHelp":
+    "The coding agent may only run a fixed set of commands inside its own folder. This is the safety limit working, not a fault — the run usually finds another way.",
+
+  // ── The files a run was given to work from ───────────────────────────────
+  // The assistant writes what it generates into its own state folder, which no
+  // run may read. The box copies what a run was handed into a folder it can,
+  // and these are the words for where that is — on the run's page, beside a
+  // refusal, and in the rules card, because "where do I put the file" is the
+  // question every one of those three raises.
+  "codingAgent.inputsTitle": "Inputs for this run",
+  "codingAgent.inputsHint": "Files given to this run are in {folder}. Anything you put in {shared} can be read by any run on this box.",
+  "codingAgent.inputsEmpty": "This run was given no files.",
+  "codingAgent.inputsRefusedTitle": "Not handed over",
+  "codingAgent.inputsRefusedLocation": "not in a folder this box takes files from",
+  "codingAgent.inputsRefusedMissing": "not there, or not an ordinary file",
+  "codingAgent.inputsRefusedSize": "too large, or too many files for one run",
+  "codingAgent.inputsRefusedFailed": "could not be copied",
+  "codingAgent.deniedInputs": "Files a run may read live in {folder} and in {shared}. The assistant's own media folder is not one of them and no rule can open it — ask the assistant to hand the file over when it starts a run, or put the file in the shared folder yourself.",
+  "codingAgent.rulesInputs": "To give a run a file to work from, put it in {shared}, or ask the assistant to hand it over when it starts the run. The assistant's own media folder holds this box's credentials beside the pictures and can never be opened by a rule.",
+
+  // ── Allowing a refused action next time ──────────────────────────────────
+  // A refusal is only half an answer while the owner cannot say "yes, that one
+  // is fine". `allow*` is the button on a refused action and the confirmation
+  // it opens; the `rules*` card in Settings is where the standing list is read
+  // and edited; `ruleRefused*` are the validator's codes, one sentence each,
+  // because a refusal the owner cannot act on is a refusal they will meet
+  // again.
+  "codingAgent.allowNextTime": "Allow next time",
+  "codingAgent.allowConfirmTitle": "Allow this from now on?",
+  "codingAgent.allowConfirmHint": "Every later run may open that folder. You can take it back in Settings.",
+  "codingAgent.allowSave": "Allow",
+  "codingAgent.allowCancel": "Cancel",
+  "codingAgent.allowSaved": "Allowed. Runs started from now on may do this.",
+  "codingAgent.allowResumeHint": "Resume this run to let it carry on with the new permission.",
+  "codingAgent.allowFailed": "Could not save that permission rule.",
+  // Shown instead of the button on a refusal no rule could ever answer: the
+  // path holds credentials or this box's own state.
+  "codingAgent.allowProtected": "Cannot be allowed: protected location.",
+
+  "codingAgent.rulesTitle": "Allowed from now on",
+  "codingAgent.rulesHint":
+    "Folders you have told this box a coding run may open, on top of the ones it allows by default. A run already working keeps the rules it started with; resuming a paused run picks up the current list.",
+  "codingAgent.rulesEmpty": "Nothing yet. When a run is refused something, you can allow it from the run's page.",
+  "codingAgent.rulesLabel": "Permission rule",
+  "codingAgent.rulesPlaceholder": "Read(//home/clawbox/Projects/notes/**)",
+  "codingAgent.rulesAdd": "Add",
+  "codingAgent.rulesRemove": "Remove",
+  "codingAgent.rulesRemoveOne": "Remove {rule}",
+  "codingAgent.rulesCount": "{n} of {max}",
+  "codingAgent.rulesFailed": "Could not change the permission rules.",
+  "codingAgent.ruleRefusedEmpty": "Type a permission rule first.",
+  "codingAgent.ruleRefusedTooLong": "That rule is too long.",
+  "codingAgent.ruleRefusedMalformed":
+    "A rule names a file tool and the paths it may open, like Read(//home/you/notes/**).",
+  "codingAgent.ruleRefusedUnknownTool":
+    "That is not a tool a permission rule may name. Use Read, Glob, Grep, Edit or Write.",
+  // Bash is not on the list and never will be: a run is already started with
+  // every command allowed, so a Bash rule would grant nothing, and the commands
+  // it may NOT run are the ones that kill processes by name, which nothing can
+  // open.
+  "codingAgent.ruleRefusedBash":
+    "A run may already use every command except the ones that kill processes by name, and those can never be allowed. A permission rule is for files.",
+  "codingAgent.ruleRefusedTooBroad": "That rule is too wide. Name the folder it is about.",
+  "codingAgent.ruleRefusedProtected": "That path holds credentials or this box's own state. No rule can open it.",
+  "codingAgent.ruleRefusedUnsafe": "A rule may not step out of the folder it names.",
+  "codingAgent.ruleRefusedDuplicate": "That rule is already on the list.",
+  "codingAgent.ruleRefusedTooMany": "The list is full. Remove a rule first.",
+  "codingAgent.stop": "Stop",
+  "codingAgent.back": "Back",
+  "codingAgent.backTo": "Back to {name}",
+  "codingAgent.breadcrumbLabel": "Breadcrumb",
+  "codingAgent.workspaceTitle": "Project workspace",
+  "codingAgent.filesTab": "Files",
+  "codingAgent.changesTab": "Changes",
+  "codingAgent.runsTab": "Runs",
+  "codingAgent.teamTab": "Team",
+  "codingAgent.createPr": "Create PR",
+  "codingAgent.createPrBusy": "Opening…",
+  "codingAgent.prOpened": "Pull request #{n} opened.",
+  "codingAgent.prExists": "Pull request #{n} is already open for this branch.",
+  "codingAgent.viewPr": "PR #{n}",
+  "codingAgent.prFailed": "Could not open a pull request.",
+  "codingAgent.openOnGithub": "Open on GitHub",
+  "codingAgent.uncommitted": "Uncommitted changes",
+  "codingAgent.filesChanged": "Files changed: {n}",
+  "codingAgent.noChanges": "Nothing has changed.",
+  "codingAgent.noGitHistory": "This folder has no git history yet.",
+  "codingAgent.pickFile": "Pick a file to read or edit it.",
+  "codingAgent.pickDiff": "Pick a file to see what changed.",
+  "codingAgent.binaryFile": "Binary file — nothing to show.",
+  "codingAgent.fileTruncated": "Showing the first part of a large file.",
+  "codingAgent.diffTruncated": "Showing the first part of a large diff.",
+  "codingAgent.emptyFolder": "This folder is empty.",
+  "codingAgent.listTruncated": "More entries than shown.",
+  "codingAgent.workspaceError": "Could not read the project.",
+  "codingAgent.fileSave": "Save",
+  "codingAgent.fileSaving": "Saving…",
+  "codingAgent.fileSaved": "Saved",
+  "codingAgent.fileUnsaved": "Unsaved changes",
+  "codingAgent.fileSaveFailed": "Could not save the file.",
+  "codingAgent.fileReadOnlyLarge": "Read-only: the file is larger than the editor takes.",
+  "codingAgent.fileDiscardAsk": "Discard the unsaved changes to {file}?",
+  "codingAgent.fileDiscard": "Discard",
+  "codingAgent.fileKeepEditing": "Keep editing",
+  "codingAgent.fileLiveEdit": "A run is working in this folder — its next commit takes your edit with it.",
+  "codingAgent.openInFiles": "Open in Files",
+  "codingAgent.openInFilesFailed": "The Files app cannot reach this folder.",
+  "codingAgent.changePicker": "Which change to show",
+  "codingAgent.change.modified": "Modified",
+  "codingAgent.change.added": "Added",
+  "codingAgent.change.untracked": "New file",
+  "codingAgent.change.deleted": "Deleted",
+  "codingAgent.change.conflict": "Conflict",
+  "codingAgent.browserPreviewTitle": "Browser preview",
+  "codingAgent.openVnc": "Open VNC",
+  "codingAgent.team.title": "Coding team",
+  "codingAgent.team.help": "A planner splits a goal into tasks, workers do them side by side in their own sessions and worktrees, and a reviewer checks each result before it counts. Every step is on the board below.",
+  "codingAgent.team.plan": "Plan with the assistant",
+  "codingAgent.team.stop": "Stop the team",
+  "codingAgent.team.stopFailed": "Could not stop the team.",
+  "codingAgent.team.progress": "{done} of {total} tasks done",
+  "codingAgent.team.alerts": "{n} alerts",
+  "codingAgent.team.earlier": "{n} earlier",
+  "codingAgent.team.plannerRun": "Planner run",
+  "codingAgent.team.planning": "The planner is reading the project and writing the plan…",
+  "codingAgent.team.after": "after {ids}",
+  "codingAgent.team.log": "Log ({n})",
+  "codingAgent.team.status.planning": "Planning",
+  "codingAgent.team.status.working": "Working",
+  "codingAgent.team.status.reviewing": "Reviewing",
+  "codingAgent.team.status.done": "Done",
+  "codingAgent.team.status.failed": "Failed",
+  "codingAgent.team.status.stopped": "Stopped",
+  "codingAgent.team.task.pending": "Pending",
+  "codingAgent.team.task.inProgress": "In progress",
+  "codingAgent.team.task.complete": "Complete",
+  "codingAgent.team.task.failed": "Failed",
+  "codingAgent.team.task.rejected": "Rejected",
+  "codingAgent.team.review.accepted": "Accepted",
+  "codingAgent.team.review.rejected": "Rejected",
+  "codingAgent.team.rolePlanner": "Team planner",
+  "codingAgent.team.roleWorker": "Team worker · {task}",
+  "codingAgent.team.roleReviewer": "Team reviewer · {task}",
+  "codingAgent.team.agents": "{total} agents worked here — planner {planner} · workers {workers} · reviewers {reviewers}",
+  "codingAgent.team.branch": "on branch {branch}, from {base}",
+  "codingAgent.createNewProject": "Create app",
+  "codingAgent.projectRuns": "Runs",
+  "codingAgent.otherRuns": "Other runs",
+  "codingAgent.gitTitle": "Git repository",
+  // Count-neutral on purpose: "1 commits" would be wrong and the catalogue
+  // has no plural mechanism.
+  "codingAgent.gitCommits": "Commits: {n}",
+  "codingAgent.gitNoRemote": "Not on GitHub yet",
+  "codingAgent.pause": "Pause",
+  "codingAgent.resume": "Resume",
+  "codingAgent.startDraft": "Start",
+  "codingAgent.discardDraft": "Discard",
+  "codingAgent.pauseFailed": "The run could not be paused.",
+  "codingAgent.resumeFailed": "The run could not be resumed.",
+  "codingAgent.startFailed": "The drafted run could not be started.",
+  "codingAgent.discardFailed": "The draft could not be discarded.",
+  "codingAgent.statusPaused": "Paused",
+  "codingAgent.statusDraft": "Draft",
+  // The run worked, reported itself done, and what it had to leave behind is
+  // not there. Its own word because the alternatives both mislead: "Did not
+  // finish" reads as a broken box, and "Stopped" is the owner's own gesture.
+  "codingAgent.statusGaveUp": "Gave up",
+  "codingAgent.chatPaused": "Coding agent paused",
+  "codingAgent.chatDraft": "Coding run drafted",
+  "codingAgent.chatGaveUp": "Coding agent gave up",
+  // Follows "≈ 12 min" under a live run's progress bar.
+  "codingAgent.timeLeft": "left",
+  "codingAgent.openResume": "Open in terminal",
+  "codingAgent.showDetails": "Show details",
+  "codingAgent.hideDetails": "Hide details",
+  "codingAgent.noticeOpenRun": "Open the run",
+  "codingAgent.liveView": "View",
+  "codingAgent.livePreviewTitle": "Live terminal",
+  "codingAgent.livePreviewOpenApp": "Open in Terminal",
+  "codingAgent.fullTask": "Show the whole task",
+  "codingAgent.startedAgo": "started {when}",
+  "codingAgent.copyId": "Copy the run id",
+  "codingAgent.statSteps": "Steps",
+  "codingAgent.statFiles": "Files changed",
+  "codingAgent.statDuration": "Duration",
+  "codingAgent.statTokens": "Tokens",
+  "codingAgent.statHelpers": "Helpers",
+  "codingAgent.statCommit": "Commit",
+  "codingAgent.statModels": "Models",
+  "codingAgent.planTitle": "Plan",
+  "codingAgent.errorTitle": "What went wrong",
+  "codingAgent.summaryTitle": "Summary",
+  "codingAgent.noSummaryYet": "No summary yet — the run is still working.",
+  "codingAgent.noSummary": "This run left no summary.",
+
+  "codingAgent.loadFailed": "Could not read the coding agent settings.",
+  "codingAgent.toggleFailed": "Could not change the coding agent setting.",
+  "codingAgent.stopFailed": "Could not stop the run.",
+
+  // The Projects section — every folder with a git history of its own in
+  // the owner's project folder — and the New app wizard, which ends in the
+  // mascot chat: the assistant scaffolds, delegates and verifies, and the
+  // owner carries on there. `newHanded` is the last thing the card says.
+  "codingAgent.projectsTitle": "Projects",
+  "codingAgent.navHome": "Home",
+  "codingAgent.projectFolderUnset": "Choose a project folder in Settings, and every project with its own git history will be listed here.",
+  "codingAgent.noProjects": "No projects yet. Tap New app, or ask your assistant to build something in {folder}.",
+  "codingAgent.onDesktop": "on desktop",
+  "codingAgent.runInProgress": "run in progress",
+  "codingAgent.open": "Open",
+  "codingAgent.copyFolder": "Copy the folder name",
+  "codingAgent.copied": "Copied",
+  "codingAgent.noCommits": "No commits yet",
+  "codingAgent.newApp": "New app",
+  "codingAgent.newTitle": "A new app for your desktop",
+  "codingAgent.newNameLabel": "Name",
+  "codingAgent.newNamePlaceholder": "Invoice generator",
+  "codingAgent.newWhatLabel": "What should it do?",
+  "codingAgent.newWhatPlaceholder": "Create invoices from a customer list with line items and tax, keep them in a list, and export each one as a PDF I can email.",
+  "codingAgent.newModeNew": "New app",
+  "codingAgent.newModeExisting": "Existing project",
+  "codingAgent.newProjectLabel": "Project",
+  "codingAgent.newProjectsLoading": "Reading your projects…",
+  "codingAgent.newNoProjects": "No projects yet — create a new app first.",
+  "codingAgent.newNextLabel": "What should the next run do?",
+  "codingAgent.newNextPlaceholder": "Add a search box to the customer list and fix the total on the invoice.",
+  "codingAgent.newExistingHint": "The assistant starts a run in that folder, reads its last run and commits first, and tells you what is left afterwards. Follow it in the Coding Agent app.",
+  "codingAgent.newContinue": "Continue",
+  "codingAgent.newTeamSwitch": "Run it as a coding team",
+  "codingAgent.newTeamHint": "The assistant starts a coding team in that folder: a planner splits the goal into tasks, workers do them side by side in their own worktrees, and a reviewer checks each result. Follow the board in the Coding Agent app.",
+  "codingAgent.newStartTeam": "Start a team",
+  "codingAgent.newProjectRequired": "Pick a project.",
+  "codingAgent.importTitle": "Import a project",
+  "codingAgent.importButton": "Import",
+  "codingAgent.importFromGitHub": "From GitHub",
+  "codingAgent.importFromFolder": "From a folder",
+  "codingAgent.importReposLoading": "Reading your repositories…",
+  "codingAgent.importNotConnected": "Connect a GitHub account in Settings to see your repositories.",
+  "codingAgent.importFilterPlaceholder": "Filter by name",
+  "codingAgent.importNoRepos": "No repositories on this account yet.",
+  "codingAgent.importNoMatches": "No repository matches.",
+  "codingAgent.importPrivate": "private",
+  "codingAgent.importRepoImport": "Import",
+  "codingAgent.importImporting": "Importing…",
+  "codingAgent.importTruncated": "Only the newest {n} repositories are listed.",
+  "codingAgent.importPathLabel": "Folder on this ClawBox",
+  "codingAgent.importPathPlaceholder": "/home/clawbox/old-site or ~/old-site",
+  "codingAgent.importFolderHint": "The folder is copied into your project folder. node_modules is left behind, and a folder without git history gets one.",
+  "codingAgent.importFolderSubmit": "Copy into my projects",
+  "codingAgent.importDone": "Imported {name}.",
+  "codingAgent.importSkipped": "Left behind: {folders}.",
+  "codingAgent.importFailed": "The import did not finish. Try again.",
+  "codingAgent.clawboxApp": "ClawBox app",
+  "codingAgent.addedToDesktop": "{name} is on the desktop.",
+  "codingAgent.newLastRun": "Last run: {task}",
+  "codingAgent.newKindCodeProject": "desktop app",
+  "codingAgent.newKindFolder": "git folder",
+  "codingAgent.newTemplateLabel": "Start from",
+  "codingAgent.newTemplateApp": "Starter app — HTML, CSS and JS files",
+  "codingAgent.newTemplateBlank": "Blank page — one HTML file",
+  "codingAgent.newTemplateNextjs": "Next.js full-stack app — pages, API routes, TypeScript (default)",
+  "codingAgent.newTemplateReact": "React app — Vite, TypeScript",
+  "codingAgent.newCreate": "Create",
+  "codingAgent.newNameRequired": "Give the app a name.",
+  "codingAgent.newNameTooLong": "The name can be at most {max} characters.",
+  "codingAgent.newWhatRequired": "Say what the app should do.",
+  "codingAgent.newWhatTooLong": "Keep the description to {max} characters.",
+  "codingAgent.newHanded": "Handed to the assistant — continue in the chat.",
+  // Shown on the standalone /app/coding page instead of the New button:
+  // there is no chat there to hand the message to.
+  "codingAgent.newNeedsDesktop": "A new app starts in the chat, which lives on the desktop. Open the Coding agent there to ask for one.",
+  "codingAgent.codeProject": "code project",
+
+  // The automatic review pass: the owner's switch in the settings card, its
+  // one-sentence cost, and the chips that tie a review run to the run it
+  // reviewed — the fixed review task reads like any other run otherwise.
+  "codingAgent.reviewPassLabel": "Review each finished run",
+  "codingAgent.reviewPassHint": "After a run that changed files finishes, one more run in the same session hunts for defects and fixes what it confirms. It costs a second, smaller run and takes the run slot while it works; never after Stop or Pause.",
+  "codingAgent.reviewPassFailed": "Could not change the review pass setting.",
+  "codingAgent.autoPrLabel": "Open a pull request and merge it when checks pass",
+  "codingAgent.autoPrHint": "Each run works on its own branch, opens a pull request into the project's default branch, and waits for GitHub Actions. It merges only when at least one check actually ran and every one passed — a pull request with no checks is never merged. Needs a GitHub remote.",
+  "codingAgent.autoPrFailed": "Could not change the pull-request setting.",
+
+  // What a run may SPEND on the project it builds. Both switches are on unless
+  // the owner turns them off, and each hint names its own cost — the pictures
+  // come out of the ClawBox AI daily allowance, the voice out of the one
+  // synthesis slot the chat shares.
+  "codingAgent.genImagesLabel": "Let runs draw pictures",
+  "codingAgent.genImagesHint": "A run can ask this box to draw artwork for the project it is building, and the box draws the project's desktop icon, favicon.png and favicon.ico by itself shortly after a run starts. Each picture comes out of your ClawBox AI daily allowance; a run gets at most twenty.",
+  "codingAgent.genImagesFailed": "Could not change the picture setting.",
+  "codingAgent.genAudioLabel": "Let runs record speech",
+  "codingAgent.genAudioHint": "A run can have this box speak a line and save it as a sound file in the project — narration, a greeting, a spoken cue. It uses the same voice as your spoken replies and waits its turn behind them; a run gets at most forty clips.",
+  "codingAgent.genAudioFailed": "Could not change the speech setting.",
+  "codingAgent.realBrowserLabel": "Verify in this box's browser",
+  "codingAgent.realBrowserHint": "A run checks its work in the Chromium window on this box's screen — the one the Browser app shows — so you can watch the pages it opens. Switched off, it uses an invisible browser instead and nothing appears on the screen. Either way, a run that cannot reach the screen's browser falls back to the invisible one by itself.",
+  "codingAgent.realBrowserFailed": "Could not change the browser setting.",
+
+  // A run that finished on its own keeps whatever it started — the way an app
+  // that serves itself on a port is meant to work — so the page says so and
+  // offers to end it, rather than the device killing it unasked.
+  "codingAgent.leftoverRunning": "Something this run started is still running.",
+  "codingAgent.killLeftover": "End it",
+  "codingAgent.killLeftoverFailed": "Could not end what the run left running.",
+
+  // WHY a run is paused, when it was not the owner who paused it. One
+  // sentence per meter this box can run out of, plus the reset time — because
+  // the only move the card offers, Resume, buys the same refusal until the
+  // allowance is actually back.
+  "codingAgent.pausedAllowanceImages": "Paused: the daily image allowance is used up.",
+  "codingAgent.pausedAllowanceSpeech": "Paused: the speech allowance is used up.",
+  // ClawBox AI's rolling allowances: they free up as old usage ages out, so
+  // the instant is said with its day, in the owner's clock ({time}).
+  "codingAgent.pausedAllowanceWeekly": "Paused: this week's ClawBox AI chat allowance is used up.",
+  "codingAgent.pausedAllowanceBurst": "Paused: the ClawBox AI 5-hour burst limit is reached.",
+  "codingAgent.pausedAllowanceEmbeddings": "Paused: this week's ClawBox AI memory indexing allowance is used up.",
+  "codingAgent.pausedAllowanceFreesUp": "It frees up at {time}.",
+  "codingAgent.pausedAllowanceResets": "It resets at {time} UTC.",
+  "codingAgent.pausedAllowanceResetsUnknown": "Resume it once the allowance is back.",
+  // Every Anthropic account in the box's pool is at its usage limit (TASK-902).
+  // Unlike the meters above nobody has to press Resume: the box carries the run
+  // on by itself at the first reset, and the second sentence says so.
+  "codingAgent.pausedAllowanceAnthropic": "Waiting: every Anthropic account on this box is at its usage limit.",
+  "codingAgent.pausedAnthropicResumesAt": "It carries on by itself at {time}.",
+  "codingAgent.pausedAnthropicResumes": "It carries on by itself as soon as one account is back.",
+  "codingAgent.prOpening": "Opening PR",
+  "codingAgent.prWaiting": "Checks {done}/{total}",
+  "codingAgent.prMerged": "Merged",
+  "codingAgent.prBlocked": "Needs you",
+  "codingAgent.prReviewRound": "Review {round}/{max}",
+  "codingAgent.prClean": "Ready to merge",
+  "codingAgent.reviewLoopOf": "review round for {id}",
+  "codingAgent.reviewLoopRoundOf": "round {round} for {id}",
+  "codingAgent.reviewTitle": "Pull request review",
+  "codingAgent.reviewState.polling": "Watching GitHub",
+  "codingAgent.reviewState.working": "A round is working",
+  "codingAgent.reviewState.clean": "Green — merge when you are ready",
+  "codingAgent.reviewState.merged": "Merged",
+  "codingAgent.reviewState.needsOwner": "Needs you",
+  "codingAgent.reviewState.failed": "The review loop could not run",
+  "codingAgent.reviewRound": "Round {round} of {max}",
+  "codingAgent.reviewChecks": "{passed} passed, {failed} failed, {pending} pending",
+  "codingAgent.reviewNoChecks": "No checks yet",
+  "codingAgent.reviewThreads": "{n} unresolved comments",
+  "codingAgent.reviewChangesRequested": "Changes requested",
+  "codingAgent.reviewFixRun": "round {id}",
+  "codingAgent.reviewRoundsLabel": "Review rounds after a pull request",
+  "codingAgent.reviewRoundsHint": "Once a run opens a pull request, ClawBox watches GitHub and hands back what it finds: the logs of failing checks, unresolved review comments, and a rebase when the branch conflicts with its base. Each round is one more turn in the run's own session. Off means the pull request is opened and left to you.",
+  "codingAgent.reviewRoundsOff": "Off",
+  "codingAgent.reviewRoundsFailed": "Could not change the number of review rounds.",
+  "codingAgent.autoMergeLabel": "Merge a pull request the review rounds cleared",
+  "codingAgent.autoMergeHint": "When every check has passed, no review comment is left unanswered and nobody has asked for changes, ClawBox squash-merges the pull request and deletes its branch. Any base branch may be merged this way — beta, master, a feature branch — except main, which ClawBox never merges into however green the pull request is. Off by default.",
+  "codingAgent.autoMergeFailed": "Could not change the merge setting.",
+  "codingAgent.stepReattached": "The web server restarted; this run kept going and was picked back up",
+  "codingAgent.stepReviewLoopTurn": "Review round for {id}",
+  "codingAgent.stepReviewLoopRound": "Review round {round} for {id}",
+  "codingAgent.stepPullRequestAdopted": "Picked up pull request #{number} into {base}, opened by the run itself",
+  "codingAgent.stepReviewRound": "Review round {round} of {max} handed to the coding agent",
+  "codingAgent.reviewOf": "review of {id}",
+  "codingAgent.reviewedBy": "reviewed by {id}",
+  "codingAgent.reviewPassTitle": "Automatic review pass of {id}",
+
+  // ── What a run had to deliver ─────────────────────────────────────────────
+  //
+  // The card on a run's page, and the words for the three steps the gate adds
+  // to the timeline. A run that gave up is the one ending where the owner has
+  // to be told what is MISSING rather than what went wrong, so the card leads
+  // with the bar and says the verdict under it.
+  "codingAgent.deliverableTitle": "What it had to deliver",
+  "codingAgent.deliverablePr": "A pull request for its branch",
+  "codingAgent.deliverablePaths": "These files, not empty: {files}",
+  "codingAgent.deliverableCommand": "This command, exiting cleanly: {command}",
+  "codingAgent.deliverableMet": "It is there.",
+  "codingAgent.deliverableMissing": "Still missing: {reason}",
+  "codingAgent.deliverablePending": "Not checked yet.",
+  "codingAgent.deliverableAttempts": "{n} of {max} attempts used",
+  "codingAgent.stepDeliverableMet": "The deliverable is there",
+  "codingAgent.stepDeliverableMissing": "Not finished yet: {reason}",
+  "codingAgent.stepAnotherAttempt": "Attempt {attempt} of {attempts} at the deliverable",
+  "codingAgent.completionAttemptsLabel": "Attempts at a run's deliverable",
+  "codingAgent.completionAttemptsHint": "A run only counts as finished when what it had to deliver is actually there \u2014 the files your assistant named, or a pull request when pull requests are on. When it is not, ClawBox carries the run on in its own session with a note saying what is missing. The run's own first go counts as one attempt.",
+  "codingAgent.completionAttemptsFailed": "Could not change the number of attempts.",
+  "codingAgent.maxParallelRunsLabel": "Coding runs at once",
+  "codingAgent.maxParallelRunsHint": "A run in a git project works in its own copy of it on a branch of its own, so runs can no longer overwrite each other's half-finished files; a folder that is not a git repository has no copy, and one run at a time still works there. How many make sense is a question about this ClawBox's memory: two is comfortable, four is a lot on a small board.",
+  "codingAgent.maxParallelRunsFailed": "Could not change how many runs may go at once.",
+  "codingAgent.worktreeKept": "This run's own copy of the project is still on disk. Its work is on the branch {branch}, so removing the copy does not lose it.",
+  "codingAgent.worktreeRemove": "Remove copy",
+  "codingAgent.worktreeRemoveFailed": "Could not remove the run's copy of the project.",
+
+  // ── A run whose work could not be merged back ─────────────────────────────
+  //
+  // The settle merges a run's branch into the project conservatively, and
+  // every refusal used to leave the owner with a run that said "Finished",
+  // work reachable only as a branch name, and one button that deleted the
+  // copy. Each sentence below names the blocker AND the move that clears it,
+  // because a dead end with no next step is the thing being fixed.
+  "codingAgent.bringHomeDirty": "This run's work is on the branch {branch} and not in the project: the project folder has uncommitted changes of its own, so ClawBox would not merge over them. Commit or stash your own changes, then bring the work home.",
+  "codingAgent.bringHomeNotOnBase": "This run's work is on the branch {branch} and not in the project: the project is on a different branch than {base}, and ClawBox will not guess where the work belongs. Switch the project back to {base}, then bring the work home.",
+  "codingAgent.bringHomeConflict": "This run's work is on the branch {branch} and not in the project: it conflicts with the project's own changes, and ClawBox will not resolve a conflict by guessing. Merge {branch} by hand to settle it, or bring the work home once the conflict is gone.",
+  "codingAgent.bringHomeFailed": "This run's work is on the branch {branch} and not in the project: git refused the merge. Try again, or merge {branch} by hand.",
+  "codingAgent.bringHomeUnknown": "This run's work is on the branch {branch} and is not in the project. Bring it home, or merge {branch} by hand.",
+  "codingAgent.bringHome": "Bring the work home",
+  "codingAgent.bringHomeWorking": "Bringing it home\u2026",
+  "codingAgent.bringHomeError": "Could not bring the run's work home.",
+  "codingAgent.bringHomeCopy": "Copy the git commands",
+  "codingAgent.bringHomeCopied": "Copied",
+  "codingAgent.worktreeMergedInto": "This run's work was merged into {base}. Its own copy of the project is still on disk.",
+
+  // ── Telling a run something while it works ────────────────────────────────
+  //
+  // A delegated run cannot ask a question, and until this box could not be
+  // told anything either. "Queued" and "Delivered" are kept apart because they
+  // are different promises: one is "the run has it", the other is "it gets it
+  // at its next step".
+  "codingAgent.message.title": "Tell the agent",
+  "codingAgent.message.hint": "Send a correction or something it should know. It carries on from where it is \u2014 it does not start over.",
+  "codingAgent.message.placeholder": "Tell the agent\u2026",
+  "codingAgent.message.send": "Send",
+  "codingAgent.message.sending": "Sending\u2026",
+  "codingAgent.message.queued": "Queued",
+  "codingAgent.message.delivered": "Delivered",
+  "codingAgent.message.failed": "Could not send that message to the run.",
+  "codingAgent.message.errorEmpty": "Type something to send.",
+  "codingAgent.message.errorTooLong": "That message is too long: at most {max} characters.",
+  "codingAgent.message.errorNotPlainText": "A message must be plain text.",
+  "codingAgent.message.errorQueueFull": "This run already has {n} messages waiting for it. Wait for it to read them.",
+  "codingAgent.message.errorSettled": "That run has finished, so there is nothing left to tell it.",
+
+  // ── First-run setup wizard ────────────────────────────────────────────────
+  //
+  // Switching the coding agent on is consent for a delegated shell, so the
+  // wizard says what it is before it asks for anything, then collects the two
+  // settings a run actually needs: the account it pushes with, and the folder
+  // it works in. Settings keeps every one of these controls — this is an
+  // onboarding path, not the only way in.
+  "codingAgent.wizardTitle": "Set up the coding agent",
+  "codingAgent.wizardIntro": "The coding agent lets your assistant hand a whole task to Claude Code running on this box: it reads and writes files in one folder, runs commands there, and reports back. Setting it up takes five steps.",
+  "codingAgent.wizardEnable": "Enable",
+  "codingAgent.wizardStepOf": "Step {n} of {total}",
+  "codingAgent.wizardNext": "Next",
+  "codingAgent.wizardBack": "Back",
+  "codingAgent.wizardSkip": "Skip for now",
+  "codingAgent.wizardFinish": "Finish setup",
+  "codingAgent.wizardFinishing": "Saving…",
+  "codingAgent.wizardFinishFailed": "Could not save the setup.",
+
+  "codingAgent.wizardGithubTitle": "Connect GitHub",
+  "codingAgent.wizardGithubHint": "A run pushes its work to GitHub with this account. You can skip this and connect later in Settings — a run still works without it, it just has nowhere to push.",
+  "codingAgent.wizardGithubConnect": "Sign in with GitHub",
+  "codingAgent.wizardGithubConnected": "GitHub connected",
+
+
+  "codingAgent.wizardProjectTitle": "Project folder and effort",
+  "codingAgent.wizardProjectHint": "The folder a run works in when the assistant names no project. Browse to pick one, or type an absolute path.",
+  "codingAgent.wizardBrowse": "Browse",
+  "codingAgent.wizardBrowseFailed": "Could not read that folder.",
+  "codingAgent.wizardPickerUp": "Up one folder",
+  "codingAgent.wizardPickerUse": "Use this folder",
+  "codingAgent.wizardPickerClose": "Close",
+  "codingAgent.wizardPickerEmpty": "No folders here.",
+  "codingAgent.wizardCreateFolder": "Create folder",
+  "codingAgent.wizardCreateFolderPlaceholder": "New folder name",
+  "codingAgent.wizardCreateFolderSave": "Create",
+  "codingAgent.wizardCreateFolderFailed": "Could not create the folder.",
+  // Said plainly and up front: Ultracode is the best answer this box can give
+  // and the most expensive one, and an owner who finds that out from a bill
+  // was told too late.
+  "codingAgent.wizardEffortCost": "Ultracode gives the best results and consumes a lot of tokens — it thinks longer and can run several agents for one task. A Max plan is recommended if you use it often. Lower effort costs less and finishes sooner.",
+  // ── Step 3: which browser a run checks its work in ──────────────────────
+  // The step says what the owner will SEE, because that is the difference
+  // between the two answers: pages opening on the device's own screen, or
+  // nothing at all. Skip is an answer, not a deferral, so it says so.
+  "codingAgent.wizardBrowserTitle": "Let runs use this box's browser",
+  "codingAgent.wizardBrowserHint": "When a run needs to check its work in a browser, it can drive the Chromium window on this box's own screen — the one the Browser app shows — so you can watch the pages it opens. Enable installs Chromium if it is missing and opens the window. Skip, and a run browses in an invisible window instead: nothing appears on the screen. Either way, you can change it later in Settings.",
+  "codingAgent.wizardBrowserEnable": "Use this box's browser",
+  "codingAgent.wizardBrowserOpening": "Opening the browser…",
+  "codingAgent.wizardBrowserInstalling": "Installing Chromium — this takes a few minutes…",
+  "codingAgent.wizardBrowserSkip": "Skip — browse invisibly",
+  "codingAgent.wizardBrowserFailed": "Could not save the browser setting.",
+  "codingAgent.wizardBrowserContinue": "Continue anyway",
+
+  "codingAgent.wizardHarnessTitle": "Try it once",
+  "codingAgent.wizardHarnessHint": "Run a small, real task in a scratch project to prove the whole chain works: Claude Code starts, writes a file, drives the browser and reports back. It costs one run. You can skip this and start it any time from the Test harness card in Settings.",
+  "codingAgent.wizardHarnessRun": "Run the test",
+  "codingAgent.wizardHarnessStarting": "Starting…",
+  "codingAgent.wizardHarnessSkip": "Skip and finish",
+
+  // ── Reset ─────────────────────────────────────────────────────────────────
+  "codingAgent.resetTitle": "Start over",
+  "codingAgent.resetHint": "Switches the coding agent off and clears the folder, effort and ceilings, then runs the setup wizard again. Your GitHub sign-in and your run history are kept.",
+  "codingAgent.resetButton": "Reset",
+  "codingAgent.artCoder": "Coder",
+  "codingAgent.artReviewer": "Reviewer",
+  "codingAgent.artBrowser": "Browser",
+  "codingAgent.team.artMain": "Assistant",
+  "codingAgent.team.artWorkers": "Workers",
+  "codingAgent.team.artPlanner": "Planner",
+  "codingAgent.team.artReviewers": "Reviewers",
+  "codingAgent.resetConfirm": "Reset everything — tap again",
+  "codingAgent.resetFailed": "Could not reset the coding agent.",
+  // The owner's secret store (src/lib/project-secrets.ts): the card, its
+  // refusals, and the two steps a run's timeline draws for it.
+  "codingAgent.secretsTitle": "Secrets",
+  "codingAgent.secretsHint": "Credentials you keep on this box for coding runs — a deploy token, a test API key, an SSH target. A run is given the ones you tick, as environment variables, and never sees them in its own output. A value cannot be read back after it is saved; to change one, type it again.",
+  "codingAgent.secretsCount": "{n} of {max}",
+  "codingAgent.secretsEmpty": "Nothing yet. Add a credential a run needs, and it reaches the run as an environment variable of that name.",
+  "codingAgent.secretsInjectLabel": "Give runs these secrets",
+  "codingAgent.secretsInjectHint": "Off, every secret stays stored and no run is given any of them. On, a run gets the ones ticked below for the whole box and for the project it works in.",
+  "codingAgent.secretsAddLabel": "Add a secret",
+  "codingAgent.secretsNamePlaceholder": "DEPLOY_TOKEN",
+  "codingAgent.secretsValuePlaceholder": "Paste the value",
+  "codingAgent.secretsScopeLabel": "Which runs it is for",
+  "codingAgent.secretsScopeBox": "Every project on this box",
+  "codingAgent.secretsAdd": "Save secret",
+  "codingAgent.secretsRemove": "Remove",
+  "codingAgent.secretsRemoveOne": "Remove {name}",
+  "codingAgent.secretsRowInject": "Give runs {name}",
+  "codingAgent.secretsSaved": "{name} saved. The value cannot be shown again.",
+  "codingAgent.secretsUnreadable": "This box can no longer decrypt this one. Save the value again.",
+  "codingAgent.secretsFailed": "Could not change the stored secrets.",
+  "codingAgent.secretsStoreFailed": "This box could not read or write its secret store.",
+  "codingAgent.secretsKeyFailed": "This box has no key to encrypt a secret with yet.",
+  "codingAgent.secretsRefusedName": "A name is capital letters, digits and underscores, starting with a letter — like DEPLOY_TOKEN.",
+  "codingAgent.secretsRefusedReserved": "That name is one this box uses itself. Choose another.",
+  "codingAgent.secretsRefusedScope": "Choose the whole box or one project.",
+  "codingAgent.secretsRefusedEmpty": "Type the value first.",
+  "codingAgent.secretsRefusedLong": "That value is too long.",
+  "codingAgent.secretsRefusedFull": "The list is full. Remove a secret first.",
+  "codingAgent.secretsRefusedGone": "That secret is no longer there.",
+  "codingAgent.stepSecretsInjected": "Secrets in the environment: {names}",
+  "codingAgent.stepSecretsUnreadable": "Could not read these secrets: {names}",
+  // Which of the owner's Anthropic accounts a run is on, and the moves between
+  // them when one hits its usage limit (TASK-902). {label}, {from} and {to} are
+  // the owner's own account names; {time} is the reset in the box's clock.
+  "codingAgent.stepAnthropicAccount": "On Anthropic account \"{label}\"",
+  "codingAgent.stepAccountSwitched": "Anthropic account \"{from}\" hit its usage limit (back at {time}); carrying on with \"{to}\" in the same session",
+  "codingAgent.stepAccountsWaiting": "Every Anthropic account is at its usage limit; waiting for the reset at {time}",
+  "codingAgent.stepResumedAfterLimit": "The usage limit reset; carrying on where it left off",
+  "codingAgent.secretsNameLabel": "Variable name",
+  "codingAgent.secretsValueLabel": "Value",
+  "codingAgent.secretsRefusedShort": "A value must be at least {n} characters, so this box can keep it out of a run's output.",
+  "codingAgent.stepPipelineReview": "Delivery pipeline: reviewing the work",
+  "codingAgent.stepPipelineImprovement": "Delivery pipeline: improvement round {round} of {rounds}",
+  "codingAgent.stepPipelineDeployPreview": "Delivery pipeline: deploying a preview",
+  "codingAgent.stepPipelineDeployProduction": "Delivery pipeline: deploying to production",
+  "codingAgent.stepPipelineVerifyPreview": "Delivery pipeline: checking the preview",
+  "codingAgent.stepPipelineVerifyProduction": "Delivery pipeline: checking production",
+  "codingAgent.stepPipelineVerified": "Checked {url} and it shows what was asked for",
+  "codingAgent.stepPipelineWaitingOwner": "Delivery pipeline: waiting for you to approve the production deployment",
+  "codingAgent.stepPipelineResumed": "Delivery pipeline: picking up where it left off after a restart",
+  "codingAgent.stepPipelineComplete": "Delivery pipeline: finished, and what was deployed was checked",
+  "codingAgent.stepPipelineStopped": "Delivery pipeline stopped: {reason}",
+  "codingAgent.pipelineTitle": "Delivery pipeline",
+  "codingAgent.pipelineStageBuild": "Build",
+  "codingAgent.pipelineStageReview": "Review",
+  "codingAgent.pipelineStageImprovement": "Improvement",
+  "codingAgent.pipelineStageDeployPreview": "Deploy a preview",
+  "codingAgent.pipelineStageVerifyPreview": "Check the preview",
+  "codingAgent.pipelineStageDeployProduction": "Deploy to production",
+  "codingAgent.pipelineStageVerifyProduction": "Check production",
+  "codingAgent.pipelineStageComplete": "Done",
+  "codingAgent.pipelineState.pending": "not started",
+  "codingAgent.pipelineState.running": "under way",
+  "codingAgent.pipelineState.passed": "done",
+  "codingAgent.pipelineState.failed": "failed",
+  "codingAgent.pipelineState.skipped": "not needed",
+  "codingAgent.pipelineState.waitingOwner": "waiting for you",
+  "codingAgent.pipelineRunning": "Running",
+  "codingAgent.pipelineWaitingOwner": "Waiting for you to deploy to production",
+  "codingAgent.pipelineComplete": "Finished — this ClawBox checked what it deployed",
+  "codingAgent.pipelineFailed": "It did not finish",
+  "codingAgent.pipelineBlocked": "It could not run: something is not set up",
+  "codingAgent.pipelineStopped": "You stopped it",
+  "codingAgent.pipelineRounds": "improvement round {round} of {max}",
+  "codingAgent.pipelineScreenshot": "Screenshot",
+  "codingAgent.pipelineJudgedByExpectations": "Checked by looking for what {url} had to contain.",
+  "codingAgent.pipelineJudgedByVision": "Checked from a screenshot of {url}, judged by this ClawBox's vision model.",
+  "codingAgent.pipelineJudgedByNothing": "This ClawBox could not check {url}.",
+  "codingAgent.pipelineDeployProduction": "Deploy to production",
+  "codingAgent.pipelineStop": "Stop the pipeline",
+  "codingAgent.pipelineWorking": "Working…",
+  "codingAgent.pipelineWorkFailed": "That could not be done just now. Try again.",
+  "codingAgent.pipelineProductionAsk": "Deploy this to production?",
+  "codingAgent.pipelineProductionWarn": "This build goes live on the project's own domain, where everyone using it sees it straight away. This ClawBox does not do it on its own unless you switch that on for the project.",
+  "codingAgent.pipelineProductionYes": "Deploy it",
+
+  // Removing a project folder. The dialog states what is there before it asks
+  // for the name to be typed, and says where the folder went afterwards —
+  // src/components/CodingProjectDeleteDialog.tsx.
+  "codingAgent.delete.action": "Remove this project",
+  "codingAgent.delete.actionFor": "Remove the project {name}",
+  "codingAgent.delete.title": "Remove {name}?",
+  "codingAgent.delete.loading": "Looking at what is in this folder…",
+  "codingAgent.delete.previewFailed": "This ClawBox could not read that project folder.",
+  "codingAgent.delete.failed": "This ClawBox could not remove that project folder.",
+  "codingAgent.delete.whatIsThere": "{size} in {files} files.",
+  "codingAgent.delete.empty": "This folder is empty.",
+  "codingAgent.delete.sizeAtLeast": "At least that — the folder was too large to measure in full.",
+  "codingAgent.delete.willMove": "The folder is moved to this ClawBox's deleted projects, not erased, and kept there for up to {days} days — this box keeps the {max} most recently removed projects and no more.",
+  "codingAgent.delete.willPurge": "This box is already keeping {max} removed projects, so removing this one deletes {names} for good, straight away.",
+  "codingAgent.delete.purged": "{names} was deleted for good to make room, before its time was up.",
+  "codingAgent.delete.willRemoveSecrets": "Its stored secrets go with it: {names}.",
+  "codingAgent.delete.willKeepRuns": "{n} runs worked here. Their records are kept.",
+  "codingAgent.delete.unsavedTitle": "There is work here that exists nowhere else",
+  "codingAgent.delete.unsavedNoGit": "This folder has no git history of its own.",
+  "codingAgent.delete.unsavedDirty": "{n} uncommitted changes:",
+  "codingAgent.delete.andMore": "and more",
+  "codingAgent.delete.unsavedUnpushed": "{n} commits that have been pushed nowhere.",
+  "codingAgent.delete.unsavedWorktrees": "Leftover run copies: {names}.",
+  "codingAgent.delete.unsavedStashes": "{n} stashed changes, which no branch and no push carries.",
+  "codingAgent.delete.unsavedIgnored": "{n} ignored files and folders, which git does not track and a push never takes:",
+  "codingAgent.delete.purgeOldestLabel": "I accept that this deletes those for good, before their time was up.",
+  "codingAgent.delete.metadataKeptSecrets": "Its stored secrets were left alone: another project of the same name is still using them.",
+  "codingAgent.delete.refusal.trashFull": "This ClawBox is already keeping the most removed projects it can, and all of them can still be recovered. Empty the deleted projects first, or agree to lose the oldest.",
+  "codingAgent.delete.forceLabel": "I have read this and want the folder removed anyway.",
+  "codingAgent.delete.typeName": "Type {folder} to confirm.",
+  "codingAgent.delete.remove": "Remove",
+  "codingAgent.delete.removing": "Removing…",
+  "codingAgent.delete.close": "Close",
+  "codingAgent.delete.movedTo": "{folder} was moved to:",
+  "codingAgent.delete.retention": "It is kept there for up to {days} days, and only while it is among the {max} most recently removed projects.",
+  "codingAgent.delete.secretsRemoved": "Its stored secrets went with it: {names}.",
+  "codingAgent.delete.runsKept": "{n} run records were kept.",
+  "codingAgent.delete.projectGone": "{folder} — removed",
+  "codingAgent.delete.refusal.liveRun": "A coding run is working in this project right now. Stop it first.",
+  "codingAgent.delete.refusal.notFound": "This ClawBox has no project by that name.",
+  "codingAgent.delete.refusal.outsideRoots": "That folder is not directly inside this ClawBox's project folder or its code projects, so it is not a project this box may remove.",
+  "codingAgent.delete.refusal.pathEscape": "That name leads out of this ClawBox's project folders, so it is not a project this box may remove.",
+  "codingAgent.delete.refusal.protectedCheckout": "That folder is ClawBox's own checkout — the operating system this box is running. It is never removed from here.",
+  "codingAgent.delete.refusal.confirmMismatch": "The name typed does not match the folder.",
+  "codingAgent.delete.refusal.ownerOnly": "Removing a project folder needs a signed-in browser session.",
+  "codingAgent.delete.refusal.crossOrigin": "A project folder can only be removed from this ClawBox's own pages.",
+  "codingAgent.delete.refusal.trashFailed": "This ClawBox could not move that folder aside, so nothing was removed.",
+};

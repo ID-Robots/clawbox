@@ -1,0 +1,212 @@
+// /setup-api/email/chat-approval — turning "approve from chat" on and off.
+//
+//   GET     what is configured, and whether anyone could actually be asked
+//   POST    save the approvals-bot token and/or flip the switch
+//   DELETE  forget the bot and switch off
+//
+// AUTHORIZATION IS THE SAME AS THE APPROVAL QUEUE'S, AND FOR A STRONGER REASON.
+// /setup-api/email/pending refuses the MCP bearer because a caller who could
+// approve a draft could send mail. This route refuses it because a caller who
+// could point this device at a bot IT controls would be able to approve every
+// draft from then on — it is the gate's own hinge, so it answers to a signed-in
+// browser and nothing else. See src/lib/owner-session.ts.
+//
+// The token is stored in ClawBox's own config and is NEVER handed to the
+// harness: not to openclaw.json, not to `hermes config set`, not to an env
+// file. That separation is what keeps the approvals bot's update stream out of
+// reach of the process that runs the agent — see email-approval-telegram.ts.
+
+import { NextResponse } from "next/server";
+import { get as configGet, set as configSet } from "@/lib/config-store";
+import {
+  CHAT_APPROVAL_ENABLED_KEY,
+  CHAT_APPROVAL_TOKEN_KEY,
+  approvalBotToken,
+  chatApprovalEnabled,
+  ownerChatIds,
+  readApprovalBotToken,
+  startApprovalPoller,
+  stopApprovalPoller,
+} from "@/lib/email-approval";
+import {
+  fetchApprovalBotInfo,
+  safeBotToken,
+  TelegramApiError,
+  TelegramUnavailableError,
+} from "@/lib/email-approval-telegram";
+import { hasOwnerSession } from "@/lib/owner-session";
+import { readTelegramBotsInUse, telegramBotId } from "@/lib/telegram-bot-identity";
+
+export const dynamic = "force-dynamic";
+
+/** Remembered so the panel can show "@YourBot" without another Telegram call. */
+const BOT_USERNAME_KEY = "email_approval_bot_username";
+
+/** The refusal every non-owner caller gets, identical whatever they presented. */
+function forbidden() {
+  return NextResponse.json(
+    { error: "Changing how email is approved needs a signed-in browser session.", kind: "owner_only" },
+    { status: 403 },
+  );
+}
+
+/** What the panel needs to draw the section: state, bot name, and a count. */
+async function snapshot() {
+  // The tri-state, not the collapsed one. An unreadable store is not "there is
+  // no approvals bot" — it is the same fault this route's own POST answers 503
+  // `bot_unknown` on, and answering `botConfigured: false` over it invites the
+  // owner to connect a bot that may already be there. Nothing renders `unknown`
+  // yet (that needs a UI state and ten locales), but the fact is in the
+  // response beside `configured` here exactly as it is on /telegram/status and
+  // /telegram/pairing, instead of only in the journal.
+  const { token, known } = await readApprovalBotToken();
+  const username = await configGet(BOT_USERNAME_KEY);
+  return {
+    enabled: await chatApprovalEnabled(),
+    botConfigured: token !== null,
+    unknown: !known,
+    botUsername: typeof username === "string" ? username : null,
+    // A count, not the ids. The panel needs to warn "nobody is paired with this
+    // ClawBox on Telegram yet, so nobody can be asked"; it does not need to
+    // publish the household's Telegram user ids to do that.
+    ownerChats: (await ownerChatIds()).length,
+  };
+}
+
+export async function GET(request: Request) {
+  if (!(await hasOwnerSession(request))) return forbidden();
+  try {
+    return NextResponse.json(await snapshot());
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Could not read the chat approval settings" },
+      { status: 500 },
+    );
+  }
+}
+
+export async function POST(request: Request) {
+  if (!(await hasOwnerSession(request))) return forbidden();
+
+  let body: { enabled?: unknown; botToken?: unknown };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  // A token, when one was sent. Checked against Telegram before it is stored:
+  // saving a dead token would leave the owner with a switch that is on and a
+  // bot that never speaks, which is the failure mode this feature can least
+  // afford — a draft nobody is ever asked about.
+  if (body.botToken !== undefined) {
+    if (typeof body.botToken !== "string" || !body.botToken.trim()) {
+      return NextResponse.json({ error: "A bot token is required" }, { status: 400 });
+    }
+    const token = safeBotToken(body.botToken);
+    if (!token) {
+      return NextResponse.json({ error: "That is not a Telegram bot token" }, { status: 400 });
+    }
+
+    // Which bots is a harness on this box ALREADY long-polling? Asked of the
+    // harness stores themselves — openclaw.json's channel block and
+    // ~/.hermes/.env — because ClawBox's own copy is a mirror its configure
+    // route happens to write, and a box paired through the harness's own CLI
+    // has none. Both stores, not just the active harness's: on the dual SKU the
+    // inactive harness's bot becomes a collision the moment the owner switches.
+    //
+    // Compared by BOT ID, not by the whole token: Telegram's /revoke issues a
+    // fresh secret for the same bot, and two tokens that differ only there feed
+    // the same getUpdates stream.
+    const inUse = await readTelegramBotsInUse();
+    const approvalBotId = telegramBotId(token);
+    if (approvalBotId !== null && inUse.ids.includes(approvalBotId)) {
+      // The whole design rests on this bot's updates being ours alone. Handing
+      // it the token the harness is already long-polling would make both
+      // pollers fight ("Conflict: terminated by other getUpdates request") and
+      // take the owner's normal Telegram chat down with it.
+      //
+      // The sentence says "another bot on this device already uses this token"
+      // rather than "this is the bot ClawBox chats with", because the set also
+      // holds ClawBox's own mirror — which on a box whose harness has since been
+      // re-pointed names a bot nothing polls any more. Refusing is still the
+      // right call there (the mirror is the only trace left of a bot whose
+      // harness store cannot be read), but the owner must not be told a fact
+      // this route cannot prove.
+      return NextResponse.json(
+        {
+          error:
+            "Another Telegram bot on this device already uses this token. Approvals need a bot of their own, so the approval never travels through the same connection as the conversation.",
+          kind: "same_bot",
+        },
+        { status: 400 },
+      );
+    }
+    if (!inUse.known) {
+      // FAIL CLOSED — and after the check above, so a store we could not read
+      // still gets the specific "this is the same bot" answer whenever another
+      // store happens to prove it.
+      //
+      // The old guard reached this state by simply finding nothing in ClawBox's
+      // mirror, which on a box paired through the harness was the ORDINARY
+      // state — and it waved the save through. "We could not check" is not
+      // evidence that this is a second bot, and the cost of being wrong is the
+      // owner's own Telegram chat going deaf.
+      //
+      // The message names the fault rather than promising it will pass: an
+      // EACCES on the harness's config does not clear up on a retry, and the
+      // service log carries the reason (see telegram-bot-identity.ts).
+      return NextResponse.json(
+        {
+          error:
+            "Could not read this device's Telegram configuration, so a second bot cannot be confirmed as different from the one ClawBox already chats with. See the ClawBox service log.",
+          kind: "bot_unknown",
+        },
+        { status: 503 },
+      );
+    }
+
+    try {
+      const info = await fetchApprovalBotInfo(token);
+      await configSet(CHAT_APPROVAL_TOKEN_KEY, token);
+      await configSet(BOT_USERNAME_KEY, info.username);
+    } catch (err) {
+      if (err instanceof TelegramUnavailableError) {
+        return NextResponse.json(
+          { error: "Could not reach Telegram to check this token.", kind: "unavailable" },
+          { status: 503 },
+        );
+      }
+      const message = err instanceof TelegramApiError ? err.message : "Telegram rejected this bot token";
+      return NextResponse.json({ error: message, kind: "invalid_token" }, { status: 400 });
+    }
+  }
+
+  if (body.enabled !== undefined) {
+    if (typeof body.enabled !== "boolean") {
+      return NextResponse.json({ error: "enabled must be true or false" }, { status: 400 });
+    }
+    if (body.enabled && (await approvalBotToken()) === null) {
+      return NextResponse.json(
+        { error: "Add an approvals bot token before switching this on.", kind: "no_bot" },
+        { status: 409 },
+      );
+    }
+    await configSet(CHAT_APPROVAL_ENABLED_KEY, body.enabled);
+    if (body.enabled) startApprovalPoller();
+    else stopApprovalPoller();
+  }
+
+  return NextResponse.json({ success: true, ...(await snapshot()) });
+}
+
+export async function DELETE(request: Request) {
+  if (!(await hasOwnerSession(request))) return forbidden();
+  // Order matters only in that the switch must not survive the token: an
+  // enabled flag with no bot behind it is the "nobody is ever asked" state.
+  await configSet(CHAT_APPROVAL_ENABLED_KEY, false);
+  await configSet(CHAT_APPROVAL_TOKEN_KEY, undefined);
+  await configSet(BOT_USERNAME_KEY, undefined);
+  stopApprovalPoller();
+  return NextResponse.json({ success: true, ...(await snapshot()) });
+}

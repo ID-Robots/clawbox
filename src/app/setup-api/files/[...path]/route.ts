@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { Readable } from "stream";
-import { isProtectedFilePath } from "@/lib/file-guard";
+import { filesBrowseRoot, isProtectedContainer, isProtectedFilePath } from "@/lib/file-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -40,7 +40,24 @@ const MIME_TYPES: Record<string, string> = {
   mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav',
 };
 
-const BASE_DIR = process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
+const BASE_DIR = filesBrowseRoot();
+
+// The rename and delete handlers' answer for a directory that HOLDS the box's
+// own state — the data directory and its ancestors, the browse root, the
+// parent of a credential store. `safePath` keeps such a directory openable so
+// its public subtrees can be listed; moving or removing it is a different
+// question (see `isProtectedContainer`). The folder is visible in the listing,
+// so there is nothing to hide: the error says what it is and carries a code
+// the Files app can key on, instead of the "Invalid path" a secret gets.
+function protectedContainerResponse(): NextResponse {
+  return NextResponse.json(
+    {
+      error: "This folder holds the box's own state and cannot be moved or deleted here",
+      code: "protected_container",
+    },
+    { status: 400 },
+  );
+}
 
 function safePath(segments: string[]): string | null {
   const rel = segments.join("/");
@@ -101,13 +118,32 @@ export async function PUT(req: NextRequest, { params }: Params) {
   const { path: segments } = await params;
   const abs = safePath(segments);
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+  // Before the existence check: `data` is renamable precisely because it is
+  // there and `safePath` lets it through.
+  if (isProtectedContainer(abs)) return protectedContainerResponse();
   if (!fs.existsSync(abs)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const body = await req.json().catch(() => ({}));
-  if (!body.newName) return NextResponse.json({ error: "newName required" }, { status: 400 });
+  // `.catch` covers a body that is not JSON at all; this covers one that IS —
+  // a request whose body is literally `null` parses to `null`, and reading
+  // `.newName` off it threw a TypeError, so the Files app got a 500 where the
+  // 400 below is the answer. Anything that is not a plain object carries no
+  // `newName` either, so they all take the same road.
+  const parsed: unknown = await req.json().catch(() => null);
+  const body = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  const newName: unknown = body.newName;
+  if (typeof newName !== "string" || !newName) return NextResponse.json({ error: "newName required" }, { status: 400 });
+
+  // A rename is a NAME, not a move. `../escape.txt` resolves to a path that is
+  // still inside the browse root, so the containment check below waved it
+  // through: the app answered "Renamed" and the file left the folder the owner
+  // was looking at with nothing on screen to say where it went. The fence is
+  // here because the route is the fence — the app is not its only caller.
+  if (newName !== path.basename(newName) || newName === "." || newName === "..") {
+    return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
+  }
 
   const parentDir = path.dirname(abs);
-  const newAbs = path.resolve(parentDir, body.newName);
+  const newAbs = path.resolve(parentDir, newName);
   const base = path.resolve(BASE_DIR);
   if (newAbs !== base && !newAbs.startsWith(base + path.sep)) {
     return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
@@ -116,6 +152,10 @@ export async function PUT(req: NextRequest, { params }: Params) {
   if (isProtectedFilePath(newAbs)) {
     return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
   }
+  // Nor take the data directory's own path: `data-copy` → `data` after a
+  // restart has recreated it is a 409, but before it has, the rename would put
+  // a folder of the owner's choosing where the box keeps its state.
+  if (isProtectedContainer(newAbs)) return protectedContainerResponse();
   if (fs.existsSync(newAbs)) return NextResponse.json({ error: "Already exists" }, { status: 409 });
 
   try {
@@ -131,6 +171,10 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   const { path: segments } = await params;
   const abs = safePath(segments);
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+  // `rmSync(…, { recursive: true })` on the data directory removes the config,
+  // the session secret and every token in one request; on the browse root it
+  // removes the home. Neither is a file-manager gesture.
+  if (isProtectedContainer(abs)) return protectedContainerResponse();
   if (!fs.existsSync(abs)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const stat = fs.statSync(abs);

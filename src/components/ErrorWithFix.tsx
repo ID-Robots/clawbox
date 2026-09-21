@@ -55,11 +55,11 @@ function FixButton({ onClick, label }: { onClick: () => void; label: string }) {
     <button
       type="button"
       onClick={onClick}
-      className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0a0f1a] border border-orange-500/30 text-xs font-medium text-orange-300 hover:bg-orange-500/10 hover:border-orange-500/50 transition-colors cursor-pointer"
+      className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--bg-deep)] border border-orange-500/30 text-xs font-medium text-orange-300 hover:bg-orange-500/10 hover:border-orange-500/50 transition-colors cursor-pointer"
       title={label}
       aria-label={label}
     >
-      <img src="/clawbox-crab.png" alt="" className="w-4 h-4 object-contain" />
+      <img src="/clawbox-crab.png" alt="" className="w-3 h-3 object-contain" />
       <span>{label}</span>
     </button>
   );

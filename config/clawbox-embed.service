@@ -1,0 +1,35 @@
+[Unit]
+Description=ClawBox memory-search embedder (Qwen3-Embedding-0.6B on llama.cpp)
+# Started on demand by the web server's local-AI proxy on the first embedding
+# request (src/lib/local-ai-runtime.ts, provider "embed") and stopped again
+# after ten idle minutes, exactly as ollama was. It is a SYSTEM unit rather
+# than a child of clawbox-setup so the cgroup memory guard in
+# config/clawbox-resource-limits.env applies to it — the web server's own unit
+# has none, which is why the Gemma instance it spawns is uncapped — and not a
+# USER unit, because those land under user@1000.service and would share the
+# desktop session's 2048M cap. No [Install] section: nothing enables it at
+# boot, and a resident embedder that nobody has asked for is the 2.8 GB this
+# unit exists to give back.
+After=network.target
+
+[Service]
+Type=simple
+User=clawbox
+Group=clawbox
+WorkingDirectory=/home/clawbox/clawbox
+Environment=HOME=/home/clawbox
+# The EMBED_* dials (batch size, GPU layers, KV cache type, model) live in the
+# project .env beside the LLAMACPP_* ones; the start script carries the shipped
+# default for every one of them, so a missing file changes nothing.
+EnvironmentFile=-/home/clawbox/clawbox/.env
+ExecStart=/home/clawbox/clawbox/scripts/start-embed-server.sh
+Restart=no
+TimeoutStopSec=15
+# Terminates llama-server and anything it spawned when the unit stops.
+KillMode=control-group
+# Memory guard (TASK-455). The numbers live in the drop-in
+# 50-clawbox-memory.conf that clawbox-resource-limits.sh writes from
+# config/clawbox-resource-limits.env — one place for every unit's limits.
+# MemoryAccounting is asserted here so the cgroup counters exist even on a box
+# whose drop-in has not been applied yet.
+MemoryAccounting=yes

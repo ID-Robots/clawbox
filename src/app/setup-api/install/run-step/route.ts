@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { requireSession } from "@/lib/route-auth";
+import { UI_ROOT_STEPS } from "@/lib/root-steps";
+import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
+import { startRootStep } from "@/lib/root-step-runner";
 
 export const dynamic = "force-dynamic";
 
@@ -14,25 +18,16 @@ const execFileAsync = promisify(execFile);
 // until the install step finishes so the UI can chain a reboot or refresh
 // on success.
 //
-// Steps are whitelisted here on top of install.sh's own DISPATCH_STEPS
-// list. Only steps that are safe to invoke from a clicked button in the
-// UI go in. Anything that would reboot, modify networking, or wipe state
-// stays out — we don't want a one-tap escalation surface.
-const ALLOWED_STEPS = new Set([
-  "cloudflared_install",
-  "vnc_install",
-  "vnc_refresh",
-  "chromium_install",
-  "ai_tools_install",
-  "ollama_install",
-  "llamacpp_install",
-  "ffmpeg_install",
-  "openclaw_install",
-  "openclaw_setup",
-  "openclaw_patch",
-  "openclaw_config",
-  "clawkeep_install",
-]);
+// Steps are whitelisted on top of install.sh's own DISPATCH_STEPS list. Only
+// steps that are safe to invoke from a clicked button in the UI go in. Anything
+// that would reboot, modify networking, or wipe state stays out — we don't want
+// a one-tap escalation surface.
+//
+// This list is advisory-in-depth: systemd starts whatever instance name it is
+// handed, so the authoritative check is the one the root-owned dispatcher does
+// (config/clawbox-root-step.sh). Keeping both in src/lib/root-steps.ts is what
+// lets a test pin them together. TASK-445.
+const ALLOWED_STEPS = new Set(UI_ROOT_STEPS);
 
 // Most install steps complete in ~30-120s on a warm Jetson. vnc_install /
 // chromium_install can take several minutes when apt has to fetch fresh.
@@ -40,11 +35,19 @@ const ALLOWED_STEPS = new Set([
 // stare at a stuck request.
 const STEP_TIMEOUT_MS = 10 * 60 * 1000;
 
-async function getJournalTail(unit: string): Promise<string> {
+/**
+ * What THIS run of the step wrote, for the failure the caller is shown.
+ *
+ * Bounded by `sinceMs`, the moment this request started the unit: the journal
+ * is persistent, so a 60-line tail of a step the owner has already retried
+ * runs back through the previous attempt and offers its output as evidence for
+ * this one. root-step-journal.ts carries the rest of the reasoning.
+ */
+async function getJournalTail(step: string, sinceMs: number): Promise<string> {
   try {
     const { stdout } = await execFileAsync(
       "/usr/bin/journalctl",
-      ["-u", unit, "-n", "60", "--no-pager", "-o", "cat"],
+      rootStepJournalArgs(step, { sinceMs, lines: 60 }),
       { timeout: 10_000 },
     );
     return stdout.trim();
@@ -54,6 +57,12 @@ async function getJournalTail(unit: string): Promise<string> {
 }
 
 export async function POST(req: Request) {
+  // Starts clawbox-root-update@<step>.service, which runs install.sh as root.
+  // Its only callers are VNCApp and RemoteControlPanel — desktop apps, always
+  // post-setup — so it fails closed unconditionally. TASK-443/445.
+  const unauthorized = await requireSession(req);
+  if (unauthorized) return unauthorized;
+
   let step: string;
   try {
     const body = (await req.json()) as { step?: unknown };
@@ -78,24 +87,24 @@ export async function POST(req: Request) {
     );
   }
 
-  const serviceName = `clawbox-root-update@${step}.service`;
+  const serviceName = rootStepUnit(step);
+  // Before the start: the journal read in the catch is bounded to this run.
+  const startedAt = Date.now();
   try {
-    // reset-failed is best-effort: a previous failed run leaves the unit
-    // in "failed" state and `systemctl start` would refuse without it.
-    await execFileAsync("/usr/bin/systemctl", ["reset-failed", serviceName], {
-      timeout: 10_000,
-    }).catch(() => {});
-
-    await execFileAsync("/usr/bin/systemctl", ["start", serviceName], {
-      timeout: STEP_TIMEOUT_MS,
-    });
+    // Through the root-owned launcher, which clears a previous failure
+    // itself and builds the unit name from a step it validates. This used to
+    // be an UNPRIVILEGED `systemctl start`, authorised by the polkit
+    // `manage-units` grant with no unit condition -- the same action that
+    // authorises `systemd-run`, i.e. arbitrary root with no password.
+    // TASK-539.
+    await startRootStep(step, { timeoutMs: STEP_TIMEOUT_MS });
 
     return NextResponse.json(
       { ok: true, step },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
-    const tail = await getJournalTail(serviceName);
+    const tail = await getJournalTail(step, startedAt);
     // Persist a structured failure record so post-mortems don't have to
     // scrape the response body. journalctl is the source of truth, but
     // having the same tail in our service logs makes it discoverable

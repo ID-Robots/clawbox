@@ -1,4 +1,5 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 import { execFile } from "child_process";
 
 vi.mock("child_process", () => ({
@@ -31,17 +32,24 @@ function rejectOnce(error: Error) {
 
 describe("/setup-api/system/power", () => {
   let POST: (req: Request) => Promise<Response>;
+  let session: SessionFixture;
 
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    session = installSessionFixture();
     const mod = await import("@/app/setup-api/system/power/route");
     POST = mod.POST;
+  });
+
+  afterEach(() => {
+    session.cleanup();
   });
 
   it("awaits systemctl poweroff for the shutdown action", async () => {
     resolveOnce();
     const req = new Request("http://localhost/setup-api/system/power", {
+      headers: { Cookie: session.cookie },
       method: "POST",
       body: JSON.stringify({ action: "shutdown" }),
     });
@@ -60,6 +68,7 @@ describe("/setup-api/system/power", () => {
   it("awaits systemctl reboot for the restart action", async () => {
     resolveOnce();
     const req = new Request("http://localhost/setup-api/system/power", {
+      headers: { Cookie: session.cookie },
       method: "POST",
       body: JSON.stringify({ action: "restart" }),
     });
@@ -78,6 +87,7 @@ describe("/setup-api/system/power", () => {
   it("returns 500 when the power command fails to dispatch", async () => {
     rejectOnce(new Error("sudo: a password is required"));
     const req = new Request("http://localhost/setup-api/system/power", {
+      headers: { Cookie: session.cookie },
       method: "POST",
       body: JSON.stringify({ action: "shutdown" }),
     });
@@ -89,6 +99,7 @@ describe("/setup-api/system/power", () => {
 
   it("rejects an invalid action without invoking execFile", async () => {
     const req = new Request("http://localhost/setup-api/system/power", {
+      headers: { Cookie: session.cookie },
       method: "POST",
       body: JSON.stringify({ action: "invalid" }),
     });
@@ -99,6 +110,7 @@ describe("/setup-api/system/power", () => {
 
   it("returns 400 on an invalid JSON body", async () => {
     const req = new Request("http://localhost/setup-api/system/power", {
+      headers: { Cookie: session.cookie },
       method: "POST",
       body: "not json",
     });

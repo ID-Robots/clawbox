@@ -2,12 +2,40 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 vi.mock("fs/promises", () => ({
   default: {
+    // The removal itself says whether a skill was there: it runs without
+    // `force`, so ENOENT means "nothing of that name" and anything else means
+    // "there and not removed". Default: it was there and it went.
     rm: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
-  getSkillsDir: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace"),
+  // See uninstall-edition.test.ts for the other two answers — null (the hermes
+  // SKU) and the throw (a config that exists and cannot be read) — both tested
+  // against the real implementation rather than a mock.
+  openclawSkillRoot: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace/skills"),
+  clearSkillEntry: vi.fn().mockResolvedValue(true),
+  OpenclawConfigUnreadableError: class OpenclawConfigUnreadableError extends Error {
+    readonly code = "config_unreadable";
+  },
+}));
+
+vi.mock("@/lib/openclaw-skill-info", () => ({
+  refreshSkillsCache: vi.fn(),
+}));
+
+vi.mock("@/lib/kv-store", () => ({
+  kvDelete: vi.fn(),
+}));
+
+// A per-PROCESS data root, and here it is not a precaution: `/tmp/test-data`
+// was the root of FOUR suites that run in parallel, each wiping it in its own
+// `beforeEach`. The same suffix `vitest.config.ts` already gives
+// `CLAWBOX_ROOT` and `OPENCLAW_HOME`, for the same reason.
+vi.mock("@/lib/config-store", () => ({
+  DATA_DIR: `/tmp/test-data-${process.pid}`,
+  getAll: vi.fn().mockResolvedValue({}),
+  setMany: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe("/setup-api/apps/uninstall", () => {
@@ -16,30 +44,59 @@ describe("/setup-api/apps/uninstall", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    const { getSkillsDir } = await import("@/lib/openclaw-config");
-    vi.mocked(getSkillsDir).mockReturnValue("/home/clawbox/.openclaw/workspace");
+    const { openclawSkillRoot, clearSkillEntry } = await import("@/lib/openclaw-config");
+    vi.mocked(openclawSkillRoot).mockReturnValue("/home/clawbox/.openclaw/workspace/skills");
+    vi.mocked(clearSkillEntry).mockResolvedValue(true);
     const fsMod = await import("fs/promises");
     vi.mocked(fsMod.default.rm).mockResolvedValue(undefined);
+    const { getAll, setMany } = await import("@/lib/config-store");
+    vi.mocked(getAll).mockResolvedValue({});
+    vi.mocked(setMany).mockResolvedValue(undefined);
     const mod = await import("@/app/setup-api/apps/uninstall/route");
     POST = mod.POST;
   });
 
-  it("uninstalls an app successfully", async () => {
-    const req = new Request("http://localhost/setup-api/apps/uninstall", {
+  function uninstall(appId: unknown) {
+    return POST(new Request("http://localhost/setup-api/apps/uninstall", {
       method: "POST",
-      body: JSON.stringify({ appId: "test-app" }),
-    });
-    const res = await POST(req);
+      body: JSON.stringify({ appId }),
+    }));
+  }
+
+  it("uninstalls an app successfully", async () => {
+    const res = await uninstall("test-app");
     const body = await res.json();
-    expect(body).toEqual({ ok: true, appId: "test-app" });
+    expect(body).toEqual({ ok: true, appId: "test-app", skillRemoved: true });
   });
 
   it("rejects invalid appId", async () => {
-    const req = new Request("http://localhost/setup-api/apps/uninstall", {
+    expect((await uninstall("../hack")).status).toBe(400);
+  });
+
+  it("answers a client error for a body that is not JSON, not a retryable 500", async () => {
+    // `req.json()` throws inside the outer try, so a malformed body was
+    // answered with this PR's own failure contract — `code:"uninstall_failed"`,
+    // `retryable:true` — and `mcp/tools/desktop.ts` turns that into "Call
+    // app_uninstall once more". A body that is not JSON can never succeed on
+    // retry, and a client's mistake is not a server fault.
+    const res = await POST(new Request("http://localhost/setup-api/apps/uninstall", {
       method: "POST",
-      body: JSON.stringify({ appId: "../hack" }),
-    });
-    const res = await POST(req);
+      body: "{ appId: not json",
+    }));
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.retryable).toBeUndefined();
+    expect(body.code).not.toBe("uninstall_failed");
+  });
+
+  it("answers a client error for a JSON body that is not an object", async () => {
+    // `const { appId } = null` throws a TypeError into the same outer catch.
+    const res = await POST(new Request("http://localhost/setup-api/apps/uninstall", {
+      method: "POST",
+      body: "null",
+    }));
+
     expect(res.status).toBe(400);
   });
 
@@ -52,14 +109,103 @@ describe("/setup-api/apps/uninstall", () => {
     expect(res.status).toBe(400);
   });
 
+  it("refuses, and removes nothing else, when the skill folder will not go", async () => {
+    // A skill directory that is THERE and could not be removed used to be
+    // reported as `skillRemoved: false` — the value the MCP tool states out
+    // loud as "there was no skill of that name on disk" — while the tile, the
+    // preferences and the KV went anyway. The removal is refused instead, so
+    // the desktop entry the owner would retry from survives.
+    const fsMod = await import("fs/promises");
+    vi.mocked(fsMod.default.rm).mockRejectedValue(Object.assign(new Error("Permission denied"), { code: "EACCES" }));
+
+    const res = await uninstall("test-app");
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      code: "skill_remove_failed",
+      retryable: true,
+      appId: "test-app",
+    });
+    const { clearSkillEntry } = await import("@/lib/openclaw-config");
+    const { kvDelete } = await import("@/lib/kv-store");
+    expect(clearSkillEntry).not.toHaveBeenCalled();
+    expect(kvDelete).not.toHaveBeenCalled();
+  });
+
   it("handles uninstall error gracefully", async () => {
     const fsMod = await import("fs/promises");
-    vi.mocked(fsMod.default.rm).mockRejectedValue(new Error("Permission denied"));
-    const req = new Request("http://localhost/setup-api/apps/uninstall", {
-      method: "POST",
-      body: JSON.stringify({ appId: "test-app" }),
+    // The skill half succeeds; the deployed webapp's removal is what fails.
+    let calls = 0;
+    vi.mocked(fsMod.default.rm).mockImplementation(async () => {
+      if (calls++ === 0) return undefined;
+      throw new Error("Permission denied");
     });
-    const res = await POST(req);
+    expect((await uninstall("test-app")).status).toBe(500);
+  });
+
+  it("clears what the skill left in openclaw.json, KV and the preferences", async () => {
+    const { getAll, setMany } = await import("@/lib/config-store");
+    vi.mocked(getAll).mockResolvedValue({
+      "pref:installed_apps": ["test-app", "other"],
+      "pref:installed_meta": { "test-app": { name: "Test" }, other: { name: "Other" } },
+      "pref:app_test-app_settings": { token: "x" },
+    });
+    const res = await uninstall("test-app");
+    expect(res.status).toBe(200);
+
+    // The config entry, or a reinstall inherits `enabled: false`.
+    const { clearSkillEntry } = await import("@/lib/openclaw-config");
+    expect(clearSkillEntry).toHaveBeenCalledWith("test-app");
+
+    // The desktop's registry, written here and nowhere else.
+    const writes = vi.mocked(setMany).mock.calls.map(([entries]) => entries);
+    expect(writes).toContainEqual({
+      "pref:installed_apps": ["other"],
+      "pref:installed_meta": { other: { name: "Other" } },
+    });
+    expect(writes).toContainEqual({ "pref:app_test-app_settings": undefined });
+
+    // The window's KV leftovers.
+    const { kvDelete } = await import("@/lib/kv-store");
+    expect(vi.mocked(kvDelete).mock.calls.map(([k]) => k)).toEqual([
+      "clawbox-app-settings-test-app",
+      "clawbox-skill-enabled-test-app",
+      "clawbox-winsize-installed-test-app",
+    ]);
+
+    const { refreshSkillsCache } = await import("@/lib/openclaw-skill-info");
+    expect(refreshSkillsCache).toHaveBeenCalled();
+  });
+
+  it("still answers ok when the openclaw.json cleanup fails: the files are already gone", async () => {
+    const { clearSkillEntry } = await import("@/lib/openclaw-config");
+    vi.mocked(clearSkillEntry).mockRejectedValue(new Error("EACCES"));
+    const res = await uninstall("test-app");
+    expect(await res.json()).toEqual({ ok: true, appId: "test-app", skillRemoved: true });
+  });
+
+  it("fails with the code and the skill fact when a later step throws", async () => {
+    // The outer catch's contract, pinned HERE rather than only in the MCP
+    // fixture that quotes it: `mcp/tools/desktop.ts` matches this 500 on
+    // `"code":"uninstall_failed"` plus `"skillRemoved":true` to tell the agent
+    // the app is only partly gone. With the code asserted on one side alone,
+    // renaming it would leave both suites green while the agent fell back to
+    // "the service did not complete this request. Call clawbox_health".
+    const fsMod = await import("fs/promises");
+    // The skill folder goes; the webapp removal is what fails.
+    vi.mocked(fsMod.default.rm)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+
+    const res = await uninstall("test-app");
+
     expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      code: "uninstall_failed",
+      retryable: true,
+      skillRemoved: true,
+    });
   });
 });

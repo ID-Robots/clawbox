@@ -9,6 +9,9 @@ interface TunnelInfo {
   installed: boolean;
   service: "active" | "inactive" | "failed" | "activating" | "unknown";
   url: string | null;
+  /** `named` = the box's permanent hostname; `quick` = a *.trycloudflare.com URL. Absent on older servers. */
+  mode?: "named" | "quick" | null;
+  hostname?: string | null;
 }
 
 interface StatusResponse {
@@ -22,9 +25,19 @@ const POLL_INTERVAL_MS = 2_000;
 export default function RemoteControlPanel() {
   const { t } = useT();
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  // `false` means the latest status request was unreadable, not that the
+  // tunnel is absent. Keep it separate from the last good payload so a stale
+  // `installed: false` cannot turn a connectivity error into an install offer.
+  const [statusReadable, setStatusReadable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState<"idle" | "starting" | "stopping" | "regenerating">("idle");
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // A start/stop that WORKED but could not be recorded for the next boot.
+  // Not an error — the unit is in the state the owner asked for — but the
+  // owner has to know a reboot will undo it, which a silent `{success:true}`
+  // never told them.
+  const [bootWarning, setBootWarning] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // Inline autoinstall — replaces the old "run sudo bash install.sh ..."
   // warning text with a one-click button. Posts to the generic install
@@ -38,11 +51,17 @@ export default function RemoteControlPanel() {
     try {
       const res = await fetch("/setup-api/portal/status", { cache: "no-store" });
       if (!res.ok) throw new Error(`Status ${res.status}`);
-      const data = await res.json() as StatusResponse;
+      const data = await res.json() as StatusResponse | null;
+      if (!data?.tunnel || typeof data.tunnel.installed !== "boolean") {
+        throw new Error(t("remoteControl.loadFailed"));
+      }
       setStatus(data);
+      setStatusReadable(true);
+      setStatusError(null);
       return data;
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("remoteControl.loadFailed"));
+      setStatusReadable(false);
+      setStatusError(err instanceof Error ? err.message : t("remoteControl.loadFailed"));
       return null;
     }
   }, [t]);
@@ -58,6 +77,12 @@ export default function RemoteControlPanel() {
       if (!body.startsWith("<")) return body;
     }
     return fallback;
+  }, []);
+
+  /** Carry a 200's `warning` (a failed enable/disable) into the panel. */
+  const readBootWarning = useCallback(async (res: Response) => {
+    const data = await res.json().catch(() => null) as { warning?: unknown } | null;
+    setBootWarning(typeof data?.warning === "string" && data.warning.trim() ? data.warning : null);
   }, []);
 
   useEffect(() => {
@@ -88,11 +113,13 @@ export default function RemoteControlPanel() {
   const handleStart = async () => {
     setAction("starting");
     setError(null);
+    setBootWarning(null);
     try {
       const res = await fetch("/setup-api/portal/start", { method: "POST" });
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, t("remoteControl.startFailed")));
       }
+      await readBootWarning(res);
       await fetchStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("remoteControl.startFailed"));
@@ -107,6 +134,7 @@ export default function RemoteControlPanel() {
   const handleRegenerate = async () => {
     setAction("regenerating");
     setError(null);
+    setBootWarning(null);
     // Optimistically clear the URL so the UI flips to the "negotiating" state
     // without waiting for the next poll to observe it.
     setStatus(prev => prev ? { ...prev, tunnel: { ...prev.tunnel, url: null } } : prev);
@@ -115,6 +143,7 @@ export default function RemoteControlPanel() {
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, t("remoteControl.startFailed")));
       }
+      await readBootWarning(res);
       await fetchStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("remoteControl.startFailed"));
@@ -126,11 +155,13 @@ export default function RemoteControlPanel() {
   const handleStop = async () => {
     setAction("stopping");
     setError(null);
+    setBootWarning(null);
     try {
       const res = await fetch("/setup-api/portal/stop", { method: "POST" });
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, t("remoteControl.stopFailed")));
       }
+      await readBootWarning(res);
       await fetchStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("remoteControl.stopFailed"));
@@ -196,6 +227,9 @@ export default function RemoteControlPanel() {
   const tunnelInstalled = status?.tunnel.installed ?? false;
   const svc = status?.tunnel.service ?? "unknown";
   const url = status?.tunnel.url ?? null;
+  // The named tunnel's address never changes, so there is nothing to
+  // regenerate and the label says what the owner is looking at.
+  const named = status?.tunnel.mode === "named";
   const isRunning = svc === "active" && !!url;
   const isStarting = (svc === "active" || svc === "activating") && !url;
   const busy = action !== "idle";
@@ -205,13 +239,15 @@ export default function RemoteControlPanel() {
   return (
     <div className="max-w-xl space-y-5">
       <div>
-        <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-1">{t("remoteControl.title")}</h2>
+        <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-1">{t("remoteControl.title")}</h3>
         <p className="text-sm text-[var(--text-muted)]">{t("remoteControl.subtitle")}</p>
       </div>
 
+      {statusError && <StatusMessage type="error" message={statusError} />}
       {error && <StatusMessage type="error" message={error} />}
+      {bootWarning && <StatusMessage type="info" message={bootWarning} />}
 
-      {!tunnelInstalled && (
+      {statusReadable && !tunnelInstalled && (
         <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
           <div className="flex items-start gap-4 mb-4">
             <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
@@ -310,17 +346,28 @@ export default function RemoteControlPanel() {
               </div>
             </div>
 
-            <label className="block text-[10px] uppercase tracking-widest font-semibold text-[var(--text-muted)] mb-2">
-              {t("remoteControl.tunnelUrlLabel")}
-            </label>
-            <div className="flex items-center gap-2 mb-3">
-              <input
-                readOnly
-                value={url!}
-                className="flex-1 bg-black/40 border border-white/[0.08] rounded-lg px-3 py-2.5 text-sm font-mono text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]/40"
-                onFocus={e => e.currentTarget.select()}
-                aria-label={t("remoteControl.tunnelUrlLabel")}
-              />
+            {/* The URL is READ, not typed: a one-line <input> clipped a
+                trycloudflare hostname mid-glyph — no ellipsis, no scrollbar,
+                nothing to say the rest existed — so an owner reading it off
+                the screen copied a URL that was never the whole one. Static
+                text wraps instead: `break-all` lets a hostname with no spaces
+                break at any character, `select-all` keeps the old input's
+                click-selects-everything, and the row aligns to the top so the
+                button stays put beside two or three lines of URL. */}
+            <div
+              id="tunnel-url-label"
+              className="block text-[10px] uppercase tracking-widest font-semibold text-[var(--text-muted)] mb-2"
+            >
+              {named ? t("remoteControl.namedUrlLabel") : t("remoteControl.tunnelUrlLabel")}
+            </div>
+            <div className="flex items-start gap-2 mb-3">
+              <p
+                data-testid="remote-control-tunnel-url"
+                aria-labelledby="tunnel-url-label"
+                className="flex-1 min-w-0 my-0 bg-black/40 border border-white/[0.08] rounded-lg px-3 py-2.5 text-sm font-mono text-[var(--text-primary)] break-all select-all"
+              >
+                {url}
+              </p>
               <button
                 onClick={copyUrl}
                 className="shrink-0 px-3 py-2.5 bg-white/[0.04] hover:bg-white/[0.08] rounded-lg text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-none cursor-pointer flex items-center gap-1.5 transition-colors"
@@ -332,10 +379,25 @@ export default function RemoteControlPanel() {
                 {copied ? t("remoteControl.copied") : t("remoteControl.copy")}
               </button>
             </div>
+            {named && (
+              <p data-testid="remote-control-named-desc" className="text-xs text-[var(--text-muted)] mt-0 mb-3">
+                {t("remoteControl.namedUrlDesc")}
+              </p>
+            )}
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {/* Two columns only when a column is wide enough for its label.
+                `sm:grid-cols-2` split on the VIEWPORT, so inside the 576px
+                settings column each cell measured 263px — enough for
+                "Regenerate Tunnel URL" and not for "Add device for quick
+                access", which wrapped to three lines beside a one-line
+                neighbour stretched to match it. 18rem is that label plus its
+                two icons and the cell's own padding; below it the pair stacks
+                full-width and both read on one line. The `min(...,100%)` is
+                what keeps a phone narrower than 18rem from being handed a
+                column wider than itself. */}
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(18rem,100%),1fr))] gap-2">
               <a
-                href={`${status?.portalWeb ?? "https://openclawhardware.dev"}/portal/devices`}
+                href={`${status?.portalWeb ?? "https://clawbox.com"}/portal/devices`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center justify-center gap-2 px-4 py-2.5 bg-[var(--coral-bright)]/15 hover:bg-[var(--coral-bright)]/25 border border-[var(--coral-bright)]/40 rounded-lg text-sm font-semibold text-[var(--coral-bright)] hover:text-orange-200 transition-colors no-underline"
@@ -344,6 +406,7 @@ export default function RemoteControlPanel() {
                 {t("remoteControl.addDevice")}
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
               </a>
+              {!named && (
               <button
                 onClick={handleRegenerate}
                 disabled={busy}
@@ -358,6 +421,7 @@ export default function RemoteControlPanel() {
                 </span>
                 {action === "regenerating" ? t("remoteControl.regenerating") : t("remoteControl.regenerate")}
               </button>
+              )}
             </div>
           </div>
 

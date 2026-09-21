@@ -10,7 +10,14 @@
  * `docker compose -f e2e-install/docker-compose.test.yml down -v` after the
  * playwright run.
  */
-import { composeUp, waitForInstallComplete, readInstallLog, dockerExec } from "./helpers/container";
+import {
+  composeUp,
+  waitForInstallComplete,
+  readInstallLog,
+  dockerExec,
+  InstallBootstrapFailedError,
+  BOOTSTRAP_UNIT,
+} from "./helpers/container";
 
 const SKIP = process.env.CLAWBOX_E2E_SKIP_SETUP === "1";
 const REBUILD = process.env.CLAWBOX_E2E_REBUILD === "1";
@@ -26,12 +33,18 @@ export default async function globalSetup() {
     await waitForInstallComplete();
     console.log("[e2e-install] install complete");
   } catch (err) {
-    const log = await readInstallLog(500).catch(() => "(log unavailable)");
+    // The fail-fast error already carries the install-log tail in its
+    // message, which Playwright prints; dumping the log here as well would
+    // show it twice. The deadline path (installer hung, unit never failed)
+    // still gets the long dump, because that error has no log of its own.
+    if (!(err instanceof InstallBootstrapFailedError)) {
+      const log = await readInstallLog(500).catch(() => "(log unavailable)");
+      console.error("[e2e-install] install failed — last 500 lines of install log:\n" + log);
+    }
     const journal = await dockerExec(
-      ["bash", "-c", "journalctl -u clawbox-bootstrap.service --no-pager | tail -n 200"],
+      ["bash", "-c", `journalctl -u ${BOOTSTRAP_UNIT} --no-pager | tail -n 200`],
       { user: "root" },
     ).catch(() => "(journal unavailable)");
-    console.error("[e2e-install] install failed — last 500 lines of install log:\n" + log);
     console.error("[e2e-install] bootstrap journal:\n" + journal);
     throw err;
   }

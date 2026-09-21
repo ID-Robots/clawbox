@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { OLLAMA_MAX_MODEL_PARAM_B } from "@/lib/resource-limits";
 
 export interface OllamaModel {
   name: string;
@@ -38,8 +39,13 @@ export function useOllamaModels(callbacks: OllamaCallbacks, configureScope: Conf
     total?: number;
   } | null>(null);
   const [ollamaSaving, setOllamaSaving] = useState<string | false>(false);
+  // The size cap the search route filters by, so the panel's copy names the
+  // figure the results were actually cut at; the constant until the first
+  // answer arrives (the route derives it from the same limit).
+  const [ollamaMaxParamBillions, setOllamaMaxParamBillions] = useState<number>(OLLAMA_MAX_MODEL_PARAM_B);
 
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pullAbortRef = useRef<AbortController | null>(null);
 
   // Cleanup search timer on unmount
   useEffect(() => {
@@ -81,6 +87,9 @@ export function useOllamaModels(callbacks: OllamaCallbacks, configureScope: Conf
       }
       const data = await res.json();
       setOllamaSearchResults(data.results || []);
+      if (typeof data.maxParamBillions === "number" && data.maxParamBillions > 0) {
+        setOllamaMaxParamBillions(data.maxParamBillions);
+      }
     } catch {
       setOllamaSearchResults([]);
     } finally {
@@ -143,11 +152,14 @@ export function useOllamaModels(callbacks: OllamaCallbacks, configureScope: Conf
       setOllamaPulling(true);
       setOllamaPullProgress(null);
       callbacks.onClearStatus?.();
+      const abort = new AbortController();
+      pullAbortRef.current = abort;
       try {
         const res = await fetch("/setup-api/ollama/pull", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ model }),
+          signal: abort.signal,
         });
         if (!res.ok || !res.body) {
           callbacks.onPullError("Failed to start model download");
@@ -157,34 +169,72 @@ export function useOllamaModels(callbacks: OllamaCallbacks, configureScope: Conf
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = "";
-        while (true) {
+        // The route forwards Ollama's failure as a 200 stream line `{error}`;
+        // it ends the pull, and the model is not there to configure.
+        let pullError: string | null = null;
+        let finished = false;
+        while (!pullError) {
           const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
+          buf += done ? decoder.decode() : decoder.decode(value, { stream: true });
           const lines = buf.split("\n");
-          buf = lines.pop() || "";
+          // The last piece is a partial line while the stream is open — but
+          // once it closed, it is the terminal line arriving without its
+          // newline, and dropping it would call a finished pull a failure.
+          buf = done ? "" : (lines.pop() || "");
           for (const line of lines) {
             if (!line.trim()) continue;
             try {
               const prog = JSON.parse(line);
+              if (typeof prog.error === "string") {
+                pullError = prog.error;
+                break;
+              }
+              if (prog.status === "success") finished = true;
               setOllamaPullProgress(prog);
             } catch {
               /* skip */
             }
           }
+          if (done) break;
         }
+        if (pullError) await reader.cancel().catch(() => {});
         await checkOllamaStatus();
         setOllamaPulling(false);
+        setOllamaPullProgress(null);
+        if (pullError) {
+          callbacks.onPullError(pullError);
+          return;
+        }
+        // Only a stream that reached Ollama's terminal line has the model on
+        // disk; one cut mid-download must not end in "Pull the model first".
+        if (!finished) {
+          callbacks.onPullError("Download did not finish");
+          return;
+        }
         await saveOllamaConfig(model);
       } catch (err) {
+        setOllamaPulling(false);
+        setOllamaPullProgress(null);
+        // Cancelled by the owner: the route drops the Ollama connection with
+        // the request, so nothing keeps downloading. Not a failure to report.
+        if (abort.signal.aborted) {
+          await checkOllamaStatus();
+          return;
+        }
         callbacks.onPullError(
           `Download failed: ${err instanceof Error ? err.message : err}`
         );
-        setOllamaPulling(false);
+      } finally {
+        if (pullAbortRef.current === abort) pullAbortRef.current = null;
       }
     },
     [callbacks, checkOllamaStatus, saveOllamaConfig]
   );
+
+  /** Stop the pull in flight, if any. Ollama keeps the partial blobs, so a retry resumes. */
+  const cancelOllamaPull = useCallback(() => {
+    pullAbortRef.current?.abort();
+  }, []);
 
   const deleteOllamaModel = useCallback(
     async (model: string) => {
@@ -234,10 +284,12 @@ export function useOllamaModels(callbacks: OllamaCallbacks, configureScope: Conf
     ollamaPulling,
     ollamaPullProgress,
     ollamaSaving,
+    ollamaMaxParamBillions,
     checkOllamaStatus,
     searchOllamaModels,
     handleOllamaSearchChange,
     pullOllamaModel,
+    cancelOllamaPull,
     saveOllamaConfig,
     selectExistingOllamaModel,
     deleteOllamaModel,

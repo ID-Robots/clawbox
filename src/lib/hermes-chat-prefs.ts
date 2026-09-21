@@ -73,3 +73,22 @@ export function writeHermesChatPrefs(patch: HermesChatPrefs): void {
     // Non-fatal: the selection still applies to this session in memory.
   }
 }
+
+/**
+ * Drop the remembered provider so the DEVICE default wins the next time the
+ * chat seeds its header.
+ *
+ * Call this when the customer explicitly names a new default in Settings.
+ * `seedHermesHeader` prefers this stored preference over the device's
+ * configured provider — which is right for an ad-hoc pick made inside the chat,
+ * and wrong the moment someone states an intent that outranks it. Without this
+ * the chat kept opening on a provider the customer had just replaced, and the
+ * only cure was clearing site data.
+ *
+ * The per-provider model picks are deliberately KEPT: they are remembered per
+ * provider, so none of them can name the wrong vendor's model, and forgetting
+ * them would throw away choices the new default has nothing to do with.
+ */
+export function forgetHermesProviderPreference(): void {
+  writeHermesChatPrefs({ provider: undefined });
+}

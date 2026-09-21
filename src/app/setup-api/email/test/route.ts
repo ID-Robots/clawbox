@@ -1,0 +1,92 @@
+// POST /setup-api/email/test — really send one message, to the user's own
+// address, over the configured SMTP server.
+//
+// This is the button that turns "it saved" into "it works". Authentication
+// already passed at configure time; what this proves in addition is that the
+// provider will ACCEPT a message from this device — a separate failure mode
+// (Gmail refusing a From: that isn't the signed-in account, a provider blocking
+// a residential IP, a relay that authenticates everyone and delivers nothing).
+//
+// The recipient is fixed to the configured account. A caller-supplied recipient
+// would turn a Settings button into an open relay for anything that can reach
+// the route.
+//
+// It has its OWN budget, separate from /setup-api/email/send's. Two reasons,
+// and they pull in opposite directions:
+//   - the agent can reach this route too (middleware admits the MCP bearer to
+//     /setup-api/*, and only /email/pending refuses it), so a route with no
+//     budget at all is a way around the send budget — to one fixed address,
+//     but unbounded;
+//   - the budget must not be SHARED with /email/send, or an agent that spent
+//     that one would lock the person at the keyboard out of the button that
+//     tells them whether their own mail account works.
+
+import { NextResponse } from "next/server";
+import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { sendMail, SmtpError } from "@/lib/smtp-client";
+
+export const dynamic = "force-dynamic";
+
+/** One test message every few minutes is a person pressing a button; ten in an hour
+ *  is already more than one. Keyed device-wide, like the send budget: the caller is either
+ *  the owner's browser or the agent on loopback, so an IP key would be one
+ *  bucket wearing a misleading name. */
+const TEST_BUDGET = { windowMs: 60 * 60 * 1000, max: 10 } as const;
+
+export async function POST() {
+  try {
+    const settings = await getEmailCredentials();
+    if (!settings) {
+      return NextResponse.json(
+        { error: "Email is not set up on this device yet.", kind: "unconfigured" },
+        { status: 400 },
+      );
+    }
+
+    if (!checkRateLimit("email-test", "device", TEST_BUDGET)) {
+      console.error("[email/test] refused: test budget exhausted");
+      return NextResponse.json(
+        {
+          error: `This ClawBox has already sent ${TEST_BUDGET.max} test messages in the last hour.`,
+          kind: "rate_limited",
+        },
+        { status: 429 },
+      );
+    }
+
+    const now = new Date();
+    try {
+      const { messageId } = await sendMail(toSmtpConfig(settings), {
+        from: settings.address,
+        fromName: settings.fromName || "ClawBox",
+        to: [settings.address],
+        subject: "ClawBox test email",
+        text: [
+          "This is a test message from your ClawBox.",
+          "",
+          `Sent: ${now.toISOString()}`,
+          `Server: ${settings.smtpHost}:${settings.smtpPort}`,
+          "",
+          "If you can read this, the device can send email — and so can its agent.",
+        ].join("\n"),
+      });
+      return NextResponse.json({ success: true, messageId, sentAt: now.toISOString() });
+    } catch (err) {
+      if (err instanceof SmtpError) {
+        console.error(`[email/test] send failed: kind=${err.kind} host=${settings.smtpHost}`);
+        return NextResponse.json({ error: err.message, kind: err.kind, detail: err.detail }, { status: 400 });
+      }
+      console.error("[email/test] send failed: kind=unknown");
+      return NextResponse.json(
+        { error: "Could not send the test message.", kind: "network" },
+        { status: 400 },
+      );
+    }
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Test failed" },
+      { status: 500 },
+    );
+  }
+}

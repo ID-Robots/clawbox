@@ -6,6 +6,11 @@ import type { InstalledHermesSkill } from '@/lib/hermes-skills';
 // Installed-tab data. Kept apart from the browse catalog because it has a
 // different lifecycle: it is re-read after every install/uninstall and it is the
 // source of truth for marking a browse result as already installed.
+//
+// The endpoint also returns a `categories` roll-up. It is deliberately NOT read
+// here any more: the facet rail counts categories itself, over the same rows it
+// filters and with the other facet groups applied, so a second count computed
+// server-side without them could only disagree with the one on screen.
 
 const INSTALLED_URL = '/setup-api/hermes/skills/installed';
 
@@ -20,7 +25,6 @@ export interface InstalledCounts {
 export interface InstalledController {
   skills: InstalledHermesSkill[];
   counts: InstalledCounts;
-  categories: { id: string; count: number }[];
   loading: boolean;
   /**
    * Set when the read FAILED. Distinct from an empty list on purpose: "you have
@@ -36,7 +40,6 @@ const EMPTY_COUNTS: InstalledCounts = { total: 0, builtin: 0, hub: 0, local: 0, 
 export function useInstalledSkills(): InstalledController {
   const [skills, setSkills] = useState<InstalledHermesSkill[]>([]);
   const [counts, setCounts] = useState<InstalledCounts>(EMPTY_COUNTS);
-  const [categories, setCategories] = useState<{ id: string; count: number }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -48,7 +51,6 @@ export function useInstalledSkills(): InstalledController {
       if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
       setSkills(Array.isArray(data.skills) ? (data.skills as InstalledHermesSkill[]) : []);
       setCounts({ ...EMPTY_COUNTS, ...(data.counts || {}) });
-      setCategories(Array.isArray(data.categories) ? data.categories : []);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not read installed skills');
@@ -61,5 +63,5 @@ export function useInstalledSkills(): InstalledController {
     refresh();
   }, [refresh]);
 
-  return { skills, counts, categories, loading, error, refresh };
+  return { skills, counts, loading, error, refresh };
 }

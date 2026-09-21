@@ -34,14 +34,26 @@ vi.mock("fs/promises", () => ({
   },
 }));
 
+// A per-PROCESS data root, and here it is not a precaution: `/tmp/test-data`
+// was the root of FOUR suites that run in parallel, each wiping it in its own
+// `beforeEach`. The same suffix `vitest.config.ts` already gives
+// `CLAWBOX_ROOT` and `OPENCLAW_HOME`, for the same reason.
 vi.mock("@/lib/config-store", () => ({
-  DATA_DIR: "/tmp/test-data",
+  DATA_DIR: `/tmp/test-data-${process.pid}`,
 }));
 
 // buildProject now registers the built app on the desktop (durability backstop).
 // Stub it so the build tests stay focused on the build output, not config IO.
 vi.mock("@/lib/webapp-registry", () => ({
   registerWebappInPreferences: vi.fn(),
+}));
+
+// deployWebapp also fires off icon generation for an app created without one
+// (fire-and-forget, never awaited). Stub it so these tests never reach the
+// ClawBox AI proxy; the real module is covered in webapp-icon.test.ts.
+vi.mock("@/lib/webapp-icon", () => ({
+  ensureWebappIcon: vi.fn(async () => "skipped"),
+  htmlHint: vi.fn(() => ""),
 }));
 
 import {
@@ -59,6 +71,9 @@ import {
   APP_ID_RE,
   MAX_PROJECT_NAME_LENGTH,
   WEBAPPS_DIR,
+  legacyRedirectPort,
+  projectPath,
+  serverAppDownHtml,
   ValidationError,
   NotFoundError,
 } from "@/lib/code-projects";
@@ -117,6 +132,29 @@ describe("code-projects", () => {
     });
   });
 
+  // The agent edits project files from a process whose working directory is
+  // NOT the web tier's, so a relative path resolves to a different tree — it
+  // read nothing and wrote into /home/clawbox/data/... Absolute is the only
+  // form both processes agree on.
+  describe("projectPath", () => {
+    it("is absolute and points into the code-projects directory", () => {
+      const dir = projectPath("notes");
+      expect(path.isAbsolute(dir)).toBe(true);
+      expect(dir).toBe(path.join(path.dirname(WEBAPPS_DIR), "code-projects", "notes"));
+    });
+
+    it("resolves the same from any working directory", () => {
+      const dir = projectPath("notes");
+      for (const cwd of ["/", "/home/clawbox", "/home/clawbox/clawbox"]) {
+        expect(path.resolve(cwd, dir)).toBe(dir);
+      }
+    });
+
+    it("refuses an id that could escape the projects directory", () => {
+      expect(() => projectPath("../hack")).toThrow(ValidationError);
+    });
+  });
+
   describe("initProject", () => {
     it("creates project with app template", async () => {
       mockStat.mockRejectedValue(new Error("ENOENT"));
@@ -125,8 +163,17 @@ describe("code-projects", () => {
       expect(meta.name).toBe("Test App");
       expect(meta.color).toBe("#f97316");
       expect(mockMkdir).toHaveBeenCalled();
-      // Should write index.html, style.css, app.js, project.json
-      expect(mockWriteFile).toHaveBeenCalledTimes(4);
+      // index.html, style.css, app.js, project.json — and .github/workflows/
+      // check.yml, which exists so the auto-PR flow has a real check to wait
+      // on: it refuses to merge a pull request with NO checks, so a project
+      // without one could open pull requests that can never satisfy their own
+      // guardrail.
+      expect(mockWriteFile).toHaveBeenCalledTimes(5);
+      expect(mockWriteFile.mock.calls.some(([file]) => String(file).endsWith(".github/workflows/check.yml"))).toBe(true);
+      // The built app runs in a sandboxed frame; the KV bridge is its only
+      // way to persist anything, and the field guide assumes it is there.
+      const index = [...writtenFiles.entries()].find(([p]) => p.endsWith("index.html"))?.[1];
+      expect(index).toContain("window.clawboxKv");
     });
 
     it("creates project with blank template", async () => {
@@ -134,7 +181,9 @@ describe("code-projects", () => {
       const meta = await initProject("blank-app", "Blank", { template: "blank" });
       expect(meta.projectId).toBe("blank-app");
       // Should write index.html and project.json only
-      expect(mockWriteFile).toHaveBeenCalledTimes(2);
+      expect(mockWriteFile).toHaveBeenCalledTimes(3);
+      const index = [...writtenFiles.entries()].find(([p]) => p.endsWith("index.html"))?.[1];
+      expect(index).toContain("window.clawboxKv");
     });
 
     it("rejects invalid project ID", async () => {
@@ -350,18 +399,44 @@ describe("code-projects", () => {
       expect(results).toHaveLength(1);
     });
 
-    it("supports regex search", async () => {
+    // The regex branch is gone: "(a+)+$" over a 30-character line held the
+    // box's one event loop for minutes, and no pattern-length cap or line
+    // slice bounds a cost that is exponential in the LINE. The pattern is a
+    // literal now, whatever it looks like.
+    it("matches a regex-shaped pattern as literal text", async () => {
       mockReaddir.mockResolvedValue([
         { name: "test.js", isDirectory: () => false },
       ] as never);
-      mockReadFile.mockResolvedValue("foo123bar");
-      const results = await searchFiles("myapp", "\\d+", { regex: true });
-      expect(results).toHaveLength(1);
+      mockReadFile.mockResolvedValue("foo123bar\nliteral (a+)+$ here\n\\d+ too");
+      expect(await searchFiles("myapp", "(a+)+$")).toEqual([
+        { file: "test.js", line: 2, content: "literal (a+)+$ here" },
+      ]);
+      // A pattern that WAS a regex once finds only itself, not the digits.
+      expect(await searchFiles("myapp", "\\d+")).toEqual([
+        { file: "test.js", line: 3, content: "\\d+ too" },
+      ]);
     });
 
-    it("rejects invalid regex", async () => {
-      mockReaddir.mockResolvedValue([] as never);
-      await expect(searchFiles("myapp", "[invalid", { regex: true })).rejects.toThrow(ValidationError);
+    it("settles at once on the line that made the regex branch a denial of service", async () => {
+      // 40 a's and a bang: as a regex "(a+)+$" would have backtracked over
+      // this for hours, synchronously, in the web server's process.
+      mockReaddir.mockResolvedValue([
+        { name: "x.txt", isDirectory: () => false },
+      ] as never);
+      mockReadFile.mockResolvedValue("a".repeat(40) + "!");
+      const started = performance.now();
+      const results = await searchFiles("myapp", "(a+)+$");
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect(results).toEqual([]);
+    });
+
+    it("never compiles the pattern — a bracket no regex would accept is just text", async () => {
+      mockReaddir.mockResolvedValue([
+        { name: "test.js", isDirectory: () => false },
+      ] as never);
+      mockReadFile.mockResolvedValue("see [invalid here");
+      const results = await searchFiles("myapp", "[invalid");
+      expect(results).toHaveLength(1);
     });
   });
 
@@ -423,6 +498,48 @@ describe("code-projects", () => {
     });
   });
 
+  // The stubs the box wrote before /apps/<id>/ existed: one line of script
+  // sending the frame to `location.hostname:<port>`. With the server down the
+  // window was a white rectangle, so the webapps route has to recognise one —
+  // and must never mistake a real app for one, because a stub it "recognises"
+  // is a stub it does not serve.
+  describe("legacyRedirectPort", () => {
+    it("reads the port out of the stub the box used to write", () => {
+      expect(
+        legacyRedirectPort(
+          `<!doctype html><html><body><script>location.replace(location.protocol+'//'+location.hostname+':4230/');</script></body></html>`,
+        ),
+      ).toBe(4230);
+      expect(legacyRedirectPort(`<script>window.location.href='http://'+location.hostname+':4199'</script>`)).toBe(4199);
+      expect(legacyRedirectPort(`<script>location.assign("//"+location.hostname+":18080/app")</script>`)).toBe(18080);
+    });
+
+    it("says nothing about a document that is not one", () => {
+      // No redirect at all.
+      expect(legacyRedirectPort(`<p>${"x"}</p><script>document.title=location.hostname;</script>`)).toBeNull();
+      // A redirect that names no host of its own — the proxy stub itself.
+      expect(legacyRedirectPort(`<script>location.replace("/apps/game/");</script>`)).toBeNull();
+      // A port no local server may hold, and one that is not a port at all.
+      expect(legacyRedirectPort(`<script>location.replace(location.hostname+':80/')</script>`)).toBeNull();
+      expect(legacyRedirectPort(`<script>location.replace(location.hostname+':70000/')</script>`)).toBeNull();
+      // Too big to be a stub: a whole app that happens to read its hostname.
+      const app = `<script>location.replace(location.hostname+':4230/')</script>${"<div></div>".repeat(600)}`;
+      expect(app.length).toBeGreaterThan(4096);
+      expect(legacyRedirectPort(app)).toBeNull();
+    });
+  });
+
+  describe("serverAppDownHtml", () => {
+    it("says which app and why, with the name and the reason escaped", () => {
+      const html = serverAppDownHtml(`Cool <Game>`, `Nothing is listening on port 4199.`);
+      expect(html).toContain("Cool &lt;Game&gt;");
+      expect(html).toContain("Nothing is listening on port 4199.");
+      expect(html).not.toContain("<Game>");
+      // No script: it renders in a frame with an opaque origin.
+      expect(html).not.toContain("<script");
+    });
+  });
+
   describe("error types", () => {
     it("NotFoundError has correct name", () => {
       const err = new NotFoundError("test");
@@ -435,5 +552,87 @@ describe("code-projects", () => {
       expect(err.name).toBe("ValidationError");
       expect(err.message).toBe("test");
     });
+  });
+});
+
+/**
+ * TASK-742 — the code-project store's containment check, split the way the
+ * Files API's was, and the equivalence that had to hold while it changed.
+ *
+ * `safePath()` here spelled two rules as one condition
+ * (`!resolved.startsWith(dir + path.sep) && resolved !== dir`), which leaves
+ * the code below reachable through the second term without the prefix test
+ * having decided anything — so every `code_file_*` sink downstream consumed a
+ * path the check did not govern (`js/path-injection` #529 at
+ * `fs.rm(absPath, { recursive: true })`, and its siblings on the same helper).
+ *
+ * The Files API's copy gets a route-driven probe of a few thousand paths; this
+ * one is not exported, so the probe drives the public door instead — `readFile`
+ * refuses with `Path traversal denied` or reaches the filesystem — and compares
+ * that verdict with beta's predicate spelled out below. The accepted set must
+ * not move by one string: a project file that stops resolving is a customer's
+ * work the agent can no longer read.
+ */
+describe("the containment check accepts exactly what it accepted before", () => {
+  const PROJECT = "probe";
+  const DIR = path.join(`/tmp/test-data-${process.pid}`, "code-projects", PROJECT);
+
+  /** Beta's predicate, verbatim apart from the root it resolves against. */
+  function betaRefuses(filePath: string): boolean {
+    const resolved = path.resolve(DIR, filePath);
+    return !resolved.startsWith(DIR + path.sep) && resolved !== DIR;
+  }
+
+  /** What the shipped helper decides, read through the door every tool uses. */
+  async function headRefuses(filePath: string): Promise<boolean> {
+    try {
+      await readFile(PROJECT, filePath);
+      return false;
+    } catch (err) {
+      // Only the containment verdict counts here — ENOENT and "is a directory"
+      // mean the path was ACCEPTED and the filesystem then had its own say.
+      return err instanceof ValidationError && /Path traversal denied/.test((err as Error).message);
+    }
+  }
+
+  it("agrees with beta on every shape a path can take", async () => {
+    mockReadFile.mockResolvedValue("content");
+    const NL = String.fromCharCode(10);
+    const BS = String.fromCharCode(92);
+    const pieces = ["..", ".", "a", "bb", "", "/", "//", BS, " ", NL, ".hidden", "..hidden", "~"];
+    const probes = new Set<string>([
+      "..", "../", "../..", "../../etc/passwd", "./..", "a/../..", "a/b/../../..",
+      ".", "./", "/", "//", "/etc/passwd", "a//b", "a/./b", "a/b/",
+      DIR, `${DIR}/`, `${DIR}/index.html`, `${DIR}x`, `${DIR}x/inside`,
+      "..hidden", "..hidden/child", "...", ".hidden", "project.json",
+      `a${NL}`, "a ", " a", " ", "a b", "Документы/файл.txt", "a".repeat(400),
+    ]);
+    let seed = 0x5eed743;
+    const next = () => {
+      seed ^= seed << 13; seed >>>= 0;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5; seed >>>= 0;
+      return seed;
+    };
+    for (let i = 0; i < 600; i += 1) {
+      let probe = "";
+      for (let p = 0, parts = 1 + (next() % 4); p < parts; p += 1) {
+        probe += pieces[next() % pieces.length];
+        if (next() % 2 === 0) probe += "/";
+      }
+      probes.add(probe);
+    }
+
+    const divergences: Array<{ probe: string; beta: boolean; head: boolean }> = [];
+    for (const probe of probes) {
+      const head = await headRefuses(probe);
+      const beta = betaRefuses(probe);
+      if (head !== beta) divergences.push({ probe, beta, head });
+    }
+    expect(divergences).toEqual([]);
+    // Not vacuous: the corpus has to contain both verdicts, or an
+    // always-refusing head would pass against an always-refusing reference.
+    expect([...probes].some((p) => betaRefuses(p))).toBe(true);
+    expect([...probes].some((p) => !betaRefuses(p))).toBe(true);
   });
 });

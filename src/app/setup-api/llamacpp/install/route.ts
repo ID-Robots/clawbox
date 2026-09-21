@@ -18,11 +18,15 @@ import {
   tailLlamaCppLog,
   writeLlamaCppPid,
 } from "@/lib/llamacpp-server";
+import { startRootStep } from "@/lib/root-step-runner";
+import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
 
 const MODEL_ID_RE = /^[a-zA-Z0-9._:-]+$/;
 const encoder = new TextEncoder();
 const execFile = promisify(execFileCb);
-const LLAMACPP_INSTALL_SERVICE = "clawbox-root-update@llamacpp_install.service";
+const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
+const LLAMACPP_INSTALL_STEP = "llamacpp_install";
+const LLAMACPP_INSTALL_SERVICE = rootStepUnit(LLAMACPP_INSTALL_STEP);
 // Must stay >= TimeoutStartSec in config/clawbox-root-update@.service so
 // systemd, not us, owns the kill. A cold box builds llama.cpp from source with
 // CUDA and downloads a multi-GB GGUF; 30 min was not enough and the install
@@ -66,11 +70,20 @@ function shouldRepairLlamaCppRuntime(logLine: string | null): boolean {
     || normalized.includes("[llamacpp] missing local model");
 }
 
-async function readLlamaCppInstallLog(lines: number): Promise<string> {
+/**
+ * What THIS install run has written.
+ *
+ * Bounded by `sinceMs`, the moment this call started the unit: the journal is
+ * persistent and this is polled from the first second — before the unit has
+ * said anything — so an unbounded read answers with the LAST attempt's last
+ * line, which the loop below shows as live progress and then reports as this
+ * run's failure reason. root-step-journal.ts has the rest of the reasoning.
+ */
+async function readLlamaCppInstallLog(sinceMs: number, lines: number): Promise<string> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
-      ["-u", LLAMACPP_INSTALL_SERVICE, "-n", String(lines), "--no-pager", "-o", "cat"],
+      rootStepJournalArgs(LLAMACPP_INSTALL_STEP, { sinceMs, lines }),
       { timeout: 10_000 },
     );
     return stdout;
@@ -79,8 +92,8 @@ async function readLlamaCppInstallLog(lines: number): Promise<string> {
   }
 }
 
-async function readLlamaCppInstallFailure(): Promise<string | null> {
-  return getLastLogLine(await readLlamaCppInstallLog(40));
+async function readLlamaCppInstallFailure(sinceMs: number): Promise<string | null> {
+  return getLastLogLine(await readLlamaCppInstallLog(sinceMs, 40));
 }
 
 /**
@@ -120,18 +133,16 @@ function isUnitRunning(active: string): boolean {
 async function repairLlamaCppRuntime(
   onStatus: (line: string) => void,
 ): Promise<{ ok: boolean; error?: string }> {
-  await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", LLAMACPP_INSTALL_SERVICE], {
-    timeout: 10_000,
-  }).catch(() => {});
-
+  // Before the start, so nothing this run writes falls outside the window the
+  // journal reads are bounded by.
+  const startedAt = Date.now();
   try {
-    await execFile(
-      "/usr/bin/sudo",
-      ["/usr/bin/systemctl", "start", "--no-block", LLAMACPP_INSTALL_SERVICE],
-      { timeout: SYSTEMCTL_QUERY_TIMEOUT_MS },
+    await startRootStep(
+      LLAMACPP_INSTALL_STEP,
+      { noBlock: true, timeoutMs: SYSTEMCTL_QUERY_TIMEOUT_MS },
     );
   } catch (err) {
-    const failureLine = await readLlamaCppInstallFailure();
+    const failureLine = await readLlamaCppInstallFailure(startedAt);
     return {
       ok: false,
       error: failureLine || (err instanceof Error ? err.message : "Failed to repair llama.cpp runtime"),
@@ -147,7 +158,7 @@ async function repairLlamaCppRuntime(
     const { active, result } = await readInstallUnitState();
     if (isUnitRunning(active)) sawRunning = true;
 
-    const line = getLastLogLine(await readLlamaCppInstallLog(5));
+    const line = getLastLogLine(await readLlamaCppInstallLog(startedAt, 5));
     if (line && line !== lastLine) {
       lastLine = line;
       onStatus(line);
@@ -194,10 +205,10 @@ function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: st
       `${spec.contextWindow}`,
     ],
     {
-      cwd: "/home/clawbox",
+      cwd: CLAWBOX_HOME_DIR,
       detached: true,
       stdio: "ignore",
-      env: { ...process.env, HOME: "/home/clawbox" },
+      env: { ...process.env, HOME: CLAWBOX_HOME_DIR },
     }
   );
 }
@@ -252,7 +263,20 @@ export async function POST(request: Request) {
         emit(controller, { status: "Checking local Gemma 4 runtime..." });
 
         const existingModels = await queryLlamaCppModels(spec.baseUrl);
-        if (existingModels.includes(alias)) {
+        // Any model, not only this alias. `getLlamaCppLaunchSpec()` resolves
+        // `modelPath` from getDefaultLlamaCppFile() whatever the alias is, and
+        // start-llamacpp.sh passes that as `--model` while the alias is only
+        // `--alias` — so every alias on a box is the SAME GGUF and a non-empty
+        // /v1/models means THE runtime is up, whatever it calls itself.
+        //
+        // waitForLlamaCppReady() and isLlamaCppUp() (src/lib/local-ai-runtime.ts)
+        // already read it that way on every proxied inference request. This
+        // route was the one that did not, and it is the one with a 20-minute
+        // budget: a warm runtime under a label from an earlier install left the
+        // live pid blocking a restart, the alias never appeared, and the wizard
+        // polled for the full startupTimeoutMs before reporting a timeout for a
+        // runtime that was answering the whole time.
+        if (existingModels.length > 0) {
           emit(controller, { status: "llama.cpp is already running. Applying configuration..." });
           const configured = await configureLlamaCpp(alias, scope, activate);
           if (!configured.ok) {
@@ -330,7 +354,9 @@ export async function POST(request: Request) {
           }
 
           const models = await queryLlamaCppModels(spec.baseUrl);
-          if (models.includes(alias)) {
+          // Same rule as the pre-check above: the runtime answering at all is
+          // the readiness signal, because one GGUF backs every alias.
+          if (models.length > 0) {
             emit(controller, { status: "llama.cpp is ready. Applying ClawBox configuration..." });
             const configured = await configureLlamaCpp(alias, scope, activate);
             if (!configured.ok) {

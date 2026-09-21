@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server";
-import { get } from "@/lib/config-store";
-import { getActiveHarness } from "@/lib/harness";
+import { getActiveHarnessSource } from "@/lib/harness";
 import { hermesGatewayStatus, hermesTelegramRegistered } from "@/lib/hermes-telegram";
+import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
+import { readCachedChannelStatus } from "@/lib/openclaw-channels";
 
 export const dynamic = "force-dynamic";
+
+/** The channel id `openclaw channels status` knows Telegram by. */
+const TELEGRAM_CHANNEL_ID = "telegram";
 
 interface TelegramBotInfo {
   username?: string;
@@ -70,66 +74,144 @@ async function fetchBotInfo(token: string): Promise<TelegramBotInfo | null> {
 
 interface HermesTelegramProbe {
   registered: boolean | null;
-  gateway: { installed: boolean; running: boolean };
+  gateway: { installed: boolean; running: boolean; answered?: boolean };
 }
 
 const HERMES_PROBE_TTL = 15_000;
+// A probe that could NOT be answered is remembered too, but briefly. `null`
+// means Hermes could not be asked, and caching that for the full success window
+// makes the panel's Retry a dead press for fifteen seconds — the very control
+// an unreadable row now offers. Same success/failure split as the shared
+// gateway memo in `hermes-telegram.ts`.
+const HERMES_PROBE_FAILURE_TTL = 3_000;
 // Keyed by token, like the bot-info cache above: saving a different bot must
 // not be answered from the previous bot's probe for the next 15 seconds.
-let cachedHermesProbe: { token: string; probe: HermesTelegramProbe; at: number } | null = null;
-const inFlightHermesProbe = new Map<string, Promise<HermesTelegramProbe>>();
+//
+// The GATEWAY half is deliberately NOT in here. `hermesGatewayStatus()` owns
+// one shared memo for the whole process, with its own failure TTL and an
+// invalidation the restart paths call; a second 15 s copy here would shadow
+// both, so a save that restarted the gateway kept being answered with the
+// pre-restart process until this cache aged out on its own.
+let cachedRegistered: { token: string; registered: boolean | null; at: number } | null = null;
+const inFlightRegistered = new Map<string, Promise<boolean | null>>();
 
-async function probeHermes(token: string): Promise<HermesTelegramProbe> {
+function probeRegistered(token: string): Promise<boolean | null> {
   if (
-    cachedHermesProbe &&
-    cachedHermesProbe.token === token &&
-    Date.now() - cachedHermesProbe.at < HERMES_PROBE_TTL
+    cachedRegistered &&
+    cachedRegistered.token === token &&
+    Date.now() - cachedRegistered.at
+      < (cachedRegistered.registered === null ? HERMES_PROBE_FAILURE_TTL : HERMES_PROBE_TTL)
   ) {
-    return cachedHermesProbe.probe;
+    return Promise.resolve(cachedRegistered.registered);
   }
-  const existing = inFlightHermesProbe.get(token);
+  const existing = inFlightRegistered.get(token);
   if (existing) return existing;
   const pending = (async () => {
-    const [registered, gateway] = await Promise.all([
-      hermesTelegramRegistered(),
-      hermesGatewayStatus(),
-    ]);
-    const probe: HermesTelegramProbe = { registered, gateway };
-    cachedHermesProbe = { token, probe, at: Date.now() };
-    return probe;
+    const registered = await hermesTelegramRegistered();
+    cachedRegistered = { token, registered, at: Date.now() };
+    return registered;
   })().finally(() => {
-    inFlightHermesProbe.delete(token);
+    inFlightRegistered.delete(token);
   });
-  inFlightHermesProbe.set(token, pending);
+  inFlightRegistered.set(token, pending);
   return pending;
+}
+
+async function probeHermes(token: string): Promise<HermesTelegramProbe> {
+  const [registered, gateway] = await Promise.all([
+    probeRegistered(token),
+    hermesGatewayStatus(),
+  ]);
+  return { registered, gateway };
 }
 
 export async function GET() {
   try {
-    const token = await get("telegram_bot_token");
-    if (!token || typeof token !== "string") {
-      return NextResponse.json({ configured: false });
-    }
+    // WHICH EDITION FIRST. Reading ClawBox's own `telegram_bot_token` up here
+    // made the Hermes branch below unreachable on exactly the boxes it was
+    // written for: on Hermes the credential is the harness's, and ClawBox's
+    // copy is written only as a side effect of /setup-api/telegram/configure,
+    // so a box paired with `hermes config set` — or restored with ~/.hermes
+    // intact but no ClawBox config.json — answered `configured: false` and the
+    // owner was invited to set up the bot he was already chatting with.
+    const harnessSource = await getActiveHarnessSource();
+    const harness = harnessSource.active;
 
-    if ((await getActiveHarness()) === "hermes") {
+    if (harness === "hermes") {
+      const { token, known } = await readActiveTelegramBot(harnessSource);
+      // `unknown` carries the third state out instead of collapsing it: a store
+      // this box could not read must not render as a box with no bot, which is
+      // the false failure the whole module exists to remove. Nothing draws it
+      // yet — that needs a UI state and ten locales — but the fact belongs in
+      // the response rather than only in the journal.
+      if (!token) return NextResponse.json({ configured: false, unknown: !known });
+
       const { registered, gateway } = await probeHermes(token);
-      // `null` = Hermes couldn't be asked; fall back to the stored token rather
-      // than reporting a working bot as gone.
+      // `null` = Hermes couldn't be asked; fall back to the token we found
+      // rather than reporting a working bot as gone. `true` is correct here
+      // only because the early return above has already established that a bot
+      // token exists — before that guard was hoisted, this line could have
+      // turned "could not ask" into "a bot is configured" on a box with none.
       const configured = registered ?? true;
       const info = configured ? await fetchBotInfo(token) : null;
       return NextResponse.json({
         configured,
         // Whether the answer came from Hermes or from the stored token alone.
         verified: registered !== null,
-        // Telegram is only LIVE when something is listening for updates.
-        receiving: configured && gateway.running,
+        // Telegram is only LIVE when something is listening for updates —
+        // and `null` when the gateway could not be ASKED. A failed probe comes
+        // back as `running: false` (the right shape for "may I start it?", the
+        // wrong one for "is it up?"), and every Telegram save restarts the
+        // gateway, so the read right after one lands inside that window: the
+        // panel would have asserted "set up, but not receiving" over a box
+        // that is fine, at exactly the moment the owner is watching it.
+        receiving: gateway.answered === false ? null : configured && gateway.running,
         gateway,
         ...info,
       });
     }
 
-    const info = await fetchBotInfo(token);
-    return NextResponse.json({ configured: true, ...info });
+    // Same reader, same reason: on OpenClaw the credential is
+    // `channels.telegram.botToken` in openclaw.json — what `setTelegramToken()`
+    // writes and what the gateway long-polls from — and ClawBox's copy is again
+    // only a side effect of the configure route. A box paired with `openclaw
+    // config set`, or restored with ~/.openclaw intact and a fresh
+    // data/config.json, was told to set up the bot it already answers on.
+    const { token, known } = await readActiveTelegramBot(harnessSource);
+    if (!token) return NextResponse.json({ configured: false, unknown: !known });
+    // Whether anything is LISTENING, asked of the harness's own answer rather
+    // than inferred: `openclaw channels status --json` through the ONE shared
+    // memo `readCachedChannelStatus` owns (15 s success / 3 s failure, in-flight
+    // coalesced, invalidated by every channel write and by a gateway restart) —
+    // one un-filtered read that answers for every channel, so opening the
+    // Channels hub costs one CLI start rather than one per card —
+    // the same mechanism the Discord route one file over already uses, and the
+    // reason this costs ~20 ms rather than a CLI boot.
+    //
+    // Without it this branch published no `receiving` at all, so the Channels
+    // hub drew its emerald dot for a Telegram bot on a box whose gateway was
+    // stopped — the false success this route exists to answer, on the edition
+    // most boxes ship with.
+    //
+    // `null` is "the gateway could not be asked", NEVER "not receiving": a
+    // panel that read a failed probe as a definite no would accuse a healthy
+    // bot every time a save restarted the gateway.
+    //
+    // Paired with the bot lookup because the two are independent — one asks the
+    // gateway, the other asks Telegram, and both need only the token. In series
+    // a cold status probe delayed the lookup by its whole duration; the Hermes
+    // branch above pairs its own two for the same reason (`probeHermes`).
+    const [channel, info] = await Promise.all([
+      readCachedChannelStatus(TELEGRAM_CHANNEL_ID),
+      fetchBotInfo(token),
+    ]);
+    return NextResponse.json({
+      configured: true,
+      // The same field, with the same meaning, as the Hermes branch above.
+      verified: channel !== null,
+      receiving: channel === null ? null : channel.running && channel.connected,
+      ...info,
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Status check failed" },

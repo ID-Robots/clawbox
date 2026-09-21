@@ -1,8 +1,8 @@
 'use client';
 
 import type { ReactNode } from 'react';
-import { sourceLabel, trustMeta } from '@/lib/hermes-skills';
-import { COPY } from './copy';
+import { sourceLabel, sourceUrlParts, trustMeta } from '@/lib/hermes-skills';
+import { useCopy } from './copy';
 
 // Shared visual atoms for the Hermes Skills store. Same vocabulary as the
 // OpenClaw AppStore (rounded-2xl cards, material-symbols icons, chip rows) but
@@ -65,6 +65,7 @@ export function SourceChip({ source }: { source?: string }) {
 }
 
 export function ScanChip({ verdict, findings }: { verdict?: string; findings?: number }) {
+  const COPY = useCopy();
   if (!verdict) return null;
   const clean = verdict.toLowerCase() === 'safe' && !findings;
   return (
@@ -207,6 +208,35 @@ export function ExternalLink({ href, children }: { href: string; children: React
   );
 }
 
+/**
+ * A provenance URL rendered so the part that identifies THIS skill survives the
+ * clip. The label is the scheme-stripped URL split at `sourceUrlParts`: the
+ * shared-prefix `head` takes the ellipsis, the identifying `tail` is pinned and
+ * never clipped, so two skills that share a long source prefix (every browse.sh
+ * skill does) no longer read as the same link. The full URL rides along in the
+ * href and the title, so hover and click still get the exact address.
+ */
+export function ExternalUrl({ href }: { href: string }) {
+  const { head, tail } = sourceUrlParts(href);
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={href}
+      className={`inline-flex max-w-full items-center gap-1 text-sm text-[var(--coral-bright)] hover:underline rounded ${FOCUS_RING}`}
+    >
+      <span className="material-symbols-rounded shrink-0" style={{ fontSize: 15 }} aria-hidden="true">
+        open_in_new
+      </span>
+      <span className="inline-flex min-w-0 max-w-full">
+        {head && <span className="truncate">{head}</span>}
+        <span className="shrink-0">{tail}</span>
+      </span>
+    </a>
+  );
+}
+
 export function EmptyState({
   icon,
   title,
@@ -266,10 +296,12 @@ export function GhostButton({
   children,
   onClick,
   tone = 'neutral',
+  disabled,
 }: {
   children: ReactNode;
   onClick?: () => void;
   tone?: 'neutral' | 'danger';
+  disabled?: boolean;
 }) {
   const cls =
     tone === 'danger'
@@ -279,7 +311,8 @@ export function GhostButton({
     <button
       type="button"
       onClick={onClick}
-      className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${cls} ${FOCUS_RING}`}
+      disabled={disabled}
+      className={`px-3 py-1 rounded-md text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${cls} ${FOCUS_RING}`}
     >
       {children}
     </button>

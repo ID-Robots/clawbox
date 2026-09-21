@@ -5,16 +5,20 @@
 //      edition is never registered. Hermes runs a per-server circuit breaker —
 //      one chronically-404ing tool takes ALL ClawBox tools offline for the
 //      agent — so hiding is an availability requirement, not politeness.
-//   2. ANNOTATIONS. readOnlyHint is exactly what exempts a tool from Hermes'
-//      `trust: untrusted` approval gate (which fails CLOSED on a missing
-//      annotation), and it is free on OpenClaw. Getting these right is what
-//      makes `trust: untrusted` a usable containment for the write tools.
+//   2. ANNOTATIONS. readOnlyHint is exactly what exempts a tool from an MCP
+//      host's approval gate (Hermes' `trust: untrusted` fails CLOSED on a
+//      missing annotation), and it is free on OpenClaw. Note what this does NOT
+//      mean on a ClawBox: scripts/register-mcp.sh registers this server with
+//      `trust: full`, because the appliance agent is headless and one-shot and a
+//      prompt would hang the turn. So no gate runs here — the annotations are
+//      for hosts that do enforce one, and the containment that actually applies
+//      to a write tool on this device is its own per-tool guard.
 //   3. OUTPUT CAPS, so a 10 MB stdout cannot be dumped into a small model's
 //      context window.
 //   4. THE ERROR ENVELOPE. Every throw becomes { error, code, message, next } —
 //      no stack, no upstream body, no absolute path.
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { capText } from "./guard";
@@ -22,7 +26,12 @@ import { ToolError, toolErrorResult } from "./errors";
 import { PARAM_NAME_RE, TOOL_NAME_RE, type Shape } from "./schema";
 
 export type Ed = "openclaw" | "hermes";
-export type Profile = "core" | "full";
+// What the SERVER runs as. `browser` is the coding-agent run profile: only
+// tools declaring `family: "browser"` register, so a delegated run drives
+// Chromium to verify its work without inheriting the assistant's device-wide
+// tool set (email, power, files, …). Distinct from the per-tool declarations
+// below — one axis is the server's mode, the other is what a tool claims.
+export type Profile = "core" | "full" | "browser";
 
 export interface ToolOpts {
   /** Editions this tool is registered on. Default: both. */
@@ -34,7 +43,14 @@ export interface ToolOpts {
   /** Reaches the public internet. */
   openWorld?: boolean;
   /** "core" tools survive CLAWBOX_MCP_PROFILE=core. Default "full". */
-  profile?: Profile;
+  profile?: "core" | "full";
+  /**
+   * Tools declaring "browser" are the ONLY ones a `browser`-profile server
+   * registers. A declaration, not a naming convention: a future tool that
+   * happens to be named browser_something stays out of delegated runs unless
+   * its author states it belongs there.
+   */
+  family?: "browser";
   /** Output cap in characters. Default 4000. */
   maxChars?: number;
 }
@@ -57,7 +73,27 @@ export interface RegisteredToolInfo {
   opts: ToolOpts;
 }
 
-const DEFAULT_MAX_CHARS = 4_000;
+export const DEFAULT_MAX_CHARS = 4_000;
+
+/**
+ * The cap for a tool whose answer is a LIST of what is on the device.
+ *
+ * 8,000 rather than the 6,000 `skill_list` and `ui_list_apps` carried since
+ * they were written: measured against a real Hermes box (90 installed rows —
+ * 82 bundled, 3 from the store, 5 made on the device — emitting 3,165
+ * characters), 6,000 left room for only 46 further store installs, because
+ * #582 grew every store row by a third (the lock id leads and a differing card
+ * name is spelled out).
+ *
+ * Not larger, and this is the trade: both tools are `profile: "core"`, the
+ * trimmed surface a 4-8B on-device model gets, so every character here is
+ * context that model does not spend on the question. Past a certain length a
+ * list of near-identical rows is worse for it than a shorter list plus an
+ * honest count — which is what both tools now emit, so the cap is no longer
+ * what stops the answer breaking, only what it costs. 8,000 is `skill_info`'s
+ * budget, the other core tool that returns something long.
+ */
+export const LIST_MAX_CHARS = 8_000;
 // An image bigger than this eats a small model's whole context window.
 const MAX_IMAGE_BASE64 = 1024 * 1024;
 
@@ -70,6 +106,18 @@ export const MAX_DESCRIPTION_CHARS = 1000;
 
 export interface Registrar {
   tool(name: string, description: string, shape: Shape, opts: ToolOpts, handler: ToolHandler): void;
+  /**
+   * Withdraw one tool again, by name. A no-op for a name this registrar never
+   * registered — the edition and profile gates above drop tools silently, so a
+   * caller that withdraws a family cannot know which half of it ever existed.
+   *
+   * It exists for the ONE decision an owner changes while the agent is running:
+   * whether the agent may open the mailbox (mcp/tools/email.ts). Everything
+   * else this server gates on is settled before `connect()` and stays settled,
+   * and `tool()` is still the only way in — so the dispatcher, the tool list and
+   * the SDK's own registry cannot disagree about what exists.
+   */
+  remove(name: string): void;
   list(): RegisteredToolInfo[];
   /** Must be called once, after every tool is registered. See installCallHandler(). */
   finalize(): void;
@@ -80,7 +128,14 @@ export interface Registrar {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ToolHandler = (args: any) => Promise<ToolResult> | ToolResult;
 
-function capResult(result: ToolResult, maxChars: number): ToolResult {
+/**
+ * Apply a tool's output cap, exactly as the dispatcher does before the result
+ * reaches the agent. Exported so the test registrar can put a handler's return
+ * value through the same gate — a suite that inspects the UNCAPPED string is
+ * not looking at what the agent sees, and an output that outgrew its cap then
+ * passes every assertion about it.
+ */
+export function capResult(result: ToolResult, maxChars: number): ToolResult {
   const content = result.content.map((part): ContentPart => {
     if (part.type === "text") return { type: "text", text: capText(part.text, maxChars) };
     if (part.data.length > MAX_IMAGE_BASE64) {
@@ -180,11 +235,22 @@ function installCallHandler(server: McpServer, entries: Map<string, CallEntry>):
     const name = request.params.name;
     const entry = entries.get(name);
     if (!entry) {
+      // NOT "there is no such tool on this edition", which is what this said
+      // while the list could not change: a WITHDRAWN name lands here too — the
+      // mailbox read tools follow Settings → Email — and that tool does exist on
+      // this edition, it is just not being offered now. The old wording sent a
+      // model looking for an edition problem, and it was the one refusal in this
+      // module's vocabulary that did not say "do not retry", while
+      // `toolErrorResult` stamps `isError: true` — which is exactly the chronic
+      // failure Hermes' per-server circuit breaker counts, and the thing the
+      // whole registration gate exists to avoid.
       return toolErrorResult(
         new ToolError(
           "NOT_FOUND",
-          `This ClawBox has no tool called "${name}".`,
-          "Use a tool from this server's tool list; the list depends on which edition this device runs.",
+          `This ClawBox is not offering a tool called "${name}".`,
+          "Do not retry this name. Read this server's tool list again and use a name from it:"
+            + " the list depends on which edition this device runs, and a few tools are withdrawn"
+            + " while the owner has switched off what they need.",
         ),
         name,
       );
@@ -202,18 +268,26 @@ function installCallHandler(server: McpServer, entries: Map<string, CallEntry>):
 }
 
 /**
- * Build the registrar for one server instance. Every registration decision —
- * edition, profile — is made HERE, once, before server.connect(); never per
- * call, so tools/list is stable for the life of the process.
+ * Build the registrar for one server instance. The registration RULES — edition,
+ * profile — are applied HERE and never per call, so an individual tool cannot
+ * answer the same question a second way.
+ *
+ * The list is built before `server.connect()` and, with the one exception the
+ * mailbox gate needs, does not change afterwards: `registerEmailReadTools` and
+ * `remove` follow Settings → Email on a running server, and the SDK turns each
+ * of those into a `notifications/tools/list_changed` the harness acts on.
  */
 export function createRegistrar(server: McpServer, edition: Ed, profile: Profile): Registrar {
   const registered: RegisteredToolInfo[] = [];
   const entries = new Map<string, CallEntry>();
+  // The SDK's own handle per tool, which is what can withdraw one again.
+  const handles = new Map<string, RegisteredTool>();
 
   return {
     tool(name, description, shape, opts, handler) {
       if (opts.editions && !opts.editions.includes(edition)) return;
       if (profile === "core" && opts.profile !== "core") return;
+      if (profile === "browser" && opts.family !== "browser") return;
 
       const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS;
       const info: RegisteredToolInfo = {
@@ -228,8 +302,6 @@ export function createRegistrar(server: McpServer, edition: Ed, profile: Profile
         // take the agent's whole tool surface down on a customer device.
         console.error(`[clawbox-mcp] TOOL CONTRACT: ${violation}`);
       }
-      registered.push(info);
-      entries.set(name, { shape, handler, maxChars });
 
       const wrapped = async (args: unknown) => {
         try {
@@ -240,7 +312,7 @@ export function createRegistrar(server: McpServer, edition: Ed, profile: Profile
         }
       };
 
-      server.registerTool(
+      const handle = server.registerTool(
         name,
         {
           description,
@@ -254,6 +326,30 @@ export function createRegistrar(server: McpServer, edition: Ed, profile: Profile
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see ToolHandler
         wrapped as any,
       );
+      // RECORDED ONLY ONCE THE SDK HAS TAKEN IT. `registerTool` throws on a name
+      // it already holds, and this used to push into `registered`/`entries`
+      // first: a throw then left a row for a tool that was never published, and
+      // — now that a family can be registered again later — one such row per
+      // attempt, with `list()` over-reporting and a later `remove()` clearing
+      // only the first of them. Nothing in the tree makes it throw today; the
+      // ordering is what keeps that true of the next caller as well.
+      registered.push(info);
+      entries.set(name, { shape, handler, maxChars });
+      if (handle) handles.set(name, handle);
+    },
+    remove(name) {
+      const handle = handles.get(name);
+      if (!handle) return;
+      handles.delete(name);
+      // The DISPATCHER first. `installCallHandler` answers from `entries`, so a
+      // tool left there would still run for a host that called it from a list
+      // it had not refreshed yet — and the gate would be gone from the one
+      // place that is not the route's.
+      entries.delete(name);
+      const at = registered.findIndex((t) => t.name === name);
+      if (at >= 0) registered.splice(at, 1);
+      // Last, because this is what emits tools/list_changed.
+      handle.remove();
     },
     list() {
       return registered;

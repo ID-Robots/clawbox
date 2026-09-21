@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
-import type { StepStatus, StepState, UpdateState } from "@/lib/updater";
+import type { RemoteReachability, StepStatus, StepState, UpdateState } from "@/lib/updater";
 import { useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
 import ReconnectingOverlay from "./ReconnectingOverlay";
@@ -201,8 +201,14 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [state, setState] = useState<UpdateState | null>(null);
 
   const [versions, setVersions] = useState<{
-    clawbox: { current: string; target: string | null; updateAvailable?: boolean };
-    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
+    // `updateAvailable` is `boolean | null`: null is the device saying it
+    // could not look, and both fallbacks below read it as the version
+    // comparison, exactly as an absent field.
+    clawbox: { current: string; target: string | null; updateAvailable?: boolean | null };
+    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean | null };
+    // Optional: a payload from a server that predates the field must keep
+    // behaving exactly as before, so ABSENT is "not known", never "unreachable".
+    remote?: RemoteReachability;
   } | null>(null);
   const [fetchError, setFetchError] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -269,6 +275,17 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     }, 2000);
   }, [stopPolling]);
 
+  // The status effect must re-run for one reason only — a Retry — and never
+  // because these two callbacks changed identity. Reaching them through refs
+  // keeps them out of the effect's dependency list, so the effect cannot abort
+  // a status read it is about to re-issue on any render but a real reload.
+  const startPollingRef = useRef(startPolling);
+  const stopPollingRef = useRef(stopPolling);
+  useEffect(() => {
+    startPollingRef.current = startPolling;
+    stopPollingRef.current = stopPolling;
+  });
+
   // Fetch initial status (but don't auto-start)
   useEffect(() => {
     const controller = new AbortController();
@@ -286,10 +303,16 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         if (data.versions) setVersions(data.versions);
 
         if (data.phase === "running") {
-          startPolling();
+          startPollingRef.current();
         }
-      } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") return;
+      } catch {
+        // Whether this read was cancelled is a fact the controller holds, not
+        // one to be inferred from the error's type. An abort during the body
+        // read surfaces as a TypeError or a plain Error, not a DOMException, so
+        // sniffing the error let a cancelled read fall through to the failure
+        // banner while every request to the box had in fact returned 200. Ask
+        // the controller; a genuine failure (signal not aborted) still shows.
+        if (controller.signal.aborted) return;
         setFetchError(true);
       } finally {
         if (!controller.signal.aborted) setLoading(false);
@@ -298,9 +321,9 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     init();
     return () => {
       controller.abort();
-      stopPolling();
+      stopPollingRef.current();
     };
-  }, [startPolling, stopPolling, statusReloadCount]);
+  }, [statusReloadCount]);
 
   const triggerUpdate = async () => {
     actionControllerRef.current?.abort();
@@ -315,8 +338,11 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
       });
       if (!res.ok) throw new Error(`Start update failed (${res.status})`);
       startPolling();
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
+    } catch {
+      // Same rule as the status read: a cancelled request is not a failure, and
+      // its abort will not reliably arrive as a DOMException. The controller is
+      // the source of truth for whether we cancelled this.
+      if (controller.signal.aborted) return;
       setFetchError(true);
       setStarting(false);
     }
@@ -348,7 +374,17 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const isIdle = !state || state.phase === "idle";
   const clawboxNeedsUpdate = !!versions && (versions.clawbox.updateAvailable ?? !!versions.clawbox.target);
   const openclawNeedsUpdate = !!versions && (versions.openclaw.updateAvailable ?? !!versions.openclaw.target);
-  const isUpToDateEarly = !loading && isIdle && !starting && versions && !clawboxNeedsUpdate && !openclawNeedsUpdate;
+  // GitHub refuses anonymous git-upload-pack POSTs from an address that has
+  // made too many, so a box being set up behind such an address compares HEAD
+  // against the STALE refs its image shipped with and finds no delta. On this
+  // screen that was worse than a wrong label: the wizard printed "System Up to
+  // Date" and AUTO-ADVANCED after 1.5 s, onboarding the customer onto whatever
+  // was in the image with no update attempted and nothing said (TASK-655).
+  // Routed into the existing check-failed branch, which already offers Retry
+  // and Skip — the owner decides, and setup is never blocked.
+  const remoteUnreachable = versions?.remote?.reachable === false;
+  const isUpToDateEarly = !loading && isIdle && !starting && versions
+    && !remoteUnreachable && !clawboxNeedsUpdate && !openclawNeedsUpdate;
 
   // Auto-advance if already up to date — show brief flash then continue
   const autoAdvancedRef = useRef(false);
@@ -386,7 +422,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     );
   }
 
-  if (fetchError) {
+  if (fetchError || (remoteUnreachable && isIdle && !starting)) {
     return (
       <Card>
         <h1 className="font-bold font-display mb-[var(--s-2)]" style={T_H1}>
@@ -395,6 +431,14 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         <p className="text-red-400 mb-[var(--s-6)]" style={T_LEDE}>
           {t("update.failedToCheck")}
         </p>
+        {/* Server-authored, in the owner's words rather than git's — the same
+            sentence the System Update screen shows. Rendered only when the
+            server sent one, so nothing here depends on a new locale key. */}
+        {!fetchError && versions?.remote?.reason && (
+          <p className="text-[var(--text-secondary)] mb-[var(--s-6)]" style={T_LEDE}>
+            {versions.remote.reason}
+          </p>
+        )}
         <div className="flex flex-col sm:flex-row sm:items-center gap-[var(--s-3)]">
           <button
             type="button"
@@ -413,7 +457,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   }
 
   // Idle state — show trigger button or "up to date"
-  const isUpToDate = versions && !clawboxNeedsUpdate && !openclawNeedsUpdate;
+  const isUpToDate = versions && !remoteUnreachable && !clawboxNeedsUpdate && !openclawNeedsUpdate;
 
   const isDowngrade = versions?.clawbox.target
     ? compareVersions(versions.clawbox.current, versions.clawbox.target) > 0
@@ -564,6 +608,19 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
                   }}
                 >
                   {step.label}
+                  {/* The installer's own account of the sub-phase, on the
+                      running step only. See SystemUpdateApp for why a coarse
+                      label alone leaves the wizard silent for minutes. */}
+                  {step.status === "running" && step.detail && (
+                    <span
+                      className="block truncate"
+                      style={{ fontSize: "var(--t-5)", color: "var(--text-muted)" }}
+                      title={step.detail}
+                      data-testid="update-step-detail"
+                    >
+                      {step.detail}
+                    </span>
+                  )}
                 </span>
               </li>
             ))}

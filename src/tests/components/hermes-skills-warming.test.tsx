@@ -14,6 +14,30 @@ import HermesSkillsStore from "@/components/HermesSkillsStore";
  * reopened.
  */
 
+/**
+ * The store renders its copy through `t()` (TASK-458). On the desktop it sits
+ * under the page's I18nProvider; here it is rendered bare, so resolve keys
+ * against the real English catalogue — the assertions below then stay on the
+ * sentences a user actually reads, not on test ids.
+ */
+vi.mock("@/lib/i18n", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/i18n")>();
+  const { skillsEn } = await import("@/lib/edition-translations/en-skills");
+  return {
+    ...actual,
+    useT: () => ({
+      locale: "en" as const,
+      localeResolved: true,
+      setLocale: () => {},
+      t: (key: string, params?: Record<string, string | number>) =>
+        Object.entries(params ?? {}).reduce(
+          (out, [name, value]) => out.replaceAll(`{${name}}`, String(value)),
+          skillsEn[key] ?? key,
+        ),
+    }),
+  };
+});
+
 const WARMING = {
   skills: [],
   page: 1,
@@ -82,7 +106,7 @@ describe("Browse while the skill index is still building", () => {
 
     expect(await screen.findByText(/Building the skill catalogue/i)).toBeTruthy();
     // The two strings the user actually saw on the device.
-    expect(screen.queryByText(/Nothing in .* yet/i)).toBeNull();
+    expect(screen.queryByText(/Nothing here yet/i)).toBeNull();
     expect(screen.queryByText(/Try a different term/i)).toBeNull();
   });
 
@@ -132,7 +156,7 @@ describe("Browse while the skill index is still building", () => {
     mockBrowse([{ ...READY, skills: [], total: 0 }]);
     await openBrowseTab();
 
-    expect(await screen.findByText(/Nothing in .* yet/i)).toBeTruthy();
+    expect(await screen.findByText(/Nothing here yet/i)).toBeTruthy();
     expect(screen.queryByText(/Building the skill catalogue/i)).toBeNull();
   });
 });

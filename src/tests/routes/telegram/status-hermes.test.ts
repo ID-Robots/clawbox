@@ -8,20 +8,43 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn() }));
-vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
+// `getActiveHarnessSource` answers from the same mock this suite drives, so the
+// routes' one resolution says what these cases set. The single-read contract
+// itself is pinned in harness-edition-read-once / harness-status, not here.
+vi.mock("@/lib/harness", () => {
+  const getActiveHarness = vi.fn();
+  const getEdition = vi.fn(() => "hermes");
+  return {
+    getActiveHarness,
+    getEdition,
+    getActiveHarnessSource: async () => ({
+      active: await getActiveHarness(),
+      defaulted: false,
+      edition: getEdition(),
+      locked: true,
+    }),
+  };
+});
 vi.mock("@/lib/hermes-telegram", () => ({
   hermesTelegramRegistered: vi.fn(),
   hermesGatewayStatus: vi.fn(),
+  readHermesTelegramToken: vi.fn(),
 }));
+// The OpenClaw branch also probes channel status. Do not boot the device's
+// real CLI when this Hermes-focused suite exercises that branch.
+vi.mock("@/lib/openclaw-channels", () => ({ readCachedChannelStatus: vi.fn() }));
 
 import { get } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
-import { hermesTelegramRegistered, hermesGatewayStatus } from "@/lib/hermes-telegram";
+import { hermesTelegramRegistered, hermesGatewayStatus, readHermesTelegramToken } from "@/lib/hermes-telegram";
+import { readCachedChannelStatus } from "@/lib/openclaw-channels";
 
 const mockGet = vi.mocked(get);
 const mockHarness = vi.mocked(getActiveHarness);
 const mockRegistered = vi.mocked(hermesTelegramRegistered);
 const mockGateway = vi.mocked(hermesGatewayStatus);
+const mockHermesToken = vi.mocked(readHermesTelegramToken);
+const mockChannelStatus = vi.mocked(readCachedChannelStatus);
 
 const TOKEN = "123456789:ABCDefGHIjklMNOpqrsTUVwxyz";
 const UP = { installed: true, running: true, scope: "system" as const };
@@ -43,6 +66,8 @@ describe("GET /setup-api/telegram/status on Hermes", () => {
     mockHarness.mockResolvedValue("hermes");
     mockRegistered.mockResolvedValue(true);
     mockGateway.mockResolvedValue(UP);
+    mockHermesToken.mockResolvedValue({ token: TOKEN, known: true });
+    mockChannelStatus.mockResolvedValue(null);
 
     GET = (await import("@/app/setup-api/telegram/status/route")).GET;
   });
@@ -84,11 +109,27 @@ describe("GET /setup-api/telegram/status on Hermes", () => {
     expect(body.verified).toBe(false);
   });
 
-  it("does not probe Hermes at all when no token is stored", async () => {
+  // The CLI probe costs ~2 s on a Jetson; a box with no bot must not pay it.
+  // The question is asked of HERMES' store now, not of ClawBox's copy.
+  it("does not probe Hermes at all when Hermes has no bot token", async () => {
     mockGet.mockResolvedValue(undefined);
+    mockHermesToken.mockResolvedValue({ token: null, known: true });
     const body = await (await GET()).json();
 
-    expect(body).toEqual({ configured: false });
+    // `unknown: false` is the whole point of the pair: this box demonstrably
+    // has no bot, which is a different answer from "we could not read its
+    // Telegram configuration" and the only one a panel may render as an
+    // invitation to set one up.
+    expect(body).toEqual({ configured: false, unknown: false });
+    expect(mockRegistered).not.toHaveBeenCalled();
+  });
+
+  it("says the answer is unknown when Hermes' own store could not be read", async () => {
+    mockGet.mockResolvedValue(undefined);
+    mockHermesToken.mockResolvedValue({ token: null, known: false });
+    const body = await (await GET()).json();
+
+    expect(body).toEqual({ configured: false, unknown: true });
     expect(mockRegistered).not.toHaveBeenCalled();
   });
 
@@ -100,12 +141,43 @@ describe("GET /setup-api/telegram/status on Hermes", () => {
     await GET();
     expect(mockRegistered).toHaveBeenCalledTimes(1);
 
-    mockGet.mockResolvedValue("987654321:a-different-bot");
+    mockHermesToken.mockResolvedValue({ token: "987654321:a-different-bot", known: true });
     mockRegistered.mockResolvedValue(false);
     const body = await (await GET()).json();
 
     expect(mockRegistered).toHaveBeenCalledTimes(2);
     expect(body.configured).toBe(false);
+  });
+
+  it("remembers a probe it could not answer for far less time than one it could", async () => {
+    // `null` is "Hermes could not be asked", and the row now offers Retry over
+    // exactly that state. Keeping it for the full fifteen seconds made that
+    // button a dead press: the same unknown came straight back out of the
+    // cache without the CLI being re-entered at all.
+    vi.useFakeTimers();
+    try {
+      mockRegistered.mockResolvedValue(null);
+      await GET();
+      expect(mockRegistered).toHaveBeenCalledTimes(1);
+
+      // Inside the failure window the box must not re-enter a wedged CLI...
+      vi.setSystemTime(Date.now() + 2_000);
+      await GET();
+      expect(mockRegistered).toHaveBeenCalledTimes(1);
+
+      // ...but the unknown may not stand for a successful answer's window.
+      vi.setSystemTime(Date.now() + 2_000);
+      mockRegistered.mockResolvedValue(true);
+      expect((await (await GET()).json()).verified).toBe(true);
+      expect(mockRegistered).toHaveBeenCalledTimes(2);
+
+      // A real answer still gets the full window.
+      vi.setSystemTime(Date.now() + 5_000);
+      await GET();
+      expect(mockRegistered).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("leaves the OpenClaw path alone", async () => {
@@ -116,5 +188,49 @@ describe("GET /setup-api/telegram/status on Hermes", () => {
     expect(body.gateway).toBeUndefined();
     expect(mockRegistered).not.toHaveBeenCalled();
     expect(mockGateway).not.toHaveBeenCalled();
+    expect(mockHermesToken).not.toHaveBeenCalled();
+    expect(mockChannelStatus).toHaveBeenCalledWith("telegram");
+  });
+
+  // The credential is the HARNESS's on a Hermes box. ClawBox's copy is written
+  // only as a side effect of /setup-api/telegram/configure, so a box paired with
+  // `hermes config set` — or restored without ClawBox's config.json — has none.
+  // Reading it first made the whole Hermes branch below unreachable on exactly
+  // the boxes it was written for: the owner was told his working bot did not
+  // exist and invited to set one up.
+  it("reports the bot Hermes holds even when ClawBox has no copy of the token", async () => {
+    mockGet.mockResolvedValue(undefined);
+
+    const body = await (await GET()).json();
+
+    expect(body).toMatchObject({ configured: true, verified: true, receiving: true, gateway: UP });
+    expect(mockRegistered).toHaveBeenCalled();
+  });
+
+  // Which bot the panel names, and which token getMe is spent on, both have to
+  // be the one Hermes actually long-polls — not a stale copy left in ClawBox's
+  // store by an earlier bot.
+  it("asks Telegram about Hermes' bot, not ClawBox's stale copy", async () => {
+    mockGet.mockResolvedValue("999999:AStaleClawBoxCopy_00");
+
+    await GET();
+
+    const called = vi.mocked(globalThis.fetch).mock.calls.map((call) => String(call[0]));
+    expect(called.some((url) => url.includes(TOKEN))).toBe(true);
+    expect(called.some((url) => url.includes("999999:AStaleClawBoxCopy_00"))).toBe(false);
+  });
+
+  // `registered ?? true` is safe only while an earlier line has already proved a
+  // token exists. Once the Hermes answer is consulted first, that fallback turns
+  // "Hermes could not be asked" into "a bot is configured" on a box with none.
+  it("does not invent a bot when there is no token and Hermes cannot be asked", async () => {
+    mockGet.mockResolvedValue(undefined);
+    mockHermesToken.mockResolvedValue({ token: null, known: false });
+    mockRegistered.mockResolvedValue(null);
+    mockGateway.mockResolvedValue(DOWN);
+
+    const body = await (await GET()).json();
+
+    expect(body.configured).toBe(false);
   });
 });

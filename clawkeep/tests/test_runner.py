@@ -133,7 +133,7 @@ def test_step_is_persisted_until_failure(isolate_state: Path, tmp_path: Path) ->
 
     captured_steps: list[str] = []
 
-    def upload_that_records_state(creds, *, archive_path, object_name):
+    def upload_that_records_state(creds, *, archive_path, object_name, progress_cb=None):
         # By the time the upload is invoked, the runner should already have
         # stamped the "uploading" step. Read state.json from disk to verify
         # the persistence path (not just in-memory state).
@@ -266,6 +266,52 @@ def test_openclaw_failure_reports_error(isolate_state: Path, tmp_path: Path) -> 
     upload.assert_not_called()
     assert heartbeats[-1]["status"] == "error"
     assert "disk full" in heartbeats[-1]["error"]
+
+
+def test_archive_session_race_retries_then_succeeds(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    archive = _archive(tmp_path)
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch(
+            "clawkeep.runner.agent.create_archive",
+            side_effect=[
+                OpenclawError("ENOENT: lstat session.trajectory.jsonl"),
+                archive,
+            ],
+        ) as create,
+        patch("clawkeep.runner.time.sleep") as sleep,
+        patch("clawkeep.runner.s3.upload"),
+        patch("clawkeep.runner.s3.stats", return_value=CloudStats(0, 1)),
+    ):
+        rc = runner.run_once(cfg, "claw_x")
+
+    assert rc == runner.EXIT_OK
+    assert create.call_count == 2
+    sleep.assert_called_once_with(1.0)
+
+
+def test_archive_non_race_error_is_not_retried(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch(
+            "clawkeep.runner.agent.create_archive",
+            side_effect=OpenclawError("permission denied"),
+        ) as create,
+        patch("clawkeep.runner.time.sleep") as sleep,
+    ):
+        rc = runner.run_once(cfg, "claw_x")
+
+    assert rc == runner.EXIT_OPENCLAW
+    create.assert_called_once()
+    sleep.assert_not_called()
 
 
 def test_upload_failure_reports_error(isolate_state: Path, tmp_path: Path) -> None:

@@ -20,8 +20,21 @@ interface CredentialsHandoffOverlayProps {
    * rejoin is needed (e.g. only the device name changed over Ethernet).
    */
   hotspotSsid: string | null;
+  /**
+   * Something the save could NOT do, carried across the handoff.
+   *
+   * A hotspot toggle that threw is saved but not applied, and the customer has
+   * to be told — but when the device was also renamed, this origin is about to
+   * stop answering, so the reconnect cannot wait for them to read a message on
+   * a page that is going away. It rides along instead. Only ever shown when
+   * there is no rejoin instruction, which is exactly the case: a toggle that
+   * threw restarted no AP, so there is no new network to rejoin.
+   */
+  notice?: string | null;
   /** Advance to the next step once the box is reachable again (same-origin only). */
   onContinue: () => void;
+  /** Hermes edition: the overlay waits in the agent's green, not coral. */
+  hermes?: boolean;
   /** Grace period before probing — the AP needs a moment to actually drop. */
   graceMs?: number;
 }
@@ -38,7 +51,9 @@ export default function CredentialsHandoffOverlay({
   targetUrl,
   sameOrigin,
   hotspotSsid,
+  notice = null,
   onContinue,
+  hermes = false,
   graceMs = 4000,
 }: CredentialsHandoffOverlayProps) {
   const { t } = useT();
@@ -82,12 +97,17 @@ export default function CredentialsHandoffOverlay({
 
   return (
     <ReconnectStage
+      hermes={hermes}
       steps={[t("credentials.handoffApplying"), rejoinLabel, t("settings.backOnline")]}
       phaseIndex={phaseIndex}
       completed={completed}
+      // Step 3 lives inside the wizard, so its handoff success marks use the
+      // wizard's DONE colour (--cyan-bright) rather than the generic emerald the
+      // shared overlay defaults to on the desktop.
+      doneTone="cyan"
       title={completed ? t("settings.backOnline") : t("credentials.handoffTitle")}
       description={completed ? t("ai.almostReady") : t("credentials.handoffDesc")}
-      instruction={completed || !hotspotSsid ? undefined : rejoinLabel}
+      instruction={completed ? undefined : (hotspotSsid ? rejoinLabel : notice ?? undefined)}
       action={completed ? undefined : { label: t("wifi.openUrl", { url: prettyUrl }), href: targetUrl }}
     />
   );

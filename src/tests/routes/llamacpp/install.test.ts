@@ -7,6 +7,12 @@ import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 // Imported rather than spelled out so a GGUF swap cannot leave this suite
 // asserting a filename the app no longer asks for.
 import { DEFAULT_LLAMACPP_HF_FILE, DEFAULT_LLAMACPP_HF_REPO } from "@/lib/llamacpp";
+import { startRootStep } from "@/lib/root-step-runner";
+
+vi.mock("@/lib/root-step-runner", () => ({
+  ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
+  startRootStep: vi.fn(async () => {}),
+}));
 
 vi.mock("child_process", () => ({
   spawn: vi.fn(),
@@ -170,6 +176,51 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(text).toContain("\"success\":true");
   });
 
+  /**
+   * TASK-682 — the alias is a WIRE LABEL, not a choice of weights.
+   *
+   * `getLlamaCppLaunchSpec(alias)` resolves `modelPath` from
+   * `getDefaultLlamaCppFile()` whatever the alias is, and start-llamacpp.sh
+   * passes it as `--model` while the alias goes to `--alias`. So every alias on
+   * a box is the SAME GGUF, and `models.includes(alias)` asks a question about
+   * a label rather than about the runtime.
+   *
+   * Two other readers already know this — `waitForLlamaCppReady` and
+   * `isLlamaCppUp` (src/lib/local-ai-runtime.ts) both accept a non-empty
+   * `/v1/models` — and this route was the one that did not. With a warm runtime
+   * under a different label (the install route itself accepts any MODEL_ID_RE
+   * string, and a Settings model change never stops the old server), the pid
+   * file is live so nothing restarts, the alias never appears, and the wizard
+   * sat in a streamed HTTP handler for the FULL startupTimeoutMs — 20 minutes —
+   * before reporting a timeout for a runtime that was up and answering.
+   */
+  it("configures against a runtime that is already up under another alias, instead of polling to the timeout", async () => {
+    // A live pid: this is what stops the loop from restarting anything.
+    mockFs.readFile.mockImplementation((async (target: unknown) =>
+      String(target).endsWith("server.pid")
+        ? `${process.pid}\n`
+        : Promise.reject(new Error("ENOENT"))) as typeof fsp.readFile);
+    // The runtime answers — under the label the install route was given last time.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [{ id: "gemma-4-e2b" }] }),
+    }));
+    // Without this the RED case would take the real 20 minutes to fail.
+    vi.stubEnv("LLAMACPP_STARTUP_TIMEOUT_MS", "1");
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    const text = await readStream(res);
+
+    vi.unstubAllEnvs();
+
+    expect(text).not.toContain("Timed out");
+    expect(text).toContain("already running");
+    expect(text).toContain("\"success\":true");
+    expect(mockConfigureAiModel).toHaveBeenCalled();
+    // And it must not race the live server for the one port.
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
   it("starts llama-server and configures after the model becomes ready", async () => {
     const mockFetch = vi.fn()
       .mockResolvedValueOnce({
@@ -323,6 +374,64 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  it("never reports the PREVIOUS install attempt's line as this run's", async () => {
+    // The unit is `clawbox-root-update@llamacpp_install.service` and the
+    // journal on this box is persistent, so an unbounded read answers with
+    // whatever the last attempt left behind — and the first poll happens
+    // before this run's unit has written anything. The owner was shown the
+    // previous failure as live progress and then handed it as this run's
+    // reason. The read is bounded to this run now; the mock is the OS.
+    mockFs.stat.mockImplementation((async () => {
+      throw new Error("ENOENT");
+    }) as typeof fsp.stat);
+
+    const journalReads: string[] = [];
+    // The dispatch takes a moment, as starting a root unit does, so a capture
+    // that slid BELOW `startRootStep` is visible here instead of landing in
+    // the same instant and looking correct.
+    let dispatchedAt = 0;
+    vi.mocked(startRootStep).mockImplementation(async () => {
+      dispatchedAt = Date.now();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    mockExecFile.mockImplementation(((
+      cmd: string,
+      args: string[],
+      optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+      maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+    ) => {
+      const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+      const key = `${cmd} ${args.join(" ")}`;
+      let stdout = "";
+      if (key.includes("systemctl show")) {
+        stdout = "ActiveState=failed\nResult=exit-code\n";
+      } else if (key.includes("journalctl")) {
+        journalReads.push(key);
+        const since = Number(/--since @([\d.]+)/.exec(key)?.[1] ?? NaN);
+        stdout = since * 1000 <= dispatchedAt
+          ? ""
+          : "Error: yesterday's attempt could not reach huggingface.co\n";
+      }
+      callback?.(null, { stdout, stderr: "" });
+      return {} as ReturnType<typeof childProcess.execFile>;
+    }) as unknown as typeof childProcess.execFile);
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    }));
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    const text = await readStream(res);
+
+    expect(text).not.toContain("yesterday's attempt");
+    expect(journalReads.length).toBeGreaterThan(0);
+    for (const read of journalReads) {
+      expect(read).toContain("-u clawbox-root-update@llamacpp_install.service");
+      expect(read).toMatch(/--since @\d+\.\d{3}/);
+    }
+  });
+
   it("repairs the llama.cpp runtime and retries when hf is missing", async () => {
     const runtimeError = "[llamacpp] Missing Hugging Face CLI at /home/clawbox/.local/bin/hf. Run the llama.cpp install step to repair the local runtime.\n";
     const mockFetch = vi.fn()
@@ -385,13 +494,12 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(text).toContain("Repairing the llama.cpp runtime");
     expect(text).toContain("runtime repaired");
     expect(text).toContain("\"success\":true");
-    expect(mockExecFile).toHaveBeenCalledWith(
-      "/usr/bin/sudo",
-      // --no-block: we poll systemd ourselves so the wizard can stream progress
-      // instead of sitting silent for the whole install.
-      ["/usr/bin/systemctl", "start", "--no-block", "clawbox-root-update@llamacpp_install.service"],
-      expect.any(Object),
-      expect.any(Function),
+    // --no-block: we poll systemd ourselves so the wizard can stream progress
+    // instead of sitting silent for the whole install. Through the root-owned
+    // launcher, which also clears a previous failure itself. TASK-539.
+    expect(vi.mocked(startRootStep)).toHaveBeenCalledWith(
+      "llamacpp_install",
+      expect.objectContaining({ noBlock: true }),
     );
     expect(mockSpawn).toHaveBeenCalledTimes(2);
 

@@ -101,13 +101,22 @@ test.describe("browser + VNC happy path", () => {
   });
 
   test("screenshot returns fresh PNG", async () => {
+    test.setTimeout(120_000);
     expect(sessionId).not.toBeNull();
+    // Go back to clawbox.com before capturing. The previous test leaves the
+    // session on youtube.com, which in CI is often a near-blank consent or
+    // bot-check page — a 1280×720 PNG of that compresses to ~6 KB and fails
+    // the size floor below (seen on PR #938). clawbox.com renders real
+    // content deterministically, so the floor measures our screenshot path,
+    // not YouTube's mood.
+    const back = await browserNavigate(sessionId!, "https://clawbox.com/");
+    expect(new URL(back.url).hostname).toBe("clawbox.com");
     const shot = await browserScreenshot(sessionId!);
     expect(shot.screenshot).toBeTruthy();
     // Decode enough to check the PNG magic.
     const png = Buffer.from(shot.screenshot!, "base64");
     expect(png.slice(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
-    // A 1280×720 YouTube capture will be well over 10 KB.
+    // A 1280×720 capture of a real page will be well over 10 KB.
     expect(png.byteLength).toBeGreaterThan(10_000);
   });
 });

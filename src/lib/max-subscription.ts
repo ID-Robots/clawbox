@@ -1,4 +1,4 @@
-export const PORTAL_LOGIN_URL = "https://openclawhardware.dev/portal";
+export const PORTAL_LOGIN_URL = "https://clawbox.com/portal";
 export const PORTAL_REGISTER_URL = `${PORTAL_LOGIN_URL}/register`;
 export const PORTAL_SUBSCRIBE_URL = `${PORTAL_LOGIN_URL}/subscribe`;
 // Logged-in landing where Free users generate manual ClawBox AI tokens

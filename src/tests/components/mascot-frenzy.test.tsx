@@ -1,27 +1,31 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, act, waitFor, cleanup } from "@/tests/helpers/test-utils";
 import Mascot from "@/components/Mascot";
+import { FRENZY_QUOTES } from "@/lib/mascot-frenzy";
+import { en } from "@/lib/mascot-packs/en";
 
 // The mascot pulls its name/phrases over the network and reads persisted UI
 // state — stub both so the component mounts deterministically in jsdom.
-vi.mock("@/lib/i18n", () => ({ useT: () => ({ t: (k: string) => k, locale: "en" }) }));
+vi.mock("@/lib/i18n", () => ({ useT: () => ({ t: (k: string) => k, locale: "en", localeResolved: true }) }));
 vi.mock("@/lib/client-kv", () => ({
   get: () => null,
   getJSON: () => null,
   set: vi.fn(),
   setJSON: vi.fn(),
 }));
-vi.mock("@/lib/mascot-client", () => ({
-  fetchUserName: () => Promise.resolve(null),
-  // Must resolve a REAL phrase set — the component reads `phrases.sass` on load.
-  // Dynamic-import the (unmocked) phrases module inside the factory so this
-  // survives vi.mock's hoisting above the top-level imports.
-  fetchPhraseSet: async () => ({
-    phrases: (await import("@/lib/mascot-phrases")).INSPIRATION_PHRASES,
-    snippets: [],
-  }),
-  pickNameGreeting: () => "",
-}));
+// Must resolve REAL phrase sets — the component reads `phrases.sass` on load
+// and `phrases.power` during a frenzy. Dynamic-import the (unmocked) packs
+// inside the factory so this survives vi.mock's hoisting above the imports.
+vi.mock("@/lib/mascot-client", async () => {
+  const { neutral } = await import("@/lib/mascot-packs/neutral");
+  const { en } = await import("@/lib/mascot-packs/en");
+  return {
+    fetchUserName: () => Promise.resolve(null),
+    initialPhraseSet: () => neutral,
+    fetchPhraseSet: async () => en,
+    pickNameGreeting: () => ({ template: "", text: "" }),
+  };
+});
 
 // Drive `prefers-reduced-motion` per-test. matchMedia is consulted once on mount.
 let reduceMotion = false;
@@ -51,7 +55,9 @@ describe("Mascot frenzy — reduced-motion / freeze gating", () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     vi.clearAllMocks();
   });
 
@@ -86,5 +92,40 @@ describe("Mascot frenzy — reduced-motion / freeze gating", () => {
     // block future ones.
     act(() => rerender(<Mascot frozen={true} />));
     await waitFor(() => expect(container.querySelector('[data-frenzy="1"]')).toBeNull());
+  });
+
+  // The mount schedules the crab's first ambient action 2 s later, and that
+  // timer is NOT the one `handleNewOrder` cancels. An order inside that window
+  // used to leave both loops running: the ambient action cleared the frenzy's
+  // walk rAF and pushed its own idle/sleep line into the bubble, so a money
+  // frenzy could read "💤". A frenzy now owns the crab until it ends.
+  it("keeps the ambient action loop out of the bubble while the frenzy runs", async () => {
+    // Math.random is pinned so the ambient action is a known one: pickAction
+    // lands on `idle`, and getSpeech('idle') picks en.idle[6]. Unfixed, that
+    // string reaches the bubble at t=2000ms.
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const ambientLine = en.idle[Math.floor(0.5 * en.idle.length)];
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector("img")).toBeTruthy());
+    // Let the phrase fetch land so the frenzy quotes come from the en pack.
+    await act(async () => { await Promise.resolve(); });
+
+    fireNewOrder();
+    await waitFor(() => expect(container.querySelector('[data-frenzy="1"]')).not.toBeNull());
+
+    // Past the mount's 2 s first-action timer, still inside the first frenzy
+    // quote's 4.5 s on screen.
+    await act(async () => { vi.advanceTimersByTime(2500); });
+
+    const bubble = container.querySelector('[data-speech="1"]')?.textContent ?? "";
+    expect(bubble).not.toBe(ambientLine);
+    expect(FRENZY_QUOTES.en).toContain(bubble);
+    // …and the frenzy itself survived: the ambient action used to cancel its
+    // walk loop on the way past.
+    expect(container.querySelector('[data-frenzy="1"]')).not.toBeNull();
+
+    vi.useRealTimers();
   });
 });

@@ -1,6 +1,15 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as childProcess from "child_process";
+
+vi.mock("child_process", () => ({ execFile: vi.fn() }));
+
 import {
+  GATEWAY_SHOW_PROPERTIES,
   gatewayJournalArgs,
+  getGatewayServiceHealth,
   lastUsefulJournalLine,
   parseGatewaySystemctlProperties,
 } from "@/lib/gateway-health";
@@ -49,6 +58,122 @@ describe("gateway service health", () => {
       subState: "failed",
       result: "start-limit-hit",
       restartCount: 5,
+      loadState: null,
+      unitLoaded: null,
+    });
+  });
+
+  it("separates a unit systemd cannot load from one that is merely down", () => {
+    // The Hermes SKU masks clawbox-gateway.service to /dev/null (install.sh
+    // step_edition_gateway_state) and an update holds the same mask on any SKU.
+    // systemctl refuses both `reset-failed` and `restart` on such a unit, so
+    // "offline, retry" is the wrong story to tell about it.
+    const masked = parseGatewaySystemctlProperties([
+      "LoadState=masked",
+      "ActiveState=inactive",
+      "SubState=dead",
+      "Result=success",
+      "NRestarts=0",
+    ].join("\n"));
+    expect(masked.loadState).toBe("masked");
+    expect(masked.unitLoaded).toBe(false);
+
+    const missing = parseGatewaySystemctlProperties("LoadState=not-found\nActiveState=inactive\n");
+    expect(missing.unitLoaded).toBe(false);
+
+    const loaded = parseGatewaySystemctlProperties("LoadState=loaded\nActiveState=failed\n");
+    expect(loaded.unitLoaded).toBe(true);
+
+    // Not asked is not answered: a systemctl that printed nothing about the
+    // load state must not be read as "the unit is fine".
+    expect(parseGatewaySystemctlProperties("ActiveState=failed\n").unitLoaded).toBeNull();
+  });
+
+  it("asks systemd for every property it parses", () => {
+    // A parser reading a property the query omits answers undefined forever,
+    // the branch that depends on it silently never runs, and no test that feeds
+    // the parser its own hand-written stdout can see it. So the stdout here is
+    // built FROM the query list: every field the parser returns must be settled
+    // by it, and a field added to the parser without being added to the query
+    // comes back null.
+    const stdout = GATEWAY_SHOW_PROPERTIES
+      .map((property) => `${property}=${property === "NRestarts" ? "0" : "loaded"}`)
+      .join("\n");
+    const parsed = parseGatewaySystemctlProperties(stdout) as Record<string, unknown>;
+
+    for (const [field, value] of Object.entries(parsed)) {
+      expect(value, `${field} is not settled by --property=${GATEWAY_SHOW_PROPERTIES.join(",")}`)
+        .not.toBeNull();
+      expect(value, `${field} is not settled by --property=${GATEWAY_SHOW_PROPERTIES.join(",")}`)
+        .not.toBeUndefined();
+    }
+    // Fields the parser DERIVES are booleans and never go null — `active` is
+    // false for an absent ActiveState just as it is for an inactive unit — so
+    // the shape check above cannot see one of those added from an unqueried
+    // property. Read the property names out of the source as well.
+    const source = fs.readFileSync(
+      path.resolve(__dirname, "..", "..", "lib", "gateway-health.ts"),
+      "utf8",
+    );
+    const readProperties = [
+      ...new Set(Array.from(source.matchAll(/properties\.([A-Za-z]+)/g), (m) => m[1])),
+    ];
+    expect(readProperties.length).toBeGreaterThan(3);
+    for (const property of readProperties) {
+      expect(GATEWAY_SHOW_PROPERTIES, `${property} is read but never queried`).toContain(property);
+    }
+
+    // The journal scope reads InvocationID off the SAME stdout, so it is part of
+    // the same contract.
+    expect(gatewayJournalArgs(`InvocationID=${"a".repeat(32)}\n`)).not.toBeNull();
+    expect(GATEWAY_SHOW_PROPERTIES).toContain("InvocationID");
+  });
+
+  describe("getGatewayServiceHealth", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    function answerSystemctl(stdout: string) {
+      vi.mocked(childProcess.execFile).mockImplementation(((
+        _cmd: string,
+        _args: string[],
+        optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+        maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+      ) => {
+        const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+        callback?.(null, { stdout, stderr: "" });
+        return {} as unknown as ReturnType<typeof childProcess.execFile>;
+      }) as unknown as typeof childProcess.execFile);
+    }
+
+    it("requests LoadState and reports a masked unit as unloadable", async () => {
+      answerSystemctl("LoadState=masked\nActiveState=inactive\nSubState=dead\nResult=success\nNRestarts=0\n");
+
+      const health = await getGatewayServiceHealth();
+
+      const args = vi.mocked(childProcess.execFile).mock.calls[0][1] as string[];
+      expect(args.some((arg) => arg.includes("LoadState"))).toBe(true);
+      expect(health.loadState).toBe("masked");
+      expect(health.unitLoaded).toBe(false);
+    });
+
+    it("answers 'unknown' rather than 'missing' when systemctl fails", async () => {
+      vi.mocked(childProcess.execFile).mockImplementation(((
+        _cmd: string,
+        _args: string[],
+        optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+        maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+      ) => {
+        const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+        callback?.(new Error("systemctl: command not found"), { stdout: "", stderr: "" });
+        return {} as unknown as ReturnType<typeof childProcess.execFile>;
+      }) as unknown as typeof childProcess.execFile);
+
+      const health = await getGatewayServiceHealth();
+
+      expect(health.unitLoaded).toBeNull();
+      expect(health.loadState).toBeNull();
     });
   });
 

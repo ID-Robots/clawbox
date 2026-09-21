@@ -1,0 +1,132 @@
+export const dynamic = "force-dynamic";
+
+// Poll stays on the middleware gate (edition + session cookie), not the owner
+// gate the mutating routes use: it changes nothing, and to read a status the
+// caller must already hold a session id it cannot guess — minted by the
+// dashboard for the logins it runs, or here for the CLI-driven ones — and
+// answers only id, status, a scrubbed reason and an expiry. The one side
+// effect, the post-connect refresh on "approved", is idempotent.
+
+import { NextResponse } from "next/server";
+import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
+import { readCliLogin } from "@/lib/hermes-cli-login";
+import { invalidateModelOptions } from "@/lib/hermes-model-options";
+import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
+import { dashboardUnreachable, hermesGate, isValidProviderId, isValidSessionId, relayJson } from "../shared";
+import { forgetProviderVerified } from "@/lib/provider-verified";
+
+// Poll a device-code session until the user approves it on the provider's
+// verification page. Terminal statuses: "approved" | "error" | "expired";
+// anything else means keep polling.
+const POLL_KEYS = ["session_id", "status", "error_message", "expires_at"] as const;
+
+// The one route in this directory that stops at `hermesGate` rather than
+// `ownerGate`, and deliberately so. Middleware refuses it without a session
+// exactly like its three siblings — it is not on the bootstrap allow-list, so
+// the pre-setup answer is 401 either way (TASK-527, asserted in
+// src/tests/middleware/middleware.test.ts). What it does NOT carry is the
+// second, in-handler check the write routes have.
+//
+// That asymmetry follows what the second line is for. `@/lib/route-auth` exists
+// so a handler that CHANGES something still refuses when the gate in front of
+// it is wrong; this one changes nothing OF THE DEVICE'S OWN. It reads back a
+// status the caller must already hold a dashboard-minted session id to name, and
+// relays four fields — session_id, status, error_message, expires_at — none of
+// them credential material (`relayJson`'s whitelist is what guarantees that).
+// Minting the id it needs goes through `start`, which is gated twice.
+//
+// IT IS NO LONGER SIDE-EFFECT-FREE, and that is worth stating plainly rather
+// than leaving the sentence above to read as more than it means. On the terminal
+// "approved" tick this route drops the model catalogue and may ask the agent for
+// a `reload.mcp`, which respawns every MCP child and invalidates the model's
+// prompt cache. Nothing about the gate changed, because nothing about what a
+// caller must hold changed: reaching that branch needs a session (middleware), a
+// dashboard-minted session id it cannot guess, and the dashboard itself
+// reporting that a real credential just landed — the sign-in the owner started
+// through `start`. A caller who can do all three has already completed the
+// owner's OAuth flow. What a stranger can still not do is turn this into a
+// repeated reload: the refresh fires only when the provider set actually MOVED,
+// so a client hammering a finished session gets one respawn, not one per tick.
+export async function GET(request: Request) {
+  const gate = await hermesGate();
+  if (gate) return gate;
+
+  const params = new URL(request.url).searchParams;
+  const providerId = params.get("providerId");
+  const sessionId = params.get("sessionId");
+  if (!isValidProviderId(providerId)) {
+    return NextResponse.json({ error: "Invalid provider id" }, { status: 400 });
+  }
+  if (!isValidSessionId(sessionId)) {
+    return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
+  }
+
+  // Sampled BEFORE the tick that may report the sign-in, because after it the
+  // answer already includes the provider that just connected and no change can
+  // be seen. It is a read of the SWR-cached catalogue the panel is holding open
+  // anyway (FRESH_MS = 60 s), so no tick BLOCKS on a dashboard round-trip — and
+  // the guard below is what keeps a pending tick from asking the agent for
+  // anything. While the catalogue is a fallback rather than an answer, a tick
+  // does start a background re-ask (throttled to one a second, see
+  // `getModelOptions`); that is deliberate — this poll runs on exactly the box
+  // whose dashboard has just come back.
+  const providersBefore = await readUsableProviderIds();
+
+  // A session minted here is a CLI login; anything else is the dashboard's.
+  // Answered in the panel's vocabulary: `pending | approved | error | expired`
+  // — "failed" is not a word its poll loop stops on.
+  const cliSession = readCliLogin(sessionId);
+  if (cliSession) {
+    if (cliSession.status === "approved") {
+      invalidateModelOptions();
+      await forgetProviderVerified(providerId);
+      await refreshProviderToolsIfSetChanged(providersBefore, await readUsableProviderIds());
+    }
+    const status = cliSession.status === "starting" || cliSession.status === "pending"
+      ? "pending"
+      : cliSession.status === "approved"
+        ? "approved"
+        : cliSession.status === "failed"
+          ? "error"
+          : "expired";
+    return NextResponse.json({
+      session_id: cliSession.id,
+      status,
+      error_message: cliSession.error || undefined,
+      expires_at: new Date(cliSession.expiresAt).toISOString(),
+    });
+  }
+
+  try {
+    const res = await dashboardFetch(`/api/providers/oauth/${providerId}/poll/${sessionId}`);
+    // On the terminal "approved" tick the credential has just landed on the
+    // dashboard; drop our cached catalogue so the next /providers/status read
+    // sees the provider as connected rather than waiting out FRESH_MS. Only on
+    // "approved" — a poll fires every few seconds, and busting the cache on
+    // every "pending" tick would defeat the cache entirely.
+    let approved = false;
+    const relayed = await relayJson(res, POLL_KEYS, (data) => {
+      if (data.status === "approved") {
+        invalidateModelOptions();
+        approved = true;
+      }
+    });
+    // The browser has been told; the RUNNING AGENT has not. Its `ai_set_provider`
+    // enum was built from a provider list probed once, at MCP-server boot — see
+    // `provider-mcp-refresh.ts`. Only on the terminal tick, and only if the set
+    // really moved: a reload respawns every MCP child and invalidates the model's
+    // prompt cache, so a client that keeps polling a finished session must not be
+    // able to charge the owner for one per tick.
+    if (approved) {
+      // The device-code flow's terminal tick: a credential has just landed, so
+      // an older turn's mark describes one that no longer exists. Only on
+      // "approved", like everything else in this branch. See
+      // src/lib/provider-verified.ts.
+      await forgetProviderVerified(providerId);
+      await refreshProviderToolsIfSetChanged(providersBefore, await readUsableProviderIds());
+    }
+    return relayed;
+  } catch {
+    return dashboardUnreachable();
+  }
+}

@@ -12,13 +12,35 @@ vi.mock("fs/promises", () => ({
     mkdir: vi.fn().mockResolvedValue(undefined),
     readFile: vi.fn().mockResolvedValue(""),
     writeFile: vi.fn().mockResolvedValue(undefined),
+    // `access` is how the route asks whether OpenClaw has already introduced
+    // the agent, which is what gates the persona write (personaWritesAllowed).
+    access: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
+// The route asks this ONE question about who is writing installed_*: cookie or
+// not. Mocked so the tests say the answer outright rather than minting a
+// session against a secret on disk; the helper's own suite covers the cookie.
+vi.mock("@/lib/owner-session", () => ({
+  hasOwnerSession: vi.fn().mockResolvedValue(false),
+}));
+
+// Who may READ: the route asks `requireSession` (bearer, cookie, test mode —
+// middleware's own order) before answering anything wider than the UI
+// language. Mocked so a test says "no session" outright; the helper's own
+// suite covers the credentials.
+vi.mock("@/lib/route-auth", () => ({
+  requireSession: vi.fn(),
+}));
+
+import { NextResponse } from "next/server";
 import * as config from "@/lib/config-store";
+import { requireSession } from "@/lib/route-auth";
+import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 
 const mockGetAll = vi.mocked(config.getAll);
 const mockSetMany = vi.mocked(config.setMany);
+const mockRequireSession = vi.mocked(requireSession);
 
 describe("/setup-api/preferences", () => {
   let GET: (req: Request) => Promise<Response>;
@@ -29,13 +51,63 @@ describe("/setup-api/preferences", () => {
     vi.clearAllMocks();
     mockGetAll.mockResolvedValue({});
     mockSetMany.mockResolvedValue(undefined);
+    mockRequireSession.mockResolvedValue(null);
     const fsMod = (await import("fs/promises")).default;
     vi.mocked(fsMod.mkdir).mockResolvedValue(undefined as never);
     vi.mocked(fsMod.readFile).mockResolvedValue("# USER.md\n");
     vi.mocked(fsMod.writeFile).mockResolvedValue(undefined);
+    // The steady state of a box in the field: the agent has been introduced,
+    // so USER.md is there and the ritual's BOOTSTRAP.md is long gone.
+    vi.mocked(fsMod.access).mockImplementation(async (target) => {
+      if (String(target).endsWith("BOOTSTRAP.md")) throw new Error("ENOENT");
+    });
     const mod = await import("@/app/setup-api/preferences/route");
     GET = mod.GET;
     POST = mod.POST;
+  });
+
+  /**
+   * /login sits inside the same I18nProvider as the desktop and asks for the
+   * box's UI language before anyone has signed in; answered 401, the page fell
+   * back to the browser's language (UI sweep 2026-09-07, shell-5). That ONE
+   * read is answered to a caller with no session. Everything else the store
+   * holds — the owner's name, the wallpaper, the installed apps — is not.
+   */
+  describe("GET without a session", () => {
+    beforeEach(() => {
+      mockRequireSession.mockImplementation(async () =>
+        NextResponse.json({ error: "Authentication required" }, { status: 401 }));
+      mockGetAll.mockResolvedValue({ "pref:ui_language": "de", "pref:ui_user_name": "Alice", "pref:wp_opacity": 80 });
+    });
+
+    it("answers the UI language alone, without asking for a session", async () => {
+      const res = await GET(new Request(`http://localhost${UI_LANGUAGE_READ.url}`));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ui_language: "de" });
+      expect(mockRequireSession).not.toHaveBeenCalled();
+    });
+
+    it("has a readable set of exactly the language — the shared object names no second key", () => {
+      // The route builds ANONYMOUS_READABLE_KEYS from this list, the
+      // middleware its match and the provider its fetch: widening it is a
+      // one-place, deliberate change, and this is where it is noticed.
+      expect([...UI_LANGUAGE_READ.keys]).toEqual(["ui_language"]);
+    });
+
+    it.each([
+      "?keys=ui_language,ui_user_name",
+      "?keys=ui_user_name",
+      "?keys=installed_meta",
+      "?all=1",
+      "?keys=ui_language&all=1",
+      "?keys=",
+      "",
+    ])("refuses anything wider with the session's own 401 and reads nothing: %s", async (query) => {
+      const res = await GET(new Request(`http://localhost/setup-api/preferences${query}`));
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "Authentication required" });
+      expect(mockGetAll).not.toHaveBeenCalled();
+    });
   });
 
   describe("GET", () => {
@@ -131,6 +203,73 @@ describe("/setup-api/preferences", () => {
       expect(body).toEqual({ ok: true });
     });
 
+    // installed_apps / installed_meta decide where a desktop icon OPENS and
+    // how (`webappUrl`, `launch: "window"` → a top-level window.open). The
+    // middleware admits the MCP bearer to this route, and the bearer is a
+    // file anything running as the box's user can read, so a shape check
+    // alone let the agent plant an entry that opened its own page as a
+    // first-class document with the owner's cookie. Only a browser with the
+    // owner's session may write the prefix; the contracted writers
+    // (install/uninstall/webapp-registry) write the store directly.
+    describe("installed_* writes", () => {
+      const planted = {
+        installed_meta: {
+          evil: {
+            name: "My app",
+            color: "#f97316",
+            iconUrl: "",
+            webappUrl: "/setup-api/webapps?app=evil",
+            launch: "window",
+          },
+        },
+      };
+
+      it("refuses the whole request from a caller without an owner session", async () => {
+        const { hasOwnerSession } = await import("@/lib/owner-session");
+        vi.mocked(hasOwnerSession).mockResolvedValue(false);
+        const req = new Request("http://localhost/setup-api/preferences", {
+          method: "POST",
+          headers: { Authorization: "Bearer not-a-cookie" },
+          body: JSON.stringify({ ...planted, wp_opacity: 80 }),
+        });
+        const res = await POST(req);
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ code: "owner_only" });
+        // Whole, not partial: the innocent key in the same body does not land
+        // either, so the caller cannot read the 403 as "the rest took".
+        expect(mockSetMany).not.toHaveBeenCalled();
+      });
+
+      it("lands from the owner's own session", async () => {
+        const { hasOwnerSession } = await import("@/lib/owner-session");
+        vi.mocked(hasOwnerSession).mockResolvedValue(true);
+        const req = new Request("http://localhost/setup-api/preferences", {
+          method: "POST",
+          headers: { Cookie: "clawbox_session=owner" },
+          body: JSON.stringify(planted),
+        });
+        const res = await POST(req);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true });
+        expect(mockSetMany).toHaveBeenCalledWith({ "pref:installed_meta": planted.installed_meta });
+        expect(hasOwnerSession).toHaveBeenCalledTimes(1);
+      });
+
+      it("never asks about the session for a body that names no installed_* key", async () => {
+        // The desktop's ordinary writes (wallpaper, window state) and the
+        // agent's `preferences_set` stay exactly as they were.
+        const { hasOwnerSession } = await import("@/lib/owner-session");
+        const req = new Request("http://localhost/setup-api/preferences", {
+          method: "POST",
+          body: JSON.stringify({ wp_opacity: 80, hidden_installed: ["x"] }),
+        });
+        const res = await POST(req);
+        expect(res.status).toBe(200);
+        expect(hasOwnerSession).not.toHaveBeenCalled();
+        expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80, "pref:hidden_installed": ["x"] });
+      });
+    });
+
     it("returns error on invalid JSON", async () => {
       const req = new Request("http://localhost/setup-api/preferences", {
         method: "POST",
@@ -140,4 +279,174 @@ describe("/setup-api/preferences", () => {
       expect(res.status).toBe(400);
     });
   });
+
+  /**
+   * The KEY half of the rules. `isAllowed` tested a PREFIX and nothing else,
+   * so everything after that prefix was free — any length, any character. Both
+   * writes in this route put a caller-supplied name onto an object
+   * (`result[key]` on the read, `entries["pref:" + key]` on the write), and the
+   * write one lands in config.json, so a caller with a session could park
+   * unbounded arbitrary names in the owner's store; CodeQL flagged both sinks
+   * (js/remote-property-injection, alerts #300 and #301 on main). The name is
+   * now rebuilt from a bounded alphabet the way project ids already are, so
+   * what reaches the object is made of those characters and no more than that
+   * many of them. A name that does not survive the rebuild is skipped, exactly
+   * as a name with the wrong prefix already was.
+   */
+  describe("preference key shape", () => {
+    const LONG_KEY = `ui_${"a".repeat(300)}`;
+    const ODD_KEY = "ui_a b";
+
+    it("does not serve a stored name longer than a preference name may be", async () => {
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, [`pref:${LONG_KEY}`]: "x" });
+      const res = await GET(
+        new Request(`http://localhost/setup-api/preferences?keys=wp_opacity,${LONG_KEY}`),
+      );
+      expect(await res.json()).toEqual({ wp_opacity: 80 });
+    });
+
+    it("does not serve a stored name spelled with characters a name may not carry", async () => {
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, [`pref:${ODD_KEY}`]: "x" });
+      const res = await GET(
+        new Request(
+          `http://localhost/setup-api/preferences?keys=wp_opacity,${encodeURIComponent(ODD_KEY)}`,
+        ),
+      );
+      expect(await res.json()).toEqual({ wp_opacity: 80 });
+    });
+
+    it("does not serve such a name through all=1 either", async () => {
+      mockGetAll.mockResolvedValue({ "pref:wp_opacity": 80, [`pref:${LONG_KEY}`]: "x" });
+      const res = await GET(new Request("http://localhost/setup-api/preferences?all=1"));
+      expect(await res.json()).toEqual({ wp_opacity: 80 });
+    });
+
+    it("refuses the whole write for an over-long name rather than dropping it", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80, [LONG_KEY]: "x" }),
+      }));
+      expect(res.status).toBe(400);
+      // Whole, not partial: the legal key beside it did not land either.
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("refuses the whole write for a name spelled with characters a name may not carry", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80, [ODD_KEY]: "x" }),
+      }));
+      expect(res.status).toBe(400);
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("does not quote the refused name back in the body", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ [ODD_KEY]: "x" }),
+      }));
+      expect(JSON.stringify(await res.json())).not.toContain(ODD_KEY);
+    });
+
+    it("still SKIPS a name this door does not own, as it always has", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80, "bad prefix": "x" }),
+      }));
+      expect(await res.json()).toEqual({ ok: true });
+      expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80 });
+    });
+
+    it("still stores the one name this product builds at runtime", async () => {
+      await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ app_EMoamEEZ73f0CkXaXp7hrann_settings: { autostart: true } }),
+      }));
+      expect(mockSetMany).toHaveBeenCalledWith({
+        "pref:app_EMoamEEZ73f0CkXaXp7hrann_settings": { autostart: true },
+      });
+    });
+  });
+
+  /**
+   * The COUNT half of the rules. The name is bounded in shape and the value in
+   * size, but until this existed one POST could name as many of them as it
+   * liked: the middleware admits the MCP bearer here, and the bearer is a file
+   * anything running as the box's user can read, so a prompt-injected turn
+   * could park thousands of legal names in config.json — a file `config.get()`
+   * re-reads and re-parses synchronously on every call, which is the desktop,
+   * Settings and the setup wizard all at once. Two caps, both the shape the
+   * read side and the KV route already use.
+   */
+  describe("write size", () => {
+    const bodyOf = (count: number, prefix = "ui_k") =>
+      Object.fromEntries(Array.from({ length: count }, (_, i) => [`${prefix}${i}`, "x"]));
+    const storeOf = (count: number) =>
+      Object.fromEntries(Array.from({ length: count }, (_, i) => [`pref:ui_stored${i}`, "x"]));
+
+    it("refuses a body naming more keys than one write may carry", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify(bodyOf(33)),
+      }));
+      expect(res.status).toBe(400);
+      // Refused BEFORE the loop, so nothing was validated or accumulated.
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("stores a body at exactly that cap", async () => {
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify(bodyOf(32)),
+      }));
+      expect(res.status).toBe(200);
+      expect(mockSetMany).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts what the body NAMES, not what survives the prefix filter", async () => {
+      // 33 names, only one of which this door owns. The bound is on the work
+      // the request asks for, like MAX_KEYS_PER_READ.
+      const body = { ...bodyOf(32, "not_a_pref_"), wp_opacity: 80 };
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }));
+      expect(res.status).toBe(400);
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("refuses a write that would grow the store past the names it may hold", async () => {
+      mockGetAll.mockResolvedValue({ ...storeOf(500), other_config_key: 1 });
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ ui_brand_new: "x" }),
+      }));
+      expect(res.status).toBe(400);
+      expect(mockSetMany).not.toHaveBeenCalled();
+    });
+
+    it("still stores a name the store ALREADY holds when it is at that cap", async () => {
+      // The cap is on new names, not on writes: a box that reached it must
+      // still be able to change its wallpaper.
+      mockGetAll.mockResolvedValue({ ...storeOf(499), "pref:wp_opacity": 10 });
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ wp_opacity: 80 }),
+      }));
+      expect(res.status).toBe(200);
+      expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80 });
+    });
+
+    it("does not read the store for a body that stores nothing", async () => {
+      // A body this door owns no name in never pays for the count.
+      mockGetAll.mockClear();
+      const res = await POST(new Request("http://localhost/setup-api/preferences", {
+        method: "POST",
+        body: JSON.stringify({ "not-a-preference": 1 }),
+      }));
+      expect(res.status).toBe(200);
+      expect(mockGetAll).not.toHaveBeenCalled();
+    });
+  });
+
 });

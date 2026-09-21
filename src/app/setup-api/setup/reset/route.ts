@@ -1,15 +1,26 @@
 import { NextResponse } from "next/server";
+import { requireSession } from "@/lib/route-auth";
+import { padResponseTime } from "@/lib/login-rate-limit";
+import {
+  checkReproveLockout,
+  lockoutBuckets,
+  reproveOwnerPassword,
+} from "@/lib/password-reprove";
 import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { getSystemUsername } from "@/lib/auth";
-import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
+import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, CHPASSWD_STEP, chpasswdRecord } from "@/lib/chpasswd";
+import { FACTORY_DEFAULT_PASSWORD } from "@/lib/system-password";
+import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { readEdition } from "@/lib/edition-source";
+import { startOllamaService } from "@/lib/local-ai-runtime";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
+import { startRootStep } from "@/lib/root-step-runner";
 
 const execFile = promisify(execFileCb);
 
@@ -44,39 +55,58 @@ const DATA_KEEP: ReadonlyArray<{ rel: string; keep?: ReadonlySet<string> }> = [
     rel: "llamacpp",
     keep: new Set(["models"]),
   },
+  {
+    // The memory-search embedder's GGUF (639 MB), for the same reason as the
+    // Gemma one above: a reset box has no internet to fetch it again, and
+    // weights are cache, not owner state. Its server.log is wiped with the
+    // rest — that log is of the owner's own documents being embedded.
+    rel: "embed",
+    keep: new Set(["models"]),
+  },
 ];
 const DATA_KEEP_NAMES = new Set(DATA_KEEP.map((entry) => entry.rel));
 
-const HERMES_KEEP = new Set(["hermes-agent"]);
+// The two named exceptions to the ~/.hermes wipe. Neither is owner state and
+// neither can be re-fetched on a reset device — it reboots into AP mode with no
+// internet. Rationale for both is at the HOME_CONTENT_WIPE_KEEP entry below.
+const HERMES_KEEP = new Set(["hermes-agent", "bin"]);
 
 /** Delete all Ollama models so a factory reset starts with a clean slate. */
 async function deleteOllamaModels(): Promise<void> {
+  // Deliberately the loopback address, not getOllamaBaseUrl(): that one honours
+  // OLLAMA_HOST, and a factory reset must never issue /api/delete against
+  // somebody else's Ollama server. What this cleans is the models this device
+  // downloaded, which live under /usr/share/ollama on the device itself.
   const OLLAMA = "http://127.0.0.1:11434";
   // Ollama is routinely STOPPED at reset time (the Local AI exclusive-mode
   // runtime shuts it down while llama.cpp is active), and its models live
   // under /usr/share/ollama — out of reach of the home wipe. Start it
-  // best-effort so the API deletes below actually run; the polkit grant
-  // already allows the clawbox user to manage units.
+  // best-effort so the API deletes below actually run.
+  //
+  // Through startOllamaService() rather than a hand-rolled systemctl call. This
+  // used to be a bare `systemctl start ollama` with no sudo, which worked only
+  // because of the unscoped polkit `manage-units` grant — the one thing that
+  // still makes the whole allow-list bypassable (TASK-539). The moment that
+  // grant goes, an unprivileged call here fails with "Interactive
+  // authentication required" and factory reset stops deleting models, silently.
+  // The shared helper already spells the unit `ollama.service` (sudoers matches
+  // arguments exactly, so the bare name matches nothing), passes `-n` so a box
+  // without the grant fails in milliseconds instead of sitting on a prompt,
+  // keeps the unprivileged call as a dev-shell fallback, and waits for the API
+  // to answer — which is what the retry loop here used to approximate. TASK-445.
   try {
-    await execFile("/usr/bin/systemctl", ["start", "ollama"], { timeout: 30_000 });
+    await startOllamaService();
   } catch {
-    // Not installed / failed to start — the fetch below decides what's cleanable.
+    // Not installed / never came up — the fetch below decides what's cleanable.
   }
   let models: { name: string }[] = [];
-  // The API needs a moment after a cold start; retry briefly.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await fetch(`${OLLAMA}/api/tags`, { signal: AbortSignal.timeout(5_000) });
-      if (res.ok) {
-        const data = await res.json();
-        models = data.models ?? [];
-        break;
-      }
-    } catch {
-      // Ollama not (yet) answering.
-    }
-    if (attempt < 2) await new Promise((r) => setTimeout(r, 1_500));
-    else return; // never came up — nothing reachable to clean
+  try {
+    const res = await fetch(`${OLLAMA}/api/tags`, { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) return;
+    const data = await res.json();
+    models = data.models ?? [];
+  } catch {
+    return; // nothing reachable to clean
   }
   for (const { name } of models) {
     try {
@@ -126,16 +156,128 @@ async function deleteWifiConnections(): Promise<void> {
   }
 }
 
+/** ENOENT, the one errno every step of this wipe reads as "already gone". */
+function isEnoent(err: unknown): boolean {
+  return Boolean(err && typeof err === "object" && "code" in err && err.code === "ENOENT");
+}
+
+/**
+ * What `removeDirectoryContents` is allowed to do with `dir`.
+ *
+ * `directory` — it really is one; readdir it.
+ * `gone`      — there was nothing there, or what was there was not a directory
+ *               and has been removed. Nothing was hidden behind it.
+ * `failure`   — say so through the failure list. NEVER a throw: everything else
+ *               in this wipe returns its failures, and the handler's outer catch
+ *               is a 500 taken AFTER data/, ~/.openclaw, ~/.clawkeep and the
+ *               home paths are gone and BEFORE the password reset, the WiFi
+ *               clear and the reboot — the un-resettable box this whole guard
+ *               exists to prevent, reached by a different errno.
+ */
+type DirectoryGuard =
+  | { kind: "directory" }
+  | { kind: "gone" }
+  | { kind: "failure"; failure: string };
+
+/**
+ * Check what `dir` actually is before anything readdirs it.
+ *
+ * Nothing may `readdir` a path this wipe is about to empty entry-by-entry until
+ * this has answered `directory`. A previous owner with a shell (the Terminal
+ * app, or SSH before the key wipe — the adversary the keep-lists are written
+ * against) can leave two things in the way:
+ *
+ *   - A SYMLINK. `readdir` follows it and `fs.rm` then deletes THROUGH it:
+ *     `rm -rf ~/.hermes && ln -s /home/clawbox ~/.hermes` turned the next
+ *     owner's factory reset into a wipe of everything in the home directory
+ *     that is not a keep-list NAME — the checkout, `.bun`, `.local/bin`, the
+ *     `~/.cache/huggingface` voice models. A reflash, caused by pressing
+ *     Factory reset.
+ *   - A PLAIN FILE. `readdir` raises ENOTDIR, which used to escape to the
+ *     handler's outer catch and answer 500 half-way through the wipe,
+ *     identically on every retry.
+ *
+ * Both are answered by removing THAT PATH — `fs.rm` on a symlink removes the
+ * link, never its target — but they are not the same outcome and must not be
+ * reported as one:
+ *
+ *   - A plain file (or socket, or fifo) hid nothing: there is no directory of
+ *     owner state behind it, so removing it finishes the job (`gone`) and the
+ *     reset completes, which is the ENOTDIR half of the defect.
+ *   - A SYMLINK hid everything. Its target still holds whatever the wipe was
+ *     sent to erase — and it may not even be on this disk. Deleting through it
+ *     is the reflash above; keeping quiet about it would hand the next owner a
+ *     box that answered "factory reset complete" over a `~/Documents` still
+ *     full of the previous owner's files, browsable in the Files app. So the
+ *     link goes and the path is REPORTED: the handler's aggregate gate then
+ *     answers "factory reset incomplete" with the path named, WITHOUT clearing
+ *     the WiFi, resetting the password or rebooting, so the owner still has a
+ *     reachable box and something to act on.
+ *
+ * That also covers a directory that is a symlink for a good reason — a
+ * `data/llamacpp` moved to another disk, say. Its `keep` list (the 3.2 GB Gemma
+ * GGUF) is unreachable through a removed link, so "nothing inside a
+ * non-directory can be a keep-list member" is true of a plain file and NOT of a
+ * symlink; reporting is what stops that becoming a silent loss on a box that
+ * reboots into AP mode with no internet.
+ *
+ * Not TOCTOU-proof, deliberately: Node exposes no readdir-at-fd (`fs.opendir`
+ * takes a path, there is no `fdopendir`), so a shell racing this between the
+ * lstat and the readdir could still swap a directory for a link. That needs a
+ * live adversary on the box DURING the reset; the planted-link case closed here
+ * needs a shell once, at any time before it.
+ */
+async function guardDirectory(dir: string): Promise<DirectoryGuard> {
+  let stats;
+  try {
+    stats = await fs.lstat(dir);
+  } catch (err: unknown) {
+    if (isEnoent(err)) return { kind: "gone" };
+    return { kind: "failure", failure: `${dir}: ${err}` };
+  }
+  if (stats.isDirectory()) return { kind: "directory" };
+
+  const wasSymlink = stats.isSymbolicLink();
+  try {
+    await fs.rm(dir, { recursive: true, force: true });
+  } catch (err: unknown) {
+    return { kind: "failure", failure: `${dir}: ${err}` };
+  }
+  if (!wasSymlink) return { kind: "gone" };
+  return {
+    kind: "failure",
+    failure: `${dir}: a symlink, not a directory — the link was removed and whatever it pointed at was left untouched, so this factory reset did not erase it`,
+  };
+}
+
+/**
+ * Name a failure from `removeDirectoryContents` for the aggregate list.
+ *
+ * An ENTRY failure is a bare name (`auth.json: EACCES…`) and is read relative to
+ * the directory it came from; a WHOLE-DIRECTORY failure from `guardDirectory`
+ * already carries its absolute path, and prefixing that again would read as a
+ * child of itself.
+ */
+function labelFailure(rel: string, failure: string): string {
+  return failure.startsWith("/") ? failure : `${rel}/${failure}`;
+}
+
 async function removeDirectoryContents(dir: string, keep?: ReadonlySet<string>): Promise<string[]> {
   // Background processes (npm install, plugin runtimes) can recreate files
   // between readdir and rm; one retry catches that.
   for (let attempt = 0; attempt < 2; attempt++) {
+    // Re-asked on every attempt, not hoisted: the retry exists because things
+    // move under this wipe, and a path that became a link between the passes
+    // must not be read through — or reported clean — on the second one either.
+    const guard = await guardDirectory(dir);
+    if (guard.kind === "gone") return [];
+    if (guard.kind === "failure") return [guard.failure];
     let entries: string[];
     try {
       entries = await fs.readdir(dir);
       if (keep) entries = entries.filter((entry) => !keep.has(entry));
     } catch (err: unknown) {
-      if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return [];
+      if (isEnoent(err)) return [];
       throw err;
     }
     if (entries.length === 0) return [];
@@ -268,8 +410,15 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // on every box of this SKU.
     //
     // KNOWN RESIDUAL, accepted deliberately: a previous owner with a shell
-    // could plant a file inside this one preserved directory and it would
-    // survive the reset. The obvious guard — wipe the checkout unless `git
+    // could plant a file inside a preserved directory and it would survive the
+    // reset. For bin/tirith that residual is sharper than for the checkout —
+    // the agent EXECUTES that file before every shell command and its exit code
+    // decides whether the command runs — but it is not made worse by keeping
+    // the directory rather than the file: a planted `tirith` survives either
+    // way, and nothing on the device can tell a genuine release binary from a
+    // replacement without a trusted checksum it does not have offline. That is
+    // also why the dashboard's scan status reports "installed and enabled", not
+    // "your commands are being checked" (src/lib/hermes-shell-scan.ts). The obvious guard — wipe the checkout unless `git
     // status --porcelain` is empty — was tried and rejected. Both of its
     // outcomes are worse than the hole: wiping a "dirty" checkout recreates
     // this very brick on every box of the SKU at once the day upstream starts
@@ -281,6 +430,28 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // invisible to --porcelain. Re-provisioning the agent from upstream after
     // a reset is the real fix, and it needs network this device does not have
     // at reset time.
+    //
+    // The second exception is bin/, and it is the same category. It holds the
+    // upstream `tirith` binary the agent runs BEFORE every shell command
+    // (Hermes' own `security.tirith_*` keys configure it). tirith is not
+    // shipped with the box: the agent downloads it from a GitHub release into
+    // $HERMES_HOME/bin the first time it is needed, and upstream's default is
+    // fail-OPEN, so a box without it runs shell commands UNSCANNED. Wiping it
+    // therefore handed the next owner an agent with its pre-exec safety check
+    // silently off, for as long as the box stayed in AP mode — and a failed
+    // download then writes ~/.hermes/.tirith-install-failed, which suppresses
+    // the retry for another 24 h. That marker is NOT kept, so the reset clears
+    // it and the next download attempt is immediate.
+    //
+    // Kept whole rather than narrowed to bin/tirith, deliberately. Narrowing
+    // would mean wiping the directory entry-by-entry, and the only thing that
+    // buys is removing files beside tirith that nothing on the box executes —
+    // ~/.hermes/bin is not on the agent's PATH. What it costs is real: nothing
+    // here has an authoritative inventory of that directory (ClawKeep's
+    // archiver calls it a virtualenv, `clawkeep/clawkeep/hermes.py`), so a
+    // narrow keep would delete whatever else upstream puts there, on every box
+    // of the SKU at once, with no internet to restore it. Same argument the
+    // `git status --porcelain` guard was rejected on above.
     //
     // Re-provisioning of the removed state is automatic: the dashboard unit
     // runs scripts/setup-hermes-dashboard-auth.sh as an ExecStartPre, which
@@ -313,11 +484,11 @@ async function wipeHomeUserState(): Promise<string[]> {
   );
   for (const rel of HOME_CONTENT_WIPE_DIRS) {
     const dirFailures = await removeDirectoryContents(path.join(HOME_DIR, rel));
-    failures.push(...dirFailures.map((f) => `${rel}/${f}`));
+    failures.push(...dirFailures.map((f) => labelFailure(rel, f)));
   }
   for (const { rel, keep } of HOME_CONTENT_WIPE_KEEP) {
     const dirFailures = await removeDirectoryContents(path.join(HOME_DIR, rel), keep);
-    failures.push(...dirFailures.map((f) => `${rel}/${f}`));
+    failures.push(...dirFailures.map((f) => labelFailure(rel, f)));
   }
   // Agent-scheduled cron jobs. `crontab -r` exits non-zero when there is no
   // crontab — that's the desired end state, not a failure; anything else
@@ -347,20 +518,14 @@ async function wipeHomeUserState(): Promise<string[]> {
  * directory the wizard then writes its own state into.
  */
 async function resetSystemPasswordToDefault(): Promise<void> {
-  const DEFAULT_PASSWORD = "clawbox";
   try {
     await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
     await fs.writeFile(
       CHPASSWD_INPUT_PATH,
-      chpasswdRecord(getSystemUsername(), DEFAULT_PASSWORD),
+      chpasswdRecord(getSystemUsername(), FACTORY_DEFAULT_PASSWORD),
       { mode: 0o600 },
     );
-    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", CHPASSWD_SERVICE_NAME], {
-      timeout: 10_000,
-    }).catch(() => {});
-    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", CHPASSWD_SERVICE_NAME], {
-      timeout: 30_000,
-    });
+    await startRootStep(CHPASSWD_STEP, { timeoutMs: 30_000 });
     console.log("[Reset] System password reset to factory default");
   } catch (err) {
     // The input file carries a plaintext credential — scrub it on failure.
@@ -385,31 +550,86 @@ function scheduleReboot(): void {
   }, 1_000);
 }
 
-export async function POST() {
+export async function POST(request: Request) {
+  const startedAt = Date.now();
+
+  // Factory reset wipes data/, ~/.openclaw, ~/.hermes and reboots. It has no
+  // onboarding role whatsoever, so it never gets the bootstrap carve-out: no
+  // session, no reset, on any device state. This handler USED to be
+  // `export async function POST()` — zero parameters, so it could not read a
+  // cookie even in principle — and an unauthenticated POST really did wipe the
+  // QA box on 2026-08-22T00:04Z. TASK-443.
+  const unauthorized = await requireSession(request);
+  if (unauthorized) {
+    await padResponseTime(startedAt);
+    return unauthorized;
+  }
+
+  // A session is what stops a stranger; it is not what stops the owner losing
+  // the box to one misdirected click, and a stolen or shared browser carries a
+  // live session too. So the request also has to re-prove the OS password and
+  // carry the typed confirmation — the rest of TASK-443's ask.
+  //
+  // The password check makes this route a right/wrong oracle, so it runs on
+  // exactly the same throttle and response-time pad as /login-api. The typed
+  // token is checked FIRST and cheaply: a caller who cannot spell it never
+  // reaches the oracle, and never burns a lockout attempt on the owner's
+  // behalf.
+  const buckets = lockoutBuckets(request);
+  const locked = await checkReproveLockout(buckets, startedAt);
+  if (locked) return locked;
+
+  let body: { password?: string; confirm?: string };
+  try {
+    body = await request.json();
+  } catch {
+    await padResponseTime(startedAt);
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  if (!isFactoryResetConfirmed(body.confirm)) {
+    await padResponseTime(startedAt);
+    return NextResponse.json(
+      { error: `Type ${FACTORY_RESET_CONFIRMATION} to confirm the factory reset` },
+      { status: 400 },
+    );
+  }
+
+  const refused = await reproveOwnerPassword(body.password ?? "", buckets, startedAt);
+  if (refused) return refused;
+
   try {
     resetUpdateState();
 
     await maskAndStopGateway();
 
     const dataFailures: string[] = [];
-    try {
-      const entries = await fs.readdir(DATA_DIR);
-      const results = await Promise.allSettled(
-        entries
-          .filter(entry => !DATA_KEEP_NAMES.has(entry))
-          .map(entry => fs.rm(path.join(DATA_DIR, entry), { recursive: true, force: true }))
-      );
-      for (const r of results) {
-        if (r.status === "rejected") dataFailures.push(String(r.reason));
+    // The top of data/ is wiped by a readdir + rm pass of its own rather than
+    // through removeDirectoryContents (it keeps no retry, so a survivor is
+    // reported on the first pass), so it needs the same guard: a link planted
+    // at data/ would point this rm at whatever it names.
+    const dataGuard = await guardDirectory(DATA_DIR);
+    if (dataGuard.kind === "failure") dataFailures.push(dataGuard.failure);
+    if (dataGuard.kind === "directory") {
+      try {
+        const entries = await fs.readdir(DATA_DIR);
+        const results = await Promise.allSettled(
+          entries
+            .filter(entry => !DATA_KEEP_NAMES.has(entry))
+            .map(entry => fs.rm(path.join(DATA_DIR, entry), { recursive: true, force: true }))
+        );
+        for (const r of results) {
+          if (r.status === "rejected") dataFailures.push(String(r.reason));
+        }
+      } catch (err: unknown) {
+        if (!isEnoent(err)) throw err;
       }
-    } catch (err: unknown) {
-      if (!(err && typeof err === "object" && "code" in err && err.code === "ENOENT")) throw err;
     }
     // …then take each container keep down to its exception list.
     for (const { rel, keep } of DATA_KEEP) {
       if (!keep) continue;
       dataFailures.push(
-        ...(await removeDirectoryContents(path.join(DATA_DIR, rel), keep)).map((f) => `${rel}/${f}`),
+        ...(await removeDirectoryContents(path.join(DATA_DIR, rel), keep)).map((f) => labelFailure(rel, f)),
       );
     }
 
@@ -433,19 +653,16 @@ export async function POST() {
     try {
       await fs.mkdir(OPENCLAW_DIR, { recursive: true });
       const seed = {
-        agents: {
-          defaults: {
-            compaction: {
-              reserveTokensFloor: 24000,
-            },
-          },
-        },
+        // No compaction block: OpenClaw 2 replaced the reserve-tuning keys
+        // with compaction.mode and fails validation on the old one; its own
+        // safeguard default needs no seeding.
         gateway: {
           auth: { mode: "token", token: crypto.randomBytes(32).toString("hex") },
-          controlUi: {
-            allowInsecureAuth: true,
-            dangerouslyDisableDeviceAuth: true,
-          },
+          // No controlUi block: OpenClaw 2 retired allowInsecureAuth and
+          // dangerouslyDisableDeviceAuth (a config carrying them fails
+          // validation), and gateway-pre-start.sh writes allowedOrigins on
+          // every boot. Browsers authenticate with the token plus a device
+          // identity (src/lib/gateway-device-identity.ts).
         },
       };
       await fs.writeFile(
@@ -495,11 +712,7 @@ export async function POST() {
     // already wiped, so clawbox-root-update@set_hostname.service will read the
     // default and apply it before the reboot.
     try {
-      await execFile("/usr/bin/sudo", [
-        "/usr/bin/systemctl",
-        "start",
-        "clawbox-root-update@set_hostname.service",
-      ], { timeout: 10_000 });
+      await startRootStep("set_hostname", { timeoutMs: 10_000 });
     } catch (err) {
       console.warn("[Reset] Failed to reset hostname:", err instanceof Error ? err.message : err);
     }

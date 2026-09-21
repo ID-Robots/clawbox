@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { spawnSync } from "node:child_process";
+import { describe, expect, it, vi } from "vitest";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +17,11 @@ import path from "node:path";
  * path so they always collide on one lock file. These pin the contract and the
  * runtime behaviour.
  */
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const REPO = process.cwd();
 const AUTH = path.join(REPO, "scripts", "setup-hermes-dashboard-auth.sh");
 const REGISTER = path.join(REPO, "scripts", "register-mcp.sh");
@@ -43,13 +48,83 @@ describe("both writers share ONE lock file", () => {
     // its PyYAML reconcile AND holds it across the `hermes tools disable` CLI
     // call (which does its own wide load->save_config on the same file).
     expect(AUTH_SRC).toMatch(/acquire_config_lock[\s\S]*mint_credentials/);
-    const regTail = REGISTER_SRC.slice(REGISTER_SRC.indexOf("acquire_config_lock\n\nexport"));
-    expect(regTail).toContain("acquire_config_lock");
-    expect(REGISTER_SRC.indexOf("acquire_config_lock\n\nexport")).toBeLessThan(
-      REGISTER_SRC.indexOf("tools disable browser"),
-    );
+
+    // Locate the registrar's CALL SITE with an anchored regex: a bare
+    // `acquire_config_lock` line at column 0. That cannot match the DEFINITION
+    // (`acquire_config_lock() {`) and does not depend on what happens to follow
+    // it, unlike the old "acquire_config_lock\n\nexport" formatting marker.
+    const call = REGISTER_SRC.search(/^acquire_config_lock[ \t]*$/m);
+    // The registrar's two writes of config.yaml: the PyYAML reconcile, and the
+    // Hermes CLI call that does its own load->save_config. The lock has to come
+    // before BOTH — "before the CLI call" alone was satisfied by taking it one
+    // line above, leaving the reconcile unprotected.
+    const reconcile = REGISTER_SRC.search(/^export CLAWBOX_MCP_HERMES_CONFIG=/m);
+    // Anchored at column 0 and on the binary, and on NOTHING that wraps the
+    // call. The wrapper has now moved three times — `if "$HERMES_BIN" …`, then
+    // `if timeout -k 5 … "$HERMES_BIN" …`, then a brace group whose status was
+    // captured, now `if { timeout -k 5 … ; } 2>/dev/null; then` with the status
+    // read in the `else` — and each time a marker that pinned the wrapper stopped
+    // matching. Each time the -1 guard below is what caught it, which is the
+    // argument for keeping the marker as loose as the ordering claim needs.
+    const cliCall = REGISTER_SRC.search(/^.*"\$HERMES_BIN" tools disable browser/m);
+    // The THIRD write: the TASK-609 background-job opt-out seed, which does its
+    // own PyYAML load->safe_dump of the same file. It was first written as a
+    // Node boot hook calling `patchHermesConfig`, which cannot take this lock —
+    // moving it in here is the whole point, and nothing else in CI says it has
+    // to stay. Marked on the env line that carries the record path, at column 0.
+    const optoutSeed = REGISTER_SRC.search(/^CLAWBOX_OPTOUT_STATE=/m);
+    // Every marker must have been FOUND before their order means anything: a
+    // `search` miss returns -1, and -1 < anything, so an ordering assertion over
+    // a moved marker passes while checking nothing.
+    expect(call, "register-mcp.sh: no top-level acquire_config_lock call").toBeGreaterThan(-1);
+    expect(reconcile, "register-mcp.sh: no PyYAML reconcile block").toBeGreaterThan(-1);
+    expect(cliCall, "register-mcp.sh: no `hermes tools disable browser` call").toBeGreaterThan(-1);
+    expect(optoutSeed, "register-mcp.sh: no background-job opt-out seed").toBeGreaterThan(-1);
+    expect(call).toBeLessThan(reconcile);
+    expect(call).toBeLessThan(cliCall);
+    expect(call).toBeLessThan(optoutSeed);
+    // And AFTER the CLI call, because that one re-saves the whole config: a
+    // read-back above it would not be the last word on what the boot leaves.
+    expect(cliCall).toBeLessThan(optoutSeed);
+
     expect(AUTH_SRC).toContain("flock -w 120 9");
     expect(REGISTER_SRC).toContain("flock -w 120 9");
+  });
+
+  it("bounds EVERY hermes invocation with a SIGKILL grace, so no survivor keeps fd 9", () => {
+    // This is a LOCK invariant, which is why it lives here. Both `hermes` calls
+    // run inside the fd-9 critical section, and a child inherits that fd: a
+    // `hermes` that ignores SIGTERM outlives `timeout` and goes on holding
+    // ~/.hermes/config.yaml.lock after this script has exited, leaving
+    // setup-hermes-dashboard-auth.sh to burn its 120 s wait and then write
+    // UNLOCKED — the lost update this whole file exists to prevent, with the
+    // lock in place and doing nothing. Plain `timeout` sends SIGTERM only, so
+    // the `-k` grace is what actually ends such a child.
+    //
+    // The sweep is over the WHOLE file rather than the critical section, which
+    // is the stronger rule and the one worth keeping: a `hermes` call added
+    // outside the lock inherits fd 9 just the same, because the `exec 9>` that
+    // opens it is inherited by every later child.
+    //
+    // An INVOCATION is the binary followed by a word — a subcommand or a flag.
+    // Every spelling of the expansion counts, because "EVERY hermes call" is
+    // what this claims: `"$HERMES_BIN"`, `${HERMES_BIN}`, and the bare
+    // `$HERMES_BIN` a future edit might reach for. The two things that are NOT
+    // invocations are excluded by name rather than by an accident of quoting,
+    // so a change to either fails here instead of quietly widening the sweep:
+    // the `[ ! -x "$HERMES_BIN" ]` executable guard and the `HERMES_BIN=`
+    // assignment.
+    const calls = REGISTER_SRC.split("\n").filter(
+      (line) =>
+        /\$\{?HERMES_BIN\}?"?\s+[a-z-]/.test(line)
+        && !/^\s*#/.test(line)
+        && !/\[\s*!?\s*-[a-z]\s+"?\$\{?HERMES_BIN/.test(line)
+        && !/^\s*HERMES_BIN=/.test(line),
+    );
+    expect(calls.length).toBeGreaterThan(0);
+    for (const line of calls) {
+      expect(line, `unbounded hermes call: ${line.trim()}`).toMatch(/timeout -k \d+ /);
+    }
   });
 
   it("keeps the exec that opens the lock fd free of a stderr redirect", () => {
@@ -78,10 +153,38 @@ describe.runIf(RUNNABLE)("the lock is really taken at runtime", () => {
   });
 
   it.runIf(FLOCK)("waits for a held lock instead of racing through it", () => {
-    // Hold the shared lock for ~800ms in the background, then run the auth
-    // script. If it honours the lock it blocks until release (elapsed ≳ hold);
-    // if it ignored it, it would finish in well under 300ms. This is the mutual
-    // exclusion that stops the lost update.
+    // Timed in THIS process, not in the shell: `date +%s.%N` is a GNU coreutils
+    // extension, and on BSD/macOS date `%N` is emitted literally, so the old
+    // driver parsed "1770000000.N" and failed for a reason that had nothing to
+    // do with the lock. The suite gates only on platform !== "win32", so it runs
+    // there. And only the auth script's OWN duration is measured — timing the
+    // whole driver, including `wait` on the holder, would report ≈ the hold
+    // time whether or not the script honoured the lock.
+    const HOLD_S = 1.5;
+
+    // Calibrate: what one UNCONTENDED run of this script costs on this machine.
+    // The assertion below is "honouring the lock adds most of the hold ON TOP of
+    // that", so it cannot be satisfied by a slow interpreter. Twice, keeping the
+    // faster: the first run in a fresh process pays cold-start costs (bash,
+    // python, page cache) that the contended run no longer pays, and a cold
+    // baseline would eat the margin and fail for the wrong reason.
+    const timeUncontendedRun = () => {
+      const baseRoot = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-lockbase-"));
+      const baseConfig = path.join(baseRoot, "hermes", "config.yaml");
+      fs.mkdirSync(path.dirname(baseConfig), { recursive: true });
+      fs.writeFileSync(baseConfig, "mcp_servers:\n  clawbox:\n    enabled: true\n");
+      const baseStart = Date.now();
+      const baseProc = spawnSync("bash", [AUTH], {
+        encoding: "utf-8",
+        timeout: 20000,
+        env: { ...process.env, CLAWBOX_ROOT: baseRoot, HERMES_CONFIG: baseConfig },
+      });
+      const ms = Date.now() - baseStart;
+      expect(baseProc.status, baseProc.stderr).toBe(0);
+      return ms;
+    };
+    const uncontendedMs = Math.min(timeUncontendedRun(), timeUncontendedRun());
+
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-lockwait-"));
     const configPath = path.join(root, "hermes", "config.yaml");
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -90,25 +193,43 @@ describe.runIf(RUNNABLE)("the lock is really taken at runtime", () => {
     fs.writeFileSync(configPath, "mcp_servers:\n  clawbox:\n    enabled: true\n");
     const lockFile = `${configPath}.lock`;
 
-    // One bash driver so the holder and the auth script actually overlap: launch
-    // a background holder that takes the lock for ~0.8s, wait 0.15s so it wins
-    // the lock first, then run the auth script and time how long it blocks.
-    const script = `
-      set -e
-      LOCK="${lockFile}"
-      ( exec 9>"$LOCK"; flock 9; sleep 0.8 ) &
-      hold=$!
-      sleep 0.15                       # ensure the holder has the lock first
-      start=$(date +%s.%N)
-      CLAWBOX_ROOT="${root}" HERMES_CONFIG="${configPath}" bash "${AUTH}" >/dev/null 2>&1
-      end=$(date +%s.%N)
-      wait $hold
-      awk -v s="$start" -v e="$end" 'BEGIN{printf "%.3f", e - s}'
-    `;
-    const proc = spawnSync("bash", ["-c", script], { encoding: "utf-8", timeout: 20000 });
-    const elapsed = parseFloat(proc.stdout.trim() || "0");
-    // Held ~0.8s, started ~0.15s in, so the auth script should wait ≳0.5s.
-    expect(elapsed).toBeGreaterThan(0.5);
+    // Background holder: takes the shared lock and keeps it for HOLD_S.
+    const holder = spawn("bash", ["-c", `exec 9>"${lockFile}"; flock 9; sleep ${HOLD_S}`], {
+      stdio: "ignore",
+    });
+    holder.on("error", () => {});
+    try {
+      // Do not GUESS that the holder has the lock — prove it, by probing with a
+      // non-blocking flock until the probe is refused. A sleep-and-hope here is
+      // how this test would start measuring nothing on a loaded machine.
+      const deadline = Date.now() + 5000;
+      let held = false;
+      while (Date.now() < deadline) {
+        const probe = spawnSync("bash", ["-c", `exec 9>"${lockFile}"; flock -n 9`], {
+          encoding: "utf-8",
+        });
+        if (probe.status !== 0) {
+          held = true;
+          break;
+        }
+      }
+      expect(held, "the background holder never took the lock").toBe(true);
+
+      const start = Date.now();
+      const proc = spawnSync("bash", [AUTH], {
+        encoding: "utf-8",
+        timeout: 20000,
+        env: { ...process.env, CLAWBOX_ROOT: root, HERMES_CONFIG: configPath },
+      });
+      const contendedMs = Date.now() - start;
+      expect(proc.status, proc.stderr).toBe(0);
+      // Held 1.5s and the script started while it was held, so honouring the
+      // lock costs ≳1.4s more than the uncontended run. Ignoring it would cost
+      // about the same as the uncontended run. 500ms separates those cleanly.
+      expect(contendedMs - uncontendedMs).toBeGreaterThan(500);
+    } finally {
+      holder.kill();
+    }
 
     // And the foreign writer's key survived alongside the new dashboard block.
     const config = fs.readFileSync(configPath, "utf-8");

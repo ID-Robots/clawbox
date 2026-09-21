@@ -218,7 +218,7 @@ describe('queryCatalog', () => {
   const state = buildCatalogState(INDEX);
 
   it('matches the `skills-sh` flag spelling against the index `skills.sh`', () => {
-    const page = queryCatalog(state, { source: 'skills-sh', sort: 'trust', page: 1, pageSize: 10 });
+    const page = queryCatalog(state, { sources: ['skills-sh'], sort: 'trust', page: 1, pageSize: 10 });
     expect(page.total).toBe(1);
     expect(page.skills[0].id).toBe('skills-sh/getagentseal/founder-playbook/100m-leads');
   });
@@ -242,7 +242,13 @@ describe('queryCatalog', () => {
   });
 
   it('filters github by provider', () => {
-    const page = queryCatalog(state, { source: 'github', provider: 'nvidia', sort: 'trust', page: 1, pageSize: 10 });
+    const page = queryCatalog(state, {
+      sources: ['github'],
+      providers: ['nvidia'],
+      sort: 'trust',
+      page: 1,
+      pageSize: 10,
+    });
     expect(page.total).toBe(1);
     expect(page.skills[0].provider).toBe('NVIDIA');
   });
@@ -261,5 +267,98 @@ describe('parseBrowseTable (CLI fallback)', () => {
     expect(skills[0].name).toBe('3-statement-model');
     expect(skills[0].trust).toBe('builtin');
     expect(skills[0].description).toBe('Builds a… model');
+  });
+});
+
+/**
+ * The facet rail's server half. The counting rule is the interesting part:
+ * every group is counted with the OTHER groups' filters applied and its own
+ * ignored, so a count says how many skills ticking that box would reach.
+ */
+describe('queryCatalog facets', () => {
+  const FACET_INDEX = {
+    version: 1,
+    generated_at: '2026-08-01T00:00:00Z',
+    skills: [
+      { name: 'a', identifier: 'official/a', source: 'official', trust_level: 'builtin', tags: [], extra: { category: 'Developer Tools' } },
+      { name: 'b', identifier: 'github/b', source: 'github', trust_level: 'trusted', tags: [], extra: { provider: 'NVIDIA', category: 'developer-tools' } },
+      { name: 'c', identifier: 'clawhub/c', source: 'clawhub', trust_level: 'community', tags: [], extra: {} },
+      { name: 'd', identifier: 'clawhub/d', source: 'clawhub', trust_level: 'community', tags: [], extra: { category: 'finance' } },
+      { name: 'e', identifier: 'skills-sh/e', source: 'skills.sh', trust_level: 'community', tags: [], extra: { category: 'other' } },
+    ],
+  };
+  const state = buildCatalogState(FACET_INDEX);
+  const base = { sort: 'name' as const, page: 1, pageSize: 24 };
+  const facet = (list: { id: string; count: number }[], id: string) =>
+    list.find((f) => f.id === id)?.count;
+
+  it('counts trust buckets, with builtin folded into official', () => {
+    const page = queryCatalog(state, base);
+    expect(facet(page.trust, 'official')).toBe(1);
+    expect(facet(page.trust, 'trusted')).toBe(1);
+    expect(facet(page.trust, 'community')).toBe(3);
+  });
+
+  it('collapses the two spellings of one category into one bucket', () => {
+    const page = queryCatalog(state, base);
+    expect(facet(page.categories, 'developer-tools')).toBe(2);
+  });
+
+  it('never offers a junk category as a filter', () => {
+    const page = queryCatalog(state, base);
+    expect(page.categories.some((f) => f.id === 'other')).toBe(false);
+  });
+
+  it('reports how much of the result set a category can even speak for', () => {
+    // 3 of the 5 rows declare a usable category; the `other` row does not count.
+    expect(queryCatalog(state, base).categoryCoverage).toBe(3);
+  });
+
+  it('emits source ids in the flag spelling the client sends back', () => {
+    expect(facet(queryCatalog(state, base).sources, 'skills-sh')).toBe(1);
+    expect(queryCatalog(state, base).sources.some((f) => f.id === 'skills.sh')).toBe(false);
+  });
+
+  it('multi-select inside a group is OR', () => {
+    expect(queryCatalog(state, { ...base, sources: ['official'] }).total).toBe(1);
+    expect(queryCatalog(state, { ...base, sources: ['official', 'clawhub'] }).total).toBe(3);
+  });
+
+  it('across groups is AND', () => {
+    const page = queryCatalog(state, { ...base, sources: ['clawhub'], categories: ['finance'] });
+    expect(page.total).toBe(1);
+    expect(page.skills[0].id).toBe('clawhub/d');
+  });
+
+  it('counts a group without its own filter, so its siblings never read zero', () => {
+    const page = queryCatalog(state, { ...base, trust: ['community'] });
+    expect(page.total).toBe(3);
+    // Ticking Community leaves the other trust counts standing …
+    expect(facet(page.trust, 'official')).toBe(1);
+    expect(facet(page.trust, 'trusted')).toBe(1);
+    // … while Source narrows to what Community can reach.
+    expect(facet(page.sources, 'official')).toBeUndefined();
+    expect(facet(page.sources, 'clawhub')).toBe(2);
+  });
+
+  it('keeps a ticked value in the list even when nothing matches it', () => {
+    // No `official` row is filed under finance, so this pair reaches nothing.
+    const page = queryCatalog(state, { ...base, sources: ['official'], categories: ['finance'] });
+    expect(page.total).toBe(0);
+    // Both boxes stay in the rail so the dead end can be undone — and both say
+    // zero rather than showing a count from before the other group narrowed.
+    expect(facet(page.categories, 'finance')).toBe(0);
+    expect(facet(page.sources, 'official')).toBe(0);
+  });
+
+  it('matches the skills-sh flag spelling against the index skills.sh', () => {
+    expect(queryCatalog(state, { ...base, sources: ['skills-sh'] }).total).toBe(1);
+  });
+
+  it('a text query narrows the counts too', () => {
+    const page = queryCatalog(state, { ...base, q: 'd', sort: 'relevance' });
+    expect(page.total).toBe(1);
+    expect(facet(page.trust, 'community')).toBe(1);
+    expect(facet(page.trust, 'official')).toBeUndefined();
   });
 });

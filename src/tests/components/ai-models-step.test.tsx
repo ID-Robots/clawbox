@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
 import AIModelsStep from "@/components/AIModelsStep";
 
 vi.mock("@/lib/i18n", () => ({
@@ -23,6 +23,7 @@ vi.mock("@/lib/i18n", () => ({
         "ai.multiProvider": "Multi-provider AI gateway",
         "ai.runLocally": "Run AI models locally on device",
         "ai.showMore": "Show more providers...",
+        "ai.openAuthPage": "Open authorization page",
         "ai.skipClawai": "Skip — set up ClawBox AI with a portal token",
         skip: "Skip",
         recommended: "Recommended",
@@ -30,6 +31,17 @@ vi.mock("@/lib/i18n", () => ({
         connecting: "Connecting...",
         "settings.connect": "Connect",
         "settings.aiProvider": "AI Provider",
+        "settings.providers.radioGroupLabel": "AI Provider",
+        // The device-code card is shared with the coding agent's GitHub login
+        // now (src/components/DeviceCodeCard.tsx) and speaks through t(),
+        // where it used to carry hardcoded English. Same strings, from the
+        // real catalogue.
+        "ai.thenEnterCode": "Then enter this code:",
+        "ai.codeExpires": "Code expires in 15 minutes",
+        "ai.waitingAuth": "Waiting for authorization...",
+        "ai.getNewCode": "Get a new code",
+        copy: "Copy",
+        copied: "Copied!",
       };
       return translations[key] ?? key;
     },
@@ -93,6 +105,83 @@ describe("AIModelsStep variants", () => {
         json: async () => ({}),
       };
     }));
+  });
+
+  /**
+   * TASK-668. This is the CONNECT list, and it offers every provider it was
+   * asked to — including one the Providers strip has dropped because the box
+   * can currently run no model from it.
+   *
+   * That is not an oversight, it is the pair: connecting is the way OUT of that
+   * state (saving a cloud provider writes its configured model rows and
+   * `models.mode: "merge"`), so the strip may drop such a row only because this
+   * list never does. An earlier revision filtered here too and left a box with
+   * no door.
+   */
+  describe("a provider the box can run no model from", () => {
+    function stubStatus(unrunnable: string[]) {
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+        if (url.includes("/setup-api/providers/status")) {
+          return {
+            ok: true,
+            json: async () => ({
+              harness: "openclaw",
+              defaultProvider: "clawai",
+              unrunnable,
+              degraded: false,
+              providers: [
+                { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai", enabled: true },
+              ],
+            }),
+          };
+        }
+        if (url.includes("/setup-api/ai-models/oauth/providers")) {
+          return { ok: true, json: async () => ({ providers: [] }) };
+        }
+        return { ok: true, json: async () => ({}) };
+      }));
+    }
+
+    async function providerGroupText(
+      unrunnable: string[],
+      selected?: string,
+    ): Promise<string> {
+      stubStatus(unrunnable);
+      const { getByRole, findByText } = render(
+        <AIModelsStep
+          embedded
+          providerIds={["clawai", "anthropic", "google"]}
+          {...(selected ? { defaultProviderId: selected } : {})}
+          testId="providers-test"
+        />,
+      );
+      // The list opens collapsed onto the selected row; the whole point here is
+      // what the EXPANDED list offers.
+      const showMore = await findByText("Show more providers...").catch(() => null);
+      if (showMore) fireEvent.click(showMore);
+      return getByRole("radiogroup", { name: "AI Provider" }).textContent ?? "";
+    }
+
+    it("is still offered, because connecting is the way out", async () => {
+      const text = await providerGroupText(["google"]);
+
+      expect(text).toContain("Google Gemini");
+      expect(text).toContain("Anthropic");
+    });
+
+    it("is offered when the panel is currently ON it, too", async () => {
+      const text = await providerGroupText(["google"], "google");
+
+      expect(text).toContain("Google Gemini");
+    });
+
+    it("is offered exactly as before when the box has said nothing about it", async () => {
+      const text = await providerGroupText([]);
+
+      expect(text).toContain("Google Gemini");
+      expect(text).toContain("Anthropic");
+    });
   });
 
   it("renders only Gemma in Local AI mode and defaults to llama.cpp", async () => {
@@ -179,9 +268,13 @@ describe("AIModelsStep variants", () => {
     expect(getByText("OpenAI GPT")).toBeInTheDocument();
     expect(getByText("Recommended")).toBeInTheDocument();
     expect(getByText("All-in cloud AI for ClawBox — backups, remote desktop, full support")).toBeInTheDocument();
-    // The plan opens as a summary that still states what it costs; the pitch
-    // and the feature list sit behind its "Change".
-    expect(getByText("Pro plan · €9/month")).toBeInTheDocument();
+    // The plan opens as a summary; the pitch and the feature list sit behind
+    // its "Change". Nothing here has connected an account, so the summary says
+    // where the plan comes from rather than naming the seeded default — that
+    // default is "flash", and printing it read as "you are on Pro, €9/month"
+    // to Max and Free owners alike.
+    expect(getByText("Plan is taken from your account")).toBeInTheDocument();
+    expect(queryByText("Pro plan · €9/month")).not.toBeInTheDocument();
     fireEvent.click(getByRole("button", { name: /^Plan/ }));
     expect(getByText("Max plan unlocks ClawKeep cloud backups, Remote Desktop, and extended warranty for ClawBox owners.")).toBeInTheDocument();
     // The legacy "Paste token manually" dialog has been removed — connection
@@ -205,7 +298,7 @@ describe("AIModelsStep variants", () => {
           ok: true,
           json: async () => ({
             user_code: "ABCD-1234",
-            verification_url: "https://openclawhardware.dev/portal/connect",
+            verification_url: "https://clawbox.com/portal/connect",
             interval: 5,
           }),
         } as Response;
@@ -240,7 +333,7 @@ describe("AIModelsStep variants", () => {
     expect(await findByText("ABCD-1234")).toBeInTheDocument();
     expect(getByRole("link", { name: /Open authorization page/i })).toHaveAttribute(
       "href",
-      "https://openclawhardware.dev/portal/connect",
+      "https://clawbox.com/portal/connect",
     );
   });
 
@@ -256,7 +349,7 @@ describe("AIModelsStep variants", () => {
           ok: true,
           json: async () => ({
             user_code: "ABCD-1234",
-            verification_url: "https://openclawhardware.dev/portal/connect",
+            verification_url: "https://clawbox.com/portal/connect",
             interval: 5,
           }),
         } as Response;
@@ -314,6 +407,49 @@ describe("AIModelsStep variants", () => {
     await waitFor(() => {
       expect(getByRole("radio", { name: /OpenAI GPT/i })).toBeChecked();
     });
+  });
+
+  it("does not pre-fill the custom-model field with the ClawBox AI image id", async () => {
+    // The recovery path for a box an older build pinned to
+    // `openai/gpt-image-1-mini`: /setup-api/ai-models/status reports that as
+    // the model and `openai` as the provider, so Settings opens on the OpenAI
+    // panel with it as `currentModel`. It is not in the curated catalog, so
+    // the seeding effect used to treat it as a typed custom id — pre-filling
+    // the field and then submitting it, which the configure route now refuses
+    // 400 BEFORE writing the API key. The owner is handed back an id they
+    // never typed and their key is not saved: a dead end on exactly the box
+    // this guard exists for.
+    const { container, getByRole, findByText } = render(
+      <AIModelsStep
+        embedded
+        providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+        defaultProviderId="clawai"
+        currentProviderId="openai"
+        currentModel="openai/gpt-image-1-mini"
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(getByRole("radio", { name: /OpenAI GPT/i })).toBeChecked();
+    });
+
+    // Settle: the seeding effect runs after the provider radio commits, so an
+    // assertion polled with waitFor would pass on its first tick — while the
+    // field is still empty — and never see the value the effect writes.
+    // Wait for the settled OUTCOME, not a timer: the seeding effect runs after
+    // the provider radio commits, so polling a negative assertion would pass
+    // on its first tick — while the field is still empty — and never see the
+    // value the effect writes. The collapsed summary naming the curated
+    // default is the positive end state, and it only appears once the effect
+    // has decided this is not a custom id.
+    await findByText("GPT-5.4");
+
+    // The custom-model field is expanded only when the panel decided the
+    // current id is a typed custom one, so its absence IS the fix.
+    expect(container.querySelector("input#ai-provider-model")).toBeNull();
+    expect(container.textContent ?? "").not.toContain("gpt-image-1-mini");
   });
 
   it("uses consistent setup button labels for provider connections", async () => {
@@ -383,6 +519,53 @@ describe("AIModelsStep variants", () => {
     ).toBe(false);
   });
 
+  it("reserves the redirect OAuth tab before awaiting and offers a blocked-popup recovery link", async () => {
+    // A no-op rather than null: the executor assigns inside a closure, so
+    // control-flow analysis otherwise narrows the variable to `null` at the
+    // call below and `?.()` becomes a call on `never`.
+    let resolveStart: () => void = () => {};
+    const startReady = new Promise<void>((resolve) => { resolveStart = resolve; });
+    const authorizationUrl = "https://console.anthropic.com/oauth/authorize?state=test";
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      if (url.includes("/setup-api/ai-models/oauth/providers")) {
+        return { ok: true, json: async () => ({ providers: ["anthropic"] }) } as Response;
+      }
+      if (url.includes("/setup-api/ai-models/oauth/start")) {
+        await startReady;
+        return { ok: true, json: async () => ({ url: authorizationUrl }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+
+    const { getByRole, findByRole } = render(
+      <AIModelsStep
+        providerIds={["anthropic"]}
+        defaultProviderId="anthropic"
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    const connect = await findByRole("button", { name: "Connect to Anthropic Claude" });
+    fireEvent.click(connect);
+
+    // The popup reservation happens in the click stack, before device I/O can
+    // consume browser user activation. This spy returns null to model a browser
+    // that still blocks it.
+    expect(openSpy).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/oauth/start"))).toBe(true);
+    expect(getByRole("button", { name: "Connect to Anthropic Claude" })).toBeInTheDocument();
+
+    resolveStart();
+
+    const recovery = await findByRole("link", { name: "Open authorization page" });
+    expect(recovery).toHaveAttribute("href", authorizationUrl);
+    expect(recovery).toHaveAttribute("target", "_blank");
+  });
+
   it("renders the device code and completes once /clawai/poll reports success", async () => {
     const onConfigured = vi.fn();
     let pollCount = 0;
@@ -396,7 +579,7 @@ describe("AIModelsStep variants", () => {
           ok: true,
           json: async () => ({
             user_code: "ABCD-1234",
-            verification_url: "https://openclawhardware.dev/portal/connect",
+            verification_url: "https://clawbox.com/portal/connect",
             // Sub-second poll interval keeps the test fast on real timers.
             interval: 0.05,
           }),
@@ -441,5 +624,74 @@ describe("AIModelsStep variants", () => {
     }, { timeout: 4000 });
 
     vi.unstubAllGlobals();
+  });
+  // TASK-483: the overlay's rows used to be driven entirely off wall-clock
+  // timers, so it reached the final row, "Almost ready", 22 seconds in and then
+  // sat there unchanged for the two further minutes the config writes actually
+  // took. On a screen that also says "Please don't close this page" that reads
+  // as a hang. The last row now belongs to the request, not the stopwatch.
+  it("does not claim 'Almost ready' until the configure request comes back", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let resolveConfigure: ((value: unknown) => void) | null = null;
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+        if (url.includes("/setup-api/ai-models/oauth/providers")) {
+          return { ok: true, json: async () => ({ providers: [] }) } as unknown as Response;
+        }
+        if (url.includes("/setup-api/ai-models/configure")) {
+          await new Promise((resolve) => { resolveConfigure = resolve; });
+          return { ok: true, json: async () => ({ success: true }) } as unknown as Response;
+        }
+        return { ok: true, json: async () => ({}) } as unknown as Response;
+      });
+
+      const { getByRole, getByText, container } = render(
+        <AIModelsStep
+          providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+          defaultProviderId="clawai"
+          title="Connect AI Provider"
+          description="Primary provider"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+      });
+
+      fireEvent.click(getByRole("button", { name: /Show more providers/i }));
+      fireEvent.click(getByRole("radio", { name: /Anthropic Claude/i }));
+      const keyInput = container.querySelector("input[type=password], input[type=text]");
+      expect(keyInput).not.toBeNull();
+      fireEvent.change(keyInput as HTMLInputElement, { target: { value: "sk-ant-test" } });
+      fireEvent.click(getByRole("button", { name: "Connect to Anthropic Claude" }));
+
+      await waitFor(() => {
+        expect(getByText("Credentials verified")).toBeInTheDocument();
+      });
+
+      // Well past the last timer in CONFIGURING_STEP_DELAYS.
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+
+      // Every row's label is in the DOM the whole time — unreached rows are
+      // just rendered transparent — so ask each row what state it is in.
+      const stepState = (label: string) =>
+        getByText(label).closest("li")?.getAttribute("data-step-state");
+      expect(stepState("Warming up models")).toBe("active");
+      expect(stepState("Almost ready")).toBe("pending");
+
+      await act(async () => {
+        resolveConfigure?.(undefined);
+      });
+
+      await waitFor(() => {
+        expect(stepState("Almost ready")).toBe("done");
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

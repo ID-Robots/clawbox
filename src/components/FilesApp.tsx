@@ -1,7 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
+import { fileExtension, fileIcon, formatSize, Icon } from "./file-icons";
+import CodeEditor from "./CodeEditor";
+import { languageForFile } from "@/lib/code-language";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -40,14 +45,6 @@ const FAVORITES = [
   { labelKey: "files.desktop", icon: "desktop_windows", path: "Desktop" },
 ];
 
-function formatSize(bytes: number | null): string {
-  if (bytes === null) return "—";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}
-
 function formatDate(iso: string): string {
   try {
     return new Date(iso).toLocaleString(undefined, {
@@ -55,11 +52,6 @@ function formatDate(iso: string): string {
       hour: "2-digit", minute: "2-digit",
     });
   } catch { return iso; }
-}
-
-function fileExtension(name: string): string {
-  const dot = name.lastIndexOf(".");
-  return dot !== -1 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
 function downloadViaLink(url: string, name: string): void {
@@ -81,6 +73,19 @@ function parentDirOf(p?: string): string {
 // directories, so the full relative path is the unique key.
 function entryId(e: FileEntry): string {
   return e.path ?? e.name;
+}
+
+// The Files WINDOW's width, not the viewport's. A desktop Files window opens
+// 507 px wide on a 1920 px screen, where every Tailwind `sm:`/`md:` branch
+// still answers "desktop": the 200 px sidebar stayed in flow, the list view's
+// name column was left ~25 px (one letter per row) and the breadcrumb was
+// squeezed to nothing at all. Measured, the way the Coding Agent measures the
+// window it puts its own sidebar in.
+const NARROW_WIDTH = 640;
+
+/** A name, not a path: what a rename may be. The route refuses the rest. */
+function isBareName(name: string): boolean {
+  return !name.includes("/") && name !== "." && name !== "..";
 }
 
 // ─── File viewer kind detection ────────────────────────────────────────────────
@@ -127,67 +132,16 @@ function looksBinary(text: string): boolean {
   return replacement > sample.length * 0.02;
 }
 
-function fileIcon(name: string, type: "file" | "directory"): { icon: string; color: string } {
-  if (type === "directory") return { icon: "folder", color: "#f97316" };
-  const ext = fileExtension(name);
-  const map: Record<string, { icon: string; color: string }> = {
-    pdf: { icon: "picture_as_pdf", color: "#ef4444" },
-    doc: { icon: "article", color: "#3b82f6" },
-    docx: { icon: "article", color: "#3b82f6" },
-    xls: { icon: "table_chart", color: "#22c55e" },
-    xlsx: { icon: "table_chart", color: "#22c55e" },
-    ppt: { icon: "slideshow", color: "#f59e0b" },
-    pptx: { icon: "slideshow", color: "#f59e0b" },
-    txt: { icon: "text_snippet", color: "#9ca3af" },
-    md: { icon: "text_snippet", color: "#9ca3af" },
-    csv: { icon: "table_chart", color: "#22c55e" },
-    jpg: { icon: "image", color: "#a855f7" },
-    jpeg: { icon: "image", color: "#a855f7" },
-    png: { icon: "image", color: "#a855f7" },
-    gif: { icon: "image", color: "#a855f7" },
-    svg: { icon: "image", color: "#a855f7" },
-    webp: { icon: "image", color: "#a855f7" },
-    mp4: { icon: "movie", color: "#ec4899" },
-    mov: { icon: "movie", color: "#ec4899" },
-    avi: { icon: "movie", color: "#ec4899" },
-    mkv: { icon: "movie", color: "#ec4899" },
-    mp3: { icon: "music_note", color: "#06b6d4" },
-    wav: { icon: "music_note", color: "#06b6d4" },
-    flac: { icon: "music_note", color: "#06b6d4" },
-    zip: { icon: "folder_zip", color: "#f59e0b" },
-    tar: { icon: "folder_zip", color: "#f59e0b" },
-    gz: { icon: "folder_zip", color: "#f59e0b" },
-    rar: { icon: "folder_zip", color: "#f59e0b" },
-    js: { icon: "code", color: "#facc15" },
-    ts: { icon: "code", color: "#3b82f6" },
-    py: { icon: "code", color: "#22c55e" },
-    json: { icon: "data_object", color: "#f59e0b" },
-    yaml: { icon: "settings", color: "#9ca3af" },
-    yml: { icon: "settings", color: "#9ca3af" },
-    sh: { icon: "terminal", color: "#22c55e" },
-    bash: { icon: "terminal", color: "#22c55e" },
-  };
-  return map[ext] ?? { icon: "draft", color: "#6b7280" };
-}
-
-function Icon({ name, size = 20, color, className = "", ariaLabel }: { name: string; size?: number; color?: string; className?: string; ariaLabel?: string }) {
-  return (
-    <span
-      className={`material-symbols-rounded ${className}`}
-      style={{ fontSize: size, color, lineHeight: 1 }}
-      aria-hidden={ariaLabel ? undefined : true}
-      aria-label={ariaLabel}
-      role={ariaLabel ? "img" : undefined}
-    >
-      {name}
-    </span>
-  );
-}
-
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function FilesApp() {
+/**
+ * `initialPath` is the browse-relative folder the window opens in — the
+ * Coding Agent's "Open in Files" hands a project's folder through the
+ * window's record; a plain Files window starts at home.
+ */
+export default function FilesApp({ initialPath = "" }: { initialPath?: string } = {}) {
   const { t } = useT();
+  const tr = useTr();
   const [currentPath, setCurrentPath] = useState("");
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -196,20 +150,36 @@ export default function FilesApp() {
   // Hidden by default — matches every desktop file manager. Persisted across
   // window reopens so the user's choice sticks. Reading lazily inside
   // useState's initializer guards against SSR (no `window` until mount).
-  const [showHidden, setShowHidden] = useState<boolean>(() => {
+  const [showHidden, setShowHiddenState] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem("clawbox.files.showHidden") === "1";
   });
 
-  const toggleShowHidden = useCallback(() => {
-    setShowHidden((v) => {
-      const next = !v;
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem("clawbox.files.showHidden", next ? "1" : "0");
-      }
-      return next;
-    });
+  // The ref carries the current choice so the toggle can compute the next one
+  // without a dependency, which is what the updater was being used for. A
+  // React state updater is a pure function of the previous state — React is
+  // entitled to run it twice — and this one wrote localStorage from inside it,
+  // so the write happened once per render attempt rather than once per click.
+  // It is idempotent, which is exactly why it went unnoticed. See
+  // src/tests/unit/state-updater-purity.test.ts.
+  //
+  // The raw setter is renamed out of reach and every write goes through
+  // `applyShowHidden`, so the mirror cannot be left behind by a writer that
+  // forgets the ref line. A mirror kept in step by a convention is an invisible
+  // LOST write, and the purity rule cannot see one: it reports side effects
+  // INSIDE an updater, never a missing ref advance outside one.
+  const showHiddenRef = useRef(showHidden);
+  const applyShowHidden = useCallback((next: boolean) => {
+    showHiddenRef.current = next;
+    setShowHiddenState(next);
   }, []);
+  const toggleShowHidden = useCallback(() => {
+    const next = !showHiddenRef.current;
+    applyShowHidden(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("clawbox.files.showHidden", next ? "1" : "0");
+    }
+  }, [applyShowHidden]);
   const [selected, setSelected] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogState>({ type: null });
   const [dragOver, setDragOver] = useState(false);
@@ -217,14 +187,82 @@ export default function FilesApp() {
   const [sidebarOpen, setSidebarOpen] = useState(() => typeof window !== "undefined" ? window.innerWidth >= 768 : true);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
 
+  // ─── The window's width ────────────────────────────────────────────────────
+
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Always false to begin with, never `window.innerWidth < NARROW_WIDTH`: the
+  // server has no window and renders the wide layout, so a phone-sized client
+  // that seeded `true` handed React a first render that disagreed with the
+  // markup it was hydrating — `data-narrow` set, columns dropped — which is a
+  // hydration mismatch. The observer below measures the real element (this is
+  // the WINDOW's width, not the screen's, so innerWidth was never the right
+  // number anyway) and corrects it in the first commit after mount.
+  const [narrow, setNarrow] = useState<boolean>(false);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let ro: ResizeObserver | null = null;
+    try {
+      ro = new ResizeObserver((entries) => {
+        const width = entries[0]?.contentRect.width ?? el.clientWidth;
+        setNarrow(width < NARROW_WIDTH);
+      });
+      ro.observe(el);
+    } catch { /* a stubbed observer with no observe(): the window stays wide */ }
+    return () => { try { ro?.disconnect(); } catch { /* same stub */ } };
+  }, []);
+
+  // Below NARROW_WIDTH the sidebar covers the files instead of standing beside
+  // them, so it is closed on the way in — the toolbar's menu button, which is
+  // up whenever the sidebar is down, brings it back.
+  const wasNarrow = useRef(narrow);
+  useEffect(() => {
+    if (narrow && !wasNarrow.current) setSidebarOpen(false);
+    wasNarrow.current = narrow;
+  }, [narrow]);
+
+  // ─── Status line ───────────────────────────────────────────────────────────
+
+  // One clock for the whole line. Every message used to arm its own
+  // uncancelled timer, so the 2 s clock a "Folder created" started wiped the
+  // ERROR that replaced it a moment later: the one message that has to stay
+  // was the one that vanished. A message with no `ms` stays until the next
+  // action replaces it.
+  const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showStatus = useCallback((msg: string | null, ms?: number) => {
+    if (statusTimer.current) clearTimeout(statusTimer.current);
+    statusTimer.current = null;
+    setStatusMsg(msg);
+    if (msg && ms) {
+      statusTimer.current = setTimeout(() => { statusTimer.current = null; setStatusMsg(null); }, ms);
+    }
+  }, []);
+  useEffect(() => () => { if (statusTimer.current) clearTimeout(statusTimer.current); }, []);
+
   // Search + viewer state
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [recursive, setRecursive] = useState(false);
   const [searchResults, setSearchResults] = useState<FileEntry[]>([]);
   const [searching, setSearching] = useState(false);
-  const [searchTruncated, setSearchTruncated] = useState(false);
+  // Why the walk ended: "matches" (the cap — there are more) or "scanned"
+  // (the tree was too big to finish, so parts of it were never looked at).
+  // Two different sentences; one boolean said "first N shown" for both.
+  const [searchStoppedBy, setSearchStoppedBy] = useState<"matches" | "scanned" | null>(null);
   const [viewer, setViewer] = useState<{ relPath: string; entry: FileEntry } | null>(null);
+  // On a phone, Back walks up the folder tree one level per press (and closes
+  // an open file or the covering sidebar first) instead of closing Files.
+  const phoneLayout = usePhoneLayout();
+  const folderDepth = currentPath.split("/").filter(Boolean).length;
+  useMobileBack(phoneLayout && folderDepth > 0, () => {
+    const parts = currentPath.split("/").filter(Boolean);
+    parts.pop();
+    void load(parts.join("/"));
+  }, folderDepth);
+  useMobileBack(phoneLayout && narrow && sidebarOpen, () => setSidebarOpen(false));
+  // An open file claims Back inside FileViewer, through its own attemptClose,
+  // so unsaved edits get the discard prompt instead of being dropped.
+
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
@@ -233,16 +271,26 @@ export default function FilesApp() {
 
   // ─── Load directory ────────────────────────────────────────────────────────
 
+  // The folder on screen, readable from `load` without giving it a dependency
+  // that would remake it on every navigation.
+  const currentPathRef = useRef(currentPath);
   const load = useCallback(async (dir: string) => {
     setLoading(true);
     setError(null);
     setSelected(null);
+    // A message with no clock is meant to outlast the ACTION it answers, not
+    // the folder: "Error: Already exists" followed the owner two folders up
+    // and stood over the new listing's count (sweep FT-1). Leaving the folder
+    // clears the line; a reload of the same one that an ACTION fired — the
+    // one "Folder created" arms just before it — keeps it. A reload the owner
+    // asked for (the Refresh button) clears it at the button, not here.
+    if (dir !== currentPathRef.current) showStatus(null);
     // Recursive results are scoped to one directory — drop them when we move
     // to another folder (the typed filter in `query` is kept and re-applies to
     // the new listing). navigateTo also closes the search bar for result dirs.
     setRecursive(false);
     setSearchResults([]);
-    setSearchTruncated(false);
+    setSearchStoppedBy(null);
     try {
       const res = await fetch(`/setup-api/files?dir=${encodeURIComponent(dir)}`);
       const data = await res.json();
@@ -253,14 +301,15 @@ export default function FilesApp() {
       });
       setFiles(sorted);
       setCurrentPath(dir);
+      currentPathRef.current = dir;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showStatus]);
 
-  useEffect(() => { load(""); }, [load]);
+  useEffect(() => { load(initialPath); }, [load, initialPath]);
 
   // POSIX hidden files start with a dot. We filter client-side because the
   // server returns the full directory; this lets the toggle flip instantly
@@ -279,7 +328,7 @@ export default function FilesApp() {
     setQuery("");
     setRecursive(false);
     setSearchResults([]);
-    setSearchTruncated(false);
+    setSearchStoppedBy(null);
   }, []);
 
   const runSearch = useCallback(async (q: string) => {
@@ -298,15 +347,16 @@ export default function FilesApp() {
         return (a.path ?? a.name).localeCompare(b.path ?? b.name);
       });
       setSearchResults(sorted);
-      setSearchTruncated(Boolean(data.truncated));
+      // An older server answers `truncated` alone; a full match list is what
+      // that always meant before the walk learned to say so.
+      setSearchStoppedBy(data.stoppedBy ?? (data.truncated ? "matches" : null));
     } catch (e) {
       setSearchResults([]);
-      setStatusMsg(e instanceof Error ? e.message : "Search failed");
-      setTimeout(() => setStatusMsg(null), 3000);
+      showStatus(e instanceof Error ? e.message : "Search failed", 3000);
     } finally {
       setSearching(false);
     }
-  }, [currentPath, showHidden]);
+  }, [currentPath, showHidden, showStatus]);
 
   // Re-render whatever is on screen after a mutation (rename/delete/save):
   // re-run the search if results are showing, otherwise reload the folder.
@@ -330,6 +380,11 @@ export default function FilesApp() {
   // ─── Breadcrumbs ────────────────────────────────────────────────────────────
 
   const breadcrumbs = [t("files.home"), ...currentPath.split("/").filter(Boolean)];
+  // Which crumbs are drawn: all of them, or — in a window too narrow for the
+  // trail — the folder itself with its ancestors folded behind one "…".
+  const shownCrumbs = narrow && breadcrumbs.length > 2
+    ? [breadcrumbs.length - 2, breadcrumbs.length - 1]
+    : breadcrumbs.map((_, i) => i);
 
   const navigateBreadcrumb = (idx: number) => {
     if (idx === 0) { load(""); return; }
@@ -371,8 +426,10 @@ export default function FilesApp() {
       if (checkRes.ok) {
         const checkData = await checkRes.json();
         if (checkData.availableSpace && totalSize > checkData.availableSpace) {
-          setStatusMsg(`Not enough disk space. Need ${formatSize(totalSize)}, only ${formatSize(checkData.availableSpace)} available.`);
-          setTimeout(() => setStatusMsg(null), 5000);
+          showStatus(tr("files.noDiskSpace", "Not enough disk space. Need {need}, only {available} available.", {
+            need: formatSize(totalSize),
+            available: formatSize(checkData.availableSpace),
+          }));
           return;
         }
       }
@@ -381,7 +438,7 @@ export default function FilesApp() {
     let ok = 0;
     for (let i = 0; i < total; i++) {
       const file = fileList[i];
-      setStatusMsg(`Uploading ${file.name} (${i + 1}/${total})...`);
+      showStatus(tr("files.uploadingFile", "Uploading {name} ({index}/{total})…", { name: file.name, index: i + 1, total }));
       try {
         const res = await fetch(
           `/setup-api/files?dir=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(file.name)}`,
@@ -392,16 +449,14 @@ export default function FilesApp() {
         } else {
           const data = await res.json().catch(() => ({}));
           if (data.error) {
-            setStatusMsg(data.error);
-            setTimeout(() => setStatusMsg(null), 5000);
+            showStatus(data.error);
             load(currentPath);
             return;
           }
         }
       } catch { /* ignore */ }
     }
-    setStatusMsg(`Uploaded ${ok}/${total} file(s)`);
-    setTimeout(() => setStatusMsg(null), 2500);
+    showStatus(tr("files.uploadedCount", "Uploaded {ok}/{total} file(s)", { ok, total }), 2500);
     load(currentPath);
   };
 
@@ -424,9 +479,8 @@ export default function FilesApp() {
       body: JSON.stringify({ action: "mkdir", name }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) { setStatusMsg(`Error: ${data.error ?? res.statusText}`); return; }
-    setStatusMsg("Folder created");
-    setTimeout(() => setStatusMsg(null), 2000);
+    if (!res.ok) { showStatus(tr("files.errorPrefix", "Error: {message}", { message: data.error ?? res.statusText })); return; }
+    showStatus(tr("files.folderCreated", "Folder created"), 2000);
     load(currentPath);
   };
 
@@ -440,9 +494,8 @@ export default function FilesApp() {
       body: JSON.stringify({ newName }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) { setStatusMsg(`Error: ${data.error ?? res.statusText}`); return; }
-    setStatusMsg("Renamed");
-    setTimeout(() => setStatusMsg(null), 2000);
+    if (!res.ok) { showStatus(tr("files.errorPrefix", "Error: {message}", { message: data.error ?? res.statusText })); return; }
+    showStatus(tr("files.renamed", "Renamed"), 2000);
     refreshView();
   };
 
@@ -452,9 +505,8 @@ export default function FilesApp() {
     const url = `/setup-api/files/${entryRelPath(entry).split("/").map(encodeURIComponent).join("/")}`;
     const res = await fetch(url, { method: "DELETE" });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) { setStatusMsg(`Error: ${data.error ?? res.statusText}`); return; }
-    setStatusMsg("Deleted");
-    setTimeout(() => setStatusMsg(null), 2000);
+    if (!res.ok) { showStatus(tr("files.errorPrefix", "Error: {message}", { message: data.error ?? res.statusText })); return; }
+    showStatus(tr("files.deleted", "Deleted"), 2000);
     refreshView();
   };
 
@@ -464,7 +516,11 @@ export default function FilesApp() {
     if (dialog.type === "mkdir" && dialog.value?.trim()) {
       createFolder(dialog.value.trim());
     } else if (dialog.type === "rename" && dialog.entry && dialog.value?.trim()) {
-      renameEntry(dialog.entry, dialog.value.trim());
+      // The route refuses a path here; the dialog says so before the trip and
+      // stays open, rather than the file leaving the folder on a "Renamed".
+      const next = dialog.value.trim();
+      if (!isBareName(next)) return;
+      renameEntry(dialog.entry, next);
     } else if (dialog.type === "delete" && dialog.entry) {
       deleteEntry(dialog.entry);
     }
@@ -508,21 +564,35 @@ export default function FilesApp() {
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
+  // Below NARROW_WIDTH the sidebar floats over the files instead of taking
+  // 200 px of them; it is the only state that needs the backdrop and the z-index.
+  const sidebarOverlay = narrow;
+
   return (
     <div
+      ref={rootRef}
       className="flex h-full overflow-hidden relative bg-[var(--bg-deep)] text-[var(--text-primary)] font-body"
       data-testid="files-app"
+      data-narrow={narrow || undefined}
       onClick={closeContextMenu}
     >
 
       {/* ── Sidebar ── */}
       {sidebarOpen && (
         <>
-          <div
-            className="fixed inset-0 z-[5] bg-black/50 md:hidden"
-            onClick={() => setSidebarOpen(false)}
-          />
-          <aside className="flex flex-col py-4 overflow-y-auto absolute md:relative z-[6] h-full w-[200px] shrink-0 bg-[var(--bg-surface)] border-r border-[var(--border-subtle)]">
+          {/* Inside the window, never `fixed`: the desktop behind a narrow
+              Files window is not this app's to darken. */}
+          {sidebarOverlay && (
+            <div
+              className="absolute inset-0 z-[5] bg-black/50"
+              onClick={() => setSidebarOpen(false)}
+            />
+          )}
+          {/* In flow the sidebar carries no z-index at all. Positioned with
+              z-6 it painted above the window's own resize handles, which have
+              none — the left edge and bottom-left corner of a Files window
+              could not be dragged. */}
+          <aside className={`flex flex-col py-4 overflow-y-auto h-full w-[200px] shrink-0 bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] ${sidebarOverlay ? "absolute z-[6]" : ""}`}>
             <div className="px-4 pb-2 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">
               {t("files.favorites")}
             </div>
@@ -531,7 +601,7 @@ export default function FilesApp() {
               return (
                 <button
                   key={fav.path}
-                  onClick={() => { load(fav.path); if (window.innerWidth < 768) setSidebarOpen(false); }}
+                  onClick={() => { load(fav.path); if (sidebarOverlay) setSidebarOpen(false); }}
                   className={`flex items-center gap-2.5 px-4 py-2 text-sm transition-colors text-left border-l-2 ${
                     active
                       ? "bg-white/[0.08] text-[var(--text-primary)] border-[var(--coral-bright)]"
@@ -562,13 +632,17 @@ export default function FilesApp() {
 
         {/* ── Toolbar ── */}
         <div className="flex items-center gap-1.5 px-3 py-2 shrink-0 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)]">
-          <button
-            onClick={() => setSidebarOpen(p => !p)}
-            className="p-1.5 rounded-md transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] md:hidden cursor-pointer"
-            title="Favorites"
-          >
-            <Icon name="menu" size={18} />
-          </button>
+          {(sidebarOverlay || !sidebarOpen) && (
+            <button
+              onClick={() => setSidebarOpen(p => !p)}
+              className="p-1.5 rounded-md transition-colors text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer"
+              title={t("files.favorites")}
+              aria-label={t("files.favorites")}
+              data-testid="files-sidebar-toggle"
+            >
+              <Icon name="menu" size={18} />
+            </button>
+          )}
           <button
             onClick={() => {
               if (!currentPath) return;
@@ -583,21 +657,29 @@ export default function FilesApp() {
             <Icon name="chevron_left" size={18} />
           </button>
 
-          {/* Breadcrumb */}
-          <div className="flex items-center gap-1 flex-1 text-sm overflow-hidden">
-            {breadcrumbs.map((crumb, idx) => (
-              <span key={idx} className="flex items-center gap-1 shrink-0">
-                {idx > 0 && <Icon name="chevron_right" size={14} color="var(--text-muted)" />}
-                <button
-                  onClick={() => navigateBreadcrumb(idx)}
-                  className={`hover:underline truncate max-w-[120px] cursor-pointer ${
-                    idx === breadcrumbs.length - 1 ? "text-[var(--text-primary)] font-medium" : "text-[var(--text-muted)]"
-                  }`}
-                >
-                  {crumb}
-                </button>
-              </span>
-            ))}
+          {/* Breadcrumb. A trail that does not fit is clipped from the RIGHT,
+              so the crumb that goes first is the folder the owner is IN. The
+              ancestors give way instead: they shrink, and in a narrow window
+              they fold into one "…" that still walks up a level. */}
+          <div className="flex items-center gap-1 flex-1 min-w-0 text-sm overflow-hidden" data-testid="files-breadcrumbs">
+            {shownCrumbs.map((idx, pos) => {
+              const isLast = idx === breadcrumbs.length - 1;
+              const folded = pos === 0 && idx > 0;
+              return (
+                <span key={idx} className={`flex items-center gap-1 ${isLast ? "shrink-0" : "min-w-0 shrink"}`}>
+                  {pos > 0 && <Icon name="chevron_right" size={14} color="var(--text-muted)" />}
+                  <button
+                    onClick={() => navigateBreadcrumb(idx)}
+                    title={breadcrumbs[idx]}
+                    className={`hover:underline truncate cursor-pointer ${isLast ? "max-w-[180px]" : "max-w-[120px]"} ${
+                      isLast ? "text-[var(--text-primary)] font-medium" : "text-[var(--text-muted)]"
+                    }`}
+                  >
+                    {folded ? "…" : breadcrumbs[idx]}
+                  </button>
+                </span>
+              );
+            })}
           </div>
 
           {/* Actions */}
@@ -620,10 +702,10 @@ export default function FilesApp() {
               title={t("files.newFolder")}
             >
               <Icon name="create_new_folder" size={16} />
-              <span className="hidden sm:inline">{t("files.newFolder")}</span>
+              {!narrow && <span>{t("files.newFolder")}</span>}
             </button>
             <button
-              onClick={() => load(currentPath)}
+              onClick={() => { showStatus(null); load(currentPath); }}
               className="p-1.5 rounded-md transition-colors text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer"
               title={t("files.refresh")}
             >
@@ -676,7 +758,7 @@ export default function FilesApp() {
                 <span className="hidden sm:inline">{t("files.searchEverywhere")}</span>
               </button>
             )}
-            {searching && <Icon name="progress_activity" size={16} className="animate-spin text-[var(--text-muted)] shrink-0" />}
+            {searching && <Icon name="progress_activity" size={16} className="motion-safe:animate-spin text-[var(--text-muted)] shrink-0" />}
             <button
               onClick={closeSearch}
               className="p-1 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer shrink-0"
@@ -709,15 +791,22 @@ export default function FilesApp() {
               <Icon name="search" size={13} />
               <span className="truncate">{t("files.searchResultsFor", { query: query.trim() })}</span>
               <span className="opacity-70 shrink-0">· {displayFiles.length}</span>
-              {searchTruncated && (
+              {searchStoppedBy === "matches" && (
                 <span className="opacity-70 shrink-0">· {t("files.searchTruncated", { count: displayFiles.length })}</span>
+              )}
+              {/* Not "first N shown": every match found IS shown — the walk
+                  ran out of budget, so part of the tree was never searched. */}
+              {searchStoppedBy === "scanned" && (
+                <span className="opacity-70 shrink-0" data-testid="files-search-stopped">
+                  · {tr("files.searchStoppedEarly", "stopped early — some folders were not searched")}
+                </span>
               )}
             </div>
           )}
 
           {loading ? (
             <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-              <Icon name="progress_activity" size={24} className="animate-spin mr-2" />
+              <Icon name="progress_activity" size={24} className="motion-safe:animate-spin mr-2" />
               {t("files.loading")}
             </div>
           ) : error ? (
@@ -759,6 +848,7 @@ export default function FilesApp() {
           ) : (
             <ListView
               files={displayFiles}
+              narrow={narrow}
               showLocation={recursive}
               selected={selected}
               onSelect={setSelected}
@@ -772,12 +862,14 @@ export default function FilesApp() {
 
         {/* ── Status bar ── */}
         <div className="px-4 py-1.5 text-xs flex items-center justify-between shrink-0 border-t border-[var(--border-subtle)] text-[var(--text-muted)]">
-          <span>
+          <span data-testid="files-status">
             {statusMsg ?? (searchActive
-              ? `${displayFiles.length} result${displayFiles.length !== 1 ? "s" : ""}`
-              : `${visibleFiles.length} item${visibleFiles.length !== 1 ? "s" : ""}`)}
-            {!searchActive && !showHidden && files.length > visibleFiles.length && (
-              <span className="opacity-60"> · {files.length - visibleFiles.length} hidden</span>
+              ? tr("files.results", "{count} result(s)", { count: displayFiles.length })
+              : t("files.items", { count: visibleFiles.length }))}
+            {/* The count of hidden entries belongs to the COUNT, not to
+                "Folder created · 22 hidden". */}
+            {!statusMsg && !searchActive && !showHidden && files.length > visibleFiles.length && (
+              <span className="opacity-60"> · {tr("files.hiddenCount", "{count} hidden", { count: files.length - visibleFiles.length })}</span>
             )}
           </span>
           {currentPath && <span className="opacity-60">~/{currentPath}</span>}
@@ -878,8 +970,10 @@ function GridView({ files, showLocation, selected, onSelect, onOpen, onContextMe
 
 // ─── List View ────────────────────────────────────────────────────────────────
 
-function ListView({ files, showLocation, selected, onSelect, onOpen, onContextMenu, onLongPressStart, onLongPressEnd }: {
+function ListView({ files, narrow, showLocation, selected, onSelect, onOpen, onContextMenu, onLongPressStart, onLongPressEnd }: {
   files: FileEntry[];
+  /** The window, not the screen: see NARROW_WIDTH. */
+  narrow?: boolean;
   showLocation?: boolean;
   selected: string | null;
   onSelect: (id: string | null) => void;
@@ -889,14 +983,18 @@ function ListView({ files, showLocation, selected, onSelect, onOpen, onContextMe
   onLongPressEnd: () => void;
 }) {
   const { t } = useT();
+  // 80 px of size and 160 px of date are fixed, so in a 300 px-wide window
+  // they left the name one letter. The date is the column that goes: it is the
+  // widest and the least of the three, and it is still in the tooltip.
+  const columns = narrow ? "1fr 80px" : "1fr 80px 160px";
   return (
-    <div className="w-full" onClick={() => onSelect(null)}>
+    <div className="w-full" data-testid="files-list" data-narrow={narrow || undefined} onClick={() => onSelect(null)}>
       {/* Header */}
       <div className="grid px-4 py-2 text-xs font-medium sticky top-0 border-b border-[var(--border-subtle)] bg-[var(--bg-deep)] text-[var(--text-muted)]"
-        style={{ gridTemplateColumns: "1fr 80px 160px" }}>
+        style={{ gridTemplateColumns: columns }}>
         <span>{t("files.name")}</span>
         <span className="text-right">{t("files.size")}</span>
-        <span className="text-right">{t("files.modified")}</span>
+        {!narrow && <span className="text-right">{t("files.modified")}</span>}
       </div>
       {files.map((entry) => {
         const id = entryId(entry);
@@ -909,7 +1007,8 @@ function ListView({ files, showLocation, selected, onSelect, onOpen, onContextMe
             className={`grid px-4 py-2 items-center cursor-pointer transition-colors border-b border-white/[0.03] select-none ${
               isSelected ? "bg-[var(--coral-bright)]/10" : "hover:bg-white/[0.03]"
             }`}
-            style={{ gridTemplateColumns: "1fr 80px 160px" }}
+            style={{ gridTemplateColumns: columns }}
+            title={formatDate(entry.modified)}
             onClick={(e) => { e.stopPropagation(); onSelect(id); }}
             onDoubleClick={() => onOpen(entry)}
             onContextMenu={(e) => onContextMenu(e, entry)}
@@ -929,7 +1028,7 @@ function ListView({ files, showLocation, selected, onSelect, onOpen, onContextMe
               </span>
             </span>
             <span className="text-right text-xs text-[var(--text-muted)]">{formatSize(entry.size)}</span>
-            <span className="text-right text-xs text-[var(--text-muted)]">{formatDate(entry.modified)}</span>
+            {!narrow && <span className="text-right text-xs text-[var(--text-muted)]">{formatDate(entry.modified)}</span>}
           </div>
         );
       })}
@@ -966,6 +1065,7 @@ function ContextMenu({ entry, x, y, onOpen, onDownload, onRename, onDelete, onCl
   }, [x, y]);
 
   const { t } = useT();
+  const tr = useTr();
   const items: { icon: string; label: string; onClick: () => void; danger?: boolean; color?: string }[] = [];
 
   if (entry.type === "directory") {
@@ -1003,7 +1103,7 @@ function ContextMenu({ entry, x, y, onOpen, onDownload, onRename, onDelete, onCl
     <div
       ref={menuRef}
       role="menu"
-      aria-label={`Actions for ${entry.name}`}
+      aria-label={tr("files.actionsFor", "Actions for {name}", { name: entry.name })}
       tabIndex={-1}
       className="fixed z-50 min-w-[160px] py-1.5 rounded-xl shadow-2xl border border-[var(--border-subtle)] overflow-hidden outline-none"
       style={{ left: x, top: y, background: "var(--bg-elevated)", backdropFilter: "blur(16px)" }}
@@ -1046,13 +1146,21 @@ function DialogOverlay({ dialog, onChange, onCancel, onSubmit }: {
   onSubmit: () => void;
 }) {
   const { t } = useT();
+  const tr = useTr();
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { if (dialog.type !== "delete") inputRef.current?.select(); }, [dialog.type]);
 
   const isDelete = dialog.type === "delete";
   const title = dialog.type === "mkdir" ? t("files.newFolderTitle")
     : dialog.type === "rename" ? t("files.renameTitle")
-    : `Delete "${dialog.entry?.name}"?`;
+    : tr("files.deleteTitle", "Delete “{name}”?", { name: dialog.entry?.name ?? "" });
+
+  // A rename is a name. `../escape.txt` used to be accepted here and the route
+  // moved the file to the parent folder under a "Renamed" — the owner's only
+  // sign was the file gone from the folder they were looking at.
+  const typed = (dialog.value ?? "").trim();
+  const pathTyped = dialog.type === "rename" && typed.length > 0 && !isBareName(typed);
+  const submit = () => { if (!pathTyped) onSubmit(); };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
@@ -1071,7 +1179,7 @@ function DialogOverlay({ dialog, onChange, onCancel, onSubmit }: {
         </h3>
         {isDelete ? (
           <p className="text-sm mb-5 text-[var(--text-secondary)]">
-            This action cannot be undone. {dialog.entry?.type === "directory" ? t("files.deleteConfirm") : ""}
+            {tr("files.cannotUndo", "This action cannot be undone.")} {dialog.entry?.type === "directory" ? t("files.deleteConfirm") : ""}
           </p>
         ) : (
           <input
@@ -1079,10 +1187,16 @@ function DialogOverlay({ dialog, onChange, onCancel, onSubmit }: {
             autoFocus
             value={dialog.value ?? ""}
             onChange={(e) => onChange(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") onSubmit(); if (e.key === "Escape") onCancel(); }}
-            className="w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border border-gray-600 rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500 mb-5"
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") onCancel(); }}
+            className={`w-full px-3.5 py-2.5 bg-[var(--bg-deep)] border rounded-lg text-sm text-gray-200 outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-gray-500 ${pathTyped ? "border-red-500 mb-2" : "border-gray-600 mb-5"}`}
             placeholder={dialog.type === "mkdir" ? t("files.folderName") : t("files.newName")}
+            aria-invalid={pathTyped || undefined}
           />
+        )}
+        {pathTyped && (
+          <p className="text-xs mb-5 text-red-400" data-testid="files-rename-invalid">
+            {tr("files.nameNotPath", "Enter a name, not a path.")}
+          </p>
         )}
         <div className="flex gap-2 justify-end">
           <button
@@ -1092,8 +1206,9 @@ function DialogOverlay({ dialog, onChange, onCancel, onSubmit }: {
             {t("cancel")}
           </button>
           <button
-            onClick={onSubmit}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors cursor-pointer text-white ${
+            onClick={submit}
+            disabled={pathTyped}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors cursor-pointer text-white disabled:opacity-40 disabled:cursor-default ${
               isDelete
                 ? "bg-red-600 hover:bg-red-500"
                 : "btn-gradient hover:opacity-90"
@@ -1197,6 +1312,14 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
     else onClose();
   }, [dirty, onClose]);
 
+  // Phone Back closes the file the same way the X does; with the discard
+  // prompt up, it dismisses the prompt first.
+  const phoneLayout = usePhoneLayout();
+  useMobileBack(phoneLayout, () => {
+    if (confirmDiscard) setConfirmDiscard(false);
+    else attemptClose();
+  });
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // While the discard confirmation is up, keep keys scoped to it — Escape
     // dismisses it, and nothing else leaks through to the editor underneath.
@@ -1239,7 +1362,7 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors disabled:opacity-40 disabled:cursor-default bg-[var(--coral-bright)]/15 text-[var(--coral-bright)] hover:bg-[var(--coral-bright)]/25 cursor-pointer"
             title={t("files.save")}
           >
-            <Icon name={saving ? "progress_activity" : "save"} size={16} className={saving ? "animate-spin" : ""} />
+            <Icon name={saving ? "progress_activity" : "save"} size={16} className={saving ? "motion-safe:animate-spin" : ""} />
             <span className="hidden sm:inline">{t("files.save")}</span>
           </button>
         )}
@@ -1263,18 +1386,20 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
       <div className="flex-1 min-h-0 overflow-auto relative">
         {loading ? (
           <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-            <Icon name="progress_activity" size={24} className="animate-spin mr-2" />{t("files.loading")}
+            <Icon name="progress_activity" size={24} className="motion-safe:animate-spin mr-2" />{t("files.loading")}
           </div>
         ) : error ? (
           <ViewerMessage icon="error" text={error} url={url} name={entry.name} color="#f87171" />
         ) : kind === "text" ? (
-          <textarea
-            autoFocus
+          <CodeEditor
             value={content}
-            onChange={(e) => setContent(e.target.value)}
-            spellCheck={false}
-            className="w-full h-full resize-none bg-[var(--bg-deep)] text-[var(--text-primary)] font-mono text-[13px] leading-relaxed p-4 outline-none"
-            style={{ tabSize: 2 }}
+            onChange={setContent}
+            language={languageForFile(entry.name)}
+            onSave={() => { if (dirty) void save(); }}
+            autoFocus
+            ariaLabel={entry.name}
+            className="[--cb-code-ground:var(--bg-deep)]"
+            testId="files-editor"
           />
         ) : kind === "image" ? (
           <div className="flex items-center justify-center h-full p-4">

@@ -7,6 +7,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NextResponse } from "next/server";
+
+const routeAuth = { requireSession: vi.fn() };
+const internalToken = { isInternalRequest: vi.fn() };
 
 const cloudflared = {
   readTunnelUrl: vi.fn(),
@@ -18,26 +22,96 @@ const liveness = {
   mayRestart: vi.fn(),
   markRestarted: vi.fn(),
 };
+const persona = { applyDeferredLanguagePersona: vi.fn() };
 
+vi.mock("@/lib/language-persona", () => persona);
 vi.mock("@/lib/cloudflared", () => cloudflared);
 vi.mock("@/lib/portal-heartbeat", () => heartbeat);
 vi.mock("@/lib/tunnel-liveness", () => liveness);
+vi.mock("@/lib/route-auth", () => routeAuth);
+vi.mock("@/lib/internal-token", () => internalToken);
 
-async function tick() {
+function request(headers: Record<string, string> = {}) {
+  return new Request("http://127.0.0.1/setup-api/portal/heartbeat-tick", { headers });
+}
+
+async function tick(req: Request = request()) {
   const mod = await import("@/app/setup-api/portal/heartbeat-tick/route");
-  return mod.GET();
+  return mod.GET(req);
 }
 
 beforeEach(() => {
   vi.resetModules();
   liveness.mayRestart.mockReturnValue(true);
-  cloudflared.startTunnelService.mockResolvedValue(undefined);
+  cloudflared.startTunnelService.mockResolvedValue({ bootPersisted: true, bootPersistWarning: null });
+  persona.applyDeferredLanguagePersona.mockResolvedValue(false);
+  // Default for the behavioural tests below: the systemd unit, presenting the
+  // install's internal token.
+  internalToken.isInternalRequest.mockReturnValue(true);
+  routeAuth.requireSession.mockResolvedValue(null);
 });
 
 afterEach(() => {
-  for (const fn of [...Object.values(cloudflared), ...Object.values(heartbeat), ...Object.values(liveness)]) {
+  for (const fn of [
+    ...Object.values(cloudflared),
+    ...Object.values(heartbeat),
+    ...Object.values(liveness),
+    ...Object.values(routeAuth),
+    ...Object.values(internalToken),
+    ...Object.values(persona),
+  ]) {
     fn.mockReset();
   }
+});
+
+/**
+ * The tick is pre-auth in middleware because the timer runs on a device nobody
+ * has logged into. That had become "anyone may call it" — and the dead-tunnel
+ * branch RESTARTS clawbox-tunnel, so any LAN neighbour, or anyone holding the
+ * box's public tunnel URL, could bounce a systemd unit four times an hour
+ * (TASK-446).
+ */
+describe("who may call the tick", () => {
+  beforeEach(() => {
+    cloudflared.readTunnelUrl.mockResolvedValue("https://dead-tunnel-example.trycloudflare.com");
+    liveness.checkTunnelLiveness.mockResolvedValue("dead");
+  });
+
+  it("refuses an anonymous caller, and restarts nothing", async () => {
+    internalToken.isInternalRequest.mockReturnValue(false);
+    routeAuth.requireSession.mockResolvedValue(
+      NextResponse.json({ error: "Authentication required" }, { status: 401 }),
+    );
+
+    const res = await tick();
+
+    expect(res.status).toBe(401);
+    expect(cloudflared.startTunnelService).not.toHaveBeenCalled();
+    expect(heartbeat.pushHeartbeatTick).not.toHaveBeenCalled();
+  });
+
+  it("accepts our own unit on its internal token, with no session", async () => {
+    internalToken.isInternalRequest.mockReturnValue(true);
+    routeAuth.requireSession.mockResolvedValue(
+      NextResponse.json({ error: "Authentication required" }, { status: 401 }),
+    );
+
+    const res = await tick(request({ "x-clawbox-internal-token": "a".repeat(64) }));
+
+    expect(res.status).toBe(200);
+    // The token is checked BEFORE the session, so the timer never depends on
+    // anyone being logged in.
+    expect(routeAuth.requireSession).not.toHaveBeenCalled();
+  });
+
+  it("accepts the owner's browser on its session cookie", async () => {
+    internalToken.isInternalRequest.mockReturnValue(false);
+    routeAuth.requireSession.mockResolvedValue(null);
+
+    const res = await tick();
+
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("a live tunnel", () => {
@@ -110,5 +184,53 @@ describe("when the box cannot tell", () => {
     const res = await tick();
     expect(res.status).toBe(200);
     expect(heartbeat.pushHeartbeatTick).toHaveBeenCalledWith(null);
+  });
+});
+
+/**
+ * The tick is also what pays back a language pick OpenClaw's
+ * first-conversation ritual made ClawBox defer.
+ *
+ * POST /setup-api/preferences refuses to write USER.md/SOUL.md while the
+ * introduction is armed or unstarted — creating those files is what suppressed
+ * the ritual on every box that shipped — and records the debt instead. Nothing
+ * restarts the gateway when the agent finishes the introduction, so the
+ * ExecStartPre that re-applies the pick can sit unrun for as long as the box
+ * stays up: the desktop in the owner's language, the agent's persona with no
+ * language directive at all. This five-minute tick is the only thing on a
+ * running box that fires without anyone touching it, so it is where the debt
+ * is drained.
+ */
+describe("the deferred language pick", () => {
+  it("is drained on an ordinary tick", async () => {
+    cloudflared.readTunnelUrl.mockResolvedValue("https://alive.trycloudflare.com");
+    liveness.checkTunnelLiveness.mockResolvedValue("alive");
+
+    await tick();
+    expect(persona.applyDeferredLanguagePersona).toHaveBeenCalledTimes(1);
+  });
+
+  it("is drained on the dead-tunnel path too, which returns early", async () => {
+    // The tunnel and the persona have nothing to do with each other; a box
+    // whose tunnel died must still learn the owner's language.
+    cloudflared.readTunnelUrl.mockResolvedValue("https://dead.trycloudflare.com");
+    liveness.checkTunnelLiveness.mockResolvedValue("dead");
+
+    const res = await tick();
+    expect(res.status).toBe(200);
+    expect(persona.applyDeferredLanguagePersona).toHaveBeenCalledTimes(1);
+  });
+
+  it("is not drained for a caller the tick refuses", async () => {
+    // The drain writes the agent's system prompt from stored state. It belongs
+    // behind the same door as the unit restart below it.
+    internalToken.isInternalRequest.mockReturnValue(false);
+    routeAuth.requireSession.mockResolvedValue(
+      NextResponse.json({ error: "Authentication required" }, { status: 401 }),
+    );
+
+    const res = await tick();
+    expect(res.status).toBe(401);
+    expect(persona.applyDeferredLanguagePersona).not.toHaveBeenCalled();
   });
 });

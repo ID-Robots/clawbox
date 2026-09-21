@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 
 import { readTunnelUrl, startTunnelService } from "@/lib/cloudflared";
+import { isInternalRequest } from "@/lib/internal-token";
+import { applyDeferredLanguagePersona } from "@/lib/language-persona";
+import { refreshCatalogIfDue } from "@/lib/hermes-model-options";
+import { readTunnelMode } from "@/lib/named-tunnel";
 import { pushHeartbeatTick } from "@/lib/portal-heartbeat";
+import { requireSession } from "@/lib/route-auth";
 import { checkTunnelLiveness, markRestarted, mayRestart } from "@/lib/tunnel-liveness";
 
 export const dynamic = "force-dynamic";
@@ -28,14 +33,71 @@ export const dynamic = "force-dynamic";
 // surfaces distinct also means a future addition to /portal/status
 // can't accidentally widen the timer's blast radius.
 //
-// Always returns 200. The tick helper is fire-and-forget: it no-ops on
+// Authenticated, despite being pre-auth in middleware. The route has to stay
+// reachable without a session — the timer curls it on a device nobody has logged
+// into — but "no session required" had become "anyone may call it", and the dead
+// -tunnel branch below RESTARTS a systemd unit. Anyone on the LAN, or anyone
+// holding the box's public tunnel URL, could bounce clawbox-tunnel four times an
+// hour by hitting this path (TASK-446). So: our own units present the
+// per-install internal token (see src/lib/internal-token.ts, and the
+// EnvironmentFile line in config/clawbox-heartbeat.service), the owner's browser
+// presents a session cookie, and everyone else gets 401.
+//
+// Otherwise always returns 200. The tick helper is fire-and-forget: it no-ops on
 // missing token, missing tunnel URL, or network failure — surfacing a 500
 // here would just make the systemd unit flap, which the timer's
 // SuccessExitStatus already tolerates. The restart is best-effort for the
 // same reason.
-export async function GET() {
+export async function GET(request: Request) {
+  if (!isInternalRequest(request)) {
+    const unauthorized = await requireSession(request);
+    if (unauthorized) return unauthorized;
+  }
+
+  // Pay back a language pick OpenClaw's first-conversation ritual made us
+  // defer, if the introduction is over. This rides on the heartbeat because
+  // the heartbeat is the only thing on a running box that fires without anyone
+  // touching it — POST /setup-api/preferences skips the persona write while
+  // the ritual is armed, and nothing restarts the gateway when the agent
+  // finishes it, so the ExecStartPre that re-applies the same pick may not run
+  // for days. It is a no-op on every box that owes nothing (see
+  // applyDeferredLanguagePersona), and it never throws, so it cannot turn a
+  // tick into the 500 that would make the systemd unit flap.
+  await applyDeferredLanguagePersona();
+
+  // Keep the model picker's list from ageing out, for the same reason and on
+  // the same ride: nothing else on the box forces the harness to go and re-read
+  // what each provider actually serves. Hermes' own caches will carry a list
+  // forward for up to seven days, and ClawBox only ever busts them when the
+  // owner clicks Refresh — so `claude-opus-5` and `claude-fable-5-1` were
+  // missing from a box whose credential listed them live (TASK-781).
+  //
+  // NOT AWAITED, deliberately, like `pushHeartbeatTick` below. This unit runs
+  // `curl --max-time 10`, and the dead-tunnel path underneath already spends up
+  // to 7.5 s of that on DNS (see tunnel-liveness.ts) — putting a dashboard
+  // round-trip in front of it would push the tunnel repair past curl's deadline
+  // on exactly the tick that performs it, and `SuccessExitStatus` would swallow
+  // the truncation. `refreshCatalogIfDue` never rejects, so there is no
+  // unhandled rejection to catch; it decides in two cheap reads on the 287
+  // ticks a day that are not the one, and no-ops on an OpenClaw box, whose
+  // catalogue route already re-enumerates by itself on the read path.
+  void refreshCatalogIfDue();
+
   const tunnelUrl = await readTunnelUrl();
   const liveness = await checkTunnelLiveness(tunnelUrl);
+
+  // A NAMED tunnel's hostname does not change on a restart, so restarting
+  // cannot fix one that does not resolve — and it only fails to resolve while
+  // the portal has not yet created (or has just re-created) its DNS record,
+  // which the portal does on a heartbeat. Withholding the heartbeat here would
+  // be the one thing that keeps the record from ever appearing.
+  if (liveness === "dead" && (await readTunnelMode()) === "named") {
+    pushHeartbeatTick(tunnelUrl);
+    return NextResponse.json(
+      { ok: true, tunnel: "dead", restarted: false },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
 
   if (liveness === "dead") {
     // Do not push. Reporting a hostname we have just proven does not exist is
@@ -44,10 +106,16 @@ export async function GET() {
     let restarted = false;
     if (mayRestart()) {
       try {
-        await startTunnelService();
+        // The `enable` verdict is read, not discarded. It is NOT surfaced in the
+        // body: this path restarts a unit that was already running, so it was
+        // already enabled, and the timer has no owner watching it. What a failure
+        // here means is that the box's own repair could not re-arm boot start —
+        // worth a line in the journal an operator can find, and nothing more.
+        const { bootPersisted, bootPersistWarning } = await startTunnelService();
         markRestarted();
         restarted = true;
         console.warn(`[heartbeat-tick] tunnel hostname dead, restarted clawbox-tunnel (was ${tunnelUrl})`);
+        if (!bootPersisted) console.warn(`[heartbeat-tick] ${bootPersistWarning}`);
       } catch (err) {
         console.warn("[heartbeat-tick] tunnel restart failed:", err instanceof Error ? err.message : err);
       }

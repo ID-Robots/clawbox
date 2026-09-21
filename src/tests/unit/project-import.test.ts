@@ -1,0 +1,610 @@
+/**
+ * @vitest-environment node
+ *
+ * Importing a project into the owner's project folder: a copy of a folder
+ * on the box (real fs, real git) and a clone of a GitHub repository (gh
+ * stubbed — the network is not under test, the fences and the outcomes are).
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "child_process";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { saveEnv } from "@/tests/helpers/env";
+import {
+  CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
+  CODING_AGENT_GIT_NAME_CONFIG_KEY,
+  CODING_GIT_PLACEHOLDER,
+} from "@/lib/coding-git-identity";
+
+// Starts real git processes: the 5 s default is not enough on a loaded runner.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+const githubStatus = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/coding-github", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/coding-github")>("@/lib/coding-github");
+  return { ...actual, githubStatus };
+});
+
+/** What each gh invocation answers, matched on its argv joined by spaces. */
+const ghAnswers = vi.hoisted(() => new Map<string, { code: number; stdout?: string; stderr?: string }>());
+const ghCalls = vi.hoisted(() => [] as string[][]);
+/**
+ * While this holds a promise, a `gh api user/repos` waits on it before
+ * answering — the only way to have a listing still in flight when the test
+ * changes the account under it.
+ */
+const ghHold = vi.hoisted(() => ({ current: null as Promise<void> | null }));
+/**
+ * The same, but held BEFORE the answer is picked — which is what a real `gh`
+ * boot does: it reads the credential out of HOME at the moment it runs, so a
+ * boot that starts under alice and lands under bob answers as bob.
+ */
+const ghHoldEarly = vi.hoisted(() => ({ current: null as Promise<void> | null }));
+/**
+ * `git` invocations whose argv CONTAINS one of these strings fail instead of
+ * running — the only way to see what an import reports when a step of setting a
+ * new repository up goes wrong. Every other git call is the real thing, and the
+ * stderr names the step, so a test can tell WHICH failure was reported.
+ *
+ * Contains rather than starts-with: a commit carries `-c user.name=…` overrides
+ * ahead of the subcommand, so its argv does not begin with `commit`.
+ */
+const gitFails = vi.hoisted(() => ({ current: [] as string[] }));
+vi.mock("@/lib/child-run", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/child-run")>("@/lib/child-run");
+  return {
+    ...actual,
+    runChild: async (bin: string, args: string[], opts: Parameters<typeof actual.runChild>[2]) => {
+      if (bin === "git") {
+        const step = gitFails.current.find((needle) => args.join(" ").includes(needle));
+        if (step) {
+          return { code: 1, stdout: "", stderr: `git refused: ${step}`, signal: null, timedOut: false, startFailed: false, startError: null };
+        }
+      }
+      if (bin !== "gh") return actual.runChild(bin, args, opts);
+      ghCalls.push(args);
+      if (ghHoldEarly.current && args.join(" ").startsWith("api user/repos")) await ghHoldEarly.current;
+      const key = [...ghAnswers.keys()].find((k) => args.join(" ").startsWith(k));
+      const a = key ? ghAnswers.get(key)! : { code: 1, stderr: "no answer scripted" };
+      // Held AFTER the answer is picked, so a listing caught mid-flight still
+      // returns the rows that were scripted when it started.
+      if (ghHold.current && args.join(" ").startsWith("api user/repos")) await ghHold.current;
+      // A scripted clone makes the folder the way a real one would.
+      if (args[0] === "repo" && args[1] === "clone" && a.code === 0) {
+        fs.mkdirSync(path.join(args[3], ".git"), { recursive: true });
+        fs.writeFileSync(path.join(args[3], "README.md"), "cloned\n");
+      }
+      return { code: a.code, stdout: a.stdout ?? "", stderr: a.stderr ?? "", signal: null, timedOut: false, startFailed: false, startError: null };
+    },
+  };
+});
+
+let lib: typeof import("@/lib/project-import");
+let base: string;
+let home: string;
+let projects: string;
+let restore: () => void;
+
+function git(dir: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf-8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: home } }).trim();
+}
+
+/**
+ * Write the owner's data/config.json — the real one the real config store
+ * reads, under this test's own CLAWBOX_ROOT.
+ *
+ * NOT a mock of `@/lib/config-store`: that module captures `CONFIG_ROOT` at
+ * import time, and a mock factory spreading the original snapshots it once for
+ * the whole file. Every later test would then measure its fences against an
+ * earlier test's temp directory — which is how mocking it here first let a
+ * source inside the ClawBox checkout be imported.
+ */
+function storeConfig(values: Record<string, unknown>): void {
+  fs.writeFileSync(path.join(home, "clawbox", "data", "config.json"), JSON.stringify(values));
+}
+
+beforeEach(async () => {
+  restore = saveEnv("HOME", "CLAWBOX_ROOT");
+  base = fs.mkdtempSync(path.join(os.tmpdir(), "project-import-"));
+  home = path.join(base, "home");
+  projects = path.join(home, "Projects");
+  fs.mkdirSync(path.join(home, "clawbox", "data"), { recursive: true });
+  fs.mkdirSync(projects, { recursive: true });
+  process.env.HOME = home;
+  process.env.CLAWBOX_ROOT = path.join(home, "clawbox");
+  gitFails.current = [];
+  ghAnswers.clear();
+  ghCalls.length = 0;
+  ghHold.current = null;
+  ghHoldEarly.current = null;
+  githubStatus.mockResolvedValue({ installed: true, connected: true, login: "yalexx", loginCommand: "gh auth login" });
+  vi.resetModules();
+  lib = await import("@/lib/project-import");
+});
+
+afterEach(() => {
+  restore();
+  fs.rmSync(base, { recursive: true, force: true });
+});
+
+describe("importFolderName", () => {
+  it("makes a folder name GitHub and the project folder both accept", () => {
+    expect(lib.importFolderName("/home/x/My Old Site")).toBe("My-Old-Site");
+    expect(lib.importFolderName("tinder-clone.git")).toBe("tinder-clone");
+    expect(lib.importFolderName("../../etc")).toBe("etc");
+    expect(lib.importFolderName("///")).toBe("project");
+    expect(lib.importFolderName("x".repeat(100))).toHaveLength(64);
+  });
+});
+
+describe("importFolder", () => {
+  function makeSource(name: string, opts: { git?: boolean; nodeModules?: boolean } = {}): string {
+    const dir = path.join(home, name);
+    fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "src", "index.js"), "console.log(1)\n");
+    fs.writeFileSync(path.join(dir, "README.md"), "# hi\n");
+    if (opts.nodeModules) {
+      fs.mkdirSync(path.join(dir, "node_modules", "left-pad"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "node_modules", "left-pad", "index.js"), "x");
+    }
+    if (opts.git) {
+      git(dir, "init", "--quiet");
+      git(dir, "config", "user.name", "T");
+      git(dir, "config", "user.email", "t@example.com");
+      git(dir, "add", "-A");
+      git(dir, "commit", "--quiet", "-m", "theirs");
+    }
+    return dir;
+  }
+
+  it("copies the folder into the project folder, leaves node_modules behind and gives it a repository", async () => {
+    const src = makeSource("old-site", { nodeModules: true });
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, folder: "old-site", directory: path.join(projects, "old-site"), initialized: true, skipped: ["node_modules"] });
+    expect(fs.readFileSync(path.join(projects, "old-site", "src", "index.js"), "utf-8")).toBe("console.log(1)\n");
+    expect(fs.existsSync(path.join(projects, "old-site", "node_modules"))).toBe(false);
+    expect(git(path.join(projects, "old-site"), "log", "--oneline")).toMatch(/Imported from /);
+    // The source is exactly as it was.
+    expect(fs.existsSync(path.join(src, "node_modules", "left-pad", "index.js"))).toBe(true);
+  });
+
+  it("authors the first commit as the owner, never as an address nobody owns", async () => {
+    // THE DEFECT THIS PINS. This function stamped `ClawBox <clawbox@localhost>`
+    // into the new repository's own config. The coding agent's identity
+    // resolver reads a project's `.git/config` FIRST — by design, because a
+    // repository the owner commits to by hand carries the identity they want —
+    // so the box's own mark outranked the Commit author setting for the life of
+    // the project, and every commit the agent made in an imported folder was
+    // authored by an address no GitHub account owns and failed the host's
+    // deployment check.
+    storeConfig({
+      [CODING_AGENT_GIT_NAME_CONFIG_KEY]: "Box Owner",
+      [CODING_AGENT_GIT_EMAIL_CONFIG_KEY]: "owner@example.com",
+    });
+    const src = makeSource("fresh-site");
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, initialized: true });
+    const dir = path.join(projects, "fresh-site");
+    expect(git(dir, "log", "-1", "--format=%an <%ae>")).toBe("Box Owner <owner@example.com>");
+    // And the mark left behind is the owner's too, so the resolver reads back
+    // an identity they chose rather than one the box invented for them.
+    expect(git(dir, "config", "user.email")).toBe("owner@example.com");
+    expect(git(dir, "config", "user.name")).toBe("Box Owner");
+  });
+
+  it("still gives a repository an identity when nothing at all is configured", async () => {
+    // The floor, unchanged: a box nobody has told anything must still be able
+    // to make that first commit rather than fail with "Committer identity
+    // unknown". The placeholder is recognised as the box's own mark elsewhere,
+    // so it never outvotes a setting the owner fills in later.
+    const src = makeSource("bare-site");
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, initialized: true });
+    const dir = path.join(projects, "bare-site");
+    expect(git(dir, "log", "--oneline")).toMatch(/Imported from /);
+    expect(git(dir, "config", "user.email")).toBe(CODING_GIT_PLACEHOLDER.email);
+  });
+
+  it("authors the first commit as the owner even when the identity cannot be written", async () => {
+    // git does not stop at a failed `git config`. It resolves the missing half
+    // from the global or system configuration and commits as whoever THAT is —
+    // so a project's very first commit would carry a name nobody chose, which
+    // is the whole defect this change exists to end. The `-c` overrides on the
+    // commit are what make it the owner's whether the write landed or not.
+    storeConfig({
+      [CODING_AGENT_GIT_NAME_CONFIG_KEY]: "Box Owner",
+      [CODING_AGENT_GIT_EMAIL_CONFIG_KEY]: "owner@example.com",
+    });
+    gitFails.current = ["config user.email"];
+    const src = makeSource("half-configured");
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, initialized: true });
+    const dir = path.join(projects, "half-configured");
+    expect(git(dir, "log", "-1", "--format=%an <%ae>")).toBe("Box Owner <owner@example.com>");
+  });
+
+  it("keeps both setup failures, naming the one that broke first", async () => {
+    // The two `git config` results used to be discarded. If writing the
+    // identity failed, the commit right after it failed with git's own
+    // "Committer identity unknown" — and the owner was told "Recording the
+    // first commit" for a fault that happened two steps earlier, pointing them
+    // at the one step that was fine.
+    const errors: string[] = [];
+    const logged = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.map((a) => String(a)).join(" "));
+    });
+    try {
+      // BOTH steps are failed, deliberately. Failing only the `config` proves
+      // nothing portable: whether the commit then fails depends on the machine.
+      // A runner with an identity in /etc/gitconfig commits happily — the
+      // import's own git calls, unlike the resolver's, do not set
+      // GIT_CONFIG_NOSYSTEM — and on a box with none it fails. What is under
+      // test is which of two failures gets reported, so both are made certain.
+      gitFails.current = ["config user.email", "commit"];
+      const src = makeSource("unlucky-site");
+      const out = await lib.importFolder({ source: src, projectsRoot: projects });
+      // The import still stands: the folder is the owner's and it arrived.
+      expect(out).toMatchObject({ ok: true, initialized: true });
+      // And the repository is still there — a failed `config` is recoverable
+      // (the settle passes the identity on every commit), so nothing is torn
+      // down for it.
+      expect(fs.existsSync(path.join(projects, "unlucky-site", ".git"))).toBe(true);
+      const said = errors.join("\n");
+      // BOTH are kept, and the step that broke FIRST is named first: a failed
+      // identity write is usually the cause of the failed commit, so naming
+      // only the commit points the owner at the one step that was fine, and
+      // naming only the config would hide a commit that broke for its own
+      // reasons.
+      expect(said).toMatch(/config user\.email/);
+      expect(said).toMatch(/git refused: commit/);
+      expect(said.indexOf("config user.email")).toBeLessThan(said.indexOf("git refused: commit"));
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("keeps a folder's own history rather than starting one", async () => {
+    const src = makeSource("with-git", { git: true });
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, initialized: false });
+    expect(git(path.join(projects, "with-git"), "log", "--oneline")).toMatch(/theirs/);
+  });
+
+  it("expands ~ the way the Terminal would", async () => {
+    makeSource("tilde");
+    const out = await lib.importFolder({ source: "~/tilde", projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, folder: "tilde" });
+  });
+
+  it("refuses without a project folder, a relative path, a folder outside home, a missing folder and a file", async () => {
+    const src = makeSource("s");
+    expect(await lib.importFolder({ source: src, projectsRoot: null })).toMatchObject({ ok: false, reason: "no_project_folder" });
+    expect(await lib.importFolder({ source: "old-site", projectsRoot: projects })).toMatchObject({ ok: false, reason: "invalid" });
+    // Only the owner's own tree: /tmp and /etc are not theirs to import.
+    expect(await lib.importFolder({ source: os.tmpdir(), projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+    expect(await lib.importFolder({ source: "/etc", projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+    expect(await lib.importFolder({ source: path.join(home, "nope"), projectsRoot: projects })).toMatchObject({ ok: false, reason: "not_found" });
+    expect(await lib.importFolder({ source: path.join(src, "README.md"), projectsRoot: projects })).toMatchObject({ ok: false, reason: "not_a_folder" });
+  });
+
+  it("refuses the ClawBox checkout, its data folder, the project folder itself, a project in it, and a parent of it", async () => {
+    const checkout = path.join(home, "clawbox");
+    fs.mkdirSync(path.join(checkout, "src"), { recursive: true });
+    expect(await lib.importFolder({ source: checkout, projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+    expect(await lib.importFolder({ source: path.join(checkout, "data"), projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+    expect(await lib.importFolder({ source: projects, projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+    fs.mkdirSync(path.join(projects, "already"), { recursive: true });
+    expect(await lib.importFolder({ source: path.join(projects, "already"), projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+    expect(await lib.importFolder({ source: home, projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+    // The credential stores are never a project.
+    fs.mkdirSync(path.join(home, ".ssh"), { recursive: true });
+    expect(await lib.importFolder({ source: path.join(home, ".ssh"), projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+  });
+
+  it("never merges into a name already taken", async () => {
+    const src = makeSource("taken");
+    fs.mkdirSync(path.join(projects, "taken"));
+    fs.writeFileSync(path.join(projects, "taken", "keep.txt"), "mine");
+    expect(await lib.importFolder({ source: src, projectsRoot: projects })).toMatchObject({ ok: false, reason: "exists" });
+    expect(fs.readFileSync(path.join(projects, "taken", "keep.txt"), "utf-8")).toBe("mine");
+    expect(fs.existsSync(path.join(projects, "taken", "README.md"))).toBe(false);
+  });
+
+  it("copies a link inside the source as a link, never as what it points at", async () => {
+    const src = makeSource("linky");
+    fs.symlinkSync(path.join(home, "clawbox"), path.join(src, "escape"));
+    const out = await lib.importFolder({ source: src, projectsRoot: projects });
+    expect(out.ok).toBe(true);
+    expect(fs.lstatSync(path.join(projects, "linky", "escape")).isSymbolicLink()).toBe(true);
+  });
+
+  it("refuses everything when the home directory is the filesystem root", async () => {
+    process.env.HOME = "/";
+    vi.resetModules();
+    const rootLib = await import("@/lib/project-import");
+    expect(await rootLib.importFolder({ source: "/etc", projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+    process.env.HOME = home;
+  });
+
+  it("runs imports one at a time, so two of one name cannot both pass the checks", async () => {
+    const a = makeSource("twin");
+    const [first, second] = await Promise.all([
+      lib.importFolder({ source: a, projectsRoot: projects }),
+      lib.importFolder({ source: a, projectsRoot: projects }),
+    ]);
+    expect([first.ok, second.ok].sort()).toEqual([false, true]);
+    expect(fs.existsSync(path.join(projects, "twin", "README.md"))).toBe(true);
+  });
+
+  it("refuses a link under home that leads outside it", async () => {
+    fs.symlinkSync(os.tmpdir(), path.join(home, "out"));
+    expect(await lib.importFolder({ source: path.join(home, "out"), projectsRoot: projects })).toMatchObject({ ok: false, reason: "refused" });
+  });
+});
+
+describe("listGitHubRepos", () => {
+  const page = (rows: unknown[]) => JSON.stringify(rows);
+  const repo = (full: string, extra: Record<string, unknown> = {}) => ({
+    full_name: full, name: full.split("/")[1], owner: { login: full.split("/")[0] }, private: false, pushed_at: "2026-09-01T00:00:00Z", default_branch: "main", ...extra,
+  });
+
+  it("lists what the account can see, newest push first, and flags the ClawBox apps", async () => {
+    ghAnswers.set("api user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member&page=1", {
+      code: 0, stdout: page([repo("yalexx/tinder-clone", { description: "Swipe", private: true }), repo("ID-Robots/clawbox"), { junk: true }]),
+    });
+    // One search PER OWNER: GitHub's code search takes one user: qualifier.
+    ghAnswers.set("api -X GET search/code -f q=filename:clawbox.json user:yalexx", {
+      code: 0, stdout: JSON.stringify({ items: [{ name: "clawbox.json", path: "clawbox.json", repository: { full_name: "yalexx/tinder-clone" } }] }),
+    });
+    ghAnswers.set("api -X GET search/code -f q=filename:clawbox.json user:ID-Robots", {
+      code: 0, stdout: JSON.stringify({ items: [{ name: "clawbox.json", path: "fixtures/clawbox.json", repository: { full_name: "ID-Robots/clawbox" } }] }),
+    });
+    const out = await lib.listGitHubRepos();
+    expect(out.ok).toBe(true);
+    if (!out.ok) throw new Error("unreachable");
+    expect(out.login).toBe("yalexx");
+    expect(out.truncated).toBe(false);
+    expect(out.repos).toEqual([
+      { fullName: "yalexx/tinder-clone", name: "tinder-clone", owner: "yalexx", description: "Swipe", private: true, pushedAt: "2026-09-01T00:00:00Z", defaultBranch: "main", clawboxApp: true, folder: "tinder-clone" },
+      // A clawbox.json three folders deep is a fixture, not the manifest.
+      { fullName: "ID-Robots/clawbox", name: "clawbox", owner: "ID-Robots", description: null, private: false, pushedAt: "2026-09-01T00:00:00Z", defaultBranch: "main", clawboxApp: false, folder: "clawbox" },
+    ]);
+    const searches = ghCalls.filter((c) => c.includes("search/code")).map((c) => c.join(" "));
+    expect(searches).toEqual([
+      expect.stringContaining("q=filename:clawbox.json user:yalexx"),
+      expect.stringContaining("q=filename:clawbox.json user:ID-Robots"),
+    ]);
+  });
+
+  it("searches the first few owners only, and says nothing about the rest", async () => {
+    const owners = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+    ghAnswers.set("api user/repos", { code: 0, stdout: page(owners.map((o) => repo(`${o}/r`))) });
+    for (const o of owners) ghAnswers.set(`api -X GET search/code -f q=filename:clawbox.json user:${o}`, { code: 0, stdout: JSON.stringify({ items: [{ path: "clawbox.json", repository: { full_name: `${o}/r` } }] }) });
+    const out = await lib.listGitHubRepos();
+    if (!out.ok) throw new Error("unreachable");
+    expect(out.repos.map((r) => r.clawboxApp)).toEqual([true, true, true, true, true, null, null]);
+    expect(ghCalls.filter((c) => c.includes("search/code"))).toHaveLength(lib.MANIFEST_SEARCH_OWNERS_MAX);
+  });
+
+  it("says null for the app flag when the code search would not answer", async () => {
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("yalexx/a")]) });
+    ghAnswers.set("api -X GET search/code -f q=filename:clawbox.json user:yalexx", { code: 1, stderr: "rate limited" });
+    const out = await lib.listGitHubRepos();
+    if (!out.ok) throw new Error("unreachable");
+    expect(out.repos[0].clawboxApp).toBeNull();
+  });
+
+  it("answers the account's state before asking GitHub anything", async () => {
+    githubStatus.mockResolvedValueOnce({ installed: true, connected: false, login: null, loginCommand: "x" });
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: false, reason: "not_connected" });
+    githubStatus.mockResolvedValueOnce({ installed: false, connected: false, login: null, loginCommand: "x", reason: "not_installed" });
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: false, reason: "no_gh" });
+    githubStatus.mockResolvedValueOnce({ installed: true, connected: false, login: null, loginCommand: "x", reason: "unreachable" });
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: false, reason: "gh_unreachable" });
+    expect(ghCalls).toEqual([]);
+  });
+
+  it("answers the next listing from the last one, and still probes the account every time", async () => {
+    // 4.5-5.3 s per call on the box — three pages of `gh api user/repos` plus
+    // five code searches, each a fresh `gh` boot — and the Import panel paid
+    // for all of it on every mount.
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("yalexx/a")]) });
+    ghAnswers.set("api -X GET search/code", { code: 0, stdout: JSON.stringify({ items: [] }) });
+    const first = await lib.listGitHubRepos();
+    expect(first).toMatchObject({ ok: true });
+    const asked = ghCalls.length;
+    expect(asked).toBeGreaterThan(0);
+
+    expect(await lib.listGitHubRepos()).toEqual(first);
+    expect(ghCalls).toHaveLength(asked);
+
+    // The CONNECTION is not cached with the rows: signing out of GitHub is
+    // answered on the very next request, not five minutes later.
+    githubStatus.mockResolvedValueOnce({ installed: true, connected: false, login: null, loginCommand: "x" });
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: false, reason: "not_connected" });
+    expect(ghCalls).toHaveLength(asked);
+
+    // …and another account is another listing, never this one's rows.
+    // Not `Once`: a listing probes the account at the start AND once more
+    // before it files anything, and on a real box both answer the same.
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "someone-else", loginCommand: "x" });
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: true, login: "someone-else" });
+    expect(ghCalls.length).toBeGreaterThan(asked);
+  });
+
+  it("never hands one account's repositories to another", async () => {
+    // A refresh is 4.5-5.3 s of `gh` boots. Sign out of one account and into
+    // another inside that window and the panel's next call joined the listing
+    // already in flight — there was ONE slot for every account — so the new
+    // owner was shown the previous one's private repositories under their own
+    // name.
+    ghAnswers.set("api -X GET search/code", { code: 0, stdout: JSON.stringify({ items: [] }) });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("alice/secret-plans", { private: true })]) });
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "alice", loginCommand: "x" });
+
+    let release!: () => void;
+    ghHold.current = new Promise<void>((resolve) => { release = resolve; });
+    const forAlice = lib.listGitHubRepos();
+    // Wait until that listing is actually out on the wire and stuck there.
+    while (ghCalls.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+
+    // The owner signs into another account while it is still out.
+    ghHold.current = null;
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("bob/todo")]) });
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "bob", loginCommand: "x" });
+    const forBob = lib.listGitHubRepos();
+
+    // Bob's listing is its own: it must come back while alice's is still held.
+    // Joining alice's promise is exactly what handed over the wrong rows, and
+    // asserted only on the OUTCOME it would show up as a 30 s deadlock here.
+    let bobSettled = false;
+    void forBob.then(() => { bobSettled = true; });
+    // waitFor, not a fixed sleep: bob's own eight `gh` boots can outlast 30 ms
+    // on a busy runner, and the failure this guards against is a DEADLOCK, so
+    // a generous ceiling costs a passing run nothing.
+    await vi.waitFor(() => expect(bobSettled).toBe(true));
+
+    const bob = await forBob;
+    release();
+    const alice = await forAlice;
+
+    expect(bob).toMatchObject({ ok: true, login: "bob" });
+    expect(JSON.stringify(bob)).not.toContain("secret-plans");
+    // And the listing that finished under the wrong account is thrown away
+    // rather than filed under the name it was started for: every `gh` boot in
+    // it answered as whoever was signed in at the time.
+    expect(alice).toMatchObject({ ok: false, reason: "failed" });
+
+    // Nothing of it was cached, either — signing back in re-fetches.
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "alice", loginCommand: "x" });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("alice/secret-plans", { private: true })]) });
+    const asked = ghCalls.length;
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: true, login: "alice" });
+    expect(ghCalls.length).toBeGreaterThan(asked);
+  });
+
+  it("throws away a listing the account bounced away from and back to", async () => {
+    // A → B → A. `gh` reads the credential out of HOME at every boot, so a
+    // listing started for alice can collect bob's rows and then find
+    // `activeLogin` back on "alice" — the name comparison alone waves it
+    // through, and the panel shows one account's repositories under the
+    // other's name. The account EPOCH is what catches it.
+    ghAnswers.set("api -X GET search/code", { code: 0, stdout: JSON.stringify({ items: [] }) });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("alice/secret-plans", { private: true })]) });
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "alice", loginCommand: "x" });
+
+    let release!: () => void;
+    ghHoldEarly.current = new Promise<void>((resolve) => { release = resolve; });
+    const forAlice = lib.listGitHubRepos();
+    await vi.waitFor(() => expect(ghCalls.length).toBeGreaterThanOrEqual(1));
+
+    // Away to bob and straight back to alice while that boot is held BEFORE it
+    // reads the credential — so it will answer with whatever is scripted when
+    // it resumes, which is bob's. Neither intermediate listing is awaited:
+    // both are held on the same gate, exactly as they would be behind a real
+    // `gh` that is still starting.
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "bob", loginCommand: "x" });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("bob/todo")]) });
+    const forBob = lib.listGitHubRepos();
+    forBob.catch(() => undefined);
+    await vi.waitFor(() => expect(ghCalls.length).toBeGreaterThanOrEqual(2));
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "alice", loginCommand: "x" });
+    // Back on alice for real: it is this call that puts `activeLogin` back, and
+    // that is the state the name comparison alone would find innocent.
+    const backOnAlice = lib.listGitHubRepos();
+    backOnAlice.catch(() => undefined);
+    // It makes no `gh` boot of its own — it joins the refresh already in
+    // flight for this account — so the probe is what says it has run.
+    await vi.waitFor(() => expect(githubStatus).toHaveBeenCalledTimes(3));
+
+    ghHoldEarly.current = null;
+    release();
+    const alice = await forAlice;
+    expect(alice).toMatchObject({ ok: false, reason: "failed" });
+    expect(JSON.stringify(alice)).not.toContain("bob/todo");
+    await forBob.catch(() => undefined);
+    await backOnAlice.catch(() => undefined);
+  });
+
+  it("refuses rows collected under a credential that changed with nobody asking", async () => {
+    // The account can change without this module hearing a word: `gh auth
+    // login` typed into the Terminal, or the device flow finishing. Neither
+    // moves `activeLogin` or the epoch, so the last word has to belong to `gh`
+    // — one live probe before anything is filed. No intermediate listing here,
+    // which is the whole point.
+    ghAnswers.set("api -X GET search/code", { code: 0, stdout: JSON.stringify({ items: [] }) });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("alice/secret-plans", { private: true })]) });
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "alice", loginCommand: "x" });
+
+    let release!: () => void;
+    ghHoldEarly.current = new Promise<void>((resolve) => { release = resolve; });
+    const forAlice = lib.listGitHubRepos();
+    await vi.waitFor(() => expect(ghCalls.length).toBeGreaterThanOrEqual(1));
+
+    // The credential is now bob's, and nothing on this box was told.
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "bob", loginCommand: "x" });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("bob/todo")]) });
+    ghHoldEarly.current = null;
+    release();
+
+    const alice = await forAlice;
+    expect(alice).toMatchObject({ ok: false, reason: "failed" });
+    expect(JSON.stringify(alice)).not.toContain("bob/todo");
+  });
+
+  it("never serves a failed listing from the cache", async () => {
+    ghAnswers.set("api user/repos", { code: 1, stderr: "rate limited" });
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: false, reason: "failed" });
+    const asked = ghCalls.length;
+
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("yalexx/a")]) });
+    ghAnswers.set("api -X GET search/code", { code: 0, stdout: JSON.stringify({ items: [] }) });
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: true });
+    expect(ghCalls.length).toBeGreaterThan(asked);
+  });
+});
+
+describe("importGitHubRepo", () => {
+  it("clones into the project folder under the repository's name", async () => {
+    ghAnswers.set("repo clone yalexx/tinder-clone", { code: 0 });
+    const out = await lib.importGitHubRepo({ fullName: "yalexx/tinder-clone", projectsRoot: projects });
+    expect(out).toMatchObject({ ok: true, folder: "tinder-clone", directory: path.join(projects, "tinder-clone"), initialized: false });
+    // GitHub is asked what it weighs first, then the clone.
+    expect(ghCalls.map((c) => c[0])).toEqual(["api", "repo"]);
+    expect(ghCalls[1]).toEqual(["repo", "clone", "yalexx/tinder-clone", path.join(projects, "tinder-clone"), "--", "--quiet"]);
+  });
+
+  it("refuses a name that is not owner/name, a taken folder, and a disconnected account", async () => {
+    expect(await lib.importGitHubRepo({ fullName: "../etc", projectsRoot: projects })).toMatchObject({ ok: false, reason: "invalid" });
+    expect(await lib.importGitHubRepo({ fullName: "yalexx/../x", projectsRoot: projects })).toMatchObject({ ok: false, reason: "invalid" });
+    fs.mkdirSync(path.join(projects, "taken"));
+    expect(await lib.importGitHubRepo({ fullName: "yalexx/taken", projectsRoot: projects })).toMatchObject({ ok: false, reason: "exists" });
+    githubStatus.mockResolvedValueOnce({ installed: true, connected: false, login: null, loginCommand: "x" });
+    expect(await lib.importGitHubRepo({ fullName: "yalexx/a", projectsRoot: projects })).toMatchObject({ ok: false, reason: "not_connected" });
+    expect(ghCalls).toEqual([]);
+  });
+
+  it("leaves nothing behind when the clone fails", async () => {
+    ghAnswers.set("repo clone yalexx/gone", { code: 1, stderr: "GraphQL: Could not resolve to a Repository" });
+    const out = await lib.importGitHubRepo({ fullName: "yalexx/gone", projectsRoot: projects });
+    expect(out).toMatchObject({ ok: false, reason: "failed" });
+    if (out.ok) throw new Error("unreachable");
+    expect(out.detail).toContain("Could not resolve");
+    expect(fs.existsSync(path.join(projects, "gone"))).toBe(false);
+  });
+});
+
+describe("what an import may weigh", () => {
+  it("measures a folder without node_modules and without following links, and knows the disk's room", async () => {
+    const src = path.join(home, "weighed");
+    fs.mkdirSync(path.join(src, "node_modules", "big"), { recursive: true });
+    fs.writeFileSync(path.join(src, "a.txt"), "x".repeat(1000));
+    fs.writeFileSync(path.join(src, "node_modules", "big", "b.txt"), "y".repeat(100_000));
+    fs.symlinkSync(home, path.join(src, "loop"));
+    expect(await lib.measureFolder(src)).toEqual({ bytes: 1000, files: 1, over: null });
+    const free = await lib.freeBytes(home);
+    expect(free === null || free > 0).toBe(true);
+    expect(lib.IMPORT_MAX_BYTES).toBeGreaterThan(lib.IMPORT_FREE_RESERVE_BYTES);
+  });
+});

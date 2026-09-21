@@ -9,7 +9,12 @@ HOME="${HOME:-$(getent passwd "$CURRENT_USER" | cut -d: -f6)}"
 PROFILE="$HOME/.config/clawbox-browser"
 CDP_PORT="${CDP_PORT:-18800}"
 VNC_STATE_FILE="${HOME}/.cache/clawbox/vnc-display.env"
+# The owner's start page, written by the web server (src/lib/browser-setup.ts)
+# because systemd is what starts this browser — the setting cannot be passed as
+# an argument from the page that changed it.
+BROWSER_STATE_FILE="${HOME}/.cache/clawbox/browser.env"
 DEFAULT_DISPLAY="${DISPLAY:-:99}"
+DEFAULT_START_URL="about:blank"
 
 display_ready() {
   local display="$1"
@@ -57,6 +62,13 @@ if [ -f "$VNC_STATE_FILE" ]; then
   # shellcheck disable=SC1090
   source "$VNC_STATE_FILE"
 fi
+
+if [ -f "$BROWSER_STATE_FILE" ]; then
+  # shellcheck disable=SC1090
+  source "$BROWSER_STATE_FILE"
+fi
+
+START_URL="${CLAWBOX_BROWSER_START_URL:-$DEFAULT_START_URL}"
 
 DISPLAY="${CLAWBOX_VNC_DISPLAY:-$DEFAULT_DISPLAY}"
 [ -n "${CLAWBOX_VNC_XAUTHORITY:-}" ] && export XAUTHORITY="$CLAWBOX_VNC_XAUTHORITY"
@@ -114,6 +126,15 @@ if [ "${CLAWBOX_TEST_MODE:-0}" = "1" ] \
   SANDBOX_FLAGS=(--no-sandbox --disable-setuid-sandbox)
 fi
 
+# WebGL without a GPU. Over VNC there is no usable GL, and `--disable-gpu`
+# used to switch the whole GPU process off — which also switched off WebGL,
+# because Chromium's software WebGL (SwiftShader, via ANGLE) runs INSIDE the
+# GPU process. A page with a <canvas> WebGL context (the coding agent's own
+# Three.js games, any WebGL site) then failed with "WebGL not supported".
+# So: keep compositing in software (--disable-gpu-compositing, the cheap part
+# of what --disable-gpu did) but let the GPU process run SwiftShader for
+# WebGL. --enable-unsafe-swiftshader is the switch recent Chromium requires
+# before it will hand a page a software WebGL context.
 echo "Starting Chromium from $CHROMIUM on DISPLAY=$DISPLAY with CDP port $CDP_PORT"
 exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   "$CHROMIUM" \
@@ -124,9 +145,12 @@ exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   --no-first-run \
   --no-default-browser-check \
   --start-maximized \
-  --disable-gpu \
+  --disable-gpu-compositing \
+  --use-gl=angle \
+  --use-angle=swiftshader \
+  --enable-unsafe-swiftshader \
   --disable-dev-shm-usage \
   --disable-background-networking \
   --password-store=basic \
   --metrics-recording-only \
-  "https://www.google.com"
+  "$START_URL"

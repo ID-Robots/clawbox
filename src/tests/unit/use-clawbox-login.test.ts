@@ -216,4 +216,38 @@ describe("useClawboxLogin", () => {
       .filter((msg) => /unmounted|cancelled/i.test(msg));
     expect(warnings).toEqual([]);
   });
+  it("reports an empty entitlement list as unanswered, not as 'nothing allowed'", async () => {
+    // An empty list read as a refusal would lock the box out of every model
+    // it has — the whole reason null and [] mean the same thing here.
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      provider: "clawai",
+      clawaiConfigured: true,
+      clawaiAccountTier: "pro",
+      clawaiAllowedModels: [],
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(result.current.allowedModels).toBeNull();
+  });
+
+  it("keeps the same array across polls that bring the same ids back", async () => {
+    // A fresh array every 30 s is a fresh identity for every consumer that
+    // memoises on it — ChatPopup rebuilds its switch callback from this.
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      provider: "clawai",
+      clawaiConfigured: true,
+      clawaiAccountTier: "pro",
+      clawaiAllowedModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => useClawboxLogin(10));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const first = result.current.allowedModels;
+    expect(first).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+
+    await waitFor(() => expect(vi.mocked(globalThis.fetch).mock.calls.length).toBeGreaterThan(2));
+    expect(result.current.allowedModels).toBe(first);
+  });
 });

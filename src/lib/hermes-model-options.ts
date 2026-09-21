@@ -27,7 +27,15 @@ import fs from "fs/promises";
 import path from "path";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { hermesConfigGet, invalidateHermesConfigCache } from "@/lib/hermes-config-cache";
-import { get } from "@/lib/config-store";
+import {
+  hermesDashboardUnitState,
+  type HermesDashboardUnitState,
+} from "@/lib/hermes-dashboard-control";
+import { get, set } from "@/lib/config-store";
+import { getActiveHarness } from "@/lib/harness";
+import { createSerialLock } from "@/lib/serial-lock";
+import { CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-models";
+import { pickedClawboxAiModelIdAmong, readExplicitModelPicks } from "@/lib/explicit-model-pick";
 import {
   CLAWAI_PROVIDER,
   HERMES_AUTO_PROVIDER,
@@ -54,20 +62,37 @@ export const isSafeModelId = isSafeHermesModelId;
  * models (a vendor-prefixed slug gets HTTP 400 "Model not allowed" from the
  * proxy). Used twice:
  *   1. cold start — a factory device with no dashboard and no catalog on disk;
- *   2. to seed the ClawBox AI row (see normalizeRow), because Hermes can only
- *      report the single id our custom-provider config declares, while the
- *      product actually serves both — which is what OpenClaw's picker shows.
+ *   2. to seed the ClawBox AI row (see normalizeRow), for a box whose Hermes
+ *      config does not declare them yet.
+ *
+ * The SAME list `applyClawaiToHermes` writes into `providers.clawai.models`,
+ * imported rather than re-typed: that block is what Hermes' own pickers read,
+ * so a second spelling here would be the two surfaces disagreeing again.
  *
  * We deliberately do NOT ship guesses for providers we cannot query: the old
  * fallback listed OpenRouter slugs like "anthropic/claude-opus-4.8" which would
  * then be offered — and saved — under the direct Anthropic provider, i.e.
  * exactly the provider/model mismatch this module exists to stop.
  */
-const COLD_START_MODELS: Record<string, string[]> = {
-  [CLAWAI_PROVIDER]: ["deepseek-v4-flash", "deepseek-v4-pro"],
+const COLD_START_MODELS: Record<string, readonly string[]> = {
+  [CLAWAI_PROVIDER]: CLAWBOX_AI_CHAT_MODEL_IDS,
 };
 
 export type ModelOptionsSource = "dashboard" | "catalog-file" | "cold-start";
+
+/**
+ * How much a payload is worth, high to low. Used to stop a degraded read from
+ * evicting a better cached one — see `load()`.
+ *
+ * `dashboard` is the live catalogue (47 providers on the QA box). `catalog-file`
+ * is Hermes' on-disk manifest, which in practice holds 2. `cold-start` is the
+ * hardcoded floor.
+ */
+const SOURCE_RANK: Record<ModelOptionsSource, number> = {
+  dashboard: 3,
+  "catalog-file": 2,
+  "cold-start": 1,
+};
 
 export interface HermesModelOption {
   id: string;
@@ -81,9 +106,39 @@ export interface HermesModelOption {
 export interface HermesProviderRow {
   id: string;
   name: string;
-  /** null when the source can't tell (the on-disk catalog carries no auth state). */
+  /**
+   * Hermes' `authenticated` flag, verbatim.
+   *
+   * It means "this provider has an API key set, or is a user-defined
+   * endpoint" — credential PRESENCE, not a working credential. Hermes derives
+   * it from `not is_skeleton`, never from a call to the provider. A row can be
+   * `authenticated: true` and still 403 on every turn, which is exactly what
+   * made a bogus user-defined provider look healthy in the picker. Prefer
+   * `credentialPresent` when reading this; see `verified` for the other half.
+   *
+   * null when the source can't tell (the on-disk catalog carries no auth state).
+   */
   authenticated: boolean | null;
-  isUserDefined: boolean;
+  /**
+   * Whether a credential was actually exercised against the provider:
+   * `true`/`false` when something upstream probed it, `null` when nobody did.
+   *
+   * ClawBox performs no probe of its own, so this is `null` unless the Hermes
+   * envelope carries it — but it is a distinct field so a consumer can no
+   * longer read "has a key" as "works". TASK-446.
+   */
+  verified: boolean | null;
+  /**
+   * Whether the provider is one the OWNER defined (a custom OpenAI-compatible
+   * endpoint) rather than one Hermes ships. `null` when the source could not
+   * say — the same three-state rule the two fields above follow, and for the
+   * same reason: this one decides whether the chat may resolve the dashboard's
+   * `custom` KIND to a slug, and collapsing "not reported" into `false` blanks
+   * the served label on the box's OWN provider from the second turn on. No
+   * capture of a live `/api/model/options` row is held in this repo, so
+   * "absent" is a shape we cannot rule out.
+   */
+  isUserDefined: boolean | null;
   source: string;
   total: number;
   models: HermesModelOption[];
@@ -101,6 +156,13 @@ export interface ModelOptionsPayload {
   source: ModelOptionsSource;
   /** True when the payload did not come from the live dashboard. */
   stale: boolean;
+  /**
+   * Set when a live read failed and the caller is being served the previous,
+   * better cached payload instead of the thin fallback. The client can say
+   * "couldn't refresh" rather than silently rendering 2 providers where 47
+   * were a moment ago.
+   */
+  degraded?: "dashboard-unreachable";
 }
 
 export interface ProviderScope {
@@ -117,7 +179,44 @@ export interface ProviderScope {
   warning?: string;
   source: ModelOptionsSource;
   stale: boolean;
+  /**
+   * Carried through from {@link ModelOptionsPayload.degraded}, because `stale`
+   * alone cannot say which of two very different boxes this is: one that has
+   * never reached its dashboard, and one that had a full catalogue a moment ago
+   * and lost it to a blip. The panel says different things about them.
+   */
+  degraded?: "dashboard-unreachable";
   fetchedAt: number;
+}
+
+/**
+ * What `/setup-api/hermes/models?provider=…` actually answers: a `ProviderScope`
+ * plus the two DEVICE-WIDE facts a scoped reader would otherwise have to report
+ * as unknown with the values one field away.
+ *
+ * Declared here, beside the scope it extends, because the MCP server reads this
+ * shape too and a route rename is only protected if every declaration of it
+ * moves together — the duplicate-type trap an earlier round of this PR
+ * consolidated into `HermesDefaultSource`.
+ *
+ * `savedPair` is the pairing itself, and is deliberately NOT called `saved`
+ * beside `savedElsewhere`: `current` is blank when the saved model is not in
+ * this provider's list and `savedElsewhere` is null when it IS this provider,
+ * so neither of them names the device default reliably and only this one does.
+ */
+export interface ScopedModelsReply extends ProviderScope {
+  reasoning: string;
+  savedPair: { provider: string; model: string };
+  /**
+   * When this box last got the harness to re-read every provider's list, and
+   * whether that was over a day ago — NOT the age of this process's copy, which
+   * is what {@link ProviderScope.fetchedAt} and `stale` describe. Both are
+   * `null` where nothing has recorded a check — not checked, never "old".
+   * See {@link CatalogRefreshMark} for what a check does and does not prove.
+   * TASK-781.
+   */
+  catalogCheckedAt: number | null;
+  catalogStale: boolean | null;
 }
 
 // ── L1 cache (in-process, SWR) ───────────────────────────────────────────────
@@ -129,9 +228,177 @@ export interface ProviderScope {
 const FRESH_MS = 60_000;
 const STALE_MS = 6 * 60 * 60 * 1000;
 const DASHBOARD_TIMEOUT_MS = 8_000;
+/** How often a DEGRADED payload may trigger a background re-ask. See the rule
+ *  in `getModelOptions`; kept at the client's first retry step so a scheduled
+ *  retry always lands on a real attempt. */
+const DEGRADED_REFRESH_GAP_MS = 1_000;
 // A click-spammer on "Refresh" must not fan out into 40 upstream /v1/models
 // calls, so an explicit refresh is throttled per process.
 const EXPLICIT_REFRESH_MIN_GAP_MS = 10_000;
+/**
+ * The BACKSTOP for "is the dashboard still coming up?", used wherever systemd
+ * cannot say (see {@link probeStillOwed}).
+ *
+ * It is NOT up when this server is: `clawbox-setup` answers in 0 ms and
+ * `clawbox-hermes-dashboard` needs another ~11-12 s — after every boot, and
+ * again after every restart this app itself triggers. About twice that window.
+ *
+ * It also covers the largest slice of a NORMAL boot, not just the exotic cases:
+ * the unit is `Type=simple`, so systemd reports `active/running` from the moment
+ * `ExecStart` forks, and the seconds the dashboard then spends building its web
+ * dist and binding :9119 are seconds no unit state describes.
+ */
+export const PROBE_GRACE_MS = 25_000;
+
+/**
+ * The other bound: how long a unit systemd reports as `activating` may be
+ * called "checking".
+ *
+ * Tied to `TimeoutStartSec=300` in `config/clawbox-hermes-dashboard.service`,
+ * because that is systemd's OWN deadline for the same question — past it
+ * systemd kills the start and the unit goes `failed`, which this module already
+ * reads as "nothing is coming". So the clock is a backstop for a transition we
+ * might not see rather than a second opinion about a start systemd is still
+ * running. `checking-retry-budget.test.ts` pins it to the shipped unit file so
+ * the two cannot drift apart.
+ *
+ * Long, and that is the point: `ExecStartPre` re-provisions the dashboard's auth
+ * on every start and a loaded Jetson can take a while over it. Waiting is
+ * honest there; "Checking..." with a live poll behind it is what the owner
+ * should see, and the poll flips to the truth the moment systemd gives up.
+ */
+export const UNIT_START_BUDGET_MS = 300_000;
+
+/**
+ * The longest any row can read `checking`, over EVERY branch — what the client
+ * has to keep polling through, and the number that makes "checking always
+ * resolves" a fact rather than a hope.
+ *
+ * The sum, not the larger: a unit may spend its whole start budget in
+ * `ExecStartPre` and only then fork, and the socket clock starts there (see
+ * {@link probeStillOwed}). Nothing can extend it further — the start budget runs
+ * from the first unanswered read and is never renewed.
+ */
+export const MAX_CHECKING_WINDOW_MS = UNIT_START_BUDGET_MS + PROBE_GRACE_MS;
+
+/** How long a systemd answer may be reused. One `systemctl` fork per second at
+ *  worst, instead of one per request: two panels poll `/providers/status`
+ *  independently and each re-asks while a row is checking, so the unmemoised
+ *  read forked several times a second during exactly the window this feature
+ *  exists for. The client's fastest retry step is 1 s, so a 1 s answer is never
+ *  staler than the thing it is compared against. */
+const UNIT_STATE_TTL_MS = 1_000;
+let unitStateCached: HermesDashboardUnitState | null = null;
+let unitStateAt = 0;
+let unitStateInflight: Promise<HermesDashboardUnitState> | null = null;
+
+async function cachedUnitState(): Promise<HermesDashboardUnitState> {
+  if (unitStateCached && Date.now() - unitStateAt < UNIT_STATE_TTL_MS) return unitStateCached;
+  // The PROMISE is shared, not just the value, so concurrent polls join one
+  // fork instead of racing an empty cache — and the clock is stamped when the
+  // answer LANDS, so a read that took the systemctl timeout is not born already
+  // expired.
+  unitStateInflight ??= hermesDashboardUnitState().finally(() => {
+    unitStateInflight = null;
+  });
+  const state = await unitStateInflight;
+  unitStateCached = state;
+  unitStateAt = Date.now();
+  return state;
+}
+
+/** When the live dashboard first failed to answer, or 0 while it is answering.
+ *  Started by the first failure, cleared by the next success — never restarted
+ *  by a later failure in the same outage, or the grace above would renew
+ *  itself once a second and never expire. */
+let firstUnansweredAt = 0;
+/** When the unit was last SEEN to be starting, or 0.
+ *  The socket-bind clock has to run from the moment the unit stopped starting,
+ *  not from the first unanswered read: `Type=simple` reports `active/running`
+ *  when ExecStart forks, so a start that spent a minute in `ExecStartPre` would
+ *  otherwise arrive in `running` with its whole grace already spent and degrade
+ *  a healthy boot on the last eleven seconds of it. Advanced ONLY while the
+ *  start budget is still unspent (`probeStillOwed` checks the budget before it
+ *  stamps, not after), so it can never exceed
+ *  `firstUnansweredAt + `{@link UNIT_START_BUDGET_MS} — which is what makes
+ *  {@link MAX_CHECKING_WINDOW_MS} a sum rather than an open end. */
+let lastSeenStartingAt = 0;
+/** Sequence of every dashboard read, and of the newest one that ANSWERED.
+ *  Two reads overlap whenever an explicit refresh lands on top of a plain load
+ *  (`load()` single-flights per mode, not across them), and they can settle out
+ *  of order: an 8 s timeout from before the dashboard came up finishing after a
+ *  refresh that just succeeded. Without this, that stale failure opens a debt
+ *  against a box that is answering, and the panel says "Checking..." over a live
+ *  dashboard until the next read clears it. Monotonic: only a read NEWER than
+ *  the last answered one may advance it, so it cannot walk backwards and hand
+ *  an already-answered sequence back to the failure guard. */
+let readSeq = 0;
+let lastAnsweredSeq = 0;
+
+/**
+ * Is an answer from the dashboard still OWED, rather than overdue?
+ *
+ * The difference between "we have not been able to ask yet" and "we asked and
+ * it is broken" — `/setup-api/providers/status` turns a true here into the row
+ * state `checking` instead of `unknown` plus a degraded banner (TASK-663).
+ *
+ * TWO FACTS, AND BOTH ARE NEEDED. SYSTEMD says WHETHER the dashboard is still
+ * starting — the unit that starts it is the thing that knows, and no clock
+ * beside it can tell a slow `ExecStartPre` from a crash loop. A BUDGET says how
+ * long we are willing to call that "checking" before degrading honestly: the
+ * unit's own `TimeoutStartSec` where systemd is starting it, and
+ * {@link PROBE_GRACE_MS} everywhere systemd's answer does not cover the wait —
+ * a `Type=simple` unit already `running` while its socket is not up yet, and a
+ * box whose systemd cannot be asked at all.
+ *
+ * Read at CALL time, never frozen into a payload. `getModelOptions` serves a
+ * degraded payload from cache and refreshes behind the request, so a flag
+ * stamped when the payload was BUILT reports the window as it stood a poll ago
+ * — and the client's last retry would then be answered "still checking" by a
+ * window that had already closed, leaving the panel spinning for good.
+ */
+export async function probeStillOwed(): Promise<boolean> {
+  // Nothing has failed, so nothing is outstanding — including on a process that
+  // has not asked yet, where there is nothing to wait for either.
+  if (!firstUnansweredAt) return false;
+  const unit = await cachedUnitState();
+  // Failed, masked, or stopped and disabled (which is what an OpenClaw box does
+  // to this unit): nothing is coming, so stop promising it and let the rows
+  // degrade now rather than after a grace that means nothing here.
+  if (unit === "down") return false;
+  const now = Date.now();
+  // BOUNDED IN EVERY BRANCH, which is the whole property. systemd's answer says
+  // WHETHER the dashboard is still starting; the budget says how long we are
+  // willing to call that "checking" before we degrade honestly. An unbounded
+  // branch — any unbounded branch — turns "Checking..." into the same lie as the
+  // degraded banner it replaces, pointing the other way.
+  //
+  // The start budget runs from the first UNANSWERED READ, because the question
+  // the panel is asking is how long WE have been unable to answer it. The cost
+  // is one case in the honest direction: a unit that starts fresh at the end of
+  // a long outage is called degraded for the ~11 s until it answers, which is
+  // exactly what a box that has been broken for ten minutes should say.
+  if (unit === "starting") {
+    // Checked BEFORE the latch is stamped, never after. A start we have already
+    // given up on must not hand the socket clock below a fresh
+    // `PROBE_GRACE_MS`: a unit that sits in `activating` for an hour would
+    // otherwise buy back a `checking` window every time it finally forked, and
+    // the panel would come back to "Checking..." long after it had honestly
+    // degraded — the same unbounded window as before, reached from the far side
+    // of the bound instead of through it.
+    if (now - firstUnansweredAt >= UNIT_START_BUDGET_MS) return false;
+    lastSeenStartingAt = now;
+    return true;
+  }
+  // `running` (up, but a just-started process still has to bind its socket),
+  // `restarting` (it died and systemd will start it again in RestartSec — this
+  // app's own dashboard bounce and a crash loop look identical from one sample,
+  // and this is the budget that serves both honestly), or `unknown`, where
+  // systemd could not be asked at all. All three are the clock's, measured from
+  // whichever came later: our first unanswered read, or the unit leaving the
+  // start it was still in a moment ago.
+  return now - Math.max(firstUnansweredAt, lastSeenStartingAt) < PROBE_GRACE_MS;
+}
 
 let cached: ModelOptionsPayload | null = null;
 let inflight: Promise<ModelOptionsPayload> | null = null;
@@ -142,6 +409,17 @@ let lastExplicitRefreshAt = 0;
 // clearing `cached` alone loses that race and resurrects the old selection for
 // a full FRESH_MS.
 let generation = 0;
+// How good the last installed answer was, and when — NOT the answer itself.
+//
+// `invalidateModelOptions()` drops `cached`, and every route that changes a
+// credential or the selection calls it. That used to take the downgrade guard's
+// only baseline with it, so a dashboard blip landing in that window installed
+// the 2-provider disk manifest over a 48-provider catalogue with nothing to
+// compare against and nothing said about it (TASK-678). This survives the
+// invalidation because it is quality and time, never data: it cannot resurrect
+// a pre-write selection, and it ages out on the same STALE_MS bound the guard
+// already uses.
+let lastGoodBaseline: DowngradeBaseline | null = null;
 // Memoised `/api/model/recommended-default` answers, keyed by provider and
 // pinned to the payload they were computed for. Without this every provider
 // click cost an uncached dashboard round-trip even on a warm catalogue — the
@@ -153,6 +431,9 @@ const recommendedCache = new Map<string, { model: string; forFetchedAt: number }
  *  provider's `authenticated` flag and unlocks its model list). */
 export function invalidateModelOptions(): void {
   cached = null;
+  // `lastGoodBaseline` deliberately SURVIVES: it is how good the answer was,
+  // not the answer, so it cannot resurrect a pre-write selection — and dropping
+  // it is what left the downgrade guard disarmed for the next read.
   generation += 1;
   recommendedCache.clear();
   // The `hermes config get` memo keys on config.yaml's mtime, so a `config set`
@@ -188,6 +469,7 @@ interface DashboardProviderRow {
   total_models?: unknown;
   source?: unknown;
   authenticated?: unknown;
+  verified?: unknown;
   is_user_defined?: unknown;
   warning?: unknown;
   featured_models?: unknown;
@@ -280,17 +562,25 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
     });
   }
 
-  // ClawBox AI is a CUSTOM provider, so Hermes can only report what our own
-  // config declares — and that is a single id (`model.default`, the current
-  // tier's model). The product actually serves both tier models, which is why
-  // OpenClaw's chat header offers a model picker for it. Without this, the
-  // Hermes header hides the model pill entirely (it needs >1 option) and the
-  // two harnesses disagree about the same provider.
+  // ClawBox AI is a CUSTOM provider, so Hermes reports what our own config
+  // declares plus whatever `<base_url>/models` answers — and the proxy answers
+  // that probe in a shape Hermes cannot read, so on a box whose
+  // `providers.clawai.models` has not been written yet the row arrives EMPTY.
+  // `applyClawaiToHermes` is what writes it, and `reconcileClawaiModelsWithHermes`
+  // backfills a box linked before it did; this seed is the fallback for the
+  // window in between, not the source of truth. On a declared box every id is
+  // already in `seen` and the loop does nothing.
   //
   // Only ClawBox AI is seeded: these are ids we have PROVEN route on this
   // hardware. We never invent ids for a third-party provider — that is the
   // mismatch class this module exists to prevent.
-  if (id === CLAWAI_PROVIDER) {
+  //
+  // ONLY when the row is EMPTY, which is what "fallback" has to mean in code:
+  // if Hermes ever reports a non-empty clawai list that differs from ours (a
+  // renamed tier id, or the proxy starting to speak the OpenAI envelope with a
+  // different set), topping it up would show the live ids PLUS two stale ones —
+  // the provider/model mismatch this module exists to prevent.
+  if (id === CLAWAI_PROVIDER && models.length === 0) {
     for (const known of COLD_START_MODELS[CLAWAI_PROVIDER] ?? []) {
       if (seen.has(known)) continue;
       seen.add(known);
@@ -314,7 +604,8 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
     id,
     name: asString(raw.name) || id,
     authenticated: typeof raw.authenticated === "boolean" ? raw.authenticated : null,
-    isUserDefined: raw.is_user_defined === true,
+    verified: typeof raw.verified === "boolean" ? raw.verified : null,
+    isUserDefined: typeof raw.is_user_defined === "boolean" ? raw.is_user_defined : null,
     source: asString(raw.source) || "unknown",
     // `total_models` is the dashboard's count; after seeding it would understate
     // what we actually offer, so report the list we return.
@@ -413,7 +704,9 @@ async function readDiskCatalog(): Promise<HermesProviderRow[] | null> {
       name: slug,
       // The manifest carries no credential state — say "unknown", never "yes".
       authenticated: null,
-      isUserDefined: false,
+      verified: null,
+      // Nor any notion of who defined the provider. Unknown, not "built-in".
+      isUserDefined: null,
       source: "catalog-file",
       total: models.length,
       models,
@@ -427,7 +720,7 @@ async function readDiskCatalog(): Promise<HermesProviderRow[] | null> {
  *  the same store the dashboard reads, unlike the old config.yaml regex (whose
  *  `^\s*(?:default|model)\s*:` pattern matched the FIRST `model:` anywhere in
  *  the file, so it was order-dependent and wrong on some configs). */
-async function readCurrentFromCli(): Promise<{ provider: string; model: string; reasoning: string }> {
+export async function readCurrentFromCli(): Promise<{ provider: string; model: string; reasoning: string }> {
   // Three CLI spawns at ~600 ms each; memoised against config.yaml's mtime so
   // repeat reads (every chat open, every Settings visit) cost a stat.
   const [provider, model, reasoning] = await Promise.all([
@@ -443,12 +736,32 @@ async function readCurrentFromCli(): Promise<{ provider: string; model: string; 
 }
 
 async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
+  const seq = ++readSeq;
   // `agent.reasoning_effort` is not in the dashboard envelope, so it always
   // comes from the CLI. Run it alongside the dashboard call rather than after.
   const [dash, cli] = await Promise.all([
     fetchFromDashboard(refresh),
     readCurrentFromCli(),
   ]);
+
+  // One live answer clears the debt; the first failure after an answer opens
+  // it. See `probeStillOwed`, which is what reads this.
+  //
+  // BOTH writes are ordered, because reads settle out of order in both
+  // directions. A failure older than an answer is stale news about a dashboard
+  // that is demonstrably up, and opening a debt on it paints "Checking..." over
+  // a live box. A SUCCESS older than an answer is stale news too: it must not
+  // clear a debt the newest read just opened — that flaps the panel
+  // `checking -> degraded -> checking`, and dragging `lastAnsweredSeq` backwards
+  // re-opens the guard below so the next failure buys a second full
+  // `MAX_CHECKING_WINDOW_MS` on the same outage.
+  if (dash && seq > lastAnsweredSeq) {
+    firstUnansweredAt = 0;
+    lastSeenStartingAt = 0;
+    lastAnsweredSeq = seq;
+  } else if (!dash && !firstUnansweredAt && lastAnsweredSeq < seq) {
+    firstUnansweredAt = Date.now();
+  }
 
   if (dash) {
     return {
@@ -480,6 +793,7 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
       id,
       name: id,
       authenticated: null,
+      verified: null,
       isUserDefined: true,
       source: "cold-start",
       total: ids.length,
@@ -493,6 +807,25 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
   };
 }
 
+/** How good an answer was, and when — everything the downgrade guard reads. */
+interface DowngradeBaseline {
+  source: ModelOptionsSource;
+  fetchedAt: number;
+}
+
+/**
+ * True when `next` is a worse answer than the `baseline` this process last had,
+ * and that baseline has not aged out.
+ *
+ * Only downgrades are refused. An equal-or-better source always installs, so a
+ * dashboard read that legitimately returns fewer providers (a key was removed)
+ * still lands, and a stale-but-good cache still expires on its own schedule.
+ */
+function isDowngrade(next: ModelOptionsPayload, baseline: DowngradeBaseline): boolean {
+  if (SOURCE_RANK[next.source] >= SOURCE_RANK[baseline.source]) return false;
+  return Date.now() - baseline.fetchedAt < STALE_MS;
+}
+
 function load(refresh: boolean): Promise<ModelOptionsPayload> {
   // Single-flight PER MODE. Concurrent callers share one dashboard round-trip,
   // but an explicit refresh must never be satisfied by a plain in-flight load:
@@ -504,8 +837,52 @@ function load(refresh: boolean): Promise<ModelOptionsPayload> {
   if (existing) return existing;
 
   const gen = generation;
+  const previous = cached;
+  // `lastGoodBaseline` alone, not the cache: it is never worse than `cached`
+  // (it is raised by every payload the cache accepts and never lowered), and it
+  // is the half that survives a credential write — without it the guard below
+  // is disarmed by every one of them.
+  const baseline = lastGoodBaseline;
   const run = buildPayload(refresh)
     .then((payload) => {
+      // A dashboard timeout makes buildPayload fall back to the 2-provider disk
+      // manifest. Installing that over a healthy 47-provider cache — which is
+      // what used to happen, unconditionally — turns one transient 8 s timeout
+      // into a device that has apparently lost 45 providers, and a `?refresh=1`
+      // an anonymous caller could trigger into a catalogue-poisoning primitive.
+      // Serve the better payload we already have and SAY that the refresh
+      // failed. TASK-446.
+      if (baseline && isDowngrade(payload, baseline)) {
+        // `previous` was read when this load STARTED. If an invalidation landed
+        // since, its `current` is the selection that write replaced, and
+        // handing it back — not merely caching it — would paint the pre-write
+        // pairing. The generation check is what separates the two cases, and it
+        // has to gate the RETURN, not just the cache.
+        if (previous && gen === generation) {
+          const kept: ModelOptionsPayload = { ...previous, degraded: "dashboard-unreachable" };
+          cached = kept;
+          return kept;
+        }
+        // The better payload is GONE — an invalidation dropped it, so its
+        // `current` is pre-write and serving it back would be wrong at exactly
+        // the moment this guard fires. Serve the thin one, whose selection IS
+        // post-write, and mark it: two providers where forty-eight were a
+        // moment ago is news, not a catalogue. TASK-678.
+        const marked: ModelOptionsPayload = { ...payload, degraded: "dashboard-unreachable" };
+        if (gen === generation) cached = marked;
+        return marked;
+      }
+      // Raise the baseline, never lower it. Recorded BEFORE the generation
+      // check, because the baseline is quality and time rather than data: a
+      // payload too old to serve is still evidence of how good the dashboard
+      // was. And only upwards, or the fallback this branch caches becomes the
+      // baseline on the very next refresh and disarms the guard again a second
+      // after it fired — which is the shape a second credential write in the
+      // same outage hits.
+      const aged = !lastGoodBaseline || Date.now() - lastGoodBaseline.fetchedAt >= STALE_MS;
+      if (aged || SOURCE_RANK[payload.source] >= SOURCE_RANK[lastGoodBaseline!.source]) {
+        lastGoodBaseline = { source: payload.source, fetchedAt: payload.fetchedAt };
+      }
       // A config write landed while we were reading, so this payload's
       // `current` is pre-write. Hand it to the caller that asked for it, but
       // never let it become the cache for everyone else.
@@ -523,23 +900,65 @@ function load(refresh: boolean): Promise<ModelOptionsPayload> {
 
 /**
  * Serve the provider/model catalogue.
- *   fresh (<60 s)  → cached, no network
- *   stale (<6 h)   → cached instantly + background refresh (never awaited)
- *   older / absent → await a live fetch
- *   { refresh }    → await a live fetch that also busts Hermes' per-provider
- *                    disk cache (throttled to one per 10 s per process)
+ *   live, fresh (<60 s)  → cached, no network
+ *   live, stale (<6 h)   → cached instantly + background refresh (never awaited)
+ *   fallback (`stale`)   → cached instantly + background refresh, once a second
+ *   older / absent       → await a live fetch
+ *   { refresh }          → await a live fetch that also busts Hermes'
+ *                          per-provider disk cache (one per 10 s per process)
  */
 export async function getModelOptions(opts: { refresh?: boolean } = {}): Promise<ModelOptionsPayload> {
   const now = Date.now();
 
   if (opts.refresh) {
-    if (now - lastExplicitRefreshAt < EXPLICIT_REFRESH_MIN_GAP_MS && cached) return cached;
-    lastExplicitRefreshAt = now;
-    return load(true);
+    // Throttled: fall through to the plain path rather than returning here, so
+    // a click-spammer is denied the EXPENSIVE upstream sweep without also being
+    // handed a placeholder the rule below would have gone back for.
+    if (now - lastExplicitRefreshAt >= EXPLICIT_REFRESH_MIN_GAP_MS || !cached) {
+      return forceCatalogRefresh(now, { unattended: false });
+    }
   }
 
   if (cached) {
     const age = now - cached.fetchedAt;
+    // A FALLBACK IS NOT AN ANSWER, so it does not earn an answer's freshness
+    // window.
+    //
+    // It is Hermes' on-disk manifest (`openrouter` + `nous`, and nothing about
+    // this device) or the cold-start floor, and it is served precisely because
+    // the dashboard could not be reached. Holding it for `FRESH_MS` turned
+    // every reboot's ~11-12 s window — `clawbox-setup` answers in 0 ms,
+    // `clawbox-hermes-dashboard` needs another eleven seconds — into a full
+    // MINUTE of a device that appeared to have two providers and no models,
+    // for the chat header, the Settings panel and the MCP tools alike.
+    // `isDowngrade` cannot help there: it compares against the previous CACHED
+    // payload, and on a cold process there is none.
+    //
+    // Refreshed BEHIND the request rather than awaited, though. Awaiting was
+    // tried and is wrong: it deletes the cache for as long as the box is
+    // degraded, and every caller pays for that — the per-turn chat path
+    // (hermes/chat), the OAuth device-code poll (twice per tick through
+    // `readUsableProviderIds`), `provider-mcp-refresh` twice per credential
+    // write under its 3 s deadline, and the deliberately session-less GET on
+    // this route, which would then drive a dashboard round-trip per anonymous
+    // request. `DASHBOARD_TIMEOUT_MS` does not bound that either: the login
+    // `dashboardFetch` performs before its first attempt carries no signal. The
+    // client re-asks on its own now (`degradedRetryDelayMs` in
+    // useHermesModelOptions), so nothing has to block for recovery to happen —
+    // the next poll finds what this refresh installed.
+    //
+    // The flag read here is `payload.stale` — "did not come from the live
+    // dashboard" — and NOT the `degraded` marker: a payload the downgrade guard
+    // KEPT is a live catalogue whose refresh failed, and holding on to that is
+    // the whole point of the guard.
+    if (cached.stale) {
+      // One attempt per second at most, so a burst of readers cannot turn a
+      // degraded box into a request loop against its own dashboard. Matched to
+      // the client's first retry step, so a retry arriving on schedule always
+      // triggers a real attempt rather than joining a throttled window.
+      if (age >= DEGRADED_REFRESH_GAP_MS) void load(false).catch(() => {});
+      return cached;
+    }
     if (age < FRESH_MS) return cached;
     if (age < STALE_MS) {
       // Serve stale immediately; refresh behind the request. Failures here are
@@ -549,6 +968,281 @@ export async function getModelOptions(opts: { refresh?: boolean } = {}): Promise
     }
   }
   return load(false);
+}
+
+/**
+ * The catalogue ONLY if this process already has it, and null otherwise. Never
+ * fetches, never starts a background refresh.
+ *
+ * For a caller that would rather answer without the catalogue than wait for it:
+ * a turn that has already been answered and is only deciding what to LABEL it
+ * (`billedProviderFor` in the chat route). `getModelOptions` awaits a live fetch
+ * on a cold process — a dashboard call plus three `hermes config get` spawns —
+ * and doing that after the reply has streamed holds the `done` frame, and the
+ * durable transcript write with it, for a check the same code waives whenever
+ * the fetch fails. Absent is treated exactly like failed there.
+ *
+ * The same `STALE_MS` bound `getModelOptions` uses to stop serving from cache:
+ * past it, this process's copy is not evidence about anything.
+ */
+export function cachedModelOptions(): ModelOptionsPayload | null {
+  if (!cached) return null;
+  return Date.now() - cached.fetchedAt < STALE_MS ? cached : null;
+}
+
+// ── The catalogue's own age, and who keeps it young (TASK-781) ───────────────
+//
+// NOTHING ABOVE THIS LINE EVER REFRESHES THE MODEL LIST BY ITSELF.
+//
+// `fetchedAt`/`stale` on the payload describe THIS process's 60-second L1
+// cache, not the age of the model ids in it. Behind that cache sit two more,
+// and both can carry a list forward for days:
+//   - Hermes' `provider_models_cache.json`: 1 h TTL, but a SEVEN DAY
+//     stale-serve window (`_PROVIDER_MODELS_STALE_SERVE_MAX`), and its
+//     background SWR refresh only rewrites a row when the live fetch comes
+//     back non-empty — one failed re-fetch keeps the old ids with the entry's
+//     `at` unmoved.
+//   - `load(false)` above re-asks the dashboard but carries no `refresh=true`,
+//     so it re-reads that same disk row rather than busting it.
+// Only `?refresh=1` on the models route sends `refresh=true`, and it is
+// session-gated: a human had to click Refresh. Measured on the Hermes box —
+// eleven ids from 12:14 in the picker while the same credential listed
+// thirteen live, `claude-opus-5` and `claude-fable-5-1` missing until a click.
+//
+// THE HARNESS'S OWN REFRESH is what this drives, not a re-implementation:
+// `GET /api/model/options?refresh=true` on the Hermes dashboard, which is
+// exactly what `clear_provider_models_cache` + a live per-provider `/v1/models`
+// sweep is reachable as. (`hermes model --refresh` is the same sweep, but
+// `--refresh` is a modifier on the INTERACTIVE picker — see this file's header
+// — so it cannot be driven from a server.)
+
+/** Config-store key for {@link CatalogRefreshMark}. Beside `provider_verified_at`,
+ *  and for the same reason: it has to survive a restart. */
+export const CATALOG_REFRESH_KEY = "hermes_catalog_refreshed_at";
+
+/** Past this, the model list is old enough to say so. The owner's complaint was
+ *  a list a day stale; a catalogue changes on release timescales, so a day is
+ *  both the promise ("at least daily") and the honesty bound. */
+export const CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The floor under RETRIES, which is a different question from the cadence.
+ *
+ * A refresh that fails leaves the mark where it was, so the catalogue stays
+ * due — and the driver below is called from a five-minute timer. Without this
+ * floor a box whose dashboard is down would sweep every authenticated
+ * provider's `/v1/models` 288 times a day. One attempt an hour still recovers
+ * a transient outage well inside the daily promise.
+ */
+const CATALOG_RETRY_MIN_GAP_MS = 60 * 60 * 1000;
+
+/**
+ * When this box last successfully ASKED the harness to re-read every
+ * provider's list, and when the unattended driver last tried. `null` = never.
+ *
+ * WHAT `checkedAt` DOES NOT MEAN, precisely: that every provider's upstream
+ * `/v1/models` answered. Hermes replies 200 to `?refresh=true` whether or not
+ * its own per-provider sweep succeeded — a provider whose key has expired
+ * keeps its previous ids and Hermes serves them — and the picker envelope
+ * carries NO per-provider timestamp to say otherwise (measured on v0.21.1: the
+ * row is `{slug, name, is_current, is_user_defined, models, total_models,
+ * source}`). So this is the age of the CHECK, which is what this box can
+ * honestly observe, and the fields are named for that.
+ */
+export interface CatalogRefreshMark {
+  checkedAt: number | null;
+  attemptedAt: number | null;
+}
+
+const NEVER: CatalogRefreshMark = { checkedAt: null, attemptedAt: null };
+
+/**
+ * The store's write is a read of the WHOLE config, one field changed, and a
+ * rename back — atomic for the file, not for the update. Two forced refreshes
+ * that overlap (both callers of one single-flighted `load(true)` reach the
+ * bookkeeping together) would each read the same base, and the second rename
+ * would drop whatever another writer had saved in between — a bot token, the
+ * mailbox password. The house pattern, and the one `recordProviderVerified`
+ * already wraps its own read-modify-write in.
+ */
+const markLock = createSerialLock();
+
+function normalizeMark(raw: unknown): CatalogRefreshMark {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return NEVER;
+  const rec = raw as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return { checkedAt: num(rec.checkedAt), attemptedAt: num(rec.attemptedAt) };
+}
+
+/**
+ * Never throws: a store that cannot be read means "we do not know when this
+ * list was last refreshed", which is the same answer as "never" — and the safe
+ * one, because it reads as stale rather than as fresh.
+ */
+export async function readCatalogRefreshMark(): Promise<CatalogRefreshMark> {
+  try {
+    return normalizeMark(await get(CATALOG_REFRESH_KEY));
+  } catch {
+    return NEVER;
+  }
+}
+
+/**
+ * Whether the unattended check is DUE. A box that has never recorded one is due
+ * immediately — that first sweep is what gives every later answer an anchor.
+ */
+export function catalogCheckDue(mark: CatalogRefreshMark, now = Date.now()): boolean {
+  return mark.checkedAt === null || now - mark.checkedAt >= CATALOG_MAX_AGE_MS;
+}
+
+/**
+ * How old the list is, FOR THE OWNER — and `null` where this box cannot say.
+ *
+ * NOT the same question as `catalogRefreshDue`, deliberately. "Nothing has ever
+ * recorded a refresh here" is not evidence that the list is old: on a box in
+ * its first five minutes, or one restored from a backup, Hermes' own catalogue
+ * may have been fetched moments ago. Painting that as stale is the false-
+ * failure class, and this route already refuses exactly that shape one field
+ * away — `verified` stays null for a provider nothing has exercised rather than
+ * reporting `false`, so an offline box is not shown a broken credential.
+ *
+ * COMPUTED AT READ TIME, never baked into a cached payload: a payload built at
+ * 23 h old would otherwise still call itself fresh two hours later, from the L1
+ * cache, with no one the wiser — the probe-once class.
+ */
+export function catalogStaleness(mark: CatalogRefreshMark, now = Date.now()): boolean | null {
+  if (mark.checkedAt === null) return null;
+  return now - mark.checkedAt >= CATALOG_MAX_AGE_MS;
+}
+
+/**
+ * Remember that a FORCED refresh happened, and whether it landed.
+ *
+ * THE ONLY WRITER, and it is called from `getModelOptions` rather than from the
+ * daily driver below, because the driver is not the only path that busts
+ * Hermes' disk cache: the owner's Refresh click (`?refresh=1`) and every
+ * credential write that goes through `hermes-cloud-provider` do the same work.
+ * Recording only our own would have reported a catalogue the owner had just
+ * refreshed by hand as a day stale — a false failure over an operation that
+ * succeeded.
+ *
+ * Never throws: this is bookkeeping about a refresh, not the refresh.
+ */
+async function noteForcedRefresh(
+  succeeded: boolean,
+  now: number,
+  { unattended }: { unattended: boolean },
+): Promise<void> {
+  try {
+    await markLock(async () => {
+      const mark = await readCatalogRefreshMark();
+      await set(CATALOG_REFRESH_KEY, {
+        // A failure leaves the age exactly where it was. Advancing it would hide
+        // a week-old list behind a fresh timestamp for another day.
+        checkedAt: succeeded ? now : mark.checkedAt,
+        // ONLY the driver's own attempts. `attemptedAt` exists to space out the
+        // driver's RETRIES and governs nothing else — stamping it from the
+        // owner's Refresh click would mean an owner clicking Refresh on a box
+        // with a flaky dashboard silently suppressed, for an hour, the
+        // automatic recovery they were trying to trigger.
+        attemptedAt: unattended ? now : mark.attemptedAt,
+      } satisfies CatalogRefreshMark);
+    });
+  } catch {
+    // A store we cannot write means the next tick tries again an hour early.
+    // Cheap, and the alternative — letting this reject — would take a heartbeat
+    // down with it.
+  }
+}
+
+/**
+ * Did this payload come from a live dashboard read, or is it the better copy we
+ * already had?
+ *
+ * `degraded` is the whole difference. The downgrade guard returns the KEPT
+ * payload when a refresh fails, and its `source` is still `dashboard` — reading
+ * that as a refresh is the false-success class exactly.
+ */
+function isLiveAnswer(payload: ModelOptionsPayload | null): boolean {
+  return payload !== null && payload.source === "dashboard" && !payload.degraded;
+}
+
+/**
+ * ONE forced refresh, and the bookkeeping that goes with it.
+ *
+ * Both callers land here — the owner's Refresh click through
+ * `getModelOptions({refresh:true})`, and the unattended driver below — so the
+ * age this box reports moves for whoever caused it, and the two can never
+ * record it differently. It also takes the explicit-refresh throttle out of the
+ * driver's answer: routing the driver through the public `getModelOptions`
+ * meant a click ten seconds earlier made it fall through to the plain path and
+ * still report `"refreshed"`, with nothing refreshed and the mark untouched.
+ */
+async function forceCatalogRefresh(
+  now: number,
+  opts: { unattended: boolean },
+): Promise<ModelOptionsPayload> {
+  lastExplicitRefreshAt = now;
+  const payload = await load(true);
+  await noteForcedRefresh(isLiveAnswer(payload), now, opts);
+  return payload;
+}
+
+export type CatalogRefreshOutcome =
+  /** Not a Hermes box — there is no dashboard to ask. */
+  | "skipped"
+  /** Checked less than `CATALOG_MAX_AGE_MS` ago. */
+  | "not-due"
+  /** Due, but the driver's last attempt was inside `CATALOG_RETRY_MIN_GAP_MS`. */
+  | "throttled"
+  /** The harness was asked to re-read its providers' lists and answered. */
+  | "refreshed"
+  /** Asked and did not get a live answer. The mark is NOT advanced. */
+  | "failed";
+
+/**
+ * Ask the harness to re-read every authenticated provider's model list, at most
+ * once a day, from something that runs with nobody watching.
+ *
+ * Its one caller is the five-minute heartbeat tick — the only thing on a
+ * running box that fires without anyone touching it, which is why the deferred
+ * language persona already rides it. Cheap on the 287 ticks a day that are not
+ * the one: an edition read and a config-store read decide, and both stop there.
+ *
+ * NOT AWAITED by that caller, and it must stay that way. The tick's own unit
+ * runs `curl --max-time 10`, and `checkTunnelLiveness` already documents a
+ * 7.5 s worst case inside that budget on precisely the dead-tunnel path that
+ * restarts the tunnel — so a slow dashboard added in front of it would push the
+ * repair past the deadline, where `SuccessExitStatus=0 7 22 28` would report
+ * the truncated tick as a success.
+ *
+ * NEVER THROWS and never rejects, so a bare `void` call cannot become an
+ * unhandled rejection.
+ */
+export async function refreshCatalogIfDue(now = Date.now()): Promise<CatalogRefreshOutcome> {
+  try {
+    // GATED ON THE HARNESS, and here rather than at the call site, because the
+    // caller is the edition-agnostic heartbeat and this is the one function in
+    // it that is about Hermes. On an OpenClaw box there is no Hermes dashboard
+    // to ask — and its own catalogue does not need this: that route already
+    // re-enumerates on the read path once its cache passes six hours, with no
+    // click and no session (see setup-api/ai-models/catalog/route.ts).
+    if ((await getActiveHarness()) !== "hermes") return "skipped";
+
+    const mark = await readCatalogRefreshMark();
+    if (!catalogCheckDue(mark, now)) return "not-due";
+    if (mark.attemptedAt !== null && now - mark.attemptedAt < CATALOG_RETRY_MIN_GAP_MS) {
+      return "throttled";
+    }
+
+    return isLiveAnswer(await forceCatalogRefresh(now, { unattended: true }))
+      ? "refreshed"
+      : "failed";
+  } catch {
+    // Quiet on failure, by contract. The next tick past the retry floor asks
+    // again; nothing on screen changes because nothing on screen was promised.
+    return "failed";
+  }
 }
 
 // ── Scoping (REQ 1) ──────────────────────────────────────────────────────────
@@ -640,10 +1334,33 @@ export async function scopeFromPayload(
 
   let defaultModel = inScopeCurrent;
   if (!defaultModel && models.length) {
-    const recommended = await recommendedDefault(provider, payload.fetchedAt);
-    defaultModel = models.some((m) => m.id === recommended)
-      ? recommended
-      : (models.find((m) => m.featured)?.id ?? models[0].id);
+    // The owner's own ClawBox AI pick outranks every default there is — the
+    // dashboard's recommendation, Hermes' `featured` flag and the list's own
+    // order alike (TASK-769). `/setup-api/hermes/models` RECORDS that pick on
+    // a save that names a model and never read it back, so a device saved on
+    // another provider was offered the ClawBox AI scope's FIRST id — Flash —
+    // and an owner who had chosen Max came back to Flash with no notice.
+    //
+    // CLAWBOX AI ONLY, and the store is not even read for another scope. The
+    // reason is `pickedClawboxAiModelIdAmong`'s: Hermes saves model ids BARE,
+    // so `pickSlotFor` files an OpenRouter save of `openai/gpt-5.4` under
+    // `openai` and records nothing at all for a slashless `claude-opus-4-8`.
+    // Only ClawBox AI's two ids survive that intact, through a closed set
+    // rather than a guessed prefix. Every other Hermes provider still lands on
+    // `recommendedDefault` after a switch — the harness's own
+    // `pick_silent_default_model`, which is the right answer for a provider
+    // whose pick this box cannot reliably remember.
+    const picked = provider === CLAWAI_PROVIDER
+      ? pickedClawboxAiModelIdAmong(await readExplicitModelPicks(), models.map((m) => m.id))
+      : null;
+    if (picked) {
+      defaultModel = picked;
+    } else {
+      const recommended = await recommendedDefault(provider, payload.fetchedAt);
+      defaultModel = models.some((m) => m.id === recommended)
+        ? recommended
+        : (models.find((m) => m.featured)?.id ?? models[0].id);
+    }
   }
 
   return {
@@ -658,6 +1375,7 @@ export async function scopeFromPayload(
     ...(row?.warning ? { warning: row.warning } : {}),
     source: payload.source,
     stale: payload.stale,
+    ...(payload.degraded ? { degraded: payload.degraded } : {}),
     fetchedAt: payload.fetchedAt,
   };
 }

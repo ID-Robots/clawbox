@@ -7,8 +7,14 @@ import {
   type HermesSkillDetail,
   type SkillProvenance,
   type SkillRequirements,
+  CLI_FAILURE_SENTENCES,
   checkInstallIdentifier,
+  cliFailureCode,
+  cliInstallIdentifier,
+  REQUEST_REFUSAL,
+  SKILL_DOCS_CLI_TIMEOUT_MS,
 } from "@/lib/hermes-skills";
+import { parseInspectNoPanel, type AmbiguousSkill } from "@/lib/hermes-skill-cli-outcome";
 import {
   type HubLockEntry,
   findInstalledSkill,
@@ -18,6 +24,7 @@ import {
   readScanReport,
   scanReportFromLock,
   statSkillDir,
+  invalidArgument,
 } from "@/lib/hermes-skills-server";
 import { getCatalogRecord } from "@/lib/hermes-skill-index";
 import { extractHeadings, parseSkillFrontmatter, type SkillFrontmatter } from "@/lib/hermes-skill-frontmatter";
@@ -148,29 +155,20 @@ function parseInspect(stdout: string): ParsedInspect {
 }
 
 /**
- * `inspect <bare name>` can print a disambiguation table instead of a panel
- * ("Multiple skills named 'notion' found" → 11 rows). Parse the three columns so
- * the store can offer the choice rather than dead-ending on "not found".
+ * The candidate rows a no-panel `inspect` printed, as the store's own skill
+ * shape. TWO shapes reach here: the disambiguation table ("Multiple skills
+ * named 'notion' found" → 11 rows) and the "did you mean one of these?" list —
+ * both mean "narrow it down", both carry ids, and the store offers either as a
+ * chooser rather than dead-ending on "not found". `install` parses the same two
+ * for the same reason, so the reading of them is shared.
  */
-function parseAmbiguity(stdout: string): HermesSkill[] {
-  if (!/Multiple skills named/i.test(stdout)) return [];
-  const out: HermesSkill[] = [];
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.startsWith("│")) continue;
-    const cells = line.split("│").map((c) => c.trim());
-    if (cells.length < 5) continue;
-    const [, source, trust, identifier] = cells;
-    if (!identifier || identifier === "Identifier") continue;
-    if (!checkInstallIdentifier(identifier).ok) continue;
-    out.push({
-      id: identifier,
-      name: identifier.split("/").pop() || identifier,
-      source: source || undefined,
-      trust: trust || undefined,
-    });
-    if (out.length >= 40) break;
-  }
-  return out;
+function toSkillRows(rows: AmbiguousSkill[]): HermesSkill[] {
+  return rows.map(({ identifier, source, trust }) => ({
+    id: identifier,
+    name: identifier.split("/").pop() || identifier,
+    source,
+    trust,
+  }));
 }
 
 // ── Small helpers ───────────────────────────────────────────────────────────
@@ -260,18 +258,19 @@ export async function GET(request: Request) {
   // Installed tab may resolve a bare name against the disk.
   const fromInstalled = params.get("scope") === "installed";
   if (!checkInstallIdentifier(id).ok) {
-    return NextResponse.json({ error: "Invalid skill id" }, { status: 400 });
+    return invalidArgument("id", "Invalid skill id");
   }
 
   try {
     return wantDocs ? await remoteDocs(id, request.signal) : await localDetail(id, fromInstalled);
   } catch (err) {
-    // runHermesCli rejects with a sanitized message (e.g. "Hermes is not
-    // installed on this device") — surface that, never the binary path.
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Could not inspect skill" },
-      { status: 502 },
-    );
+    // runHermesCli's message is sanitised of the binary path but it is still
+    // ENGLISH, and the detail panel painted it verbatim under a localised
+    // header (HERMES-04). The code is the part the panel can say in the
+    // owner's language; the message goes to the log.
+    const code = cliFailureCode(err);
+    console.error("[hermes skills inspect] CLI failed", code, err instanceof Error ? err.message : err);
+    return NextResponse.json({ error: CLI_FAILURE_SENTENCES[code], code }, { status: 502 });
   }
 }
 
@@ -399,10 +398,27 @@ async function localDetail(id: string, fromInstalled: boolean): Promise<NextResp
   }
 
   // Catalog metadata only — the body needs the CLI (phase 2).
+  //
+  // With NO record this whole object is a placeholder: every field below reads
+  // `record?.…`, so an id nothing on this device knows produced a
+  // complete-looking skill whose name was the request echoed back —
+  // `?id=totally-made-up-skill-xyz-42` answered 200 with a skill. `catalogMiss`
+  // is that fact, put on the wire.
+  //
+  // It is a flag and not a 404 because this device cannot refuse an id. Its
+  // catalogue is a snapshot the browse route builds once and never rebuilds, so
+  // a skill published since is real and absent from it; and the store opens
+  // details by publisher-written bare NAME too (the related-skill chips), which
+  // is not a key of the index at all. `hermes skills inspect` resolves both —
+  // it is the authority on what exists, and phase 2 already answers its refusal
+  // as a 404. So phase 1 says "nothing here backs this", phase 2 asks Hermes,
+  // and the two together are what let the browser and the agent say "no such
+  // skill" without this device ever guessing it.
   const sourceUrl = record?.sourceUrl;
   const detail: HermesSkillDetail = {
     id,
     name: record?.name || id.split("/").pop() || id,
+    catalogMiss: record ? undefined : true,
     description: record?.description,
     provenanceNote: record?.provenanceNote,
     source: record?.source,
@@ -427,25 +443,73 @@ async function localDetail(id: string, fromInstalled: boolean): Promise<NextResp
 
 /** Phase 2 — the CLI preview, fetched only while the detail view is open. */
 async function remoteDocs(id: string, signal: AbortSignal): Promise<NextResponse> {
+  // A bare ClawHub slug has to be spelled `clawhub/<slug>` for the CLI, for the
+  // same reason the install route does it — `hermes skills inspect <bare name>`
+  // resolves on the catalog NAME and a ClawHub row's name is its display name,
+  // so every clawhub card dead-ended on "Skill not found" here.
+  const record = await getCatalogRecord(id).catch(() => undefined);
+  const cliId = cliInstallIdentifier(id, record?.source);
   // Queued (max 2 children) and cancelled with the request: clicking through a
   // dozen cards must not leave a dozen Python processes resident on a Jetson.
-  const r = await runSkillsCli(["skills", "inspect", id], {
-    env: { COLUMNS: "200" },
-    timeoutMs: 45_000,
-    signal,
-  });
+  //
+  // `hermes skills inspect` on a browse.sh/github row goes over the
+  // unauthenticated GitHub API, which is why this has a cap at all; the cap
+  // itself is SKILL_DOCS_CLI_TIMEOUT_MS, which carries the measurements. Below
+  // it, runHermesCli SIGKILLs a fetch that was about to land and throws
+  // "hermes timed out". That is the same jargon Report B
+  // flagged on the install surface; here it is only the docs BODY that failed
+  // (the metadata is already painted from the catalog), so a timeout is not an
+  // error page, it is the identical non-alarming note a non-zero exit already
+  // yields. A real cancellation (SkillsCliAborted, the client navigated away)
+  // still propagates untouched.
+  let r: Awaited<ReturnType<typeof runSkillsCli>>;
+  try {
+    r = await runSkillsCli(["skills", "inspect", cliId], {
+      timeoutMs: SKILL_DOCS_CLI_TIMEOUT_MS,
+      signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && /timed out/i.test(err.message)) {
+      return NextResponse.json(
+        { error: "Could not load the full documentation", code: "cli_timeout" },
+        { status: 504 },
+      );
+    }
+    throw err;
+  }
   if (r.code !== 0) {
     // Never surface raw stderr (it can carry the binary path).
-    return NextResponse.json({ error: "Could not load skill details" }, { status: 502 });
+    return NextResponse.json({ error: "Could not load skill details", code: "cli_failed" }, { status: 502 });
   }
 
   const { fields, preview, hasSkillPanel } = parseInspect(r.stdout);
   if (!hasSkillPanel) {
-    const candidates = parseAmbiguity(r.stdout);
-    if (candidates.length) {
-      return NextResponse.json({ ambiguous: true, query: id, candidates });
+    // "Exit 0 and no panel" is a CLASS of outcomes, not one — this module's own
+    // vocabulary names them (`hermes-skill-cli-outcome.ts`), and its header
+    // states the rule: the CLI fails to download and exits 0. Only ONE of them
+    // means the skill does not exist, and answering the whole class 404
+    // `not_found` is what lets both consumers say so out loud: the agent is
+    // told "Hermes does not have it, do not guess ids" and the owner that the
+    // skill "isn't on this device or in the skill store". Over a real
+    // `github/*` row opened while the unauthenticated GitHub API is
+    // rate-limited — a state this codebase models explicitly — both are false,
+    // and the second is a claim about the store this device never asked about.
+    const outcome = parseInspectNoPanel(r.stdout);
+    if (outcome.kind === "ambiguous" || outcome.kind === "suggestions") {
+      // Both candidate-bearing shapes answer the same way: the ids are on
+      // stdout, the store already renders them as a chooser and the agent's
+      // refusal already words them. A "did you mean" list dead-ended here while
+      // the install surface has parsed it all along.
+      return NextResponse.json({ ambiguous: true, query: id, candidates: toSkillRows(outcome.candidates) });
     }
-    return NextResponse.json({ error: "Skill not found" }, { status: 404 });
+    if (outcome.kind === "not-found") {
+      return NextResponse.json({ error: "Skill not found", code: REQUEST_REFUSAL.notFound }, { status: 404 });
+    }
+    // A source that could not be reached says nothing about whether the skill
+    // exists. Same answer as a non-zero exit, which both consumers already
+    // treat as a documentation failure rather than an absence.
+    console.error("[hermes-skills] inspect printed no panel and no known outcome");
+    return NextResponse.json({ error: "Could not load skill details", code: "cli_failed" }, { status: 502 });
   }
 
   // ONLY prose survives the Rich panel — list fields (platforms/tags) are

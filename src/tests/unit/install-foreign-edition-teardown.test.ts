@@ -1,8 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 // A device converted in place from hermes to openclaw came up with the OpenClaw
 // gateway healthy AND the whole Hermes stack still running — clawbox-gateway,
@@ -372,13 +377,62 @@ describe("stop+disable is the right amount of force", () => {
     // step_edition_gateway_state masks clawbox-gateway because a plain disable
     // is undone from the in-UI terminal. If an equivalent grant ever appears
     // for a Hermes unit, this test fails and the teardown needs revisiting.
-    const grants = SUDOERS.split("\n").filter(
-      (l) => l.startsWith("clawbox ") && l.includes("systemctl"),
-    );
-    expect(grants.some((l) => /\bstart\s+clawbox-gateway/.test(l))).toBe(true);
-    for (const unit of ["hermes-dashboard", "hermes-gateway"]) {
-      expect(grants.some((l) => l.includes(unit))).toBe(false);
+    //
+    // `restart` as well as `start`: TASK-445 round 2 dropped the redundant
+    // `start clawbox-gateway` grant, and `systemctl restart` brings a stopped
+    // unit up just the same — so the escalation the mask exists to block is
+    // unchanged.
+    //
+    // ── Revisited, TASK-445 follow-up ──────────────────────────────────────
+    // The rule used to be "no Hermes unit may appear in sudoers at all", which
+    // is stricter than the reason behind it. The two directions of the teardown
+    // defend different things:
+    //
+    //   clawbox-gateway is foreign on HERMES because it is an unauthenticated
+    //   agent surface on :18789. That is a security boundary, so the teardown
+    //   removes the unit file AND masks it — the grants above are dead there.
+    //
+    //   hermes-gateway is foreign on OPENCLAW because two harnesses polling one
+    //   Telegram token deadlock each other. That is a functional conflict, and
+    //   the teardown deliberately only stops+disables it: the unit is written by
+    //   the UPSTREAM Hermes installer, so a persistent mask would make a later
+    //   `hermes gateway install --system` write to /dev/null — the exact trap
+    //   step_edition_gateway_state's unmask branch exists to undo.
+    //
+    // So `restart hermes-gateway` is allowed, because the alternative was worse:
+    // that restart was running `sudo -n /home/clawbox/.local/bin/hermes`, a
+    // clawbox-WRITABLE binary, i.e. one-step local root. Restarting a root-owned
+    // unit that runs `User=clawbox` grants nothing new.
+    //
+    // The tripwire stays, sharpened: hermes-dashboard (a web surface) still gets
+    // nothing, and hermes-gateway gets `restart` and NOTHING else — no `start`,
+    // `enable`, `stop` or `unmask`, any of which would be a new capability
+    // rather than a cheaper spelling of one we already had.
+    // Trimmed: a Windows checkout of config/clawbox-sudoers carries CRLF (the
+    // file has no extension, so .gitattributes' `eol=lf` rules miss it) and the
+    // exact-match assertion below is anchored.
+    const grants = SUDOERS.split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("clawbox ") && l.includes("systemctl"));
+    expect(grants.some((l) => /\b(?:re)?start\s+clawbox-gateway/.test(l))).toBe(true);
+
+    // The dashboard units remain completely ungranted.
+    expect(grants.some((l) => l.includes("hermes-dashboard"))).toBe(false);
+
+    // hermes-gateway: restart only, both spellings, nothing else.
+    const hermesGateway = grants.filter((l) => /\bhermes-gateway\b/.test(l));
+    expect(hermesGateway).toHaveLength(2);
+    for (const line of hermesGateway) {
+      expect(line).toMatch(
+        /^clawbox ALL=\(root\) NOPASSWD: \/usr\/bin\/systemctl restart hermes-gateway(\.service)?$/,
+      );
     }
+
+    // And the teardown must still bring it down on an OpenClaw box, so the grant
+    // is only ever a way to restart a gateway that BELONGS on the device.
+    expect(TEARDOWN_FN).toContain('systemctl stop "$funit"');
+    expect(TEARDOWN_FN).toContain('systemctl disable "$funit"');
+    expect(SERVICE_REGISTRY).toContain("hermes-gateway.service");
   });
 
   it("hermes-gateway.service is not ours to delete", () => {
@@ -397,6 +451,17 @@ function runValidator(
   edition: string,
   units: Record<string, string>,
 ): { status: number; stdout: string } {
+  // Stubbed healthy for the same reason systemctl and curl are: this file's
+  // subject is the foreign-unit checks, and a validator that also reads the
+  // on-device TTS verdict would otherwise fail every case here for a reason
+  // that has nothing to do with editions.
+  const ttsStatus = path.join(tmp, "tts-status");
+  // BOTH engine verdicts, because scripts/install-voice.sh now publishes
+  // both and step_validate_services fails an ABSENT one under the same
+  // rule it already applied to KOKORO. This device is healthy, so the TTS
+  // probe is not what these tests are about.
+  fs.writeFileSync(ttsStatus, "KOKORO=ready\nPIPER=ready\n");
+
   const script = [
     "set -uo pipefail",
     `CLAWBOX_EDITION=${edition}`,
@@ -421,7 +486,10 @@ function runValidator(
 
   const r = spawnSync("bash", ["-c", script], {
     encoding: "utf-8",
-    env: { PATH: process.env.PATH ?? "", NODE_ENV: process.env.NODE_ENV },
+    // TTS_STATUS_FILE travels as an environment variable rather than as an
+    // interpolated shell assignment: JSON quoting is not shell quoting, and a
+    // path is data, not script.
+    env: { PATH: process.env.PATH ?? "", NODE_ENV: process.env.NODE_ENV, TTS_STATUS_FILE: ttsStatus },
   });
   return { status: r.status ?? -1, stdout: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
@@ -435,6 +503,7 @@ function healthyOpenclaw(): Record<string, string> {
     "clawbox-codex-auth-sync.timer": "enabled:active",
     "clawbox-heartbeat.service": "static:inactive",
     "clawbox-browser.service": "disabled:inactive",
+    "clawbox-embed.service": "static:inactive",
     "clawbox-tunnel.service": "disabled:inactive",
     "clawbox-root-update@.service": "static:inactive",
     "clawbox-ap-watchdog.service": "static:inactive",
@@ -485,6 +554,7 @@ d("the validator now says what to run, not just what is wrong", () => {
     // The teardown adds no checks — the healthy line must not move.
     const r = runValidator("openclaw", healthyOpenclaw());
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/All 15 checks healthy/);
+    // 17 with clawbox-embed.service among the installed-but-on-demand units.
+    expect(r.stdout).toMatch(/All 17 checks healthy/);
   });
 });

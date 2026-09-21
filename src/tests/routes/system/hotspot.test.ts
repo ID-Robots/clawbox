@@ -2,6 +2,11 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
 import fs from "fs/promises";
 
+vi.mock("@/lib/root-step-runner", () => ({
+  ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
+  startRootStep: vi.fn(async () => {}),
+}));
+
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
 }));
@@ -20,11 +25,13 @@ vi.mock("@/lib/config-store", () => ({
 }));
 
 import { get, setMany, getAll } from "@/lib/config-store";
+import { startRootStep } from "@/lib/root-step-runner";
 
 const mockGet = vi.mocked(get);
 const mockSetMany = vi.mocked(setMany);
 const mockGetAll = vi.mocked(getAll);
 const mockExecFile = vi.mocked(childProcess.execFile);
+const mockStartRootStep = vi.mocked(startRootStep);
 const mockFs = vi.mocked(fs);
 
 function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
@@ -249,6 +256,10 @@ describe("/setup-api/system/hotspot", () => {
     });
 
     it("continues even if AP toggle fails", async () => {
+      // The restart runs through the root-step launcher now, so that is where
+      // the failure has to be injected — a throwing systemctl no longer
+      // reaches this path at all.
+      mockStartRootStep.mockRejectedValueOnce(new Error("Service failed"));
       setupExecFileMock({
         systemctl: new Error("Service failed"),
         bash: new Error("Script failed"),
@@ -260,6 +271,87 @@ describe("/setup-api/system/hotspot", () => {
       // Should still succeed because AP toggle failure is non-fatal
       expect(res.status).toBe(200);
       expect(body.success).toBe(true);
+    });
+
+    describe("the AP verdict is a fact, not a leftover boolean", () => {
+      /**
+       * `{ success: true, apRestarted: false }` was the answer to THREE
+       * different things: "we deliberately held off", "we stopped it as asked"
+       * and "the toggle threw and nothing happened". The wizard read the same
+       * bytes in all three and showed "Settings saved!" — including for the box
+       * whose hotspot is not in the state its owner just asked for.
+       */
+
+      it("distinguishes a deliberate deferral from a failure", async () => {
+        // Deferral: the radio is a client on a real network, so bouncing the AP
+        // would sever THIS connection. Nothing failed.
+        setupExecFileMock({
+          nmcli: { stdout: "HomeWiFi:802-11-wireless:wlP1p1s0", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+
+        const res = await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: true }));
+        const body = await res.json();
+
+        expect(res.status).toBe(200);
+        expect(body.apRestarted).toBe(false);
+        expect(body.apAction).toBe("deferred");
+        expect(body.warning).toBeUndefined();
+      });
+
+      it("names a failed AP restart as failed, and says why", async () => {
+        mockStartRootStep.mockRejectedValueOnce(new Error("Service failed"));
+        setupExecFileMock({
+          systemctl: new Error("Service failed"),
+          bash: new Error("Script failed"),
+        });
+
+        const res = await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: true }));
+        const body = await res.json();
+
+        expect(body.apRestarted).toBe(false);
+        expect(body.apAction).toBe("failed");
+        expect(body.warning).toMatch(/could not restart/i);
+      });
+
+      it("names a failed AP stop as failed, so 'off' is not claimed for a live radio", async () => {
+        setupExecFileMock({ bash: new Error("Script failed") });
+
+        const res = await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: false }));
+        const body = await res.json();
+
+        expect(body.apAction).toBe("failed");
+        expect(body.warning).toMatch(/still be broadcasting/i);
+      });
+
+      it("names a clean stop as stopped", async () => {
+        const res = await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: false }));
+        const body = await res.json();
+
+        expect(body.apAction).toBe("stopped");
+        expect(body.apRestarted).toBe(false);
+        expect(body.warning).toBeUndefined();
+      });
+
+      it("names a real restart as restarted, and keeps apRestarted true for the handoff", async () => {
+        const res = await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: true }));
+        const body = await res.json();
+
+        expect(body.apAction).toBe("restarted");
+        expect(body.apRestarted).toBe(true);
+      });
+    });
+
+    it("does not answer the next GET out of a cache the save just invalidated", async () => {
+      // GET caches for 3s. Without an invalidation the reload that follows a
+      // save is answered with the settings it just replaced.
+      mockGetAll.mockResolvedValue({ hotspot_ssid: "OldName", hotspot_enabled: true });
+      expect((await (await hotspotGet()).json()).ssid).toBe("OldName");
+
+      await hotspotPost(jsonRequest({ ssid: "NewName" }));
+      mockGetAll.mockResolvedValue({ hotspot_ssid: "NewName", hotspot_enabled: true });
+
+      expect((await (await hotspotGet()).json()).ssid).toBe("NewName");
     });
 
     it("returns 500 on setMany failure", async () => {

@@ -1,8 +1,15 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { NextRequest } from "next/server";
+
+// gateway-proxy.ts reads the box's own name from os.hostname(); this handle is
+// the same module object its `import os from "os"` holds, so assigning here is
+// what a rename looks like from inside the process. Restored in afterEach.
+const osModule = createRequire(import.meta.url)("node:os") as { hostname: () => string };
+const realHostname = osModule.hostname;
 
 // gateway-proxy.ts's redirectToSetup() reflects the request's own origin
 // back into the /setup redirect URL when the host is trusted, instead of
@@ -35,6 +42,7 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    osModule.hostname = realHostname;
     rmSync(dir, { recursive: true, force: true });
     if (originalEnv === undefined) delete process.env[ENV_VAR];
     else process.env[ENV_VAR] = originalEnv;
@@ -201,6 +209,41 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     const ipRequest = createRequest("http://192.0.2.3/", { host: "192.0.2.3" });
     const ipResponse = gatewayProxy.redirectToSetup(ipRequest);
     expect(ipResponse.headers.get("location")).toContain("192.0.2.3");
+  });
+
+  it("reflects the box's own BARE hostname, and follows a rename with no restart", async () => {
+    // TASK-808: `http://clawbox/` — the box's own hostname with no suffix, which
+    // a router that registers the DHCP name hands the browser. Reflecting
+    // `clawbox.local` at a browser that reached the box by the bare name is a
+    // dead end wherever mDNS does not resolve.
+    process.env[ENV_VAR] = path.join(dir, "absent.json");
+    await importFresh();
+
+    osModule.hostname = () => "krasi-workshop";
+    const bare = gatewayProxy.redirectToSetup(
+      createRequest("http://krasi-workshop/", { host: "krasi-workshop" }),
+    );
+    expect(bare.headers.get("location")).toBe("http://krasi-workshop/setup");
+    // The `<name>.local` form this has always reflected still does.
+    const mdns = gatewayProxy.redirectToSetup(
+      createRequest("http://krasi-workshop.local/", { host: "krasi-workshop.local" }),
+    );
+    expect(mdns.headers.get("location")).toBe("http://krasi-workshop.local/setup");
+
+    // A rename applies `hostnamectl set-hostname` without restarting this
+    // server, so the name cannot be captured once per process.
+    osModule.hostname = () => "kitchen";
+    const renamed = gatewayProxy.redirectToSetup(
+      createRequest("http://kitchen/", { host: "kitchen" }),
+    );
+    expect(renamed.headers.get("location")).toBe("http://kitchen/setup");
+
+    // Still narrow: a name that is not this box's falls back to the canonical
+    // origin rather than being reflected.
+    const foreign = gatewayProxy.redirectToSetup(
+      createRequest("http://intranet/", { host: "intranet" }),
+    );
+    expect(foreign.headers.get("location")).toContain("clawbox.local");
   });
 
   it("falls back to the canonical origin on a malformed Host port instead of throwing", async () => {

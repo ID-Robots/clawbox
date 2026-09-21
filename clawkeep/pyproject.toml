@@ -9,7 +9,7 @@ description = "ClawKeep device-side backup client for ClawBox hardware"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "ID Robots", email = "support@openclawhardware.dev" }]
+authors = [{ name = "ID Robots", email = "support@clawbox.com" }]
 dependencies = [
     "requests>=2.31",
     # Cloud upload + list-objects against R2. Lazy-imported in clawkeep.s3

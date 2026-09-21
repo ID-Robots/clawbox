@@ -8,10 +8,25 @@ import HermesProviderConfig from "@/components/HermesProviderConfig";
 // — otherwise a customer who successfully configures a provider is left sitting
 // on a step that has already finished.
 
-vi.mock("@/lib/i18n", () => ({
-  I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
-  useT: () => ({ t: (key: string) => key, locale: "en", setLocale: vi.fn() }),
-}));
+// This panel's copy lives in the edition catalogue (`edition-translations/en-provider.ts`, TASK-458), so resolve keys
+// against the real English table instead of echoing them back: the assertions
+// below stay on the sentence a customer actually reads.
+vi.mock("@/lib/i18n", async () => {
+  const { providerEn } = await import("@/lib/edition-translations/en-provider");
+  const { translations } = await import("@/lib/translations");
+  return {
+    I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+    useT: () => ({
+      t: (key: string, params?: Record<string, string | number>) =>
+        Object.entries(params ?? {}).reduce(
+          (out, [name, value]) => out.replaceAll(`{${name}}`, String(value)),
+          providerEn[key] ?? translations.en[key] ?? key,
+        ),
+      locale: "en",
+      setLocale: vi.fn(),
+    }),
+  };
+});
 
 vi.mock("next/image", () => ({
   default: ({ alt = "" }: { alt?: string }) => <img alt={alt} />,
@@ -62,7 +77,16 @@ function stubFetch({ saveOk = true }: { saveOk?: boolean } = {}) {
         : { ok: false, status: 502, json: async () => ({ error: "hermes config failed" }) } as Response;
     }
     if (url === "/setup-api/hermes/models") {
-      return { ok: true, json: async () => ({ provider: "openrouter" }) } as Response;
+      // A box whose OpenRouter key is in place: the wizard opens on that row
+      // only because the harness holds a credential for it.
+      return {
+        ok: true,
+        json: async () => ({
+          provider: "openrouter",
+          current: "vendor/model-a",
+          providers: [{ id: "openrouter", authenticated: true, credentialPresent: true }],
+        }),
+      } as Response;
     }
 
     return { ok: true, json: async () => ({}) } as Response;
@@ -89,10 +113,13 @@ describe("HermesProviderConfig auto-advance", () => {
 
     fireEvent.click(await saveButton());
 
+    // The save runs behind the progress overlay; the wizard advances after
+    // the overlay's minimum dwell and DONE beat, not the instant the POST lands.
+    expect(await screen.findByText("Setting up OpenRouter")).toBeInTheDocument();
     await waitFor(() => {
       expect(onNext).toHaveBeenCalledTimes(1);
-    }, { timeout: 4_000 });
-  });
+    }, { timeout: 6_000 });
+  }, 10_000);
 
   it("advances exactly once even when the step is saved repeatedly", async () => {
     stubFetch();
@@ -106,7 +133,7 @@ describe("HermesProviderConfig auto-advance", () => {
 
     await waitFor(() => {
       expect(onNext).toHaveBeenCalledTimes(1);
-    }, { timeout: 4_000 });
+    }, { timeout: 6_000 });
 
     // Give a second timer every chance to fire before declaring it doesn't.
     await new Promise((resolve) => setTimeout(resolve, 1_500));
@@ -137,7 +164,7 @@ describe("HermesProviderConfig auto-advance", () => {
     fireEvent.click(await saveButton());
 
     await waitFor(() => {
-      expect(screen.getByRole("status")).toBeInTheDocument();
+      expect(screen.getAllByRole("status").length).toBeGreaterThan(0);
     });
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect(onNext).not.toHaveBeenCalled();

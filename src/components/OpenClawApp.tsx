@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
+import CrabWaitMark from "./CrabWaitMark";
 
 export default function OpenClawApp() {
   const { t } = useT();
@@ -47,8 +48,13 @@ export default function OpenClawApp() {
 
   if (status === "checking") {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-3 bg-[#0a0f1a]">
-        <div className="w-8 h-8 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent animate-spin" />
+      <div className="h-full flex flex-col items-center justify-center gap-4 bg-[var(--bg-deep)]">
+        {/* The device's own wait mark rather than a generic ring. This wait is
+            the same KIND as the full-screen ones — the box's gateway is not
+            answering yet — so it should look like them; ReconnectStage itself
+            cannot be used here because it portals full-screen and would black
+            out the desktop behind this window. */}
+        <CrabWaitMark size={88} />
         <span className="text-sm text-white/50">{t("openclaw.connecting")}</span>
       </div>
     );
@@ -56,7 +62,7 @@ export default function OpenClawApp() {
 
   if (status === "not-running") {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-6 p-8 bg-[#0a0f1a]">
+      <div className="h-full flex flex-col items-center justify-center gap-6 p-8 bg-[var(--bg-deep)]">
         <h2 className="text-xl font-semibold text-white">{t("openclaw.offline")}</h2>
         <p className="text-white/50 text-sm">{t("openclaw.notRunning")}</p>
         <button

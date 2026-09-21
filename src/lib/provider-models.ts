@@ -10,16 +10,96 @@
 // (e.g. `anthropic/claude-haiku-4-5`) since OpenRouter's catalog uses
 // `<org>/<model>` slugs.
 
+import { lastModelSegment } from "./chat-header-pills";
 import {
   OPENROUTER_CURATED_MODELS,
   OPENROUTER_DEFAULT_MODEL_ID,
   isValidOpenRouterModelId,
 } from "./openrouter-models";
 
+// Model families that are not CHAT models, whatever provider lists them —
+// image, audio/speech, transcription, video, embeddings, moderation, and the
+// pre-chat completion engines.
+//
+// It lives HERE, not in the catalog route, because it is a fact about model
+// ids rather than about one HTTP handler, and this module already owns the
+// catalogue vocabulary and is import-safe from both client and server. The
+// second catalogue surface (src/lib/hermes-model-options.ts) cannot import a
+// route without dragging `spawn`/`fs` in, so a rule parked there would simply
+// be copied.
+//
+// It is a GUESS, and only for catalogues that leave us no alternative.
+// `openclaw models list` enumerates a provider's whole catalogue and offers no
+// capability filter to ask for the chat ones (`--all`, `--local`, `--provider`
+// and nothing else on 2026.8.1), and its rows carry no capability field: an
+// image SKU comes back shaped exactly like a chat model —
+// `openai/gpt-image-1-mini` beside `openai/gpt-5.6-sol`, `input` reported as
+// "-" for both on a stock host. That gap is worth reporting upstream.
+//
+// Where a catalogue DOES publish the capability this list is not consulted at
+// all: OpenRouter's `architecture.output_modalities` is read directly by the
+// catalog route (`outputIsRenderableChat`), and `MODALITY_REPORTING_PROVIDERS`
+// keeps this pattern off that provider so a guess can never disagree with an
+// answer. An earlier revision of this comment claimed the field was already
+// read while nothing in the tree referenced it; the measurement below is what
+// closed that gap.
+//
+// A MODALITY exclusion, deliberately not a generation allowlist: it can only
+// hide SKUs a chat picker has no way to talk to, never a chat model the box has
+// learned about. That distinction is the point — the generation allowlist it
+// replaces (`/^gpt-5\.[45](-pro|-mini)?$/`) hid the whole gpt-5.6 generation,
+// which is the defect this change exists to fix. Older chat generations the box
+// lists are shown: the device's own catalogue decides, and an older model the
+// box can route is not a dead button.
+//
+// The families are measured, not guessed at twice: run against the 423 rows of
+// the live OpenRouter catalogue (2026-09-02), which is the only catalogue that
+// states the truth alongside the name, this pattern drops 13 of the 15 rows
+// whose output is not text-only — the `-image` family (`gpt-5-image`,
+// `gemini-2.5-flash-image`, `gpt-5.4-image-2`), `imagen-*`, `veo-*`, `lyria-*`,
+// `gpt-audio` — and produces ZERO false failures: no text-output row matches
+// it. The two it misses are `openrouter/auto` and `openrouter/auto-beta`, which
+// the field-based rule deliberately keeps too. `vision` is NOT a family here
+// for the same measured reason: `deepseek/deepseek-v4-flash-vision-exp` is a
+// text-output chat model.
+const NON_CHAT_MODEL_RE = new RegExp([
+  "^(?:gpt-image|dall-e|whisper|tts-|text-embedding|omni-moderation|sora",
+  "|davinci|babbage|codex-mini|imagen|veo|lyria)",
+  // Suffix families: gpt-4o-audio-preview, gpt-4o-realtime-preview,
+  // gpt-4o-transcribe, gpt-4o-mini-tts, gemini-2.5-flash-image,
+  // gpt-5.4-image-2.
+  "|(?:-audio|-realtime|-transcribe|-tts|-image)(?:-|$)",
+].join(""));
+
+/**
+ * Is this id a SKU a chat picker has no way to talk to?
+ *
+ * Tested against the last path segment, because OpenRouter ids keep their
+ * `<org>/<model>` slug (`openai/gpt-image-1`) and an anchored pattern matched
+ * against the whole id is silently inert for the largest catalogue we serve.
+ */
+export function isNonChatModelId(id: string): boolean {
+  return NON_CHAT_MODEL_RE.test(lastModelSegment(id));
+}
+
 export interface ProviderModelOption {
   id: string;
   label: string;
   hint: string;
+  /**
+   * Whether a SUBSCRIPTION (OAuth sign-in) credential can route this model, as
+   * opposed to an API key. A provider's subscription can put it on a different
+   * or a smaller set than its API key does, and a picker that renders the API
+   * set while the customer is on the Subscription tab offers models their plan
+   * cannot run. Which set applies is {@link SUBSCRIPTION_SURFACE}'s answer,
+   * and it is the transport that decides — read the history note there before
+   * assuming any particular provider narrows.
+   *
+   * `undefined` means UNKNOWN, not "yes": the device could not enumerate the
+   * subscription surface (cold start, CLI failure), so nothing is marked and
+   * the whole list stays pickable rather than the UI inventing a restriction.
+   */
+  availableOnSubscription?: boolean;
 }
 
 export interface ProviderCatalog {
@@ -46,16 +126,51 @@ export interface ProviderCatalog {
 // stable entries per provider) and let the live catalog fill in the
 // rest. If you find yourself adding the latest model here, stop —
 // that's the catalog route's job.
+//
+// They are DISPLAY ONLY, and they can never hide a live row: the route no
+// longer merges them into an enumeration, and never persists them. Whatever
+// renders them is holding a catalogue marked `fallback: true` and is expected
+// to ask again — see `ResolvedProviderCatalog` and `useProviderCatalog`. The
+// one thing they still contribute to a live row is a `hint`, which no
+// enumeration returns.
 export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest, near-frontier." },
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", hint: "Default. Speed + intelligence." },
-  { id: "claude-opus-4-7", label: "Claude Opus 4.7", hint: "Most capable." },
+  { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Speed + intelligence." },
+  { id: "claude-opus-5", label: "Claude Opus 5", hint: "Default. Most capable." },
 ] as const;
 
-// OpenAI API key models. Curated to the 5.4 + 5.5 generations only —
-// older gens (4.1, 5.0, 5.1, 5.2, 5.3) are filtered out at the catalog
-// route via ALLOWED_MODEL_RE_BY_PROVIDER. Power users can still hit
-// older models via the "custom" toggle.
+/**
+ * The Anthropic model this box lands on when nothing named one.
+ *
+ * Exported so the two routes that WRITE `agents.defaults.model.primary` for a
+ * provider the caller did not pick a model for — ai-models/configure's
+ * PROVIDERS table and chat/model's DEFAULT_PROVIDER_MODELS — name one id
+ * instead of a copy each. Those two are final: neither consults the box's own
+ * enumeration. The catalog route reads the same answer through
+ * `getProviderCatalog(...).defaultModelId` below, but only as its fallback —
+ * a row the harness tags `default` outranks it there (`isDefault` in
+ * src/app/setup-api/ai-models/catalog/route.ts).
+ *
+ * The two agree on the pinned core: `openclaw models list --provider anthropic
+ * --all --json` on 2026.8.1 answers eleven rows with an empty `tags` on every
+ * one (measured 2026-09-03), claude-opus-5 among them, so nothing outranks
+ * this and the picker pre-selects what "Make default -> Anthropic" writes. A
+ * later core that starts tagging an Anthropic row would show that row in the
+ * picker while these two still write this id — deliberate, per the ruling that
+ * put Opus 5 here, and the point to revisit if it happens.
+ *
+ * Hermes never reads it: there the recommendation comes from the harness's own
+ * `/api/model/recommended-default` (src/lib/hermes-model-options.ts).
+ */
+export const ANTHROPIC_DEFAULT_MODEL_ID = "claude-opus-5";
+
+// OpenAI API key models — cold-start display only, like every list here.
+// There is no longer a generation allowlist at the catalog route for openai:
+// it matched none of the gpt-5.6 generation, so on a 2026.8.1 box it hid the
+// live catalogue behind these five ids instead of supplementing them. What a
+// box shows now is what `openclaw models list --provider openai --all --json`
+// returns, minus the non-chat SKUs. Power users can still type any id via the
+// "custom" toggle.
 export const OPENAI_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.5-pro", label: "GPT-5.5 Pro", hint: "Latest, max reasoning." },
   { id: "gpt-5.5", label: "GPT-5.5", hint: "Latest flagship." },
@@ -64,17 +179,91 @@ export const OPENAI_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
 ] as const;
 
-// ChatGPT-subscription (Codex) models — provider id `codex` in OpenClaw
-// 2026.6.x (renamed from `openai-codex` in <=2026.5.x). Available when
-// the user authenticates via ChatGPT OAuth instead of pasting an API
-// key. NO -pro variants — those are API-key only (they 400 with "model
-// not supported when using Codex with a ChatGPT account" on the OAuth
-// path). Per developers.openai.com/codex/models the supported set via
-// ChatGPT-account auth is gpt-5.6-{sol,terra,luna}, gpt-5.5, gpt-5.4,
-// gpt-5.4-mini. The gpt-5.6 models are plan-gated upstream (Plus/Pro/Max)
-// — the live catalog only returns them for entitled accounts, so listing
-// them here just gives them stable labels; accounts without the plan
-// never see them. Filter lives in ALLOWED_MODEL_RE_BY_PROVIDER (catalog).
+/**
+ * The OpenAI model this box lands on when nothing named one.
+ *
+ * The twin of ANTHROPIC_DEFAULT_MODEL_ID above, and for the same reason: the
+ * two routes that WRITE `agents.defaults.model.primary` for an API-key save
+ * that carried no model — ai-models/configure's PROVIDERS table and
+ * chat/model's DEFAULT_PROVIDER_MODELS — used to each hold their own copy, and
+ * they had drifted. configure's was `gpt-5`, which is in neither the list above
+ * nor any live enumeration on the pinned core (2026.8.1); it exists only as an
+ * OpenRouter slug. The CLI refuses that reference against the enabled plugins'
+ * catalogs, the route falls through to setPrimaryModelWithoutCatalogValidation
+ * and still answers 200, and the picker never offers the id — so nothing
+ * surfaced it until the owner's first turn failed. TASK-705.
+ *
+ * Measured read-only on the OpenClaw dev box, 2026-09-04, on the pinned core
+ * (2026.8.1): `openclaw models list --provider openai --all --json` answers
+ * eleven rows — gpt-5.4, -mini, -nano, -pro, gpt-5.5, gpt-5.5-pro, the three
+ * gpt-5.6 and gpt-6-astra, plus the image SKU. `gpt-5.4` is there; `gpt-5` is
+ * not.
+ *
+ * This is the WRITE path's cold start, and it is not the same answer as the
+ * READ path's. `openclaw models list` does tag one row `default` per provider,
+ * the catalog route prefers that tag over the curated `defaultModelId`
+ * (ai-models/catalog/route.ts), and on a stock 2026.8.1 host the tagged openai
+ * row is `gpt-5.6-sol` — so a picker can legitimately show `gpt-5.6-sol` while
+ * a save that names no model writes this id. That divergence is real and known;
+ * what it is NOT is the TASK-705 defect, because both are ids the box can run.
+ * Preferring the catalog route's cached `defaultModelId` here would close it and
+ * is the right next step, but it changes what every cold-start save writes for
+ * every provider and belongs in its own change with its own device proof. The
+ * dev box measured above carries no `default` tag on any openai row (the only
+ * tag present was `configured`), which is why the first version of this comment
+ * claimed the divergence could not occur.
+ *
+ * Hermes never reads it: there the recommendation comes from the harness's own
+ * `/api/model/recommended-default` (src/lib/hermes-model-options.ts).
+ */
+export const OPENAI_DEFAULT_MODEL_ID = "gpt-5.4";
+
+// ChatGPT-subscription (Codex) models. `codex` is the UI id for the
+// subscription; the models themselves are written as `openai/<id>` — OpenClaw
+// 2 retired the `codex` provider id (`openai-codex` before 2026.6), see
+// src/lib/chatgpt-subscription.ts. Available when the user authenticates via
+// ChatGPT OAuth instead of pasting an API key.
+//
+// THIS ARRAY IS THE FALLBACK, and the labels, for the ChatGPT surface — not the
+// surface itself. `chatgptSurface()` (src/lib/chatgpt-surface.ts) derives that
+// from the INSTALLED core's `extensions/openai` manifest, which states the route
+// per model, and answers this array only where there is no manifest to read: CI,
+// a box with no core yet, a file half-written by an upgrade. The picker, both
+// write paths to `agents.defaults.model.primary` (`isCodexSupportedModelId`) and
+// the refusal sentence all read that one surface, so there is still no second
+// spelling to keep in step. There was: a generation regex in
+// subscription-surface.ts, which could not spell `gpt-5.3-codex-spark` and so
+// hid it (TASK-786).
+//
+// It used to BE the surface, mirroring the core's
+// `OPENAI_CHATGPT_MODERN_MODEL_IDS` by hand, and a hand-kept mirror is wrong in
+// both directions the moment a core bump is measured: 2026.9.3 files
+// `gpt-6-astra` as a dual-route model and lists it FIRST in the openai manifest,
+// and suppresses `gpt-5.4` and `gpt-5.4-mini` on `chatgpt.com` — "retired from
+// the ChatGPT-account Codex route" — both of which this array still offers.
+//
+// Measured on the box, core 2026.8.1 (the route facts that still hold):
+//   * gpt-5.6-sol         -> chatgpt.com/backend-api/codex/responses  200
+//   * gpt-5.3-codex-spark -> chatgpt.com/backend-api/codex/responses  200, and
+//     `models list --provider openai` reports it `available: false` — the
+//     platform route is the one that excludes it.
+// What does NOT hold is the reading that `gpt-6-astra` is "not on the ChatGPT
+// route": measured 2026-09-10 on that same box, a turn on it goes to
+// api.openai.com — and so does a turn on the owner's own `openai/gpt-5.5`, which
+// 401s there and fails over. Both are the box's inline
+// `models.providers.openai.apiKey` deciding which catalogue the core publishes
+// for `openai`, not a property of either model.
+//
+// NO -pro variants — those are API-key only (they 400 with "model not
+// supported when using Codex with a ChatGPT account" on the OAuth path), even
+// though the core files them as dual-route; `chatgpt-surface.ts` applies that
+// narrowing to the manifest too. Plan gating is the opposite case and is
+// deliberately NOT applied: the gpt-5.6 models are gated upstream
+// (Plus/Pro/Max), there is no plan-scoped list on this core to filter by — the
+// catalog route's `WHY codex IS NOT ENUMERATED FROM openai` note is the whole
+// argument — so an unentitled account sees all three, the turn 400s upstream
+// and the sign-in probe (src/lib/codex-model-probe.ts) is what keeps a box off
+// a row its plan cannot run. Listing them here gives them stable labels.
 export const CODEX_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "Newest flagship. Plus/Pro." },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "GPT-5.6. Plus/Pro." },
@@ -82,6 +271,17 @@ export const CODEX_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.5", label: "GPT-5.5", hint: "Default. Every tier." },
   { id: "gpt-5.4", label: "GPT-5.4", hint: "Previous gen. 1M context." },
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
+  // Subscription-ONLY upstream: the core's route contract lists it under
+  // OPENAI_SUBSCRIPTION_ONLY_ROUTE_MODEL_IDS, and the box's own `models list
+  // --provider openai` reports it `available: false` because the platform
+  // route excludes it. This is the only surface that can offer it.
+  // Label deliberately short of the core's "GPT-5.3 Codex Spark": the chat
+  // header's model pill has ~142px for its text (chat-header-pills.ts) and
+  // drops only a LEADING or TRAILING token that repeats the provider pill —
+  // "Codex" sits in the middle here, so the full name would be the longest
+  // label in any catalogue we ship and the only one that truncates. The
+  // popover still shows the whole id.
+  { id: "gpt-5.3-codex-spark", label: "GPT-5.3 Spark", hint: "Codex, fast. ChatGPT sign-in only." },
 ] as const;
 
 // Unlike the other picker lists, GOOGLE_MODELS is ALSO the seed for
@@ -96,6 +296,19 @@ export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
   { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite", hint: "Fastest, budget-friendly." },
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", hint: "Complex reasoning." },
 ] as const;
+
+/**
+ * The Google model this box lands on when nothing named one.
+ *
+ * The third of the trio, added for the same reason as the other two: the
+ * configure route's PROVIDERS table, chat/model's DEFAULT_PROVIDER_MODELS and
+ * PROVIDER_CATALOGS each spelled this id by hand, and `chat/model`'s copy is
+ * not display-only — `POST /setup-api/providers/default` reads the model off
+ * that row and writes it to `agents.defaults.model.primary`. Bumping the id in
+ * two of the three places would have pointed every Google turn at a model the
+ * box cannot resolve.
+ */
+export const GOOGLE_DEFAULT_MODEL_ID = "gemini-2.5-flash";
 
 // ClawBox AI tiers — surfaced via the secondary model picker after
 // consolidating Flash/Pro into one "ClawBox AI" provider row in the
@@ -113,6 +326,140 @@ export const CLAWAI_MODELS: readonly ProviderModelOption[] = [
 // own /api/v1/models for the last). Single source of truth so the route's
 // allowlist, the AIModelsStep `catalogProvider` memo, and the chat-popup
 // header dropdown all gate on the same set.
+/**
+ * What SUBSCRIPTION (OAuth sign-in) changes about the models a provider can
+ * run. Three shapes, because three different things happen:
+ *
+ *  * `catalogProvider` — the whole namespace moves. OpenAI's ChatGPT sign-in
+ *    routes through `codex`: different catalogue, different credential, and a
+ *    different `<provider>/<id>` written to config (see the configure route's
+ *    `subscriptionOverride`). The picker swaps catalogues wholesale.
+ *  * `surfaceProvider` — the namespace STAYS, the set narrows. The provider's
+ *    subscription credential is carried by a SECOND, smaller catalogue of the
+ *    same plugin, and only what that catalogue lists actually routes. The
+ *    picker keeps the main catalogue and marks the rest unavailable — swapping
+ *    wholesale here would drop rows silently, which is the same lie in the
+ *    other direction.
+ *  * `nativeRouting` — the namespace stays and NOTHING narrows. The provider's
+ *    own plugin carries the subscription credential on the provider's own
+ *    transport, so the set it can run is the provider's own catalogue. There
+ *    is no second, smaller catalogue to enumerate, and therefore no narrowing
+ *    this box can observe.
+ *
+ * WHY ANTHROPIC MOVED (this history matters — read it before "restoring" the
+ * old value). Anthropic used to be `surfaceProvider: "claude-cli"`, and that
+ * was CORRECT when it was written and verified on a device: a Claude
+ * subscription was routed by a `models.providers.anthropic` openai-compat
+ * override, whose turns left the box as `POST /v1/chat/completions`, and the
+ * only Anthropic catalogue reachable that way was the plugin's `claude-cli`
+ * one — 5 models, no Fable, no Mythos, no Haiku.
+ *
+ * PR #532 changed the transport out from under that rule. A subscription
+ * anthropic save no longer writes the openai-compat override; it hands the
+ * provider to the native anthropic plugin, whose turns leave as
+ * `POST /v1/messages` with `anthropic-beta: oauth-2025-04-20`. That transport
+ * serves the FULL anthropic catalogue on a subscription credential — which is
+ * why the same Claude sign-in has always run claude-fable-5 on the Hermes
+ * edition, which routed natively all along.
+ *
+ * So the narrowing did not become wrong through carelessness; it became STALE.
+ * `nativeRouting` is set from the same table the transport decision reads
+ * ({@link routesSubscriptionNatively}, which the configure route imports
+ * instead of keeping its own copy) precisely so the next transport change
+ * cannot silently invalidate the availability stamp again.
+ *
+ * One table because this is one fact. It used to be spelled three ways in
+ * three files, none of which knew about the others.
+ */
+export const SUBSCRIPTION_SURFACE: Readonly<Record<string, {
+  catalogProvider?: string;
+  surfaceProvider?: string;
+  nativeRouting?: boolean;
+}>> = Object.freeze({
+  openai: { catalogProvider: "codex" },
+  anthropic: { nativeRouting: true },
+});
+
+/**
+ * Does this provider+authMode pair route through the provider's OWN plugin
+ * rather than through a `models.providers.<p>` openai-compat override?
+ *
+ * Anthropic, and deliberately NOT "every provider that has an OAuth flow".
+ * `OAUTH_PROVIDERS` also carries google (Gemini Code Assist), and google's
+ * subscription reaches the configure route's `applyCloudProviderTransport` the
+ * same way anthropic's does — but nothing gives it a native route to fall back
+ * on. `setProviderPlugins` toggles the anthropic plugin and no other, and the
+ * google branch there records that the native google plugin's auth fails at
+ * call time. Dropping google's override would hand its turns to a route no one
+ * has evidence about and no device to test on: the same mistake as the bug
+ * #532 fixed, pointed the other way. Google stays on the override until
+ * someone proves the native path on hardware.
+ *
+ * It lives HERE, in the table, rather than as a Set inside the configure
+ * route, because the transport decision and the availability stamp are the
+ * same fact. They were two facts in two files for exactly one release, and in
+ * that release the stamp described a transport the box no longer used.
+ */
+export function routesSubscriptionNatively(provider: string, authMode: string): boolean {
+  return authMode === "subscription" && SUBSCRIPTION_SURFACE[provider]?.nativeRouting === true;
+}
+
+/**
+ * The provider id whose catalogue IS the subscription surface for `provider`,
+ * or null when its subscription does not put it on a nameable surface (OpenAI
+ * swaps the whole namespace instead — see `catalogProvider` above).
+ *
+ * For a natively-routed provider this is the provider ITSELF: its subscription
+ * runs on its own plugin, so its own catalogue is the set. That is not a
+ * no-op — it keeps the gate pointed at a real, enumerated list, so an id that
+ * is in NO Anthropic catalogue is still refused rather than silently pinned.
+ */
+export function subscriptionSurfaceProvider(provider: string): string | null {
+  const entry = SUBSCRIPTION_SURFACE[provider];
+  if (!entry) return null;
+  if (entry.nativeRouting) return provider;
+  return entry.surfaceProvider ?? null;
+}
+
+/**
+ * Can this credential run this model? The one greying-out rule, named once.
+ *
+ * `availableOnSubscription === undefined` means the box could not enumerate
+ * the subscription surface — unknown is not "no", so an unstamped model stays
+ * usable and the customer keeps the full list rather than the UI inventing a
+ * restriction it never verified.
+ *
+ * It lives here, next to the table it reads, because BOTH model pickers have
+ * to obey it: the setup wizard's (AIModelsStep) and the chat header's
+ * (ChatPopup). It used to be a closure inside the wizard, so the header — the
+ * surface the wizard's own help line points the customer at ("switch between
+ * the curated models from the chat window anytime") — offered every
+ * API-key-only model as an ordinary pickable row.
+ */
+export function isModelUsableOnSubscription(
+  model: { availableOnSubscription?: boolean },
+  isSubscription: boolean,
+): boolean {
+  return !isSubscription || model.availableOnSubscription !== false;
+}
+
+/**
+ * The surface a refusal should NAME, so it can say which catalogue it is
+ * refusing against rather than telling the customer their provider is
+ * misconfigured when it is not.
+ *
+ * Null for a natively-routed provider as well as for an unlisted one: there
+ * the surface is the provider's own catalogue, and "claude-fable-5 is not on
+ * the anthropic surface (anthropic)" names nothing the customer can act on.
+ * {@link subscriptionSurfaceProvider} is the one to ask for the id to
+ * enumerate; this one is only for wording.
+ */
+export function subscriptionSurfaceLabel(provider: string): string | null {
+  const entry = SUBSCRIPTION_SURFACE[provider];
+  if (!entry || entry.nativeRouting) return null;
+  return entry.surfaceProvider ?? null;
+}
+
 export const CATALOG_PROVIDERS = ["clawai", "anthropic", "openai", "codex", "google", "openrouter"] as const;
 export type CatalogProvider = typeof CATALOG_PROVIDERS[number];
 
@@ -131,13 +478,13 @@ export const PROVIDER_CATALOGS = Object.freeze({
   anthropic: {
     provider: "anthropic",
     models: ANTHROPIC_MODELS,
-    defaultModelId: "claude-sonnet-4-6",
+    defaultModelId: ANTHROPIC_DEFAULT_MODEL_ID,
     allowCustom: true,
   },
   openai: {
     provider: "openai",
     models: OPENAI_MODELS,
-    defaultModelId: "gpt-5.4",
+    defaultModelId: OPENAI_DEFAULT_MODEL_ID,
     allowCustom: true,
   },
   codex: {
@@ -153,7 +500,7 @@ export const PROVIDER_CATALOGS = Object.freeze({
   google: {
     provider: "google",
     models: GOOGLE_MODELS,
-    defaultModelId: "gemini-2.5-flash",
+    defaultModelId: GOOGLE_DEFAULT_MODEL_ID,
     allowCustom: true,
   },
   openrouter: {
@@ -186,6 +533,7 @@ interface CatalogApiModel {
   hint?: string;
   contextWindow: number;
   input?: string;
+  availableOnSubscription?: boolean;
 }
 
 interface CatalogApiResponse {
@@ -197,7 +545,39 @@ interface CatalogApiResponse {
   /** True when the route fell back to a stale cached payload because the
    * upstream catalog query just failed; UI may want to show a warning. */
   stale?: boolean;
+  /**
+   * `"live"` when a device enumeration produced this payload. Any other value,
+   * including absent, means it did not — that is the whole test. ONE field
+   * rather than a second derived boolean beside it, so the two cannot
+   * disagree; `CatalogResponse` in the catalog route persists this one.
+   */
+  source?: string;
+  /** True when an enumeration is in flight right now, so asking again will
+   * eventually get a different answer. */
+  warming?: boolean;
 }
+
+/**
+ * A catalogue as a component actually receives it: the shape above plus the
+ * two things the picker has to know about the ANSWER rather than the models —
+ * whether it is old, and whether a device produced it at all.
+ */
+export type ResolvedProviderCatalog = ProviderCatalog & {
+  stale?: boolean;
+  /**
+   * True when these rows are the curated cold-start list rather than a device
+   * enumeration — a placeholder for an answer, not the answer. A consumer may
+   * render them, but must not treat them as facts about the box.
+   */
+  fallback?: boolean;
+  /**
+   * True when the box is enumerating RIGHT NOW, so a later ask gets a better
+   * answer. This, not `fallback`, is what a consumer polls on: a provider that
+   * cannot enumerate at all serves a fallback forever, and polling it would be
+   * a request loop with no destination. The route holds the matching backoff.
+   */
+  warming?: boolean;
+};
 
 /**
  * Fetch the live model catalog for `provider` from the catalog route.
@@ -214,29 +594,48 @@ interface CatalogApiResponse {
  */
 export async function fetchProviderCatalog(
   provider: string,
-  opts: { signal?: AbortSignal } = {},
-): Promise<ProviderCatalog & { stale?: boolean }> {
+  opts: { signal?: AbortSignal; refresh?: boolean } = {},
+): Promise<ResolvedProviderCatalog> {
   const fallback = getProviderCatalog(provider);
   try {
-    const url = `/setup-api/ai-models/catalog?provider=${encodeURIComponent(provider)}`;
+    // `?refresh=1` asks the route to re-enumerate NOW rather than wait out its
+    // 6h interval. It still answers from cache immediately — the refresh runs
+    // detached — so this costs the caller nothing and is what makes "connect a
+    // provider, see its models" work without a reload.
+    const url = `/setup-api/ai-models/catalog?provider=${encodeURIComponent(provider)}`
+      + (opts.refresh ? "&refresh=1" : "");
     const res = await fetch(url, { signal: opts.signal, cache: "no-store" });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
     const body = (await res.json()) as CatalogApiResponse;
     if (!body.models || body.models.length === 0) {
-      // Empty catalog — keep the fallback so the picker isn't blank.
-      if (fallback) return { ...fallback, stale: true };
+      // Empty catalog — keep the curated rows so the picker isn't blank, and
+      // carry `warming` through unchanged. It is the route saying an
+      // enumeration is in flight, and it is the ONLY thing `useProviderCatalog`
+      // polls on; dropped here, a box whose cached rows the sanitiser filtered
+      // away entirely (an upgraded box holding an older build's ids) would sit
+      // on the curated list until the next provider event, while the real
+      // answer landed seconds later with nobody left asking for it.
+      if (fallback) {
+        return {
+          ...fallback,
+          stale: true,
+          fallback: true,
+          warming: body.warming === true ? true : undefined,
+        };
+      }
       throw new Error("empty catalog");
     }
     return {
       provider,
-      models: body.models.map(({ id, label, hint }) => ({
+      models: body.models.map(({ id, label, hint, availableOnSubscription }) => ({
         id,
         label: label || id,
         // OpenRouter sometimes ships long descriptions; trim so the
         // picker row doesn't blow up vertically.
         hint: typeof hint === "string" ? hint.slice(0, 120) : "",
+        availableOnSubscription,
       })),
       defaultModelId: body.defaultModelId
         || body.models[0].id
@@ -244,6 +643,12 @@ export async function fetchProviderCatalog(
         || "",
       allowCustom: body.allowCustom !== false,
       stale: body.stale,
+      warming: body.warming === true ? true : undefined,
+      // Derived from the route's one marker, never inferred from the rows: the
+      // client cannot tell a curated list from a device's by looking at it —
+      // that is precisely how three hard-coded model names passed for the
+      // box's own catalogue for a day.
+      fallback: body.source === "live" ? undefined : true,
     };
   } catch (err) {
     // AbortError isn't a real failure — the consumer cancelled because
@@ -259,7 +664,7 @@ export async function fetchProviderCatalog(
         `[provider-models] catalog fetch failed for ${provider}, using fallback:`,
         err instanceof Error ? err.message : err,
       );
-      return { ...fallback, stale: true };
+      return { ...fallback, stale: true, fallback: true };
     }
     throw err;
   }

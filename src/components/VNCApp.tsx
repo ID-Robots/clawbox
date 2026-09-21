@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, useCallback, type Ref } from "react";
 import { useT } from "@/lib/i18n";
 import { getTrackedVncKey, type TrackedKey } from "@/lib/vnc-keys";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -34,10 +34,32 @@ function apiError(data: unknown): string | undefined {
   return typeof data.error === "string" ? data.error : undefined;
 }
 
-export default function VNCApp() {
+/** What a host can ask of the screen from outside: open the paste dialog. */
+export interface VNCHandle {
+  openPaste: () => void;
+}
+
+export interface VNCAppProps {
+  /**
+   * A picture only: no keys, no clicks reach the guest. The Coding Agent's
+   * run page embeds the screen this way, so a stray click on the preview
+   * cannot steer the browser a run is driving.
+   */
+  viewOnly?: boolean;
+  /**
+   * Where the paste button lives. `overlay` (the default) draws it over the
+   * screen's top-right, the way the VNC app always has; `hidden` leaves it
+   * to a host that offers the same action from its own toolbar — the
+   * Browser app's single header — through `ref.openPaste()`.
+   */
+  pasteButton?: "overlay" | "hidden";
+  ref?: Ref<VNCHandle>;
+}
+
+export default function VNCApp({ viewOnly = false, pasteButton = "overlay", ref }: VNCAppProps = {}) {
   const { t } = useT();
   const canvasContainerRef = useRef<HTMLDivElement>(null);
-  const rfbRef = useRef<InstanceType<typeof import("@novnc/novnc/lib/rfb").default> | null>(null);
+  const rfbRef = useRef<InstanceType<typeof import("@novnc/novnc").default> | null>(null);
   const vncFocusedRef = useRef(false);
   const pressedKeysRef = useRef<Map<string, TrackedKey>>(new Map());
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
@@ -78,6 +100,17 @@ export default function VNCApp() {
   // closure declared before openPasteModal / writeAndPaste exist) can call
   // them. Filled in via a `useEffect` further down.
   const openPasteModalRef = useRef<(() => void) | null>(null);
+  // Mirrors the prop for the connect effect, which runs once per screen and
+  // must not reconnect because the host flipped view-only.
+  const viewOnlyRef = useRef(viewOnly);
+  useEffect(() => {
+    viewOnlyRef.current = viewOnly;
+    if (rfbRef.current) {
+      rfbRef.current.viewOnly = viewOnly;
+      rfbRef.current.focusOnClick = !viewOnly;
+    }
+  }, [viewOnly]);
+  useImperativeHandle(ref, () => ({ openPaste: () => { if (!viewOnlyRef.current) openPasteModalRef.current?.(); } }), []);
   const writeAndPasteRef = useRef<((text: string) => Promise<boolean>) | null>(null);
   // Same trick for the noVNC `clipboard` event handler — it fires when the
   // guest copies, but the payload is Latin-1-mangled; we use the event as a
@@ -173,6 +206,8 @@ export default function VNCApp() {
   }, []);
 
   const activateVncInput = useCallback(() => {
+    // A picture only: nothing here may arm the keyboard forwarders.
+    if (viewOnlyRef.current) return;
     if (!vncFocusedRef.current) {
       releaseRemoteModifiers();
     }
@@ -191,13 +226,13 @@ export default function VNCApp() {
   useEffect(() => {
     if (!vncInfo || !canvasContainerRef.current) return;
 
-    let rfb: InstanceType<typeof import("@novnc/novnc/lib/rfb").default> | null = null;
+    let rfb: InstanceType<typeof import("@novnc/novnc").default> | null = null;
     let canvas: HTMLCanvasElement | null = null;
     let handleContextMenu: ((event: Event) => void) | null = null;
 
     const connect = async () => {
       try {
-        const { default: RFB } = await import("@novnc/novnc/lib/rfb");
+        const { default: RFB } = await import("@novnc/novnc");
         // Same-origin WebSocket path: the production server proxies
         // /novnc-ws upgrades to 127.0.0.1:${vncInfo.wsPort} (websockify).
         // This keeps the flow working on the LAN, under HTTPS (no mixed
@@ -213,7 +248,8 @@ export default function VNCApp() {
         rfb.resizeSession = false;
         rfb.clipViewport = false;
         rfb.showDotCursor = true;
-        rfb.focusOnClick = true;
+        rfb.focusOnClick = !viewOnlyRef.current;
+        rfb.viewOnly = viewOnlyRef.current;
 
         rfb.addEventListener("connect", () => {
           setStatus("connected");
@@ -381,6 +417,7 @@ export default function VNCApp() {
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!vncFocusedRef.current || !rfbRef.current) return;
+      if (viewOnlyRef.current) return;
       if (isEditableTarget(e.target)) return;
 
       if (!getInputCanvas()) return;
@@ -522,13 +559,13 @@ export default function VNCApp() {
           }
         } catch { /* device still rebooting, keep waiting */ }
       }
-      setRepairError("Reboot timed out waiting for the VNC service. Refresh the page if it has come back.");
+      setRepairError(t("vnc.rebootTimeout"));
       setRepairState("failed");
     } catch (err) {
       setRepairError(err instanceof Error ? err.message : "Repair request failed");
       setRepairState("failed");
     }
-  }, [setupFetch]);
+  }, [setupFetch, t]);
 
   const openPasteModal = useCallback(() => {
     setPasteText("");
@@ -555,6 +592,9 @@ export default function VNCApp() {
   // from the freshly-updated selection. xclip preserves UTF-8 (Cyrillic,
   // CJK, emoji); the basic-RFB clientCutText path mangles those.
   const writeAndPaste = useCallback(async (text: string): Promise<boolean> => {
+    // View-only never sends the host's clipboard to the guest, whatever
+    // shortcut asked — the screen is a picture and the paste is a write.
+    if (viewOnlyRef.current) return false;
     if (!text) return false;
     try {
       const result = await setupFetch<{ error?: string }>("/setup-api/vnc/clipboard", {
@@ -708,17 +748,17 @@ export default function VNCApp() {
             onClick={() => window.location.reload()}
             className="px-4 py-2 btn-gradient rounded-lg text-sm text-white cursor-pointer"
           >
-            Refresh to sign in again
+            {t("vnc.refreshSignIn")}
           </button>
         ) : rebooting ? (
           <div className="flex flex-col items-center gap-2 mt-2">
             <span className="material-symbols-rounded animate-spin text-orange-400" style={{ fontSize: 28 }}>progress_activity</span>
-            <p className="text-sm text-white/80">Rebooting device — Remote Desktop will be ready in ~30s.</p>
+            <p className="text-sm text-white/80">{t("vnc.rebooting")}</p>
           </div>
         ) : repairing ? (
           <div className="flex flex-col items-center gap-2 mt-2">
             <span className="material-symbols-rounded animate-spin text-orange-400" style={{ fontSize: 28 }}>progress_activity</span>
-            <p className="text-sm text-white/80">Installing / repairing Remote Desktop… this may take a few minutes.</p>
+            <p className="text-sm text-white/80">{t("vnc.repairing")}</p>
           </div>
         ) : (
           <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
@@ -733,10 +773,10 @@ export default function VNCApp() {
               onClick={handleRepairAndReboot}
               disabled={busy}
               className="px-4 py-2 btn-gradient rounded-lg text-sm text-white transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-2"
-              title="Runs install.sh --step vnc_install, then reboots"
+              title={t("vnc.repairTitle")}
             >
               <span className="material-symbols-rounded" style={{ fontSize: 16 }}>build</span>
-              Install / Repair &amp; Reboot
+              {t("vnc.repairButton")}
             </button>
           </div>
         )}
@@ -750,7 +790,7 @@ export default function VNCApp() {
       tabIndex={0}
       className="h-full overflow-hidden bg-black relative"
     >
-      {status === "connected" && (
+      {status === "connected" && pasteButton === "overlay" && !viewOnly && (
         <button
           type="button"
           onClick={openPasteModal}
@@ -768,7 +808,7 @@ export default function VNCApp() {
             aria-modal="true"
             aria-labelledby="vnc-paste-dialog-title"
             aria-describedby="vnc-paste-dialog-desc"
-            className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-5 shadow-xl"
+            className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] p-5 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 id="vnc-paste-dialog-title" className="text-sm font-semibold text-white mb-1">{t("vnc.pasteToRemote")}</h3>
@@ -851,7 +891,7 @@ export default function VNCApp() {
                   type="button"
                   onClick={dismissCopyToast}
                   className="px-2 py-1 rounded-md text-[11px] text-white/60 hover:text-white/90 cursor-pointer"
-                  aria-label="Dismiss"
+                  aria-label={t("vnc.dismiss")}
                 >
                   ✕
                 </button>
@@ -862,7 +902,7 @@ export default function VNCApp() {
             <button
               type="button"
               onClick={dismissCopyToast}
-              aria-label={t("dismiss")}
+              aria-label={t("vnc.dismiss")}
               className="text-white/50 hover:text-white/90 cursor-pointer"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 16 }}>close</span>

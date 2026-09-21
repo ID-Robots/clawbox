@@ -26,3 +26,10 @@ StandardError=append:/tmp/clawbox-browser.log
 # the main chrome, dbus-launch helpers) when the unit stops — no ExecStopPost
 # pgrep needed (and the prior pattern was broad enough to kill unrelated procs).
 KillMode=control-group
+# Memory guard (TASK-455). The numbers live in the drop-in
+# 50-clawbox-memory.conf that clawbox-resource-limits.sh writes from
+# config/clawbox-resource-limits.env — one place for every unit's limits.
+# MemoryAccounting is asserted here so the cgroup counters exist even on a box
+# whose drop-in has not been applied yet (an older install that has not re-run
+# install.sh or the in-app updater).
+MemoryAccounting=yes

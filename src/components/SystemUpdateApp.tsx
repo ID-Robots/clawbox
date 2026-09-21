@@ -1,21 +1,80 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useModalDialog } from "@/hooks/useModalDialog";
-import type { StepStatus, UpdateState } from "@/lib/updater";
-import { RESTART_STEP_ID } from "@/lib/update-constants";
+import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
+import { useBuildIdentity } from "@/components/BuildIdentityPanel";
+import type { RemoteReachability, StepStatus, UpdateState } from "@/lib/updater";
+import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID } from "@/lib/update-constants";
+import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
 import { cleanVersion } from "@/lib/version-utils";
 
-interface VersionInfo {
-  clawbox: { current: string; target: string | null; updateAvailable?: boolean };
-  openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
+export interface ComponentVersion {
+  current: string | null;
+  target: string | null;
+  /**
+   * `null` where the device could not look — see `remote` below. It resolves
+   * through `componentNeedsUpdate`, which falls back to the version comparison
+   * for both null and absent, so nothing here changes behaviour on its own:
+   * `remote.reachable === false` is what the screen renders the unknown from.
+   */
+  updateAvailable?: boolean | null;
+}
+
+export interface VersionInfo {
+  clawbox: ComponentVersion & { current: string };
+  openclaw: ComponentVersion;
+  // Both optional: a device that has not been updated yet still answers
+  // /update/versions with the old two-key shape, and the Hermes block is
+  // present only on the SKUs that ship Hermes.
+  hermes?: ComponentVersion;
+  edition?: "openclaw" | "hermes" | "dual";
+  /**
+   * Whether the device actually reached its update remote — the producer's own
+   * type, so a field added there (`cause`) cannot be missed here. Optional for
+   * the same reason as the two above: a payload from a server that predates the
+   * field must keep rendering exactly as it did, so ABSENT means "not known",
+   * never "unreachable".
+   */
+  remote?: RemoteReachability;
+}
+
+/**
+ * Whether an OpenClaw row is about software this device has. The `hermes` SKU
+ * ships none; `dual` has one even while Hermes is the harness answering. A
+ * payload from a server that predates the `edition` field reads as OpenClaw,
+ * which is what those builds were.
+ */
+export function shipsOpenclaw(versions: VersionInfo | null): boolean {
+  return versions?.edition !== "hermes";
 }
 
 interface BranchInfo {
   branch: string | null;
 }
 
-const CARD = "rounded-xl border border-white/10 bg-[var(--bg-deep)]/70 p-5";
+const CARD = "rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-5";
+
+/**
+ * A translated sentence with one or more rendered elements inside it.
+ *
+ * The elements are placeholders in the string (`{beta}`, `{reboot}`) rather
+ * than markup in the catalogue: a translator gets one whole sentence and can
+ * put the `<code>` chip or the emphasis where their language wants it, which
+ * splitting the sentence into fragments around the JSX would not allow.
+ */
+function Interpolated({ text, slots }: { text: string; slots: Record<string, ReactNode> }) {
+  return (
+    <>
+      {text.split(/(\{[a-zA-Z]+\})/g).map((part, i) => {
+        const name = part.match(/^\{([a-zA-Z]+)\}$/)?.[1];
+        const slot = name ? slots[name] : undefined;
+        return <span key={i}>{slot ?? part}</span>;
+      })}
+    </>
+  );
+}
 
 function compareSemver(a: string | null | undefined, b: string | null | undefined): number {
   if (!a || !b) return 0;
@@ -40,11 +99,11 @@ function isUpdateAvailable(current: string | null | undefined, target: string | 
   return compareSemver(target, current) > 0;
 }
 
-function componentNeedsUpdate(component: { current: string | null; target: string | null; updateAvailable?: boolean }): boolean {
+export function componentNeedsUpdate(component: { current: string | null; target: string | null; updateAvailable?: boolean | null }): boolean {
   return component.updateAvailable ?? isUpdateAvailable(component.current, component.target);
 }
 
-type Status = "loading" | "up-to-date" | "available" | "updating" | "completed" | "failed" | "fetch-error";
+type Status = "loading" | "up-to-date" | "available" | "drift" | "updating" | "completed" | "failed" | "fetch-error";
 
 function StepIcon({ status }: { status: StepStatus }) {
   if (status === "completed") {
@@ -57,7 +116,7 @@ function StepIcon({ status }: { status: StepStatus }) {
   if (status === "running") {
     return (
       <span className="flex items-center justify-center w-6 h-6 shrink-0">
-        <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin" />
+        <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent motion-safe:animate-spin" />
       </span>
     );
   }
@@ -73,7 +132,24 @@ function StepIcon({ status }: { status: StepStatus }) {
   </span>;
 }
 
-export default function SystemUpdateApp() {
+/**
+ * `embedded`: drawn inside another pane — Settings → System Update — which
+ * brings its own padding and width, so the app skips its window chrome (the
+ * full-height centring) and just lays its cards out. The desktop window and
+ * the standalone page keep the default.
+ *
+ * Embedded, the hero's headline is an `h2`: the pane around it already owns the
+ * window's `h1`, and two of those would have the document claim two titles.
+ */
+export default function SystemUpdateApp({ embedded = false }: { embedded?: boolean } = {}) {
+  const { t } = useT();
+  const tr = useTr();
+  const HeroHeading = embedded ? "h2" : "h1";
+  // Settings embeds this app while the desktop can have the standalone window
+  // open beside it, so the label's id has to be per-instance or the second
+  // toggle would borrow the first one's name.
+  const betaLabelId = useId();
+  const branchInputId = useId();
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [versionsError, setVersionsError] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
@@ -87,6 +163,13 @@ export default function SystemUpdateApp() {
   const [branchError, setBranchError] = useState<string | null>(null);
   const [betaConfirm, setBetaConfirm] = useState(false);
   const [forceConfirm, setForceConfirm] = useState(false);
+
+  // Fetched once on mount, from the same endpoint the About screen uses, so
+  // the two surfaces cannot disagree about whether this box is running its own
+  // code. Not polled: it shells out to git and only changes when the box
+  // rebuilds.
+  const identity = useBuildIdentity(true);
+  const driftDetected = !!identity?.drift?.detected;
 
   const pollRef = useRef<number | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
@@ -142,6 +225,15 @@ export default function SystemUpdateApp() {
   // If an update is already running when the user opens this app (it was
   // kicked off from Settings, the wizard, or a prior session), immediately
   // join the poll so the live progress shows.
+  //
+  // A run that already FAILED is adopted the same way. It used to be ignored,
+  // and the failure of 2026-09-05 is what that costs: the restart step is the
+  // one that failed, so nobody was watching this page when it did, and every
+  // window opened afterwards showed "1 update available — Update everything"
+  // over an update that had died an hour earlier. `completed` is deliberately
+  // NOT adopted — the status route synthesises that phase for any box whose
+  // `update_completed` flag is set and has nothing to do, so adopting it would
+  // paint "Update complete" on a device that has just been sitting there.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -154,6 +246,9 @@ export default function SystemUpdateApp() {
           setUpdateStarted(true);
           setUpdateState(data);
           startPolling();
+        } else if (data.phase === "failed") {
+          setUpdateStarted(true);
+          setUpdateState(data);
         }
       } catch { /* idle */ }
     })();
@@ -221,21 +316,57 @@ export default function SystemUpdateApp() {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setUpdateError(typeof data.error === "string" ? data.error : `Failed to start update (HTTP ${res.status})`);
+        setUpdateError(typeof data.error === "string"
+          ? data.error
+          : tr("update.startFailedHttp", "Failed to start update (HTTP {status})", { status: res.status }));
         return;
       }
       startPolling();
     } catch (err) {
-      setUpdateError(err instanceof Error ? err.message : "Failed to start update");
+      setUpdateError(err instanceof Error ? err.message : tr("update.startFailed", "Failed to start update"));
     }
-  }, [startPolling]);
+  }, [startPolling, tr]);
 
   const dismissResult = useCallback(() => {
     setUpdateStarted(false);
     setUpdateError(null);
     setUpdateState(null);
     stopPolling();
-  }, [stopPolling]);
+    // The settled run lives in the web server's memory, not in this component,
+    // so clearing local state alone would hide the panel until the next mount
+    // re-adopted the same dead run.
+    //
+    // A 409 is not an error to show — it means another surface (Settings, the
+    // wizard, the MCP tools) started an update between the click and the POST,
+    // and the state this button was clearing now belongs to that run. `fetch`
+    // resolves for a 409, so ignoring the answer left the screen showing "1
+    // update available — Update everything" over an update that was already
+    // running, and a second Update from here is exactly what the run route
+    // refuses. Read the status back and rejoin the live run instead.
+    void (async () => {
+      try {
+        const res = await fetch("/setup-api/update/dismiss", { method: "POST" });
+        if (res.ok) return;
+        // Anything OTHER than a 409 is the server saying the result is still
+        // there — the record could not be written away. The panel has already
+        // been cleared locally, so leaving it at that hides a dismissal that
+        // did not happen and hands the same failure back on the next reload,
+        // with nothing said. Put it back and say why.
+        if (res.status !== 409) {
+          setUpdateStarted(true);
+          setUpdateError(tr("update.dismissFailed", "The device could not clear that result. Try again in a moment."));
+          return;
+        }
+        const status = await fetch("/setup-api/update/status", { cache: "no-store" });
+        if (!status.ok) return;
+        const data = (await status.json()) as UpdateState;
+        if (data.phase !== "running") return;
+        setUpdateStarted(true);
+        setUpdateState(data);
+        startPolling();
+      } catch { /* offline: the next mount adopts whatever is running */ }
+    })();
+  }, [stopPolling, startPolling, tr]);
 
   const saveBranch = useCallback(async (next: string | null) => {
     setBranchSaving(true);
@@ -269,10 +400,30 @@ export default function SystemUpdateApp() {
     // of the ClawBox update, so an OpenClaw-pin delta without a ClawBox
     // delta means a ClawBox release hasn't been cut yet and there's
     // nothing for the user to install.
-    return componentNeedsUpdate(versions.clawbox)
-      ? "available"
-      : "up-to-date";
-  }, [updateStarted, updateError, updateState, versions, versionsError]);
+    if (componentNeedsUpdate(versions.clawbox)) return "available";
+    // Versions cannot see drift: package.json does not change commit-to-commit,
+    // so a box serving a build from another commit — or sitting dozens of
+    // commits behind its tested branch — reports `target: null` and used to be
+    // told "You're up to date" by the one screen whose whole job is "should I
+    // update?", while Settings → About simultaneously said "run Update to
+    // realign" (hwtest-round1, 2026-08-24). Drift offers the update instead,
+    // and the banner below says which drift.
+    if (driftDetected) return "drift";
+    // Last, and only where the screen would otherwise say "You're up to date".
+    //
+    // A device GitHub refused produces the same payload as a current one: the
+    // fetch fails, HEAD is compared against the STALE `origin/<branch>` the
+    // last successful fetch left, and there is no delta. Reporting that as
+    // "Every component is on the latest release" is the lie TASK-655 was filed
+    // for, and a box behind a refused address can sit on it for weeks.
+    //
+    // Below the two tests above on purpose: an offer and a drift are LOCAL
+    // evidence that there is something to do, and they stay actionable — a
+    // refused remote must not take the Update button away from a box that
+    // already knows it needs one.
+    if (versions.remote && !versions.remote.reachable) return "fetch-error";
+    return "up-to-date";
+  }, [updateStarted, updateError, updateState, versions, versionsError, driftDetected]);
 
   // ─── HERO ────────────────────────────────────────────────────────────
   const hero = (() => {
@@ -280,50 +431,86 @@ export default function SystemUpdateApp() {
       case "loading":
         return {
           icon: "hourglass_empty", iconClass: "text-white/40",
-          headline: "Checking for updates…", subhead: "Reading device + cloud version manifests.",
+          headline: tr("update.heroChecking", "Checking for updates…"),
+          subhead: tr("update.heroCheckingSub", "Reading device + cloud version manifests."),
           tone: "neutral" as const,
         };
       case "fetch-error":
         return {
           icon: "cloud_off", iconClass: "text-amber-300",
-          headline: "Couldn't reach the update server", subhead: versionsError ?? "Check the device's internet connection and try again.",
+          // Two headlines, because the device now reports two kinds of failure
+          // and "couldn't reach the update server" sends the owner to the
+          // router for a box whose `origin` is a file on its own disk. The
+          // reason below names the actual one either way.
+          headline: versions?.remote?.cause === "device"
+            ? tr("update.heroCouldNotCheck", "Couldn't check for updates")
+            : tr("update.heroUnreachable", "Couldn't reach the update server"),
+          subhead: versionsError
+            ?? versions?.remote?.reason
+            ?? tr("update.heroUnreachableSub", "Check the device's internet connection and try again."),
           tone: "warn" as const,
         };
       case "up-to-date":
         return {
           icon: "verified", iconClass: "text-emerald-300",
-          headline: "You're up to date", subhead: "Every component is on the latest release.",
+          headline: tr("update.heroCurrent", "You're up to date"),
+          subhead: tr("update.heroCurrentSub", "Every component is on the latest release."),
           tone: "good" as const,
+        };
+      case "drift":
+        // Offered, not alarmed about. Versions cannot see this case —
+        // package.json does not change commit-to-commit — so a box serving a
+        // build from another commit reports `target: null` and this screen,
+        // whose whole job is "should I update?", would otherwise say "You're up
+        // to date" and give the owner no button at all. It says what is true
+        // and offers the rebuild; the amber "this box is not running its own
+        // code" alarm this used to raise is gone.
+        return {
+          icon: "system_update", iconClass: "text-emerald-300",
+          headline: t("update.driftHeadline"), subhead: t("update.driftSubhead"),
+          tone: "available" as const,
         };
       case "available": {
         const updates: string[] = [];
         if (versions && componentNeedsUpdate(versions.clawbox)) updates.push("ClawBox");
-        if (versions && componentNeedsUpdate(versions.openclaw)) updates.push("OpenClaw");
+        // Guarded by the edition, not only by `updateAvailable`: on the Hermes
+        // SKU that flag is false today only because `openclaw.current` is null,
+        // and a headline offering an OpenClaw update on a box that ships no
+        // OpenClaw is not something to leave resting on that.
+        if (versions && shipsOpenclaw(versions) && componentNeedsUpdate(versions.openclaw)) updates.push("OpenClaw");
         return {
           icon: "system_update", iconClass: "text-emerald-300",
-          headline: `${updates.length} update${updates.length === 1 ? "" : "s"} available`,
-          subhead: `New version available for ${updates.join(" and ")}.`,
+          headline: updates.length === 1
+            ? tr("update.heroAvailableOne", "1 update available")
+            : tr("update.heroAvailableMany", "{count} updates available", { count: updates.length }),
+          subhead: tr("update.heroAvailableSub", "New version available for {components}.", {
+            components: updates.join(tr("update.componentJoin", " and ")),
+          }),
           tone: "available" as const,
         };
       }
       case "updating":
         return {
           icon: "downloading", iconClass: "text-orange-300",
-          headline: "Updating your device", subhead: "Don't power off until this finishes.",
+          headline: tr("update.heroUpdating", "Updating your device"),
+          subhead: tr("update.heroUpdatingSub", "Don't power off until this finishes."),
           tone: "busy" as const,
         };
       case "completed":
         return {
           icon: "task_alt", iconClass: "text-emerald-300",
-          headline: "Update complete",
-          subhead: updateState?.steps.some((s) => s.id === RESTART_STEP_ID) ? "The device will restart in a moment." : "Everything's been updated.",
+          headline: tr("update.heroComplete", "Update complete"),
+          subhead: updateState?.steps.some((s) => s.id === RESTART_STEP_ID)
+            ? tr("update.heroCompleteRestart", "The device will restart in a moment.")
+            : tr("update.heroCompleteSub", "Everything's been updated."),
           tone: "good" as const,
         };
       case "failed":
         return {
           icon: "error", iconClass: "text-red-300",
-          headline: "Update failed",
-          subhead: updateError || updateState?.error || "One step couldn't complete. See the steps below.",
+          headline: tr("update.heroFailed", "Update failed"),
+          subhead: updateError || updateState?.error
+            || tr("update.heroFailedSub", "One step couldn't complete. See the steps below."),
           tone: "error" as const,
         };
     }
@@ -338,11 +525,22 @@ export default function SystemUpdateApp() {
     error: "from-red-500/10 via-red-500/5",
   }[hero.tone];
 
-  const clawboxAvail = !!versions && componentNeedsUpdate(versions.clawbox);
+  // Drift counts as "there is an update to run" for the card too: its button
+  // otherwise reads "Up to date" and is disabled, which is the same denial the
+  // hero used to make, one card further down.
+  const clawboxAvail = (!!versions && componentNeedsUpdate(versions.clawbox)) || driftDetected;
+
+  // "CURRENT" / "Up to date" on the card is derived from a comparison against
+  // the STALE refs a refused fetch left behind, so on a box whose remote could
+  // not be reached it is the same denial the hero has just stopped making, one
+  // card further down. `unknown` makes the card say so instead. Only where
+  // there is no local evidence: a drifted or genuinely-behind box keeps its
+  // offer, because that fact was established without the remote.
+  const clawboxUnknown = !clawboxAvail && versions?.remote?.reachable === false;
 
   return (
-    <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
-      <div className="min-h-full w-full flex items-start justify-center p-6 pt-10">
+    <div className={embedded ? "relative w-full text-gray-200" : "relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200"} data-testid="system-update-app">
+      <div className={embedded ? "w-full" : "min-h-full w-full flex items-start justify-center p-6 pt-10 bg-[var(--bg-deep)]"}>
         <div className="w-full max-w-2xl space-y-4">
           {/* HERO */}
           <div className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-10 pb-8 bg-gradient-to-br ${heroBgClass} to-transparent`}>
@@ -360,26 +558,26 @@ export default function SystemUpdateApp() {
                   />
                 </>
               )}
-              <div className="relative w-24 h-24 rounded-full flex items-center justify-center bg-white/[0.04] border border-white/10">
+              <div className="relative w-24 h-24 rounded-full flex items-center justify-center bg-white/[0.04] border border-[var(--border-subtle)]">
                 <span className={`material-symbols-rounded ${hero.iconClass} ${status === "updating" ? "clawkeep-shelf-glow" : ""}`} style={{ fontSize: 56, fontVariationSettings: "'FILL' 1, 'wght' 600" }}>
                   {hero.icon}
                 </span>
               </div>
             </div>
-            <h1 className="font-display text-3xl font-bold">{hero.headline}</h1>
+            <HeroHeading className="font-display text-3xl font-bold">{hero.headline}</HeroHeading>
             <p className="mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
               {hero.subhead}
             </p>
 
-            {(status === "available" || status === "up-to-date") && (
+            {(status === "available" || status === "up-to-date" || status === "drift") && (
               <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-                {status === "available" && (
+                {(status === "available" || status === "drift") && (
                   <button
                     type="button"
                     onClick={() => void triggerUpdate()}
                     className="px-6 py-2.5 rounded-full bg-emerald-500 hover:bg-emerald-400 text-black text-sm font-semibold shadow-lg cursor-pointer"
                   >
-                    Update everything
+                    {tr("update.updateEverything", "Update everything")}
                   </button>
                 )}
                 {status === "up-to-date" && (
@@ -387,9 +585,9 @@ export default function SystemUpdateApp() {
                     type="button"
                     onClick={() => void fetchVersions(true)}
                     disabled={refreshing}
-                    className="px-6 py-2.5 rounded-full border border-white/15 bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] disabled:opacity-50 cursor-pointer"
+                    className="px-6 py-2.5 rounded-full border border-[var(--border-subtle)] bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] disabled:opacity-50 cursor-pointer"
                   >
-                    {refreshing ? "Checking…" : "Check for updates"}
+                    {refreshing ? tr("update.checking", "Checking…") : tr("update.checkForUpdates", "Check for updates")}
                   </button>
                 )}
               </div>
@@ -402,32 +600,38 @@ export default function SystemUpdateApp() {
                 disabled={refreshing}
                 className="mt-6 px-5 py-2 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-200 text-sm font-semibold hover:bg-amber-500/25 cursor-pointer disabled:opacity-50"
               >
-                {refreshing ? "Retrying…" : "Try again"}
+                {refreshing ? tr("update.retrying", "Retrying…") : tr("update.tryAgain", "Try again")}
               </button>
             )}
           </div>
 
           {/* COMPONENTS
-              Only ClawBox is exposed as a standalone update target. OpenClaw
-              is pinned by ClawBox (config/openclaw-target.txt) and bumped
-              automatically inside the full ClawBox update — see
+              Only ClawBox is exposed as a standalone update target. The agent
+              harness is pinned by ClawBox (config/openclaw-target.txt) and
+              bumped automatically inside the full ClawBox update — see
               install.sh::step_openclaw_install. Surfacing a separate
               OpenClaw card would let customers bypass the pin and pick
               whatever was last published to npm, which is what we just
-              moved away from. The OpenClaw version is still shown in the
-              ClawBox card's release notes / version-info section. */}
+              moved away from. The installed harness version is reported
+              below the card instead: read-only, no second update button. */}
           {versions && status !== "updating" && status !== "completed" && status !== "failed" && (
             <div className="grid grid-cols-1 gap-3">
               <ComponentCard
                 name="ClawBox"
-                description="Device OS and built-in apps"
+                description={tr("update.clawboxCardSub", "Device OS and built-in apps")}
                 current={versions.clawbox.current}
                 target={versions.clawbox.target}
                 available={clawboxAvail}
+                unknown={clawboxUnknown}
                 onUpdate={() => void triggerUpdate()}
               />
             </div>
           )}
+
+          {/* Outside the gate above: "Update complete" is exactly when an owner
+              wants to read the version their agent came back on, and the
+              components block is hidden in that state. */}
+          {versions && <AgentVersions versions={versions} />}
 
           {/* PROGRESS */}
           {(status === "updating" || status === "completed" || status === "failed") && (
@@ -436,6 +640,13 @@ export default function SystemUpdateApp() {
               error={updateError}
               status={status}
               onDismiss={dismissResult}
+              // A run the box lost (a restart, a power cut, a replaced web
+              // server) is RESUMED from the step it died on by a fresh run —
+              // the verdict's own sentence says so — and this is the control
+              // that starts one. Dismiss forgets the position; the hero's
+              // update button is hidden while a run is settled, so without
+              // this the resume was reachable by no gesture at all.
+              onResume={updateState?.error?.startsWith(INTERRUPTED_MESSAGE_PREFIX) ? () => void triggerUpdate() : undefined}
             />
           )}
 
@@ -450,7 +661,7 @@ export default function SystemUpdateApp() {
               >
                 <span className="inline-flex items-center gap-2">
                   <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">tune</span>
-                  Advanced options
+                  {tr("update.advancedOptions", "Advanced options")}
                 </span>
                 <span
                   className={`material-symbols-rounded text-[var(--text-muted)] transition-transform ${showAdvanced ? "rotate-180" : ""}`}
@@ -466,36 +677,51 @@ export default function SystemUpdateApp() {
                   {/* Beta toggle */}
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <div className="text-sm text-gray-100 inline-flex items-center gap-2">
+                      {/* The label the toggle beside it is named by — a switch
+                          whose only accessible name was the empty string is an
+                          unnamed button to a screen reader. */}
+                      <div id={betaLabelId} className="text-sm text-gray-100 inline-flex items-center gap-2">
                         <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">science</span>
-                        Beta channel
+                        {tr("update.betaChannel", "Beta channel")}
                       </div>
                       <p className="mt-1 text-xs text-[var(--text-muted)]">
-                        Pulls updates from <code className="bg-black/30 px-1 rounded">beta</code> instead of <code className="bg-black/30 px-1 rounded">main</code>. Pre-release features land here first; expect rough edges.
+                        <Interpolated
+                          text={tr(
+                            "update.betaChannelHelp",
+                            "Pulls updates from {beta} instead of {main}. Pre-release features land here first; expect rough edges.",
+                          )}
+                          slots={{
+                            beta: <code className="bg-[var(--bg-elevated)] px-1 rounded">beta</code>,
+                            main: <code className="bg-[var(--bg-elevated)] px-1 rounded">main</code>,
+                          }}
+                        />
                       </p>
                     </div>
                     <BetaToggle
                       enabled={branch === "beta"}
                       saving={branchSaving}
+                      labelledBy={betaLabelId}
                       onEnable={() => setBetaConfirm(true)}
                       onDisable={() => void saveBranch(null)}
                     />
                   </div>
 
                   {/* Branch override */}
-                  <div className="border-t border-white/5 pt-4">
-                    <div className="text-sm text-gray-100">Branch override</div>
+                  <div className="border-t border-[var(--border-subtle)] pt-4">
+                    {/* A label, not a div: the input was named by its placeholder alone. */}
+                    <label htmlFor={branchInputId} className="block text-sm text-gray-100">{tr("update.branchOverride", "Branch override")}</label>
                     <p className="mt-1 text-xs text-[var(--text-muted)]">
-                      Pin updates to a specific git branch (e.g. for QA). Leave blank to follow the configured channel.
+                      {tr("update.branchOverrideHelp", "Pin updates to a specific git branch (e.g. for QA). Leave blank to follow the configured channel.")}
                     </p>
                     <div className="mt-2 flex items-center gap-2">
                       <input
+                        id={branchInputId}
                         type="text"
                         value={branchInput}
                         onChange={(e) => setBranchInput(e.target.value)}
                         placeholder="main / beta / clawkeep"
                         spellCheck={false}
-                        className="flex-1 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm font-mono text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                        className="flex-1 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm font-mono text-gray-200 focus:outline-none focus:border-emerald-500/50"
                       />
                       <button
                         type="button"
@@ -503,7 +729,7 @@ export default function SystemUpdateApp() {
                         disabled={branchSaving || branchInput.trim() === (branch ?? "")}
                         className="px-3 py-1.5 rounded-md bg-emerald-500/15 border border-emerald-500/40 text-emerald-200 text-xs font-semibold disabled:opacity-50 cursor-pointer"
                       >
-                        {branchSaving ? "Saving…" : "Save"}
+                        {branchSaving ? tr("update.saving", "Saving…") : tr("update.save", "Save")}
                       </button>
                     </div>
                     {branchError && (
@@ -513,24 +739,28 @@ export default function SystemUpdateApp() {
 
                   {/* Force full update — recovery for a device left with a stale
                       OpenClaw/system unit by force-update.sh (restores the UI but
-                      not the full update). Only offered when otherwise up to date
-                      (the recovery scenario) so it can't fire during loading or a
-                      failed version fetch. */}
-                  {status === "up-to-date" && (
-                    <div className="border-t border-white/5 pt-4">
+                      not the full update). Offered when there is no update to
+                      run — up to date, or a box whose remote could not be
+                      reached — and never while loading, so it can't fire before
+                      the payload is in. The refused case is the one that most
+                      needs it: install.sh retries the fetch, so the update has a
+                      real chance of getting through where the version check did
+                      not, and this is the only control that starts it. */}
+                  {(status === "up-to-date" || (status === "fetch-error" && !!versions)) && (
+                    <div className="border-t border-[var(--border-subtle)] pt-4">
                       <div className="text-sm text-gray-100 inline-flex items-center gap-2">
                         <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">restart_alt</span>
-                        Force full update
+                        {tr("update.forceFullUpdate", "Force full update")}
                       </div>
                       <p className="mt-1 text-xs text-[var(--text-muted)]">
-                        Re-runs OpenClaw and system-service setup even when the version is current. Use it if a recovery script told you to, or if the assistant or services misbehave after an update. The device reboots when it finishes.
+                        {tr("update.forceFullUpdateHelp", "Re-runs OpenClaw and system-service setup even when the version is current. Use it if a recovery script told you to, or if the assistant or services misbehave after an update. The device reboots when it finishes.")}
                       </p>
                       <button
                         type="button"
                         onClick={() => setForceConfirm(true)}
                         className="mt-2 px-3 py-1.5 rounded-md bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs font-semibold cursor-pointer hover:bg-amber-500/25"
                       >
-                        Force full update
+                        {tr("update.forceFullUpdate", "Force full update")}
                       </button>
                     </div>
                   )}
@@ -544,16 +774,14 @@ export default function SystemUpdateApp() {
       {betaConfirm && (
         <ConfirmModal
           titleId="beta-confirm-title"
-          title="Enable beta updates?"
+          title={tr("update.betaConfirmTitle", "Enable beta updates?")}
           icon="warning"
-          confirmLabel="Enable beta"
+          confirmLabel={tr("update.betaConfirmAction", "Enable beta")}
           onCancel={() => setBetaConfirm(false)}
           onConfirm={() => { setBetaConfirm(false); void saveBranch("beta"); }}
         >
           <p>
-            Beta builds may include unfinished features and regressions. They&apos;re great for early
-            feedback but can break local state. You can switch back any time, but downgrades aren&apos;t
-            always reversible.
+            {tr("update.betaConfirmBody", "Beta builds may include unfinished features and regressions. They're great for early feedback but can break local state. You can switch back any time, but downgrades aren't always reversible.")}
           </p>
         </ConfirmModal>
       )}
@@ -561,16 +789,20 @@ export default function SystemUpdateApp() {
       {forceConfirm && (
         <ConfirmModal
           titleId="force-confirm-title"
-          title="Force a full update?"
+          title={tr("update.forceConfirmTitle", "Force a full update?")}
           icon="restart_alt"
-          confirmLabel="Yes, run full update"
+          confirmLabel={tr("update.forceConfirmAction", "Yes, run full update")}
           onCancel={() => setForceConfirm(false)}
           onConfirm={() => { setForceConfirm(false); void triggerUpdate(); }}
         >
           <p>
-            This re-runs the full update — including OpenClaw and system-service setup — even
-            though the version is already current, then <strong>reboots the device</strong>. Use it
-            to finish a recovery or fix services that misbehave after an update.
+            <Interpolated
+              text={tr(
+                "update.forceConfirmBody",
+                "This re-runs the full update — including OpenClaw and system-service setup — even though the version is already current, then {reboot}. Use it to finish a recovery or fix services that misbehave after an update.",
+              )}
+              slots={{ reboot: <strong>{tr("update.forceConfirmReboot", "reboots the device")}</strong> }}
+            />
           </p>
         </ConfirmModal>
       )}
@@ -602,6 +834,7 @@ function ConfirmModal({
   onCancel: () => void;
   children: ReactNode;
 }) {
+  const tr = useTr();
   // Cancel is first in DOM order, so the shared trap lands there on open.
   const dialogRef = useModalDialog<HTMLDivElement>({ onClose: onCancel });
 
@@ -615,7 +848,7 @@ function ConfirmModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
+        className="w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-3 px-5 pt-5">
@@ -627,13 +860,13 @@ function ConfirmModal({
         <div className="px-5 pt-3 pb-4 text-sm leading-relaxed text-[var(--text-secondary)]">
           {children}
         </div>
-        <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
+        <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-[var(--border-subtle)]">
           <button
             type="button"
             onClick={onCancel}
-            className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
+            className="px-4 py-2 rounded-lg text-sm font-medium border border-[var(--border-subtle)] text-gray-200 hover:bg-white/5 cursor-pointer"
           >
-            Cancel
+            {tr("update.cancel", "Cancel")}
           </button>
           <button
             type="button"
@@ -648,12 +881,81 @@ function ConfirmModal({
   );
 }
 
+/**
+ * The harness this box actually runs, read-only.
+ *
+ * TASK-548: this screen is where an owner goes to ask "what version am I on",
+ * and it named only ClawBox — so a Hermes owner could read their agent's
+ * version in Settings -> About and nowhere here. The rows follow the same
+ * per-edition rule About uses: OpenClaw unless the SKU is `hermes`, Hermes
+ * whenever the payload carries it.
+ *
+ * BOTH harnesses are pinned by ClawBox and bumped inside the full update —
+ * OpenClaw by `config/openclaw-target.txt`, Hermes by `HERMES_PIN_COMMIT` in
+ * install.sh, which `step_hermes_install` re-checks on every update — so the
+ * note is the same for both. There is no way for an owner to update either one
+ * on its own, and telling them otherwise sends them looking for a button that
+ * does not exist.
+ *
+ * `format` per row, not one shared call: `hermes.current` has already been
+ * normalised server-side by `parseHermesVersion`, whose whole reason for
+ * existing is that `cleanVersion`'s rules are shaped for OpenClaw/git-describe
+ * output. Running the second parser over the first one's result turned
+ * "Hermes Agent (dev build)" into "Hermes Agent" here while About, reading the
+ * same field raw, kept it — two windows the desktop can show side by side.
+ */
+function AgentVersions({ versions }: { versions: VersionInfo }) {
+  const tr = useTr();
+  const pinnedNote = tr("update.pinnedByClawbox", "Pinned by ClawBox — updated with it");
+  const rows: { name: string; version: string | null; note: string }[] = [];
+  if (shipsOpenclaw(versions)) {
+    rows.push({
+      name: "OpenClaw",
+      version: cleanVersion(versions.openclaw.current) || versions.openclaw.current,
+      note: pinnedNote,
+    });
+  }
+  if (versions.hermes) {
+    rows.push({
+      name: "Hermes",
+      version: versions.hermes.current,
+      note: pinnedNote,
+    });
+  }
+  if (!rows.length) return null;
+
+  return (
+    <div className={CARD} data-testid="agent-versions">
+      <div className="text-base font-semibold text-gray-100">{tr("update.agent", "Agent")}</div>
+      <p className="text-xs text-[var(--text-muted)] mt-0.5 mb-3">{tr("update.agentSub", "The assistant harness running on this device")}</p>
+      <div className="space-y-2">
+        {rows.map((row) => (
+          <div key={row.name} className="flex items-baseline justify-between gap-3 text-xs">
+            <div className="min-w-0">
+              <div className="text-sm text-gray-100">{row.name}</div>
+              <div className="text-[11px] text-[var(--text-muted)]">{row.note}</div>
+            </div>
+            {/* "—", not "not installed": a null version here means the probe
+                failed, never that the harness is absent. The payload only
+                carries a `hermes` block on a box that HAS Hermes, and
+                `hermes --version` does not answer while step_hermes_install is
+                moving the checkout aside mid-update. ComponentCard below says
+                the same nothing the same way. */}
+            <div className="min-w-0 font-mono text-gray-100 truncate">{row.version || "—"}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ComponentCard({
   name,
   description,
   current,
   target,
   available,
+  unknown = false,
   onUpdate,
 }: {
   name: string;
@@ -661,8 +963,11 @@ function ComponentCard({
   current: string | null;
   target: string | null;
   available: boolean;
+  /** The remote could not be reached, so "current" is not a fact. */
+  unknown?: boolean;
   onUpdate: () => void;
 }) {
+  const tr = useTr();
   return (
     <div className={`${CARD} flex flex-col`}>
       <div className="flex items-start justify-between gap-2">
@@ -670,19 +975,21 @@ function ComponentCard({
           <div className="text-base font-semibold text-gray-100">{name}</div>
           <p className="text-xs text-[var(--text-muted)] mt-0.5">{description}</p>
         </div>
-        <span className={`shrink-0 px-2 py-0.5 rounded-full border text-[10px] font-semibold tracking-wider ${available ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-white/5 text-[var(--text-muted)] border-white/10"}`}>
-          {available ? "UPDATE" : "CURRENT"}
+        <span className={`shrink-0 px-2 py-0.5 rounded-full border text-[10px] font-semibold tracking-wider ${available ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-white/5 text-[var(--text-muted)] border-[var(--border-subtle)]"}`}>
+          {available
+            ? tr("update.badgeUpdate", "UPDATE")
+            : unknown ? tr("update.badgeUnknown", "UNKNOWN") : tr("update.badgeCurrent", "CURRENT")}
         </span>
       </div>
       <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
         <div>
-          <div className="uppercase tracking-wider text-[10px] text-[var(--text-muted)]">Installed</div>
+          <div className="uppercase tracking-wider text-[10px] text-[var(--text-muted)]">{tr("update.installed", "Installed")}</div>
           <div className="mt-1 font-mono text-gray-100 truncate">{cleanVersion(current ?? "") || current || "—"}</div>
         </div>
         <div>
-          <div className="uppercase tracking-wider text-[10px] text-[var(--text-muted)]">Latest</div>
+          <div className="uppercase tracking-wider text-[10px] text-[var(--text-muted)]">{tr("update.latest", "Latest")}</div>
           <div className={`mt-1 font-mono truncate ${available ? "text-emerald-300" : "text-gray-100"}`}>
-            {cleanVersion(target ?? "") || target || "—"}
+            {unknown ? "—" : cleanVersion(target ?? "") || target || "—"}
           </div>
         </div>
       </div>
@@ -692,7 +999,9 @@ function ComponentCard({
         disabled={!available}
         className="mt-4 px-3 py-1.5 rounded-md text-xs font-semibold border cursor-pointer disabled:cursor-default disabled:opacity-50 transition-colors bg-emerald-500/15 border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/25"
       >
-        {available ? `Update ${name}` : "Up to date"}
+        {available
+          ? tr("update.updateComponent", "Update {name}", { name })
+          : unknown ? tr("update.couldNotCheck", "Couldn't check") : tr("update.upToDateShort", "Up to date")}
       </button>
     </div>
   );
@@ -701,11 +1010,18 @@ function ComponentCard({
 function BetaToggle({
   enabled,
   saving,
+  labelledBy,
   onEnable,
   onDisable,
 }: {
   enabled: boolean;
   saving: boolean;
+  /**
+   * The id of the "Beta channel" text beside it. The toggle has no label of
+   * its own — it is a bare styled <button> — so without this assistive tech
+   * reads "button, pressed" with no name at all.
+   */
+  labelledBy: string;
   onEnable: () => void;
   onDisable: () => void;
 }) {
@@ -714,7 +1030,9 @@ function BetaToggle({
       type="button"
       onClick={() => (enabled ? onDisable() : onEnable())}
       disabled={saving}
-      aria-pressed={enabled}
+      role="switch"
+      aria-checked={enabled}
+      aria-labelledby={labelledBy}
       className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors cursor-pointer border-none shrink-0 ${enabled ? "bg-amber-500" : "bg-white/15"} ${saving ? "opacity-50" : ""}`}
     >
       <span
@@ -730,51 +1048,125 @@ function UpdateProgressCard({
   error,
   status,
   onDismiss,
+  onResume,
 }: {
   state: UpdateState | null;
   error: string | null;
   status: Status;
   onDismiss: () => void;
+  /** Present only for an interrupted run: starts the fresh run that resumes it. */
+  onResume?: () => void;
 }) {
+  const tr = useTr();
   const failedSteps = state?.steps.filter((s) => s.status === "failed") ?? [];
+  // Non-fatal problems the update found and worked around — build drift, a
+  // missing update pin it wrote for the owner. Krasi's ruling is that these
+  // warn rather than block, which only means anything if they are visible;
+  // the text comes from the server alongside the step labels.
+  const warnings = state?.warnings ?? [];
   return (
     <div className={CARD}>
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-sm font-semibold text-gray-100">
-          {status === "completed" ? "Update finished" : status === "failed" ? "Update stopped" : "In progress"}
+          {status === "completed"
+            ? tr("update.progressFinished", "Update finished")
+            : status === "failed" ? tr("update.progressStopped", "Update stopped") : tr("update.progressRunning", "In progress")}
         </h2>
         {(status === "completed" || status === "failed") && (
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="px-3 py-1 rounded-md text-xs font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
-          >
-            Dismiss
-          </button>
+          <div className="flex items-center gap-2">
+            {status === "failed" && onResume && (
+              <button
+                type="button"
+                onClick={onResume}
+                className="px-3 py-1 rounded-md text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-black cursor-pointer"
+              >
+                {/* The step is known when one is marked failed: the run picks
+                    up there. With none known a fresh run is what "again" means. */}
+                {failedSteps.length > 0
+                  ? tr("update.resume", "Resume update")
+                  : tr("update.startAgain", "Start the update again")}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="px-3 py-1 rounded-md text-xs font-medium border border-[var(--border-subtle)] text-gray-200 hover:bg-white/5 cursor-pointer"
+            >
+              {tr("update.dismiss", "Dismiss")}
+            </button>
+          </div>
         )}
       </div>
 
       {!state && (
         <div className="mt-4 flex items-center gap-2 text-sm text-[var(--text-muted)]">
-          <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin" />
-          Connecting…
+          <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent motion-safe:animate-spin" />
+          {tr("update.connecting", "Connecting…")}
         </div>
       )}
 
       {state && state.steps.length > 0 && (
         <ul className="mt-4 space-y-2">
           {state.steps.map((step) => (
-            <li key={step.id} className="flex items-center gap-3 text-sm">
+            <li key={step.id} className="flex items-start gap-3 text-sm">
               <StepIcon status={step.status} />
-              <span className={
-                step.status === "running" ? "text-gray-100 font-medium" :
-                step.status === "completed" ? "text-emerald-300/80" :
-                step.status === "failed" ? "text-red-300" : "text-[var(--text-muted)]"
-              }>
-                {step.label}
+              <span className="min-w-0">
+                <span className={
+                  step.status === "running" ? "text-gray-100 font-medium" :
+                  step.status === "completed" ? "text-emerald-300/80" :
+                  step.status === "failed" ? "text-red-300" : "text-[var(--text-muted)]"
+                }>
+                  {step.label}
+                </span>
+                {/* What the step is doing under a label that cannot say it —
+                    "Applying system fixups" is fifteen minutes of CUDA compile
+                    and multi-hundred-MB downloads. Only ever on the running
+                    step, and absent unless the installer has said something, so
+                    a step with nothing to add looks exactly as it did. */}
+                {step.status === "running" && step.detail && (
+                  <span
+                    className="block truncate text-xs text-[var(--text-muted)]"
+                    title={step.detail}
+                    data-testid="update-step-detail"
+                  >
+                    {step.detail}
+                  </span>
+                )}
               </span>
             </li>
           ))}
+        </ul>
+      )}
+
+      {warnings.length > 0 && (
+        <ul className="mt-4 space-y-2">
+          {warnings.map((w) => {
+            // The line a finished run leaves behind about drift it RESOLVED is
+            // history, not a problem. Drawn amber with a warning triangle it
+            // alarmed the owner exactly as the stale imperative did, which is
+            // the thing the completion card is meant to stop doing.
+            const resolved = w.code === DRIFT_RESOLVED_CODE;
+            return (
+              <li
+                key={w.code}
+                data-testid={`update-warning-${w.code}`}
+                data-tone={resolved ? "info" : "warning"}
+                className={`flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${
+                  resolved
+                    ? "border-[var(--border-subtle)] bg-white/5 text-[var(--text-muted)]"
+                    : "border-amber-500/20 bg-amber-500/10 text-amber-100"
+                }`}
+              >
+                <span
+                  className={`material-symbols-rounded shrink-0 ${resolved ? "text-gray-400" : "text-amber-300"}`}
+                  style={{ fontSize: 16 }}
+                >
+                  {resolved ? "history" : "warning"}
+                </span>
+                <span>{w.message}</span>
+              </li>
+            );
+          })}
         </ul>
       )}
 
@@ -786,7 +1178,7 @@ function UpdateProgressCard({
           {failedSteps.map((step) => (
             <li key={`${step.id}-err`} className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
               <span className="font-semibold text-red-100">{step.label}:</span>{" "}
-              {step.error || "Unknown error"}
+              {step.error || tr("update.unknownError", "Unknown error")}
             </li>
           ))}
         </ul>
@@ -794,7 +1186,7 @@ function UpdateProgressCard({
 
       {status === "completed" && state?.steps.some((s) => s.id === RESTART_STEP_ID) && (
         <p className="mt-4 text-xs text-[var(--text-muted)]">
-          The page will reload once the device is back up.
+          {tr("update.reloadOnRestart", "The page will reload once the device is back up.")}
         </p>
       )}
     </div>

@@ -1,0 +1,50 @@
+ClawBox crab (pack id `vibrant-clawd`)
+======================================
+
+ClawBox's own mascot, in Petdex pack format. This is FIRST-PARTY artwork —
+drawn for this product by the ClawBox maintainer — which is why it may be
+bundled here at all. Nothing in src/lib/pet-curated.ts changes: Petdex's
+submitted art stays un-mirrored and is still downloaded on the owner's own
+click, onto the owner's own device. The rule is "we do not redistribute other
+people's sprites", not "no sprite ever ships"; the same distinction already
+lets public/pet-egg-sheet.png ride along under its MIT notice.
+
+Pack
+----
+id:                  vibrant-clawd
+displayName:         ClawBox crab
+version:             2.1.0
+spriteVersionNumber: 1
+spritesheetPath:     spritesheet.webp
+Author:              ID-Robots (ClawBox)
+Licence:             same terms as the rest of this repository (see LICENSE)
+
+Sheet geometry
+--------------
+1536x1872 px RGBA WebP: 8 columns x 9 rows of 192x208 cells — the nine-state
+Petdex/Codex atlas src/lib/pet-state-map.ts already knows (CODEX_STATE_ROWS).
+
+  row 0  idle           6 frames
+  row 1  running-right  6 frames
+  row 2  running-left   6 frames
+  row 3  waving         4 frames
+  row 4  jumping        5 frames
+  row 5  failed         6 frames
+  row 6  waiting        6 frames
+  row 7  running        6 frames
+  row 8  review         6 frames
+
+Ragged rows are normal and are measured, not assumed: src/lib/pet-sheet-
+metrics.ts scans the alpha channel once per sheet revision, so the tail cells
+of `waving` and `jumping` are never stepped onto and the feet land on the bar.
+
+Where it is used
+----------------
+  - the desktop mascot wherever the brand crab is worn (openclaw and dual
+    editions with no pet picked, or the pet switched off) — hermes-pets.ts
+    `brandPetSlug()`;
+  - the pet gallery: the FIRST tile, named for the crab and selected by
+    default, wherever the crab is the placeholder; an ordinary built-in,
+    already-installed tile on a Hermes-only box;
+  - public/clawbox-crab.png (and its inlined copy, and the docs-site copy) is
+    a still of row 0 frame 0, cut by scripts/generate-crab-still.mjs.

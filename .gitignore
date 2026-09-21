@@ -1,6 +1,18 @@
 node_modules/
+# The name in every form, not only as a directory: a worktree with node_modules
+# as a SYMLINK once got that symlink committed by `git add -A`, and checking the
+# commit out replaced the real tree with a link to itself.
+/node_modules
+node_modules
 .next/
 .next-old/
+# The two transient names the atomic build reclaim uses (TASK-729), both
+# PRIVATE per process: the tree a rename claims the parked build into, and the
+# one it moves the outgoing .next aside into. Both must be ignored for the same
+# reason .next-old is — an update runs `git clean -fd` over this tree, and a
+# claim swept away mid-flight is a box with no build.
+.next-claim.*/
+.next-discard.*/
 out/
 build/
 coverage/
@@ -14,6 +26,18 @@ next-env.d.ts
 !.env.template
 !.env.test.example
 .update-branch
+# install.sh writes the pin through an mktemp file alongside it and renames it
+# into place, so the write cannot follow a symlink. It exists for microseconds
+# and is removed if any step fails, but a run killed mid-write must not leave
+# the device's working tree dirty forever.
+.update-branch.*
+# Orphan deploy marker from the pre-3.9 deploy method: nothing in this repo
+# writes or reads it, but boxes that were deployed by hand still carry one. Left
+# untracked it counted as a dirty working tree, so the About screen accused a
+# healthy box of "not running the code on its disk" and every build stamped
+# itself `dirty: true` (hwtest-round1, 2026-08-24). Ignored here so the artifact
+# cannot fake drift; the updater deletes any it finds.
+.deployed-sha
 claude-code-source-code/
 code-source-code/
 .omx/
@@ -25,3 +49,8 @@ scripts/nm-dispatcher-failover.sh
 
 # Local debug scripts (per-session sandbox)
 .scratch/
+
+# Python bytecode (scripts/ has .py helpers; the cache is never shipped)
+__pycache__/
+*.pyc
+bench/results/

@@ -18,13 +18,21 @@
 
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
+import {
+  BACKUP_RUN_CAP_MS,
+  RESTORE_RUN_CAP_MS,
+  expectedBackupWindowMs,
+} from "@/lib/clawkeep-protection";
 import { findOpenclawBin } from "@/lib/openclaw-config";
+import { get as configGet, set as configSet } from "@/lib/config-store";
 import { getEdition } from "@/lib/harness";
+import { backupSourceFor } from "@/lib/harness/backup-source";
+import type { HarnessId } from "@/lib/harness/transport";
 
 export const CLAWKEEP_DATA_DIR =
   process.env.CLAWKEEP_DATA_DIR?.trim() || path.join(os.homedir(), ".clawkeep");
@@ -42,7 +50,7 @@ const RESTORING_FLAG_PATH = path.join(CLAWKEEP_DATA_DIR, "restoring.flag");
 const SCHEDULE_PATH = path.join(CLAWKEEP_DATA_DIR, "schedule.json");
 
 export const DEFAULT_PORTAL_SERVER =
-  process.env.CLAWKEEP_PORTAL_SERVER?.trim() || "https://openclawhardware.dev";
+  process.env.CLAWKEEP_PORTAL_SERVER?.trim() || "https://clawbox.com";
 
 const DEFAULT_BIN_NAME = "clawkeepd";
 
@@ -106,6 +114,10 @@ export const DEFAULT_SCHEDULE: ClawKeepSchedule = {
 
 export interface ClawKeepStatus {
   paired: boolean;
+  /** Has the owner been through the ClawKeep setup wizard? The app shows the
+   *  wizard instead of the dashboard until this is true — or until the box
+   *  is paired, which is the wizard's whole point. */
+  setupComplete: boolean;
   configured: boolean;
   server: string;
   lastBackupAtMs: number;
@@ -121,13 +133,29 @@ export interface ClawKeepStatus {
   uploadBytesTotal: number;
   uploadBytesDone: number;
   uploadStartedAtMs: number;
+  /** Whether the `openclaw` CLI is on PATH. A prerequisite ONLY on the
+   *  OpenClaw edition, where the archive is made by `openclaw backup create`.
+   *  Kept as the raw fact; `archiverReady` is the question the UI asks. */
   openclawInstalled: boolean;
   daemonInstalled: boolean;
-  /** False on an edition that ships no OpenClaw to back up (Hermes). ClawKeep
-   *  archives the OpenClaw agent via the openclaw CLI, which that edition does
-   *  not have — so the feature genuinely cannot run there, and the UI must say
-   *  so honestly rather than print an `npm install -g openclaw` remedy that
-   *  contradicts the SKU. */
+  /** Which agent's state a backup on this box captures. Mirrors
+   *  `clawkeep.agent.device_agent()` in the daemon, which is the authority —
+   *  the daemon is what actually picks the backend. */
+  agent: HarnessId;
+  /** Is there anything left to install before a backup can run?
+   *
+   *  On OpenClaw this is `openclawInstalled`: no CLI, no archive. On Hermes the
+   *  archiver lives inside the daemon (`clawkeep/hermes.py`), so once the
+   *  daemon is there the box can back up — there is no second binary and no
+   *  `npm install -g openclaw` remedy to print, which would contradict the SKU.
+   */
+  archiverReady: boolean;
+  /** True when a snapshot from this box carries provider keys or platform
+   *  tokens, so the UI can say a backup is a credential. Both editions do. */
+  backupContainsCredentials: boolean;
+  /** Retained for older clients that gate the whole app on it. ClawKeep now
+   *  supports BOTH editions, so it is always true; the honest per-edition
+   *  answer is `archiverReady`. */
   supportedOnEdition: boolean;
   /** True while a restore is mid-flight (download → verify → swap). */
   restoring: boolean;
@@ -135,6 +163,12 @@ export interface ClawKeepStatus {
   schedule: ClawKeepSchedule;
   /** Wall-clock ms of the next scheduled run, or 0 when disabled. */
   nextRunAtMs: number;
+  /** When auto-backup was last armed — switched on, or tightened to a shorter
+   * cadence — or 0. Read by the protection shield so arming a schedule does not
+   * lapse a box for a run that has not come round yet. Deliberately NOT "when
+   * schedule.json was last saved": the same file holds the retention count and
+   * the time of day. */
+  scheduleArmedAtMs: number;
   /** True when the device-local passphrase file is present (and non-empty).
    * `paired && !encryptionConfigured` is the gate the UI watches to surface
    * the "Set encryption passphrase" CTA before the first backup. */
@@ -145,10 +179,36 @@ export class ClawKeepError extends Error {
   constructor(
     message: string,
     readonly status: number = 500,
+    /** Machine-readable reason, echoed by the routes as `code`. Present only
+     * where a caller has to branch on the failure; a client must never have to
+     * match on the English sentence to do it. */
+    readonly code?: string,
   ) {
     super(message);
     this.name = "ClawKeepError";
   }
+}
+
+/** The one sentence, and the one code, for "this box has no ClawKeep pairing".
+ * Every path that needs the daemon answers exactly this, so the app, the MCP
+ * tools and the scheduler all see one failure instead of six. */
+class ClawKeepNotPairedError extends ClawKeepError {
+  constructor() {
+    super("ClawKeep is not paired with an account", 409, "not_paired");
+    this.name = "ClawKeepNotPairedError";
+  }
+}
+
+/** The body a ClawKeep route answers a failure with: the sentence, plus the
+ * `code` when the error carries one. One helper so every route in the folder
+ * reports a failure the same way and a caller never has to read the English. */
+export function clawKeepErrorBody(err: unknown, fallback: string): {
+  error: string;
+  code?: string;
+} {
+  const error = err instanceof Error && err.message ? err.message : fallback;
+  const code = err instanceof ClawKeepError ? err.code : undefined;
+  return code ? { error, code } : { error };
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -162,7 +222,22 @@ async function ensureDataDir(): Promise<void> {
 // Stale-flag window: if the restoring marker is older than the restore
 // timeout it almost certainly means the Next.js process crashed mid-run
 // and never cleaned up. Treat as not-restoring so the shield stops glowing.
-const RESTORING_FLAG_MAX_AGE_MS = 30 * 60 * 1000;
+//
+// It has to BE the restore timeout, not a number that happens to equal it.
+// The two were both 30 minutes, so the flag could never go stale during a
+// live restore — the run was SIGKILLed at the same instant. Raising the
+// restore cap without this would have had `isRestoring()` DELETE the flag of
+// a restore still in flight (it removes the file, it does not merely report
+// false), dropping the shelf's orange restoring shield back to a calm green
+// verdict while the box's whole state directory was being replaced.
+const RESTORING_FLAG_MAX_AGE_MS = RESTORE_RUN_CAP_MS;
+
+/**
+ * "HH:MM", 24-hour, and a time that exists. Kept in step with the memory
+ * index's own schedule (`clawkeep-memory.ts`): both are read by a scheduler
+ * that arms nothing for an hour outside 00:00-23:59.
+ */
+const TIME_OF_DAY_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 function sanitiseSchedule(input: unknown): ClawKeepSchedule {
   // Coerce-and-default: tolerate a missing/partial schedule file rather than
@@ -171,7 +246,14 @@ function sanitiseSchedule(input: unknown): ClawKeepSchedule {
   const r = (input ?? {}) as Record<string, unknown>;
   const frequency: ScheduleFrequency =
     r.frequency === "weekly" ? "weekly" : "daily";
-  const time = typeof r.timeOfDay === "string" && /^\d{2}:\d{2}$/.test(r.timeOfDay)
+  // Range, not just shape. `/^\d{2}:\d{2}$/` accepted "99:99", "24:00" and
+  // "00:60" — and `computeNextRunMs` answers 0 for exactly those, so the file
+  // kept `enabled: true` over a schedule the scheduler could never arm: the
+  // panel said auto-backup was on and no backup ever ran (TASK-433). Same
+  // expression as `clawkeep-memory.ts`, which got this right for the memory
+  // index; a value this rejects falls back to the default, so a box with a
+  // hand-edited or half-written file still backs itself up.
+  const time = typeof r.timeOfDay === "string" && TIME_OF_DAY_RE.test(r.timeOfDay)
     ? r.timeOfDay
     : DEFAULT_SCHEDULE.timeOfDay;
   const weekdayRaw = Number(r.weekday);
@@ -194,23 +276,199 @@ function sanitiseSchedule(input: unknown): ClawKeepSchedule {
   };
 }
 
-export async function readSchedule(): Promise<ClawKeepSchedule> {
-  try {
-    const raw = await fs.readFile(SCHEDULE_PATH, "utf8");
-    return sanitiseSchedule(JSON.parse(raw));
-  } catch {
-    return { ...DEFAULT_SCHEDULE };
-  }
+/** Everything `schedule.json` says, from one read of it. */
+export interface ClawKeepScheduleSnapshot {
+  schedule: ClawKeepSchedule;
+  /**
+   * When auto-backup was last *armed*, as unix ms; 0 if the file does not say.
+   *
+   * The protection shield needs it: arming auto-backup shrinks the tolerated
+   * backup age from a week to 36 h, and applying that retroactively would lapse
+   * a box on the same click for a run that is not due yet.
+   *
+   * The stamp lives inside `schedule.json` rather than being its mtime, because
+   * an mtime answers "when was this file written" and the question here is
+   * "when was a window started". The same file carries the retention count and
+   * the time of day, so on the mtime a box whose backups died ten days ago went
+   * green the moment its owner nudged either — and a `cp -a` or an image
+   * restore of `~/.clawkeep` did it too.
+   *
+   * A file written before the stamp existed therefore answers 0, NOT its mtime:
+   * falling back would carry exactly that defect onto every box that upgrades.
+   * 0 costs a box armed shortly before the update its remaining grace; the
+   * mtime would cost a dead box's owner the alarm.
+   *
+   * 0 means "no window is running", which is the safe answer for a reader. It
+   * does NOT mean "this box has never armed a schedule" — an enabled file
+   * without a stamp was armed, by definition, and {@link nextArmedAtMs} is
+   * where that distinction is made, because it is the only place a stamp is
+   * minted.
+   */
+  armedAtMs: number;
+  /**
+   * The file is there and says nothing we can read — a truncated write, a
+   * power cut mid-rename. Distinct from "no file", which is a box that has
+   * never had a schedule: this one may have had any schedule at all, so it is
+   * evidence of nothing rather than evidence of "off".
+   */
+  unreadable: boolean;
 }
 
-export async function writeSchedule(next: ClawKeepSchedule): Promise<ClawKeepSchedule> {
+/**
+ * Everything the schedule file says, from ONE read of it.
+ *
+ * The schedule and the stamp are two halves of a single verdict —
+ * `deriveProtection` takes the age window from the schedule and the grace
+ * anchor from the stamp — so reading them separately lets a `writeSchedule()`
+ * rename land between the two reads and pair the cadence of one version with
+ * the stamp of the next. That pair is a verdict neither version would give.
+ */
+export async function readScheduleSnapshot(): Promise<ClawKeepScheduleSnapshot> {
+  const unknownFile = { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: true };
+  let raw: string;
+  try {
+    raw = await fs.readFile(SCHEDULE_PATH, "utf8");
+  } catch (err) {
+    // "No file" is one error code, not all of them. ENOENT — and ENOTDIR on a
+    // broken parent — really does mean no schedule has ever been written here.
+    // EACCES on a file left root-owned, EIO on failing storage (the box that
+    // needs the alarm most), EMFILE on a loaded Jetson: each is a file that IS
+    // there and says nothing we can read, which is evidence of nothing.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") return unknownFile;
+    return { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: false };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return unknownFile;
+  }
+  // `sanitiseSchedule` coerces rather than throwing (`r.enabled === true`), so
+  // a file holding `null`, an array or a bare string would otherwise come back
+  // as a perfectly readable "auto-backup is off" — and buy the next arming
+  // click a fresh window. Parsing is not the same as being a schedule.
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return unknownFile;
+  const stamp = Number((parsed as { armedAtMs?: unknown }).armedAtMs);
+  return {
+    schedule: sanitiseSchedule(parsed),
+    armedAtMs: Number.isFinite(stamp) && stamp > 0 ? Math.round(stamp) : 0,
+    unreadable: false,
+  };
+}
+
+/**
+ * The stamp given to a schedule that was armed before stamps existed. Any
+ * value above 0 answers "a window has been started on this box"; 1 ms past the
+ * epoch adds "too long ago to be worth anything", which is the honest reading
+ * of a file that was armed but does not say when.
+ *
+ * It is inert in the verdict: `deriveProtection` anchors on
+ * `Math.max(lastBackupAtMs, armedAtMs)`, and every real backup is newer.
+ */
+const LEGACY_ARM_STAMP_MS = 1;
+
+/**
+ * Does this save start a window that was not running before? Switching
+ * auto-backup on does; so does tightening the cadence, which shrinks the
+ * tolerated age and would otherwise lapse the box on the click. Loosening it
+ * cannot lapse a box the tighter cadence already allowed, and a plain re-save —
+ * retention, time of day, weekday — changes no window at all.
+ */
+function armsTheSchedule(prev: ClawKeepSchedule, next: ClawKeepSchedule): boolean {
+  if (!next.enabled) return false;
+  if (!prev.enabled) return true;
+  return expectedBackupWindowMs(next) < expectedBackupWindowMs(prev);
+}
+
+/**
+ * The arm stamp to persist with this save.
+ *
+ * Arming must not lapse a box for a run that is not due yet — but it must not
+ * un-lapse one either, and those are different things. Only the first buys
+ * anything, so only the first is granted:
+ *
+ *   - a plain re-save (retention, time of day, weekday) arms nothing and keeps
+ *     the stamp it had — otherwise nudging either would hand a box whose
+ *     backups died ten days ago a fresh 36 h of green, on the very card the
+ *     lapsed copy sends its owner to;
+ *   - switching auto-backup ON only mints a stamp on a box that has never had a
+ *     schedule. Switching it OFF widens the tolerated age from the cadence's own
+ *     window to the no-schedule week, so a box that was amber under its nightly
+ *     schedule reads green the moment the switch goes off; minting on the way
+ *     back on would make that round trip permanent — two clicks, another 36 h,
+ *     repeatable for ever. A box that has been armed before keeps its stamp,
+ *     and an enabled schedule with no stamp — every box in the field, the
+ *     moment it takes this build — HAS been armed before;
+ *   - and what it mints, first arm or tightened cadence alike, it mints only
+ *     for a box the PREVIOUS window still called protected. One already past
+ *     it stays lapsed.
+ *
+ * This is the one place those questions can be asked, because it is the only
+ * place that knows the window the box was being judged against a moment ago.
+ */
+async function nextArmedAtMs(
+  prevSnapshot: ClawKeepScheduleSnapshot,
+  next: ClawKeepSchedule,
+): Promise<number> {
+  const prev = prevSnapshot.schedule;
+  // "No stamp" is three different facts, and only one of them may be granted a
+  // fresh window:
+  //   - no window is running — a box that has never armed one. Grant.
+  //   - no window was RECORDED — a schedule.json written before the stamp
+  //     existed. Every deployed box is this one the moment it updates, and an
+  //     enabled schedule is evidence of its own arming: read as a first arm,
+  //     the off→on toggle below hands a box whose backups are dead the very
+  //     rescue this function exists to refuse.
+  //   - nothing could be read at all — a file truncated by a power cut. That
+  //     is evidence of NOTHING, not evidence of "off", so it is read the same
+  //     way: the cost of withholding a window is one amber card until the next
+  //     run, the cost of granting one is 36 h of green over a dead box.
+  const armedBefore = prev.enabled || prevSnapshot.unreadable;
+  const prevArmedAtMs = prevSnapshot.armedAtMs === 0 && armedBefore
+    ? LEGACY_ARM_STAMP_MS
+    : prevSnapshot.armedAtMs;
+  if (!armsTheSchedule(prev, next)) return prevArmedAtMs;
+  const now = Date.now();
+  const lastBackupAtMs = (await readStateFile()).last_backup_at_ms ?? 0;
+  // Nothing has ever backed this box up: it reads "Not Protected" on its own
+  // account and never reaches the age term, so there is no verdict to rescue.
+  if (lastBackupAtMs <= 0) return now;
+  // Switching back ON is not a new window for a box that has had one. The
+  // window it is leaving is the one OFF widened, so measuring the return trip
+  // against that would forgive precisely the box the widening had flattered.
+  if (!prev.enabled && prevArmedAtMs > 0) return prevArmedAtMs;
+  // A first arm is owed a window only where applying the new one retroactively
+  // would lapse a box the old one still called protected. Past that, arming is
+  // not evidence of anything and the box keeps the stamp it had.
+  return now - lastBackupAtMs > expectedBackupWindowMs(prev) ? prevArmedAtMs : now;
+}
+
+export async function writeSchedule(next: ClawKeepSchedule): Promise<{
+  schedule: ClawKeepSchedule;
+  armedAtMs: number;
+}> {
   await ensureDataDir();
   const sanitised = sanitiseSchedule(next);
-  const tmp = `${SCHEDULE_PATH}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(sanitised, null, 2), { mode: 0o600 });
+  const armedAtMs = await nextArmedAtMs(await readScheduleSnapshot(), sanitised);
+  // Per-call temp name (pid + monotonic counter), like writeStateFile: this is
+  // a read-modify-write now, and two saves from the same card must not
+  // interleave into one temp file and rename a torn schedule into place —
+  // readScheduleSnapshot() would then fall back to DEFAULT_SCHEDULE and silently turn
+  // auto-backup off.
+  const tmp = `${SCHEDULE_PATH}.tmp.${process.pid}.${++scheduleWriteSeq}`;
+  // `armedAtMs` rides alongside the schedule rather than in it: it is not a
+  // setting the owner edits, and `sanitiseSchedule` drops it on the way back
+  // out so `ClawKeepSchedule` stays exactly what the PUT body may contain.
+  await fs.writeFile(tmp, JSON.stringify({ ...sanitised, armedAtMs }, null, 2), { mode: 0o600 });
   await fs.rename(tmp, SCHEDULE_PATH);
-  return sanitised;
+  // The stamp comes back with the schedule rather than being re-read: a second
+  // save landing between the rename and a re-read would pair this schedule with
+  // that one's stamp, and the card folds the pair into its local status.
+  return { schedule: sanitised, armedAtMs };
 }
+
+let scheduleWriteSeq = 0;
 
 /** Compute the next wall-clock ms a backup should fire, given a schedule
  * and a "now" reference. Pure function — exported for unit tests. */
@@ -293,7 +551,21 @@ export async function readToken(): Promise<string | null> {
     return raw;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw e;
+    // A token that exists and cannot be READ is not "not paired" — saying so
+    // would send the owner to re-pair over a permissions problem — but the raw
+    // error carries the token's absolute path, and most of the ClawKeep routes
+    // put whatever they are handed into the response through
+    // `clawKeepErrorBody`. Default-deny rather than a list of errnos: EACCES and
+    // EPERM are the likely ones, but ENOTDIR (a botched install leaving
+    // `~/.clawkeep` a regular file), ELOOP and ENAMETOOLONG all carry the path
+    // in `e.message` too. One fixed sentence, no path; the real error goes to
+    // the server log where an operator can read it.
+    console.warn("[clawkeep] could not read the pairing token:", e);
+    throw new ClawKeepError(
+      "The ClawKeep pairing file could not be read — check that it exists and is mode 600",
+      409,
+      "token_unreadable",
+    );
   }
 }
 
@@ -488,8 +760,23 @@ async function getDaemonBin(): Promise<string | null> {
   if (daemonBinCache) return daemonBinCache;
   const override = process.env.CLAWKEEP_BIN?.trim();
   if (override) {
-    daemonBinCache = override;
-    return override;
+    // Checked, not trusted. An override left pointing at a path that no longer
+    // exists used to report the daemon as installed, which now also reports
+    // `archiverReady: true` — a box that cannot back up telling the owner it
+    // can. A bad override falls through to the normal probe rather than
+    // failing outright, so a stale env var degrades to "look for it properly".
+    try {
+      // isFile() as well as X_OK: a DIRECTORY passes the executable check
+      // (that is what the x bit means on a directory), and caching one would
+      // report the daemon as installed and the box as ready to back up.
+      const stat = await fs.stat(override);
+      if (!stat.isFile()) throw new Error("not a regular file");
+      await fs.access(override, fsConstants.X_OK);
+      daemonBinCache = override;
+      return override;
+    } catch {
+      // fall through to the PATH / user-local probes below
+    }
   }
   if (await which(DEFAULT_BIN_NAME)) {
     daemonBinCache = DEFAULT_BIN_NAME;
@@ -503,6 +790,27 @@ async function getDaemonBin(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * The daemon binary for a call that needs the pairing token, refused before it
+ * can spawn anything when the device has none.
+ *
+ * The pairing signal is the daemon's own: `clawkeep/clawkeep/token.py`
+ * `read_token()` raises `TokenError("No token at <path>; run 'clawkeep pair'
+ * first")`, which `clawkeepd` returns as exit 65 and every token-taking
+ * `clawkeep` subcommand as `{"ok":false,"error":"No token at <path>…"}`.
+ * Reading the same file first is what lets a route answer the owner one
+ * sentence instead of quoting a daemon log line that names a path on the box.
+ *
+ * Everything that reaches the portal comes through here — `clawkeepd` itself
+ * and `snapshots`, `restore`, `label`, `lock`, `delete`, `prune`. The
+ * `*-passphrase` subcommands deliberately do NOT: they are device-local, and a
+ * box has to be able to set its encryption passphrase before it is paired.
+ */
+async function pairedDaemonBin(): Promise<string> {
+  if (!(await readToken())) throw new ClawKeepNotPairedError();
+  return (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
 }
 
 /** Build the env for spawning the Python daemon/CLI. Augments PATH with the
@@ -617,22 +925,73 @@ export async function clearPassphrase(): Promise<{ removed: boolean }> {
   return { removed: resp.removed ?? false };
 }
 
+/**
+ * The setup wizard's completion flag, in the config store like the coding
+ * agent's and Memory Shard's. Cleared by nothing but a factory reset: a
+ * backup failing, or an unpair, must not send the owner back to the front
+ * door of a feature they already set up.
+ */
+export const CLAWKEEP_SETUP_CONFIG_KEY = "clawkeep_setup_complete";
+
+/**
+ * Has the owner been through ClawKeep's first-run wizard?
+ *
+ * An EXPLICIT flag wins; absent, a box that is already PAIRED counts as set up.
+ * Pairing is the wizard's point, so a box that had done it before this flag
+ * existed must not be dragged through onboarding by an update.
+ *
+ * That legacy answer belongs here rather than in the app's front door, and the
+ * difference is a defect this repairs. ClawKeepApp used to ask
+ * `setupComplete === false && !paired`, re-evaluated on every status poll — so
+ * the wizard's OWN pairing step falsified the condition keeping it on screen
+ * and dropped the owner onto the dashboard two steps early, at "Protection
+ * Lapsed", with setupComplete still false. Answered at the source, the app asks
+ * the single question its siblings ask (BrowserApp, CodingAgentApp and
+ * MemoryShardApp all gate on `setupComplete` alone), and the wizard survives its
+ * own success — including across a reload, which a front-door latch could not
+ * fix because the reloaded page reads `paired: true` on its very first status.
+ *
+ * Same shape as `getMemoryShardSetupComplete`, deliberately: a derivation, not
+ * a write, so nothing is persisted from a status read.
+ */
+export async function getClawKeepSetupComplete(): Promise<boolean> {
+  const flag = await configGet(CLAWKEEP_SETUP_CONFIG_KEY);
+  if (typeof flag === "boolean") return flag;
+  return (await readToken()) !== null;
+}
+
+export async function setClawKeepSetupComplete(done: boolean): Promise<boolean> {
+  await configSet(CLAWKEEP_SETUP_CONFIG_KEY, done);
+  return done;
+}
+
 export async function getStatus(): Promise<ClawKeepStatus> {
   await ensureDataDir();
-  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, schedule, encryptionConfigured] = await Promise.all([
+  const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, scheduleSnapshot, encryptionConfigured, setupComplete] = await Promise.all([
     readToken(),
     readConfigToml(),
     readStateFile(),
     getOpenclawInstalled(),
     getDaemonBin(),
     isRestoring(),
-    readSchedule(),
+    readScheduleSnapshot(),
     isEncryptionConfigured(),
+    getClawKeepSetupComplete(),
   ]);
+  // Both halves off one read: the pair decides the verdict, so they must be
+  // the same version of the file. See readScheduleSnapshot().
+  const { schedule, armedAtMs: scheduleArmedAtMs } = scheduleSnapshot;
 
   const server = readServer(configToml);
+  // A single-harness edition names its own agent. "dual" installs both and
+  // defaults to OpenClaw (`DEFAULT_HARNESS` in harness.ts), which is also what
+  // the daemon's `device_agent()` picks when both state directories exist — the
+  // two must agree, because the daemon is what actually builds the archive.
+  const agent: HarnessId = getEdition() === "hermes" ? "hermes" : "openclaw";
+  const source = backupSourceFor(agent);
   return {
     paired: !!token,
+    setupComplete,
     // openclaw decides what's in the archive — we no longer ask the user
     // to declare paths, so any paired device with a valid config is
     // "configured" enough to run.
@@ -650,12 +1009,25 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     uploadStartedAtMs: stateRaw.upload_started_at_ms ?? 0,
     openclawInstalled,
     daemonInstalled: daemonBin !== null,
-    // ClawKeep backs up the OpenClaw agent; the Hermes SKU ships no openclaw, so
-    // the feature has nothing to archive there and is not supported.
-    supportedOnEdition: getEdition() !== "hermes",
+    agent,
+    // "Is there anything left to install before a backup can run?"
+    //
+    // The daemon is required on BOTH editions — it is the thing that runs, and
+    // on Hermes it is also where the archiver itself lives. Reporting `true`
+    // for Hermes on a box with no `clawkeepd` said the backup path was usable
+    // on a device that cannot create a backup at all. OpenClaw needs the
+    // separate `openclaw` CLI on top of that.
+    archiverReady:
+      daemonBin !== null && (source.requiresExternalCli ? openclawInstalled : true),
+    backupContainsCredentials: source.containsCredentials,
+    // ClawKeep now archives EITHER agent (see `clawkeep/agent.py`), so no
+    // edition is unsupported. Kept true rather than deleted so a client that
+    // still gates on it keeps working.
+    supportedOnEdition: true,
     restoring,
     schedule,
     nextRunAtMs: computeNextRunMs(schedule, new Date()),
+    scheduleArmedAtMs,
     encryptionConfigured,
   };
 }
@@ -668,6 +1040,101 @@ export interface BackupResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+}
+
+/**
+ * The daemon's own failure taxonomy, as an HTTP answer.
+ *
+ * `clawkeepd` publishes a complete, deliberate set of exit codes and the
+ * bridge consumed none of them, so every failure left as HTTP 200 whose only
+ * explanation was `stderrTail` — the daemon's raw log line, printed verbatim by
+ * the panel, device paths and all. Leverage what the daemon already says
+ * rather than parsing its English: `clawkeep/clawkeep/runner.py` for the
+ * `EXIT_*` block, `clawkeep/clawkeep/daemon.py` for the two pre-run codes,
+ * whose own comment says the classification exists "so the runner can branch …
+ * without parsing English error strings".
+ *
+ * Two of these codes are the BRIDGE's, not the daemon's — `runBackup`
+ * synthesises 124 when its kill timer fires and 127 when the process could not
+ * be started — and they are mapped here for the same reason: to the owner they
+ * are equally "the backup did not happen".
+ *
+ * The sentence is one line the owner can act on and never the daemon's output;
+ * the `code` is what a caller branches on, so nothing has to match on English.
+ * The status is chosen so a client that only looks at the class still gets it
+ * right: 4xx where the owner has to do something (re-pair, buy room, set a
+ * passphrase), 5xx where the box or the portal failed.
+ */
+export function backupExitError(exitCode: number): ClawKeepError | null {
+  if (exitCode === 0) return null;
+  switch (exitCode) {
+    case 2: // EXIT_QUOTA_FULL
+      return new ClawKeepError(
+        "The ClawKeep account is out of space — free some snapshots or upgrade the plan",
+        507,
+        "quota_full",
+      );
+    case 3: // EXIT_AUTH_REVOKED — the portal-side unpair the token file cannot see
+      return new ClawKeepError(
+        "ClawKeep authorisation was rejected — pair this device again",
+        401,
+        "pairing_revoked",
+      );
+    case 4: // EXIT_TIER
+      return new ClawKeepError(
+        "This ClawKeep plan does not allow that backup",
+        402,
+        "tier_limit",
+      );
+    case 5: // EXIT_SERVER
+      return new ClawKeepError("The ClawKeep portal returned an error", 502, "portal_error");
+    case 6: // EXIT_NETWORK
+      return new ClawKeepError("Could not reach the ClawKeep portal", 504, "offline");
+    case 7:
+      // EXIT_OPENCLAW — building the archive failed, on either edition. The
+      // failure is the BOX's own, so 500 rather than 502: nothing upstream was
+      // even reached.
+      return new ClawKeepError("The backup archive could not be built", 500, "archive_failed");
+    case 8: // EXIT_UPLOAD
+      return new ClawKeepError("The backup could not be uploaded", 502, "upload_failed");
+    case 9: // EXIT_NEED_PASSPHRASE — the UI already has the modal for this
+      return new ClawKeepError(
+        "Set an encryption passphrase before backing up",
+        409,
+        "needs_passphrase",
+      );
+    case 10: // EXIT_ENCRYPTION_FAILED
+      return new ClawKeepError("The backup could not be encrypted", 500, "encryption_failed");
+    case 64: // daemon.py, EX_USAGE — a bad config, before the run begins
+      return new ClawKeepError("The ClawKeep configuration is unusable", 500, "config_error");
+    case 65:
+      // daemon.py, EX_DATAERR — `token.read_token` raised. It raises for THREE
+      // conditions and the pre-flight already refuses two of them before the
+      // spawn (`readToken` answers null for a missing file and for a body that
+      // is not `claw_*`), so the one that actually reaches here in the field is
+      // the third: `assert_perms` refusing a token with `0o077` bits — a 0644
+      // file restored from a backup, or a hand-edit under a loose umask. That
+      // is a `chmod 600`, not a re-pairing, and answering `not_paired` would
+      // walk the owner through a full unpair/re-pair for it. (The narrow race
+      // where the file is deleted between the pre-flight and the spawn lands
+      // here too and is served the same sentence, which names the file rather
+      // than the account.)
+      return new ClawKeepError(
+        "The ClawKeep pairing file could not be read — check that it exists and is mode 600",
+        409,
+        "token_unreadable",
+      );
+    case 124:
+      // runBackup's own kill timer. Not the daemon's word — ours.
+      return new ClawKeepError("The backup ran out of time and was stopped", 504, "timed_out");
+    case 127:
+      return new ClawKeepError("The ClawKeep daemon could not be started", 503, "daemon_missing");
+    default:
+      // EXIT_BACKUP_FAILED (1), EXIT_UNKNOWN (99), a signal, and anything a
+      // newer daemon adds. "It did not work" is still an honest answer, and it
+      // is a 502 rather than a 200.
+      return new ClawKeepError("The backup did not finish", 502, "backup_failed");
+  }
 }
 
 // Cap stdout/stderr capture so a chatty `openclaw backup create` over a
@@ -715,7 +1182,30 @@ function mapSnapshotsError(resp: SnapshotsResponse): ClawKeepError {
     case "unpaired":
     case "no_token":
     case "not_paired":
-      return new ClawKeepError("ClawKeep is not paired with an account", 409);
+      // Still unreached, and for a narrower reason than before: `_emit_err` now
+      // carries whatever `kind` the exception has, but `token.TokenError` and
+      // `cfg_mod.ConfigError` have none — `api.ApiError`'s union is
+      // auth | quota_full | tier | server | network | other — so a token
+      // vanishing mid-session still falls to `default:` (502). Kept as the
+      // mapping to use when the daemon gives those two a kind of their own.
+      return new ClawKeepNotPairedError();
+    case "quota_full":
+      // The portal answers 402 to `POST /credentials` while the account is over
+      // quota, and `snapshots` mints credentials before it lists anything — so
+      // the READ is refused over a limit a read cannot exceed. That is a portal
+      // defect and not this function's to fix; what IS this function's is to
+      // stop hiding the reason. Same sentence, status and code the backup path
+      // has always answered (see backupExitError): being told "the account is
+      // full" is what makes "Could not list cloud backups" actionable.
+      return new ClawKeepError(
+        "The ClawKeep account is out of space — free some snapshots or upgrade the plan",
+        507,
+        "quota_full",
+      );
+    case "tier":
+      // The other half of `_classify` that had nowhere to land. Same pairing as
+      // backupExitError's EXIT_TIER.
+      return new ClawKeepError("This ClawKeep plan does not allow that", 402, "tier_limit");
     case "auth":
     case "unauthorized":
     case "revoked":
@@ -742,6 +1232,11 @@ interface RestoreOk {
   ok: true;
   archive: string;
   archiveBytes: number;
+  /** Members the daemon deliberately did not recreate — unsafe absolute
+   *  symlinks. Normally empty; when it is not, the restore is INCOMPLETE and
+   *  the UI has to say so rather than showing a clean success. Optional
+   *  because a daemon predating the field simply omits it. */
+  skippedMembers?: string[];
   assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
 }
 
@@ -764,10 +1259,12 @@ export class RestoreNeedsPassphraseError extends ClawKeepError {
   }
 }
 
-const RESTORE_TIMEOUT_MS = 30 * 60 * 1000; // hard cap matches openclaw verify + multipart download
+const RESTORE_TIMEOUT_MS = RESTORE_RUN_CAP_MS;
 // Generous cap for a full backup (openclaw backup create + multipart upload).
-// A hung clawkeepd must not hold a Next.js worker open forever.
-const BACKUP_TIMEOUT_MS = 60 * 60 * 1000;
+// A hung clawkeepd must not hold a Next.js worker open forever. Shared with
+// the UI's "is this `running` heartbeat still alive" rule, which is only
+// honest if it is the same number as the kill timer below.
+const BACKUP_TIMEOUT_MS = BACKUP_RUN_CAP_MS;
 
 function spawnCliJson<T>(
   bin: string,
@@ -831,6 +1328,25 @@ function spawnCliJson<T>(
       // text if parsing fails so the caller still gets a usable message.
       try {
         const parsed = JSON.parse(stdout.trim().split("\n").pop() || "{}") as T;
+        // The CLI's exit code is an outcome, not decoration. A non-zero exit
+        // whose payload does not itself say `ok:false` — a partially written
+        // line, a stale object from an earlier run, or the empty `{}` the
+        // fallback above produces when a SIGKILL left nothing on stdout — was
+        // resolved as a success, which is the same false success the backup
+        // route had. `code` is `null` when the kill timer fired, and that is a
+        // failure too.
+        const saysFailed =
+          !!parsed && typeof parsed === "object" && (parsed as { ok?: unknown }).ok === false;
+        if (code !== 0 && !saysFailed) {
+          reject(
+            new ClawKeepError(
+              `ClawKeep could not complete ${subcommand}`,
+              502,
+              "cli_failed",
+            ),
+          );
+          return;
+        }
         resolve(parsed);
       } catch {
         reject(
@@ -847,11 +1363,7 @@ function spawnCliJson<T>(
 async function fetchCloudSnapshots(): Promise<SnapshotsResponse> {
   // Fail fast + friendly on the unpaired case rather than shelling out and
   // surfacing the daemon's raw "no token" error as a 502.
-  const token = await readToken();
-  if (!token) {
-    throw new ClawKeepError("ClawKeep is not paired with an account", 409);
-  }
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<SnapshotsResponse>(bin, "snapshots", [], { timeoutMs: 60_000 });
   if (!resp.ok) {
     throw mapSnapshotsError(resp);
@@ -943,7 +1455,7 @@ interface MutationResponse {
 /** Set (or clear, when `text` is empty) a snapshot's human label. */
 export async function setSnapshotLabel(name: string, text: string): Promise<void> {
   assertSnapshotName(name);
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<MutationResponse>(
     bin,
     "label",
@@ -958,7 +1470,7 @@ export async function setSnapshotLabel(name: string, text: string): Promise<void
 /** Mark a snapshot as protected (locked) — exempt from delete + retention. */
 export async function lockSnapshot(name: string): Promise<void> {
   assertSnapshotName(name);
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<MutationResponse>(bin, "lock", [name], { timeoutMs: 30_000 });
   if (!resp.ok) {
     throw new ClawKeepError(resp.error ?? "lock failed", 502);
@@ -968,7 +1480,7 @@ export async function lockSnapshot(name: string): Promise<void> {
 /** Remove a snapshot's protected flag. */
 export async function unlockSnapshot(name: string): Promise<void> {
   assertSnapshotName(name);
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<MutationResponse>(bin, "unlock", [name], { timeoutMs: 30_000 });
   if (!resp.ok) {
     throw new ClawKeepError(resp.error ?? "unlock failed", 502);
@@ -978,7 +1490,7 @@ export async function unlockSnapshot(name: string): Promise<void> {
 /** Delete a snapshot. Refused (SnapshotLockedError) if it's locked. */
 export async function deleteSnapshot(name: string): Promise<void> {
   assertSnapshotName(name);
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<MutationResponse>(bin, "delete", [name], { timeoutMs: 60_000 });
   if (!resp.ok) {
     if (resp.kind === "locked") {
@@ -990,7 +1502,7 @@ export async function deleteSnapshot(name: string): Promise<void> {
 
 /** Run retention on demand: keep the newest `keepLast` unlocked snapshots. */
 export async function pruneSnapshots(keepLast: number): Promise<string[]> {
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   const resp = await spawnCliJson<MutationResponse & { deleted?: string[] }>(
     bin,
     "prune",
@@ -1014,7 +1526,7 @@ export async function runRestore(
   // the new encrypted form (`.tar.gz.enc`) and the legacy unencrypted one
   // (`.tar.gz`); the daemon detects which is which on its end too.
   assertSnapshotName(name);
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   await setRestoring(true);
   try {
     const runWith = async (extraArgs: string[]) => {
@@ -1049,7 +1561,7 @@ export async function runRestore(
 export async function runBackup(
   opts: { idle?: boolean; label?: string } = {},
 ): Promise<BackupResult> {
-  const bin = (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
+  const bin = await pairedDaemonBin();
   return new Promise((resolve) => {
     const env = buildSpawnEnv();
     const args = ["--config", CLAWKEEP_CONFIG_PATH];

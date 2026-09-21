@@ -1,9 +1,16 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 import * as childProcess from "child_process";
 import fs from "fs/promises";
 
+vi.mock("@/lib/root-step-runner", () => ({
+  ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
+  startRootStep: vi.fn(async () => {}),
+}));
+
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
+  spawn: vi.fn(),
 }));
 
 vi.mock("fs/promises", () => ({
@@ -34,10 +41,12 @@ vi.mock("@/lib/auth", () => ({
 
 import { set } from "@/lib/config-store";
 import { getSystemUsername } from "@/lib/auth";
+import { startRootStep } from "@/lib/root-step-runner";
 
 const mockSet = vi.mocked(set);
 const mockGetSystemUsername = vi.mocked(getSystemUsername);
 const mockExecFile = vi.mocked(childProcess.execFile);
+const mockSpawn = vi.mocked(childProcess.spawn);
 const mockFs = vi.mocked(fs);
 
 function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
@@ -72,8 +81,34 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
   }) as unknown as typeof childProcess.execFile);
 }
 
+/**
+ * Stand in for `/usr/sbin/unix_chkpwd`, which @/lib/system-password spawns to
+ * ask whether the account's password is still the factory default. `exitCode`
+ * follows PAM: 0 = it is, 7 = it is not, anything else = the helper could not
+ * tell. `null` mimics a signal/timeout kill.
+ */
+function mockUnixChkpwd(exitCode: number | null) {
+  mockSpawn.mockImplementation((() => {
+    const listeners = new Map<string, Array<(arg?: unknown) => void>>();
+    const child = {
+      stdin: {
+        on: vi.fn(),
+        end: vi.fn(() => {
+          queueMicrotask(() => listeners.get("close")?.forEach((cb) => cb(exitCode)));
+        }),
+      },
+      on: vi.fn((event: string, cb: (arg?: unknown) => void) => {
+        listeners.set(event, [...(listeners.get(event) || []), cb]);
+        return child;
+      }),
+    };
+    return child;
+  }) as unknown as typeof childProcess.spawn);
+}
+
 describe("POST /setup-api/system/credentials", () => {
   let credentialsPost: (req: Request) => Promise<Response>;
+  let session: SessionFixture;
 
   function jsonRequest(body: unknown, headers?: Record<string, string>): Request {
     return new Request("http://localhost/test", {
@@ -86,6 +121,7 @@ describe("POST /setup-api/system/credentials", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    session = installSessionFixture();
 
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue();
@@ -103,6 +139,7 @@ describe("POST /setup-api/system/credentials", () => {
   afterEach(() => {
     vi.clearAllMocks();
     delete process.env.CLAWBOX_USER;
+    session.cleanup();
   });
 
   it("sets password successfully", async () => {
@@ -175,10 +212,8 @@ describe("POST /setup-api/system/credentials", () => {
     expect(body.error).toContain("control characters");
   });
 
-  it("returns 500 when systemctl fails", async () => {
-    setupExecFileMock({
-      systemctl: new Error("Service failed"),
-    });
+  it("returns 500 when the root step fails", async () => {
+    vi.mocked(startRootStep).mockRejectedValueOnce(new Error("Service failed"));
 
     const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
     const body = await res.json();
@@ -187,10 +222,8 @@ describe("POST /setup-api/system/credentials", () => {
     expect(body.error).toBe("Service failed");
   });
 
-  it("cleans up input file on systemctl failure", async () => {
-    setupExecFileMock({
-      systemctl: new Error("Service failed"),
-    });
+  it("cleans up input file when the root step fails", async () => {
+    vi.mocked(startRootStep).mockRejectedValueOnce(new Error("Service failed"));
 
     await credentialsPost(jsonRequest({ password: "securepassword123" }));
 
@@ -225,7 +258,7 @@ describe("POST /setup-api/system/credentials", () => {
     const res = await credentialsPost(jsonRequest({
       password: "newsecurepassword123",
       currentPassword: "oldpassword123",
-    }));
+    }, { Cookie: session.cookie }));
 
     expect(res.status).toBe(200);
     expect(vi.mocked(bumpSessionGeneration)).toHaveBeenCalled();
@@ -239,7 +272,33 @@ describe("POST /setup-api/system/credentials", () => {
     const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
     expect(res.status).toBe(200);
     expect(vi.mocked(bumpSessionGeneration)).not.toHaveBeenCalled();
-    expect(res.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("mints the owner's session on the first-boot password set", async () => {
+    // There is no prior session to revoke, but there IS now an owner — so the
+    // wizard's remaining steps run authenticated instead of needing a pre-auth
+    // carve-out, and the bootstrap window closes behind them. TASK-443.
+    const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ success: true, authenticated: true });
+    const cookie = res.headers.get("set-cookie");
+    expect(cookie).toContain("clawbox_session=reissued.cookie");
+    expect(cookie).toContain("HttpOnly");
+  });
+
+  it("refuses an unauthenticated password CHANGE once one is configured", async () => {
+    const { get } = await import("@/lib/config-store");
+    vi.mocked(get).mockResolvedValue(true); // password_configured → this is a change
+
+    const res = await credentialsPost(jsonRequest({
+      password: "newsecurepassword123",
+      currentPassword: "oldpassword123",
+    }));
+
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "Authentication required" });
+    // Nothing was written and the root chpasswd unit was never started.
+    expect(mockSet).not.toHaveBeenCalledWith("password_configured", true);
   });
 
   it("resets rate limit on successful password change", async () => {
@@ -254,5 +313,90 @@ describe("POST /setup-api/system/credentials", () => {
     // Should be able to make more requests now
     const res2 = await credentialsPost(jsonRequest({ password: "anotherpassword123" }));
     expect(res2.status).toBe(200);
+  });
+
+  describe("first boot vs. an owner's password in /etc/shadow", () => {
+    // `passwd -S` output for the install user. The config flag stays unset
+    // (config-store `get` defaults to false) so only shadow can close the
+    // initial-set path.
+    function shadowSays(status: "P" | "NP" | "L") {
+      setupExecFileMock({
+        systemctl: { stdout: "", stderr: "" },
+        "/usr/bin/passwd -S": { stdout: `clawbox ${status} 05/08/2026 0 99999 7 -1\n`, stderr: "" },
+      });
+    }
+
+    beforeEach(() => {
+      // @/lib/system-password resolves the user from the environment, not from
+      // the mocked getSystemUsername — pin it so the spawn assertion holds on CI.
+      process.env.CLAWBOX_USER = "clawbox";
+    });
+
+    it("sets the initial password without a session while the account still carries the factory default", async () => {
+      // As-flashed / factory-reset state: /etc/shadow has a usable hash, and it
+      // verifies as the published default. This is the exact request the
+      // wizard's CredentialsStep makes on step 3, and it 401'd on every new box.
+      shadowSays("P");
+      mockUnixChkpwd(0);
+
+      const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ success: true, authenticated: true });
+      expect(mockSpawn).toHaveBeenCalledWith("/usr/sbin/unix_chkpwd", ["clawbox", "nonull"], expect.anything());
+      expect(mockFs.writeFile).toHaveBeenCalledWith(
+        expect.any(String),
+        "clawbox:securepassword123\n",
+        expect.objectContaining({ mode: 0o600 })
+      );
+      expect(mockSet).toHaveBeenCalledWith("password_configured", true);
+    });
+
+    it("refuses an unauthenticated initial set when /etc/shadow holds a password that is NOT the default (TASK-444a)", async () => {
+      shadowSays("P");
+      mockUnixChkpwd(7); // PAM_AUTH_ERR: "clawbox" is not this account's password
+
+      const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
+
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "Authentication required" });
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      expect(mockSet).not.toHaveBeenCalledWith("password_configured", true);
+    });
+
+    it("fails closed when the default-password check itself cannot run", async () => {
+      shadowSays("P");
+      mockUnixChkpwd(10); // PAM_USER_UNKNOWN: the helper refused — answer unknown
+
+      const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
+
+      expect(res.status).toBe(401);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it("does not probe /etc/shadow at all once the config flag says the box is owned", async () => {
+      // A password CHANGE on a normally-owned box: the flag already decides,
+      // so neither passwd -S nor unix_chkpwd may run — the latter would log a
+      // failed password check against the owner's account for every change.
+      const { get } = await import("@/lib/config-store");
+      vi.mocked(get).mockResolvedValue(true);
+      shadowSays("P");
+      mockUnixChkpwd(7);
+
+      const res = await credentialsPost(jsonRequest({ password: "newsecurepassword123", currentPassword: "old" }));
+
+      expect(res.status).toBe(401); // no session on this request — fails closed as before
+      expect(mockExecFile).not.toHaveBeenCalledWith("/usr/bin/passwd", expect.anything(), expect.anything(), expect.anything());
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it("treats a locked account as first boot without consulting unix_chkpwd", async () => {
+      shadowSays("L");
+
+      const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
+
+      expect(res.status).toBe(200);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
   });
 });

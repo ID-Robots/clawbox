@@ -14,6 +14,7 @@ import {
   getPreferences,
   getSystemInfo,
   getSystemStats,
+  loginSessionCookie,
   setHotspot,
   setPreferences,
 } from "./helpers/setup-api";
@@ -37,12 +38,24 @@ test.describe("settings actions", () => {
     expect(Object.keys(stats as object)).toContain("temperature");
   });
 
-  test("preferences persist language change", async () => {
+  test("preferences persist language change, and the box ends on US English", async () => {
+    // A freshly installed box stores NO `pref:ui_language`, and that is
+    // correct: only an explicit pick writes the key (`setLocale` in
+    // src/lib/i18n.tsx), and until then the desktop takes its language from
+    // the browser — which this suite pins to en-US in playwright.config.ts.
+    // So nothing is asserted about the value before the first write, only that
+    // the route answers with a preferences object; a re-run against a
+    // container this spec has already touched finds "en" here rather than
+    // nothing, and both are fine.
+    const before = await getPreferences();
+    expect(before.ui_language === undefined || typeof before.ui_language === "string").toBe(true);
+
     await setPreferences({ ui_language: "de" });
     const prefs = await getPreferences();
     expect(prefs.ui_language).toBe("de");
 
-    // Reset for subsequent tests.
+    // Left pinned on US English for every downstream spec, all of which drive
+    // the UI by its English copy.
     await setPreferences({ ui_language: "en" });
     expect((await getPreferences()).ui_language).toBe("en");
   });
@@ -167,7 +180,11 @@ test.describe("settings actions", () => {
     expect(["active", "inactive", "failed", "activating", "unknown"]).toContain(
       body.tunnel.service,
     );
-    expect(body.portalAddDeviceUrl).toMatch(/openclawhardware\.dev/);
+    // Anchored to the host, not merely "contains clawbox.com": an unanchored
+    // match also accepts https://clawbox.com.attacker.example/… , which is
+    // exactly the string an open-redirect bug would produce and this assertion
+    // is meant to catch.
+    expect(body.portalAddDeviceUrl).toMatch(/^https:\/\/(?:[a-z0-9-]+\.)*clawbox\.com(?:[/?#]|$)/);
   });
 
   test("System panel — power route exists (without actually shutting down)", async () => {
@@ -192,12 +209,16 @@ test.describe("settings actions", () => {
   });
 
   test("Preferences — persist installed apps list across writes", async () => {
+    // installed_* writes need the OWNER's cookie even under CLAWBOX_TEST_MODE:
+    // the route refuses the MCP bearer on that prefix and has no test-mode
+    // path, on purpose (the bearer is what a prompt-injected turn holds).
+    const cookie = await loginSessionCookie();
     const initial = (await getPreferences()) as { installed_apps?: string[] };
     const previous = initial.installed_apps ?? [];
-    await setPreferences({ installed_apps: [...previous, "settings-test-app"] });
+    await setPreferences({ installed_apps: [...previous, "settings-test-app"] }, cookie);
     const after = (await getPreferences()) as { installed_apps?: string[] };
     expect(after.installed_apps).toContain("settings-test-app");
     // Restore.
-    await setPreferences({ installed_apps: previous });
+    await setPreferences({ installed_apps: previous }, cookie);
   });
 });

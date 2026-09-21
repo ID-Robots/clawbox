@@ -6,6 +6,8 @@ import { cachedEdition, resolveEdition } from "@/lib/client-harness";
 
 interface TelegramConfiguringOverlayProps {
   onDone: () => void;
+  /** Called when the configured harness never reports Telegram readiness. */
+  onTimeout: () => void;
   /**
    * Optional promise the overlay awaits before transitioning to the
    * final "ready" phase. When the caller knows the configure request is
@@ -17,7 +19,7 @@ interface TelegramConfiguringOverlayProps {
   waitFor?: Promise<void>;
   /**
    * Max ms to poll for readiness before giving up. When the poll times
-   * out, the overlay calls onDone() without transitioning to phase 4 so
+   * out, the overlay calls onTimeout() without transitioning to phase 4 so
    * the parent can surface its own error instead of falsely reporting
    * "ready". Default: 60_000.
    */
@@ -26,6 +28,7 @@ interface TelegramConfiguringOverlayProps {
 
 export default function TelegramConfiguringOverlay({
   onDone,
+  onTimeout,
   waitFor,
   healthTimeoutMs = 60_000,
 }: TelegramConfiguringOverlayProps) {
@@ -53,11 +56,18 @@ export default function TelegramConfiguringOverlay({
   const [phase, setPhase] = useState(0);
   const [dots, setDots] = useState("");
   const overlayRef = useRef<HTMLDivElement>(null);
-  const cancelledRef = useRef(false);
+  const onDoneRef = useRef(onDone);
+  const onTimeoutRef = useRef(onTimeout);
 
   useEffect(() => {
-    cancelledRef.current = false;
+    onDoneRef.current = onDone;
+    onTimeoutRef.current = onTimeout;
+  }, [onDone, onTimeout]);
+
+  useEffect(() => {
+    let cancelled = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
+    const requestControllers = new Set<AbortController>();
 
     function delay(ms: number): Promise<void> {
       return new Promise((resolve) => {
@@ -67,19 +77,95 @@ export default function TelegramConfiguringOverlay({
     }
 
     const POLL_INTERVAL_MS = 2000;
-    const maxAttempts = Math.ceil(healthTimeoutMs / POLL_INTERVAL_MS);
+    // Attach the rejection handler immediately. The visual choreography takes
+    // six seconds before readiness polling starts, while the configure POST
+    // can fail much earlier; leaving its promise bare until it is awaited below
+    // would emit an unhandled rejection in that gap.
+    const configureResult = (waitFor ?? Promise.resolve()).then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    type ConfigureOutcome = Awaited<typeof configureResult>;
 
-    async function pollGatewayHealth(): Promise<boolean> {
-      for (let i = 0; i < maxAttempts; i++) {
-        if (cancelledRef.current) return false;
+    async function waitForConfigureBeforeDeadline(
+      deadline: number,
+    ): Promise<ConfigureOutcome | null> {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0 || cancelled) return null;
+
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<null>((resolve) => {
+        timeoutId = setTimeout(() => resolve(null), remainingMs);
+        timers.push(timeoutId);
+      });
+      try {
+        const result = await Promise.race([configureResult, timeout]);
+        return !cancelled && Date.now() < deadline ? result : null;
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+      }
+    }
+
+    /** Fetch and parse one readiness response without crossing the shared deadline. */
+    async function fetchJsonBeforeDeadline(
+      path: string,
+      deadline: number,
+      maxRequestMs: number,
+    ): Promise<Record<string, unknown> | null> {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0 || cancelled) return null;
+
+      const controller = new AbortController();
+      requestControllers.add(controller);
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const request = (async () => {
         try {
-          const res = await fetch("/setup-api/gateway/health", { cache: "no-store" });
-          if (res.ok) {
-            const data = await res.json();
-            if (data.available) return true;
-          }
-        } catch { /* gateway not ready yet */ }
-        await delay(POLL_INTERVAL_MS);
+          const res = await fetch(path, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (!res.ok) return null;
+          const data: unknown = await res.json();
+          return typeof data === "object" && data !== null
+            ? data as Record<string, unknown>
+            : null;
+        } catch {
+          return null;
+        }
+      })();
+      const timeout = new Promise<null>((resolve) => {
+        timeoutId = setTimeout(() => {
+          controller.abort();
+          resolve(null);
+        }, Math.min(remainingMs, maxRequestMs));
+        timers.push(timeoutId);
+      });
+
+      try {
+        const data = await Promise.race([request, timeout]);
+        return !cancelled && Date.now() < deadline ? data : null;
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        requestControllers.delete(controller);
+      }
+    }
+
+    async function waitForNextProbe(deadline: number): Promise<boolean> {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0 || cancelled) return false;
+      await delay(Math.min(POLL_INTERVAL_MS, remainingMs));
+      return !cancelled && Date.now() < deadline;
+    }
+
+    async function pollGatewayHealth(deadline: number): Promise<boolean> {
+      while (!cancelled && Date.now() < deadline) {
+        const data = await fetchJsonBeforeDeadline(
+          "/setup-api/gateway/health",
+          deadline,
+          POLL_INTERVAL_MS,
+        );
+        if (data?.available === true) return true;
+        if (!(await waitForNextProbe(deadline))) return false;
       }
       return false;
     }
@@ -89,7 +175,7 @@ export default function TelegramConfiguringOverlay({
      *
      * /setup-api/gateway/health is meaningless here — the OpenClaw gateway is
      * not installed and its unit is masked, so polling it burned the whole
-     * healthTimeoutMs budget and then called onDone() having never reached the
+     * healthTimeoutMs budget and then timed out having never reached the
      * "ready to chat" phase. The owner saw a minute of spinner and no green
      * check on a save that had actually succeeded.
      *
@@ -103,22 +189,17 @@ export default function TelegramConfiguringOverlay({
      * The route caches its Hermes probe for 15 s, so polling every 2 s costs at
      * most one real CLI round-trip per window rather than one per attempt.
      */
-    async function pollHermesTelegramReady(): Promise<boolean> {
-      for (let i = 0; i < maxAttempts; i++) {
-        if (cancelledRef.current) return false;
-        try {
-          const res = await fetch("/setup-api/telegram/status", {
-            cache: "no-store",
-            // The probe shells out to the Hermes CLI; a request that stalls
-            // must not eat more of the budget than one attempt is worth.
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (data.receiving === true) return true;
-          }
-        } catch { /* messaging gateway not up yet */ }
-        await delay(POLL_INTERVAL_MS);
+    async function pollHermesTelegramReady(deadline: number): Promise<boolean> {
+      while (!cancelled && Date.now() < deadline) {
+        // The status route shells out to the Hermes CLI, so permit a longer
+        // individual probe while still capping it at the shared deadline.
+        const data = await fetchJsonBeforeDeadline(
+          "/setup-api/telegram/status",
+          deadline,
+          10_000,
+        );
+        if (data?.receiving === true) return true;
+        if (!(await waitForNextProbe(deadline))) return false;
       }
       return false;
     }
@@ -127,54 +208,70 @@ export default function TelegramConfiguringOverlay({
       // Resolve before the phase machine reaches the steps whose meaning
       // depends on it. Cached, so this is a no-op read in the normal case.
       const activeEdition = await resolveEdition();
-      if (cancelledRef.current) return;
+      if (cancelled) return;
       setEdition(activeEdition);
       const hermes = activeEdition === "hermes";
 
       await delay(1500);
-      if (cancelledRef.current) return;
+      if (cancelled) return;
       setPhase(1);
 
       await delay(2500);
-      if (cancelledRef.current) return;
+      if (cancelled) return;
       setPhase(2);
 
       await delay(2000);
-      if (cancelledRef.current) return;
+      if (cancelled) return;
       setPhase(3);
 
       // Wait for BOTH signals before declaring ready:
       //   1. the caller's configure request has succeeded (waitFor)
       //   2. the harness's own messaging path reports it is listening again
-      // Running them concurrently matches the phase-3 spinner the user already
-      // sees — we don't want to add more delay, just make sure neither
-      // completes prematurely.
-      const [ready] = await Promise.all([
-        hermes ? pollHermesTelegramReady() : pollGatewayHealth(),
-        waitFor ?? Promise.resolve(),
-      ]);
-      if (cancelledRef.current) return;
+      // Both already run concurrently: configureResult is attached above and
+      // the readiness poll starts here. Await readiness FIRST so expiry can
+      // release the UI even if the configure request itself has stalled. A
+      // Promise.all here made its timeout wait forever for that pending request,
+      // which meant the parent's abort/retry recovery could never run.
+      const readinessDeadline = Date.now() + Math.max(0, healthTimeoutMs);
+      const ready = await (hermes
+        ? pollHermesTelegramReady(readinessDeadline)
+        : pollGatewayHealth(readinessDeadline));
+      if (cancelled) return;
       if (!ready) {
-        // Nothing reported itself listening within healthTimeoutMs — hand
-        // control back to the parent without pretending we finished.
-        onDone();
+        // Nothing reported itself listening within healthTimeoutMs. This is
+        // not completion: setup must stay on Telegram, and Settings must show
+        // an actionable failure instead of silently hiding the overlay.
+        onTimeoutRef.current();
         return;
       }
 
+      const configured = await waitForConfigureBeforeDeadline(readinessDeadline);
+      if (cancelled) return;
+      if (configured === null) {
+        onTimeoutRef.current();
+        return;
+      }
+      if (!configured.ok) throw configured.error;
+
       setPhase(4);
       await delay(1500);
-      if (cancelledRef.current) return;
-      onDone();
+      if (cancelled) return;
+      onDoneRef.current();
     }
 
-    run();
+    void run().catch((err) => {
+      if (cancelled) return;
+      console.warn("[telegram] Readiness sequence failed:", err);
+      onTimeoutRef.current();
+    });
 
     overlayRef.current?.focus();
     return () => {
-      cancelledRef.current = true;
+      cancelled = true;
+      requestControllers.forEach((controller) => controller.abort());
       timers.forEach((t) => clearTimeout(t));
     };
-  }, [onDone, waitFor, healthTimeoutMs]);
+  }, [waitFor, healthTimeoutMs]);
 
   useEffect(() => {
     const id = setInterval(() => setDots((d) => (d.length >= 3 ? "" : d + ".")), 500);

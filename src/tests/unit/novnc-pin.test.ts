@@ -5,23 +5,11 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 /**
- * @novnc/novnc is consumed through deep subpath imports — `@novnc/novnc/lib/rfb`
- * in VNCApp and `@novnc/novnc/lib/input/keysymdef` in src/lib/vnc-keys.ts.
- * Those subpaths are not a stable public API:
- *
- *   - 1.6.0 ships `lib/` and declares no `exports` field, so any file inside the
- *     package is importable.
- *   - 1.7.0 moves `lib/` to `core/` AND adds `"exports": "./core/rfb.js"` — a
- *     single-entry map. Under that map every subpath is refused with
- *     ERR_PACKAGE_PATH_NOT_EXPORTED, including the rewritten `core/...` path, so
- *     there is no drop-in specifier to move to.
- *
- * vnc-keys.ts is pulled into the unit suite, so an unusable @novnc/novnc does not
- * merely break VNC — it stops the whole build and test run. bun.lock pins 1.6.0,
- * but a RANGE in package.json would let `bun update`, or any npm-based install,
- * pick 1.7.0 up on the next resolve. These tests fail if the pin is loosened, if
- * the installed copy drifts, or if the source grows a subpath import the
- * installed copy cannot serve.
+ * @novnc/novnc 1.7 is ESM and exports only its public package root. The 1.6
+ * private `lib/*` imports were Babel CommonJS; Turbopack emitted their free
+ * `exports` reference into a browser chunk and Remote Desktop crashed before
+ * it could connect. These tests keep the exact ESM pin and reject any return
+ * to private subpaths.
  */
 
 const REPO_ROOT = path.resolve(__dirname, "../../..");
@@ -30,7 +18,7 @@ const PACKAGE = "@novnc/novnc";
 // The last version that ships `lib/` with no `exports` map. Written literally
 // rather than read back from package.json, so loosening the pin cannot make
 // this test vacuously agree with itself.
-const PINNED_VERSION = "1.6.0";
+const PINNED_VERSION = "1.7.0";
 
 // Resolve exactly the way the app does — from the repo root, against the
 // installed tree. require.resolve honours `exports`, so it refuses on 1.7.0.
@@ -113,11 +101,11 @@ function moduleSpecifiers(file: string): string[] {
 
 // Discover the specifiers rather than hard-coding them, so a newly added deep
 // import is covered by these tests the day it lands instead of the day it breaks.
-const SUBPATH_SPECIFIERS = [
+const NOVNC_SPECIFIERS = [
   ...new Set(
     importingSources()
       .flatMap(moduleSpecifiers)
-      .filter((specifier) => specifier.startsWith(`${PACKAGE}/`)),
+      .filter((specifier) => specifier === PACKAGE || specifier.startsWith(`${PACKAGE}/`)),
   ),
 ].sort();
 
@@ -143,16 +131,11 @@ describe("@novnc/novnc pin", () => {
     expect(installed.version).toBe(PINNED_VERSION);
   });
 
-  it("still deep-imports the package", () => {
-    // Guards the test below from passing vacuously: if the source stops using
-    // subpath imports there is nothing left to protect and this file should go.
-    expect(SUBPATH_SPECIFIERS).toContain(`${PACKAGE}/lib/input/keysymdef`);
-    expect(SUBPATH_SPECIFIERS).toContain(`${PACKAGE}/lib/rfb`);
+  it("uses the public ESM entry point and no private subpaths", () => {
+    expect(NOVNC_SPECIFIERS).toEqual([PACKAGE]);
   });
 
-  it.each(SUBPATH_SPECIFIERS)("resolves %s against the installed copy", (specifier) => {
-    // Resolution only — importing lib/rfb for real would need browser globals.
-    // Resolution is the property 1.7.0 breaks, so it is the property to assert.
+  it.each(NOVNC_SPECIFIERS)("resolves %s against the installed copy", (specifier) => {
     expect(() => requireFromRepo.resolve(specifier)).not.toThrow();
   });
 });

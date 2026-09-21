@@ -1,154 +1,394 @@
-// Every user-facing string of the Hermes Skills store lives here.
+'use client';
+
+import { useMemo } from 'react';
+import { useT } from '@/lib/i18n';
+
+// Every user-facing string of the Hermes Skills store, resolved through `t()`.
 //
-// WHY one map: the store is not translated yet (the rest of the desktop is, via
-// lib/i18n). Keeping the strings in one place means the eventual i18n pass is a
-// mechanical swap of this module for `t(...)` calls, instead of a hunt through
-// eight components.
+// WHY one hook: keeping the store's copy in a single object means a component
+// still reads `COPY.installTitle(name)` rather than a key literal, so the shape
+// the store was written against survives translation — and a new string has
+// exactly one place to land. The catalogue lives in
+// lib/edition-translations/en-skills.ts under `skills.*`.
+//
+// Plurals branch HERE, in TypeScript, with one key per branch: the catalogue is
+// a flat string map and encoding plural rules in it would make every translator
+// reimplement them.
 
-export const COPY = {
-  title: 'Hermes Skills',
-  subtitleWithCount: (n: number) => `${n.toLocaleString()} skills available for your Hermes agent`,
-  subtitleFallback: 'Add capabilities to your Hermes agent',
+export function useCopy() {
+  const { t } = useT();
+  return useMemo(
+    () => ({
+      title: t('skills.title'),
+      subtitleWithCount: (n: number) =>
+        t('skills.subtitleWithCount', { n: n.toLocaleString() }),
+      subtitleFallback: t('skills.subtitleFallback'),
 
-  tabInstalled: (n: number) => (n > 0 ? `Installed (${n})` : 'Installed'),
-  tabBrowse: 'Browse',
+      tablistLabel: t('skills.tablistLabel'),
+      tabInstalled: (n: number) =>
+        n > 0 ? t('skills.tabInstalled.withCount', { n }) : t('skills.tabInstalled.empty'),
+      tabBrowse: t('skills.tabBrowse'),
 
-  searchPlaceholder: 'Search skills…',
-  searchLabel: 'Search skills',
-  clearSearch: 'Clear search',
-  sortLabel: 'Sort',
-  sortOptions: {
-    relevance: 'Best match',
-    name: 'Name A–Z',
-    trust: 'Most trusted',
-    popular: 'Most installed',
-  } as const,
-  sourceLabel: 'Source',
-  allSources: 'All sources',
-  providerLabel: 'Publisher',
-  allProviders: 'All publishers',
-  categoryLabel: 'Category',
-  allCategories: 'All categories',
-  showingRange: (from: number, to: number, total: number) =>
-    `Showing ${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}`,
-  degradedCount: (n: number) => `Top ${n} matches — refine your search to narrow it`,
-  loadMore: 'Load more',
-  loadingMore: 'Loading more skills…',
+      searchPlaceholder: t('skills.searchPlaceholder'),
+      searchLabel: t('skills.searchLabel'),
+      searchBusy: t('skills.searchBusy'),
+      clearSearch: t('skills.clearSearch'),
+      sortLabel: t('skills.sortLabel'),
+      sortOptions: {
+        relevance: t('skills.sortOptions.relevance'),
+        name: t('skills.sortOptions.name'),
+        trust: t('skills.sortOptions.trust'),
+        popular: t('skills.sortOptions.popular'),
+      } as const,
+      sourceLabel: t('skills.sourceLabel'),
+      providerLabel: t('skills.providerLabel'),
+      categoryLabel: t('skills.categoryLabel'),
 
-  scanPassed: 'Scan passed',
-  scanFlagged: (n: number) => `Scan flagged ${n} ${n === 1 ? 'finding' : 'findings'}`,
-  notScanned: 'Not scanned',
+      // === The facet rail ===
+      filtersHeading: t('skills.filtersHeading'),
+      filtersButton: t('skills.filtersButton'),
+      filtersButtonWithCount: (n: number) => t('skills.filtersButtonWithCount', { n }),
+      filtersClearAll: t('skills.filtersClearAll'),
+      facetLimit: (n: number) => t('skills.facetLimit', { n }),
+      filtersClose: t('skills.filtersClose'),
+      filtersShowAll: (n: number) => t('skills.filtersShowAll', { n }),
+      filtersShowFewer: t('skills.filtersShowFewer'),
+      filtersNone: t('skills.filtersNone'),
+      filterChipRemove: (group: string, value: string) =>
+        t('skills.filterChipRemove', { group, value }),
+      facetTrust: t('skills.facetTrust'),
+      facetSafety: t('skills.facetSafety'),
+      /** Fixed vocabularies, so an id a newer index invents falls back to itself. */
+      trustBucket: (id: string) => trustLabel(t, id),
+      safetyBucket: (id: string) => safetyLabel(t, id),
+      facetCategoryCoverage: (n: number, total: number) =>
+        t('skills.facetCategoryCoverage', { n: n.toLocaleString(), total: total.toLocaleString() }),
+      facetCountsLoaded: (n: number) => t('skills.facetCountsLoaded', { n: n.toLocaleString() }),
+      facetSafetyBrowseNote: t('skills.facetSafetyBrowseNote'),
+      liveResults: (n: number) =>
+        n === 1 ? t('skills.liveResults.one', { n }) : t('skills.liveResults.other', { n: n.toLocaleString() }),
+      liveResultsNone: t('skills.liveResults.none'),
+      showingRange: (from: number, to: number, total: number) =>
+        t('skills.showingRange', {
+          from: from.toLocaleString(),
+          to: to.toLocaleString(),
+          total: total.toLocaleString(),
+        }),
+      degradedCount: (n: number) => t('skills.degradedCount', { n }),
+      loadMore: t('skills.loadMore'),
+      loadingMore: t('skills.loadingMore'),
 
-  originBuiltin: 'Built-in',
-  originHub: 'Installed',
-  originLocal: 'Created here',
-  originLocalHelp: 'Written on this device by your agent — not from a registry.',
+      scanPassed: t('skills.scanPassed'),
+      scanFlagged: (n: number) =>
+        n === 1 ? t('skills.scanFlagged.one', { n }) : t('skills.scanFlagged.other', { n }),
+      notScanned: t('skills.notScanned'),
 
-  install: 'Install',
-  installing: 'Installing…',
-  installed: 'Installed',
-  remove: 'Remove',
-  removing: 'Removing…',
-  retry: 'Retry',
-  builtinLocked: 'Already available (built-in)',
+      originBuiltin: t('skills.originBuiltin'),
+      originHub: t('skills.originHub'),
+      originLocal: t('skills.originLocal'),
+      originLocalHelp: t('skills.originLocalHelp'),
 
-  installTitle: (name: string) => `Install ${name}?`,
-  installTrustedBody:
-    'This skill runs inside your Hermes agent. Hermes scans it before enabling it.',
-  installCommunityBody:
-    'Community-contributed and not reviewed by ID Robots. Check the identifier below matches the publisher you expect.',
-  installWillAsk: (labels: string[]) => `Will ask you for: ${labels.join(', ')}`,
-  cancel: 'Cancel',
+      install: t('skills.install'),
+      installing: t('skills.installing'),
+      installed: t('skills.installed'),
+      remove: t('skills.remove'),
+      removing: t('skills.removing'),
+      retry: t('skills.retry'),
+      builtinLocked: t('skills.builtinLocked'),
 
-  uninstallTitle: (name: string) => `Remove ${name}?`,
-  uninstallBody: (installPath?: string) =>
-    installPath
-      ? `This deletes ${installPath} from your agent. You can install it again from Browse.`
-      : 'This deletes the skill from your agent. You can install it again from Browse.',
+      installTitle: (name: string) => t('skills.installTitle', { name }),
+      installTrustedBody: t('skills.installTrustedBody'),
+      installCommunityBody: t('skills.installCommunityBody'),
+      installWillAsk: (labels: string[]) => t('skills.installWillAsk', { labels: labels.join(', ') }),
+      cancel: t('skills.cancel'),
 
-  emptySearch: (q: string) => `No skills match “${q}”`,
-  emptySearchHint: 'Try a different term.',
-  emptySearchAllSources: 'Search all sources instead',
-  emptySource: (label: string) => `Nothing in ${label} yet`,
-  clearSourceFilter: (label: string) => `Clear the ${label} filter`,
-  emptyInstalled: 'No skills installed',
-  emptyInstalledHint: 'Browse the registry to add capabilities.',
-  browseSkills: 'Browse skills',
-  installedError: 'Couldn’t read your installed skills.',
-  installedStale: 'Couldn’t refresh this list — showing the last known state.',
-  buildingCatalog:
-    'Building the skill catalogue — the first browse on a new device takes about a minute.',
-  // The store re-asks on a timer while the index builds, so say so: the earlier
-  // wording left people closing and reopening the window to make skills appear.
-  buildingCatalogAuto: 'Skills will appear here as soon as it is ready — you can leave this open.',
-  // Keyed off when THIS device last downloaded the catalogue. The publisher's
-  // own build date never moves on a refetch, so it can't say anything here.
-  catalogStale: (when: string) => `Catalogue last downloaded ${when}.`,
+      uninstallTitle: (name: string) => t('skills.uninstallTitle', { name }),
+      uninstallBody: (installPath?: string) =>
+        installPath
+          ? t('skills.uninstallBody.withPath', { path: installPath })
+          : t('skills.uninstallBody.generic'),
 
-  ambiguousTitle: (n: number, q: string) => `${n} skills are named “${q}”. Pick the one you want:`,
-  ambiguousPickFirst: 'Pick one below to install',
+      liveInstalling: (name: string) => t('skills.liveInstalling', { name }),
+      liveInstalled: (name: string) => t('skills.liveInstalled', { name }),
+      liveInstallFailed: (name: string) => t('skills.liveInstallFailed', { name }),
+      installFailed: t('skills.installFailed'),
+      /**
+       * `too_large` is not a failure: the installer's own output overran the read
+       * cap, so the OUTCOME is unknown — the MCP tool has always said so and the
+       * store said "Install failed", which is one device state told two ways.
+       */
+      installUnknownOutcome: (name: string) => t('skills.installUnknownOutcome', { name }),
+      uninstallUnknownOutcome: (name: string) => t('skills.uninstallUnknownOutcome', { name }),
+      liveRemoving: (name: string) => t('skills.liveRemoving', { name }),
+      liveRemoved: (name: string) => t('skills.liveRemoved', { name }),
+      liveRemoveFailed: (name: string) => t('skills.liveRemoveFailed', { name }),
+      liveInstallUnknown: (name: string) => t('skills.liveInstallUnknown', { name }),
+      liveRemoveUnknown: (name: string) => t('skills.liveRemoveUnknown', { name }),
+      uninstallFailed: t('skills.uninstallFailed'),
 
-  platformWarning: (platforms: string[]) =>
-    `Requires ${platforms.map(platformName).join(' or ')} — this skill won’t run on your ClawBox.`,
+      emptySearch: (q: string) => t('skills.emptySearch', { q }),
+      emptySearchHint: t('skills.emptySearchHint'),
+      emptyFiltered: t('skills.emptyFiltered'),
+      emptyCatalog: t('skills.emptyCatalog'),
+      emptyInstalled: t('skills.emptyInstalled'),
+      emptyInstalledHint: t('skills.emptyInstalledHint'),
+      browseSkills: t('skills.browseSkills'),
+      installedError: t('skills.installedError'),
+      installedStale: t('skills.installedStale'),
+      buildingCatalog: t('skills.buildingCatalog'),
+      // The store re-asks on a timer while the index builds, so say so: the earlier
+      // wording left people closing and reopening the window to make skills appear.
+      buildingCatalogAuto: t('skills.buildingCatalogAuto'),
+      // Keyed off when THIS device last downloaded the catalogue. The publisher's
+      // own build date never moves on a refetch, so it can't say anything here.
+      catalogStale: (when: string) => t('skills.catalogStale', { when }),
 
-  sectionRequirements: 'Requirements',
-  sectionGlance: 'At a glance',
-  sectionAbout: 'About',
-  sectionSecurity: 'Security & provenance',
-  sectionRelated: 'Related skills',
-  sectionDocs: 'Documentation',
-  docsOutline: 'In this document',
-  readMore: 'Read more',
-  showLess: 'Show less',
-  docsFull: 'Full SKILL.md',
-  docsPreview: 'Documentation preview — the full text is available after install',
-  docsLoading: 'Loading documentation…',
-  docsUnavailable: 'No documentation available for this skill yet.',
+      ambiguousTitle: (n: number, q: string) => t('skills.ambiguousTitle', { n, q }),
+      ambiguousPickFirst: t('skills.ambiguousPickFirst'),
 
-  reqCommands: 'Commands',
-  reqCommandPresent: 'available on this device',
-  reqCommandMissing: 'not installed',
-  reqEnvVars: 'Environment variables',
-  reqDependencies: 'Packages',
-  reqCredentials: 'Credential files',
-  reqCompatibility: 'Compatibility',
-  reqSetup: 'Setup',
-  reqSecrets: 'Will ask you for',
-  reqGetKey: 'Get a key',
-  reqSetupGuide: 'Setup guide',
+      platformWarning: (platforms: string[]) =>
+        t('skills.platformWarning', { platforms: platforms.map(platformName).join(' or ') }),
 
-  provSource: 'Source',
-  provSourceUnverified: 'Publisher site (unverified)',
-  provRepo: 'Repository',
-  provDetailPage: 'Detail page',
-  provHomepage: 'Homepage',
-  provInstallCommand: 'Install command',
-  provWeeklyInstalls: 'Installs',
-  provContentHash: 'Content hash',
-  copyIdentifier: 'Copy identifier',
-  copied: 'Copied',
+      sectionRequirements: t('skills.sectionRequirements'),
+      sectionGlance: t('skills.sectionGlance'),
+      sectionAbout: t('skills.sectionAbout'),
+      sectionSecurity: t('skills.sectionSecurity'),
+      sectionRelated: t('skills.sectionRelated'),
+      sectionDocs: t('skills.sectionDocs'),
+      docsOutline: t('skills.docsOutline'),
+      docsSections: (n: number) => t('skills.docsSections', { n }),
+      readMore: t('skills.readMore'),
+      showLess: t('skills.showLess'),
+      docsFull: t('skills.docsFull'),
+      docsPreview: t('skills.docsPreview'),
+      docsLoading: t('skills.docsLoading'),
+      docsLoadingElapsed: (s: number) => t('skills.docsLoadingElapsed', { s }),
+      docsUnavailable: t('skills.docsUnavailable'),
 
-  // "At a glance" field labels + the small card facts. They live here, not in
-  // the components, so the eventual i18n pass stays the mechanical swap the
-  // header comment promises.
-  fieldVersion: 'Version',
-  fieldAuthor: 'Author',
-  fieldLicense: 'License',
-  fieldCategory: 'Category',
-  fieldPlatforms: 'Platforms',
-  fieldSize: 'Size',
-  fieldIncludes: 'Includes',
-  fieldInstalled: 'Installed',
-  fieldUpdated: 'Updated',
-  fileCount: (n: number) => `${n} ${n === 1 ? 'file' : 'files'}`,
-  platformOnly: (platforms: string[]) => `${platforms.join(' / ')} only`,
-  installedAgo: (when: string) => `Installed ${when}`,
-  showAllFindings: (n: number) => `Show all ${n} findings`,
+      reqCommands: t('skills.reqCommands'),
+      reqCommandPresent: t('skills.reqCommandPresent'),
+      reqCommandMissing: t('skills.reqCommandMissing'),
+      reqEnvVars: t('skills.reqEnvVars'),
+      reqDependencies: t('skills.reqDependencies'),
+      reqCredentials: t('skills.reqCredentials'),
+      reqCompatibility: t('skills.reqCompatibility'),
+      reqSetup: t('skills.reqSetup'),
+      reqSecrets: t('skills.reqSecrets'),
+      reqGetKey: t('skills.reqGetKey'),
+      reqSetupGuide: t('skills.reqSetupGuide'),
 
-  back: 'Back to skills',
-  breadcrumbBrowse: 'Browse',
-  breadcrumbInstalled: 'Installed',
-} as const;
+      provSource: t('skills.provSource'),
+      provSourceUnverified: t('skills.provSourceUnverified'),
+      provRepo: t('skills.provRepo'),
+      provDetailPage: t('skills.provDetailPage'),
+      provHomepage: t('skills.provHomepage'),
+      provInstallCommand: t('skills.provInstallCommand'),
+      provWeeklyInstalls: t('skills.provWeeklyInstalls'),
+      provContentHash: t('skills.provContentHash'),
+      copyIdentifier: t('skills.copyIdentifier'),
+      copied: t('skills.copied'),
+
+      // "At a glance" field labels + the small card facts. They live here, not in
+      // the components, so a component never has to name a translation key.
+      fieldVersion: t('skills.fieldVersion'),
+      fieldAuthor: t('skills.fieldAuthor'),
+      fieldLicense: t('skills.fieldLicense'),
+      fieldCategory: t('skills.fieldCategory'),
+      fieldPlatforms: t('skills.fieldPlatforms'),
+      fieldSize: t('skills.fieldSize'),
+      fieldIncludes: t('skills.fieldIncludes'),
+      fieldInstalled: t('skills.fieldInstalled'),
+      fieldUpdated: t('skills.fieldUpdated'),
+      fileCount: (n: number) =>
+        n === 1 ? t('skills.fileCount.one', { n }) : t('skills.fileCount.other', { n }),
+      platformOnly: (platforms: string[]) =>
+        t('skills.platformOnly', { platforms: platforms.join(' / ') }),
+      installedAgo: (when: string) => t('skills.installedAgo', { when }),
+      showAllFindings: (n: number) => t('skills.showAllFindings', { n }),
+
+      // === TASK-452: the flagged-skill warning + confirm ===
+      dangerTitle: (name: string) => t('skills.dangerTitle', { name }),
+      dangerLead: (verdict: string) => t('skills.dangerLead', { verdict }),
+      dangerSeverity: (critical: number, high: number) =>
+        t('skills.dangerSeverity', { critical, high }),
+      dangerCanDo: t('skills.dangerCanDo'),
+      dangerNoCapabilities: t('skills.dangerNoCapabilities'),
+      dangerOther: (n: number) =>
+        n === 1 ? t('skills.dangerOther.one', { n }) : t('skills.dangerOther.other', { n }),
+      dangerTrustNote: t('skills.dangerTrustNote'),
+      dangerShowFindings: (n: number) => t('skills.dangerShowFindings', { n }),
+      dangerUnderstand: t('skills.dangerUnderstand'),
+      dangerInstallAnyway: t('skills.dangerInstallAnyway'),
+      dangerCancel: t('skills.dangerCancel'),
+      /** Plain-language name for one capability bucket. */
+      capability: (id: string) =>
+        t(`skills.capability.${CAPABILITY_KEYS.has(id) ? id : 'other'}`),
+
+      // === TASK-452: install refusals ===
+      installIncomplete: (files: string[]) =>
+        t('skills.installIncomplete', { files: files.slice(0, 5).join(', ') }),
+      installIncompleteHint: t('skills.installIncompleteHint'),
+      nameConflict: (name: string) => t('skills.nameConflict', { name }),
+      nameConflictHint: t('skills.nameConflictHint'),
+      installRepaired: (n: number) =>
+        n === 1 ? t('skills.installRepaired.one', { n }) : t('skills.installRepaired.other', { n }),
+
+      // === HERMES-04: refusals the routes name by code ===
+      // The routes' own `error` sentences are English composed on the server;
+      // the card reads the `code` (installRefusalCopy / uninstallRefusalCopy in
+      // HermesSkillsStore) and says it from here.
+      installTimeout: (name: string) => t('skills.installTimeout', { name }),
+      ambiguousId: t('skills.ambiguousId'),
+      alreadyInstalled: t('skills.alreadyInstalled'),
+      alreadyInstalledFlagged: (name: string, verdict?: string) =>
+        t('skills.alreadyInstalledFlagged', { name, verdict: safetyLabel(t, verdict || 'caution') }),
+      rateLimited: t('skills.rateLimited'),
+      downloadFailed: t('skills.downloadFailed'),
+      unresolved: t('skills.unresolved'),
+      /**
+       * The scanner's verdict and the source's trust tier, as the rail names
+       * them. The route sends this code for a "dangerous" verdict and nothing
+       * else, so that is what a payload missing the verdict is assumed to say —
+       * "caution" would describe a skill the device does install.
+       *
+       * The TRUST tier has no such single answer: the device refuses a
+       * dangerous verdict from a community OR a trusted source, and its own
+       * sentence says "third-party" when the scan carried no tier. Defaulting
+       * to the rail's `unknown` bucket told the owner where the skill came
+       * from, which is a claim this payload did not make — so a missing tier
+       * drops the clause instead.
+       */
+      blockedByDevice: (name: string, verdict?: string, trust?: string) => {
+        const params = { name, verdict: safetyLabel(t, verdict || 'dangerous') };
+        return trust
+          ? t('skills.blockedByDevice', { ...params, trust: trustLabel(t, trust) })
+          : t('skills.blockedByDeviceUnknownSource', params);
+      },
+      builtinSkill: (name: string) => t('skills.builtinSkill', { name }),
+      notInstalled: (name: string) => t('skills.notInstalled', { name }),
+      uninstallRefused: t('skills.uninstallRefused'),
+      /**
+       * F-09: two installed skills answer to one string, so the device refused
+       * rather than deleting one of them. The candidate lock ids come from the
+       * route's `candidates` — they are lock keys, not translatable text, and
+       * they are the only strings that separate the two on the next attempt.
+       */
+      ambiguousName: (name: string, candidates: string[]) =>
+        t('skills.ambiguousName', { name, names: candidates.join(', ') }),
+      /** The browse route's failure code; one it did not name gets the generic line. */
+      browseError: (code: string) => t(`skills.${BROWSE_ERROR_KEYS[code] ?? 'browseFailed'}`),
+      /**
+       * The detail panel's note. `docs` lost only the documentation body — the
+       * metadata is on screen behind the note — so it says so rather than
+       * claiming the skill could not be loaded. A device without Hermes is the
+       * one `meta` cause worth naming: nothing on that panel will load, and
+       * retrying is pointless.
+       */
+      detailError: (part: 'meta' | 'docs', code?: string | null) =>
+        part === 'docs'
+          ? t('skills.detailDocsFailed')
+          : code === 'not_found'
+            // A permanent answer, so it must not read as "try again": Hermes was
+            // asked and said no such skill.
+            ? t('skills.detailNotFound')
+            : t(code === 'cli_missing' ? 'skills.detailUnavailable' : 'skills.detailFailed'),
+
+      // === TASK-452: enabled/disabled ===
+      skillDisabled: t('skills.skillDisabled'),
+      skillDisabledHelp: t('skills.skillDisabledHelp'),
+      countDisabled: (n: number) => t('skills.countDisabled', { n }),
+
+      // === TASK-452: API keys ===
+      secretSaveLabel: (label: string) => t('skills.secretSaveLabel', { label }),
+      secretPlaceholder: t('skills.secretPlaceholder'),
+      secretSave: t('skills.secretSave'),
+      secretSaving: t('skills.secretSaving'),
+      secretSaved: t('skills.secretSaved'),
+      secretStored: t('skills.secretStored'),
+      secretClear: t('skills.secretClear'),
+      secretFailed: t('skills.secretFailed'),
+      secretHelp: t('skills.secretHelp'),
+
+      back: t('skills.back'),
+      breadcrumbLabel: t('skills.breadcrumbLabel'),
+      breadcrumbBrowse: t('skills.breadcrumbBrowse'),
+      breadcrumbInstalled: t('skills.breadcrumbInstalled'),
+
+      /** "3 days ago" / "just now" — dates come from the hub lock (ISO-8601). */
+      relativeDate: (iso?: string): string | undefined => {
+        if (!iso) return undefined;
+        const parsed = Date.parse(iso);
+        if (Number.isNaN(parsed)) return undefined;
+        const seconds = Math.round((Date.now() - parsed) / 1000);
+        if (seconds < 60) return t('skills.relative.justNow');
+        const minutes = Math.round(seconds / 60);
+        if (minutes < 60) return t('skills.relative.minutes', { n: minutes });
+        const hours = Math.round(minutes / 60);
+        if (hours < 24) return t('skills.relative.hours', { n: hours });
+        const days = Math.round(hours / 24);
+        if (days < 31) {
+          return days === 1
+            ? t('skills.relative.days.one', { n: days })
+            : t('skills.relative.days.other', { n: days });
+        }
+        const months = Math.round(days / 30);
+        if (months < 12) {
+          return months === 1
+            ? t('skills.relative.months.one', { n: months })
+            : t('skills.relative.months.other', { n: months });
+        }
+        return t('skills.relative.years', { n: Math.round(months / 12) });
+      },
+    }),
+    [t],
+  );
+}
+
+// The two fixed facet vocabularies, as key sets, for the same reason the
+// capability ids below are: a bucket a newer index or scanner invents must fall
+// back to its own id rather than render a raw translation key at the customer.
+const TRUST_KEYS = new Set(['official', 'trusted', 'community', 'unknown']);
+const SAFETY_KEYS = new Set(['safe', 'caution', 'dangerous', 'unscanned']);
+
+type Translate = ReturnType<typeof useT>['t'];
+
+const trustLabel = (t: Translate, id: string) =>
+  TRUST_KEYS.has(id) ? t(`skills.trustBucket.${id}`) : id;
+const safetyLabel = (t: Translate, id: string) =>
+  SAFETY_KEYS.has(id) ? t(`skills.safetyBucket.${id}`) : id;
+
+// The browse route's failure codes that have their own line; `cli_failed`,
+// `too_large`, `cancelled` and a code this build does not know share the
+// generic one. (`cancelled` is answered only once the client has gone, so no
+// card ever shows it — it has no line of its own on purpose.)
+const BROWSE_ERROR_KEYS: Record<string, string> = {
+  cli_timeout: 'browseTimeout',
+  cli_missing: 'browseUnavailable',
+  // Not a device failure at all: the search itself is one the route will not
+  // run, so the line says what to change and the button clears it.
+  bad_query: 'browseBadQuery',
+  // Nor are these two: the rail's own values, refused by the route. Retrying
+  // resends them, so both get a line that names the remedy — untick.
+  invalid_argument: 'browseBadFilter',
+  too_many_facets: 'browseTooManyFilters',
+};
+
+// The capability ids hermes-skill-capabilities.ts can emit. Kept as a set so a
+// bucket a newer scanner introduces falls back to the generic line instead of
+// rendering a raw translation key at the customer.
+const CAPABILITY_KEYS = new Set([
+  'shell',
+  'filesystem',
+  'network',
+  'credentials',
+  'browser',
+  'system',
+  'agentInstructions',
+  'other',
+]);
+
+/** The copy object every component in the store reads its strings from. */
+export type SkillsCopy = ReturnType<typeof useCopy>;
 
 const PLATFORM_NAMES: Record<string, string> = {
   macos: 'macOS',
@@ -158,24 +398,7 @@ const PLATFORM_NAMES: Record<string, string> = {
   linux: 'Linux',
 };
 
+/** Proper nouns, not copy: the same on every locale. */
 export function platformName(id: string): string {
   return PLATFORM_NAMES[id.toLowerCase()] || id;
-}
-
-/** "3 days ago" / "just now" — dates come from the hub lock (ISO-8601). */
-export function relativeDate(iso?: string): string | undefined {
-  if (!iso) return undefined;
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return undefined;
-  const seconds = Math.round((Date.now() - t) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
-  const days = Math.round(hours / 24);
-  if (days < 31) return `${days} ${days === 1 ? 'day' : 'days'} ago`;
-  const months = Math.round(days / 30);
-  if (months < 12) return `${months} ${months === 1 ? 'month' : 'months'} ago`;
-  return `${Math.round(months / 12)} y ago`;
 }

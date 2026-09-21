@@ -3,44 +3,155 @@ import type { NextRequest } from "next/server";
 import fs from "fs";
 import path from "path";
 import { verifyMcpBearer } from "@/lib/mcp-token";
+import { isPublicGatewayAsset } from "@/lib/gateway-static";
 import { readEdition } from "@/lib/edition-source";
+import { isBootstrapAllowedPath } from "@/lib/setup-api-gate";
+import { isSetupApiPath } from "@/lib/clawbox-namespaces";
+import { UPDATE_LOCK_HEADER, UPDATE_LOCK_KEY, UPDATING_PAGE } from "@/lib/update-lock";
+import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
+import { isAllowedHostHeader, isTunnelRequest, systemHostLabel } from "@/lib/host-allowlist";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
-// While the wizard is still running there is no session cookie yet, so every
-// /setup-api/* call would be 307'd to /login. We mirror config-store's
-// CONFIG_ROOT resolution and treat "config.json missing" or "setup_complete
-// not yet true" as the bootstrap window where /setup-api/* must pass through.
-// Cached by mtime so the per-request hit is one stat() in the steady state.
+// Before the owner has set a password there is no session cookie to have, so a
+// narrow allow-list of wizard routes must pass through unauthenticated. We
+// mirror config-store's CONFIG_ROOT resolution to read that state. Cached by
+// mtime so the per-request hit is one stat() in the steady state.
 
 const CONFIG_ROOT = process.env.CLAWBOX_ROOT
   || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
 const CONFIG_PATH = path.join(CONFIG_ROOT, "data", "config.json");
 
-let configCache: { mtimeMs: number; setupComplete: boolean; sessionGen: number } | null = null;
+interface ConfigSnapshot {
+  mtimeMs: number;
+  setupComplete: boolean;
+  passwordConfigured: boolean;
+  sessionGen: number;
+  /**
+   * An update owns the box. Read from the same cached snapshot as everything
+   * else here, so the lock costs no extra I/O: config.json is already stat'd
+   * per request and re-read only when its mtime moves.
+   */
+  updateInProgress: boolean;
+  // Webapp ids whose InstalledMeta says `public: true` — served read-only
+  // over GET /setup-api/webapps without a session (see step 5 below).
+  publicWebapps: ReadonlySet<string>;
+}
 
-function readConfigCached(): { setupComplete: boolean; sessionGen: number } {
+const NO_PUBLIC_WEBAPPS: ReadonlySet<string> = new Set();
+
+function publicWebappIds(installedMeta: unknown): ReadonlySet<string> {
+  if (typeof installedMeta !== "object" || installedMeta === null) return NO_PUBLIC_WEBAPPS;
+  const ids = Object.entries(installedMeta as Record<string, unknown>)
+    .filter(([, meta]) => typeof meta === "object" && meta !== null && (meta as { public?: unknown }).public === true)
+    .map(([id]) => id);
+  return ids.length ? new Set(ids) : NO_PUBLIC_WEBAPPS;
+}
+
+let configCache: ConfigSnapshot | null = null;
+
+function readConfigCached(): ConfigSnapshot {
+  // ONE descriptor for the mtime AND the bytes.
+  //
+  // This used to be `statSync(CONFIG_PATH)` followed by a separate
+  // `readFileSync(CONFIG_PATH)` — two lookups of the same NAME, with the
+  // cache key taken from the first and the contents from the second. The
+  // config store writes a temp file and renames it over this path, so a
+  // rename landing between the two calls gives the OLD file's mtime with the
+  // NEW file's contents, and the pair is then cached under that key: the
+  // snapshot stays wrong until some later write moves the mtime again. On a
+  // file that decides `setup_complete`, `password_configured` and the session
+  // generation, a stale cached answer is an auth decision made on the wrong
+  // data. `fstat` on an open handle describes the very inode the bytes are
+  // read from, so the two can no longer disagree.
+  //
+  // Costs open+fstat+close instead of one stat in the steady state — a few
+  // microseconds per request, which is worth a snapshot that cannot be
+  // internally inconsistent.
+  let fd: number | undefined;
   try {
-    const stat = fs.statSync(CONFIG_PATH);
+    fd = fs.openSync(CONFIG_PATH, "r");
+    const stat = fs.fstatSync(fd);
     if (configCache && configCache.mtimeMs === stat.mtimeMs) return configCache;
-    const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
-    const parsed = JSON.parse(raw) as { setup_complete?: unknown; session_generation?: unknown };
-    const setupComplete = parsed.setup_complete === true;
+    const raw = fs.readFileSync(fd, "utf-8");
+    const parsed = JSON.parse(raw) as {
+      setup_complete?: unknown;
+      password_configured?: unknown;
+      session_generation?: unknown;
+      "pref:installed_meta"?: unknown;
+      [UPDATE_LOCK_KEY]?: unknown;
+    };
     const sessionGen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
       : 0;
-    configCache = { mtimeMs: stat.mtimeMs, setupComplete, sessionGen };
+    configCache = {
+      mtimeMs: stat.mtimeMs,
+      setupComplete: parsed.setup_complete === true,
+      passwordConfigured: parsed.password_configured === true,
+      sessionGen,
+      updateInProgress: parsed[UPDATE_LOCK_KEY] === true,
+      publicWebapps: publicWebappIds(parsed["pref:installed_meta"]),
+    };
     return configCache;
-  } catch {
-    // Missing/unreadable config = pre-setup. Cache the negative answer so we
-    // don't statSync on every request before config.json is first written.
-    configCache = { mtimeMs: -1, setupComplete: false, sessionGen: 0 };
+  } catch (err) {
+    // A config.json that is genuinely ABSENT is a first-boot device: the
+    // bootstrap window has to open or the wizard can never run.
+    //
+    // A config.json that EXISTS but won't parse is a different animal — a
+    // provisioned box with a corrupt or truncated file, or one an attacker
+    // just clobbered. Treating that as "pre-setup" is fail-OPEN and hands
+    // back the whole unauthenticated window on a device that has an owner
+    // (TASK-446, crit11 note). Fail closed instead: assume set up and
+    // password-configured, so everything needs a session.
+    const missing = (err as NodeJS.ErrnoException)?.code === "ENOENT";
+    configCache = {
+      mtimeMs: -1,
+      setupComplete: !missing,
+      passwordConfigured: !missing,
+      sessionGen: 0,
+      // Fail OPEN for this one, unlike the auth fields above: a corrupt
+      // config.json is not evidence of an update, and locking the desktop on it
+      // would take away the surfaces the owner needs to fix the box.
+      updateInProgress: false,
+      publicWebapps: NO_PUBLIC_WEBAPPS,
+    };
     return configCache;
+  } finally {
+    // Every branch above RETURNS — the cache hit, the parsed snapshot, the
+    // failure — so the close belongs here and nowhere else. This runs on the
+    // per-request path: a descriptor left on any one of them exhausts the
+    // process within minutes of ordinary browsing.
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Nothing useful to do about a close that fails, and a middleware that
+        // threw here would 500 every request over it.
+      }
+    }
   }
 }
 
-function isSetupComplete(): boolean {
-  return readConfigCached().setupComplete;
+/**
+ * The first-boot bootstrap window: no owner credential exists yet, so a subset
+ * of /setup-api/* (see src/lib/setup-api-gate.ts) is reachable without a
+ * session because there is no session to have.
+ *
+ * Gated on `password_configured`, NOT on `setup_complete`. The old gate used
+ * setup_complete alone, which meant a box that had set a password but not
+ * finished (or resumed) the wizard — and, after the factory-reset incident, a
+ * box whose config.json had simply lost the key — served setup/reset,
+ * update/run, system/power and install/run-step to anyone on the open AP.
+ * Once a password exists there is someone to log in as, so the window shuts.
+ *
+ * `password_configured` here is the config-store flag only; middleware is a
+ * synchronous hot path and cannot shell out to `passwd -S` per request. The
+ * handlers that care about config-vs-shadow drift (system/credentials) resolve
+ * the authoritative answer themselves via src/lib/system-password.ts.
+ */
+function isBootstrapWindowOpen(): boolean {
+  const cfg = readConfigCached();
+  return !cfg.setupComplete && !cfg.passwordConfigured;
 }
 
 // Current session generation — bumped on password change to revoke every cookie
@@ -84,14 +195,35 @@ const APPLE_PATHS = new Set([
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
+// `/fonts/` and `/images/` are deliberately NOT here any more. `/fonts/` is
+// admitted by step 2a below (`isPublicGatewayAsset`: GET/HEAD, and only a file
+// with a static extension — which every file in public/fonts/ and the Control
+// UI's own /fonts tree has), so a bare prefix here only widened that to
+// `/fonts/anything`, and `/images/` was a prefix for a tree that has never
+// existed on this box. Either one let an unauthenticated navigation fall
+// through the router to the gateway catch-all, which is the route that owns
+// the gateway token; that route gates the token on its own now, but a path
+// nobody serves should reach /login, not the SPA shell.
 const PUBLIC_PREFIXES = [
   "/login",
-  "/setup",
   "/login-api",
   "/_next/",
-  "/fonts/",
-  "/images/",
 ];
+
+// The wizard PAGE. Public only while the device has no owner credential — the
+// same window its API surface is open in.
+//
+// Once a password exists, a half-finished or resumed wizard has to log in
+// first. That isn't just tidiness: it is what makes the API allow-list
+// survivable. CredentialsStep's password POST hands back a session cookie, so
+// steps 4-5 (AI models, Telegram, setup/complete) run authenticated and need no
+// pre-auth carve-out at all. A user who comes back in a fresh browser gets
+// /login?redirect=/setup and lands right back on the step they left.
+const WIZARD_PAGE_PREFIX = "/setup";
+
+function isWizardPagePath(pathname: string): boolean {
+  return pathname === WIZARD_PAGE_PREFIX || pathname.startsWith(WIZARD_PAGE_PREFIX + "/");
+}
 
 // Endpoints the unauthenticated /login + /setup pages must reach before a
 // session exists. Everything else under /setup-api/ requires a session
@@ -109,88 +241,45 @@ const PRE_AUTH_API_PATHS = new Set([
 ]);
 
 // Loopback proxy paths used by openclaw (a separate process with no session
-// cookie) to reach llama.cpp / Ollama through Next.js. The proxy routes
-// enforce their own service-to-service bearer-token check via
+// cookie) to reach llama.cpp / Ollama / the memory embedder through Next.js.
+// The proxy routes enforce their own service-to-service bearer-token check via
 // `verifyLocalAiBearer` in src/lib/local-ai-proxy.ts, so the session gate
 // here would only break openclaw without adding any real security: a stale
 // 401 from middleware just trips openclaw's auth-failure cooldown and
-// kills every chat turn against a local model.
+// kills every chat turn against a local model — and, for the embed prefix,
+// every memory search, since OpenClaw's embedding client retries a refused
+// request three times inside two seconds and then gives up.
 const LOOPBACK_PROXY_PREFIXES = [
   "/setup-api/local-ai/llamacpp",
   "/setup-api/local-ai/ollama",
+  "/setup-api/local-ai/embed",
 ];
 
-// Sensitive /setup-api/* surfaces that must NEVER be reachable without a session
-// (or the MCP bearer) — not even during the pre-setup wizard window. These are
-// desktop-app / agent backends (file access, browser automation, the code
-// workspace, the remote-desktop bridge, and the gateway-token endpoints) with
-// no role in first-boot onboarding. The blanket pre-setup pass below used to
-// expose them unauthenticated while the open `ClawBox-Setup` AP was up, turning
-// otherwise-local issues into network-adjacent, pre-auth ones.
-const PRE_AUTH_SENSITIVE_PREFIXES = [
-  "/setup-api/files",
-  "/setup-api/browser",
-  "/setup-api/code",        // code workspace file ops / build (also /code/*)
-  "/setup-api/code-server",
-  "/setup-api/webapps",
-  "/setup-api/vnc",
-  "/setup-api/terminal",
-  "/setup-api/clawkeep",    // backup restore/encryption/pairing — data-injection surface
-  "/setup-api/tunnel",      // enabling remote tunnel access
-  "/setup-api/portal",      // same privileged tunnel start/stop/enable as /tunnel
-  "/setup-api/apps/install",
-  "/setup-api/apps/uninstall",
-  "/setup-api/apps/settings",  // privileged `openclaw config set skills.*` + credential writes
-  "/setup-api/gateway/ws-config", // hands back the live gateway auth token
-  // Hermes edition. During setup the device broadcasts an OPEN `ClawBox-Setup`
-  // AP, so anything left pre-auth is reachable by anyone in radio range.
-  //   - /hermes/chat runs a full agent turn with shell/tool access, unlimited.
-  //   - /hermes/skills/* installs & uninstalls agent skills (code execution).
-  //   - /harness/select rewrites which agent the device runs.
-  // None of the three has any onboarding role: chat is only called from
-  // ChatPopup, the skills store only from HermesSkillsStore (both desktop-only,
-  // mounted from page.tsx), and the harness picker only from SettingsApp.
-  //
-  // Deliberately NOT listed — the wizard calls these BEFORE setup completes, so
-  // gating them would make the Hermes SKU unprovisionable:
-  //   /setup-api/harness/active         (AIModelsStep.tsx — the ONLY harness
-  //                                      route the wizard touches; /status is
-  //                                      HarnessPicker-only, so it is gated)
-  //   /setup-api/hermes/models          (HermesProviderConfig + useHermesModelOptions)
-  //   /setup-api/hermes/clawai          (ClawBox AI sign-in during onboarding)
-  //   /setup-api/hermes/oauth           (provider OAuth status during onboarding)
-  //   /setup-api/hermes/provider-key    (writes the provider key the wizard collects)
-  // That is exactly the same pre-auth exposure the OpenClaw SKU already accepts
-  // for /setup-api/ai-models/* on the same AP, and the read paths return status
-  // booleans (hasToken/loggedIn), never the stored secrets.
-  "/setup-api/hermes/chat",
-  "/setup-api/hermes/skills",
-  "/setup-api/harness/select",
-  "/setup-api/harness/status",  // probes both harnesses; only the desktop picker calls it
-];
-// Exact-match only: a bare `/setup-api/gateway` subtree deny would also catch
-// `/setup-api/gateway/health`, which the wizard's readiness check legitimately
-// polls before setup completes. The SPA proxy at the bare path injects the
-// gateway token into HTML, so it stays gated.
-const PRE_AUTH_SENSITIVE_EXACT = new Set([
-  "/setup-api/gateway",
-]);
-
-function isSensitiveSetupApi(pathname: string): boolean {
-  // Normalize a trailing slash so `/setup-api/gateway/` can't dodge the exact
-  // match (Next.js may not always redirect it before middleware runs).
-  const p0 = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
-  if (PRE_AUTH_SENSITIVE_EXACT.has(p0)) return true;
-  for (const p of PRE_AUTH_SENSITIVE_PREFIXES) {
-    if (p0 === p || p0.startsWith(p + "/")) return true;
-  }
-  return false;
-}
+// Which /setup-api/* routes are reachable during the first-boot bootstrap
+// window lives in src/lib/setup-api-gate.ts as an ALLOW-list. See that file for
+// why the previous deny-list (`PRE_AUTH_SENSITIVE_PREFIXES`) was inverted:
+// every route nobody remembered to name was served unauthenticated on the open
+// `ClawBox-Setup` AP, which is how setup/reset, update/run, system/power and
+// install/run-step ended up pre-auth (TASK-443/446).
 
 // Paths that exist ONLY because next.config.ts rewrites them to the OpenClaw
 // gateway (see the edition check in the middleware body).
 const GATEWAY_ONLY_EXACT = new Set(["/favicon.svg", "/favicon-32.png"]);
 const GATEWAY_ONLY_PREFIXES = ["/api", "/assets"];
+
+
+
+/**
+ * A page the owner looks at, as opposed to an API, an asset or the gateway.
+ *
+ * Deliberately narrow: the desktop and the standalone app pages. The gateway UI
+ * is left reachable because the assistant answers on it throughout an update,
+ * and /login stays reachable so an expired session is still recoverable.
+ */
+function isDesktopPagePath(pathname: string): boolean {
+  if (pathname === UPDATING_PAGE) return false;
+  return pathname === "/" || pathname === "/app" || pathname.startsWith("/app/");
+}
 
 function isGatewayOnlyPath(pathname: string): boolean {
   if (GATEWAY_ONLY_EXACT.has(pathname)) return true;
@@ -199,18 +288,73 @@ function isGatewayOnlyPath(pathname: string): boolean {
 
 const PUBLIC_EXACT = new Set([
   "/manifest.json",
+  // The service worker script. A browser that once registered /sw.js re-fetches
+  // it on navigations to look for an update — and treats a redirect (to /login)
+  // as "no update", so an old worker with its cache-first rules stayed in
+  // charge forever and the desktop kept showing the previous build. The file
+  // is public by nature (it is what every visitor already holds).
+  "/sw.js",
   "/favicon.ico",
   "/favicon.svg",
   "/favicon-32.png",
+  // The icons the browser is TOLD about while it has no session: the two
+  // `public/manifest.json` declares (the manifest is listed at the top of this
+  // set) and the ones the root layout puts in the document head. Gating them
+  // did not protect anything — an app icon is the same class of asset as the
+  // favicons and the clawbox-* logos below — it only broke the feature the
+  // manifest exists for: a browser fetching /icon-192.png to offer "Install
+  // page as app" followed the redirect to /login and got a 31-byte HTML body,
+  // so the prompt showed no icon, or was refused outright by browsers that
+  // require a resolvable 192 px icon first. `curl -f` cannot even see it,
+  // because a redirect is not a 4xx.
+  //
+  // `/apple-touch-icon.png` is listed here too, though the gateway-static list
+  // already admits it: that list is the OpenClaw Control UI's own files, and it
+  // is also what the catch-all asks before PROXYING a path to the gateway — so
+  // leaving our head icon governed by it means renaming the file quietly turns
+  // it into an unauthenticated proxy to 127.0.0.1:18789 rather than a 404. The
+  // file that declares an icon should own its public status.
+  //
+  // The drift guard in src/tests/middleware/pwa-icons-public.test.ts derives
+  // the whole set from manifest.json and layout.tsx's metadata object, so a new
+  // icon cannot be declared without the gate being opened for it.
+  "/icon-192.png",
+  "/icon-512.png",
+  "/favicon-32x32.png",
+  "/favicon-16x16.png",
+  "/apple-touch-icon.png",
   "/clawbox-crab.png",
   "/clawbox-icon.png",
   "/clawbox-logo.png",
   "/portal/subscribe",
 ]);
 
-function isPublicPath(pathname: string): boolean {
-  if (PUBLIC_EXACT.has(pathname)) return true;
+/** `/apps/<id>/…` — see src/lib/app-proxy.ts. The prefix alone, no import: middleware runs on the edge runtime. */
+const APP_PROXY_PREFIX = "/apps/";
+
+function isAppProxyPath(pathname: string): boolean {
+  return pathname.startsWith(APP_PROXY_PREFIX) && pathname.length > APP_PROXY_PREFIX.length;
+}
+
+/** A navigation (a document, a frame) as opposed to a fetch a document makes — the same test app-proxy.ts makes. */
+function isDocumentRequest(headers: Headers): boolean {
+  const dest = headers.get("sec-fetch-dest");
+  if (dest) return dest === "document" || dest === "iframe" || dest === "frame" || dest === "embed" || dest === "object";
+  return (headers.get("accept") ?? "").includes("text/html");
+}
+
+function isPublicPath(pathname: string, method: string): boolean {
+  // Every entry in PUBLIC_EXACT is something a browser READS — a manifest, a
+  // service worker, an icon, one public page — so the opening is GET/HEAD, the
+  // way `isPublicGatewayAsset` and the public-webapp carve-out below already
+  // are. A write to one of these paths happens to 405 today (Next's public/
+  // handler and the gateway catch-all both answer GET only), which makes the
+  // list safe by accident of what sits behind it rather than by construction.
+  if (PUBLIC_EXACT.has(pathname)) return method === "GET" || method === "HEAD";
   if (PRE_AUTH_API_PATHS.has(pathname)) return true;
+  // `/setup-api/...` also starts with `/setup`, so this must not be a bare
+  // prefix test — isWizardPagePath matches on a segment boundary.
+  if (isWizardPagePath(pathname) && isBootstrapWindowOpen()) return true;
   // Match each prefix on a path-segment boundary. Bare `startsWith("/setup")`
   // would also match `/setup-api/...` and silently expose every protected
   // setup-api route — that was the original auth-bypass.
@@ -273,10 +417,93 @@ async function verifySessionCookie(cookie: string, expectedGen: number): Promise
   }
 }
 
+/**
+ * The answer to a request on a name that is not this box's (step 1a).
+ *
+ * While the box has no owner it is usually on its own hotspot, where dnsmasq
+ * resolves EVERY name to it and a phone's browser lands on whatever the owner
+ * typed — so a page navigation goes to the portal, the one address the wizard
+ * is advertised on. A redirect leaks nothing: the page that asked cannot read
+ * the other origin. Otherwise the refusal is a 403 — JSON with a stable `code`
+ * for an API caller, a line naming the box's `.local` address for a person.
+ */
+function refuseForeignHost(request: NextRequest, pathname: string): NextResponse {
+  const accept = request.headers.get("accept") || "";
+  const isApi = isSetupApiPath(pathname) || pathname.startsWith("/api/") || accept.includes("application/json");
+  const isRead = request.method === "GET" || request.method === "HEAD";
+  if (isRead && !isApi && isBootstrapWindowOpen()) {
+    return NextResponse.redirect(PORTAL_URL, { status: 302, headers: { "cache-control": "no-store" } });
+  }
+  if (isApi) {
+    return NextResponse.json(
+      { error: "ClawBox does not answer on this address", code: "host_not_allowed" },
+      { status: 403, headers: { "cache-control": "no-store" } },
+    );
+  }
+  const label = systemHostLabel() ?? "clawbox";
+  return new NextResponse(
+    `ClawBox does not answer on this address. Open http://${label}.local/ or the box's IP address instead.\n`,
+    { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8", "cache-control": "no-store" } },
+  );
+}
+
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname.toLowerCase();
+
+  // 0. Trailing slashes. Next used to canonicalise them itself before
+  // anything here ran; `skipTrailingSlashRedirect` in next.config.ts switches
+  // that off so `/apps/<id>/` — an app's base path, which a Vite dev server
+  // insists on with the slash — reaches the proxy as typed, which makes this
+  // block the ONLY canonicaliser the box has. It runs both ways, and the two
+  // rules are written so no path can be moved by both:
+  //   - a page path LOSES a trailing slash — never a proxied app's under
+  //     /apps/<id>/ (src/lib/app-proxy.ts), and never an API path, which the
+  //     gates below judge as typed (a `/setup-api/gateway/` must not dodge
+  //     the exact-match list by way of a redirect);
+  //   - an app's base path `/apps/<id>` GAINS one.
+  {
+    const raw = request.nextUrl.pathname;
+    // The OTHER half of the pair, and the reason /apps/<id>/ is exempt from
+    // the strip below: `/apps/<id>` is an app's BASE PATH and has to CARRY
+    // the slash. Without it the document's relative links resolve one level
+    // up (`./assets/x.js` → `/assets/x.js`, off the proxy altogether) and a
+    // Vite build answers its own "did you mean /apps/<id>/?" 404, which the
+    // owner saw as a bare page of upstream text. Only the base path is moved
+    // — anything with a segment after the id is a request the app answers as
+    // typed — so this cannot loop with the strip, which skips every
+    // /apps/<id>/… path.
+    if (isAppProxyPath(raw) && !raw.endsWith("/") && !raw.slice(APP_PROXY_PREFIX.length).includes("/")) {
+      const url = new URL(request.url);
+      url.pathname = `${url.pathname}/`;
+      return NextResponse.redirect(url, {
+        status: 308,
+        headers: { "cache-control": "no-store" },
+      });
+    }
+    if (raw.length > 1 && raw.endsWith("/") && !isAppProxyPath(raw) && !raw.startsWith("/setup-api/") && !raw.startsWith("/api/") && !raw.startsWith("/_next/")) {
+      // A PLAIN `URL`, never `request.nextUrl.clone()`: `NextURL` records the
+      // trailing slash in a `trailingSlash` flag when it parses the URL, its
+      // `pathname` setter writes the pathname and leaves that flag set, and
+      // `href`/`toString()` — what `NextResponse.redirect` serialises — re-add
+      // the slash from the flag. The Location therefore came back as the path
+      // being redirected AWAY from, i.e. an infinite 308 loop on every page
+      // path typed with a slash. A plain `URL` carries no such flag.
+      const url = new URL(request.url);
+      url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+      // `no-store`, because a 308 is cacheable by default (RFC 7538 §3) and
+      // browsers treat a permanent redirect as durable. Both shipped boxes
+      // served `/setup/ → /setup/` as a PERMANENT redirect, so a browser that
+      // cached it replays the loop without asking the box and the fix reads as
+      // "did not work". An uncacheable canonical redirect costs one request and
+      // takes the whole class away.
+      return NextResponse.redirect(url, {
+        status: 308,
+        headers: { "cache-control": "no-store" },
+      });
+    }
+  }
 
   // 1. Captive portal detection
   if (REDIRECT_PATHS.has(pathname)) {
@@ -287,6 +514,30 @@ export async function middleware(request: NextRequest) {
       "<!DOCTYPE html><HTML><HEAD><TITLE>ClawBox Setup</TITLE></HEAD><BODY>Please complete setup.</BODY></HTML>",
       { status: 200, headers: { "Content-Type": "text/html" } }
     );
+  }
+
+  // 1a. The Host allow-list (src/lib/host-allowlist.ts). A name that is not
+  // one of this box's own — `intranet` from a hostile DHCP search domain, a
+  // rebinding record — would give a page served on that name the owner's
+  // host-only, SameSite=Lax session on top-level navigations and same-origin
+  // reads of everything below. So nothing below this line answers such a name,
+  // public paths included. It sits AFTER the captive-portal probes, which a
+  // phone on the hotspot sends under Google's, Apple's or Microsoft's name.
+  // The tunnel is admitted by CF-Connecting-IP, which only survives
+  // scripts/proxy-peer.js on a loopback peer.
+  //
+  // The Host HEADER is what is judged, never `request.url`: behind the
+  // standalone server the URL's host is not the one the browser typed, and
+  // `nextUrl.host` additionally honours X-Forwarded-Host, which on this box
+  // is a header the client writes (there is no reverse proxy in front of
+  // :80). It is used only when the header is absent altogether — impossible
+  // from an HTTP/1.1 client, and a failure direction that must not 403 the
+  // whole box if some internal caller ever arrives without one.
+  {
+    const hostHeader = request.headers.get("host") ?? request.nextUrl.host;
+    if (!isAllowedHostHeader(hostHeader) && !isTunnelRequest(request.headers)) {
+      return refuseForeignHost(request, pathname);
+    }
   }
 
   // 1b. Gateway paths on a Hermes device.
@@ -301,8 +552,11 @@ export async function middleware(request: NextRequest) {
   // rewrites (verified on-device: /api/zzz answered 401 from here, never the
   // gateway), always sees the current edition, and survives a stale build.
   //
-  // Nothing on the ClawBox side owns these paths: there is no src/app/api, no
-  // /assets route, and public/ has neither favicon.svg nor favicon-32.png.
+  // ClawBox owns these paths only as gateway proxies: src/app/api/[...path],
+  // src/app/assets/[...path] and the two favicon route handlers all forward to
+  // 127.0.0.1:18789 via proxyGatewayRequest(). They replaced the next.config.ts
+  // rewrites (which added x-forwarded-* headers OpenClaw 2 refuses), and this
+  // gate still runs ahead of them, so a Hermes box answers 404 as before.
   if (isGatewayOnlyPath(pathname) && readEdition() === "hermes") {
     if (pathname.startsWith("/api/")) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -310,8 +564,46 @@ export async function middleware(request: NextRequest) {
     return new NextResponse("Not found", { status: 404, headers: { "Content-Type": "text/plain" } });
   }
 
-  // 2. Public paths — no auth needed
-  if (isPublicPath(pathname)) {
+  // 2. Public paths — no auth needed.
+  //
+  // The RAW path, not the lower-cased `pathname`: this gate decides, but the
+  // ROUTER routes the original string. `/Login` folded into PUBLIC_EXACT here
+  // and was then routed as `/Login`, which matches no page — so it fell to the
+  // gateway catch-all and was answered, unauthenticated, with the token-
+  // bearing SPA shell. Same for `/Manifest.json` and `/SW.JS`. Any gate must
+  // decide on the string the router will actually use.
+  if (isPublicPath(request.nextUrl.pathname, request.method)) {
+    return NextResponse.next();
+  }
+
+  // 2b. A project's own server under /apps/<id>/ (src/lib/app-proxy.ts).
+  // Every DOCUMENT there still needs the owner's session — the line below
+  // this block redirects it to /login like any page. But the document is
+  // served under a CSP sandbox that gives it an opaque origin, so the
+  // requests it then makes for its assets and its own API carry no cookie
+  // at all, and a cookie gate on those would break every proxied app. They
+  // pass, which exposes the app's routes to whoever has the address the way
+  // its port on 0.0.0.0 is exposed on the LAN today — and nothing of the
+  // box's: the proxy reaches the app's port and nothing else.
+  if (isAppProxyPath(request.nextUrl.pathname) && !isDocumentRequest(request.headers)) {
+    return NextResponse.next();
+  }
+
+  // 2a. The Control UI's own static files — /assets, /themes, /fonts,
+  // /provider-icons and friends — which the browser fetches credential-less
+  // because the gateway marks its stylesheets `crossorigin`. See
+  // src/lib/gateway-static.ts. This sits AFTER the Hermes gate above, so a
+  // Hermes box still answers 404 rather than proxying to a masked gateway.
+  //
+  // The RAW path, never the lower-cased `pathname` above. Those are two
+  // different strings, and routing uses the raw one: `/ASSETS/x.css` lower-cases
+  // into the allow-list here, but no /assets route matches the real path, so it
+  // fell through to the catch-all — which answered an UNAUTHENTICATED caller
+  // with the SPA shell, and that shell carries the injected gateway auth token.
+  // One case-folded character was a full gateway credential, on the open
+  // internet through the tunnel. Any gate must decide on the string the router
+  // will actually use.
+  if (isPublicGatewayAsset(request.nextUrl.pathname, request.method)) {
     return NextResponse.next();
   }
 
@@ -320,28 +612,35 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // 3a. Setup wizard bootstrap — production-server.js always provisions
+  // 3a. First-boot bootstrap — production-server.js always provisions
   // SESSION_SECRET so the env-var short-circuit above never fires in real
-  // deployments. While setup_complete is not yet true the wizard runs without
-  // a session cookie; let it reach its API surface so it can configure WiFi,
-  // run the updater, set the password, etc. Once setup completes the gate
-  // closes and every /setup-api/* request requires a valid session.
-  if (pathname.startsWith("/setup-api/") && !isSetupComplete()) {
-    // ...except the sensitive surfaces above, which stay gated even pre-setup
-    // (they play no part in onboarding). They fall through to the session /
-    // MCP-bearer checks below, so an authenticated caller still reaches them.
-    if (!isSensitiveSetupApi(pathname)) {
+  // deployments. While the device has no owner credential the wizard runs
+  // without a session cookie, so the handful of routes steps 1-3 need are let
+  // through; everything else falls to the session / MCP-bearer checks below.
+  //
+  // Two changes from the old gate, both load-bearing (TASK-443):
+  //   - ALLOW-list, not deny-list. The default is now 401.
+  //   - keyed on `password_configured`, not `setup_complete`. A box that has a
+  //     password but an unfinished wizard is a box with an owner.
+  if (isSetupApiPath(pathname) && isBootstrapWindowOpen()) {
+    if (isBootstrapAllowedPath(pathname)) {
       return NextResponse.next();
     }
   }
 
   // 3b. Trusted-test-environment escape hatch for the e2e-install harness.
-  // Scoped to /setup-api/* only — page requests still go through the
-  // normal /login redirect so the login-round-trip spec can verify it.
+  // Scoped to /setup-api/* and the wizard page — every other page request
+  // still goes through the normal /login redirect so the login-round-trip
+  // spec can verify it. The harness drives the wizard past the password step
+  // over plain HTTP with no cookie jar, which the session gate on /setup
+  // would otherwise stop.
   // Mirrors the convention src/lib/network.ts uses to skip hardware-only
   // nmcli paths; both are gated on the flag install.sh writes when it
   // boots under CLAWBOX_TEST_MODE.
-  if (process.env.CLAWBOX_TEST_MODE === "1" && pathname.startsWith("/setup-api/")) {
+  if (
+    process.env.CLAWBOX_TEST_MODE === "1"
+    && (isSetupApiPath(pathname) || isWizardPagePath(pathname))
+  ) {
     return NextResponse.next();
   }
 
@@ -353,7 +652,7 @@ export async function middleware(request: NextRequest) {
   // service-to-service auth via a per-install bearer (see
   // src/lib/mcp-token.ts), scoped to /setup-api/* only so the dashboard
   // and login flow still go through the normal session gate.
-  if (pathname.startsWith("/setup-api/")) {
+  if (isSetupApiPath(pathname)) {
     const authHeader = request.headers.get("authorization");
     if (authHeader && verifyMcpBearer(authHeader)) {
       return NextResponse.next();
@@ -363,6 +662,64 @@ export async function middleware(request: NextRequest) {
   // 4. Check session cookie
   const sessionCookie = request.cookies.get("clawbox_session")?.value;
   if (sessionCookie && await verifySessionCookie(sessionCookie, currentSessionGeneration())) {
+    // 4a. An update owns the box: send desktop navigations to the updating page.
+    //
+    // Not decoration. `updateClawBoxAndReboot` runs `git reset --hard` and
+    // `git clean -fd` over the project while the desktop is still on screen,
+    // and every app on it can write through /setup-api — so a window left open
+    // can save into a tree that is being rewritten underneath it.
+    //
+    // Only top-level PAGE navigations are redirected. /setup-api/* is left
+    // alone on purpose: the updating page itself polls the status route, and an
+    // API surface answering a redirect with HTML is the defect #304 fixed.
+    // Placed after the session check so an unauthenticated visitor still gets
+    // the login page rather than a page whose only content needs a session.
+    const updateInProgress = readConfigCached().updateInProgress;
+    if (isDesktopPagePath(pathname) && updateInProgress) {
+      return NextResponse.redirect(new URL(UPDATING_PAGE, request.url));
+    }
+    // A desktop that was ALREADY OPEN when the update began never navigates, so
+    // the redirect above never fires for it — it sat on the desktop until the
+    // rebuild stopped the web server under it, and the owner had to reload by
+    // hand to reach the page built for this. The lock is read here anyway, so
+    // say so on the way past: /setup-api is deliberately never redirected (an
+    // API answering a navigation redirect with HTML is defect #304), but a
+    // HEADER costs nothing and carries the same fact on requests the desktop is
+    // already making. src/app/page.tsx turns it into the navigation.
+    const res = NextResponse.next();
+    if (updateInProgress && isSetupApiPath(pathname)) {
+      res.headers.set(UPDATE_LOCK_HEADER, "1");
+    }
+    return res;
+  }
+
+  // 4b. No session — but a webapp the owner marked public (InstalledMeta
+  // `public: true`) is served read-only so it can be shared over the tunnel.
+  // GET on this one path only, judged per app id from the cached config read:
+  // it never opens another app, the POST create/update surface, or anything
+  // else. Sits after the session checks so authenticated traffic never pays
+  // for it, and after the setup gate so a pre-setup box shares nothing.
+  if (request.method === "GET" && pathname === "/setup-api/webapps") {
+    const app = request.nextUrl.searchParams.get("app");
+    if (app && readConfigCached().publicWebapps.has(app)) {
+      return NextResponse.next();
+    }
+  }
+
+  // 4c. No session — the box's UI language, and nothing else: the ONE
+  // preference read /login's I18nProvider makes before anyone has signed in
+  // (UI_LANGUAGE_READ, src/lib/ui-language-read.ts — the provider sends it and
+  // the preferences route answers it from the same object, so the three
+  // cannot disagree about what an anonymous caller is told). The RAW path and
+  // the raw query, byte for byte: the router routes the original string, and
+  // an exact match is what keeps this from being a prefix. Anything wider —
+  // `keys=ui_language,ui_user_name`, `all=1`, a POST — is not this request
+  // and stays behind the session.
+  if (
+    request.method === "GET"
+    && request.nextUrl.pathname === UI_LANGUAGE_READ.pathname
+    && request.nextUrl.search === UI_LANGUAGE_READ.search
+  ) {
     return NextResponse.next();
   }
 
@@ -386,7 +743,7 @@ export async function middleware(request: NextRequest) {
   // prefix) still redirect below.
   const accept = request.headers.get("accept") || "";
   if (
-    pathname.startsWith("/setup-api/") ||
+    isSetupApiPath(pathname) ||
     pathname.startsWith("/api/") ||
     accept.includes("application/json")
   ) {
@@ -403,7 +760,22 @@ export const config = {
   // setup wizard has finished, which the Edge runtime can't do (no fs).
   runtime: "nodejs",
   matcher: [
-    // Match all paths except static assets
-    "/((?!_next/static|_next/image|fonts/|images/).*)",
+    // Every path but Next's own build output. `fonts/` and `images/` used to be
+    // skipped here too, which meant this file never ran for them at all: a
+    // request for `/fonts/nope` or `/images/nope` — nothing under either name
+    // exists on the box (there is no public/images/ tree) — went straight to
+    // the gateway catch-all and was answered with the Control UI shell rather
+    // than the session gate. Both trees go through the pipeline now: the real
+    // font files are let in credential-less by step 2a (GET/HEAD + a static
+    // extension, the same gate the Control UI's own `crossorigin` font loads
+    // already rely on, and ahead of the SESSION_SECRET, bootstrap and session
+    // steps so the captive-portal wizard and the /updating page keep their
+    // fonts), and anything else under them reaches /login like any other
+    // unknown page. Nothing before 2a looks at a /fonts/ path: the trailing-
+    // slash canonicaliser, the captive-portal probe URLs, the Hermes gate
+    // (/api, /assets, the two favicons) and the update lock (desktop pages,
+    // after the session check) all leave it alone. The cost is one mtime-cached
+    // config read per font request, which /login already pays.
+    "/((?!_next/static|_next/image).*)",
   ],
 };

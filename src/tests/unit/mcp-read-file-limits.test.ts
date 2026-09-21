@@ -28,6 +28,9 @@ function captureTools(): Map<string, Captured> {
     tool(name: string, _description: string, shape: Shape, _opts, handler: ToolHandler) {
       tools.set(name, { shape, handler });
     },
+    remove(name: string) {
+      tools.delete(name);
+    },
     list(): RegisteredToolInfo[] {
       return [];
     },

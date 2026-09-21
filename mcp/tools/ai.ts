@@ -1,5 +1,8 @@
-// Hermes provider / model configuration — "what model are you using" and
-// "switch to OpenAI".
+// Hermes provider / model configuration — "what model is this device set to"
+// and "switch to OpenAI".
+//
+// Everything here reads and writes the DEVICE DEFAULT (config.yaml), never the
+// chat a call arrives from — see CURRENT_CHAT_MODEL_NOTE in ../lib/report.ts.
 //
 // DELIBERATELY ABSENT:
 //   - a ClawBox AI plan switch. It changes what the customer is BILLED, and
@@ -15,6 +18,7 @@ import { isPlausibleHermesProviderId, isSafeHermesModelId } from "../../src/lib/
 import { apiGet, apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
+import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault, type HermesDefaultSource } from "../lib/report";
 import { zEnumOf, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
 
@@ -32,16 +36,51 @@ interface ProviderRow {
   total?: number;
 }
 
-interface ModelsBody {
+interface ModelsBody extends HermesDefaultSource {
   models?: ModelRow[];
-  current?: string;
-  provider?: string;
-  reasoning?: string;
   providers?: ProviderRow[];
   stale?: boolean;
+  /**
+   * Scoped form only: the device's saved pairing, whichever provider it belongs
+   * to. Named as the route names it (`ScopedModelsReply` in
+   * src/lib/hermes-model-options.ts) — this file cannot import from the app, so
+   * the two are kept honest by the name and by mcp-served-model-honesty.test.ts.
+   */
+  savedPair?: { provider?: string; model?: string } | null;
+}
+
+/**
+ * The device default as a SCOPED reply tells it. The route reuses `provider`
+ * for the filter it was given and `current` for the saved model IFF it belongs
+ * to that provider AND is in its list — so the pairing travels separately as
+ * `savedPair`. Read that way, a filtered call reports the same object an
+ * unfiltered one does — never the asked-about provider as the default, and
+ * never a prose string in a field that is an object everywhere else.
+ */
+function scopedDeviceDefault(body: ModelsBody) {
+  return hermesDeviceDefault({
+    provider: body.savedPair?.provider,
+    current: body.savedPair?.model,
+    reasoning: body.reasoning,
+  });
 }
 
 const MODEL_LIMIT = 40;
+// A device answers with ~48 providers, three of which have credentials. Pretty-
+// printed, the full list alone is over the tool's 6,000-char cap, and the cap
+// slices from the END — so the whole `models` array, the part the question was
+// about, was what got cut. Only the usable providers are listed; the rest are a
+// count.
+const PROVIDER_LIMIT = 12;
+
+// Both setters change the default only. Said once in each description and
+// once in each answer — the answer is what the agent relays to the user.
+const DEFAULT_SCOPE = "what new chats start on; this chat keeps its header model";
+// "Where there is a header" is not padding: this answer also reaches Telegram
+// and cron sessions, which have no header to keep a model in — what is true of
+// all of them is that the setter moved the DEFAULT and not this conversation.
+const KEEPS_HEADER_MODEL =
+  "This conversation keeps the model it is already on; where it has a header, the user changes it there.";
 
 const SET_RULES: ErrorRule[] = [
   {
@@ -85,10 +124,236 @@ const SET_RULES: ErrorRule[] = [
   },
 ];
 
+/**
+ * What an unlinked box says when it is asked for a picture.
+ *
+ * Two jobs, and the second is the one that was missing. It names the reason and
+ * the fix, so the agent can say something true instead of nothing; and it
+ * closes the door the agent walked through when nothing was there — writing an
+ * SVG with the file tool and rasterising it from the shell produced a real
+ * 1024x1024 PNG that the chat still could not display, because a picture only
+ * renders when it comes from a path the chat can serve.
+ *
+ * Told to the AGENT, not shown to the customer, so it is deliberately in
+ * English and deliberately unlocalised: the agent writes the customer's own
+ * sentence, in the customer's own language, out of it.
+ */
+const IMAGE_GEN_UNAVAILABLE =
+  "Picture generation is not available on this ClawBox. It runs on ClawBox AI and this device is not connected to one. Tell the user that in their own language, and that they can connect it in Settings -> AI Providers. Do NOT try to make the picture some other way — not with the terminal, not by writing an SVG or HTML and converting it, not with a Python imaging library. A file made that way cannot be displayed in this chat, so the user would get a broken image instead of an answer.";
+
+/** One allowance window as GET /setup-api/ai-models/usage answers it (`ClawaiUsageWindow`). */
+interface UsageWindow {
+  used?: number;
+  limit?: number;
+  percentUsed?: number;
+  isOverLimit?: boolean;
+  resetAt?: string | null;
+  unavailable?: boolean;
+}
+
+/**
+ * GET /setup-api/ai-models/usage — `normalizeClawaiUsage` in
+ * src/lib/clawai-usage.ts, under `usage`, with the older top-level fields
+ * beside it. Declared here because that module is reached through the app's
+ * `@/` alias, which this stdio process may not import.
+ */
+interface UsageBody {
+  available?: boolean;
+  reason?: "not_connected" | "refused" | "unreachable" | "invalid";
+  timeZone?: string | null;
+  usage?: {
+    shape?: "weekly" | "legacy";
+    plan?: string | null;
+    tierDisplayName?: string | null;
+    weekly?: UsageWindow;
+    burst?: UsageWindow | null;
+    meters?: Record<string, UsageWindow | undefined>;
+    credits?: { balanceCents?: number; usedThisWeekCents?: number; currency?: string; unavailable?: boolean } | null;
+    billingInterval?: "month" | "year" | null;
+    legacy?: { percentUsed?: number; resetIn?: string | null; isOverLimit?: boolean };
+  };
+}
+
+/** How "used of limit" is said for one window — the card's `countOf` / `minutesOf` / `tokensOf`. */
+type OfLine = (used: number, limit: number) => string;
+const countOf: OfLine = (used, limit) => `${used} of ${limit}`;
+const minutesOf: OfLine = (used, limit) => `${Math.round(used / 60)} of ${Math.round(limit / 60)} min`;
+/** The weekly pool, the burst ceiling and the indexing meter count tokens. */
+const tokensOf: OfLine = (used, limit) => `${used.toLocaleString("en-US")} of ${limit.toLocaleString("en-US")} tokens`;
+
+/** What each weekly meter counts, and how to say a number of it. */
+const METERS: Record<string, { label: string; of: OfLine }> = {
+  images: { label: "pictures", of: countOf },
+  speechSeconds: { label: "spoken replies", of: minutesOf },
+  audioSeconds: { label: "transcribed audio", of: minutesOf },
+  embeddingsTokens: { label: "memory indexing", of: tokensOf },
+};
+
+/** A window as one line: how much is used, whether it is spent, when it frees up. */
+function windowLine(w: UsageWindow | null | undefined, ofLine: OfLine = countOf): string | null {
+  if (!w) return null;
+  if (w.unavailable) return "could not be read";
+  if (typeof w.limit === "number" && w.limit <= 0) return "not part of this plan";
+  const pct = typeof w.percentUsed === "number" ? `${Math.round(w.percentUsed)}% used` : null;
+  const of = typeof w.used === "number" && typeof w.limit === "number" ? ofLine(w.used, w.limit) : null;
+  const spent = w.isOverLimit ? "USED UP" : null;
+  // Only a window holding usage has anything to free up — the usage card's own
+  // rule; an empty one's reset instant means nothing.
+  const frees = typeof w.used === "number" && w.used > 0 && w.resetAt && !Number.isNaN(Date.parse(w.resetAt))
+    ? `frees up at ${new Date(Date.parse(w.resetAt)).toISOString().slice(0, 16).replace("T", " ")} UTC`
+    : null;
+  return [spent, pct, of, frees].filter(Boolean).join(", ") || null;
+}
+
+/** The answer when the device has no usage to give — an answer, not a fault. */
+const USAGE_UNAVAILABLE: Record<NonNullable<UsageBody["reason"]>, string> = {
+  not_connected:
+    "This ClawBox is not linked to ClawBox AI, so there is no allowance to read. The owner links it in Settings → Providers.",
+  refused:
+    "ClawBox AI does not share usage details with this box yet. Tell the user they can see them in their account on clawbox.com.",
+  unreachable:
+    "The ClawBox could not reach clawbox.com to read the usage just now. Say so; ask again later only if the user does.",
+  invalid:
+    "clawbox.com answered with usage this ClawBox could not read. Tell the user they can see it in their account on clawbox.com.",
+};
+
+/** GET /setup-api/anthropic/accounts — the pool's state, never a credential (TASK-902). */
+interface AnthropicPoolBody {
+  accounts?: {
+    label?: string;
+    kind?: string;
+    status?: string;
+    limitedUntil?: number | null;
+    limitKind?: string | null;
+    priority?: number;
+    active?: boolean;
+  }[];
+  health?: { total?: number; healthy?: number; limited?: number; needsAttention?: number; allLimited?: boolean; nextResetAt?: number | null };
+}
+
+const ACCOUNT_KIND_NOUN: Record<string, string> = {
+  oauth: "Claude account",
+  api_key: "API key",
+  login: "Claude Code sign-in",
+};
+
+const ACCOUNT_STATUS_NOUN: Record<string, string> = {
+  ok: "can answer",
+  limited: "at its usage limit",
+  expired: "needs its sign-in renewed by the owner",
+  revoked: "refused by Anthropic; the owner must re-authenticate it",
+};
+
+function isoOrNull(at: unknown): string | null {
+  return typeof at === "number" && Number.isFinite(at) ? new Date(at).toISOString() : null;
+}
+
 export function registerAiTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
+    "anthropic_accounts",
+    "Read this box's Anthropic accounts — the Claude subscriptions and API keys the owner connected for coding runs: each one's label, whether it can answer now or is at its usage limit and until when, the order the box uses them in, and how many can answer. A coding run whose account hits its limit moves to the next account by itself; when every account is limited, runs wait and resume by themselves at the first reset. Read this before starting or retrying an Anthropic coding run, and when one is waiting: if none can answer, wait until the time it gives rather than retrying. It changes nothing: the owner adds and orders accounts in Settings → Providers.",
+    {},
+    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 3_000 },
+    async () => {
+      const body = await apiGet<AnthropicPoolBody>("/setup-api/anthropic/accounts", { timeoutMs: 15_000 });
+      const health = body.health ?? {};
+      const accounts = (body.accounts ?? []).map((a) => ({
+        priority: a.priority,
+        label: a.label,
+        kind: ACCOUNT_KIND_NOUN[a.kind ?? ""] ?? a.kind,
+        status: ACCOUNT_STATUS_NOUN[a.status ?? ""] ?? a.status,
+        ...(a.status === "limited" && isoOrNull(a.limitedUntil) ? { back_at: isoOrNull(a.limitedUntil) } : {}),
+        ...(a.active ? { in_use: true } : {}),
+      }));
+      const nextReset = isoOrNull(health.nextResetAt);
+      if (accounts.length === 0) {
+        return text("No Anthropic account is connected on this box. The owner can connect one in Settings → Providers; until then coding runs use ClawBox AI.");
+      }
+      return json({
+        can_answer: `${health.healthy ?? 0} of ${health.total ?? accounts.length}`,
+        all_limited: health.allLimited === true,
+        ...(nextReset ? { next_reset: nextReset } : {}),
+        accounts,
+        ...(health.allLimited
+          ? {
+            advice: nextReset
+              ? `Every account is at its usage limit. Wait until ${nextReset}: runs that were cut off resume by themselves then. Do not start or retry Anthropic runs before it.`
+              : "No account can answer and none comes back by itself: the owner has to renew or re-authenticate one in Settings → Providers.",
+          }
+          : {}),
+      });
+    },
+  );
+
+  // Both editions: the allowance belongs to the box's ClawBox AI plan, which
+  // either harness spends. READ ONLY for the reason there is no plan switch
+  // (see the file header) — buying credits or changing the plan is billed.
+  reg.tool(
+    "clawbox_ai_usage",
+    "Read how much of this box's ClawBox AI allowance is used: the plan, the weekly chat allowance and the 5-hour burst limit (percent used, whether it is used up, when it frees up), the weekly meters for pictures, spoken replies, transcribed audio and memory indexing, and the prepaid credit balance. Use it when the user asks how much they have left, or when chat, a picture or a coding run was refused for a spent allowance. It changes nothing: the plan and credits are the owner's, in Settings → Providers or on clawbox.com.",
+    {},
+    { editions: ["openclaw", "hermes"], readOnly: true, openWorld: true, maxChars: 3_000 },
+    async () => {
+      // Always 200: `available` and `reason` carry every "no", and each is an
+      // ANSWER — a spent tool call here would only teach the harness's circuit
+      // breaker that a working device is failing.
+      const body = await apiGet<UsageBody>("/setup-api/ai-models/usage", { timeoutMs: 15_000 });
+      if (!body.available || !body.usage) {
+        return text(USAGE_UNAVAILABLE[body.reason ?? "invalid"] ?? USAGE_UNAVAILABLE.invalid);
+      }
+      const u = body.usage;
+      const plan = u.tierDisplayName ?? u.plan ?? "unknown";
+      if (u.shape !== "weekly") {
+        const legacy = u.legacy ?? {};
+        return json({
+          plan,
+          used: typeof legacy.percentUsed === "number" ? `${Math.round(legacy.percentUsed)}%` : "unknown",
+          used_up: legacy.isOverLimit === true,
+          ...(legacy.resetIn ? { resets_in: legacy.resetIn } : {}),
+        });
+      }
+      const meters: Record<string, string> = {};
+      for (const [key, meter] of Object.entries(METERS)) {
+        const line = windowLine(u.meters?.[key], meter.of);
+        if (line) meters[meter.label] = line;
+      }
+      const credits = u.credits && !u.credits.unavailable && typeof u.credits.balanceCents === "number"
+        ? `${(u.credits.balanceCents / 100).toFixed(2)} ${u.credits.currency ?? "EUR"} left${typeof u.credits.usedThisWeekCents === "number" && u.credits.usedThisWeekCents > 0 ? `, ${(u.credits.usedThisWeekCents / 100).toFixed(2)} spent this week` : ""}`
+        : null;
+      return json({
+        plan,
+        ...(u.billingInterval ? { billed: u.billingInterval === "year" ? "yearly" : "monthly" } : {}),
+        weekly_allowance: windowLine(u.weekly, tokensOf) ?? "unknown",
+        ...(u.burst ? { five_hour_limit: windowLine(u.burst, tokensOf) ?? "unknown" } : {}),
+        ...(Object.keys(meters).length ? { this_week: meters } : {}),
+        ...(credits ? { credits } : {}),
+        ...(body.timeZone ? { box_time_zone: body.timeZone } : {}),
+      });
+    },
+  );
+
+  // Registered only where the box CANNOT draw. On a linked box the harness's
+  // own image tool is present and this would be a second, contradicting tool
+  // beside it; on an unlinked one there is no image tool at all, and this is
+  // the only thing standing between the customer and an improvised answer.
+  if (!ctx.canGenerateImages) {
+    reg.tool(
+      "image_generate",
+      "Generate a picture from a text description. Call this whenever the user asks for an image, a picture, a drawing or a logo. On this device it will tell you why it cannot run and what the user should do — say that, and do not attempt to make the picture by any other means.",
+      {},
+      // CORE, and not as an afterthought: `CLAWBOX_MCP_PROFILE=core` is the
+      // trimmed tool set a SMALL model gets, and a small model is the one most
+      // likely to answer "draw me a crab" by reaching for the shell. Dropping
+      // this tool from the profile would remove the guidance from exactly the
+      // boxes that need it most. It costs an empty schema and two sentences.
+      { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
+      async () => text(IMAGE_GEN_UNAVAILABLE),
+    );
+  }
+
+  reg.tool(
     "ai_list_models",
-    "List the AI providers configured on this device and the models each one serves, plus which provider and model are in use right now. Call this before ai_set_provider or ai_set_model so you use ids that exist here.",
+    "List the AI providers configured on this device and the models each one serves, plus the device default provider and model (what a new chat starts on — this chat may be on a per-session override; the label under the reply says what answered). Call this before ai_set_provider or ai_set_model so you use ids that exist here.",
     {
       provider: zText(64, "Show only this provider's models. Omit to list every configured provider.").optional(),
     },
@@ -126,18 +391,28 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
           ? { id: m.id, price_per_million: `in ${m.pricing.input ?? "?"} / out ${m.pricing.output ?? "?"}` }
           : { id: m.id },
       );
+      const allProviders = body.providers ?? [];
+      const usable = allProviders.filter((p) => p.authenticated !== false);
+      // KEY ORDER IS LOAD-BEARING. The output cap truncates from the end, so
+      // what the caller asked about goes first and the provider directory last.
       return json({
-        in_use: { provider: body.provider ?? "unknown", model: body.current ?? "unknown" },
-        thinking: body.reasoning ?? "unknown",
-        providers: (body.providers ?? []).map((p) => ({
-          id: p.id,
-          name: p.name,
-          has_credentials: p.authenticated !== false,
-          model_count: p.total,
-        })),
+        // `device_default`, not `in_use`: config.yaml's pairing is not what
+        // the calling chat necessarily runs — `current_chat` says so. Same
+        // shape on both branches; see scopedDeviceDefault for the filtered one.
+        ...(provider ? { asked_about: provider } : {}),
+        device_default: provider ? scopedDeviceDefault(body) : hermesDeviceDefault(body),
+        current_chat: CURRENT_CHAT_MODEL_NOTE,
         models,
         models_truncated: (body.models ?? []).length > MODEL_LIMIT,
         catalogue_stale: body.stale === true,
+        providers: usable.slice(0, PROVIDER_LIMIT).map((p) => ({
+          id: p.id,
+          name: p.name,
+          has_credentials: true,
+          model_count: p.total,
+        })),
+        providers_truncated: usable.length > PROVIDER_LIMIT,
+        providers_without_credentials: allProviders.length - usable.length,
       });
     },
   );
@@ -153,7 +428,7 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "ai_set_provider",
-    "Switch which AI provider this device uses. Only call it when the user names a provider. The model resets to that provider's own default, so call ai_set_model afterwards if the user also named a model. Use ai_list_models first to see which providers have credentials here.",
+    `Switch the AI provider this device uses by default (${DEFAULT_SCOPE}). Only call it when the user names a provider. The default model resets to that provider's own default, so call ai_set_model afterwards if the user also named a model. Use ai_list_models first to see which providers have credentials here.`,
     { provider: providerParam },
     { editions: ["hermes"], readOnly: false },
     async ({ provider }: { provider: string }) => {
@@ -176,13 +451,15 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
         { provider },
         { timeoutMs: 30_000, rules: SET_RULES },
       );
-      return text(`Now using provider "${body.provider ?? provider}" with model "${body.model ?? "its default"}".`);
+      return text(
+        `Device default is now provider "${body.provider ?? provider}" with model "${body.model ?? "its default"}". ${KEEPS_HEADER_MODEL}`,
+      );
     },
   );
 
   reg.tool(
     "ai_set_model",
-    "Switch which model this device's AI uses, keeping the current provider. Only call it when the user names a model. To change provider instead, use ai_set_provider. Call ai_list_models first so you pass a model id this provider actually serves.",
+    `Switch the model this device uses by default (${DEFAULT_SCOPE}), keeping the current provider. Only call it when the user names a model. To change provider instead, use ai_set_provider. Call ai_list_models first so you pass a model id this provider actually serves.`,
     { model: zText(128, "Model id exactly as ai_list_models reports it") },
     { editions: ["hermes"], readOnly: false },
     async ({ model }: { model: string }) => {
@@ -198,7 +475,9 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
         { model },
         { timeoutMs: 30_000, rules: SET_RULES },
       );
-      return text(`Now using model "${body.model ?? model}" from provider "${body.provider ?? "the current provider"}".`);
+      return text(
+        `Device default is now model "${body.model ?? model}" from provider "${body.provider ?? "the current provider"}". ${KEEPS_HEADER_MODEL}`,
+      );
     },
   );
 }

@@ -1,4 +1,4 @@
-declare module "@novnc/novnc/lib/rfb" {
+declare module "@novnc/novnc" {
   export default class RFB {
     constructor(target: HTMLElement, urlOrChannel: string | WebSocket, options?: Record<string, unknown>);
     disconnect(): void;
@@ -12,6 +12,8 @@ declare module "@novnc/novnc/lib/rfb" {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     removeEventListener(type: string, listener: (e: any) => void): void;
     scaleViewport: boolean;
+    /** A picture only: input events are not sent to the server. */
+    viewOnly: boolean;
     resizeSession: boolean;
     clipViewport: boolean;
     showDotCursor: boolean;
@@ -19,12 +21,4 @@ declare module "@novnc/novnc/lib/rfb" {
     qualityLevel: number;
     compressionLevel: number;
   }
-}
-
-declare module "@novnc/novnc/lib/input/keysymdef" {
-  const keysymdef: {
-    lookup(codepoint: number): number;
-  };
-
-  export default keysymdef;
 }

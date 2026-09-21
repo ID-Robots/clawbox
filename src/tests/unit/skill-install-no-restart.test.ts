@@ -32,9 +32,10 @@ describe("skill install does not restart the gateway", () => {
   it("never signals the gateway from the skill library", () => {
     // restartGateway() still exists and is still correct — it goes through
     // `systemctl restart`, which systemd completes. Only the signal is banned,
-    // so match the signalling code rather than the word in the comment above it.
+    // so match the signalling argument rather than every `process.kill` call:
+    // config-lock recovery legitimately probes owner liveness with signal 0.
     expect(OPENCLAW_CONFIG).not.toContain('"SIGUSR1"');
-    expect(OPENCLAW_CONFIG).not.toContain("process.kill");
+    expect(OPENCLAW_CONFIG).not.toMatch(/process\.kill\([^;\n]*SIGUSR1/);
   });
 
   it("installs and uninstalls skills without reloading anything", () => {
@@ -45,10 +46,12 @@ describe("skill install does not restart the gateway", () => {
   });
 
   it("still writes skills where OpenClaw watches for them", () => {
-    // getSkillsDir() resolves the workspace; the skill root is its `skills`
-    // subdirectory, which is what OpenClaw's watcher and `openclaw skills
-    // install` both target.
-    expect(INSTALL_ROUTE).toContain('path.join(skillsDir, "skills")');
+    // `openclawSkillRoot()` resolves the workspace and appends `skills` — the
+    // directory OpenClaw's watcher and `openclaw skills install` both target,
+    // and the SAME expression the uninstall route deletes under. Two spellings
+    // of one path is how a wrong-directory delete comes back (TASK-551).
+    expect(INSTALL_ROUTE).toContain("openclawSkillRoot()");
+    expect(INSTALL_ROUTE).toContain("fs.mkdir(skillRoot");
   });
 });
 

@@ -21,7 +21,7 @@ test("installed app settings can save configuration and toggle enablement", asyn
         installs: "20K",
         developer: "ClawBox Labs",
         version: "3.2.1",
-        url: "https://openclawhardware.dev/store/apps/home-assistant",
+        url: "https://clawbox.com/store/apps/home-assistant",
         tags: ["home", "automation"],
       },
     ],
@@ -34,7 +34,7 @@ test("installed app settings can save configuration and toggle enablement", asyn
   const storeWindow = page.getByTestId("chrome-window-store");
   await storeWindow.getByRole("heading", { name: "Home Assistant" }).click();
   await storeWindow.getByRole("button", { name: "Install" }).click();
-  await page.getByRole("button", { name: "Install Anyway" }).click();
+  await page.getByRole("button", { name: "Install skill" }).click();
   await expect(storeWindow.getByText("Installed").first()).toBeVisible();
 
   // The freshly-installed icon animates in, so it never passes Playwright's
@@ -46,9 +46,32 @@ test("installed app settings can save configuration and toggle enablement", asyn
   const settingsWindow = page.getByTestId("chrome-window-installed-home-assistant");
   await expect(settingsWindow).toBeVisible();
 
+  // Installing a skill opens the contextual chat prompt above the desktop.
+  // Close it the way a user would before operating the window underneath;
+  // forcing the switch click would prove only that its handler exists, not
+  // that this UI path is actually reachable.
+  const chatPopup = page.getByTestId("chat-popup");
+  if (await chatPopup.isVisible()) {
+    await chatPopup.getByTestId("chat-popup-close").click();
+    await expect(chatPopup).toHaveCount(0);
+  }
+
+  const enabledSwitch = settingsWindow.getByRole("switch", { name: "Enable skill" });
+  await expect(enabledSwitch).toBeChecked();
+  const disableRequest = page.waitForRequest((request) =>
+    request.url().endsWith("/setup-api/apps/settings") &&
+    request.method() === "POST" &&
+    request.postDataJSON()?.settings?._setEnabled === false
+  );
+  await enabledSwitch.click();
+  await disableRequest;
+  await expect(enabledSwitch).not.toBeChecked();
+
   await settingsWindow.getByPlaceholder("http://homeassistant.local:8123").fill("http://ha.local:8123");
   await settingsWindow.getByPlaceholder("Enter HA access token").fill("ha-secret-token");
-  await settingsWindow.getByRole("switch", { name: "Enable Webhooks" }).click({ force: true });
+  // No webhook switch: the form offers only what the skill's config writer
+  // persists, and HA's inbound webhooks are configured on the HA side.
+  await expect(settingsWindow.getByRole("switch", { name: "Enable Webhooks" })).toHaveCount(0);
   await settingsWindow.getByRole("button", { name: /^Connect$/ }).click({ force: true });
   await expect(settingsWindow.getByText("Home Assistant URL")).toBeVisible();
 });

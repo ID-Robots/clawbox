@@ -5,8 +5,15 @@ Wants=NetworkManager.service
 
 [Service]
 Type=oneshot
-EnvironmentFile=-/home/clawbox/clawbox/data/network.env
+# Root-owned, like clawbox-ap.service: this unit runs as root every ~20 s for
+# the life of the appliance, so the script it opens and the environment it
+# loads must both be files clawbox cannot write. The script is the libexec copy
+# install_root_libexec installs; the environment is the root-owned twin of
+# data/network.env (in test mode it also carries CLAWBOX_TEST_MODE=1, which the
+# watchdog does not read). The setup_complete early-exit inside the script is a
+# behaviour, not a protection — bash has already opened the file by then.
+EnvironmentFile=-/etc/clawbox/network.env
 # Runs as root: re-raising the AP needs nmcli/iptables privileges, same as
 # clawbox-ap.service. The script itself is a no-op unless the hotspot is down
 # AND setup is incomplete AND no client-connect handoff holds the lock.
-ExecStart=/home/clawbox/clawbox/scripts/ap-watchdog.sh
+ExecStart=/usr/local/libexec/clawbox/ap-watchdog.sh

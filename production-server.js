@@ -10,36 +10,126 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const WebSocket = require("ws");
+const { Transform } = require("stream");
+const { attachAccessLog } = require("./scripts/access-log.js");
+const { attachProxyPeerGuard } = require("./scripts/proxy-peer.js");
+const { isAllowedUpgrade } = require("./scripts/host-allowlist.js");
 
-const GATEWAY_PORT = parseInt(process.env.GATEWAY_PORT || "18789", 10);
-const TERMINAL_WS_PORT = parseInt(process.env.TERMINAL_WS_PORT || "3006", 10);
-const NOVNC_WS_PORT = parseInt(process.env.NOVNC_WS_PORT || "6080", 10);
+// Same rule as envPort() in src/lib/port-probe.ts, written out because this
+// entry point is standalone CommonJS and cannot import the TypeScript helper:
+// an integer in 1-65535, or the default. `parseInt` alone yields NaN on a typo
+// and lets `-1` / `70000` through, and every one of those makes `net.connect`
+// throw ERR_SOCKET_BAD_PORT on the first proxied request rather than falling
+// back to the default the `||` promises.
+function envPort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : fallback;
+}
+
+const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
+const TERMINAL_WS_PORT = envPort(process.env.TERMINAL_WS_PORT, 3006);
+const NOVNC_WS_PORT = envPort(process.env.NOVNC_WS_PORT, 6080);
 const IS_DEV = process.env.NODE_ENV === "development";
 
 // Path prefixes that the production server routes to a non-gateway upstream.
 // Keep entries in sync with any new WebSocket-only services added behind :80.
 //
-//   /terminal-ws  → xterm/PTY WebSocket (scripts/terminal-server.ts)
+//   /terminal-ws  → xterm/PTY WebSocket (scripts/terminal-server.mjs)
 //   /novnc-ws     → noVNC / websockify for the remote desktop app
 // `requireAuth` gates the raw single-service sockets (terminal PTY, noVNC) on a
 // valid ClawBox session cookie. WebSocket upgrades never pass through Next.js
 // middleware, so without this check any LAN client could reach the unauth PTY /
 // VNC services straight through the port-80 proxy (SEC-1). The gateway route
 // (default) is intentionally NOT gated here — it enforces its own auth token.
+// `sanitizeClose` marks the one upstream that answers a code-less goodbye with
+// a status code no browser will accept — see createCloseFrameRewriter below.
 const UPGRADE_ROUTES = [
   { prefix: "/terminal-ws", targetPort: TERMINAL_WS_PORT, stripPrefix: true, requireAuth: true },
-  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true },
+  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true, sanitizeClose: true },
 ];
+
+// A project's own server under /apps/<id>/ (src/lib/app-proxy.ts): the
+// port and the project folder are in the app's data/webapps/<id>/meta.json,
+// written when the app was registered. Mirrored here in CJS because
+// upgrades never reach Next.js. No auth, like the middleware's rule for the
+// app's own requests: the document that opens the socket has an opaque
+// origin and carries no cookie — which is why, exactly as the proxy does,
+// the port's LISTENER must be the project's own (a process of this user
+// running from inside the project folder) before anything is forwarded.
+const APP_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const APP_LISTENER_TTL_MS = 30_000;
+const appListenerVerdicts = new Map();
+function readJsonSync(file) {
+  try { return JSON.parse(fs.readFileSync(file, "utf-8")); } catch { return null; }
+}
+function isProxyablePort(port) {
+  return typeof port === "number" && Number.isInteger(port) && port >= 1024 && port <= 65535;
+}
+function appListenerOwned(port, directory) {
+  const key = `${port}:${directory}`;
+  const cached = appListenerVerdicts.get(key);
+  if (cached && Date.now() - cached.at < (cached.owned ? APP_LISTENER_TTL_MS : 3000)) return cached.owned;
+  let owned = false;
+  try {
+    const out = require("child_process").execFileSync("ss", ["-H", "-l", "-t", "-n", "-p", `sport = :${port}`], { encoding: "utf-8", timeout: 5000, env: { PATH: process.env.PATH || "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } });
+    let real = directory;
+    try { real = fs.realpathSync(directory); } catch {}
+    // Only a row bound where 127.0.0.1 reaches it vouches for the port.
+    const reachable = out.split("\n").filter((row) => {
+      const local = row.trim().split(/\s+/)[3] || "";
+      const host = local.slice(0, local.lastIndexOf(":"));
+      return ["127.0.0.1", "0.0.0.0", "*", "[::]", "::", "[::1]"].includes(host);
+    }).join("\n");
+    for (const m of reachable.matchAll(/pid=(\d+)/g)) {
+      try {
+        const cwd = fs.readlinkSync(`/proc/${m[1]}/cwd`);
+        const rel = path.relative(real, cwd);
+        if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) { owned = true; break; }
+      } catch {}
+    }
+  } catch {
+    owned = false;
+  }
+  appListenerVerdicts.set(key, { owned, at: Date.now() });
+  return owned;
+}
+function resolveAppPort(reqUrl) {
+  const m = /^\/apps\/([^/?]+)/.exec(reqUrl);
+  if (!m || !APP_ID_RE.test(m[1])) return null;
+  const id = m[1];
+  const root = process.env.CLAWBOX_ROOT || __dirname;
+  const meta = readJsonSync(path.join(root, "data", "webapps", id, "meta.json"));
+  if (!meta || !isProxyablePort(meta.port)) return null;
+  // The project folder: on the registration, or — for one that predates the
+  // field — the folder of that id under the owner's project folder or the
+  // code projects, the way src/lib/app-proxy.ts's projectFolderFor answers.
+  let directory = typeof meta.directory === "string" && path.isAbsolute(meta.directory) ? meta.directory : null;
+  if (!directory) {
+    const config = readJsonSync(path.join(root, "data", "config.json"));
+    const projects = config && typeof config.coding_agent_default_directory === "string" && path.isAbsolute(config.coding_agent_default_directory) ? config.coding_agent_default_directory : null;
+    for (const candidate of [...(projects ? [path.join(projects, id)] : []), path.join(root, "data", "code-projects", id)]) {
+      try { if (fs.statSync(candidate).isDirectory()) { directory = candidate; break; } } catch {}
+    }
+  }
+  if (!directory || !appListenerOwned(meta.port, directory)) return null;
+  return { port: meta.port, strip: meta.stripBasePath === true, id };
+}
 
 function resolveUpgradeTarget(reqUrl) {
   const path = reqUrl.split("?")[0];
+  const app = resolveAppPort(path);
+  if (app) {
+    const prefix = `/apps/${app.id}`;
+    const stripped = reqUrl.slice(prefix.length);
+    return { targetPort: app.port, url: app.strip ? (!stripped || stripped.startsWith("?") ? `/${stripped}` : stripped) : reqUrl, requireAuth: false };
+  }
   for (const r of UPGRADE_ROUTES) {
     if (path === r.prefix || path.startsWith(r.prefix + "/")) {
       const stripped = reqUrl.slice(r.prefix.length);
       const rewritten = r.stripPrefix
         ? (!stripped || stripped.startsWith("?") ? `/${stripped}` : stripped)
         : reqUrl;
-      return { targetPort: r.targetPort, url: rewritten, requireAuth: !!r.requireAuth };
+      return { targetPort: r.targetPort, url: rewritten, requireAuth: !!r.requireAuth, sanitizeClose: !!r.sanitizeClose };
     }
   }
   return { targetPort: GATEWAY_PORT, url: reqUrl, requireAuth: false };
@@ -103,6 +193,18 @@ function hasValidSession(req) {
   }
 }
 
+// An upgrade addressed to a name that is not this box's own (see
+// scripts/host-allowlist.js). Checked before the session and before the route,
+// on :80 and :443 alike: upgrades never reach the middleware's Host allow-list.
+function rejectForeignHostUpgrade(socket) {
+  try {
+    socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+  } catch {
+    // socket already gone
+  }
+  socket.destroy();
+}
+
 function rejectUpgrade(socket) {
   try {
     socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
@@ -152,13 +254,34 @@ try {
     fs.mkdirSync(path.dirname(MCP_TOKEN_PATH), { recursive: true });
     fs.writeFileSync(MCP_TOKEN_PATH, mcpToken, { mode: 0o600 });
   }
+  // Publish the value FIRST. The re-harden below is a separate concern and it
+  // can fail on its own (a root-owned token, a read-only data/); with it inside
+  // this try and above this line, an EPERM threw past the assignment and
+  // CLAWBOX_MCP_TOKEN was never set — so a permissions hiccup discarded a token
+  // that had just been read successfully, and middleware.ts lost the very
+  // first-request resolution this block exists to provide. On the Hermes SKU
+  // clawbox-gateway.service is masked, so gateway-pre-start.sh's replacement
+  // never runs and nothing else repairs it. TASK-657.
+  process.env.CLAWBOX_MCP_TOKEN = mcpToken;
   // Re-harden mode on every boot. fs.writeFileSync only applies mode
   // when creating; an existing file from an older install (or one
   // that drifted to broader perms via manual edit) would otherwise
   // stay readable to other local users. The bearer is the sole
   // /setup-api/* credential, so don't trust a reused file's perms.
-  fs.chmodSync(MCP_TOKEN_PATH, 0o600);
-  process.env.CLAWBOX_MCP_TOKEN = mcpToken;
+  // In its own try, because it is the one step here that may fail
+  // without costing anything already achieved. The message states the
+  // STATE and never a cause: chmod fails with EPERM (another uid owns
+  // it), EROFS or EACCES (data/ read-only, or a path component), and
+  // no code here can tell which — the same correction the shell copy
+  // in scripts/gateway-pre-start.sh got.
+  try {
+    fs.chmodSync(MCP_TOKEN_PATH, 0o600);
+  } catch (err) {
+    console.warn(
+      `[production-server] Could not re-harden ${MCP_TOKEN_PATH} (${err.code || err.message}); `
+        + "if other local users can read it, the MCP bearer for /setup-api/* is exposed on this box.",
+    );
+  }
 } catch (err) {
   console.warn("[production-server] Failed to set up MCP token:", err.message);
 }
@@ -175,8 +298,14 @@ try {
 // is the one unit active on every edition, and both a deploy and an in-app
 // update finish by restarting it.
 //
-// Fire-and-forget on purpose. The reconcile is idempotent and takes ~200ms, but
-// it must never delay or block the web server coming up — a device whose UI
+// Fire-and-forget on purpose, and that matters more since TASK-697: the
+// reconcile is idempotent, but it is no longer ~200ms. It now also runs
+// `hermes plugins doctor`, which imports the plugin in a sandboxed temporary
+// HERMES_HOME — seconds on an Orin — on every web-server boot, with no stamp
+// and no backoff. The OpenClaw twin (scripts/gateway-pre-start.sh) was given
+// both because it runs in an ExecStartPre that the gateway waits on; this one
+// blocks nothing, so it pays the cost every time and reports every time.
+// It must never delay or block the web server coming up — a device whose UI
 // does not start is worse than one whose agent has to wait for the next boot.
 try {
   const registerMcp = require("child_process").spawn(
@@ -218,6 +347,90 @@ try {
   console.warn("[production-server] Failed to set up local-ai token:", err.message);
 }
 
+// ─── Internal-unit token ───
+// Per-install credential ClawBox's own systemd units present when they call
+// back into this server. clawbox-heartbeat.timer is the first user: its tick
+// endpoint is pre-auth (nobody may be logged in) and restarts clawbox-tunnel
+// when the advertised hostname has died, so leaving it anonymous handed anyone
+// on the LAN — or anyone holding the box's public tunnel URL — a systemd
+// restart four times an hour. See src/lib/internal-token.ts.
+//
+// Written as KEY=value rather than a bare token so systemd can read it with
+// `EnvironmentFile=`: PID 1 parses that as root before the unit's ProtectHome
+// sandbox applies, which is how a sandboxed unit can present a secret that
+// lives under /home.
+const INTERNAL_TOKEN_PATH = path.join(__dirname, "data", "internal-token.env");
+try {
+  let internalToken;
+  try {
+    const raw = fs.readFileSync(INTERNAL_TOKEN_PATH, "utf-8");
+    const match = /^\s*(?:export\s+)?CLAWBOX_INTERNAL_TOKEN=(.*)$/m.exec(raw);
+    if (match) internalToken = match[1].trim().replace(/^"(.*)"$/, "$1");
+  } catch {}
+  if (!internalToken || internalToken.length < 32) {
+    internalToken = require("crypto").randomBytes(32).toString("hex");
+    fs.mkdirSync(path.dirname(INTERNAL_TOKEN_PATH), { recursive: true });
+    fs.writeFileSync(INTERNAL_TOKEN_PATH, `CLAWBOX_INTERNAL_TOKEN=${internalToken}\n`, { mode: 0o600 });
+  }
+  // Re-harden on every boot: writeFileSync only applies `mode` when creating.
+  fs.chmodSync(INTERNAL_TOKEN_PATH, 0o600);
+  process.env.CLAWBOX_INTERNAL_TOKEN = internalToken;
+} catch (err) {
+  console.warn("[production-server] Failed to set up internal token:", err.message);
+}
+
+// ─── Honest shutdown ───
+// systemd stops this unit with SIGTERM. With no handler the process died on the
+// default disposition and systemd recorded
+//   `Main process exited, code=exited, status=143/n/a` + `Failed with result 'exit-code'`
+// for EVERY clean stop or restart — so `systemctl status clawbox-setup` showed
+// red for the rest of the session and the Remote Access panel rendered a
+// "failed" alert after a perfectly normal restart. A support engineer cannot
+// tell that state apart from a real crash.
+//
+// Belt and braces with `SuccessExitStatus=143 SIGTERM` in the unit file: this
+// makes the exit genuinely 0, the unit line covers the window before this
+// handler is installed and any child that still exits 143.
+const SHUTDOWN_GRACE_MS = parseInt(process.env.SHUTDOWN_GRACE_MS || "5000", 10);
+const managedServers = new Set();
+let shuttingDown = false;
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[production-server] ${signal} received — closing listeners`);
+
+  // Backstop: a socket that refuses to drain must not turn a clean stop into a
+  // SIGKILL (which systemd DOES report as a failure, and rightly).
+  const force = setTimeout(() => {
+    console.log("[production-server] shutdown grace elapsed — exiting");
+    process.exit(0);
+  }, SHUTDOWN_GRACE_MS);
+
+  let pending = managedServers.size;
+  if (pending === 0) {
+    clearTimeout(force);
+    process.exit(0);
+    return;
+  }
+  const done = () => {
+    if (--pending === 0) {
+      clearTimeout(force);
+      process.exit(0);
+    }
+  };
+  for (const server of managedServers) {
+    try {
+      server.close(done);
+    } catch {
+      done();
+    }
+  }
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
 // HTTP upgrade proxy — raw TCP pipe (works fine with bun's http.Server).
 // Routes by path: UPGRADE_ROUTES entries (e.g. /terminal-ws) go to their
 // configured port; everything else goes to the OpenClaw gateway.
@@ -226,9 +439,174 @@ try {
 // controlUi.allowedOrigins check passes — the allowlist uses port-less
 // entries and a port-suffixed origin would be rejected. Host is rewritten
 // to 127.0.0.1:<port> since upstream does need the port for Host routing.
+// Forwarded-client headers are DROPPED, not piped through: a request that
+// arrives via the Cloudflare tunnel carries the CF forwarded-client set
+// (X-Forwarded-For, CF-Connecting-IP, ...), and OpenClaw 2 refuses an
+// upgrade that presents proxy attribution from a proxy it has not been
+// told to trust - 403 "Proxy client attribution is required. Configure
+// gateway.trustedProxies narrowly and make the proxy overwrite or safely
+// rebuild forwarded client headers." (reproduced over a live quick tunnel
+// on 2026.8.1; this strip is that overwrite). Every proxied upgrade then
+// looks like the clean loopback client it is - exactly what LAN requests
+// already look like - which also keeps the gateway loopback device-pairing
+// auto-approval working for tunnel browsers.
+// The x-forwarded-* FAMILY is matched by prefix at the call site — OpenClaw 2
+// treats any of them (x-forwarded-user included) as forwarded-client
+// evidence; this set carries the attribution headers that do not share the
+// prefix.
+const FORWARDED_CLIENT_HEADERS = new Set([
+  "x-real-ip", "forwarded", "true-client-ip", "cdn-loop",
+  "cf-connecting-ip", "cf-connecting-ipv6", "cf-ipcountry", "cf-visitor", "cf-ray", "cf-warp-tag-id",
+]);
+
+// ─── A close frame the browser will accept ───────────────────────────────────
+//
+// noVNC says goodbye with `WebSocket.close()` and no arguments, so the browser
+// sends a close frame with an EMPTY payload — no status code, which is legal.
+// Python websockify fills the gap in: it records 1005 ("No close status code
+// specified by peer") and echoes THAT back on the wire. 1005 is one of the
+// codes RFC 6455 reserves for the API and forbids in a frame, so Chromium
+// refuses it — `WebSocket connection to 'ws://…/novnc-ws' failed: Received a
+// broken close frame containing a reserved status code` on every close of the
+// Remote Desktop and of the Browser app, which embeds the same view. Nothing
+// was broken except the goodbye, and nothing in the console said so.
+//
+// The proxy below is a byte pipe, so the repair belongs here: on the route
+// that names `sanitizeClose`, the upstream half is walked frame by frame and a
+// close frame carrying a code that must not be sent is replaced by an empty
+// one — which is precisely what "no status code" looks like on the wire, and
+// what the browser itself sent. Everything else is forwarded untouched, and
+// the moment a stream stops making sense the rest of it is passed through raw:
+// a proxy that cannot parse a frame must still deliver it.
+
+/** The close codes RFC 6455 allows in a FRAME: 1005/1006/1015 are API-only and 1004 is undefined. */
+function isSendableCloseCode(code) {
+  if (code >= 3000 && code <= 4999) return true;
+  return code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006;
+}
+
+/**
+ * One upstream→client stream's rewriter: hand it a chunk, write back what it
+ * returns. Stateful, so one per connection.
+ */
+function createCloseFrameRewriter() {
+  const EMPTY = Buffer.alloc(0);
+  const CLOSE = 0x8;
+  // "headers" — the upstream's 101 response, which is not framed at all;
+  // "frames" — parsing; "raw" — forward everything, whatever it is.
+  let phase = "headers";
+  let held = EMPTY;
+  let payloadLeft = 0;
+
+  const join = (parts) => (parts.length === 0 ? EMPTY : parts.length === 1 ? parts[0] : Buffer.concat(parts));
+
+  /** A close frame, or an empty one in its place when its code may not travel. */
+  const repairClose = (frame, header, length, masked) => {
+    if (length < 2) return frame;
+    const code = masked
+      ? ((frame[header] ^ frame[header - 4]) << 8) | (frame[header + 1] ^ frame[header - 3])
+      : frame.readUInt16BE(header);
+    // The reason string goes with the code: websockify's is about the code it
+    // invented, and there is no honest way to keep it once the code is gone.
+    return isSendableCloseCode(code) ? frame : Buffer.from([0x88, 0x00]);
+  };
+
+  return function rewrite(chunk) {
+    if (phase === "raw") return chunk;
+    // The framebuffer case — mid-payload with nothing held back. VNC pixels
+    // must reach the socket without being copied through a parser.
+    if (phase === "frames" && held.length === 0 && payloadLeft >= chunk.length) {
+      payloadLeft -= chunk.length;
+      return chunk;
+    }
+    let data = held.length ? Buffer.concat([held, chunk]) : chunk;
+    held = EMPTY;
+    const out = [];
+
+    if (phase === "headers") {
+      const end = data.indexOf("\r\n\r\n");
+      if (end < 0) {
+        // A 101 response's headers are a few hundred bytes; this much without
+        // an end of headers is not a handshake we should be reading.
+        if (data.length > 16384) { phase = "raw"; return data; }
+        held = Buffer.from(data);
+        return EMPTY;
+      }
+      out.push(data.subarray(0, end + 4));
+      // Anything but a 101 is an ordinary HTTP body (a 401, a 404) — not frames.
+      phase = /^HTTP\/1\.[01] 101/.test(data.subarray(0, 32).toString("latin1")) ? "frames" : "raw";
+      data = data.subarray(end + 4);
+      if (phase === "raw") { out.push(data); return join(out); }
+    }
+
+    for (;;) {
+      if (payloadLeft > 0) {
+        const take = payloadLeft < data.length ? payloadLeft : data.length;
+        if (take > 0) {
+          out.push(data.subarray(0, take));
+          data = data.subarray(take);
+          payloadLeft -= take;
+        }
+        if (payloadLeft > 0) break;
+      }
+      if (data.length < 2) { held = Buffer.from(data); break; }
+      const opcode = data[0] & 0x0f;
+      const masked = (data[1] & 0x80) !== 0;
+      let length = data[1] & 0x7f;
+      let header = 2 + (masked ? 4 : 0);
+      if (length === 126) {
+        header += 2;
+        if (data.length < 4) { held = Buffer.from(data); break; }
+        length = data.readUInt16BE(2);
+      } else if (length === 127) {
+        header += 8;
+        if (data.length < 10) { held = Buffer.from(data); break; }
+        const big = data.readBigUInt64BE(2);
+        // Past 2^53 the byte counting below stops being exact, and a proxy
+        // that miscounts truncates the app's data. Stop parsing instead.
+        if (big > BigInt(Number.MAX_SAFE_INTEGER)) { phase = "raw"; out.push(data); return join(out); }
+        length = Number(big);
+      }
+      if (data.length < header) { held = Buffer.from(data); break; }
+      if (opcode === CLOSE) {
+        // A control frame is never fragmented and never carries more than 125
+        // bytes; one that does is a stream this parser no longer understands.
+        if (length > 125) { phase = "raw"; out.push(data); return join(out); }
+        if (data.length < header + length) { held = Buffer.from(data); break; }
+        out.push(repairClose(data.subarray(0, header + length), header, length, masked));
+        data = data.subarray(header + length);
+        continue;
+      }
+      out.push(data.subarray(0, header));
+      data = data.subarray(header);
+      payloadLeft = length;
+    }
+    return join(out);
+  };
+}
+
+/** The rewriter as a stream, for the pipe. A throw inside it forwards the chunk rather than dropping the connection. */
+function closeFrameSanitizer() {
+  const rewrite = createCloseFrameRewriter();
+  return new Transform({
+    transform(chunk, _encoding, done) {
+      let out;
+      try {
+        out = rewrite(chunk);
+      } catch {
+        out = chunk;
+      }
+      done(null, out.length ? out : undefined);
+    },
+  });
+}
+
 function attachUpgradeProxy(server) {
   server.on("upgrade", (req, socket, head) => {
-    const { targetPort, url, requireAuth } = resolveUpgradeTarget(req.url);
+    if (!isAllowedUpgrade(req)) {
+      return rejectForeignHostUpgrade(socket);
+    }
+    const { targetPort, url, requireAuth, sanitizeClose } = resolveUpgradeTarget(req.url);
     if (requireAuth && !hasValidSession(req)) {
       return rejectUpgrade(socket);
     }
@@ -239,6 +617,7 @@ function attachUpgradeProxy(server) {
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
         const name = req.rawHeaders[i];
         const lc = name.toLowerCase();
+        if (lc.startsWith("x-forwarded-") || FORWARDED_CLIENT_HEADERS.has(lc)) continue;
         const value =
           lc === "origin" ? originHeader :
           lc === "host" ? hostHeader :
@@ -248,7 +627,14 @@ function attachUpgradeProxy(server) {
       raw += "\r\n";
       upstream.write(raw);
       if (head.length) upstream.write(head);
-      socket.pipe(upstream).pipe(socket);
+      socket.pipe(upstream);
+      if (sanitizeClose) {
+        const filter = closeFrameSanitizer();
+        filter.on("error", () => socket.destroy());
+        upstream.pipe(filter).pipe(socket);
+      } else {
+        upstream.pipe(socket);
+      }
     });
     upstream.on("error", () => socket.destroy());
     socket.on("error", () => upstream.destroy());
@@ -283,6 +669,9 @@ function startHttpsServer(httpServer) {
     const wss = new WebSocket.Server({ noServer: true });
 
     httpsServer.on("upgrade", (req, socket, head) => {
+      if (!isAllowedUpgrade(req)) {
+        return rejectForeignHostUpgrade(socket);
+      }
       const gate = resolveUpgradeTarget(req.url || "/");
       if (gate.requireAuth && !hasValidSession(req)) {
         return rejectUpgrade(socket);
@@ -328,6 +717,7 @@ function startHttpsServer(httpServer) {
       });
     });
 
+    managedServers.add(httpsServer);
     httpsServer.listen(HTTPS_PORT, "0.0.0.0", () => {
       console.log(`[production-server] HTTPS server listening on port ${HTTPS_PORT}`);
     });
@@ -347,6 +737,23 @@ function startHttpsServer(httpServer) {
 // Monkey-patch http.Server.prototype.listen to capture the server instance
 const originalListen = http.Server.prototype.listen;
 http.Server.prototype.listen = function (...args) {
+  managedServers.add(this);
+  // Attached here, on the ONE server Next actually creates, before it starts
+  // accepting. HTTPS requests are re-emitted onto this same server (see
+  // startHttpsServer), so this single call covers :80 and :443 both.
+  //
+  // The peer guard goes on FIRST (it prepends, so it runs ahead of Next's
+  // handler and ahead of the access log): a request from anywhere but loopback
+  // has its CF-Connecting-IP / CF-Connecting-IPv6 / True-Client-IP deleted
+  // before the login route can key a lockout bucket on a value the client
+  // chose, and before the access line records it as the client's address. The
+  // only honest source of those headers on this box is cloudflared, which
+  // arrives from 127.0.0.1 — see scripts/proxy-peer.js for what trusting
+  // loopback also trusts.
+  attachProxyPeerGuard(this);
+  if (attachAccessLog(this)) {
+    console.log("[production-server] HTTP access log enabled");
+  }
   if (IS_DEV) {
     attachUpgradeProxy(this);
   } else {
@@ -373,4 +780,249 @@ http.Server.prototype.listen = function (...args) {
   return originalListen.apply(this, args);
 };
 
+// A build parked by an update that was killed OUTRIGHT is the box's only build,
+// and until here nothing ever looked for it.
+//
+// install.sh's do_rebuild renames the serving build to `.next-old` before it
+// builds and renames it back when the build fails — but only if that shell
+// survives to do it. An OOM kill that picks the shell (TASK-709: three in one
+// night, `next-build` at 2.1 GB against ollama's 2.3 GB), a power cut or a
+// Ctrl-C leaves no `.next` at all and a perfectly good build under a gitignored
+// directory. install.sh's own `promote_parked_build` cannot help: it runs
+// inside an update, and an update needs THIS server to be up. So the box
+// crash-looped on the missing entry with its build sitting on disk, and every
+// recovery was by hand.
+//
+// Deliberately the last thing before the require, and deliberately narrow: it
+// does nothing at all unless the entry is already missing — i.e. unless this
+// process is about to throw anyway. Everything is best-effort; a failure here
+// must never be the reason the server does not start, and the throw below stays
+// the real error. clawbox-setup runs as the `clawbox` user, which owns both
+// directories (the rename in do_rebuild preserves the inode), and its
+// `Restart=always` means a lost race just tries again in three seconds.
+try {
+  const buildEntry = path.join(__dirname, ".next", "standalone", "server.js");
+  const parkedDir = path.join(__dirname, ".next-old");
+  const parkedEntry = path.join(parkedDir, "standalone", "server.js");
+  // `lstatSync`, not `existsSync`: for the nested standalone layout `postbuild`
+  // supports, this path is a symlink into `.next` that DANGLES while the tree is
+  // parked, and `existsSync` would call the box's only build absent.
+  const present = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
+  const nextDir = path.join(__dirname, ".next");
+  // BOTH transients are private per process. The mutex is the atomic rename of
+  // the SOURCE (`.next-old`); sharing a destination buys nothing for that and
+  // costs a latch — a stray shared `.next-claim` beside an existing `.next-old`
+  // made every later claim fail ENOTEMPTY, here and in install.sh, for ever.
+  const claimDir = path.join(__dirname, `.next-claim.${process.pid}`);
+  const discardDir = path.join(__dirname, `.next-discard.${process.pid}`);
+  /**
+   * A rename that answers WHY it failed instead of throwing.
+   *
+   * The distinction matters at the claim below: ENOENT means the other
+   * reclaimer took the parked tree, which is a normal outcome and not a
+   * problem; anything else — EROFS, EACCES, ENOSPC — is a real failure an
+   * operator has to see, and reporting it as "someone else got there first"
+   * would be a false cause in the one line they triage from.
+   */
+  const renameQuiet = (from, to) => {
+    try { fs.renameSync(from, to); return null; } catch (err) { return err; }
+  };
+
+  // The drain, and install.sh's `drain_build_transients` is its twin — keep the
+  // two in step. A process killed mid-claim leaves the box's only build under a
+  // private name nothing else looks at, so every orphan is dealt with before
+  // either reclaimer decides anything: junk goes, a build is adopted under the
+  // parked name by a rename (safe against a LIVE owner, whose placement then
+  // fails and which stands down), and a build that would displace a parked one
+  // is reported and left rather than destroyed.
+  const hasEntry = (dir) => present(path.join(dir, "standalone", "server.js"));
+  for (const name of fs.readdirSync(__dirname)) {
+    if (!name.startsWith(".next-claim.") && !name.startsWith(".next-discard.")) continue;
+    const orphan = path.join(__dirname, name);
+    if (!hasEntry(orphan)) {
+      fs.rmSync(orphan, { recursive: true, force: true });
+      continue;
+    }
+    if (renameQuiet(orphan, parkedDir) === null) {
+      console.warn(`[production-server] Adopted a build left behind by an interrupted reclaim (${name}).`);
+      continue;
+    }
+    // A rename onto a non-empty destination fails whatever is in it, so "it
+    // failed" is not "there is a build there". An entry-less but non-empty
+    // `.next-old` — an interrupted `rm -rf` in set_previous_build_aside leaves
+    // exactly that — is worth nothing and must not strand a real build for ever.
+    //
+    // CLAIMED before it is destroyed, never probed and then deleted: those are
+    // two syscalls apart and a concurrent set_previous_build_aside can rename a
+    // real build into `.next-old` in between, which a check-then-delete would
+    // destroy. The claim is a rename to the private discard name — the same
+    // mutex the whole reclaim rests on — and what was claimed is asked again
+    // before anything is removed.
+    if (!hasEntry(parkedDir)) {
+      if (renameQuiet(parkedDir, discardDir) === null) {
+        if (hasEntry(discardDir)) {
+          // It gained a build between the probe and the claim. Put it back and
+          // leave the orphan for the next run.
+          renameQuiet(discardDir, parkedDir);
+          console.warn(`[production-server] ${name} holds a build and .next-old gained one — leaving it for the next run.`);
+          continue;
+        }
+        fs.rmSync(discardDir, { recursive: true, force: true });
+      }
+      if (renameQuiet(orphan, parkedDir) === null) {
+        console.warn(`[production-server] Adopted a build left behind by an interrupted reclaim (${name}).`);
+      } else {
+        console.warn(`[production-server] Could not adopt ${name} into .next-old.`);
+      }
+      continue;
+    }
+    console.warn(`[production-server] ${name} holds a build and .next-old already does — leaving it for the next run.`);
+  }
+
+
+  // …and "no entry, a parked one exists" is not on its own the killed rebuild
+  // this block repairs. It is ALSO the normal state of a rebuild in flight, for
+  // the whole length of the build: install.sh's do_rebuild renames `.next` to
+  // `.next-old` and `next build` writes the standalone entry last. This process
+  // was started inside that window as a matter of routine — clawbox-gateway.service
+  // carried `Wants=clawbox-setup.service`, so every gateway (re)start started the
+  // service do_rebuild had just stopped (e2e-install run 33971129750: four
+  // seconds after the stop). That line is gone (TASK-728), which removes the
+  // routine trigger and not the case: `install.sh --step rebuild` run by hand, a
+  // box where the gateway unit was never installed so gateway_setup is skipped,
+  // and an operator (or the sudoers grant) restarting clawbox-setup all still
+  // land inside the window. Reclaiming
+  // there `rm -rf`s the half-written build
+  // out from under `next build` and renames the previous one on top of it, and
+  // the box comes back on the build the update was replacing.
+  //
+  // So the rebuild says so: set_previous_build_aside stamps the tree it parks
+  // with its PID, the boot id, and that process's start time. Only a stamp that
+  // can be PROVEN to name a running rebuild refuses the reclaim — anything
+  // else, absent (every build parked before this existed) or of another shape
+  // or from another boot or naming a process that is gone, leaves this block
+  // behaving exactly as it did before the stamp existed. That is the safe
+  // direction to fail in: a mid-build reclaim costs one failed update, while a
+  // stamp wrongly believed live costs a crash-looping box with its only build
+  // on disk — the state this whole block was added to end.
+  //
+  // All three fields, because none of them identifies a process on its own. A
+  // PID means nothing across boots, and within a boot it is REUSED: a number
+  // that has been handed to something unrelated would hold the reclaim off for
+  // as long as that process lives, which is the brick this exists to prevent.
+  // Start time (field 22 of /proc/<pid>/stat) is what pins the number to one
+  // process. Reading /proc is also how liveness is answered — the entry is
+  // world-readable, so this needs no permission over root's rebuild shell.
+  const OWNER_STAMP = ".rebuild-pid";
+  const stampPath = path.join(parkedDir, OWNER_STAMP);
+  const readTrimmed = (p) => { try { return fs.readFileSync(p, "utf-8").trim(); } catch { return ""; } };
+  /** Field 22 of /proc/<pid>/stat, or "" if that process is not there. */
+  const startTimeOf = (pid) => {
+    const stat = readTrimmed(`/proc/${pid}/stat`);
+    // Field 2 is the command, parenthesised and free to contain spaces and
+    // parens of its own, so read from after the LAST ") ": field 3 is then
+    // index 0 and field 22 is index 19.
+    const cut = stat.lastIndexOf(") ");
+    if (cut < 0) return "";
+    return stat.slice(cut + 2).split(" ")[19] ?? "";
+  };
+  const rebuildOwnerPid = () => {
+    // Exactly three fields, and a PID that is nothing but digits.
+    // `Number.parseInt` accepts "123junk" and destructuring ignores extra
+    // fields, so either would let a stamp this file cannot vouch for refuse the
+    // reclaim — the expensive direction, per the paragraph above.
+    const fields = readTrimmed(stampPath).split(/\s+/);
+    if (fields.length !== 3 || !/^[1-9][0-9]*$/.test(fields[0])) return 0;
+    const [rawPid, stampBootId, stampStartTime] = fields;
+    const pid = Number(rawPid);
+    if (!Number.isSafeInteger(pid)) return 0;
+    const bootId = readTrimmed("/proc/sys/kernel/random/boot_id");
+    if (!bootId || bootId !== stampBootId) return 0;
+    if (!stampStartTime || startTimeOf(pid) !== stampStartTime) return 0;
+    return pid;
+  };
+
+  if (!present(buildEntry) && present(parkedEntry)) {
+    const owner = rebuildOwnerPid();
+    if (owner) {
+      console.warn(`[production-server] No .next build yet — a rebuild is in progress (pid ${owner}), leaving .next-old alone.`);
+    } else {
+      // Said out loud when a stamp is there but proves nothing — stale, from
+      // another boot, or unreadable. Reclaiming is right in all three cases,
+      // but a guard that is silently inoperative (a future UMask on the
+      // root-update unit would do it) must not look like one that never fired.
+      if (present(stampPath)) {
+        console.warn("[production-server] .next-old carries a rebuild stamp that names no live rebuild — treating the parked build as abandoned.");
+      }
+      console.warn("[production-server] No .next build, but .next-old holds one — an update was killed mid-rebuild. Putting it back.");
+
+      // THE CLAIM, and the whole of TASK-729's fix. There are two reclaimers of
+      // these directories — this one and install.sh's promote_parked_build —
+      // with no lock between them, and both used to run the same non-atomic
+      // pair, `rm -rf .next` then `mv .next-old .next`. Whichever arrived
+      // second deleted what the first had just restored and then failed its own
+      // rename into this file's best-effort catch, leaving the box with NEITHER
+      // tree: the exact outcome the park exists to prevent.
+      //
+      // A rename is atomic and has exactly one winner, so the claim goes first
+      // and nothing is destroyed before it. The loser returns having touched
+      // nothing, which is the whole point.
+      const claimErr = renameQuiet(parkedDir, claimDir);
+      if (claimErr && claimErr.code === "ENOENT") {
+        console.warn("[production-server] Another reclaim took the parked build first — leaving it to finish.");
+      } else if (claimErr) {
+        // Not a lost race: the tree is still there and this box could not move
+        // it. Same sentence the outer catch used to produce, because it is the
+        // line an operator triages from.
+        console.warn("[production-server] Could not reclaim a parked build:", claimErr.message);
+      } else {
+        // Everything from here destroys only PRIVATE names. `.next` is moved
+        // aside rather than deleted, so even if "it has no build entry" was
+        // raced by the other reclaimer placing a good one, nothing is lost.
+        // The move-aside's result is the difference between "somebody took our
+        // claim" and "this filesystem will not let us move a directory".
+        // Discarded, an EACCES/EROFS/EBUSY here left `.next` in place, made the
+        // placement fail ENOTEMPTY, and was then reported as a lost race while
+        // the build stayed under the claim — a false cause on a process that is
+        // about to crash-loop for want of an entry.
+        const asideErr = renameQuiet(nextDir, discardDir);
+        if (asideErr && present(nextDir)) {
+          console.warn(
+            `[production-server] Could not move .next aside (${asideErr.message}) — the parked build stays claimed at ${path.basename(claimDir)}.`,
+          );
+        } else if (!renameQuiet(claimDir, nextDir)) {
+          fs.rmSync(discardDir, { recursive: true, force: true });
+          console.warn("[production-server] Restored the parked build. Run the update again to get the new one.");
+          // Its own try, deliberately: the reclaim is already done by the lines
+          // above, and `force` swallows ENOENT but not EACCES or EIO. Letting
+          // one reach the catch below would report "Could not reclaim a parked
+          // build" over a reclaim that succeeded — a false failure in the line
+          // an operator triages from.
+          try {
+            fs.rmSync(path.join(nextDir, OWNER_STAMP), { force: true });
+          } catch {
+            // A stale stamp inside the restored tree is inert: the next park
+            // overwrites it, and nothing else reads it there.
+          }
+        } else {
+          // Our claim was folded back by the other reclaimer, which means it is
+          // placing this same build. Return what we moved aside and get out of
+          // its way; the tree is not lost, it is in the other one's hands.
+          if (renameQuiet(discardDir, nextDir)) {
+            fs.rmSync(discardDir, { recursive: true, force: true });
+          }
+          console.warn("[production-server] Another reclaim claimed the parked build mid-flight — leaving it to finish.");
+        }
+      }
+    }
+  }
+} catch (err) {
+  console.warn("[production-server] Could not reclaim a parked build:", err.message);
+}
+
 require("./.next/standalone/server.js");
+
+// After Next has started: the title Next gave this process is ours again
+// (scripts/process-title.js says why — a run's `pkill -f next-server` took
+// the box down on 2026-09-05).
+require("./scripts/process-title.js").guardProcessTitle();

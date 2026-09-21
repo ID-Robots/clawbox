@@ -3,7 +3,7 @@
  * browser page) so happy-path tests can exercise the full install/setup
  * lifecycle without needing a full graphical session.
  */
-import { BASE_URL } from "./container";
+import { BASE_URL, dockerExec } from "./container";
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -69,11 +69,26 @@ export async function loginSessionCookie(
   );
 }
 
-export interface SetupStatus {
+/**
+ * What /setup-api/setup/status tells a caller with NO session.
+ *
+ * This route is the one deliberately public /setup-api endpoint (the /login
+ * page and the desktop bootstrap both read it before a session exists) AND it
+ * is reachable through the cloudflared tunnel, so its unauthenticated payload
+ * is readable by anyone holding that URL. It therefore carries only the
+ * wizard's own progress — which AI provider the box is wired to, which local
+ * model it runs and whether Telegram is configured are session-only.
+ */
+export interface SetupStatusPublic {
   setup_complete: boolean;
   wifi_configured: boolean;
   update_completed: boolean;
   password_configured: boolean;
+  setup_progress_step: number | null;
+}
+
+/** The full payload, served only to a caller with a session. */
+export interface SetupStatus extends SetupStatusPublic {
   local_ai_configured: boolean;
   local_ai_provider?: string | null;
   local_ai_model?: string | null;
@@ -81,7 +96,19 @@ export interface SetupStatus {
   telegram_configured: boolean;
 }
 
-export const getStatus = () => request<SetupStatus>("/setup-api/setup/status");
+/** The trimmed payload an anonymous caller sees. */
+export const getStatus = () => request<SetupStatusPublic>("/setup-api/setup/status");
+
+/**
+ * The full payload, fetched the way the desktop actually fetches it — with a
+ * session. Use this for anything beyond the wizard's progress flags.
+ */
+export async function getStatusAuthed(
+  password: string = SETUP_PASSWORD,
+): Promise<SetupStatus> {
+  const cookie = await loginSessionCookie(password);
+  return request<SetupStatus>("/setup-api/setup/status", { headers: { cookie } });
+}
 
 export const scanWifi = () =>
   request<{ scanning: boolean; networks: Array<{ ssid: string }> | null }>("/setup-api/wifi/scan?live=1", {
@@ -161,9 +188,15 @@ export const systemPower = (action: "restart" | "shutdown") =>
 export const getPreferences = () =>
   request<Record<string, unknown>>("/setup-api/preferences?all=1");
 
-export const setPreferences = (patch: Record<string, unknown>) =>
+// `cookie`: the owner's session, needed for an `installed_*` write. The route's
+// gate on that prefix is cookie-only ON PURPOSE — it has no CLAWBOX_TEST_MODE
+// door, because the bearer holder it refuses (the agent) runs on the box the
+// same way in test mode — so a spec that changes the installed-app list logs
+// in first, exactly as the desktop does.
+export const setPreferences = (patch: Record<string, unknown>, cookie?: string) =>
   request<{ success: boolean }>("/setup-api/preferences", {
     method: "POST",
+    headers: cookie ? { cookie } : {},
     body: JSON.stringify(patch),
   });
 
@@ -243,16 +276,47 @@ export const browserClose = (sessionId: string) =>
 
 // ── App store ─────────────────────────────────────────────────────────────
 
+export interface StoreCatalog {
+  total: number;
+  apps: Array<{ slug: string; name: string; category: string }>;
+}
+
 export const searchApps = (query = "") =>
-  request<{ total: number; apps: Array<{ slug: string; name: string; category: string }> }>(
-    `/setup-api/apps/store?q=${encodeURIComponent(query)}`,
-  );
+  request<StoreCatalog>(`/setup-api/apps/store?q=${encodeURIComponent(query)}`);
 
 export const installApp = (appId: string) =>
   request<{ clawhub?: { success: boolean; error?: string }; reload?: string }>(
     "/setup-api/apps/install",
     { method: "POST", body: JSON.stringify({ appId }) },
   );
+
+export interface InstallOutcome {
+  status: number;
+  ok: boolean;
+  code?: string;
+  error?: string;
+  retryable?: boolean;
+  matches?: Array<{ ownerHandle?: string; ref?: string }>;
+  clawhub?: { success: boolean; error?: string };
+}
+
+/**
+ * Like installApp, but a refusal is an answer, not an exception: the install
+ * route reports ClawHub's honest verdict as a non-2xx with `ok:false` and a
+ * `code` (review_required, ambiguous, not_found, rate_limited, …), and the
+ * store spec needs to read that verdict rather than blow up on it.
+ */
+export async function installAppRaw(appId: string): Promise<InstallOutcome> {
+  const res = await fetch(`${BASE_URL}/setup-api/apps/install`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ appId }),
+  });
+  const text = await res.text();
+  let body: Record<string, unknown> = {};
+  try { body = text ? JSON.parse(text) as Record<string, unknown> : {}; } catch { /* non-JSON body */ }
+  return { status: res.status, ...body, ok: res.ok && body.ok !== false } as InstallOutcome;
+}
 
 export const uninstallApp = (appId: string) =>
   request<{ success: boolean }>(
@@ -319,14 +383,94 @@ export const getGatewayHealth = () =>
  * Returns the final state. Tolerates transient fetch failures with
  * `maxConsecutiveFetchErrors` so a service restart doesn't abort the wait.
  */
+/**
+ * "Nothing has started" — the state a box reports when no update was ever asked
+ * for.
+ *
+ * It is also, before TASK-731, what a box reported when an update HAD been
+ * asked for and the web server that was running it was replaced: the step
+ * list's position lived only in that process, and the next one released the
+ * update lock and answered this. Six e2e-install runs polled it for the whole
+ * 45-minute budget.
+ */
+function looksUnstarted(state: UpdateState): boolean {
+  return (
+    state.phase === "idle"
+    && state.currentStepIndex < 0
+    && state.steps.length > 0
+    && state.steps.every((step) => step.status === "pending")
+  );
+}
+
+/** What the container can say about a run that vanished. Never throws. */
+async function diagnoseLostUpdate(): Promise<string> {
+  const parts: string[] = [];
+  // Bounded well under dockerExec's 60 s default: this runs on a path that has
+  // already spent its 120 s budget, and three sequential defaults would turn a
+  // two-minute verdict into a five-minute one.
+  const DIAGNOSIS_TIMEOUT_MS = 15_000;
+  const ask = async (label: string, cmd: string[]) => {
+    try {
+      parts.push(`${label}:\n${(await dockerExec(cmd, { user: "root", timeoutMs: DIAGNOSIS_TIMEOUT_MS })).trim()}`);
+    } catch (err) {
+      parts.push(`${label}: could not be read (${err instanceof Error ? err.message : String(err)})`);
+    }
+  };
+  // How many times the web server has been (re)started, and when: an update
+  // whose process was replaced shows a restart between the POST and now.
+  await ask("clawbox-setup.service", [
+    "systemctl", "show", "clawbox-setup.service",
+    "-p", "NRestarts", "-p", "ActiveEnterTimestamp", "-p", "ExecMainStartTimestamp", "-p", "Result",
+  ]);
+  // `update_lock_holder` is REDUCED, not printed: what a failure needs from it
+  // is whether a holder was recorded and how old its heartbeat is, and this
+  // message is uploaded as a CI artifact on a PUBLIC repository — the boot id
+  // it carries is ephemeral and not a secret, but it identifies the machine and
+  // this file's own rule below is that nothing goes down that does not have to.
+  await ask("the updater's own keys on disk", [
+    "bash", "-lc",
+    "python3 -c \"import json;d=json.load(open('/home/clawbox/clawbox/data/config.json'));"
+    + "h=d.get('update_lock_holder');"
+    + "a=(h.get('at') if isinstance(h,dict) else None);"
+    // EVERY shape is reduced, not just the dict: a string, a list or a number
+    // under that key would otherwise have gone down verbatim, and `at` is only
+    // repeated when it looks like the timestamp this code writes.
+    + "h=({'recorded':False} if h is None else "
+    + "{'recorded':True,'at':(a if isinstance(a,str) and len(a)<40 else None),'pid_present':bool(h.get('pid'))} "
+    + "if isinstance(h,dict) else {'recorded':True,'shape':type(h).__name__});"
+    + "print({k:d.get(k) for k in ('update_in_progress','update_needs_continuation',"
+    + "'update_interrupted_at','update_completed','update_completed_at')}, 'holder=', h)\" 2>&1 || true",
+  ]);
+  // REDACTED, and only the web server's own unit. This message becomes a
+  // Playwright error and is uploaded as a CI artifact on a PUBLIC repository,
+  // where GitHub's `***` masking does not reach; the container is started with
+  // real provider keys in its environment (e2e-install/.env.test). Anything
+  // that looks like a token is replaced before it can be written down, and the
+  // `clawbox-root-update@*` journal — the unit that runs install.sh, which
+  // handles four provider keys — is deliberately not dumped at all.
+  await ask("the last 40 web-server journal lines (redacted)", [
+    "bash", "-lc",
+    "journalctl -u clawbox-setup.service -n 40 --no-pager 2>&1 | sed -E 's/[A-Za-z0-9_-]{20,}/[redacted]/g' || true",
+  ]);
+  return parts.join("\n\n");
+}
+
 export async function waitForUpdate(
-  opts: { timeoutMs?: number; maxConsecutiveFetchErrors?: number } = {},
+  opts: { timeoutMs?: number; maxConsecutiveFetchErrors?: number; unstartedBudgetMs?: number } = {},
 ): Promise<UpdateState> {
   const timeoutMs = opts.timeoutMs ?? 20 * 60_000;
   const maxConsecutiveFetchErrors = opts.maxConsecutiveFetchErrors ?? 60; // ~3min downtime
+  // How long a state that says "nothing has started" is tolerated before it is
+  // called what it is. It is legitimate only briefly — a web server that has
+  // just come back answers it until `checkContinuation()` resumes the second
+  // half, which is one poll later — so two minutes is generous by a wide
+  // margin, and it replaces a 45-minute wait for a state machine that cannot
+  // move.
+  const unstartedBudgetMs = opts.unstartedBudgetMs ?? 120_000;
   const deadline = Date.now() + timeoutMs;
   let consecutiveErrors = 0;
   let lastState: UpdateState | null = null;
+  let unstartedSince: number | null = null;
   while (Date.now() < deadline) {
     try {
       const state = await getUpdateStatus();
@@ -335,7 +479,33 @@ export async function waitForUpdate(
       if (state.phase === "completed" || state.phase === "failed") {
         return state;
       }
-    } catch {
+      if (looksUnstarted(state)) {
+        unstartedSince ??= Date.now();
+        if (Date.now() - unstartedSince > unstartedBudgetMs) {
+          // The headline says what was OBSERVED, not what caused it. This shape
+          // has two causes and the poller cannot tell them apart: a run that
+          // lost its process (TASK-731), and a run that FINISHED whose status
+          // the container cannot synthesise as `completed` — the e2e box is
+          // permanently `checkout-dirty`, which forces drift and disables that
+          // synthesis for the whole run, so a web-server restart after a good
+          // update lands here too. The disk keys below say which: an
+          // `update_interrupted_at` is the first, an `update_completed` with no
+          // lock is the second.
+          throw new Error(
+            `the box has reported "nothing is running" for `
+            + `${Math.round((Date.now() - unstartedSince) / 1000)}s after the update was accepted. `
+            + `Either the web server that owned the run was replaced and its successor had nothing to `
+            + "resume (TASK-731), or the run finished and this container cannot report completed "
+            + "because it is permanently drifted. The updater's own keys below say which.\n"
+            + `last state: ${JSON.stringify(lastState)}\n\n${await diagnoseLostUpdate()}`,
+          );
+        }
+      } else {
+        unstartedSince = null;
+      }
+    } catch (err) {
+      // Our own verdict is not a fetch failure; it must not be counted as one.
+      if (err instanceof Error && err.message.startsWith("the box has reported")) throw err;
       consecutiveErrors += 1;
       if (consecutiveErrors > maxConsecutiveFetchErrors) {
         throw new Error(`update status unreachable for ${consecutiveErrors * 3}s — giving up`);
@@ -343,7 +513,10 @@ export async function waitForUpdate(
     }
     await new Promise((r) => setTimeout(r, 3_000));
   }
-  throw new Error(`update did not complete within ${timeoutMs}ms; last state: ${JSON.stringify(lastState)}`);
+  throw new Error(
+    `update did not complete within ${timeoutMs}ms; last state: ${JSON.stringify(lastState)}`
+    + `\n\n${await diagnoseLostUpdate()}`,
+  );
 }
 
 // ── Tunnel (Cloudflare quick-tunnel) ─────────────────────────────────

@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
 // ~/.clawkeep/token in the background and the next poll resolves.
 const CLAWKEEP_DEVICE_POLL_URL =
   process.env.CLAWKEEP_DEVICE_POLL_URL?.trim()
-  || "https://openclawhardware.dev/api/clawkeep/device-poll";
+  || "https://clawbox.com/api/clawkeep/device-poll";
 
 interface UpstreamPollResponse {
   status?: string;

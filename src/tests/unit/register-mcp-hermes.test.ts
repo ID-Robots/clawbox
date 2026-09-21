@@ -1,8 +1,15 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync, spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
+
+import { testEnv } from "@/tests/helpers/env";
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 // scripts/register-mcp.sh is what puts the ClawBox MCP server into Hermes'
 // config. Before it existed, the only thing that ever registered the MCP was
@@ -32,6 +39,15 @@ const CAN_RUN =
 
 const d = CAN_RUN ? describe : describe.skip;
 
+/**
+ * Skip ONLY where root's extra privilege changes which branch the script takes:
+ * it reads a 0000 file and writes into a 0555 directory, so those cases would
+ * pass by taking the happy path and prove nothing. A stubbed `chmod` is NOT
+ * such a case — the stub exits 1 for every user — so the cases that turn on the
+ * minting umask run everywhere. CI is non-root; a `sudo npm test` on a box is not.
+ */
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
 let home: string;
 let root: string;
 let configPath: string;
@@ -40,7 +56,7 @@ let lockPath: string;
 function run(env: Record<string, string> = {}): { status: number; stdout: string; stderr: string } {
   const r = spawnSync("bash", [SCRIPT], {
     encoding: "utf-8",
-    env: {
+    env: testEnv({
       PATH: process.env.PATH ?? "",
       HOME: home,
       CLAWBOX_ROOT: root,
@@ -49,7 +65,7 @@ function run(env: Record<string, string> = {}): { status: number; stdout: string
       BUN_BIN: path.join(home, "fake-bun"),
       CLAWBOX_EDITION_FILE: lockPath,
       ...env,
-    },
+    }),
   });
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
@@ -115,7 +131,9 @@ d("register-mcp.sh — registering on Hermes", () => {
     const cfg = readConfig();
     expect(cfg.model).toEqual({ default: "deepseek-v4-pro" });
     expect(cfg.providers).toEqual({ clawai: { api_key: "keep-me" } });
-    expect(cfg.skills).toEqual({ enabled: true });
+    // `skills` keeps what it had; the script only ADDS its disabled list
+    // (asserted in its own describe block below).
+    expect((cfg.skills as Record<string, unknown>).enabled).toBe(true);
   });
 
   it("leaves an MCP server someone else registered alone", () => {
@@ -158,6 +176,91 @@ d("register-mcp.sh — registering on Hermes", () => {
     const tokenPath = path.join(root, "data", ".mcp-token");
     expect(fs.readFileSync(tokenPath, "utf-8").trim().length).toBeGreaterThanOrEqual(32);
     expect(fs.statSync(tokenPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("mints the token owner-only without leaning on the chmod that follows", () => {
+    // A bare `openssl rand -hex 32 > file` creates the file at the umask's
+    // mode — 0644 under root's — so the secret is on disk world-readable for
+    // the window before the chmod, and STAYS there when the chmod cannot run
+    // (a file this uid does not own). `umask 077` in the minting subshell is
+    // what makes the mode a property of the creation instead. Stubbing `chmod`
+    // to fail is how that window is made visible without being two users.
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    const stubBin = path.join(home, "stub-bin");
+    fs.mkdirSync(stubBin, { recursive: true });
+    const stub = path.join(stubBin, "chmod");
+    fs.writeFileSync(stub, "#!/bin/sh\nexit 1\n");
+    fs.chmodSync(stub, 0o755);
+
+    const r = run({ PATH: `${stubBin}:${process.env.PATH ?? ""}` });
+    expect(r.status).toBe(0);
+    const tokenPath = path.join(root, "data", ".mcp-token");
+    expect(fs.readFileSync(tokenPath, "utf-8").trim().length).toBeGreaterThanOrEqual(32);
+    expect(fs.statSync(tokenPath).mode & 0o077, "the bearer was left readable by other local users").toBe(0);
+  });
+
+  it.skipIf(isRoot)("still registers the MCP server when the bearer cannot be written", () => {
+    // REGISTERING is this script's job; minting the bearer is a convenience it
+    // does on the way past. The mint was a bare subshell in plain command
+    // position, so under `set -euo pipefail` (:36) a failed redirect — a
+    // root-owned token, a read-only data/ — exited the subshell 1 and killed
+    // the run before it reached the reconcile. On the hermes SKU nothing else
+    // writes mcp_servers.clawbox (there is no gateway pre-start), so
+    // `hermes mcp list` stayed "No MCP servers configured" and the agent had NO
+    // device tools at all, on every web-server boot. Nothing is lost by
+    // carrying on: production-server.js seeds the same file at every
+    // clawbox-setup boot and mcp/lib/api.ts reads it directly. TASK-657.
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    const dataDir = path.join(root, "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.chmodSync(dataDir, 0o555);
+
+    let r;
+    try {
+      r = run();
+    } finally {
+      fs.chmodSync(dataDir, 0o755);
+    }
+
+    expect(r.status, `the registration aborted:\n${r.stdout}${r.stderr}`).toBe(0);
+    // The whole point: the device tools exist even though the bearer does not.
+    expect(clawboxEntry().command).toBe(path.join(home, "fake-bun"));
+    // And it says so, rather than failing silently or claiming it minted one.
+    expect(r.stdout).toMatch(/WARN: could not write .*\.mcp-token/);
+    expect(r.stdout).not.toMatch(/minted/);
+    // The remedy it names has to be one that can actually happen.
+    // production-server.js seeds the same path as the same uid, so "seeded
+    // again at every clawbox-setup boot" was false in every state that reaches
+    // this line — and on the hermes SKU clawbox-gateway.service is masked, so
+    // gateway-pre-start.sh's replacement never runs either.
+    expect(r.stdout).toMatch(/401/);
+    expect(r.stdout).not.toMatch(/seeded again/);
+    expect(fs.existsSync(path.join(dataDir, ".mcp-token"))).toBe(false);
+  });
+
+  it.skipIf(isRoot)("still registers the MCP server when data/ cannot even be created", () => {
+    // One line earlier than the mint: `mkdir -p "$(dirname "$MCP_TOKEN_FILE")"`
+    // was the last write in this block left in plain command position, so a
+    // $PROJECT_DIR that cannot be written — a read-only mount, ENOSPC — exited
+    // non-zero and `set -e` killed the run before the reconcile, which is the
+    // same "no device tools at all on the hermes SKU" outcome the mint guard
+    // below it exists to prevent. The sibling case above cannot see it: it
+    // creates data/ first and only then chmods it, so the mkdir is always a
+    // no-op on a directory that already exists. TASK-657.
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    expect(fs.existsSync(path.join(root, "data"))).toBe(false);
+    fs.chmodSync(root, 0o555);
+
+    let r;
+    try {
+      r = run();
+    } finally {
+      fs.chmodSync(root, 0o755);
+    }
+
+    expect(r.status, `the registration aborted:\n${r.stdout}${r.stderr}`).toBe(0);
+    expect(clawboxEntry().command).toBe(path.join(home, "fake-bun"));
+    expect(fs.existsSync(path.join(root, "data"))).toBe(false);
   });
 
   it("does not disturb a bearer token that already exists", () => {
@@ -233,6 +336,27 @@ d("register-mcp.sh — refuses rather than clobbers", () => {
     expect(fs.readFileSync(configPath, "utf-8")).toBe(broken);
   });
 
+  it.skipIf(isRoot)("says why, rather than tracing back, when the config cannot be read", () => {
+    // The file is THERE and unreadable — permissions, a truncated mount. The
+    // `except FileNotFoundError: cfg = {}` arm beside this one is for "Hermes
+    // has not been onboarded yet", and taking it here would write a config
+    // holding only `mcp_servers` over one whose contents were never seen. The
+    // reader had no arm for it at all, so a bare `python3` heredoc under
+    // `set -euo pipefail` ended the run with a PermissionError traceback.
+    // TASK-657.
+    const kept = "model:\n  default: deepseek-v4-pro\n";
+    fs.writeFileSync(configPath, kept);
+    fs.chmodSync(configPath, 0o000);
+    const r = run();
+    fs.chmodSync(configPath, 0o600);
+    expect(r.status).not.toBe(0);
+    // Diagnosed, not traced back.
+    expect(r.stderr).toMatch(/could not be read/);
+    expect(r.stderr).not.toMatch(/Traceback/);
+    // And the file it could not read is exactly as it was.
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(kept);
+  });
+
   it("fails when the MCP entry point is missing", () => {
     fs.rmSync(path.join(root, "mcp", "clawbox-mcp.ts"));
     fs.writeFileSync(configPath, "model:\n  default: x\n");
@@ -269,5 +393,136 @@ d("register-mcp.sh — the entry Hermes will accept", () => {
 
   it("allows enough time for a cold start on a loaded device", () => {
     expect(Number(clawboxEntry().connect_timeout)).toBeGreaterThanOrEqual(15);
+  });
+});
+
+// Hermes seeds a bundled `email` skill category (himalaya CLI + inbox triage)
+// that teaches the agent to drive a mailbox from the terminal. On a ClawBox the
+// himalaya CLI is unconfigured and the device's email capability is the
+// ClawBox MCP email_* tools, so the script disables those two skills through
+// `skills.disabled` — the exact key agent/skill_utils.py reads. Observed live:
+// "read my last 5 emails" went himalaya → failing terminal calls → a clarify
+// question nothing could answer, with email_list sitting in the tool list.
+d("register-mcp.sh — bundled email-skill distractors", () => {
+  const DISTRACTORS = ["himalaya", "email-inbox-triage", "google-workspace"];
+
+  function disabledSkills(): unknown {
+    const skills = readConfig().skills as Record<string, unknown> | undefined;
+    return skills?.disabled;
+  }
+
+  it("disables the bundled email skills on a config that never mentioned skills", () => {
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    run();
+    expect(disabledSkills()).toEqual(DISTRACTORS);
+  });
+
+  it("appends to the owner's own disabled list without duplicating", () => {
+    fs.writeFileSync(configPath, "skills:\n  disabled:\n    - my-own-skill\n    - himalaya\n");
+    run();
+    expect(disabledSkills()).toEqual(["my-own-skill", "himalaya", "email-inbox-triage", "google-workspace"]);
+  });
+
+  it("parses the JSON-string list form `hermes config set` stores", () => {
+    // hermes' own parse_config_string_list treats '["a"]' as a list; writing
+    // our names next to it as plain strings must not lose the owner's entry.
+    fs.writeFileSync(configPath, `skills:\n  disabled: '["my-own-skill"]'\n`);
+    run();
+    expect(disabledSkills()).toEqual(["my-own-skill", "himalaya", "email-inbox-triage", "google-workspace"]);
+  });
+
+  it("is part of the idempotence contract: a second run rewrites nothing", () => {
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    run();
+    const first = fs.readFileSync(configPath, "utf-8");
+    const second = run();
+    expect(second.stdout).toContain("already current");
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(first);
+  });
+
+  it("leaves a skills.disabled it cannot read alone but still registers the MCP", () => {
+    // A mapping under `disabled` is not a shape this script understands, and
+    // the previous read of it as "nothing is disabled" would have written the
+    // three distractor names straight over the owner's value. Same rule as the
+    // non-mapping `skills` key below: leave it, say so, register anyway.
+    fs.writeFileSync(configPath, "skills:\n  disabled:\n    himalaya: true\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(disabledSkills()).toEqual({ himalaya: true });
+    expect(r.stderr).toContain("skills.disabled is not a list or a string");
+    expect(clawboxEntry().enabled).toBe(true);
+  });
+
+  it("leaves a malformed skills value alone but still registers the MCP", () => {
+    fs.writeFileSync(configPath, "skills: broken\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(readConfig().skills).toBe("broken");
+    expect(clawboxEntry().enabled).toBe(true);
+  });
+});
+
+// Hermes parks the agent's worker thread on a clarify for `agent.clarify_timeout`
+// seconds — 3600 by default, and `<= 0` means forever. On an appliance that is
+// an hour of a session nobody can use for anything else because one question
+// went unanswered. 300s is the ClawBox default, written where the rest of this
+// device's Hermes config is rendered.
+d("register-mcp.sh — the clarify window this appliance ships with", () => {
+  function agentBlock(): Record<string, unknown> {
+    return (readConfig().agent as Record<string, unknown>) ?? {};
+  }
+
+  it("seeds agent.clarify_timeout at 300 on a config that never set it", () => {
+    fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    // A NUMBER, not the string `hermes config set` would have stored: upstream
+    // reads it as a number and a quoted one is a different value.
+    expect(agentBlock().clarify_timeout).toBe(300);
+  });
+
+  it("leaves a window the owner chose for themselves alone", () => {
+    fs.writeFileSync(configPath, "agent:\n  clarify_timeout: 900\n");
+    run();
+    expect(agentBlock().clarify_timeout).toBe(900);
+  });
+
+  it("defers to the legacy clarify.timeout, which wins in hermes' own resolver", () => {
+    // resolve_clarify_timeout reads `clarify.timeout` BEFORE
+    // `agent.clarify_timeout`, so writing ours beside it would leave the file
+    // claiming 300 while the box waited the owner's window.
+    fs.writeFileSync(configPath, "clarify:\n  timeout: 1800\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(readConfig().agent).toBeUndefined();
+    expect(clawboxEntry().enabled).toBe(true);
+  });
+
+  it("keeps the rest of the agent block untouched", () => {
+    fs.writeFileSync(configPath, "agent:\n  reasoning_effort: medium\n");
+    run();
+    expect(agentBlock().reasoning_effort).toBe("medium");
+    expect(agentBlock().clarify_timeout).toBe(300);
+  });
+
+  it("writes nothing on a second run, with the key already seeded", () => {
+    // The idempotence contract, exercised through the branch this block adds:
+    // the first run creates the `agent` block, and the second must find its own
+    // value there and leave the file byte-identical.
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    run();
+    const first = fs.readFileSync(configPath, "utf-8");
+    expect(first).toContain("clarify_timeout");
+    const second = run();
+    expect(second.stdout).toContain("already current");
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(first);
+  });
+
+  it("leaves an agent key it cannot read alone but still registers the MCP", () => {
+    fs.writeFileSync(configPath, "agent: broken\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(readConfig().agent).toBe("broken");
+    expect(clawboxEntry().enabled).toBe(true);
   });
 });

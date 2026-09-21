@@ -1,10 +1,17 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
+import { useModalDialog } from "@/hooks/useModalDialog";
+import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
+import { isProxiedAppUrl, WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
+import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
-import { OPEN_APP_EVENT, FIX_ERROR_EVENT } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail } from "@/lib/ui-events";
+import { toastDetailForNotice } from "@/lib/notify-action";
+import { useAutoHide } from "@/lib/use-auto-hide";
+import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
@@ -15,20 +22,43 @@ import AppStore from "@/components/AppStore";
 import HermesSkillsStore from "@/components/HermesSkillsStore";
 import FilesApp from "@/components/FilesApp";
 import ClawKeepApp from "@/components/ClawKeepApp";
+import MemoryShardApp from "@/components/MemoryShardApp";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
+import TimezoneAdopter from "@/components/TimezoneAdopter";
 import type { StoreApp } from "@/components/AppStore";
-import TerminalApp from "@/components/TerminalApp";
+import TerminalTabs from "@/components/TerminalTabs";
+import CodingAgentApp from "@/components/CodingAgentApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
-import ChatPopup from "@/components/ChatPopup";
+import ChatPopup, { CHAT_PANEL_GAP, noticeColumnInset, type ChatFloatingRect } from "@/components/ChatPopup";
+
+/** How long a coding run's finish card stays on the desktop before it hides itself. */
+import ToastHost from "@/components/ToastHost";
+import PowerApprovalPrompt from "@/components/PowerApprovalPrompt";
+import InstalledAppIcon from "@/components/InstalledAppIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
-import { fetchHarness } from "@/lib/client-harness";
+import { resolveHarnessProbe } from "@/lib/harness-probe";
 import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
+import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } from "@/lib/skill-change-message";
+import { apps, type AppDef } from "@/lib/desktop-apps";
+import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
+import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
+import {
+  brandingHarness,
+  brandWallpaperId,
+  builtinWallpapers,
+  paintedWallpaperOpacity,
+  renderedWallpaperId as resolveRenderedWallpaperId,
+} from "@/lib/builtin-wallpapers";
+import { TOAST_EVENT } from "@/components/ToastHost";
+import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
+import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat-first";
+import { runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
 import {
   layoutIcons,
   layoutsEqual,
@@ -41,43 +71,88 @@ import {
 
 const Mascot = dynamic(() => import("@/components/Mascot"), { ssr: false });
 
-// App definitions
-interface AppDef {
-  id: string;
-  name: string;
-  color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update" | "chat";
-  url?: string;
-  pinned: boolean;
-  defaultWidth?: number;
-  defaultHeight?: number;
-  storeApp?: StoreApp;
+// Every built-in id. This is the VALIDITY filter for a saved desktop list —
+// an id naming no built-in reserves an empty grid slot — and it is deliberately
+// wider than the default set below, so an icon the owner added from the
+// launcher survives a reload.
+const BUILT_IN_APP_IDS = apps.map(a => a.id);
+
+// Built-ins that ship OFF the desktop. They stay in the launcher, and "Add to
+// desktop" puts them back permanently; a fresh box just doesn't spend a grid
+// slot on them out of the box.
+//
+// Remote Desktop (`vnc`) shows the box's own X session, which is a diagnostic
+// tool on a headless appliance, and it was the least-opened icon on the default
+// grid. System Update (`system_update`) is a page the owner visits twice a year
+// and reaches from Settings → System Update, from the About tile and from the
+// desktop's own "new version" notice, so it does not need to hold a grid slot
+// of its own either.
+const OFF_DESKTOP_BY_DEFAULT = new Set(["vnc", "system_update"]);
+
+const DEFAULT_DESKTOP_APPS = BUILT_IN_APP_IDS.filter(id => !OFF_DESKTOP_BY_DEFAULT.has(id));
+
+// Built-ins that moved OFF the desktop after boxes had already saved a
+// `desktop_apps` list containing them.
+//
+// `OFF_DESKTOP_BY_DEFAULT` only shapes the DEFAULT grid, and the loader below
+// restores a saved list verbatim — deliberately, so an owner's own additions
+// survive. The consequence is that moving an app off the desktop reached fresh
+// boxes only: every box that had ever saved a list kept the icon for good, with
+// no way to the new layout short of a factory reset.
+//
+// Shed ONCE per version, because "the owner never asked for this icon" and "the
+// owner put this icon back" are different states and only a persisted mark can
+// tell them apart — after the shed, Add to desktop is permanent again.
+//
+// Keyed BY VERSION rather than as one flat set, and that is what makes a bump
+// safe: only entries ABOVE the box's stored version are applied, so adding a
+// third id later cannot take back an icon this version already shed and the
+// owner has since restored. A flat set would re-shed the lot on every bump,
+// which is the very case the version exists to prevent.
+//
+// Deliberately NOT `OFF_DESKTOP_BY_DEFAULT`, which happens to hold the same two
+// ids today: that one is the live default set and will change, this is frozen
+// history. Both ids stay in the App Launcher — this is about the default grid,
+// not about removing the app. System Update moved into Settings → System Update
+// (still reached from About and the new-version notice) and Remote Desktop is a
+// diagnostic on a headless appliance: the owner's call, 2026-09-09, on a box
+// where both icons had survived the upgrade to v4.0.0.
+const DESKTOP_APPS_SHED_BY_VERSION: Record<number, readonly string[]> = {
+  1: ["system_update", "vnc"],
+};
+
+/** The newest shed a box can have applied — the highest key above. */
+const DESKTOP_APPS_SHED_VERSION = Math.max(
+  ...Object.keys(DESKTOP_APPS_SHED_BY_VERSION).map(Number),
+);
+
+/** The ids a box stored at `from` has not been shed yet. */
+function desktopAppsToShed(from: number): Set<string> {
+  return new Set(
+    Object.entries(DESKTOP_APPS_SHED_BY_VERSION)
+      .filter(([version]) => Number(version) > from)
+      .flatMap(([, ids]) => ids),
+  );
 }
 
-const apps: AppDef[] = [
-  { id: "settings", name: "app.settings", color: "#6b7280", type: "settings", pinned: true, defaultWidth: 800, defaultHeight: 600 },
-  { id: "clawbox", name: "app.chat", color: "#0a0f1a", type: "chat", pinned: true },
-  { id: "openclaw", name: "app.openclaw", color: "#0a0f1a", type: "external", url: "/chat", pinned: true },
-  // Hermes dashboard — only shown on the Hermes edition. Opened via the
-  // auth-gated dashboard proxy (url computed at click time from the host).
-  { id: "hermes", name: "Hermes", color: "#1a1230", type: "external", url: "hermes-dashboard", pinned: true },
-  // Hermes Skills Store — only shown on the Hermes edition (gated below via
-  // HERMES_ONLY_APP_IDS / harnessHiddenAppIds, same mechanism as `hermes`).
-  { id: "hermes-skills", name: "Skills", color: "#1a1230", type: "hermes_skills", pinned: true, defaultWidth: 900, defaultHeight: 600 },
-  { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
-  { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
-  { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
-  { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
-  { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
-  { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
-  { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
-];
-const DEFAULT_DESKTOP_APPS = apps.map(a => a.id);
+// How old an owner-notice may be and still be acted on — `PENDING_ACTION_TTL_MS`
+// in src/lib/pending-actions.ts, which is the WRITER's pruning window. Copied
+// rather than imported: that module reaches for node:crypto and the KV file, and
+// this one is the desktop bundle. A desktop that was not open within the minute
+// has nothing to act on, and the ring is only pruned when something is pushed,
+// so the reader has to apply the same rule or a stale entry replays for ever.
+const PENDING_ACTION_MAX_AGE_MS = 60_000;
 
 // Desktop icon grid metrics. Module-level so the resize listener can derive
 // `rowsPerColumn` without reaching into the component.
 const CELL_H = 110; // px — one icon cell, label included
 const TASKBAR_RESERVE = 72; // px kept clear at the bottom for the taskbar
+// The top-right notice column, as the markup below draws it (`w-[320px]`,
+// `top-4`, `right: NOTICE_MARGIN + …`). Named because the column has to be
+// placed against the chat, and a card that dodges by a number the markup does
+// not use is a card that still lands on the chat's buttons.
+const NOTICE_COLUMN_WIDTH = 320;
+const NOTICE_MARGIN = 16;
 
 /**
  * Declared order for icons that have no saved slot yet.
@@ -90,47 +165,66 @@ const TASKBAR_RESERVE = 72; // px kept clear at the bottom for the taskbar
  * differed from load to load.
  */
 function canonicalIconOrder(installedAppIds: readonly string[]): string[] {
-  return [...installedAppIds, ...DEFAULT_DESKTOP_APPS.map((id) => `desktop-${id}`)];
+  return [...installedAppIds, ...BUILT_IN_APP_IDS.map((id) => `desktop-${id}`)];
 }
 
-// Apps that only make sense on ONE harness. The other harness's backend isn't
-// installed, so its app would open onto errors:
-//   - "openclaw" is the OpenClaw gateway Control UI.
-//   - "store" is the OpenClaw App Store — it installs OpenClaw desktop apps via
-//     the openclaw binary and reloads the OpenClaw gateway. On Hermes the Skills
-//     app ("hermes-skills") is the equivalent surface.
-//   - "hermes" / "hermes-skills" are the Hermes dashboard and skills store.
-// BOTH the icon-layout filter (harnessHiddenAppIds) and getAllApps read THESE
-// lists — keep them the single source of the policy so a hidden app can never be
-// visible in one surface and hidden in another.
-const OPENCLAW_ONLY_APP_IDS = ["openclaw", "store"] as const;
-const HERMES_ONLY_APP_IDS = ["hermes", "hermes-skills"] as const;
-
-/**
- * Should an app the user installed from the OpenClaw store still be shown?
- *
- * An `installed` app IS an OpenClaw skill: its window (InstalledAppSettings)
- * calls /setup-api/apps/settings + /apps/skill-info, both of which shell out to
- * the openclaw binary, and its uninstall reloads the OpenClaw gateway. None of
- * that exists on a Hermes device, so the window would open onto errors — hide
- * it. A WEBAPP (meta.webappUrl) is different: those are ClawBox code-assistant
- * builds served by /setup-api/webapps, harness-independent, and frequently the
- * Hermes agent's OWN output — hiding them would be the regression, not the fix.
- *
- * This filters what is RENDERED only. The persisted installedApps list is never
- * mutated, so a dual box that switches back finds its layout intact.
- *
- * While the harness is still unresolved (null) these stay VISIBLE, unlike the
- * built-in harness apps: they are the majority case on an OpenClaw box, they
- * are not the surface goal B forbids, and hiding then re-showing them would
- * flash the whole desktop on every load.
- */
-function isInstalledAppVisible(meta: InstalledMeta | undefined, harness: string | null): boolean {
-  return harness !== "hermes" || !!meta?.webappUrl;
-}
+// `isInstalledAppVisible` lives in src/lib/desktop-app-editions.ts beside the
+// built-in harness gate, so the desktop and the two agent-facing gates answer
+// it from one copy. It filters what is RENDERED only: the persisted
+// installedApps list is never mutated, so a dual box that switches back finds
+// its layout intact.
 
 // LAN port of the auth-gated Hermes dashboard proxy (scripts/hermes-dashboard-proxy.js).
 const HERMES_DASH_PROXY_PORT = 8090;
+
+/**
+ * One debounced POST per preference key, sent only when THAT key's state
+ * changes.
+ *
+ * The desktop used to persist a snapshot of every key it holds 500 ms after
+ * any of them changed. A desktop loaded before the agent (or the CLI, or a
+ * second tab) installed or uninstalled an app still held the old
+ * `installed_apps`, and wrote it back over the route's server-side write the
+ * next time a window opened — the skill's files were gone but its icon came
+ * back on every desktop, or a fresh install vanished from the desktop while
+ * its files stayed. The same last-writer-wins race existed for every other
+ * key between two open desktops, or a desktop and the agent's preferences_set.
+ * So `installed_apps` and `installed_meta` are not written from here at all
+ * any more — apps/install, apps/uninstall and webapp-registry.ts own them —
+ * and each remaining key is its own write, keyed on its own state.
+ */
+function usePreferenceWriter(loadedRef: { current: boolean }) {
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  // A write still pending when the desktop unmounts must not fire from the
+  // torn-down tree.
+  useEffect(() => {
+    const map = timers.current;
+    return () => {
+      for (const t of map.values()) clearTimeout(t);
+      map.clear();
+    };
+  }, []);
+  return useCallback((body: Record<string, unknown>, slotKey?: string) => {
+    // Nothing is written before the saved preferences have been read: until
+    // then the state is the defaults, and writing them would erase the device's.
+    if (!loadedRef.current) return;
+    // The key set names the slot, so a body whose SHAPE changes over the life
+    // of the page would debounce against itself: the appearance write drops
+    // `wp_id` until something has chosen one, and without an explicit slot the
+    // pending short write and the long one that replaced it would both fire.
+    const slot = slotKey ?? Object.keys(body).join(",");
+    const pending = timers.current.get(slot);
+    if (pending) clearTimeout(pending);
+    timers.current.set(slot, setTimeout(() => {
+      timers.current.delete(slot);
+      fetch("/setup-api/preferences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).catch(() => {});
+    }, 500));
+  }, [loadedRef]);
+}
 
 // Inline SVG icons for each app
 function MIcon({ name, className = "", size = 24 }: { name: string; className?: string; size?: number }) {
@@ -158,9 +252,10 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   }
 
   if (id === "clawbox") {
-    // PNG ships with transparent padding, so a 1× render looks shrunk inside
-    // the tile. Scale up and let the flex parent center the overflow.
-    const scaled = Math.round(px * 2.5);
+    // The crab fills its square except for a little headroom above the
+    // claws, so a 1.3× render is exactly tile-high and overhangs the sides a
+    // touch; the flex parent centres the overflow.
+    const scaled = Math.round(px * 1.3);
     return (
       <img
         src="/clawbox-crab.png"
@@ -196,12 +291,25 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     return <MIcon name="extension" className="text-white" size={px} />;
   }
 
+  if (id === "coding") {
+    // The same glyph the finish card's Open button and the run page use for
+    // the agent, so the icon on the desktop is the icon in the app.
+    return <MIcon name="smart_toy" className="text-white" size={px} />;
+  }
+
   const iconMap: Record<string, string> = {
     settings: "settings",
     setup: "construction",
     terminal: "terminal",
     files: "folder",
     clawkeep: "shield_lock",
+    // A faceted gem rather than a memory chip: the shard is the thing the app
+    // is named for. `diamond`, not `diamond_shine` — both ship a ligature in
+    // the bundled subset, but the shine variant's sparkle marks sit right on
+    // top of the facet lines, and at desktop-icon size (48px) the two read as
+    // one blob instead of a gem. The plain gem keeps the identity and stays
+    // legible small.
+    "memory-shard": "diamond",
     system_update: "system_update",
     vnc: "desktop_windows",
     camera: "photo_camera",
@@ -224,38 +332,18 @@ interface OpenWindow {
   width?: number;
   height?: number;
   meta?: Record<string, string>;
-}
-
-// Icon component for installed store apps — tries local cached icon first, then store URL
-function InstalledAppIcon({ iconUrl, appId, name, size = "w-6 h-6" }: { iconUrl?: string; appId?: string; name?: string; size?: string }) {
-  const px = size.includes("w-12") ? 48 : size.includes("w-7") ? 28 : size.includes("w-6") ? 24 : size.includes("w-3") ? 12 : 24;
-  const localSrc = appId ? `/setup-api/apps/icon/${appId}` : undefined;
-  const sources = [localSrc, iconUrl].filter(Boolean) as string[];
-  const [srcIdx, setSrcIdx] = useState(0);
-  const [failed, setFailed] = useState(false);
-
-  const src = sources[srcIdx];
-  if (src && !failed) {
-    return (
-      <img
-        src={src}
-        alt={name || ""}
-        className="w-full h-full object-cover rounded-[inherit]"
-        onError={() => {
-          if (srcIdx + 1 < sources.length) {
-            setSrcIdx(srcIdx + 1);
-          } else {
-            setFailed(true);
-          }
-        }}
-      />
-    );
-  }
-  return <span className="material-symbols-rounded text-white" style={{ fontSize: px }}>extension</span>;
+  /** Bumped when something asks for this window maximized (a chat's View); ChromeWindow acts on the change. */
+  maximizeNonce?: number;
 }
 
 function ChromeDesktopInner() {
-  const { t } = useT();
+  const { t, locale } = useT();
+  // English is the floor for a key the locale packs do not carry yet: a raw
+  // `window.switchApp` in an aria-label is what a screen reader would read out.
+  const tr = useCallback((key: string, english: string) => {
+    const value = t(key);
+    return value === key ? english : value;
+  }, [t]);
   const resolveAppName = (app: AppDef) => t(app.name) || app.name;
   const [setupChecked, setSetupChecked] = useState(false);
   const [setupRequired, setSetupRequired] = useState(false);
@@ -291,6 +379,10 @@ function ChromeDesktopInner() {
     if (clawboxLogin.loading) return;
     setShowClawAiOfferNotification(!clawboxLogin.loggedIn);
   }, [setupRequired, clawboxLogin.loading, clawboxLogin.loggedIn]);
+
+  const offerNoticeKeys = useMemo(() => (showClawAiOfferNotification ? ["offer"] : []), [showClawAiOfferNotification]);
+  const hideOfferNotice = useCallback(() => setShowClawAiOfferNotification(false), []);
+  useAutoHide(offerNoticeKeys, hideOfferNotice);
 
   // One-shot cleanup of stale chat localStorage from older builds.
   useEffect(() => { purgeLegacyChatCaches() }, []);
@@ -336,45 +428,55 @@ function ChromeDesktopInner() {
   // overwrite it.
   const wallpaperChosen = useRef(false);
   const [activeHarness, setActiveHarness] = useState<string | null>(null);
+  // The harness whose BRANDING this device wears, null until the device has
+  // actually named an edition. A separate value from `activeHarness` because
+  // the two questions fail closed in different directions: "which agent runs
+  // here" may take the route's word and hide both harnesses' apps on a doubt,
+  // which is safe either way, while a BRAND shown on a doubt is the other
+  // product's artwork on the customer's screen half the time.
+  const [wallpaperHarness, setWallpaperHarness] = useState<string | null>(null);
   useEffect(() => {
-    let alive = true;
-    const load = async (attempt: number): Promise<void> => {
-      try {
-        const d = await fetchHarness({ force: attempt > 0 });
-        if (!alive) return;
-        if (d?.active) {
-          setActiveHarness(d.active);
-          // A Hermes device that has never picked a wallpaper opens on the
-          // Hermes art. Guarded on wallpaperChosen because the preferences
-          // request and this one race, and a saved choice must survive
-          // whichever order they land in.
-          if (d.active === "hermes" && !wallpaperChosen.current) {
-            wallpaperChosen.current = true;
-            setWallpaperId("hermes");
-          }
-          return;
+    const probe = new AbortController();
+    // Backing off and asking again — `install.sh` truncates and rewrites the
+    // edition lock on EVERY update and the desktop reloads right after it, so a
+    // mount inside that window would otherwise wear no branding, and write no
+    // `wp_id`, for the life of the tab: the probe-once class. The rule lives in
+    // `resolveHarnessProbe` because `/app/<id>` needs exactly the same one and
+    // had none; `onAnswer` fires for every answer, settled or not, so the honest
+    // one paints at once and a later one improves it.
+    void resolveHarnessProbe({
+      signal: probe.signal,
+      onAnswer: (d) => {
+        // An attempt that answered NOTHING leaves the desktop unresolved, which
+        // hides both harnesses' apps — safe either way, and what it did before.
+        if (!d) return;
+        setActiveHarness(d.active);
+        const branding = brandingHarness(d);
+        setWallpaperHarness(branding);
+        // A device that has never picked a wallpaper opens on its OWN
+        // edition's art — and on a device that has named no edition it opens
+        // on neither, since `brandWallpaperId` answers null there and no
+        // wallpaper is chosen at all. Guarded on wallpaperChosen because the
+        // preferences request and this one race, and a saved choice must
+        // survive whichever order they land in.
+        const brand = brandWallpaperId(branding);
+        if (brand && !wallpaperChosen.current) {
+          wallpaperChosen.current = true;
+          setWallpaperId(brand);
         }
-        throw new Error("no harness");
-      } catch {
-        if (!alive || attempt >= 2) return; // stay unresolved = stay closed
-        setTimeout(() => { if (alive) load(attempt + 1); }, 500 * (attempt + 1));
-      }
-    };
-    load(0);
-    return () => { alive = false; };
+      },
+    });
+    return () => { probe.abort(); };
   }, []);
 
   // The harness-specific apps hidden on this edition (OpenClaw Control-UI +
   // App Store on Hermes; the Hermes dashboard + Hermes Skills Store on
-  // OpenClaw). See OPENCLAW_ONLY_APP_IDS / HERMES_ONLY_APP_IDS. Until the
+  // OpenClaw). The policy lives in src/lib/desktop-app-editions.ts, which the
+  // standalone /app/<id> window and the MCP server read too — so a hidden app
+  // can never be visible in one surface and hidden in another. Until the
   // harness is known BOTH sets are hidden — fail closed.
   const harnessHiddenAppIds = useMemo<string[]>(
-    () =>
-      activeHarness === "hermes"
-        ? [...OPENCLAW_ONLY_APP_IDS]
-        : activeHarness === "openclaw"
-          ? [...HERMES_ONLY_APP_IDS]
-          : [...OPENCLAW_ONLY_APP_IDS, ...HERMES_ONLY_APP_IDS],
+    () => hiddenAppIdsForHarness(activeHarness),
     [activeHarness],
   );
 
@@ -399,10 +501,19 @@ function ChromeDesktopInner() {
     [installedApps, hiddenInstalledApps, installedMeta, activeHarness],
   );
   const handleAddToDesktop = useCallback((appId: string) => {
-    // Also unhide installed apps when adding to desktop
-    setHiddenInstalledApps(prev => prev.filter(id => id !== appId && id !== `installed-${appId}`));
+    // The launcher hands over its own ids, which for an installed app carry
+    // the `installed-` prefix; "Remove from desktop" stores the RAW id in
+    // hidden_installed, and installed apps are drawn from installed_apps minus
+    // that list — never from desktop_apps, which holds built-in ids only. The
+    // two lists must not cross: this used to filter for `installed-x` (and
+    // `installed-installed-x`), un-hiding nothing, while pushing the prefixed
+    // id into desktop_apps, where it drew an empty grid slot forever.
+    if (appId.startsWith("installed-")) {
+      const rawId = appId.slice("installed-".length);
+      setHiddenInstalledApps(prev => prev.filter(id => id !== rawId));
+      return;
+    }
     setDesktopApps(prev => prev.includes(appId) ? prev : [...prev, appId]);
-
   }, []);
 
   // ─── Dynamic pin state ───
@@ -422,22 +533,40 @@ function ChromeDesktopInner() {
   }, []);
 
   // ─── Wallpapers ───
-  const wallpapers = [
-    { id: "clawbox", name: "ClawBox", gradient: "", stars: false, nebula: false, image: "/clawbox-wallpaper.jpeg" },
-    { id: "hermes", name: "Hermes", gradient: "", stars: false, nebula: false, image: "/hermes-wallpaper.jpeg" },
-    { id: "deep-space", name: "Deep Space", gradient: "bg-gradient-to-br from-[#0a0f1a] via-[#111827] to-[#1a1f2e]", stars: true, nebula: false, image: "" },
-  ] as const;
-  // Both wallpapers stay available on every device — this only decides which
-  // one a device that has never chosen starts on. A Hermes box opens on the
-  // Hermes art; OpenClaw is untouched.
-  const [wallpaperId, setWallpaperId] = useState("clawbox");
-  const currentWallpaper = wallpapers.find(w => w.id === wallpaperId) || wallpapers[0];
+  // Edition-scoped: this box's own brand plus the neutral one, and only the
+  // neutral one while the edition is unknown (src/lib/builtin-wallpapers.ts).
+  // The other product's art is not offered, not painted and not fetched.
+  const wallpapers = builtinWallpapers(wallpaperHarness);
+  // Null until something has CHOSEN one — the box's saved `wp_id`, this
+  // device's own edition once the probe answers, or the owner. What is painted
+  // meanwhile is `renderedWallpaperId` below, and nothing is written: seeding a
+  // brand here would persist it box-wide on a box whose edition never resolved.
+  const [wallpaperId, setWallpaperId] = useState<string | null>(null);
   type WpFit = "fill" | "fit" | "center";
   const [wpFit, setWpFit] = useState<WpFit>("fill");
   const [wpBgColor, setWpBgColor] = useState("#000000");
-  const [wpOpacity, setWpOpacity] = useState(50);
+  // Null while the box holds no `wp_opacity`: what is PAINTED then is the
+  // wallpaper's own default (`wallpaperOpacity`), and nothing is written —
+  // the appearance write below leaves the key out, so the default never
+  // becomes the owner's saved value.
+  const [wpOpacity, setWpOpacity] = useState<number | null>(null);
   // ─── Unified SQLite load on mount ───
   const prefsLoaded = useRef(false);
+  // The ids a shed removed from the saved list during this load, or null when
+  // there was nothing to shed. Read by the icon-grid load below, which has to
+  // drop their cells, and by the `desktop_apps` write, which records the version
+  // so it happens exactly once.
+  const shedNeeded = useRef<Set<string> | null>(null);
+  // Bumped once by the load when a shed is owed, purely to run the write effect
+  // below on a box whose `desktopApps` the load did not change.
+  const [shedTick, setShedTick] = useState(0);
+  // Set once this page has shed, and never cleared: every `desktop_apps` write
+  // from then on carries the version, so no debounce replacement can drop it.
+  const shedRecorded = useRef(false);
+  // The docked chat's width as the DEVICE remembers it — see the write below.
+  // Seeded from the stored value even on a phone, which never restores the
+  // panel, so opening the desktop on a phone cannot erase the layout.
+  const dockWidthRef = useRef(0);
   useEffect(() => {
     nextZIndexRef.current = nextZIndex;
   }, [nextZIndex]);
@@ -457,19 +586,63 @@ function ChromeDesktopInner() {
         }
         if (data.wp_fit) setWpFit(data.wp_fit as WpFit);
         if (data.wp_bg_color) setWpBgColor(String(data.wp_bg_color));
-        if (data.wp_opacity !== undefined && data.wp_opacity !== null) setWpOpacity(parseInt(String(data.wp_opacity), 10));
+        if (data.wp_opacity !== undefined && data.wp_opacity !== null) {
+          const opacity = parseInt(String(data.wp_opacity), 10);
+          if (Number.isFinite(opacity)) setWpOpacity(opacity);
+        }
         // Installed apps
         if (Array.isArray(data.installed_apps)) setInstalledApps(data.installed_apps as string[]);
         if (data.installed_meta && typeof data.installed_meta === "object") setInstalledMeta(data.installed_meta as Record<string, InstalledMeta>);
+        // Evaluated for EVERY box, not only one with a saved list. A fresh box
+        // has nothing to shed, but it still has to record the version: without
+        // that, its first saved list carries no marker, and the moment the owner
+        // adds one of these apps from the launcher the next load sheds it right
+        // back out. The owner's own addition would be undone by a migration that
+        // had nothing to migrate.
+        const shedFrom = Number(data.desktop_apps_shed ?? 0);
+        if (shedFrom < DESKTOP_APPS_SHED_VERSION) {
+          shedNeeded.current = desktopAppsToShed(shedFrom);
+          // The write effect keys on `desktopApps`, which does not change on a
+          // box that had no saved list — so nothing would carry the marker to
+          // disk. This is the one-shot that makes it run.
+          setShedTick((n) => n + 1);
+        }
         // Merge new built-ins into the saved list so they appear without a factory reset.
         if (Array.isArray(data.desktop_apps)) {
-          const saved = data.desktop_apps as string[];
+          // Built-in ids only. An older launcher pushed `installed-*` ids here
+          // (see handleAddToDesktop); an id that names no built-in reserves an
+          // empty grid slot, so a box that already saved one sheds it on load.
+          // Validated against every built-in, not just the default set: an
+          // owner who added Remote Desktop from the launcher keeps it.
+          let saved = (data.desktop_apps as string[]).filter(id => BUILT_IN_APP_IDS.includes(id));
+          // An app that MOVED off the desktop is dropped from a list that was
+          // saved before it moved — once per shed version. Without this the move
+          // reaches new boxes only; run unconditionally, an owner who put the
+          // icon back would lose it again on every reload.
+          //
+          // The state set here is what reaches the disk: the effects that mirror
+          // `desktopApps` and `iconPositions` into preferences do the writing.
+          // The decision travels out on a ref because this load effect has empty
+          // deps and cannot see `savePreferences`.
+          if (shedNeeded.current) {
+            const shed = shedNeeded.current;
+            saved = saved.filter(id => !shed.has(id));
+          }
+          // ...but only default-set built-ins are auto-added, so an app that
+          // ships off the desktop never appears on a box that never had it.
           const missingNewBuiltins = DEFAULT_DESKTOP_APPS.filter(id => !saved.includes(id));
           setDesktopApps(missingNewBuiltins.length > 0 ? [...saved, ...missingNewBuiltins] : saved);
         }
         if (Array.isArray(data.hidden_installed)) setHiddenInstalledApps(data.hidden_installed as string[]);
         if (data.pinned_apps && typeof data.pinned_apps === "object") setPinnedOverrides(data.pinned_apps as Record<string, boolean>);
-        if (data.icon_grid && typeof data.icon_grid === "object") setIconPositions(data.icon_grid as Record<string, { row: number; col: number }>);
+        if (data.icon_grid && typeof data.icon_grid === "object") {
+          const grid = { ...(data.icon_grid as Record<string, { row: number; col: number }>) };
+          // A shed app's reserved cell goes with it. This is applied HERE rather
+          // than beside the shed above because this assignment runs after it and
+          // would otherwise put the empty slot straight back.
+          for (const id of shedNeeded.current ?? []) delete grid[`desktop-${id}`];
+          setIconPositions(grid);
+        }
         // Open windows
         if (Array.isArray(data.desktop_open_windows)) {
           // Restore the workspace but minimized — windows return to the taskbar
@@ -488,7 +661,16 @@ function ChromeDesktopInner() {
         // we still restore it. The FLOATING chat popup, however, must never
         // auto-open on load: it should appear only when the user taps the crab.
         // (We intentionally ignore a persisted `ui_chat_open` here.)
-        if (data.ui_chat_panel_width && Number(data.ui_chat_panel_width) > 0) {
+        //
+        // Never on a PHONE, though: the panel's geometry is a desktop one
+        // (765px anchored to the right edge), so a phone drew it at x=-381 over
+        // the whole home screen, with its header — title, new chat, dock, and
+        // every way back — off the left edge. The viewport is read here rather
+        // than from `isMobile`, whose resize effect may not have run yet when
+        // this answer lands.
+        const phone = typeof window !== "undefined" && window.innerWidth < 768;
+        dockWidthRef.current = Number(data.ui_chat_panel_width) || 0;
+        if (!phone && data.ui_chat_panel_width && Number(data.ui_chat_panel_width) > 0) {
           setChatPanelWidth(Number(data.ui_chat_panel_width));
           setChatOpen(true);
         }
@@ -501,51 +683,15 @@ function ChromeDesktopInner() {
       .catch(() => { prefsLoaded.current = true; });
   }, []);
 
-  const [clawkeepStale, setClawkeepStale] = useState(false);
-  const [clawkeepBusy, setClawkeepBusy] = useState(false);
-  const [clawkeepRestoring, setClawkeepRestoring] = useState(false);
-  useEffect(() => {
-    let aborted = false;
-    let inFlight = false;
-    const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
-    const check = async () => {
-      // Skip ticks while a previous fetch is still outstanding so a slow
-      // device doesn't pile up overlapping requests.
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const res = await fetch("/setup-api/clawkeep", { cache: "no-store" });
-        if (!res.ok) return;
-        const data = await res.json() as {
-          paired?: boolean;
-          lastBackupAtMs?: number;
-          lastHeartbeatStatus?: string;
-          restoring?: boolean;
-        };
-        if (aborted) return;
-        const stale =
-          !data.paired
-          || !data.lastBackupAtMs
-          || Date.now() - data.lastBackupAtMs > STALE_AFTER_MS;
-        setClawkeepStale(stale);
-        setClawkeepBusy(data.lastHeartbeatStatus === "running");
-        setClawkeepRestoring(!!data.restoring);
-      } catch {
-        // Leave last-known state alone on transient failures so the shield
-        // doesn't flicker on a brief network blip.
-      } finally {
-        inFlight = false;
-      }
-    };
-    void check();
-    // Poll often enough for the shelf shield to start/stop pulsing within
-    // a few seconds of a backup beginning or finishing.
-    const id = window.setInterval(() => { void check(); }, 5_000);
-    return () => {
-      aborted = true;
-      window.clearInterval(id);
-    };
-  }, []);
+  // The desktop shelf's ClawKeep shield: one verdict, shared with the ClawKeep
+  // card and the `backup_status` tool, and re-judged on a clock of its own so
+  // it keeps ageing when the box stops answering. See the hook.
+  const {
+    protection: clawkeepProtection,
+    unconfigured: clawkeepUnconfigured,
+    busy: clawkeepBusy,
+    restoring: clawkeepRestoring,
+  } = useClawkeepShieldStatus();
 
   const wpFitStyle: React.CSSProperties = wpFit === "fill"
     ? { backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
@@ -553,15 +699,97 @@ function ChromeDesktopInner() {
     ? { backgroundSize: "contain", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
     : { backgroundSize: "auto", backgroundPosition: "center", backgroundRepeat: "no-repeat" };
   const CUSTOM_WPS_KEY = "clawbox-custom-wallpapers";
-  const [customWallpapers, setCustomWallpapers] = useState<string[]>([]);
+  const [customWallpapers, setCustomWallpapersState] = useState<string[]>([]);
+  // Mirrored so the writers below can compute the next list without a
+  // functional updater. The upload and the delete used to do their localStorage
+  // write and their sibling `setWallpaperId` from INSIDE one, which React may
+  // run twice.
+  //
+  // EVERY writer advances the ref itself, before its state update — including
+  // the loader below, which is why there is no mirroring effect. An effect
+  // would have left a window one paint wide between the load committing and the
+  // ref catching up, and a delete dispatched inside it would compute
+  // `[].filter(…)` and write an empty list over every saved wallpaper.
+  //
+  // The raw setter is renamed out of reach and all three writers go through
+  // `applyCustomWallpapers` — the two that CHANGE the list by way of
+  // `storeCustomWallpapers`, which stores it first — so a fourth cannot advance
+  // the state while leaving the mirror behind. A mirror kept in step by convention is an invisible LOST
+  // write, and the purity rule cannot see one: it reports side effects INSIDE
+  // an updater, never a missing ref advance outside one.
+  // What a box with nothing showable selected PAINTS — this edition's own art,
+  // or the neutral one while the edition is unknown — against what it may
+  // WRITE, which is null until the device has named an edition. Both rules live
+  // in one module now; see the note on `persistableDefaultWallpaperId` there.
+  const persistableFallbackWallpaperId = brandWallpaperId(wallpaperHarness);
+  // The fallback below has to be able to tell "no custom wallpapers" from "not
+  // read yet": an empty initial state puts every `custom-<n>` out of range, so
+  // without this a perfectly good selection flashes the default on every load.
+  const [customWallpapersLoaded, setCustomWallpapersLoaded] = useState(false);
+  const customWallpapersRef = useRef<string[]>([]);
+  const applyCustomWallpapers = useCallback((next: string[]) => {
+    customWallpapersRef.current = next;
+    setCustomWallpapersState(next);
+  }, []);
+  // The STORED list is the OUTCOME of an upload or a delete, so it is written
+  // first and its failure is the whole operation's.
+  //
+  // It is what the next load paints, and `wp_id` — box-wide, in SQLite — is a
+  // position into it. Moving the state and the id over a list that never
+  // actually changed (site data blocked, a locked-down profile, quota) leaves
+  // the three disagreeing and a DIFFERENT picture on screen after a reload,
+  // with nothing said. So the operation simply does not happen and the owner
+  // is told why. The same rule is in src/app/app/[id]/page.tsx.
+  const storeCustomWallpapers = useCallback((next: string[], failure: string) => {
+    try {
+      localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next));
+    } catch {
+      window.dispatchEvent(new CustomEvent(TOAST_EVENT, { detail: { message: failure } }));
+      return false;
+    }
+    applyCustomWallpapers(next);
+    return true;
+  }, [applyCustomWallpapers]);
   // Wallpapers are large base64 blobs — keep in localStorage to avoid
   // bloating the KV JSON file that gets read/written on every state save.
   useEffect(() => {
     try {
       const saved = localStorage.getItem(CUSTOM_WPS_KEY);
-      if (saved) setCustomWallpapers(JSON.parse(saved));
+      if (saved) {
+        // Whatever is under this key is not necessarily a list: another tab,
+        // an older build, a hand-edited profile. A non-array reached the grid
+        // as `.map is not a function` — the standalone route already checks,
+        // and the two read the same key.
+        const parsed: unknown = JSON.parse(saved);
+        if (Array.isArray(parsed)) applyCustomWallpapers(parsed as string[]);
+      }
     } catch {}
-  }, []);
+    setCustomWallpapersLoaded(true);
+  }, [applyCustomWallpapers]);
+  // What is PAINTED, which is not always what the box holds.
+  //
+  // `wp_id` is box-wide (SQLite, read by every browser that opens the desktop)
+  // while the pictures are per-browser `localStorage`. So a `custom-<n>` this
+  // browser cannot answer is not a wrong selection to be repaired — it is
+  // almost always ANOTHER browser's, still resolving perfectly on the laptop
+  // that chose it. This browser has no standing to overwrite it: healing it
+  // box-wide would mean the box's own screen, or a phone, silently destroying
+  // the owner's wallpaper by being opened.
+  //
+  // So the fallback lives here, in the render, and nowhere else. `wallpaperId`
+  // — the value the debounced write sends — only ever changes on an explicit
+  // choice: picking a tile, uploading, or deleting the picture in use.
+  const renderedWallpaperId = resolveRenderedWallpaperId(
+    wallpaperId,
+    wallpaperHarness,
+    customWallpapersLoaded ? customWallpapers.length : null,
+  );
+  const currentWallpaper = wallpapers.find(w => w.id === renderedWallpaperId) || wallpapers[0];
+  // The strength the picture is painted at and the slider shows: the saved
+  // value, else the wallpaper's own default (an uploaded picture has none —
+  // `currentWallpaper` is only the list's first entry then, not the picture
+  // on screen, which is why the id is resolved again rather than reused).
+  const paintedWpOpacity = paintedWallpaperOpacity(wpOpacity, renderedWallpaperId, wallpapers);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const handleWallpaperUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -569,34 +797,97 @@ function ChromeDesktopInner() {
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result as string;
-      setCustomWallpapers(prev => {
-        const next = [...prev, dataUrl];
-        try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
-        setWallpaperId(`custom-${next.length - 1}`);
-        setWpOpacity(100);
-        return next;
-      });
+      // Computed from the ref, not from inside a `setCustomWallpapers` updater.
+      // React may run an updater twice, and this one wrote localStorage and
+      // called two other setters from inside it — the side-effect-in-an-updater
+      // shape TASK-703 removes from the chat surfaces. Idempotent today, which
+      // is exactly why it would go unnoticed.
+      const next = [...customWallpapersRef.current, dataUrl];
+      // `applyCustomWallpapers` advances the ref synchronously with the write,
+      // rather than a mirroring effect doing it after the commit: two uploads
+      // (or an upload and a delete) can both run before React commits, and both
+      // would otherwise read the same list and the second would discard the
+      // first — from the state AND from localStorage.
+      // Nothing was stored, so there is no picture to select: showing it and
+      // pointing the box-wide `wp_id` at it would put a slot on the card that
+      // the next load cannot paint.
+      if (!storeCustomWallpapers(next, "Could not save that wallpaper — this browser is not letting the page store them.")) return;
+      setWallpaperId(customWallpaperId(next.length - 1));
+      setWpOpacity(100);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
-  }, []);
+  }, [storeCustomWallpapers]);
 
   // ─── Chat (mascot click toggles chat popup) ───
   const [chatOpen, setChatOpen] = useState(false);
   const [chatPanelWidth, setChatPanelWidth] = useState(0);
   const [mascotX, setMascotX] = useState(85);
   const handleChatPanelModeChange = useCallback((panelWidth: number) => setChatPanelWidth(panelWidth), []);
+  // What the FLOATING chat covers, reported by the popup itself — only while a
+  // notice is on screen, since that is the one surface that has to dodge it.
+  const [chatFloatingRect, setChatFloatingRect] = useState<ChatFloatingRect | null>(null);
+  const handleChatFloatingRect = useCallback((rect: ChatFloatingRect | null) => setChatFloatingRect(rect), []);
 
-  // Open chat on skill-install or fix-error events so the user can watch
-  // the agent's response.
+  // ─── Where the floating chat stands among the windows ───
+  //
+  // It used to stand above all of them, always (a constant 10010 against a
+  // window's 100-and-up): a window opened while the chat was up had its
+  // minimize, maximize and close buttons underneath the popup, and the only way
+  // to reach them was to close the chat. So the floating chat draws from the
+  // SAME focus counter the windows do — open it or click in it and it comes to
+  // the front, focus a window and that window does. The docked panel is not
+  // part of this: windows reserve its strip instead of overlapping it, and it
+  // keeps DESKTOP_LAYERS.chat (see ChatPopup's `floatingZIndex`).
+  const [chatZIndex, setChatZIndex] = useState<number>(DESKTOP_LAYERS.window);
+  // null until the chat has taken a layer of its own: a chat that has never
+  // been raised must not be mistaken for one sitting on the counter's last
+  // value, or it would open UNDER the window that took that value.
+  const chatZIndexRef = useRef<number | null>(null);
+  const raiseChat = useCallback(() => {
+    const next = nextZIndexRef.current;
+    // Already the top surface. Without this, every pointer press inside the
+    // chat — every keystroke's click, every scroll grab — would spin the
+    // counter and re-render the whole desktop.
+    if (chatZIndexRef.current === next - 1) return;
+    // Advanced on the ref as well as in state, the way the wallpaper list is:
+    // two raises in one tick would otherwise both read the pre-commit value and
+    // the second would land on the same layer as the first.
+    chatZIndexRef.current = next;
+    nextZIndexRef.current = next + 1;
+    setChatZIndex(next);
+    setNextZIndex(next + 1);
+  }, []);
+  // Opening the chat puts it in front of whatever was focused before it.
+  useEffect(() => {
+    if (chatOpen) raiseChat();
+  }, [chatOpen, raiseChat]);
+
+  // Open chat on skill-install, fix-error or handed-over-message events so
+  // the user can watch the agent's response.
   useEffect(() => {
     const handler = () => setChatOpen(true);
-    window.addEventListener('clawbox-skill-installed', handler);
+    window.addEventListener(SKILL_CHANGE_EVENT, handler);
     window.addEventListener(FIX_ERROR_EVENT, handler);
+    window.addEventListener(CHAT_MESSAGE_EVENT, handler);
+    // The Coding Agent's "Create app" button: the chat has to be open before
+    // the card inside it can be seen.
+    window.addEventListener(NEW_APP_EVENT, handler);
     return () => {
-      window.removeEventListener('clawbox-skill-installed', handler);
+      window.removeEventListener(SKILL_CHANGE_EVENT, handler);
       window.removeEventListener(FIX_ERROR_EVENT, handler);
+      window.removeEventListener(CHAT_MESSAGE_EVENT, handler);
+      window.removeEventListener(NEW_APP_EVENT, handler);
     };
+  }, []);
+
+  // Chat-first on a phone and in the installed home-screen app: the page lands
+  // in the chat, with the desktop one tap behind it (the chat's Desktop button,
+  // the Android back gesture). Once per page load, so closing the chat to reach
+  // the desktop sticks until the next launch. The desktop on a big screen with
+  // a mouse is unchanged — see src/lib/mobile-chat-first.ts.
+  useEffect(() => {
+    if (shouldOpenChatFirst(readChatFirstEnvironment(window))) setChatOpen(true);
   }, []);
 
   // ─── Mascot visibility ───
@@ -636,43 +927,99 @@ function ChromeDesktopInner() {
   const isMobile = gridDims.mobile;
   const GRID_ROWS = 6;
   const CELL_W = gridDims.cellW;
+
+  // What the docked chat actually occupies: its width PLUS the gap it floats
+  // in, so a maximized window stops at the gap instead of sliding under the
+  // panel and showing through it. Derived rather than folded into
+  // `chatPanelWidth`, because that value is persisted and handed straight back
+  // to the chat as `initialPanelWidth` — adding the gap there would widen the
+  // panel by one gap on every reload.
+  //
+  // Zero on a PHONE, whatever the stored width says: the panel is a desktop
+  // layout and a phone draws the chat full-screen instead (see `panelMode` in
+  // ChatPopup), so reserving a 771px strip on a 390px screen would push the
+  // notice column off the left edge and inset a mascot that is not drawn. It
+  // is only the reservation that is dropped — the width itself is kept, so
+  // widening the window back docks the chat where it was. Read from `isMobile`
+  // rather than measured here, so the whole desktop changes its mind at one
+  // width.
+  const chatPanelInset = !isMobile && chatPanelWidth > 0 ? chatPanelWidth + CHAT_PANEL_GAP : 0;
   const [iconPositions, setIconPositions] = useState<IconLayout>({});
   const [draggingIcon, setDraggingIcon] = useState<string | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const [dragGhost, setDragGhost] = useState<{ row: number; col: number } | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
 
-  // ─── Unified SQLite save (debounced, after all state is declared) ───
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // ─── Preference writes (per key, debounced, after all state is declared) ───
+  // See usePreferenceWriter for why these are separate and why installed_apps
+  // and installed_meta are not among them.
+  const savePreferences = usePreferenceWriter(prefsLoaded);
   useEffect(() => {
-    if (!prefsLoaded.current) return;
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      fetch("/setup-api/preferences", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          wp_id: wallpaperId,
-          wp_fit: wpFit,
-          wp_bg_color: wpBgColor,
-          wp_opacity: wpOpacity,
-          installed_apps: installedApps,
-          installed_meta: installedMeta,
-          desktop_apps: desktopApps,
-          hidden_installed: hiddenInstalledApps,
-          pinned_apps: pinnedOverrides,
-          icon_grid: iconPositions,
-          desktop_open_windows: openWindows
-            .filter((w) => w.appId !== "setup")
-            .map(w => ({ appId: w.appId, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height })),
-          ui_mascot_hidden: mascotHidden ? 1 : 0,
-          ui_chat_panel_width: chatPanelWidth || 0,
-          ui_chat_open: chatOpen ? 1 : 0,
-        }),
-      }).catch(() => {});
-    }, 500);
-    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, installedApps, installedMeta, desktopApps, hiddenInstalledApps, pinnedOverrides, iconPositions, openWindows, mascotHidden, chatPanelWidth, chatOpen]);
+    // `wp_id` is left OUT while nothing has chosen one. The rest of the card is
+    // still the owner's to change: a box whose edition never resolved must be
+    // able to set its fit and opacity, and must not have a wallpaper picked for
+    // it box-wide by the browser that happened to open first. One slot for both
+    // shapes, so the transition does not cost a second POST. `wp_opacity` is
+    // left out the same way while the box holds none: the wallpaper's own
+    // default is painted, never persisted.
+    const appearance = {
+      wp_fit: wpFit,
+      wp_bg_color: wpBgColor,
+      ...(wpOpacity === null ? {} : { wp_opacity: wpOpacity }),
+    };
+    savePreferences(
+      wallpaperId === null ? appearance : { ...appearance, wp_id: wallpaperId },
+      "appearance",
+    );
+  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, savePreferences]);
+  useEffect(() => {
+    // The shed's version rides along with the list it changed, in ONE write:
+    // a second effect on the same dependency would cost a second POST on every
+    // first load that sheds, and the two must not be able to land apart — a box
+    // that shed its icons without recording the version would shed them again.
+    // STICKY, not consumed. The write is debounced by 500 ms and shares one slot
+    // with every later `desktop_apps` write, so a replacement queued inside that
+    // window cancels the pending one — and if the marker had been consumed by
+    // then, the payload that actually reaches the disk carries no version and
+    // the next load sheds the app the owner just restored. Carrying it on every
+    // write for the life of the page is idempotent (same value each time) and
+    // cannot lose the race.
+    if (shedNeeded.current !== null) {
+      shedRecorded.current = true;
+      shedNeeded.current = null;
+    }
+    savePreferences(
+      shedRecorded.current
+        ? { desktop_apps: desktopApps, desktop_apps_shed: DESKTOP_APPS_SHED_VERSION }
+        : { desktop_apps: desktopApps },
+      // An EXPLICIT slot, because this body has two shapes: without one the slot
+      // key is the field names, so the shed write and every later plain write
+      // would debounce in separate slots and could both be in flight. The
+      // appearance write above carries an explicit slot for the same reason.
+      "desktop_apps",
+    );
+  }, [desktopApps, shedTick, savePreferences]);
+  useEffect(() => { savePreferences({ hidden_installed: hiddenInstalledApps }); }, [hiddenInstalledApps, savePreferences]);
+  useEffect(() => { savePreferences({ pinned_apps: pinnedOverrides }); }, [pinnedOverrides, savePreferences]);
+  useEffect(() => { savePreferences({ icon_grid: iconPositions }); }, [iconPositions, savePreferences]);
+  useEffect(() => {
+    savePreferences({
+      desktop_open_windows: openWindows
+        .filter((w) => w.appId !== "setup")
+        .map(w => ({ appId: w.appId, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height })),
+    });
+  }, [openWindows, savePreferences]);
+  useEffect(() => { savePreferences({ ui_mascot_hidden: mascotHidden ? 1 : 0 }); }, [mascotHidden, savePreferences]);
+  // The dock width the desktop restores is the last one the chat had while it
+  // was OPEN. ChatPopup leaves panel mode whenever it closes — the X, Escape, a
+  // tap on the crab — and reports a width of 0 on the way out; persisting that
+  // zero threw the docked layout away, so the panel came back on one reload and
+  // was gone on the next. Closing a docked chat is not undocking it. A 0 while
+  // the chat is OPEN is the dock button, and that one is saved.
+  useEffect(() => {
+    if (chatOpen) dockWidthRef.current = chatPanelWidth || 0;
+    savePreferences({ ui_chat_panel_width: dockWidthRef.current, ui_chat_open: chatOpen ? 1 : 0 });
+  }, [chatPanelWidth, chatOpen, savePreferences]);
 
   // ─── Marquee selection ───
   const [selectedIcons, setSelectedIcons] = useState<Set<string>>(new Set());
@@ -787,13 +1134,29 @@ function ChromeDesktopInner() {
       e.preventDefault();
       setCtxMenu(null);
     };
+    // Escape closes it, the way it closes the launcher. The menu takes no
+    // focus, so nothing on the page was listening for the key and a click
+    // somewhere harmless was the only way out of it.
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setCtxMenu(null); };
     window.addEventListener("click", close);
     window.addEventListener("contextmenu", close);
+    window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("click", close);
       window.removeEventListener("contextmenu", close);
+      window.removeEventListener("keydown", onKey);
     };
   }, [ctxMenu]);
+
+  // The system tray — the power menu — is the desktop's other focus-less popup,
+  // and it stayed open on Escape too. (The launcher closes itself, with its
+  // animation; closing it from here would cut that short.)
+  useEffect(() => {
+    if (!trayOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setTrayOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [trayOpen]);
 
   const handleDesktopContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -992,22 +1355,34 @@ function ChromeDesktopInner() {
   }, [snapToGrid, selectedIcons, isMobile, allIconIds, iconGeometry, iconCanonicalOrder]);
 
 
-  // Update clock
+  // Update clock — in the desktop's own language, never the browser's: `[]`
+  // meant navigator.language, so a German box opened from an en-US browser
+  // showed "09:27 AM" on the shelf and "Monday, September 7" in the power
+  // menu while About printed its build date in German. Re-run when the
+  // locale resolves, since every provider starts on a provisional "en".
   useEffect(() => {
+    // …with the browser's REGION for that language, when it offers one:
+    // `locale` is a bare tag, and a bare "en" is en-US to Intl — "09:27 AM" for
+    // every English desktop, the en-GB, en-IE and en-ZA browsers that read
+    // "09:27" until now included. The box's language still wins: the German
+    // box above finds no "de-…" entry in an en-US browser's list and keeps
+    // "de". A bare "en" ahead of "en-GB" in the list adds nothing over
+    // `locale`, so only a regional entry is taken.
+    const tag = navigator.languages?.find((l) => l.toLowerCase().startsWith(`${locale}-`)) ?? locale;
     const updateClock = () => {
       const now = new Date();
-      setTime(now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
-      setDate(now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" }));
+      setTime(now.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit" }));
+      setDate(now.toLocaleDateString(tag, { weekday: "long", month: "long", day: "numeric" }));
     };
     updateClock();
     const interval = setInterval(updateClock, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [locale]);
 
   // Install app handler — called after AppStore's server-side install completes
   const handleInstallApp = useCallback((app: StoreApp) => {
     setInstalledApps((prev) => prev.includes(app.id) ? prev : [...prev, app.id]);
-    setInstalledMeta((prev) => ({ ...prev, [app.id]: { name: app.name, color: app.color, iconUrl: app.iconUrl } }));
+    setInstalledMeta((prev) => ({ ...prev, [app.id]: { name: app.name, color: app.color, iconUrl: app.iconUrl, developer: app.developer } }));
     setHiddenInstalledApps((prev) => prev.filter((id) => id !== app.id));
     setRecentlyInstalled(app.id);
     setTimeout(() => setRecentlyInstalled(null), 1000);
@@ -1015,29 +1390,126 @@ function ChromeDesktopInner() {
 
   // Uninstall confirmation
   const [uninstallConfirm, setUninstallConfirm] = useState<string | null>(null);
+  const dismissUninstall = useCallback(() => setUninstallConfirm(null), []);
+  // The same trap the Store's install confirmation uses — dialog role, Escape,
+  // focus moved in and restored — so a keyboard user is not left Tabbing
+  // through the scrim into the desktop behind it. Cancel is first in DOM
+  // order, so that is where focus lands rather than on the destructive button.
+  const uninstallTitleId = useId();
+  const uninstallPanelRef = useModalDialog<HTMLDivElement>({ open: uninstallConfirm !== null, onClose: dismissUninstall });
 
   const requestUninstallApp = useCallback((appId: string) => {
     setUninstallConfirm(appId);
   }, []);
 
+  // Read through a ref inside the callback: capturing `uninstallConfirm`
+  // directly made react-hooks/preserve-manual-memoization skip compiling the
+  // whole component. The dialog's confirm button only renders (and is only
+  // clickable) after the render that set the state, so the ref is current.
+  const uninstallConfirmRef = useRef<string | null>(null);
+  useEffect(() => {
+    uninstallConfirmRef.current = uninstallConfirm;
+  }, [uninstallConfirm]);
+
+  // Same reason, for the same callback: it needs the removed app's meta to say
+  // WHAT it removed, and taking `installedMeta` as a dependency would rebuild
+  // the callback on every install. Captured before the request is issued, so
+  // neither the prune below nor a preferences reload in flight can take it
+  // away.
+  const installedMetaRef = useRef<Record<string, InstalledMeta>>({});
+  useEffect(() => {
+    installedMetaRef.current = installedMeta;
+  }, [installedMeta]);
+
   const confirmUninstallApp = useCallback(async () => {
-    if (!uninstallConfirm) return;
-    const appId = uninstallConfirm;
-    // Remove skill files and reload gateway
+    const appId = uninstallConfirmRef.current;
+    if (!appId) return;
+    const removedMeta = installedMetaRef.current[appId];
+    // Remove skill files and reload gateway.
+    //
+    // The desktop only takes the app off itself once the route has said it
+    // removed it. A refusal is the route saying it removed NOTHING — an
+    // OpenClaw config it could not read, a skill folder it could not delete —
+    // and a thrown fetch (a network drop, or the 10 s abort below) says
+    // nothing at all about whether the removal landed. Dropping the icon on
+    // either is a false success in the one place the owner can see it: the
+    // tile is what they retry from, the list here is display-only (see the
+    // usePreferenceWriter note above — the ROUTE owns `installed_apps`), so
+    // the next reload would put the icon back with no explanation. Retrying
+    // is safe: a second uninstall of an app already gone answers `ok:true`.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    // Read inside the try, said outside it: the route reports whether a store
+    // skill of the same id went with the tile, and the sentence that mentions
+    // it is dispatched after the state cleanup below.
+    let skillRemoved: boolean | null | undefined;
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10_000);
-      await fetch("/setup-api/apps/uninstall", {
+      const res = await fetch("/setup-api/apps/uninstall", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ appId }),
         signal: controller.signal,
       });
-      clearTimeout(timer);
+      if (!res.ok) {
+        const failure = await res.json().catch(() => null);
+        const message = typeof failure?.error === "string"
+          ? failure.error
+          : "Couldn't uninstall this app — please try again.";
+        window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message } }));
+        setUninstallConfirm(null);
+        return;
+      }
+      // A removal that landed, over a device whose OpenClaw configuration
+      // could not be read: the route removed the web app and never got to look
+      // for a skill of the same id (one id can be both). The app IS off the
+      // desktop, so the cleanup below is right — but saying nothing would put
+      // this route's own defect back in the one surface the owner watches.
+      const removed = await res.json().catch(() => null);
+      skillRemoved = removed?.skillRemoved;
+      if (removed?.skillHalfChecked === false) {
+        window.dispatchEvent(new CustomEvent("clawbox:toast", {
+          detail: {
+            // The remedy, not just the problem. The desktop entry has just
+            // been dropped from `installed_apps`, so Settings → Apps will not
+            // list this app any more and there is no route back to it in the
+            // UI: the Terminal is the only way to remove the skill, and the
+            // agent is told exactly that (`mcp/tools/desktop.ts`). This toast
+            // auto-hides after 8 s, so the next step has to be IN it. 227 of
+            // the 280 characters `ToastHost` keeps.
+            message: "Removed from the desktop. OpenClaw's configuration couldn't be read, so its skills weren't checked — if this app also had a skill, it may still be installed. Remove it from the Terminal once the configuration is readable again.",
+          },
+        }));
+      }
     } catch (err) {
       console.warn("[uninstall] Failed to uninstall skill:", err);
+      // Worded as an unknown, not as a failure. The abort below is six times
+      // shorter than the 60 s the MCP tool gives the same route, and a skill
+      // folder with a large venv on a loaded Jetson can outrun it while the
+      // removal succeeds — so "couldn't uninstall" would be a false failure in
+      // the one surface the owner reads. A reload settles it, and a retry is
+      // harmless either way.
+      window.dispatchEvent(new CustomEvent("clawbox:toast", {
+        detail: { message: "Couldn't confirm the uninstall — reload the page to see whether it went through." },
+      }));
+      setUninstallConfirm(null);
+      return;
+    } finally {
+      clearTimeout(timer);
     }
     setInstalledApps((prev) => prev.filter((id) => id !== appId));
+    // Meta and the shelf-pin override go with the app: both used to outlive
+    // it, and the meta the desktop kept undid the route's own delete.
+    setInstalledMeta((prev) => {
+      const next = { ...prev };
+      delete next[appId];
+      return next;
+    });
+    setPinnedOverrides((prev) => {
+      if (!(`installed-${appId}` in prev)) return prev;
+      const next = { ...prev };
+      delete next[`installed-${appId}`];
+      return next;
+    });
     setOpenWindows((prev) => prev.filter((w) => w.appId !== `installed-${appId}`));
     setIconPositions((prev) => {
       const next = { ...prev };
@@ -1045,9 +1517,17 @@ function ChromeDesktopInner() {
       return next;
     });
     setUninstallConfirm(null);
-    // Refresh agent session with updated skills
-    window.dispatchEvent(new CustomEvent('clawbox-skill-installed', { detail: { action: 'uninstall', id: appId } }));
-  }, [uninstallConfirm]);
+    // Tell the chat what was actually removed. A webapp is not a skill — on
+    // Hermes it is the ONLY installed app an owner can remove
+    // (`isInstalledAppVisible` hides every other kind there) and "skill" is a
+    // live separate concept with its own store, so the old wording sent the
+    // agent to check a list the app was never in. `installedAppRemovedDetail`
+    // reads the meta captured above, which is still the pre-prune copy.
+    // `removed?.skillRemoved` is the route's own answer to "did a store skill
+    // of this id go too" — one id can be both, and a line that mentions only
+    // the tile hides a capability the owner has just lost.
+    announceSkillChange(installedAppRemovedDetail(appId, removedMeta, skillRemoved));
+  }, []);
 
   // Get all apps including installed ones
   const getAllApps = useCallback((): AppDef[] => {
@@ -1059,13 +1539,14 @@ function ChromeDesktopInner() {
       // or any openApp(id) path either, not just the desktop grid.
       if (meta && isInstalledAppVisible(meta, activeHarness)) {
         const isWebapp = !!meta.webappUrl;
-        const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl };
+        const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl, developer: meta.developer };
         installedAppDefs.push({
           id: `installed-${appId}`,
           name: meta.name,
           color: meta.color,
           type: isWebapp ? "webapp" : "installed",
           url: isWebapp ? meta.webappUrl : undefined,
+          launch: isWebapp ? meta.launch : undefined,
           pinned: false,
           defaultWidth: isWebapp ? 800 : 600,
           defaultHeight: isWebapp ? 600 : 400,
@@ -1082,7 +1563,7 @@ function ChromeDesktopInner() {
       ...installedAppDefs,
       {
         id: "setup",
-        name: "Setup",
+        name: "app.setup",
         color: "#f97316",
         type: "setup",
         pinned: false,
@@ -1098,7 +1579,13 @@ function ChromeDesktopInner() {
     return visibleWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b)).id;
   }, [openWindows]);
 
-  const openApp = useCallback((appId: string, forceNew = false) => {
+  const openApp = useCallback((appId: string, forceNew = false, meta?: Record<string, string>) => {
+    // `maximize` is a request, not a property of the window: the record
+    // keeps a nonce ChromeWindow maximizes on, and the rest of `meta` rides
+    // with the window (a Terminal's command).
+    const { maximize, ...windowMeta } = meta ?? {};
+    const wantMaximized = maximize === "true";
+    const maxNonce = wantMaximized ? { maximizeNonce: Date.now() } : {};
     const allApps = getAllApps();
     const app = allApps.find((a) => a.id === appId);
     if (!app) return;
@@ -1113,8 +1600,29 @@ function ChromeDesktopInner() {
       return;
     }
 
+    if (app.type === "webapp" && app.url && app.launch === "window") {
+      // The app's meta asks for a real top-level browser document (e.g.
+      // pointer lock for an FPS), which the sandboxed desktop iframe blocks —
+      // open in a new browser window instead. Same rule as the iframe branch
+      // below: http(s) or a same-origin path only, so a `javascript:` URL in
+      // an installed app's meta cannot run in the desktop's top-level window.
+      // Anything else falls through to the sandboxed iframe.
+      try {
+        const u = new URL(app.url, window.location.origin);
+        if (["http:", "https:"].includes(u.protocol)) {
+          window.open(u.href, "_blank", "noopener,noreferrer");
+          return;
+        }
+      } catch {}
+    }
+
     if (app.type === "chat") {
       setChatOpen(true);
+      // Also when it is ALREADY open: the chat now takes its turn in the focus
+      // order like a window, so the shelf's chat button has to be able to pull
+      // it out from under one — `setChatOpen(true)` on an open chat is a no-op
+      // and would leave the button dead on a covered chat.
+      raiseChat();
       return;
     }
 
@@ -1127,7 +1635,7 @@ function ChromeDesktopInner() {
           setOpenWindows((prev) =>
             prev.map((w) =>
               w.id === existingWindow.id
-                ? { ...w, minimized: false, zIndex: nextZIndex }
+                ? { ...w, minimized: false, zIndex: nextZIndex, ...maxNonce }
                 : w
             )
           );
@@ -1136,7 +1644,7 @@ function ChromeDesktopInner() {
           // Bring to front
           setOpenWindows((prev) =>
             prev.map((w) =>
-              w.id === existingWindow.id ? { ...w, zIndex: nextZIndex } : w
+              w.id === existingWindow.id ? { ...w, zIndex: nextZIndex, ...maxNonce } : w
             )
           );
           setNextZIndex((z) => z + 1);
@@ -1149,10 +1657,10 @@ function ChromeDesktopInner() {
     const windowId = `${appId}-${Date.now()}`;
     setOpenWindows((prev) => [
       ...prev,
-      { id: windowId, appId, zIndex: nextZIndex, minimized: false },
+      { id: windowId, appId, zIndex: nextZIndex, minimized: false, ...(Object.keys(windowMeta).length ? { meta: windowMeta } : {}), ...maxNonce },
     ]);
     setNextZIndex((z) => z + 1);
-  }, [openWindows, nextZIndex, getAllApps]);
+  }, [openWindows, nextZIndex, getAllApps, raiseChat]);
 
   const closeWindow = useCallback((windowId: string) => {
     setOpenWindows((prev) => prev.filter((w) => w.id !== windowId));
@@ -1178,22 +1686,64 @@ function ChromeDesktopInner() {
   }, [syncSetupStatus]);
 
   // ─── Android back button / browser back handling ───
+  // One history entry per thing Back can close: the launcher, the tray, the
+  // phone's full-screen chat, every open window, and every in-app level a
+  // screen registered (src/lib/mobile-back.ts). Entries are pushed when the
+  // count GROWS, i.e. in the commit right after the tap that opened something,
+  // while that tap still counts as a user activation. The old scheme pushed a
+  // single entry at mount and re-pushed it from inside `popstate`, neither
+  // with an activation, and Chrome on Android skips such entries on the back
+  // gesture: the first Back closed an app, the second left ClawBox.
+  //
+  // Each entry is an OBJECT with a marker field, a fresh one per push — never
+  // a string: Next's app router patches `pushState` and, while the current
+  // entry is its own, writes its fields (`__NA`, its route tree) onto whatever
+  // is pushed. On a string that is a TypeError (it once replaced the desktop
+  // with Next's error page and made the back gesture do nothing at all).
+  const inAppBackDepth = useMobileBackDepth();
+  const visibleWindowCount = openWindows.filter(w => !w.minimized).length;
+  const backDepth = (launcherOpen ? 1 : 0) + (trayOpen ? 1 : 0) + (isMobile && chatOpen ? 1 : 0)
+    + visibleWindowCount + inAppBackDepth;
+  const historyDepthRef = useRef(0);
+  const ignoredPopsRef = useRef(0);
   useEffect(() => {
-    // Push a dummy history state so back button triggers popstate instead of leaving
-    const pushState = () => {
-      if (window.history.state !== "clawbox") {
-        window.history.pushState("clawbox", "");
+    const have = historyDepthRef.current;
+    if (backDepth > have) {
+      for (let d = have + 1; d <= backDepth; d++) {
+        window.history.pushState({ clawbox: true, clawboxDepth: d }, "");
       }
-    };
-    pushState();
+      historyDepthRef.current = backDepth;
+    } else if (backDepth < have) {
+      // Closed from the UI rather than by Back: drop the entries it no longer
+      // needs, so the next Back closes the next thing instead of nothing.
+      historyDepthRef.current = backDepth;
+      ignoredPopsRef.current += 1;
+      window.history.go(backDepth - have);
+    }
+  }, [backDepth]);
 
+  useEffect(() => {
     const handleBack = (e: PopStateEvent) => {
-      // Re-push state to stay on the page
-      pushState();
+      if (ignoredPopsRef.current > 0) { ignoredPopsRef.current -= 1; return; }
+      const state = e.state as { clawbox?: unknown; clawboxDepth?: unknown } | null;
+      const landed = state && state.clawbox === true && typeof state.clawboxDepth === "number" ? state.clawboxDepth : 0;
+      if (landed > historyDepthRef.current) {
+        // Forward: nothing to reopen, so step back to where the desktop is.
+        ignoredPopsRef.current += 1;
+        window.history.go(historyDepthRef.current - landed);
+        return;
+      }
+      historyDepthRef.current = landed;
 
       // Close things in priority order
       if (launcherOpen) { setLauncherOpen(false); return; }
       if (trayOpen) { setTrayOpen(false); return; }
+      // On a phone the chat is full-screen and above every window, so it is
+      // the top thing Back can close — and closing it is how the phone gets
+      // from the chat it opened in to the desktop behind it.
+      if (isMobile && chatOpen) { setChatOpen(false); return; }
+      // A screen inside the top app with a level above it: go up one level.
+      if (runMobileBack()) return;
 
       // Close topmost non-minimized window
       const visible = openWindows.filter(w => !w.minimized);
@@ -1206,7 +1756,7 @@ function ChromeDesktopInner() {
 
     window.addEventListener("popstate", handleBack);
     return () => window.removeEventListener("popstate", handleBack);
-  }, [launcherOpen, trayOpen, openWindows, closeWindow]);
+  }, [launcherOpen, trayOpen, openWindows, closeWindow, isMobile, chatOpen]);
 
   // ─── Poll for MCP-triggered UI actions (open app, notify, etc.) ───
   const openAppRef = useRef(openApp);
@@ -1214,56 +1764,174 @@ function ChromeDesktopInner() {
 
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ appId?: string }>).detail;
-      if (detail?.appId) openAppRef.current(detail.appId);
+      const detail = (e as CustomEvent<OpenAppDetail>).detail;
+      if (!detail?.appId) return;
+      const meta = { ...(detail.maximize ? { maximize: "true" } : {}), ...(detail.meta ?? {}) };
+      openAppRef.current(detail.appId, detail.forceNew === true, Object.keys(meta).length ? meta : undefined);
     };
     window.addEventListener(OPEN_APP_EVENT, handler);
     return () => window.removeEventListener(OPEN_APP_EVENT, handler);
   }, []);
 
+  // The Coding Agent app asks for a terminal on a specific run: a live tail
+  // while it works, or `claude-ds --resume` once it has finished. Through
+  // openAppRef like the OPEN_APP_EVENT handler above: this listener used to
+  // sit in a run-once effect holding the first render's openApp, whose
+  // nextZIndex was still 100, so every terminal it opened landed BEHIND the
+  // Coding Agent window the owner had just clicked in — and that effect never
+  // removed the listener either.
+  useEffect(() => {
+    const handleOpenTerminal = (e: Event) => {
+      const command = (e as CustomEvent<{ command?: string }>).detail?.command;
+      if (typeof command !== "string" || !command) return;
+      // forceNew: a second run must get its own terminal rather than typing
+      // into one already busy following the first. The command rides on THAT
+      // window's record — it used to sit in shared state, so every Terminal
+      // opened later, a plain one from the shelf included, retyped the last
+      // run's command into its shell.
+      openAppRef.current("terminal", true, { command });
+    };
+    window.addEventListener("clawbox:open-terminal", handleOpenTerminal);
+    return () => window.removeEventListener("clawbox:open-terminal", handleOpenTerminal);
+  }, []);
+
+  /** Finished coding runs waiting to be seen, newest first. */
+  const [codingNotices, setCodingNotices] = useState<{ runId: string; status: string; projectId: string | null; message: string }[]>([]);
+  // A finish card leaves on its own after a while — the owner asked for every
+  // top-right card to "hide after some time" — and the run is always one
+  // click away in the app. Keyed by run id so a card re-shown by a ring
+  // replay keeps its clock and never gets two.
+  const dismissCodingNotice = useCallback((runId: string) => {
+    setCodingNotices(prev => prev.filter(n => n.runId !== runId));
+  }, []);
+  const codingNoticeKeys = useMemo(() => codingNotices.map(n => n.runId), [codingNotices]);
+  useAutoHide(codingNoticeKeys, dismissCodingNotice);
+
+
+  // The owner-notice ring: `ui:pending-actions` holds an array of
+  // { id, ts, ...action }, newest last, written through pushPendingAction()
+  // in src/lib/pending-actions.ts by every server-side notice (ui_notify,
+  // `clawbox notify`, the coding agent's finish card, the webapp icon nudge).
+  // Readers never delete or rewrite it — the writer prunes it. The previous
+  // single-value slot was deleted by whichever desktop polled first, so with
+  // a phone, a second tab or the remote-control tunnel open, every other
+  // desktop missed the notice. Each desktop instead remembers what it has
+  // seen: a watermark with a few seconds of replay grace, plus the ids at or
+  // past it. The coding card is deduped by run id and register_webapp is
+  // idempotent, so a replay is harmless. Entries are stamped by the BOX's
+  // clock, which can be minutes off before NTP syncs (no RTC), so the
+  // watermark is baselined against the ring's own newest stamp on first
+  // sight rather than the browser's clock — comparing across the two dropped
+  // every notice while the box ran behind.
   useEffect(() => {
     let active = true;
-    let lastProcessedTs = 0;
     let polling = false;
+    let lastSeenTs = Date.now() - 5_000;
+    let baselined = false;
+    let seen = new Set<string>();
+    const handle = (action: Record<string, unknown>) => {
+      if (action.type === "open_app" && typeof action.appId === "string") {
+        openAppRef.current(action.appId);
+      } else if (action.type === "register_webapp" && typeof action.appId === "string" && action.name && action.url) {
+        const appId = action.appId;
+        setInstalledApps(prev => prev.includes(appId) ? prev : [...prev, appId]);
+        setInstalledMeta(prev => ({
+          ...prev,
+          [appId]: {
+            name: String(action.name),
+            color: typeof action.color === "string" && action.color ? action.color : "#f97316",
+            iconUrl: typeof action.iconUrl === "string" ? action.iconUrl : "",
+            webappUrl: String(action.url),
+          },
+        }));
+        setHiddenInstalledApps(prev => prev.includes(appId) ? prev.filter(id => id !== appId) : prev);
+      } else if (action.type === "coding_agent" && typeof action.runId === "string") {
+        // A finished coding run is something the owner may want to act on,
+        // so it becomes a top-right CARD with a button rather than a toast
+        // that slides away. Newest first, deduped by run id.
+        const runId = action.runId;
+        setCodingNotices(prev => (
+          prev.some(n => n.runId === runId)
+            ? prev
+            : [{ runId, status: String(action.status ?? ""), projectId: typeof action.projectId === "string" ? action.projectId : null, message: String(action.message ?? "") }, ...prev].slice(0, 3)
+        ));
+        // A notice here can be the first this browser hears of a run — one
+        // started from another device, or the server-side review pass that
+        // follows a finish. Nudge the activity hook (idempotent: it only
+        // re-asks the runs route) so an open chat shows the run card too.
+        notifyCodingRunStarted();
+      } else if (action.type === "notify") {
+        // A notice may name where it takes the owner — the email-approval
+        // toast opens Settings → Email. The destination is checked against the
+        // allowlist here as well as where it was written: the ring is a file
+        // on disk in between, and one of its writers is the agent-driven
+        // `ui_notify`.
+        const detail = toastDetailForNotice(action);
+        if (detail) window.dispatchEvent(new CustomEvent("clawbox:toast", { detail }));
+      }
+    };
     const poll = async () => {
       if (!active || polling) return;
       polling = true;
       try {
-        const res = await fetch("/setup-api/kv?key=ui:pending-action");
+        const res = await fetch("/setup-api/kv?key=ui:pending-actions");
+        // An update took the box while this desktop was open. The middleware
+        // redirects NAVIGATIONS to the updating page, and an open page makes
+        // none — so without this it stayed here, kept polling, and went blank
+        // when the rebuild stopped the web server under it; only a manual
+        // reload reached the screen built for this. Read off a request the
+        // desktop was making anyway, so no interval or endpoint exists for it.
+        //
+        // `replace`, not `assign`: the desktop this leaves is a page the
+        // middleware would bounce straight back, so it must not be in history.
+        if (res.headers.get(UPDATE_LOCK_HEADER) === "1") {
+          window.location.replace(UPDATING_PAGE);
+          return;
+        }
         if (res.ok) {
+          // How old an entry is, judged on the one clock both sides agree on:
+          // the response's own Date header, which is the BOX's clock — the same
+          // clock that stamped the entry — so the skew this poll works around
+          // everywhere else cannot creep back in here.
+          //
+          // The ring is pruned by its WRITER, so an entry nothing has pushed
+          // over stays in it for hours, and the baseline below makes the newest
+          // entry news on every fresh desktop: a "Coding agent finished" card
+          // from two hours ago reappeared on every load and after every
+          // dismissal. Nothing older than the ring's own TTL is news.
+          const serverNow = Date.parse(res.headers.get("date") ?? "");
+          const freshFrom = Number.isFinite(serverNow) ? serverNow - PENDING_ACTION_MAX_AGE_MS : 0;
           const data = await res.json();
-          if (data.value) {
-            const action = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
-            const ts = action.ts ?? 0;
-            // Skip if already processed
-            if (ts > 0 && ts <= lastProcessedTs) { polling = false; return; }
-            lastProcessedTs = ts;
-            // Delete before processing to prevent re-reads. The KV route's
-            // delete contract is { delete: "<key>" } — sending { delete: true }
-            // silently 400s, leaving the action in KV so it re-fires (and
-            // reopens the app) on every reload.
-            await fetch("/setup-api/kv", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ delete: "ui:pending-action" }),
-            }).catch(() => {});
-            if (action.type === "open_app" && action.appId) {
-              openAppRef.current(action.appId);
-            } else if (action.type === "register_webapp" && action.appId && action.name && action.url) {
-              setInstalledApps(prev => prev.includes(action.appId) ? prev : [...prev, action.appId]);
-              setInstalledMeta(prev => ({
-                ...prev,
-                [action.appId]: {
-                  name: action.name,
-                  color: action.color || "#f97316",
-                  iconUrl: action.iconUrl || "",
-                  webappUrl: action.url,
-                },
-              }));
-              setHiddenInstalledApps(prev => prev.includes(action.appId) ? prev.filter(id => id !== action.appId) : prev);
-            } else if (action.type === "notify" && action.message) {
-              window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: action.message } }));
+          const ring = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
+          if (Array.isArray(ring)) {
+            if (!baselined && ring.length > 0) {
+              const newestRing = ring.reduce((max: number, e: unknown) => {
+                const ts = e && typeof e === "object" && typeof (e as { ts?: unknown }).ts === "number" ? (e as { ts: number }).ts : 0;
+                return ts > max ? ts : max;
+              }, 0);
+              if (newestRing > 0) {
+                lastSeenTs = newestRing - 5_000;
+                baselined = true;
+              }
             }
+            const present = new Set<string>();
+            let newest = lastSeenTs;
+            for (const entry of ring) {
+              if (!entry || typeof entry !== "object") continue;
+              const action = entry as Record<string, unknown>;
+              const id = typeof action.id === "string" ? action.id : "";
+              const ts = typeof action.ts === "number" ? action.ts : 0;
+              if (!id || ts < lastSeenTs || ts < freshFrom) continue;
+              present.add(id);
+              if (seen.has(id)) continue;
+              seen.add(id);
+              if (ts > newest) newest = ts;
+              handle(action);
+            }
+            // Ids the writer has pruned can be forgotten; what is left is
+            // bounded by the ring's own cap.
+            seen = new Set([...seen].filter(id => present.has(id)));
+            lastSeenTs = newest;
           }
         }
       } catch {}
@@ -1273,14 +1941,37 @@ function ChromeDesktopInner() {
     return () => { active = false; clearInterval(id); };
   }, []);
 
+  // Answers the KV requests framed webapps post — see src/lib/webapp-kv-bridge.ts.
+  useEffect(() => attachWebappKvBridge(), []);
+
   // Surfaces a corner card when ClawBox or OpenClaw has a newer release.
   // Dismissals persist per exact target-version pair via SQLite so the user
   // isn't pestered across browsers or after a cache wipe.
-  const [updateAvailable, setUpdateAvailable] = useState<{
-    clawbox: { current: string | null; target: string | null; updateAvailable?: boolean };
-    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
+  const [updateAvailable, setUpdateAvailableState] = useState<{
+    // `updateAvailable` is `boolean | null` — null is "the device could not
+    // check", which this card treats as the absent field it already handled:
+    // no notice, because there is nothing it can honestly offer.
+    clawbox: { current: string | null; target: string | null; updateAvailable?: boolean | null };
+    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean | null };
   } | null>(null);
+  // Mirrors `updateAvailable` so the dismiss handler can read the notice it is
+  // dismissing WITHOUT an updater. Every writer advances it on the line before
+  // its own state write — the same rule the custom wallpapers follow in this
+  // file, and the reason there is no mirroring effect: an effect leaves a
+  // window in which the ref is behind the state.
+  //
+  // As with the custom wallpapers above, the raw setter is renamed out of reach
+  // so no writer can advance the state without the mirror.
+  const updateAvailableRef = useRef<typeof updateAvailable>(null);
+  const applyUpdateAvailable = useCallback((next: typeof updateAvailable) => {
+    updateAvailableRef.current = next;
+    setUpdateAvailableState(next);
+  }, []);
   const lastVersionFingerprintRef = useRef<string | null>(null);
+  // Gone for THIS session once its clock runs out — never recorded as a
+  // dismissal, so the card is back after a reload and in the next session,
+  // and Settings → System Update shows the same fact meanwhile.
+  const [updateNoticeHidden, setUpdateNoticeHidden] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -1299,7 +1990,7 @@ function ChromeDesktopInner() {
         lastVersionFingerprintRef.current = fingerprint;
 
         if (!clawboxNeedsUpdate && !openclawNeedsUpdate) {
-          setUpdateAvailable(null);
+          applyUpdateAvailable(null);
           return;
         }
         // Only hit the dismissal store when we actually have something to suppress.
@@ -1309,38 +2000,49 @@ function ChromeDesktopInner() {
           try { dismissed = (await dismissalRes.json()).fingerprint ?? null; } catch {}
         }
         const dismissalFingerprint = `${data.clawbox?.target ?? ""}|${data.openclaw?.target ?? ""}`;
-        setUpdateAvailable(dismissed === dismissalFingerprint ? null : data);
+        applyUpdateAvailable(dismissed === dismissalFingerprint ? null : data);
+        // A different pair of versions is a different notice.
+        setUpdateNoticeHidden(false);
       } catch { /* network blip — try again next interval */ }
     };
     checkVersions();
     const id = setInterval(checkVersions, 30 * 60 * 1000);
     return () => { active = false; clearInterval(id); };
-  }, []);
+  }, [applyUpdateAvailable]);
+
+  const updateNoticeKeys = useMemo(() => (updateAvailable && !updateNoticeHidden ? ["update"] : []), [updateAvailable, updateNoticeHidden]);
+  const hideUpdateNotice = useCallback(() => setUpdateNoticeHidden(true), []);
+  useAutoHide(updateNoticeKeys, hideUpdateNotice);
 
   const dismissUpdateNotification = useCallback(() => {
-    setUpdateAvailable((current) => {
-      if (current) {
-        const fingerprint = `${current.clawbox?.target ?? ""}|${current.openclaw?.target ?? ""}`;
-        fetch("/setup-api/update/dismissal", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fingerprint }),
-        }).catch(() => { /* will retry next dismiss */ });
-      }
-      return null;
-    });
-  }, []);
+    // The POST is OUTSIDE the updater. React is entitled to run an updater
+    // twice, so this dismissal was recorded once per render attempt rather than
+    // once per click — two POSTs to /setup-api/update/dismissal, two
+    // `sqliteSet`s. Idempotent, which is exactly why nobody had seen it.
+    const current = updateAvailableRef.current;
+    if (current) {
+      const fingerprint = `${current.clawbox?.target ?? ""}|${current.openclaw?.target ?? ""}`;
+      fetch("/setup-api/update/dismissal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fingerprint }),
+      }).catch(() => { /* will retry next dismiss */ });
+    }
+    applyUpdateAvailable(null);
+  }, [applyUpdateAvailable]);
 
-  const openUpdateSettings = useCallback(() => {
-    openAppRef.current("system_update");
-    dismissUpdateNotification();
-  }, [dismissUpdateNotification]);
-
-  const openSettingsSection = useCallback((section: "ai" | "localAi") => {
+  const openSettingsSection = useCallback((section: "ai" | "localAi" | "system" | "update") => {
     (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = section;
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section } }));
     openApp("settings");
   }, [openApp]);
+
+  // The system update lives in Settings → System Update now; the notice's
+  // button lands there rather than on the old standalone window.
+  const openUpdateSettings = useCallback(() => {
+    openSettingsSection("update");
+    dismissUpdateNotification();
+  }, [openSettingsSection, dismissUpdateNotification]);
 
   const openClawAiProviderSettings = useCallback(() => {
     const w = window as Window & {
@@ -1372,6 +2074,10 @@ function ChromeDesktopInner() {
   >([]);
   const [approvingPairCode, setApprovingPairCode] = useState<string | null>(null);
 
+  // Requests whose card has timed out in this session. Not the persisted
+  // dismissal list: that is the owner's "no", this is only "not on screen".
+  const expiredPairCodesRef = useRef(new Set<string>());
+
   const loadDismissedPairCodes = useCallback((): Set<string> => {
     try { return new Set(JSON.parse(localStorage.getItem("clawbox:telegram-pairing-dismissed") || "[]")); }
     catch { return new Set(); }
@@ -1387,10 +2093,15 @@ function ChromeDesktopInner() {
         const res = await fetch("/setup-api/telegram/pairing?poll=1", { cache: "no-store" });
         if (res.ok) {
           const data = await res.json();
-          if (data.configured && Array.isArray(data.pending)) {
+          // `unknown` is not "no bot": the route could not read this device's
+          // Telegram credential, and it still answers with the pairing store,
+          // which is a different file. Reading that third state as an empty
+          // list is what cleared a waiting access request off every screen.
+          if ((data.configured || data.unknown) && Array.isArray(data.pending)) {
             const dismissed = loadDismissedPairCodes();
+            const expired = expiredPairCodesRef.current;
             setPairingRequests(
-              data.pending.filter((r: { code?: string }) => r.code && !dismissed.has(r.code)),
+              data.pending.filter((r: { code?: string }) => r.code && !dismissed.has(r.code) && !expired.has(r.code)),
             );
           } else {
             setPairingRequests([]);
@@ -1427,6 +2138,16 @@ function ChromeDesktopInner() {
       setApprovingPairCode(null);
     }
   }, []);
+
+  const pairingNoticeKeys = useMemo(
+    () => pairingRequests.map((r) => r.code).filter((code): code is string => Boolean(code)),
+    [pairingRequests],
+  );
+  const expirePairingNotice = useCallback((code: string) => {
+    expiredPairCodesRef.current.add(code);
+    setPairingRequests((prev) => prev.filter((r) => r.code !== code));
+  }, []);
+  useAutoHide(pairingNoticeKeys, expirePairingNotice);
 
   const dismissPairingRequest = useCallback((code: string) => {
     const dismissed = loadDismissedPairCodes();
@@ -1522,12 +2243,14 @@ function ChromeDesktopInner() {
         return (
           <div className="h-full overflow-y-auto">
             <SettingsApp ui={{
-              wallpaperId,
+              // What is on screen, not what the box holds: the panel must not
+              // highlight — or name — a slot this browser cannot show.
+              wallpaperId: renderedWallpaperId,
               wpFit,
               wpBgColor,
-              wpOpacity,
+              wpOpacity: paintedWpOpacity,
               mascotHidden,
-              wallpapers: wallpapers.map(w => ({ id: w.id, name: w.name, image: w.image || undefined })),
+              wallpapers,
               customWallpapers,
               onWallpaperChange: setWallpaperId,
               onWpFitChange: setWpFit,
@@ -1536,18 +2259,40 @@ function ChromeDesktopInner() {
               onMascotToggle: setMascotHidden,
               onWallpaperUpload: () => wallpaperInputRef.current?.click(),
               onCustomWallpaperDelete: (idx: number) => {
-                setCustomWallpapers(prev => {
-                  const next = prev.filter((_, i) => i !== idx);
-                  try { localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(next)); } catch {}
-                  if (wallpaperId === `custom-${idx}`) setWallpaperId("clawbox");
-                  return next;
-                });
+                // Same as the upload above: outside the updater, and off the
+                // ref rather than off `prev`.
+                const before = customWallpapersRef.current;
+                const next = before.filter((_, i) => i !== idx);
+                // Nothing was removed, so nothing is renumbered.
+                if (!storeCustomWallpapers(next, "Could not remove that wallpaper — this browser is not letting the page store them.")) return;
+                // `custom-<n>` is an INDEX into that list, so deleting one
+                // renumbers every picture after it. Through the SHARED rule,
+                // which is also what src/app/app/[id]/page.tsx's handler and
+                // the background below now use — and the fallback is the
+                // harness's own art, so a Hermes box does not land on the
+                // ClawBox wallpaper.
+                // Off the STORED id, not the rendered one: this is the write
+                // that goes to the box, and it must renumber what the box
+                // actually holds. `before` is the list as it stood immediately
+                // ahead of THIS delete — captured before the store above, which
+                // advances the ref to the shortened one — and it is what tells
+                // the rule whether the saved id was an index into this
+                // browser's list at all.
+                //
+                // Nothing chosen yet is nothing to renumber: the fallback on
+                // screen is a built-in, so no `custom-<n>` can be pointing into
+                // this list, and writing one now would persist a selection the
+                // owner never made.
+                if (wallpaperId === null) return;
+                setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, before, persistableFallbackWallpaperId));
               },
             }} />
           </div>
         );
       case "terminal":
-        return <TerminalApp />;
+        return <TerminalTabs initialCommand={_meta?.command} />;
+      case "coding":
+        return <CodingAgentApp />;
       case "store":
         return (
           <AppStore
@@ -1568,9 +2313,11 @@ function ChromeDesktopInner() {
           />
         ) : null;
       case "files":
-        return <FilesApp />;
+        return <FilesApp initialPath={_meta?.path} />;
       case "clawkeep":
         return <ClawKeepApp />;
+      case "memory_shard":
+        return <MemoryShardApp />;
       case "system_update":
         return <SystemUpdateApp />;
       case "browser":
@@ -1580,11 +2327,21 @@ function ChromeDesktopInner() {
       case "webapp": {
         let webappSrc = "about:blank";
         try { const u = new URL(app.url || "", window.location.origin); if (["http:", "https:"].includes(u.protocol)) webappSrc = u.href; } catch {}
+        // Sandboxed to an opaque origin, the same as /app/[id]: the app is HTML
+        // the agent wrote, and with allow-same-origin it ran in the desktop's
+        // origin with the owner's session. Its persistence goes through the KV
+        // bridge (data-webapp-id is how the bridge knows whose keys to serve).
+        // A project's own server proxied under /apps/<id>/ is the exception
+        // to the ATTRIBUTE: a sandboxed frame's navigation carries no cookie
+        // and that document needs the owner's; the proxy serves it under a
+        // CSP sandbox instead, which boxes it the same way
+        // (src/lib/app-proxy.ts).
         return (
           <iframe
             src={webappSrc}
             style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
-            sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
+            sandbox={isProxiedAppUrl(webappSrc) ? undefined : WEBAPP_IFRAME_SANDBOX}
+            data-webapp-id={app.storeApp?.id}
             title={resolveAppName(app)}
           />
         );
@@ -1735,8 +2492,26 @@ function ChromeDesktopInner() {
     setTimeout(() => { setUploadStatus(null); setUploadProgress(0); }, 3000);
   }, [uploadFileWithProgress]);
 
+  // Is a top-right card on screen at all? Asked once, because it decides two
+  // things: whether the column is drawn, and whether the chat is asked to
+  // report where it is standing (a rect per pointer move of a drag is not a
+  // price to pay while nothing is dodging it).
+  const noticesUp = Boolean(
+    (updateAvailable && !updateNoticeHidden)
+    || showClawAiOfferNotification
+    || pairingRequests.length > 0
+    || codingNotices.length > 0,
+  );
+  // Beside the chat, not on top of it. The docked half is the strip the panel
+  // reserves; the floating half is the popup's own rect, which lands in the
+  // same top-right corner the cards do and hid the chat's +, dock and close
+  // buttons for the 30 s a card takes to hide itself.
+  const noticeRightInset = chatPanelInset > 0
+    ? chatPanelInset
+    : noticeColumnInset(chatFloatingRect, typeof window !== "undefined" ? window.innerWidth : 0, NOTICE_COLUMN_WIDTH, NOTICE_MARGIN);
+
   if (!setupChecked || setupRequired) {
-    return <div className="bg-[#0a0f1a]" style={{ height: '100dvh' }} />;
+    return <div className="bg-[var(--bg-deep)]" style={{ height: '100dvh' }} />;
   }
 
   return (
@@ -1757,17 +2532,17 @@ function ChromeDesktopInner() {
       <TierUpgradeCelebration />
       {/* Drop overlay */}
       {desktopDragOver && (
-        <div className="fixed inset-0 z-[99998] flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
+        <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none" style={{ zIndex: DESKTOP_LAYERS.notice }}>
           <div className="flex flex-col items-center gap-3 p-8 rounded-2xl border-2 border-dashed border-orange-500/60 bg-[#0d1117]/90">
             <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 48 }}>upload_file</span>
-            <span className="text-lg font-semibold text-white">Drop files to upload</span>
-            <span className="text-sm text-white/50">Files will be saved to Downloads</span>
+            <span className="text-lg font-semibold text-white">{t("files.dropToUpload")}</span>
+            <span className="text-sm text-white/50">{t("desktop.dropHint")}</span>
           </div>
         </div>
       )}
       {/* Upload status toast */}
       {uploadStatus && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[99998] min-w-[220px] rounded-lg bg-[#1e2030] border border-white/10 text-sm text-white shadow-lg overflow-hidden">
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 min-w-[220px] rounded-lg bg-[var(--bg-elevated)] border border-white/10 text-sm text-white shadow-lg overflow-hidden" style={{ zIndex: DESKTOP_LAYERS.notice }}>
           <div className="px-4 py-2">{uploadStatus}</div>
           {uploadProgress < 100 && (
             <div className="h-1 bg-white/5">
@@ -1776,17 +2551,30 @@ function ChromeDesktopInner() {
           )}
         </div>
       )}
-      {(updateAvailable || showClawAiOfferNotification || pairingRequests.length > 0) && (
-        <div className="pointer-events-none fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
+      {/* Renders the `clawbox:toast` events the pending-action poll above and
+          the pairing flow dispatch. Without it ui_notify, `clawbox notify`
+          and every server-side owner notice were fired and never shown. */}
+      <ToastHost />
+      <PowerApprovalPrompt />
+      {noticesUp && (
+        <div
+          className="desktop-notice-stack pointer-events-none fixed top-4 flex w-[320px] flex-col gap-3"
+          // Beside the chat — docked or floating — never on top of it. Both are
+          // anchored to the top-right corner, and a notice at the top of the
+          // stacking order covered the chat's tab row and its +, dock and close
+          // buttons for the 30 s a card takes to hide itself. See
+          // `noticeRightInset`.
+          style={{ zIndex: DESKTOP_LAYERS.notice, right: NOTICE_MARGIN + noticeRightInset }}
+        >
           {/* New version available notification */}
-          {updateAvailable && (() => {
+          {updateAvailable && !updateNoticeHidden && (() => {
             const cb = updateAvailable.clawbox;
             const oc = updateAvailable.openclaw;
             const cbNeeds = cb?.updateAvailable ?? (!!cb?.target && cb.target !== cb.current);
             const ocNeeds = oc?.updateAvailable ?? (!!oc?.target && oc.target !== oc.current);
             return (
               <div
-                className="rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                className="rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
                 role="status"
                 aria-live="polite"
               >
@@ -1838,7 +2626,7 @@ function ChromeDesktopInner() {
 
           {showClawAiOfferNotification && (
             <div
-              className="rounded-xl bg-[#1e2030] border border-green-400/20 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+              className="rounded-xl bg-[var(--bg-elevated)] border border-green-400/20 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
               role="status"
               aria-live="polite"
             >
@@ -1854,22 +2642,22 @@ function ChromeDesktopInner() {
                   </span>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-semibold text-white">Free backup with ClawBox AI</div>
+                  <div className="text-sm font-semibold text-white">{t("desktop.clawAiOfferTitle")}</div>
                   <div className="text-xs leading-relaxed text-white/60 mt-0.5">
-                    Add ClawBox AI as your free desktop backup and keep a ready-to-use provider one click away.
+                    {t("desktop.clawAiOfferBody")}
                   </div>
                 </div>
                 <button
                   onClick={() => setShowClawAiOfferNotification(false)}
                   className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
-                  aria-label="Dismiss ClawBox AI offer"
+                  aria-label={t("desktop.clawAiOfferDismiss")}
                 >
                   <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
                 </button>
               </div>
               <div className="px-4 pb-2">
                 <div className="rounded-lg border border-green-400/15 bg-green-500/10 px-3 py-2 text-[11px] leading-relaxed text-green-50/90">
-                  We’ll open AI Provider settings with ClawBox AI already selected so you can log in right away.
+                  {t("desktop.clawAiOfferNote")}
                 </div>
               </div>
               <div className="pointer-events-auto flex items-center gap-2 px-4 pb-3">
@@ -1877,26 +2665,82 @@ function ChromeDesktopInner() {
                   onClick={openClawAiProviderSettings}
                   className="flex-1 px-3 py-1.5 rounded-md bg-green-500 hover:bg-green-600 text-white text-xs font-semibold transition-colors cursor-pointer border-none"
                 >
-                  Login with ClawBox AI
+                  {t("desktop.clawAiOfferLogin")}
                 </button>
                 <button
                   onClick={() => setShowClawAiOfferNotification(false)}
                   className="px-3 py-1.5 rounded-md bg-white/5 hover:bg-white/10 text-white/70 text-xs font-medium transition-colors cursor-pointer border-none"
                 >
-                  Later
+                  {t("updateNotification.later")}
                 </button>
               </div>
             </div>
           )}
 
           {/* New Telegram access request popup(s) */}
+          {/* A finished coding run. Same shape as the pairing card above,
+              because it is the same kind of thing: a notice the owner may want
+              to act on. The button opens the Coding Agent app, where the run's
+              summary and what it changed are — the card itself carries only
+              ClawBox-authored text, never the model's. */}
+          {codingNotices.map((notice) => {
+            const failed = notice.status === "failed";
+            const stopped = notice.status === "stopped";
+            const accent = failed ? "#f87171" : stopped ? "#cbd5e1" : "#4ade80";
+            const glyph = failed ? "error" : stopped ? "stop_circle" : "task_alt";
+            const title = failed
+              ? t("codingAgent.chatFailed")
+              : stopped ? t("codingAgent.chatStopped") : t("codingAgent.chatFinished");
+            return (
+              <div
+                key={notice.runId}
+                className="rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                role="status"
+                aria-live="polite"
+                data-testid="coding-agent-notice"
+              >
+                <div className="flex items-start gap-3 px-4 py-3">
+                  <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: `${accent}26`, border: `1px solid ${accent}4d` }}>
+                    <span className="material-symbols-rounded" style={{ fontSize: 20, color: accent }}>{glyph}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-white">{title}</div>
+                    {notice.projectId && <div className="text-xs text-white/60 mt-0.5 truncate">{notice.projectId}</div>}
+                    <div className="text-[11px] text-white/40 font-mono mt-0.5 truncate">{notice.runId}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => dismissCodingNotice(notice.runId)}
+                    className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
+                    aria-label={t("codingAgent.noticeDismiss")}
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
+                  </button>
+                </div>
+                <div className="pointer-events-auto flex items-center gap-2 px-4 pb-3">
+                  {/* Straight to the run's own page, not the app's home:
+                      the handoff names the run, then the app opens on it. */}
+                  <button
+                    type="button"
+                    onClick={() => { handoffCodingRun(notice.runId); openApp("coding"); dismissCodingNotice(notice.runId); }}
+                    data-testid="coding-agent-notice-open"
+                    className="flex-1 px-3 py-1.5 rounded-md bg-white/10 hover:bg-white/15 text-white text-xs font-semibold transition-colors cursor-pointer border-none inline-flex items-center justify-center gap-1.5"
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 14 }}>smart_toy</span>
+                    {t("codingAgent.noticeOpenRun")}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+
           {pairingRequests.map((req) => {
             const label = req.name || req.id || "A Telegram user";
             const code = req.code || "";
             return (
               <div
                 key={code || req.id}
-                className="rounded-xl bg-[#1e2030] border border-[#229ED9]/30 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                className="rounded-xl bg-[var(--bg-elevated)] border border-[#229ED9]/30 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
                 role="status"
                 aria-live="polite"
               >
@@ -1905,15 +2749,15 @@ function ChromeDesktopInner() {
                     <span className="material-symbols-rounded text-[#5eb8e6]" style={{ fontSize: 20 }}>person_add</span>
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold text-white">New Telegram access request</div>
-                    <div className="text-xs text-white/60 mt-0.5 truncate">{label} wants to chat with your bot.</div>
+                    <div className="text-sm font-semibold text-white">{t("desktop.telegramRequestTitle")}</div>
+                    <div className="text-xs text-white/60 mt-0.5 truncate">{t("desktop.telegramRequestBody", { name: label })}</div>
                     {req.id && <div className="text-[11px] text-white/40 font-mono mt-0.5 truncate">id {req.id}</div>}
                   </div>
                   <button
                     type="button"
                     onClick={() => dismissPairingRequest(code)}
                     className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
-                    aria-label="Dismiss"
+                    aria-label={t("desktop.toast.dismiss")}
                   >
                     <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
                   </button>
@@ -1943,17 +2787,17 @@ function ChromeDesktopInner() {
       )}
       {/* Desktop wallpaper background */}
       {(() => {
-        const customIdx = wallpaperId.startsWith("custom-") ? parseInt(wallpaperId.split("-")[1]) : -1;
-        const customWp = customIdx >= 0 ? customWallpapers[customIdx] : undefined;
+        const customIdx = customWallpaperIndex(renderedWallpaperId);
+        const customWp = customIdx === null ? undefined : customWallpapers[customIdx];
         return customWp ? (
           <>
             <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />
-            <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${customWp})`, ...wpFitStyle, opacity: wpOpacity / 100 }} />
+            <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${customWp})`, ...wpFitStyle, opacity: paintedWpOpacity / 100 }} />
           </>
       ) : currentWallpaper.image ? (
         <>
           <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />
-          <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${currentWallpaper.image})`, ...wpFitStyle, opacity: wpOpacity / 100 }} />
+          <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${currentWallpaper.image})`, ...wpFitStyle, opacity: paintedWpOpacity / 100 }} />
         </>
       ) : (
         <>
@@ -2020,7 +2864,7 @@ function ChromeDesktopInner() {
                 >
                   <InstalledAppIcon appId={app.id} iconUrl={app.iconUrl} name={app.name} size="w-7 h-7" />
                 </div>
-                <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
+                <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 break-words hyphens-auto max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
                   {app.name}
                 </span>
               </button>
@@ -2078,7 +2922,7 @@ function ChromeDesktopInner() {
                 >
                   <AppIcon id={app.id} size="w-7 h-7" />
                 </div>
-                <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
+                <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 break-words hyphens-auto max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
                   {resolveAppName(app)}
                 </span>
               </button>
@@ -2146,9 +2990,23 @@ function ChromeDesktopInner() {
           mascotX for a frame right after opening, flashing the popup to the wrong
           corner before it settled. */}
       {!isMobile && (
-        <Mascot frozen={chatOpen} rightInset={chatPanelWidth} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
+        <Mascot frozen={chatOpen} rightInset={chatPanelInset} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
       )}
-      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onOpenSettingsSection={openSettingsSection} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} mobile={isMobile} />
+      <ChatPopup
+        isOpen={chatOpen}
+        onClose={() => setChatOpen(false)}
+        onOpenSettingsSection={openSettingsSection}
+        onPanelModeChange={handleChatPanelModeChange}
+        initialPanelWidth={chatPanelWidth}
+        floatingZIndex={chatZIndex}
+        onFocus={raiseChat}
+        // Only while a card is up: the popup reports its rect on every pointer
+        // move of a drag, and nothing is dodging it the rest of the time.
+        onFloatingRectChange={noticesUp ? handleChatFloatingRect : undefined}
+        mascotX={mascotHidden ? 85 : mascotX}
+        trayMode={mascotHidden}
+        mobile={isMobile}
+      />
 
       {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
       {isMobile ? (
@@ -2163,19 +3021,30 @@ function ChromeDesktopInner() {
           return (
             <div
               key={top.id}
-              className="fixed inset-0 z-[200] flex flex-col bg-[#0d1117] animate-slide-up"
+              data-testid="mobile-app-window"
+              className="mobile-app-window fixed inset-0 z-[200] flex flex-col bg-[#0d1117] animate-slide-up"
               style={{ paddingBottom: 'calc(56px + env(safe-area-inset-bottom))', paddingTop: 'env(safe-area-inset-top)' }}
             >
               {/* Mobile window header */}
               <div className="flex items-center gap-3 px-3 py-2 bg-[#161b22] border-b border-white/[0.06] shrink-0">
                 <button
-                  onClick={() => { vibrate(10); closeWindow(top.id); }}
-                  className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
+                  onClick={() => { vibrate(10); if (!runMobileBack()) closeWindow(top.id); }}
+                  // Icon-only, and it is the phone's ONLY way out of an app:
+                  // unnamed, a screen reader announced nothing but "button".
+                  title={t("back")}
+                  aria-label={t("back")}
+                  data-testid="mobile-window-back"
+                  className="w-10 h-10 -ml-1 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/70 cursor-pointer"
                 >
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
                 </button>
                 <div className="w-6 h-6 rounded flex items-center justify-center shrink-0" style={{ backgroundColor: app.color }}>
-                  {app.type === "installed" && app.storeApp
+                  {/* `storeApp` — not `type === "installed"`. An installed WEB
+                      APP has type "webapp", so it fell through to AppIcon,
+                      which knows no `installed-*` id and drew nothing: the
+                      launcher, the shelf and this header showed bare coloured
+                      discs, two of which were the same orange. */}
+                  {app.storeApp
                     ? <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-3 h-3" />
                     : <AppIcon id={app.id} size="w-3 h-3" />}
                 </div>
@@ -2183,8 +3052,11 @@ function ChromeDesktopInner() {
                 {visible.length > 1 && (
                   <button
                     onClick={() => minimizeWindow(top.id)}
-                    className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
-                    title="Switch app"
+                    className="w-10 h-10 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
+                    // Was an English `title` on a shelf that speaks ten
+                    // languages, and no accessible name at all.
+                    title={tr("window.switchApp", "Switch app")}
+                    aria-label={tr("window.switchApp", "Switch app")}
                   >
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" /></svg>
                   </button>
@@ -2204,7 +3076,7 @@ function ChromeDesktopInner() {
           if (!app) return null;
 
           const renderWindowIcon = () => {
-            if (app.type === "installed" && app.storeApp) {
+            if (app.storeApp) {
               return (
                 <div
                   className="w-5 h-5 rounded flex items-center justify-center"
@@ -2241,7 +3113,8 @@ function ChromeDesktopInner() {
               onMinimize={() => minimizeWindow(window.id)}
               onGeometryChange={(geo) => updateWindowGeometry(window.id, geo)}
               minimized={window.minimized}
-              rightInset={chatPanelWidth}
+              rightInset={chatPanelInset}
+              maximizeSignal={window.maximizeNonce}
             >
               {renderWindowContent(window.appId, window.meta)}
             </ChromeWindow>
@@ -2252,7 +3125,7 @@ function ChromeDesktopInner() {
       {/* App Launcher */}
       <ChromeLauncher
         apps={allAppsForLauncher.map((app) => {
-          if (app.type === "installed" && app.storeApp) {
+          if (app.storeApp) {
             return {
               id: app.id,
               name: resolveAppName(app),
@@ -2304,7 +3177,7 @@ function ChromeDesktopInner() {
               ? appWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b))
               : null;
             const renderIcon = () => {
-              if (app.type === "installed" && app.storeApp) {
+              if (app.storeApp) {
                 return (
                   <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: app.color }}>
                     <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} />
@@ -2341,10 +3214,12 @@ function ChromeDesktopInner() {
           setLauncherOpen((prev) => !prev);
         }}
         onTrayClick={() => {
-          // Clock click — no-op for now (could open a calendar/notifications panel)
+          setLauncherOpen(false);
+          setTrayOpen(false);
+          openSettingsSection("system");
         }}
         onClawKeepShieldClick={openClawKeepOrAiProvider}
-        clawkeepStatus={{ stale: clawkeepStale, busy: clawkeepBusy, restoring: clawkeepRestoring }}
+        clawkeepStatus={{ protection: clawkeepProtection, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring }}
         onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);
@@ -2366,8 +3241,9 @@ function ChromeDesktopInner() {
       {ctxMenu && (
         <div
           data-testid="desktop-context-menu"
-          className="fixed z-[99999] min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90 overflow-y-auto"
+          className="fixed min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90 overflow-y-auto"
           style={{
+            zIndex: DESKTOP_LAYERS.menu,
             left: Math.min(ctxMenu.x, window.innerWidth - 220),
             top: Math.min(ctxMenu.y, window.innerHeight - 400),
             maxHeight: "calc(100vh - 80px)",
@@ -2377,7 +3253,7 @@ function ChromeDesktopInner() {
           {ctxMenu.isGroup && ctxMenu.appId ? (
             <>
               <div className="px-4 py-1.5 text-xs text-white/40 font-medium">
-                {selectedIcons.size} items selected
+                {t("desktop.ctx.itemsSelected", { count: selectedIcons.size })}
               </div>
               <div className="border-t border-white/10 my-0.5" />
               <button onClick={() => {
@@ -2390,7 +3266,7 @@ function ChromeDesktopInner() {
                 });
                 setSelectedIcons(new Set());
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> Open all
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("desktop.ctx.openAll")}
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
@@ -2401,7 +3277,7 @@ function ChromeDesktopInner() {
                 });
                 setSelectedIcons(new Set());
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Reset positions
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> {t("desktop.ctx.resetPositions")}
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
@@ -2415,7 +3291,7 @@ function ChromeDesktopInner() {
                 });
                 setSelectedIcons(new Set());
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>visibility_off</span> Remove all from desktop
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>visibility_off</span> {t("desktop.ctx.removeAllFromDesktop")}
               </button>
             </>
           ) : ctxMenu.appId ? (() => {
@@ -2423,29 +3299,35 @@ function ChromeDesktopInner() {
             const resolvedAppId = ctxMenu.appId!.startsWith("desktop-")
               ? ctxMenu.appId!.replace("desktop-", "")
               : `installed-${ctxMenu.appId}`;
+            // A store skill's window is its settings page; a new tab of that
+            // is not something anyone asks for, and it used to open a broken
+            // page. Webapps and built-ins keep the entry.
+            const isSkill = allApps.find((a) => a.id === resolvedAppId)?.type === "installed";
             return (
             <>
               <button onClick={() => openApp(resolvedAppId)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> Open
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.open")}
               </button>
               {openWindows.some(w => w.appId === resolvedAppId) && (
                 <button onClick={() => openApp(resolvedAppId, true)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>tab</span> New Window
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>tab</span> {t("shelf.newWindow")}
                 </button>
               )}
-              <button onClick={() => {
-                window.open(`/app/${encodeURIComponent(resolvedAppId)}`, "_blank");
-              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> Open in new tab
-              </button>
+              {!isSkill && (
+                <button onClick={() => {
+                  window.open(`/app/${encodeURIComponent(resolvedAppId)}`, "_blank");
+                }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.openNewTab")}
+                </button>
+              )}
               <div className="border-t border-white/10 my-1" />
               {isAppPinned(resolvedAppId) ? (
                 <button onClick={() => handleUnpinApp(resolvedAppId)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>keep_off</span> Unpin from shelf
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>keep_off</span> {t("shelf.unpinFromShelf")}
                 </button>
               ) : (
                 <button onClick={() => handlePinApp(resolvedAppId)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>keep</span> Pin to shelf
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>keep</span> {t("shelf.pinToShelf")}
                 </button>
               )}
               <div className="border-t border-white/10 my-1" />
@@ -2454,7 +3336,7 @@ function ChromeDesktopInner() {
                   <button onClick={() => {
                     if (ctxMenu.appId) requestUninstallApp(ctxMenu.appId);
                   }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
-                    <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span> Uninstall
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span> {t("store.uninstall")}
                   </button>
                   <div className="border-t border-white/10 my-1" />
                 </>
@@ -2466,7 +3348,7 @@ function ChromeDesktopInner() {
                   return next;
                 });
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Reset Position
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> {t("desktop.ctx.resetPosition")}
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
@@ -2481,7 +3363,7 @@ function ChromeDesktopInner() {
                   setHiddenInstalledApps(prev => prev.includes(id) ? prev : [...prev, id]);
                 }
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>visibility_off</span> Remove from desktop
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>visibility_off</span> {t("desktop.ctx.removeFromDesktop")}
               </button>
             </>
             ); })() : (
@@ -2494,16 +3376,19 @@ function ChromeDesktopInner() {
                   wrong one. */}
               {!harnessHiddenAppIds.includes("hermes-skills") && (
                 <button onClick={() => openApp("hermes-skills")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>extension</span> Hermes Skills
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>extension</span> {t("app.skills")}
                 </button>
               )}
               {!harnessHiddenAppIds.includes("store") && (
                 <button onClick={() => openApp("store")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>storefront</span> App Store
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>storefront</span> {t("store.appStore")}
                 </button>
               )}
               <button onClick={() => openApp("terminal")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>terminal</span> Terminal
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>terminal</span> {t("app.terminal")}
+              </button>
+              <button onClick={() => openApp("coding")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>code</span> {t("app.codingAgent")}
               </button>
               <div className="border-t border-white/10 my-1" />
               {!harnessHiddenAppIds.includes("hermes") && (
@@ -2517,15 +3402,15 @@ function ChromeDesktopInner() {
                 </button>
               )}
               <button onClick={() => arrangeIcons()} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Arrange icons
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> {t("desktop.ctx.arrangeIcons")}
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => openApp("settings")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>settings</span> Settings
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>settings</span> {t("app.settings")}
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => window.location.reload()} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>refresh</span> Refresh
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>refresh</span> {t("desktop.ctx.refresh")}
               </button>
             </>
           )}
@@ -2537,26 +3422,33 @@ function ChromeDesktopInner() {
         const meta = installedMeta[uninstallConfirm];
         const appName = meta?.name || uninstallConfirm;
         return (
-          <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setUninstallConfirm(null)}>
-            <div className="bg-[#1e2030] border border-white/10 rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4" onClick={(e) => e.stopPropagation()}>
+          <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm" style={{ zIndex: DESKTOP_LAYERS.modal }} onClick={dismissUninstall}>
+            {/* The role sits on the panel, not the scrim — see useModalDialog. */}
+            <div
+              ref={uninstallPanelRef}
+              role="dialog" aria-modal="true" aria-labelledby={uninstallTitleId}
+              data-testid="uninstall-dialog"
+              className="bg-[var(--bg-elevated)] border border-white/10 rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4" onClick={(e) => e.stopPropagation()}>
               <div className="flex flex-col items-center text-center">
                 <div className="w-14 h-14 rounded-xl flex items-center justify-center mb-4" style={{ backgroundColor: meta?.color || "#6b7280" }}>
                   <InstalledAppIcon appId={uninstallConfirm} iconUrl={meta?.iconUrl} name={appName} size="w-7 h-7" />
                 </div>
-                <h3 className="text-lg font-semibold text-white mb-1">Uninstall {appName}?</h3>
-                <p className="text-sm text-white/50 mb-6">This will remove the app from your desktop and launcher. You can reinstall it from the App Store.</p>
+                <h3 id={uninstallTitleId} className="text-lg font-semibold text-white mb-1">{t("uninstall.title", { name: appName })}</h3>
+                <p className="text-sm text-white/50 mb-6">{t("uninstall.message")}</p>
                 <div className="flex gap-3 w-full">
                   <button
-                    onClick={() => setUninstallConfirm(null)}
+                    type="button"
+                    onClick={dismissUninstall}
                     className="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-white/10 hover:bg-white/15 text-white transition-colors cursor-pointer"
                   >
-                    Cancel
+                    {t("cancel")}
                   </button>
                   <button
+                    type="button"
                     onClick={confirmUninstallApp}
                     className="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-red-500/20 hover:bg-red-500/30 text-red-400 transition-colors cursor-pointer"
                   >
-                    Uninstall
+                    {t("store.uninstall")}
                   </button>
                 </div>
               </div>
@@ -2571,6 +3463,9 @@ function ChromeDesktopInner() {
 export default function ChromeDesktop() {
   return (
     <I18nProvider>
+      {/* A box already in the field never sees the wizard again, and its
+          timezone was never asked for — see the component. Renders nothing. */}
+      <TimezoneAdopter />
       <ChromeDesktopInner />
     </I18nProvider>
   );

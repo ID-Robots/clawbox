@@ -19,7 +19,7 @@
 // live defect in the previous implementation.
 
 import { readFile as fsReadFile, writeFile as fsWriteFile, readdir, stat, mkdir } from "fs/promises";
-import { statSync } from "fs";
+import { constants as fsConstants, statSync } from "fs";
 import { basename, dirname, extname, join, relative } from "path";
 import { ToolError } from "../lib/errors";
 import {
@@ -29,6 +29,9 @@ import {
   filterAllowedPaths,
   isAllowedPath,
   assertPathAllowed,
+  commandDeniedByPathGuard,
+  resolveGuardedPath,
+  hasBinary,
   resolveUserPath,
   spawnArgv,
 } from "../lib/guard";
@@ -95,7 +98,67 @@ function simpleDiff(oldText: string, newText: string, label: string): string {
   return hunks.length > 2 ? hunks.join("\n") : "";
 }
 
+// ── The file sinks ──────────────────────────────────────────────────────────
+//
+// Every read and write below opens the CANONICAL path `resolveGuardedPath`
+// vetted, with O_NOFOLLOW. The guard judged that path's target; opening the
+// typed path instead would follow whatever link sits there NOW, and a link
+// swapped between the check and the open is the classic way past a path
+// guard. The canonical path is not a link at check time — a legitimately
+// symlinked project file has already been resolved to its target, a dangling
+// one to the name the kernel would create — so O_NOFOLLOW costs an ordinary
+// file nothing and refuses only a leaf that is a link at the moment of the
+// open: one swapped in after the check, or a cycle of links `canonicalPath`
+// could not resolve and handed back as typed. ELOOP is what Linux answers for
+// either under O_NOFOLLOW (there is no O_EXCL here, so EEXIST never arrives),
+// and it means "not the file that was vetted", never a reason to retry.
+const READ_FLAGS = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
+const WRITE_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW;
+
+function isSwappedLink(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === "ELOOP";
+}
+
+function swappedLinkError(): ToolError {
+  return new ToolError(
+    "BLOCKED_PATH",
+    "That path is a link at the moment of opening — not the file that was checked, or a chain of links that never reaches one — and was not opened.",
+    "Do not retry it. Tell the user the file could not be opened safely and continue with the rest of the task.",
+  );
+}
+
+/** Read the vetted target. Any failure but a swapped link is the caller's to word. */
+async function readGuarded(target: string): Promise<Buffer> {
+  try {
+    return await fsReadFile(target, { flag: READ_FLAGS });
+  } catch (err) {
+    throw isSwappedLink(err) ? swappedLinkError() : err;
+  }
+}
+
+/** The same read, answering null where the earlier `.catch(() => null)` did. */
+async function readGuardedOrNull(target: string): Promise<Buffer | null> {
+  try {
+    return await fsReadFile(target, { flag: READ_FLAGS });
+  } catch (err) {
+    if (isSwappedLink(err)) throw swappedLinkError();
+    return null;
+  }
+}
+
+async function writeGuarded(target: string, body: string, encoding: BufferEncoding): Promise<void> {
+  try {
+    await fsWriteFile(target, body, { encoding, flag: WRITE_FLAGS });
+  } catch (err) {
+    throw isSwappedLink(err) ? swappedLinkError() : err;
+  }
+}
+
 // Staleness: only meaningful for files this process has actually read.
+//
+// Keyed by the CANONICAL path, the one the sinks open. A read recorded under
+// the typed path and a staleness check under the canonical one would never
+// meet, and the CONFLICT protection would be silently off.
 const readState = new Map<string, number>();
 const READ_STATE_MAX = 500;
 
@@ -146,16 +209,38 @@ async function assertNotStale(abs: string): Promise<void> {
  *   2. the whole command scanned for a credential-store NAME anywhere in it, so
  *      a path assembled indirectly is still recognised.
  */
-function commandTouchesProtectedPath(command: string): boolean {
+function commandTouchesProtectedPath(command: string, cwd?: string): string | null {
   const tokens = command.split(/[\s;|&<>()'"`]+/).filter(Boolean);
   for (const raw of tokens) {
     if (!raw.startsWith("/") && !raw.startsWith("~") && !raw.startsWith("./")) continue;
     try {
-      if (!isAllowedPath(resolveUserPath(raw))) return true;
+      if (!isAllowedPath(resolveUserPath(raw))) return CREDENTIAL_REASON;
     } catch { /* not a resolvable path */ }
   }
-  return SECRET_NAME_RE.test(command);
+  // TASK-605: the same rule the two harnesses enforce on their own shells. This
+  // tool is registered on the OpenClaw edition, where the harness's `exec` is
+  // covered by the before_tool_call hook — and this is a SECOND shell, reached
+  // by a different tool id, so without this the deny would have a door in it.
+  //
+  // The WORKING DIRECTORY goes with the command. It is the reason the hook
+  // reads `workdir` at all: `cd <protected> && rm x` reaches a text matcher as
+  // two tokens it cannot relate, and this tool is handed the directory as an
+  // argument, so the same hole was open here in a simpler form.
+  const guarded = commandDeniedByPathGuard(command, cwd);
+  if (guarded) return guarded;
+  return SECRET_NAME_RE.test(command) ? CREDENTIAL_REASON : null;
 }
+
+/**
+ * The refusal for a credential path, kept apart from the protected-path one.
+ *
+ * The two answers are different on purpose: a credential store's refusal names
+ * nothing (this tool is reachable from untrusted page content, and "blocked
+ * because it is ~/.hermes/.env" is a map of where the secrets are), while a
+ * TASK-605 refusal names the rule, because there is nothing secret about where
+ * the device keeps its own code and an agent told WHY stops trying spellings.
+ */
+const CREDENTIAL_REASON = "__credential__";
 
 function tooLargeToFetch(): ToolError {
   return new ToolError(
@@ -198,7 +283,10 @@ async function readCapped(res: Response, maxBytes: number): Promise<string> {
 }
 
 export function registerCodingTools(reg: Registrar): void {
-  const both: ("openclaw" | "hermes")[] =
+  // OpenClaw only — the three reasons are at the top of this file.
+  // CLAWBOX_MCP_CODING_TOOLS=1 widens it to Hermes for debugging, and is set on
+  // no shipped device.
+  const codingEditions: ("openclaw" | "hermes")[] =
     process.env.CLAWBOX_MCP_CODING_TOOLS === "1" ? ["openclaw", "hermes"] : ["openclaw"];
 
   // ── bash ─────────────────────────────────────────────────────────────────
@@ -212,9 +300,9 @@ export function registerCodingTools(reg: Registrar): void {
       timeout: zInt(1_000, MAX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, "How long to allow, in milliseconds."),
       run_in_background: zBool(false, "Return a job id immediately instead of waiting."),
       cwd: zOptText(300, "Folder to run in. Defaults to the ClawBox home folder."),
-      allow_dangerous: zBool(false, "Override the block on destructive commands. Only set it when the user asked for exactly this."),
+      allow_dangerous: zBool(false, "Skip the typo check that blocks destructive spellings (rm -rf, git push --force). It is not permission and not the user's consent: nothing on the device treats it as either. Only set it when the user asked for exactly this command in their own words."),
     },
-    { editions: both, readOnly: false, destructive: true, maxChars: BIG_OUTPUT },
+    { editions: codingEditions, readOnly: false, destructive: true, maxChars: BIG_OUTPUT },
     async ({
       command,
       description,
@@ -243,11 +331,22 @@ export function registerCodingTools(reg: Registrar): void {
           );
         }
       }
-      if (commandTouchesProtectedPath(command)) {
+      const blockedReason = commandTouchesProtectedPath(command, workDir);
+      if (blockedReason === CREDENTIAL_REASON) {
         throw new ToolError(
           "BLOCKED_PATH",
           "That command names a protected device file.",
           "Do not try variations of it. Tell the user that file holds device credentials.",
+        );
+      }
+      if (blockedReason) {
+        // The rule, not the credential sentence: `rm -rf ~/clawbox` holds no
+        // credentials, and telling the agent it does sends it to the owner with
+        // the wrong explanation.
+        throw new ToolError(
+          "BLOCKED_PATH",
+          `That command is refused on this device: ${blockedReason}. The ClawBox install tree and the local-model folders can be read, but not deleted, overwritten, truncated or moved.`,
+          "Do not retry or rephrase it. Tell the user what you were asked to do and that the device refused it.",
         );
       }
       const { blocked, warnings } = inspectCommand(command);
@@ -255,7 +354,7 @@ export function registerCodingTools(reg: Registrar): void {
         throw new ToolError(
           "DANGEROUS_COMMAND",
           `This command is blocked: ${blocked.join("; ")}.`,
-          "Ask the user to confirm exactly what should be removed or changed, then set allow_dangerous only if they said so.",
+          "Ask the user to confirm exactly what should be removed or changed, then set allow_dangerous only if they said so — it skips this typo check and nothing else.",
         );
       }
       const notes = warnings.length ? `Warning: ${warnings.join("; ")}.\n\n` : "";
@@ -282,7 +381,7 @@ export function registerCodingTools(reg: Registrar): void {
       // Floor 1: "just show me the last line" must not be a schema rejection.
       tail: zInt(1, 500, 100, "How many of the most recent output lines to return."),
     },
-    { editions: both, readOnly: true, maxChars: BIG_OUTPUT },
+    { editions: codingEditions, readOnly: true, maxChars: BIG_OUTPUT },
     async ({ job_id, tail }: { job_id: string; tail: number }) => {
       const job = getJob(job_id);
       if (!job) {
@@ -307,7 +406,7 @@ export function registerCodingTools(reg: Registrar): void {
     "job_stop",
     "Stop a background job that bash started and that is still running. Its output up to that point stays readable with job_status.",
     { job_id: zText(40, "The job id bash returned, e.g. \"job-1\".") },
-    { editions: both, readOnly: false },
+    { editions: codingEditions, readOnly: false },
     async ({ job_id }: { job_id: string }) => {
       const job = getJob(job_id);
       if (!job) {
@@ -332,12 +431,16 @@ export function registerCodingTools(reg: Registrar): void {
       offset: zInt(0, 1_000_000, 0, "First line to return, counting from 0."),
       limit: zInt(1, 5_000, 2_000, "How many lines to return."),
     },
-    { editions: both, readOnly: true, maxChars: BIG_OUTPUT },
+    { editions: codingEditions, readOnly: true, maxChars: BIG_OUTPUT },
     async ({ file_path, offset, limit }: { file_path: string; offset: number; limit: number }) => {
       const abs = resolveUserPath(file_path);
-      assertPathAllowed(abs);
+      // `abs` is the name the agent typed and stays in every header below —
+      // the path it can read back out of the answer; `target` is what is
+      // opened. `isImage`/`isPdf`/`isNotebook` judge the typed name too: the
+      // agent asked for a .png, whatever the link is called on the other side.
+      const target = resolveGuardedPath(abs, "read");
 
-      const st = await stat(abs).catch(() => null);
+      const st = await stat(target).catch(() => null);
       if (!st) throw notFound(file_path);
       if (st.isDirectory()) {
         throw new ToolError(
@@ -360,23 +463,24 @@ export function registerCodingTools(reg: Registrar): void {
       }
 
       if (isImage(abs)) {
-        const buf = await fsReadFile(abs);
+        const buf = await readGuarded(target);
         const ext = extname(abs).toLowerCase();
         const mime = ext === ".png" ? "image/png"
           : ext === ".svg" ? "image/svg+xml"
             : ext === ".gif" ? "image/gif"
               : ext === ".webp" ? "image/webp" : "image/jpeg";
-        await recordRead(abs);
+        await recordRead(target);
         return {
           content: [
-            { type: "text", text: `Image ${basename(abs)} (${buf.length} bytes)` },
+            { type: "text", text: `Image ${abs} (${buf.length} bytes)` },
             { type: "image", data: buf.toString("base64"), mimeType: mime },
           ],
         };
       }
 
       if (isPdf(abs)) {
-        const r = await spawnArgv("pdftotext", [abs, "-"], { timeoutMs: 20_000, maxBytes: 4 * 1024 * 1024 });
+        // pdftotext follows a link itself, so it is handed the vetted target.
+        const r = await spawnArgv("pdftotext", [target, "-"], { timeoutMs: 20_000, maxBytes: 4 * 1024 * 1024 });
         if (r.exitCode !== 0 && !r.stdout.trim()) {
           throw new ToolError(
             "NOT_SUPPORTED_HERE",
@@ -385,12 +489,12 @@ export function registerCodingTools(reg: Registrar): void {
           );
         }
         const lines = r.stdout.split("\n").slice(offset, offset + limit);
-        await recordRead(abs);
-        return text(`[PDF ${basename(abs)}]\n${lines.map((l, i) => `${offset + i + 1}\t${l}`).join("\n")}`);
+        await recordRead(target);
+        return text(`[PDF ${abs}]\n${lines.map((l, i) => `${offset + i + 1}\t${l}`).join("\n")}`);
       }
 
       if (isNotebook(abs)) {
-        const raw = await fsReadFile(abs, "utf-8");
+        const raw = (await readGuarded(target)).toString("utf-8");
         let nb: { cells?: { cell_type?: string; source?: string | string[]; outputs?: { text?: string | string[] }[] }[] };
         try {
           nb = JSON.parse(raw);
@@ -405,23 +509,23 @@ export function registerCodingTools(reg: Registrar): void {
             if (o.text) out.push(`[output] ${Array.isArray(o.text) ? o.text.join("") : o.text}`);
           }
         });
-        await recordRead(abs);
-        return text(`[Notebook ${basename(abs)}, ${nb.cells?.length ?? 0} cells]\n${out.join("\n")}`);
+        await recordRead(target);
+        return text(`[Notebook ${abs}, ${nb.cells?.length ?? 0} cells]\n${out.join("\n")}`);
       }
 
       if (isBinary(abs)) {
-        return text(`${basename(abs)} is a binary file of ${st.size} bytes. Its contents cannot be shown as text.`);
+        return text(`${abs} is a binary file of ${st.size} bytes. Its contents cannot be shown as text.`);
       }
 
-      const buf = await fsReadFile(abs);
+      const buf = await readGuarded(target);
       const raw = buf.toString(detectEncoding(buf));
       const all = raw.split("\n");
       const selected = all.slice(offset, offset + limit);
       const numbered = selected.map((l, i) => `${offset + i + 1}\t${l}`).join("\n");
       const header = offset + limit < all.length
-        ? `[${basename(abs)}: lines ${offset + 1}-${offset + selected.length} of ${all.length}]`
-        : `[${basename(abs)}: ${all.length} lines]`;
-      await recordRead(abs);
+        ? `[${abs}: lines ${offset + 1}-${offset + selected.length} of ${all.length}]`
+        : `[${abs}: ${all.length} lines]`;
+      await recordRead(target);
       return text(`${header}\n${numbered}`);
     },
   );
@@ -435,27 +539,34 @@ export function registerCodingTools(reg: Registrar): void {
       file_path: zText(4_000, "Path to the file. Absolute, starting with ~, or relative to the ClawBox project folder."),
       content: zText(2_000_000, "The complete new contents of the file."),
     },
-    { editions: both, readOnly: false, destructive: true },
+    { editions: codingEditions, readOnly: false, destructive: true },
     async ({ file_path, content }: { file_path: string; content: string }) => {
       const abs = resolveUserPath(file_path);
-      assertPathAllowed(abs);
+      const target = resolveGuardedPath(abs, "write");
 
-      const existed = await stat(abs).then(() => true).catch(() => false);
-      if (existed) await assertNotStale(abs);
+      const existed = await stat(target).then(() => true).catch(() => false);
+      if (existed) await assertNotStale(target);
 
       let original: string | null = null;
-      if (existed) original = await fsReadFile(abs, "utf-8").catch(() => null);
+      if (existed) original = (await readGuardedOrNull(target))?.toString("utf-8") ?? null;
 
       let body = content;
       if (original && detectLineEnding(original) === "\r\n" && !body.includes("\r\n")) {
         body = body.replace(/\n/g, "\r\n");
       }
 
-      await mkdir(dirname(abs), { recursive: true });
-      await fsWriteFile(abs, body, "utf-8");
-      await recordRead(abs);
+      // The parent of the TARGET: for a new file under a link into an ordinary
+      // folder, the missing folders are made where the file will land.
+      await mkdir(dirname(target), { recursive: true });
+      await writeGuarded(target, body, "utf-8");
+      await recordRead(target);
 
-      const parts = [`${existed ? "Rewrote" : "Created"} ${basename(abs)} (${body.split("\n").length} lines).`];
+      // The RESOLVED path, never the basename. A relative `file_path` resolves
+      // against CLAWBOX_ROOT, which is not the cwd the harness spawned this
+      // server from — so "Created notes.txt" left the agent with no way to tell
+      // which of two plausible trees it had just written into, and its next
+      // read_file of the same relative path could land somewhere else again.
+      const parts = [`${existed ? "Rewrote" : "Created"} ${abs} (${body.split("\n").length} lines).`];
       if (original !== null) {
         const diff = simpleDiff(original, body, basename(abs));
         if (diff) parts.push(diff);
@@ -475,7 +586,7 @@ export function registerCodingTools(reg: Registrar): void {
       new_text: zMaybeEmptyText(100_000, "The replacement text. Use an empty string to delete the old text."),
       replace_all: zBool(false, "Replace every occurrence instead of requiring exactly one."),
     },
-    { editions: both, readOnly: false },
+    { editions: codingEditions, readOnly: false },
     async ({
       file_path,
       old_text,
@@ -486,10 +597,10 @@ export function registerCodingTools(reg: Registrar): void {
         throw new ToolError("BAD_ARGUMENT", "old_text and new_text are identical.", "Pass the text you actually want in the file as new_text.");
       }
       const abs = resolveUserPath(file_path);
-      assertPathAllowed(abs);
-      await assertNotStale(abs);
+      const target = resolveGuardedPath(abs, "write");
+      await assertNotStale(target);
 
-      const buf = await fsReadFile(abs).catch(() => null);
+      const buf = await readGuardedOrNull(target);
       if (!buf) throw notFound(file_path);
       const encoding = detectEncoding(buf);
       let content = buf.toString(encoding);
@@ -524,10 +635,10 @@ export function registerCodingTools(reg: Registrar): void {
         replacements = 1;
       }
 
-      await fsWriteFile(abs, content, encoding);
-      await recordRead(abs);
+      await writeGuarded(target, content, encoding);
+      await recordRead(target);
       const diff = simpleDiff(original, content, basename(abs));
-      return text(`Changed ${basename(abs)} (${replacements} replacement${replacements === 1 ? "" : "s"}).${diff ? `\n${diff}` : ""}`);
+      return text(`Changed ${abs} (${replacements} replacement${replacements === 1 ? "" : "s"}).${diff ? `\n${diff}` : ""}`);
     },
   );
 
@@ -537,7 +648,7 @@ export function registerCodingTools(reg: Registrar): void {
     "list_directory",
     "List what is inside a folder on the ClawBox: folders first, then files. Use glob when you are looking for files by name across many folders. Folders holding device credentials are not listed.",
     { path: zOptText(4_000, "Folder to list. Defaults to the ClawBox project folder.") },
-    { editions: both, readOnly: true, maxChars: 8_000 },
+    { editions: codingEditions, readOnly: true, maxChars: 8_000 },
     async ({ path }: { path?: string }) => {
       const abs = path ? resolveUserPath(path) : DEFAULT_CWD;
       assertPathAllowed(abs);
@@ -565,7 +676,7 @@ export function registerCodingTools(reg: Registrar): void {
       pattern: zText(200, "Name pattern, e.g. \"**/*.ts\"."),
       path: zOptText(4_000, "Folder to search under. Defaults to the ClawBox project folder."),
     },
-    { editions: both, readOnly: true, maxChars: 8_000 },
+    { editions: codingEditions, readOnly: true, maxChars: 8_000 },
     async ({ pattern, path }: { pattern: string; path?: string }) => {
       const dir = path ? resolveUserPath(path) : DEFAULT_CWD;
       assertPathAllowed(dir);
@@ -608,7 +719,7 @@ export function registerCodingTools(reg: Registrar): void {
       max_results: zInt(1, 500, GREP_LIMIT, "Most output lines to return."),
       offset: zInt(0, 10_000, 0, "Skip this many results before returning any."),
     },
-    { editions: both, readOnly: true, maxChars: BIG_OUTPUT },
+    { editions: codingEditions, readOnly: true, maxChars: BIG_OUTPUT },
     async ({
       pattern,
       path,
@@ -628,10 +739,17 @@ export function registerCodingTools(reg: Registrar): void {
       max_results: number;
       offset: number;
     }) => {
-      const target = path ? resolveUserPath(path) : DEFAULT_CWD;
-      assertPathAllowed(target);
+      // rg and grep follow a link named on the command line, so the search
+      // root is the vetted canonical path, not the typed one.
+      const target = path ? resolveGuardedPath(resolveUserPath(path), "read") : DEFAULT_CWD;
 
-      const useRg = (await spawnArgv("/usr/bin/env", ["which", "rg"], { timeoutMs: 3_000 })).exitCode === 0;
+      // The shared probe, not a second copy of it: this was an inlined
+      // `env which rg` carrying the same missing-cwd false failure hasBinary()
+      // was just fixed for (TASK-722). On a device the tree is there and it
+      // answered correctly; where it is not — a dev PC, a CI runner, the brief
+      // mid-update window — a host with ripgrep silently searched with
+      // `grep -r` instead.
+      const useRg = await hasBinary("rg");
       const args: string[] = [];
       if (useRg) {
         // --null / -Z make the searcher terminate every printed FILE NAME with a
@@ -711,7 +829,7 @@ export function registerCodingTools(reg: Registrar): void {
       new_source: zOptText(200_000, "The new cell contents. Required for replace and insert."),
       cell_type: zEnumOf(["code", "markdown"], "Type of the cell to insert.").default("code"),
     },
-    { editions: both, readOnly: false },
+    { editions: codingEditions, readOnly: false },
     async ({
       notebook_path,
       cell_index,
@@ -722,11 +840,11 @@ export function registerCodingTools(reg: Registrar): void {
       const abs = resolveUserPath(notebook_path);
       // This tool called no guard at all before: a notebook path pointing into
       // a credential directory was written without a check.
-      assertPathAllowed(abs);
+      const target = resolveGuardedPath(abs, "write");
       if (!isNotebook(abs)) {
         throw new ToolError("BAD_ARGUMENT", "That is not a notebook file.", "Pass a path ending in .ipynb, or use edit_file for ordinary files.");
       }
-      const raw = await fsReadFile(abs, "utf-8").catch(() => null);
+      const raw = (await readGuardedOrNull(target))?.toString("utf-8") ?? null;
       if (raw === null) throw notFound(notebook_path);
       let nb: { cells?: Record<string, unknown>[] };
       try {
@@ -765,8 +883,8 @@ export function registerCodingTools(reg: Registrar): void {
           });
         }
       }
-      await fsWriteFile(abs, JSON.stringify(nb, null, 1), "utf-8");
-      return text(`${edit_mode === "delete" ? "Deleted" : edit_mode === "insert" ? "Inserted a cell after" : "Replaced"} cell ${cell_index} in ${basename(abs)} (${nb.cells.length} cells now).`);
+      await writeGuarded(target, JSON.stringify(nb, null, 1), "utf-8");
+      return text(`${edit_mode === "delete" ? "Deleted" : edit_mode === "insert" ? "Inserted a cell after" : "Replaced"} cell ${cell_index} in ${abs} (${nb.cells.length} cells now).`);
     },
   );
 
@@ -781,7 +899,7 @@ export function registerCodingTools(reg: Registrar): void {
       accept: zOptText(200, "Optional Accept header, e.g. \"application/json\"."),
       accept_language: zOptText(100, "Optional Accept-Language header, e.g. \"en\"."),
     },
-    { editions: both, readOnly: true, openWorld: true, maxChars: BIG_OUTPUT },
+    { editions: codingEditions, readOnly: true, openWorld: true, maxChars: BIG_OUTPUT },
     async ({
       url,
       max_length,
@@ -850,7 +968,7 @@ export function registerCodingTools(reg: Registrar): void {
       max_results: zInt(1, 20, 10, "How many results to return."),
       allowed_domains: zOptText(300, "Comma-separated list of domains to restrict results to, e.g. \"github.com,python.org\"."),
     },
-    { editions: both, readOnly: true, openWorld: true, maxChars: 8_000 },
+    { editions: codingEditions, readOnly: true, openWorld: true, maxChars: 8_000 },
     async ({ query, max_results, allowed_domains }: { query: string; max_results: number; allowed_domains?: string }) => {
       let res: Response;
       try {

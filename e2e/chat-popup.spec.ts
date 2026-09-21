@@ -60,6 +60,12 @@ async function installFakeGatewaySocket(page: Page) {
         }
 
         if (message.method === "chat.history") {
+          // Counted so a test can wait for the transcript read to have HAPPENED
+          // before asserting that nothing was sent. Without that, "no turn went
+          // out" is asserted before the greeting path could have run and would
+          // pass against a regression that still greets.
+          const w = window as unknown as { __chatHistoryReads?: number };
+          w.__chatHistoryReads = (w.__chatHistoryReads ?? 0) + 1;
           emit({
             type: "res",
             id: message.id,
@@ -72,6 +78,17 @@ async function installFakeGatewaySocket(page: Page) {
         }
 
         if (message.method === "chat.send") {
+          // The popup greets an empty transcript with a "hi" of its own, and
+          // that turn is answered here like any other. The owner's turn gets a
+          // reply that names it, so a test can tell the two apart: asserting
+          // the greeting's words after typing found that bubble AND the new
+          // one — the same text twice, which a strict locator refuses — and
+          // passed only when it looked before the second reply landed.
+          const w = window as unknown as { __chatSends?: string[] };
+          w.__chatSends = w.__chatSends ?? [];
+          const sent = String((message.params as { message?: unknown } | undefined)?.message ?? "");
+          w.__chatSends.push(sent);
+          const reply = sent === "hi" ? "Hello from the fake gateway" : `Fake gateway heard: ${sent}`;
           emit({
             type: "res",
             id: message.id,
@@ -85,7 +102,7 @@ async function installFakeGatewaySocket(page: Page) {
               payload: {
                 sessionKey: "main",
                 state: "delta",
-                message: { text: "Hello from the" },
+                message: { text: reply.slice(0, 14) },
               },
             });
           }, 20);
@@ -96,14 +113,17 @@ async function installFakeGatewaySocket(page: Page) {
               payload: {
                 sessionKey: "main",
                 state: "final",
-                message: { text: "Hello from the fake gateway" },
+                message: { text: reply },
               },
             });
           }, 50);
           return;
         }
 
-        if (message.method === "chat.abort") {
+        // Session RPCs are part of a real reconnect/provider switch. Leaving
+        // them unanswered only worked when the global timer cap forced their
+        // failures early; the mock must acknowledge the protocol instead.
+        if (["chat.abort", "sessions.reset", "sessions.patch", "sessions.subscribe"].includes(message.method)) {
           emit({
             type: "res",
             id: message.id,
@@ -131,6 +151,11 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
   await installFakeGatewaySocket(page);
 
   await installClawboxMocks(page, {
+    // Keep the real startup deadline: the default 50 ms cap expires it
+    // before this spec's asynchronous gateway handshake can complete.
+    timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
@@ -153,7 +178,10 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
   const chatInput = page.locator("textarea").last();
   await chatInput.fill("What changed?");
   await page.getByTitle("Send").click();
-  await expect(page.getByText("What changed?")).toBeVisible();
+  // Exact: the reply below quotes the question, and a substring match would
+  // find both bubbles.
+  await expect(page.getByText("What changed?", { exact: true })).toBeVisible();
+  await expect(page.getByText("Fake gateway heard: What changed?", { exact: true })).toBeVisible();
 
   await page.getByTitle("Dock to right").click();
   await expect(page.getByTitle("Undock panel")).toBeVisible();
@@ -161,10 +189,74 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
   await expect(page.getByTitle("Dock to right")).toBeVisible();
 });
 
+test("chat popup stays silent on a box whose agent has been introduced", async ({ page }) => {
+  // The common case on a real box, and the one the greet used to get wrong: an
+  // empty transcript is not a first conversation. A cleared conversation, a
+  // reset session and a box introduced months ago all look identical, and every
+  // one of them used to be answered with an unasked-for "hi" that spent a model
+  // turn and put a word in the owner's mouth.
+  await installFakeGatewaySocket(page);
+
+  await installClawboxMocks(page, {
+    timeoutCapMs: 300_000,
+    kvEntries: { "clawbox-mascot-hidden": "1" },
+    // No introduction waiting: BOOTSTRAP.md is gone because the ritual finished.
+    chatFacts: { onboardingArmed: false },
+    initialSetup: {
+      setup_complete: true,
+      wifi_configured: true,
+      update_completed: true,
+      password_configured: true,
+      ai_model_configured: true,
+      telegram_configured: true,
+    },
+    preferences: { ui_mascot_hidden: 1 },
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("desktop-root")).toBeVisible();
+
+  await openChatPopup(page);
+
+  // The composer is usable and the transcript is empty: nothing was sent, so
+  // the fake gateway — which answers "hi" and nothing else with that line —
+  // never replied. Asserted against the gateway's OWN reply rather than a
+  // generic empty check, so a turn that went out under any other text still
+  // fails this.
+  await expect(page.getByTestId("chat-composer-row")).toBeVisible();
+
+  // Wait for the transcript read to have HAPPENED before claiming nothing was
+  // sent. `toHaveCount(0)` on its own succeeds the moment the composer renders,
+  // which is before the greeting path has had its chance — so a regression that
+  // still greets would sail past it. The read is the input the greet decision
+  // waits on, so once it has landed, a box that was going to greet has.
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __chatHistoryReads?: number }).__chatHistoryReads ?? 0))
+    .toBeGreaterThan(0);
+
+  // A settle window, because this is a NEGATIVE assertion: polling for an empty
+  // array succeeds on its first evaluation, so without a pause it proves only
+  // that nothing had been sent yet. The greet waits on two inputs — the read
+  // above and the capabilities fetch — and this covers the gap between them.
+  await page.waitForTimeout(1000);
+
+  // Asserted on what reached the WIRE, not on what is painted: a turn that went
+  // out and whose reply merely had not rendered yet would still fail this.
+  expect(
+    await page.evaluate(() => (window as unknown as { __chatSends?: string[] }).__chatSends ?? []),
+  ).toEqual([]);
+  await expect(page.getByText("Hello from the fake gateway")).toHaveCount(0);
+});
+
 test("chat popup lets you switch to Local AI when it is configured", async ({ page }) => {
   await installFakeGatewaySocket(page);
 
   await installClawboxMocks(page, {
+    // Keep the real startup deadline: the default 50 ms cap expires it
+    // before this spec's asynchronous gateway handshake can complete.
+    timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
@@ -206,6 +298,11 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
   await installFakeGatewaySocket(page);
 
   await installClawboxMocks(page, {
+    // Keep the real startup deadline: the default 50 ms cap expires it
+    // before this spec's asynchronous gateway handshake can complete.
+    timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
@@ -225,13 +322,22 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
-  await openChatPopup(page);
+  // 640px is a phone-sized viewport, so the page lands in the chat on its own
+  // (src/lib/mobile-chat-first.ts) — pressing the crab now would close it.
+  await expect(page.getByTestId("chat-popup")).toHaveCSS("pointer-events", "auto");
   await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
 
+  // Push the popup into the bottom-right corner of a viewport that is barely
+  // taller than the popup itself. The provider pill sits in the composer row
+  // under the textarea, so with the popup's bottom edge 20px above the
+  // viewport's there is no room for a list to drop DOWN from it — the popover
+  // has to flip upward, and stay inside the viewport when it does. (The popup
+  // must stay on screen for the pill to be clickable at all: a popup placed
+  // any lower would put the composer, and the pill, below the fold.)
   await page.getByTestId("chat-popup").evaluate((el) => {
     Object.assign(el.style, {
-      left: "128px",
-      top: "180px",
+      left: "216px",
+      top: "20px",
       right: "auto",
       bottom: "auto",
       width: "416px",
@@ -240,6 +346,8 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
   });
 
   const providerTrigger = page.getByRole("button", { name: "Chat provider" });
+  await expect(providerTrigger).toBeInViewport();
+  const triggerBox = await providerTrigger.boundingBox();
   await providerTrigger.click();
 
   const listbox = page.getByRole("listbox", { name: "Chat provider" });
@@ -263,12 +371,21 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
   expect(bounds.top).toBeGreaterThanOrEqual(8);
   expect(bounds.right).toBeLessThanOrEqual(bounds.viewportWidth - 8);
   expect(bounds.bottom).toBeLessThanOrEqual(bounds.viewportHeight - 8);
+  // Inside the viewport BECAUSE it flipped: the list sits above the pill it
+  // opened from, not squeezed into the 20px under it.
+  expect(triggerBox).not.toBeNull();
+  expect(bounds.bottom).toBeLessThanOrEqual(triggerBox!.y);
 });
 
 test("chat popup opens Local AI settings when local AI is not configured", async ({ page }) => {
   await installFakeGatewaySocket(page);
 
   await installClawboxMocks(page, {
+    // Keep the real startup deadline: the default 50 ms cap expires it
+    // before this spec's asynchronous gateway handshake can complete.
+    timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
@@ -296,5 +413,15 @@ test("chat popup opens Local AI settings when local AI is not configured", async
 
   const settingsWindow = page.getByTestId("chrome-window-settings");
   await expect(settingsWindow).toBeVisible();
-  await expect(settingsWindow.getByText("No local model configured")).toBeVisible();
+
+  // Settings opens straight on Local AI — not on Providers, where the window
+  // opens by default. The sidebar row carries the reason the chat sent us here
+  // as its sr-only subtitle, and the pane is the on-device inventory, in
+  // which the model the chat could not switch to reads as absent.
+  const localAiNav = settingsWindow.getByRole("navigation").getByRole("button", { name: /Local AI/ });
+  await expect(localAiNav).toContainText("Not configured");
+  const localAi = settingsWindow.getByTestId("local-ai-panel");
+  await expect(localAi).toContainText("AI that runs on this box, and what each part is doing right now.");
+  await expect(localAi.getByTestId("local-model-llamacpp").getByText("Not installed", { exact: true })).toBeVisible();
+  await expect(settingsWindow.getByTestId("ai-provider-list")).toHaveCount(0);
 });

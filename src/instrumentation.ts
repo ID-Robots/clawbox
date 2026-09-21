@@ -3,27 +3,317 @@
  * Delegates to instrumentation-node.ts which is loaded via require()
  * to avoid Edge Runtime static analysis warnings.
  */
-export async function onRequestError() {
-  // required export — no-op
+
+/**
+ * The boot-time repairs of openclaw.json, one after the other.
+ *
+ * WHY IN SEQUENCE. Each repair is its own read-modify-write of the same file
+ * through the same `.tmp` path. Run together they each read the original,
+ * each write their own change, and whichever renames last wins — the other
+ * repair is silently undone until the next boot, and two writers on one temp
+ * path can rename a half-written file into place. Awaiting the first before
+ * starting the second is the whole fix; nothing here is on the request path,
+ * so the extra few milliseconds cost nobody anything.
+ *
+ * Each repair keeps its own error handling: one that fails must not stop the
+ * other, and neither may stop the box booting. The gateway restarts once if
+ * either of them wrote anything. A separate function, with the repairs handed
+ * in, so the sequencing can be pinned by a test without `require()`-ing the
+ * real config module into it.
+ */
+export async function repairOpenclawConfig(repairs: {
+  ensureLocalAiProxyUrls: () => Promise<boolean>
+  ensureMicrosoftTtsExcluded: () => Promise<boolean>
+  /** Seeds `tts.auto` for the spoken-replies switch on a box that predates it. */
+  ensureVoiceAutoReplyMode?: () => Promise<boolean>
+  restartGateway: (options?: { awaitReady?: boolean }) => Promise<void>
+}): Promise<void> {
+  const steps: Array<[label: string, run: () => Promise<boolean>]> = [
+    ['migrate Local AI proxy URLs', repairs.ensureLocalAiProxyUrls],
+    ['exclude Microsoft TTS', repairs.ensureMicrosoftTtsExcluded],
+  ]
+  if (repairs.ensureVoiceAutoReplyMode) steps.push(['seed the spoken-replies mode', repairs.ensureVoiceAutoReplyMode])
+  let changed = false
+  for (const [label, run] of steps) {
+    try {
+      if (await run()) changed = true
+    } catch (err) {
+      console.error(`[instrumentation] Failed to ${label}:`, err instanceof Error ? err.message : err)
+    }
+  }
+  if (!changed) return
+  try {
+    // No readiness wait: nothing here reads the answer, and this promise gates
+    // `armUpdateContinuation`, which resumes a half-finished update. Spending
+    // the restart budget at boot would eat the margin the memory-probe delay
+    // is sized against for no information.
+    await repairs.restartGateway({ awaitReady: false })
+  } catch (err) {
+    console.error('[instrumentation] Gateway restart after config repair failed:', err instanceof Error ? err.message : err)
+  }
 }
 
+/**
+ * Ask the updater, once the boot rush has passed, whether an update is waiting
+ * for its second half.
+ *
+ * WHY. An update reboots the box halfway through: the system fixups, the
+ * Hermes re-provisioning and the build-identity check run AFTER the restart,
+ * and `checkContinuation()` is what starts them. Its only caller was the
+ * update status route, so the second half waited for somebody to open the
+ * Update page — both test boxes sat at "running" for six and a half hours and
+ * then bounced the gateway and the dashboard the moment a page was opened
+ * (2026-09-01). Nothing an update does should depend on being watched.
+ *
+ * The status route keeps its call as the fallback. The two never collide: the
+ * check is single-flight, so a poll that lands on the boot hook's read joins
+ * it and gets the same answer instead of resuming a second time.
+ *
+ * Waits for the boot-time config repair first. That repair restarts the
+ * gateway when it changed something, and the resumed update's first act is to
+ * mask and stop the gateway for post_update: started together, the restart
+ * either fails against the mask (a spurious boot error) or the stop lands on
+ * the gateway's pre-start halfway through. Whether the repair succeeded or
+ * not is beside the point — only that it is over.
+ *
+ * Never awaited and never allowed to throw: clawbox-setup.service is
+ * Restart=always, so an unhandled rejection here is a crash loop, not a
+ * missed step. Unref'd, so an exiting server does not wait on it. A plain
+ * function with the check handed in, so a test can drive it with fake timers
+ * without `require()`-ing the real updater.
+ */
+export function armUpdateContinuation(
+  checkContinuation: () => Promise<boolean>,
+  options: { afterConfigRepair?: Promise<unknown>; delayMs?: number } = {},
+): NodeJS.Timeout {
+  const { afterConfigRepair = Promise.resolve(), delayMs = 5_000 } = options
+  const timer = setTimeout(async () => {
+    try {
+      await afterConfigRepair.catch(() => undefined)
+      if (await checkContinuation()) console.log('[Updater] continuation resumed at boot')
+    } catch (err) {
+      console.error('[Updater] continuation at boot failed:', err instanceof Error ? err.message : err)
+    }
+  }, delayMs)
+  timer.unref()
+  return timer
+}
+
+/**
+ * Warm the memory-status cache once the boot rush has passed — unless an
+ * update owns the box.
+ *
+ * WHY THE GATE. The probe boots a whole OpenClaw process against the v2
+ * SQLite store, and the resumed second half of an update (armed above) runs
+ * post_update against that same store with the gateway masked and stopped
+ * precisely so it has ONE writer. With the continuation resumed at boot the
+ * probe would land inside that window on every first boot after an update:
+ * "database is locked", and post_update's fixups — non-fatal by design —
+ * silently skipped. An update in flight means no warm; the first reader pays
+ * the probe instead, as it always did. A gate that cannot be read is treated
+ * the same way: better one slow Settings open than a second writer.
+ */
+export function armMemoryStatusWarm(deps: {
+  warm: () => Promise<void>
+  updateInFlight: () => Promise<boolean>
+  delayMs?: number
+}): NodeJS.Timeout {
+  const { warm, updateInFlight, delayMs = 45_000 } = deps
+  const timer = setTimeout(async () => {
+    try {
+      if (await updateInFlight()) return
+      await warm()
+    } catch {
+      /* the first reader retries */
+    }
+  }, delayMs)
+  timer.unref()
+  return timer
+}
+
+/**
+ * Seed the process zone from the zone the box has already applied, so the two
+ * "device-local" schedulers arm in it from the first boot on.
+ *
+ * WHY. `POST /setup-api/system/timezone` applies a change to the RUNNING web
+ * server (applyProcessTimeZone), but a server that starts takes its zone from
+ * the OS once and keeps it. On a healthy boot that is already the owner's
+ * zone and this is a no-op; it earns its place when the server comes up
+ * BEFORE the OS leg has landed — an update restarting the web server while
+ * the `set_timezone` root step is still queued, a zone changed while the
+ * server was down — because otherwise the first schedule armed at boot is in
+ * the wrong zone and stays there until the next change. Only a zone the store
+ * records as APPLIED (`timezone_applied` equal to `timezone`, exactly the
+ * route's own reading): a stored zone whose apply failed is what the marker
+ * exists to say, and seeding it would put the schedulers three hours from the
+ * `date` the Terminal shows. Answers the zone seeded, or null.
+ *
+ * Handed its readers so a test can drive it without `require()`-ing the real
+ * config store; the wiring into `register()` is pinned by reading the boot
+ * file, as the other hooks are.
+ */
+export async function seedProcessTimeZone(deps: {
+  get: (key: string) => Promise<unknown>
+  apply: (tz: unknown) => string | null
+  keys: { stored: string; applied: string }
+}): Promise<string | null> {
+  const [stored, applied] = await Promise.all([deps.get(deps.keys.stored), deps.get(deps.keys.applied)])
+  if (typeof stored !== 'string' || !stored || applied !== stored) return null
+  return deps.apply(stored)
+}
+
+/**
+ * Next.js calls this once per server start, in both runtimes. Everything
+ * below is Node-only and loaded through `require()` so the Edge bundle never
+ * sees it; each hook fails on its own and none of them may stop the boot.
+ */
 export async function register() {
   if (typeof process === 'undefined' || process.env.NEXT_RUNTIME === 'edge') return
+  // A second server on the same data/ — a `next dev` live-edit session beside
+  // the running clawbox-setup — must not run the boot jobs too: it would
+  // reconcile and reattach the coding runs, resume their pipelines and PR
+  // watches, start a second email-approval poller and both schedulers, and
+  // repair openclaw.json (restarting the gateway) against the same files the
+  // real server owns. It serves pages and routes; the real server keeps the jobs.
+  if (process.env.CLAWBOX_SKIP_BOOT_JOBS === '1') {
+    console.log('[instrumentation] CLAWBOX_SKIP_BOOT_JOBS=1: serving only, boot jobs left to the main server')
+    return
+  }
 
   // Dynamic require avoids Next.js Edge Runtime static analysis of Node.js APIs
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { startTerminalServer } = require('./instrumentation-node')
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { ensureLocalAiProxyUrls, restartGateway } = require('./lib/openclaw-config')
+  const { ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, restartGateway } = require('./lib/openclaw-config')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { ensureVoiceAutoReplyMode } = require('./lib/voice-reply')
   startTerminalServer()
-  void ensureLocalAiProxyUrls()
-    .then((changed: boolean) => {
-      if (!changed) return
-      return restartGateway()
+  try {
+    // The factory git identity the golden flash image ships in the clawbox
+    // user's own ~/.gitconfig (`yalexx <yanko@idrobots.com>`). Left there, git
+    // layers it under every project that has no identity of its own and the
+    // coding agent's first commit on a freshly flashed box is authored as a
+    // member of staff — see src/lib/coding-git-factory-identity.ts.
+    //
+    // HERE, and AWAITED, for one reason: Next awaits `register()` before this
+    // server answers its first request, and the coding agent lives in this
+    // server — so there is no run, and no commit, that can reach git before the
+    // value is gone. It is two `git config` reads on a box that is already
+    // clean, which is every boot after the first. It runs on every update too,
+    // because an update restarts clawbox-setup.service.
+    //
+    // Never rejects — see its own docblock — and wrapped anyway: a box must
+    // boot whatever git says, and the next boot tries again.
+    //
+    // ONLY on the device's own account. This hook runs under `bun run dev` on a
+    // developer's laptop as well, and the job removes keys from whatever
+    // ~/.gitconfig it is pointed at — so ungated it would silently delete a
+    // developer's own git identity, and the identity it matches belongs to the
+    // person most likely to be running it, at every restart.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { CLAWBOX_ACCOUNT_HOME, clearFactoryGitIdentity } = require('./lib/coding-git-factory-identity')
+    if (process.env.HOME === CLAWBOX_ACCOUNT_HOME) await clearFactoryGitIdentity()
+    else console.log(`[instrumentation] Not the ${CLAWBOX_ACCOUNT_HOME} account: leaving the global git identity alone`)
+  } catch (err) {
+    console.error('[instrumentation] Could not clear the factory git identity:', err instanceof Error ? err.message : err)
+  }
+  // One-time repairs of openclaw.json, in sequence — see repairOpenclawConfig
+  // for why they must not run together. Never awaited: boot goes on. Never
+  // rejects: every step inside catches for itself.
+  const configRepaired = repairOpenclawConfig({ ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, ensureVoiceAutoReplyMode, restartGateway })
+  try {
+    // An update that rebooted the box still has its second half to run. Ask
+    // here, so it starts whether or not anyone opens the Update page — see
+    // armUpdateContinuation, including why it waits for the repair above.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { checkContinuation } = require('./lib/updater')
+    armUpdateContinuation(checkContinuation, { afterConfigRepair: configRepaired })
+  } catch (err) {
+    console.error('[instrumentation] Could not arm the update continuation:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The process zone, BEFORE either scheduler below arms: they compute their
+    // "device-local" hour with `setHours` in whatever zone this process has
+    // when they run, and a zone seeded after them would be a slot armed in
+    // the old one. AWAITED for that reason alone — one mtime-cached JSON read
+    // — and the one hook here that is; see seedProcessTimeZone for why only an
+    // APPLIED zone is taken.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { TIMEZONE_APPLIED_KEY, TIMEZONE_STORE_KEY, applyProcessTimeZone } = require('./lib/timezone')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { get } = require('./lib/config-store')
+    const seeded = await seedProcessTimeZone({
+      get,
+      apply: applyProcessTimeZone,
+      keys: { stored: TIMEZONE_STORE_KEY, applied: TIMEZONE_APPLIED_KEY },
     })
-    .catch((err: unknown) => {
-      console.error('[instrumentation] Failed to migrate Local AI proxy URLs:', err instanceof Error ? err.message : err)
-    })
+    if (seeded) console.log(`[instrumentation] Process timezone seeded from the applied zone: ${seeded}`)
+  } catch (err) {
+    console.error('[instrumentation] Could not seed the process timezone:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The one-shot migrations, on the first boot that carries each of them —
+    // see src/lib/boot-migrations.ts for why the marker is a list of ids.
+    // AWAITED, and early: these are repairs of stored state that the readers
+    // below (and the routes this server is about to answer) take as given, and
+    // a migration landing after a reader has already answered is the shape
+    // that leaves a box reporting one thing and doing another. It is one
+    // config read on a box that is up to date, which is every boot but one.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { runBootMigrations, dropRemovedConsentMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration } = require('./lib/boot-migrations')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DATA_DIR, get, set } = require('./lib/config-store')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getActiveHarnessSource } = require('./lib/harness')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fsp = require('fs').promises
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const nodePath = require('path')
+    const removeDataFile = async (name: string): Promise<boolean> => {
+      // `force` would answer "removed" for a file that was never there, and
+      // the answer is what decides whether the boot log says anything.
+      try {
+        await fsp.unlink(nodePath.join(DATA_DIR, name))
+        return true
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return false
+        throw err
+      }
+    }
+    // Which edition this device is, in the shape `/setup-api/harness/active`
+    // hands the browser — `activeKnown` is that route's own inverted
+    // `defaulted`, so the two wallpaper migrations below apply the very rule
+    // (`brandingHarness`) the desktop paints by.
+    //
+    // ASKED ONCE for the whole boot, and the promise shared: `install.sh`
+    // truncates and rewrites the edition lock during an update, so two reads a
+    // moment apart can disagree, and two migrations that disagree about which
+    // box this is would each act on half an answer. One answer, both migrations
+    // — and if it cannot be had, both defer together and the next boot asks.
+    let harnessAnswer: Promise<{ active: string; activeKnown: boolean }> | null = null
+    const harness = () => {
+      if (!harnessAnswer) {
+        harnessAnswer = getActiveHarnessSource().then(
+          ({ active, defaulted }: { active: string; defaulted: boolean }) => ({ active, activeKnown: !defaulted }),
+        )
+      }
+      return harnessAnswer
+    }
+    const ran = await runBootMigrations(
+      [
+        dropRemovedConsentMigration({ set, removeFile: removeDataFile }),
+        // The v4 wallpaper defaults. A box updated before its edition's own
+        // brand landed still holds the picture it opened on back then, and
+        // nothing but an owner opening Settings would ever move it.
+        openclawWallpaperDefaultMigration({ get, set, harness }),
+        hermesWallpaperDefaultMigration({ get, set, harness }),
+      ],
+      { get, set },
+    )
+    if (ran.length > 0) console.log(`[instrumentation] Ran ${ran.length} one-shot migration(s): ${ran.join(', ')}`)
+  } catch (err) {
+    console.error('[instrumentation] Could not run the one-shot migrations:', err instanceof Error ? err.message : err)
+  }
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const clawkeepScheduler = require('./lib/clawkeep-scheduler')
@@ -34,5 +324,243 @@ export async function register() {
     // The scheduler is opt-in — if its module fails to load (missing deps,
     // syntax error in dev), the rest of the app must still boot.
     console.error('[instrumentation] Could not load ClawKeep scheduler:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // Old chat transcripts. Age is the only thing left to bound here -- the
+    // per-conversation caps already decide how big any ONE of them gets, so
+    // what accumulates is stale ones. Boot is the right moment because these
+    // are the customer's own words: the sweep should run even on a box nobody
+    // has opened the chat on since the last update.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { sweepTranscripts } = require('./lib/harness/transcript-store')
+    void sweepTranscripts()
+      .then((removed: number) => {
+        if (removed > 0) console.log(`[instrumentation] Swept ${removed} stale chat transcript(s)`)
+      })
+      .catch((err: unknown) => {
+        console.error('[instrumentation] Chat transcript sweep failed:', err instanceof Error ? err.message : err)
+      })
+  } catch (err) {
+    console.error('[instrumentation] Could not load the chat transcript sweep:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // Coding runs the previous web server was still babysitting died with it
+    // (systemd kills the whole cgroup on restart). Settle them now so the
+    // agent's next status question is not answered with "still running".
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const codingAgent = require('./lib/coding-agent')
+    // Asynchronous since runs got scopes of their own: a run may have SURVIVED
+    // this restart, and only systemd can say which did. Chained rather than
+    // raced with the watches below, which read the records this settles.
+    codingAgent
+      .reconcileAfterRestart()
+      .then((stale: number) => {
+        if (stale > 0) console.log(`[instrumentation] ${stale} coding run(s) left running by the previous server were marked failed`)
+      })
+      .catch((err: unknown) => {
+        console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)
+      })
+      .finally(() => {
+        // Pull requests left pending by the restart. Same reason the approval
+        // poller is restarted below: nothing else polls them, so without this a
+        // run shows "waiting for checks" forever and is never merged. The
+        // watcher takes everything it decides on — the review verdict included —
+        // from the run record, so what it resumes with is what the previous
+        // server knew.
+        //
+        // AFTER the reconciliation, which settles and reattaches the records
+        // this reads — and on its FAILED path too, in a `finally`: one boot step
+        // that throws must not take an unrelated one with it.
+        try {
+          codingAgent.resumePullRequestWatches()
+        } catch (err) {
+          console.error('[instrumentation] Could not resume the pull request watches:', err instanceof Error ? err.message : err)
+        }
+        // Delivery pipelines the restart interrupted. AFTER the two above, and
+        // deliberately doing less than either: a stage waiting on a run or on a
+        // deployment is picked back up by the reconciliation and the deployment
+        // watches respectively, so what is left is a verification that was in
+        // flight and a stage nothing at all is behind. Its own try, so one boot
+        // step that throws does not take an unrelated one with it.
+        try {
+          codingAgent.resumePipelines()
+        } catch (err) {
+          console.error('[instrumentation] Could not resume the delivery pipelines:', err instanceof Error ? err.message : err)
+        }
+        // The Anthropic account pool (TASK-902): its first read migrates a
+        // legacy key into the secret store and arms the limit-reset wake, and
+        // a run left waiting for a reset that passed while the box was down is
+        // resumed now. AFTER the reconciliation, which settles the records it
+        // reads. Its own catch, like its siblings.
+        codingAgent.armAnthropicAccounts().catch((err: unknown) => {
+          console.error('[instrumentation] Could not arm the Anthropic account pool:', err instanceof Error ? err.message : err)
+        })
+      })
+  } catch (err) {
+    console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // Run worktrees nothing needs any more (src/lib/coding-run-worktree.ts).
+    // At most weekly — the module keeps the date, so this fires on the first
+    // boot after the week is up rather than on every restart — and after the
+    // boot rush, because it is a `git worktree list` per project and nothing
+    // on the box is waiting for its answer.
+    //
+    // A boot hook rather than a cron entry for the reason the memory schedule
+    // is one: a timer rebuilt at every boot cannot be duplicated or orphaned
+    // by an update.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { sweepCodingWorktrees } = require('./lib/coding-agent')
+    const sweep = setTimeout(() => {
+      void sweepCodingWorktrees()
+        .then((removed: number) => {
+          if (removed > 0) console.log(`[instrumentation] Swept ${removed} stale coding worktree(s)`)
+        })
+        .catch((err: unknown) => {
+          console.error('[instrumentation] Coding worktree sweep failed:', err instanceof Error ? err.message : err)
+        })
+    }, 60_000)
+    sweep.unref?.()
+  } catch (err) {
+    console.error('[instrumentation] Could not arm the coding worktree sweep:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The ClawBox AI cloud defaults (the owner's decision of 2026-09-14): a box
+    // whose subscription covers the cloud voice, cloud transcription or cloud
+    // embeddings is put on them, and a box whose owner pinned the engine on the
+    // device is left exactly as it is. Here rather than in a boot script
+    // because two of the three answers need the OpenClaw CLI and one needs an
+    // HTTP probe, and a shell transcription of that rule would be a fourth
+    // place it could drift.
+    //
+    // AFTER the boot rush, for the same reason the worktree sweep is: the
+    // commonest outcome by far is "nothing to do" and nothing on the box is
+    // waiting for the answer. It never rejects — see its own docblock.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { applyClawaiCloudDefaults } = require('./lib/clawai-cloud-defaults')
+    const defaults = setTimeout(() => {
+      void applyClawaiCloudDefaults({ trigger: 'boot' })
+    }, 45_000)
+    defaults.unref?.()
+  } catch (err) {
+    console.error('[instrumentation] Could not arm the ClawBox AI cloud defaults:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // A question asked in chat outlives the process that asked it: the button
+    // is still sitting in the owner's Telegram. Nothing listens for the answer
+    // unless something starts listening, so a box that reboots with an
+    // approval outstanding has to pick the poll back up here or the owner taps
+    // into silence. Starts nothing when the feature is off or nothing is
+    // waiting -- see startApprovalPoller.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const emailApproval = require('./lib/email-approval')
+    emailApproval.startApprovalPoller()
+  } catch (err) {
+    console.error('[instrumentation] Could not resume email chat approvals:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // A Hermes plugin the owner installs after boot never reaches the chat on
+    // its own: Hermes scans for plugins once per process, and the process
+    // serving chat is a long-lived service. Nothing else on the box notices, so
+    // this watches ~/.hermes and bounces the dashboard when the plugin set
+    // really changes — see src/lib/hermes-plugin-reload.ts for why that restart
+    // needs no privilege and must not be given one.
+    //
+    // Starts nothing on a box with no Hermes dashboard (`hasHermesHarness()`).
+    // Its first look is a BASELINE unless the running dashboard is demonstrably
+    // BEHIND the files AND those files were touched after it started — the
+    // `register-mcp.sh` case, true at most once per dashboard — so an ordinary
+    // web-server restart never restarts the owner's chat backend.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { startHermesPluginWatcher } = require('./lib/hermes-plugin-reload')
+    startHermesPluginWatcher()
+  } catch (err) {
+    console.error('[instrumentation] Could not start the Hermes plugin watcher:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // On the OpenClaw arm the memory-status probe boots a whole OpenClaw
+    // process (~8 s on a Jetson), so it is paid once, after the boot rush
+    // (gateway restart, schedulers, Next's own warm-up) has passed, and the
+    // first Settings → Local AI open answers from the cache.
+    //
+    // Armed on EVERY edition, not because the other arm is expensive — reading
+    // ClawBox's own index is a couple of sqlite counts — but because the cache
+    // this fills is what makes `peekMemoryStatus()` answer at all, and the
+    // Local AI route peeks rather than waits. Without it the memory row on that
+    // SKU is blank until something else has asked. Not under an update — see
+    // armMemoryStatusWarm.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { warmMemoryStatusCache } = require('./lib/clawkeep-memory')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { updateInFlight } = require('./lib/updater')
+    armMemoryStatusWarm({ warm: warmMemoryStatusCache, updateInFlight })
+  } catch (err) {
+    console.error('[instrumentation] Could not warm the memory status cache:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The memory embedder is a system unit, so it outlives this process: an
+    // update restarts the web server and the 2 GB embedder comes back into a
+    // process with no idle timer for it. Re-arm one for a unit found running.
+    // Delayed past the boot rush so the health probe is not part of it; the
+    // request path arms its own timer, so a search in the meantime loses
+    // nothing. See armIdleStopIfRunning.
+    //
+    // Deliberately NOT extended to ollama (TASK-724). It looks like the same
+    // shape — a system unit with the same ten-minute standby, restarted by a
+    // root shell that cannot arm a timer living in this process — but the
+    // timing does not work: this fires once at boot + 15 s, while
+    // step_post_update's stop and restart of ollama happen minutes later, so
+    // the timer would either be armed for the WRONG ollama (and stop the one
+    // the update restarts, ten minutes in) or fire before that restart and
+    // leave it with no timer at all. Closing that loop needs the arm to happen
+    // at the moment of the start, which only the web server can do. Recorded
+    // rather than half-done.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { armIdleStopIfRunning } = require('./lib/local-ai-runtime')
+    const rearm = setTimeout(() => {
+      void armIdleStopIfRunning('embed').catch((err: unknown) => {
+        console.warn('[instrumentation] Could not re-arm the embedder idle stop:', err instanceof Error ? err.message : err)
+      })
+    }, 15_000)
+    rearm.unref?.()
+  } catch (err) {
+    console.error('[instrumentation] Could not load the local AI runtime:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The chat's capability facts on a Hermes box cost three Python starts on
+    // a cold cache, and `use-harness-adapter` asks for them on every chat
+    // mount. Pay them once here, after the boot rush, so the first chat open
+    // after a restart answers from the memos. Same delay as the memory probe
+    // above, on purpose: a probe that times out under boot load is held as a
+    // 60 s backoff, which would hide the attach button for exactly the chat
+    // open this is meant to speed up.
+    //
+    // Only on a Hermes box, and decided at fire time rather than now: an
+    // OpenClaw box can have a `hermes` checkout and a config.yaml on disk, and
+    // an ungated probe would start Python at boot for facts no OpenClaw
+    // capability reads.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getActiveHarness } = require('./lib/harness')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { warmHermesFeatureMemos } = require('./lib/harness/hermes-features')
+    setTimeout(() => {
+      void getActiveHarness()
+        .then((harness: string) => (harness === 'hermes' ? warmHermesFeatureMemos() : undefined))
+        .catch(() => { /* the first chat open asks for itself */ })
+    }, 45_000).unref()
+  } catch (err) {
+    console.error('[instrumentation] Could not warm the hermes chat capability memos:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // Memory indexing is armed the same way, from its own persisted schedule.
+    // Rebuilding the timer at every boot is what makes the schedule survive a
+    // reboot and an update without a crontab entry to duplicate or orphan.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const memoryScheduler = require('./lib/clawkeep-memory-scheduler')
+    void memoryScheduler.start().catch((err: unknown) => {
+      console.error('[instrumentation] Memory index scheduler boot failed:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not load memory index scheduler:', err instanceof Error ? err.message : err)
   }
 }

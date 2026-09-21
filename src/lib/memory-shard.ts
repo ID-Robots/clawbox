@@ -1,0 +1,470 @@
+/**
+ * Memory Shard's server side: the owner's switch, the folders they added, and
+ * the one thing nothing in ClawBox could do before — point the memory index at
+ * the embedding model running on this box.
+ *
+ * SERVER ONLY. It drives the OpenClaw CLI, so a client component must import
+ * `@/lib/memory-shard-state` instead (types and constants), never this.
+ */
+
+import { readFile } from "fs/promises";
+import path from "path";
+import { get as configGet, set as configSet } from "@/lib/config-store";
+import {
+  findOpenclawBin,
+  openclawIsAbsent,
+  readConfig,
+  readConfigStrict,
+  runOpenclawConfigSetBatch,
+  runOpenclawConfigUnset,
+} from "@/lib/openclaw-config";
+import { readLocalSources, stampLocalEmbeddingIdentity, writeLocalSources } from "@/lib/memory-index-local";
+import {
+  assertEmbedEndpointAllowed,
+  defaultEmbedderSource,
+  readEmbedderPin,
+  writeEmbedderPin,
+} from "@/lib/memory-embedder";
+import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
+import {
+  CLOUD_EMBEDDING_MODEL,
+  CLOUD_EMBEDDING_PROVIDER,
+  cloudEmbeddingsSwitchedOff,
+  embeddingEndpointParseable,
+  embeddingsBaseUrlOf,
+} from "@/lib/clawai-cloud-embeddings";
+import { getLocalAiToken } from "@/lib/local-ai-token";
+import {
+  EXTRA_PATHS_CONFIG_PATH,
+  extraPathsOf,
+  LOCAL_EMBEDDING_MODEL,
+  LOCAL_EMBEDDING_PROVIDER,
+  MEMORY_SHARD_ENABLED_KEY,
+  MEMORY_SHARD_SETUP_KEY,
+  type EmbeddingSource,
+  type MemorySource,
+} from "@/lib/memory-shard-state";
+import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
+
+/** The owner's consent for the index to run. Off on a new box. */
+export async function getMemoryShardEnabled(): Promise<boolean> {
+  return (await configGet(MEMORY_SHARD_ENABLED_KEY)) === true;
+}
+
+export async function setMemoryShardEnabled(on: boolean): Promise<boolean> {
+  await configSet(MEMORY_SHARD_ENABLED_KEY, on);
+  return on;
+}
+
+/**
+ * Has the owner been through the wizard?
+ *
+ * Same shape as the coding agent's flag, including the reason an EXPLICIT value
+ * wins over the fallback: the wizard switches the feature on at its provisioning
+ * step so the final "Index now" has something to run, and a rule of
+ * `flag || enabled` would then declare setup finished mid-wizard and swap the
+ * last step for the home page.
+ */
+export async function getMemoryShardSetupComplete(): Promise<boolean> {
+  const flag = await configGet(MEMORY_SHARD_SETUP_KEY);
+  if (typeof flag === "boolean") return flag;
+  // A box that was already indexing before this wizard existed has been set up
+  // by definition; it must not be dragged through onboarding by an update.
+  return (await configGet(MEMORY_SHARD_ENABLED_KEY)) === true;
+}
+
+export async function setMemoryShardSetupComplete(done: boolean): Promise<boolean> {
+  await configSet(MEMORY_SHARD_SETUP_KEY, done);
+  return done;
+}
+
+/**
+ * The folders the owner added, read from OpenClaw's own config.
+ *
+ * `memory.search.extraPaths` is OpenClaw's supported way to widen the index, and
+ * it is already what the status probe counts — so this is a READ of the thing
+ * that actually governs indexing, not a ClawBox-side mirror that could drift
+ * away from it.
+ */
+export async function readExtraPaths(): Promise<string[]> {
+  try {
+    // No OpenClaw means no `memory.search.extraPaths` and no indexer to honour
+    // it — ClawBox keeps the list, because ClawBox does the indexing there.
+    if (openclawIsAbsent()) return await readLocalSources();
+    return extraPathsOf(await readConfig());
+  } catch {
+    // An unreadable config is "no extra folders", not a crash: the wizard has
+    // to be able to open on a box whose gateway config is mid-write.
+    return [];
+  }
+}
+
+/**
+ * openclaw.json is there and could not be read as a configuration, so the
+ * folder list is UNKNOWN — which a mutation must not mistake for empty. Its
+ * own class so the route can name the refusal without matching on a message.
+ */
+export class ExtraPathsUnreadableError extends Error {
+  readonly code = "read_failed";
+  constructor(cause: unknown) {
+    super("The folder list could not be read", { cause });
+    this.name = "ExtraPathsUnreadableError";
+  }
+}
+
+/**
+ * The read half of a mutation. `readExtraPaths` forgives every failure as
+ * `[]`, which is right for the wizard's first paint and wrong for a writer:
+ * an add that read `[]` off a half-written or EACCES'd file would save a
+ * one-entry list over every folder the owner had chosen, and a remove would
+ * answer "no folders" over a list still on disk. `readConfigStrict` is the
+ * reader built for that — ENOENT is still `{}` (a fresh box has nothing to
+ * lose), everything else throws.
+ */
+async function readExtraPathsForWrite(local: boolean): Promise<string[]> {
+  try {
+    // Same rule on both arms and for the same reason: a read that FAILED must
+    // not be written over as if it were an empty list.
+    return local ? await readLocalSources() : extraPathsOf(await readConfigStrict());
+  } catch (err) {
+    throw new ExtraPathsUnreadableError(err);
+  }
+}
+
+/** Replace the whole list. OpenClaw validates the shape on write. */
+export async function writeExtraPaths(paths: readonly string[], local = openclawIsAbsent()): Promise<void> {
+  if (local) {
+    await writeLocalSources(paths);
+    return;
+  }
+  await runOpenclawConfigSetBatch([
+    [EXTRA_PATHS_CONFIG_PATH, JSON.stringify([...paths]), "--json"],
+  ]);
+}
+
+/**
+ * The one queue every extraPaths mutation waits in. Always settled to
+ * `undefined` — a turn that failed is caught before it becomes the tail, so
+ * the next caller runs after it rather than inheriting its rejection.
+ */
+let extraPathsQueue: Promise<void> = Promise.resolve();
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((entry, i) => entry === b[i]);
+}
+
+/**
+ * Read → change → write the folder list, one mutation at a time.
+ *
+ * A write is one `openclaw config set` (~5 s on a Jetson, and the gateway
+ * restarts on the change), and the two handlers behind the wizard's picker
+ * each did their own read-modify-write with nothing between them: on the box
+ * an add and a remove overlapped, the remove's write landed last, and
+ * openclaw.json ended with `extraPaths: []` while the add had ANSWERED with
+ * the folder in the list — the wizard then provisioned and indexed nothing
+ * (ms-findings F-A). Serialised here, in process, so each mutation reads the
+ * state the previous one left — and reads it STRICTLY, so a config that
+ * cannot be read rejects the turn (`ExtraPathsUnreadableError`) rather than
+ * reading as an empty list to be written over.
+ *
+ * `fn` gets the list as read and answers the list wanted; nothing is written
+ * when the two are the same (an idempotent add or a remove of a folder that
+ * is not there costs no CLI spawn and no gateway restart). Answers the list
+ * as read back after the write, so a caller reports what is on disk rather
+ * than what it asked for — or, when only that read-back fails, the list that
+ * was written, which is what is on disk then.
+ */
+export async function mutateExtraPaths(
+  fn: (current: string[]) => string[] | Promise<string[]>,
+): Promise<string[]> {
+  const turn = extraPathsQueue.then(async () => {
+    // WHICH ARM, once, for the whole read-modify-write. The predicate reads a
+    // root-owned file that a harness swap rewrites on a LIVE box, and there is
+    // an `await fn(...)` in the middle of this — asked twice, a swap landing
+    // inside a mutation could read the local store and write openclaw.json.
+    const local = openclawIsAbsent();
+    const current = await readExtraPathsForWrite(local);
+    const next = [...(await fn([...current]))];
+    if (sameList(current, next)) return current;
+    await writeExtraPaths(next, local);
+    // Strict here too: a lenient read-back would answer `[]` over the list
+    // just written. But a read-back that FAILS is not a failed mutation —
+    // the CLI has validated and saved `next` by now — so it is not the
+    // pre-write `ExtraPathsUnreadableError` either: that one means "nothing
+    // was touched", and the route answers it as such. Reported that way, a
+    // folder that IS on disk would be shown as not added and the status
+    // cache left warm over a changed identity. The written list is the
+    // truth here, so it is answered, and the read-back failure logged.
+    try {
+      return await readExtraPathsForWrite(local);
+    } catch (err) {
+      console.warn("[memory-shard] extraPaths written but could not be read back; answering the written list:", err);
+      return next;
+    }
+  });
+  // The tail never rejects: a failed write is this caller's to report, not
+  // the next caller's to inherit.
+  extraPathsQueue = turn.then(() => undefined, () => undefined);
+  return turn;
+}
+
+/**
+ * The installed core's own package.json, derived from the binary the way
+ * scripts/ensure-local-embeddings.sh derives it (`dirname bin`/../lib/…), so
+ * the two writers read one file and cannot disagree about the generation.
+ * Not `openclaw --version`: that costs ~10 s on a Jetson, and this runs on a
+ * wizard click right before a second CLI spawn (the write itself).
+ */
+function openclawPackageJson(): string {
+  return path.join(path.dirname(findOpenclawBin()), "..", "lib", "node_modules", "openclaw", "package.json");
+}
+
+async function installedOpenclawVersion(): Promise<string | null> {
+  try {
+    const pkg = JSON.parse(await readFile(openclawPackageJson(), "utf-8")) as { version?: unknown };
+    return typeof pkg.version === "string" ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where the installed core keeps the embedding choice.
+ *
+ * OpenClaw 2 (2026.8+) moved it from `agents.defaults.memorySearch.*` to
+ * `memory.search.*`, and its CLI refuses the retired path outright ("moved to
+ * memory.search. Run openclaw doctor --fix") — so the names must follow the
+ * core that will parse the write, on the same 2026.8 boundary
+ * scripts/ensure-local-embeddings.sh uses at boot.
+ *
+ * The two differ only when the version cannot be read at all. There, the boot
+ * script keeps the legacy names because it also runs on a Hermes box that has
+ * no core (and no binary to accept either spelling); this path is reached only
+ * by the OpenClaw wizard, so it assumes the generation ClawBox pins instead
+ * (config/openclaw-target.txt, 2026.9.x) — the write fails loudly either way
+ * if that guess is wrong, and every shipping OpenClaw box is on it.
+ */
+export function embeddingConfigHome(version: string | null): "memory.search" | "agents.defaults.memorySearch" {
+  const match = /\b(20\d{2})\.(\d+)\b/.exec(version ?? "");
+  if (match === null) return "memory.search";
+  const [year, month] = match.slice(1).map(Number);
+  const legacy = year < 2026 || (year === 2026 && month < 8);
+  return legacy ? "agents.defaults.memorySearch" : "memory.search";
+}
+
+/**
+ * Point the memory index at the model running on this box.
+ *
+ * Named `switchTo...` rather than `use...`: the `use` prefix is reserved for
+ * React hooks and the lint rule reads any such call as one.
+ *
+ * This is the gap the design surfaced: the embedding choice had no route and
+ * no TypeScript caller anywhere in the product — only
+ * scripts/ensure-local-embeddings.sh wrote it, at boot, and on this box it had
+ * failed six times in a row. So nothing the owner could click could move memory
+ * off the cloud embedder, which is why the panel says "Cloud" while the wizard
+ * offers a local one.
+ *
+ * Written as ONE batch: the CLI costs ~8 s of start-up per invocation on a
+ * Jetson, and a batch is a single validated read-modify-write rather than two
+ * that can interleave.
+ */
+export async function switchToLocalEmbeddings(): Promise<void> {
+  // Nothing to point on the edition where ClawBox is the client: the write
+  // that remains is recording WHICH model the vectors about to be written
+  // belong to, so a later embedder change is caught rather than silently
+  // degrading search.
+  if (openclawIsAbsent()) {
+    // The pin FIRST, then the stamp: the stamp reads where the box is pointed,
+    // and in the other order it would record the embedder being switched away
+    // from. Both halves are idempotent, so a failure between them asks for a
+    // retry that costs nothing.
+    await writeEmbedderPin("local");
+    await stampLocalEmbeddingIdentity();
+    return;
+  }
+  const home = embeddingConfigHome(await installedOpenclawVersion());
+  // The embedder is reached through ClawBox's local-AI proxy — that is what
+  // wakes it on the first request — with the per-install service token as the
+  // bearer. `queryInputType`/`documentInputType` make OpenClaw label each
+  // request, and the proxy restores the model's query instruction from that
+  // label (src/lib/embed-query-instruction.ts); without them every query
+  // would be embedded bare and recall would quietly degrade. One batch, and
+  // the provider LAST in it: the batch is atomic, but the order is what a
+  // reader of the config sees if it is ever split into single writes.
+  await runOpenclawConfigSetBatch([
+    [`${home}.model`, LOCAL_EMBEDDING_MODEL],
+    [`${home}.remote.baseUrl`, getEmbedProxyBaseUrl()],
+    [`${home}.remote.apiKey`, getLocalAiToken()],
+    [`${home}.queryInputType`, "query"],
+    [`${home}.documentInputType`, "document"],
+    [`${home}.provider`, LOCAL_EMBEDDING_PROVIDER],
+  ]);
+}
+
+/**
+ * The embedding choice as it stands in openclaw.json: which provider, which
+ * model, and where its endpoint is.
+ *
+ * A FILE READ, never the CLI and never the status probe — both cost a process
+ * boot, and the cloud-defaults resolver asks this on every boot and on every
+ * credential save. `null` is "this config does not say", which the caller must
+ * not read as either answer.
+ *
+ * ONE HOME, resolved the same way the WRITERS resolve it. An earlier version
+ * read each leaf from `memory.search` and fell back to
+ * `agents.defaults.memorySearch` per FIELD, which could compose an answer out of
+ * two different configurations: a box part-way through the 2026.8 move — new
+ * `memory.search.provider` and `.model`, a stale legacy `remote.baseUrl` still
+ * naming a cloud endpoint — reported `baseUrl` from the home nothing writes any
+ * more. `currentEmbeddingSource` then called that box "cloud", `promoteEmbeddings`
+ * skipped the write as already done, and the half-written `memory.search` it was
+ * meant to complete stayed half-written. Reading only the home
+ * {@link embeddingConfigHome} names keeps this reader and
+ * {@link switchToCloudEmbeddings}/{@link switchToLocalEmbeddings} describing the
+ * same place.
+ */
+export async function readEmbeddingChoice(): Promise<{ provider: string | null; model: string | null; baseUrl: string | null }> {
+  const [config, home] = await Promise.all([
+    readConfig() as Promise<Record<string, unknown>>,
+    installedOpenclawVersion().then(embeddingConfigHome),
+  ]);
+  const pick = (keys: readonly string[]): string | null => {
+    let node: unknown = config;
+    for (const key of keys) {
+      if (!node || typeof node !== "object") return null;
+      node = (node as Record<string, unknown>)[key];
+    }
+    return typeof node === "string" && node.trim() ? node.trim() : null;
+  };
+  const at = (tail: readonly string[]) => pick([...home.split("."), ...tail]);
+  return { provider: at(["provider"]), model: at(["model"]), baseUrl: at(["remote", "baseUrl"]) };
+}
+
+/**
+ * Where the index is embedded right now — the ONE reader both editions use.
+ *
+ * Two arms because the thing that INDEXES owns the setting: OpenClaw's own
+ * `memory.search.remote.baseUrl` where the core is the embedding client, and
+ * ClawBox's `memory_shard_embedder` pin where ClawBox is.
+ *
+ * `recorded` is the half a caller cannot work out afterwards: FALSE means
+ * nothing has been written down and the answer is the default rule speaking —
+ * the cloud whenever this box's subscription covers it (the owner's ruling of
+ * 2026-09-18). The automatic promotion reads exactly that to decide whether it
+ * still has a write to make, and it is why a box that has been promoted once is
+ * not promoted — and reindexed — again at every boot.
+ */
+export interface EmbeddingPlacement {
+  source: EmbeddingSource;
+  recorded: boolean;
+}
+
+export async function readEmbeddingPlacement(fallback?: EmbeddingSource): Promise<EmbeddingPlacement> {
+  if (openclawIsAbsent()) {
+    const pinned = await readEmbedderPin();
+    if (pinned) {
+      // THE SUPPORT LEVER OUTRANKS THE PIN, on this reader as it already does on
+      // `resolveMemoryEmbedder`. With `clawai_cloud_embeddings: "off"` every
+      // embed and every search goes to the loopback proxy, and this reader
+      // answering "cloud" from the pin alone made the embedder card draw the
+      // cloud hint, preselect the cloud segment and the provider GET report
+      // `source: "cloud"` beside `cloudAvailable: false` — the very shape that
+      // route's own comment records as a defect and fixed for the unpinned path,
+      // while `clawkeep-memory.ts` read the resolved embedder and said "local".
+      // The pin is NOT rewritten: the lever is a support action and reversible,
+      // and clearing the key must put the box back where the owner left it.
+      if (pinned === "cloud" && (await cloudEmbeddingsSwitchedOff())) {
+        return { source: "local", recorded: true };
+      }
+      return { source: pinned, recorded: true };
+    }
+    return { source: fallback ?? (await defaultEmbedderSource()), recorded: false };
+  }
+  const { baseUrl } = await readEmbeddingChoice();
+  // No endpoint at all is the on-device answer: the only thing this box points
+  // at without one is its own embedder, and claiming "cloud" over an unset key
+  // would make the automatic default skip the write that puts it right.
+  if (!baseUrl) return { source: "local", recorded: false };
+  if (isLoopbackBaseUrl(baseUrl)) return { source: "local", recorded: true };
+  // AN ADDRESS NOTHING CAN EMBED THROUGH IS NOT A PLACEMENT. `memory.search`
+  // is a file a restored backup, a hand edit or a half-finished migration can
+  // leave holding a truncated URL or a `file:` scheme. Reading one of those as
+  // "recorded: cloud" is the false-success shape on the one reader the automatic
+  // default asks before it decides whether it still owes this box a write: it
+  // would skip the write, and the box would keep a `memory.search` it cannot
+  // embed with and no surface saying so. Unrecorded hands it back to the default
+  // rule, which writes a configuration that works.
+  //
+  // CLEARTEXT OFF THE DEVICE IS NOT ONE OF THOSE, and refusing it here was a
+  // regression of its own: on this arm the client is OPENCLAW'S, not ClawBox's
+  // (see `embeddingEndpointParseable`), so an owner's own LAN llama.cpp is a
+  // real placement and overwriting it would be the configuration change.
+  if (!embeddingEndpointParseable(baseUrl)) {
+    console.warn(
+      "[memory-shard] the configured memory embedder endpoint is not an address anything can embed through; treating it as unset",
+    );
+    return { source: "local", recorded: false };
+  }
+  return { source: "cloud", recorded: true };
+}
+
+/**
+ * Point the memory index at the ClawBox AI cloud embedder.
+ *
+ * The mirror of {@link switchToLocalEmbeddings}, and since 2026-09-18 available
+ * on BOTH editions. Where ClawBox itself is the indexer there is no external
+ * client to point, so what is written is the word `cloud` in ClawBox's own store
+ * — never the address and never a copy of the credential: `memory-index-local.ts`
+ * re-derives both per request, from the image's environment and the box's own
+ * credential store. The fence did not move, it widened by exactly one address:
+ * the endpoint offered here is checked against the ClawBox AI endpoint this box
+ * knows, because a fence with one gate is a fence.
+ *
+ * The two `*InputType` keys are REMOVED rather than left: they exist to make
+ * OpenClaw label each request so ClawBox's own proxy can restore the Qwen3
+ * query instruction (`embed-query-instruction.ts`). Sent to an OpenAI-shaped
+ * route they are an unknown field on the request body, and a 400 per query is a
+ * memory search that has stopped working. Unset only when the path is there —
+ * the CLI exits 1 on a path that is not, which would make the whole switch fail
+ * over a key this box never had.
+ *
+ * @param token the box's `claw_` credential, which is the bearer the proxy wants.
+ */
+export async function switchToCloudEmbeddings(endpoint: string, token: string): Promise<void> {
+  if (openclawIsAbsent()) {
+    if (!token.trim()) throw new Error("The ClawBox AI credential is missing.");
+    assertEmbedEndpointAllowed("cloud", embeddingsBaseUrlOf(endpoint));
+    // Same order as the local arm, for the same reason.
+    await writeEmbedderPin("cloud");
+    await stampLocalEmbeddingIdentity();
+    return;
+  }
+  const home = embeddingConfigHome(await installedOpenclawVersion());
+  await runOpenclawConfigSetBatch([
+    [`${home}.model`, CLOUD_EMBEDDING_MODEL],
+    [`${home}.remote.baseUrl`, embeddingsBaseUrlOf(endpoint)],
+    [`${home}.remote.apiKey`, token],
+    [`${home}.provider`, CLOUD_EMBEDDING_PROVIDER],
+  ]);
+  const config = (await readConfig()) as Record<string, unknown>;
+  for (const key of ["queryInputType", "documentInputType"] as const) {
+    if (embeddingKeyPresent(config, home, key)) {
+      await runOpenclawConfigUnset(`${home}.${key}`);
+    }
+  }
+}
+
+function embeddingKeyPresent(config: Record<string, unknown>, home: string, key: string): boolean {
+  let node: unknown = config;
+  for (const part of [...home.split("."), key]) {
+    if (!node || typeof node !== "object") return false;
+    node = (node as Record<string, unknown>)[part];
+  }
+  return node !== undefined;
+}
+
+/** Describe the sources for the app, pairing derived folders with their origin. */
+export function describeSources(paths: readonly string[], derived: Record<string, string>): MemorySource[] {
+  return paths.map((path) => (derived[path] ? { path, derivedFrom: derived[path] } : { path }));
+}

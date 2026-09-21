@@ -1,442 +1,116 @@
-// ── Mascot phrase generator (server-side) ──
-//
-// Replaces the hardcoded mascot phrase arrays with phrases the local LLM
-// generates in the user's selected language. Refreshes incrementally
-// across the week so phrases evolve based on what the user works on and
-// shares with the assistant.
-//
-// Generation backend: Ollama (local-first, free, offline). If no Ollama
-// model is available the cache stays empty and the Mascot falls back to
-// the inspiration phrases in `mascot-phrases.ts`.
+/**
+ * The mascot's vocabulary, server side.
+ *
+ * This module used to run an on-device generator: it prompted the local
+ * llama.cpp model for fresh crab lines on a weekly/daily schedule, validated
+ * and merged the batch, cached it per locale in the KV store, and backed off
+ * behind a failure record when the model was busy or the box was short on
+ * memory. Settings → Appearance carried a "Refresh phrases" button that
+ * triggered it by hand.
+ *
+ * All of that is gone. The hand-written packs in `src/lib/mascot-packs/` are
+ * the mascot's whole vocabulary now, and the crab picks a random line out of
+ * them — which is what the generator's output was blended into anyway, and
+ * what every locale outside the English-only generation allowlist already got.
+ *
+ * What remains here is the one thing the route needs: resolve the locale, hand
+ * back that locale's complete pack. The KV envelopes and failure records the
+ * old scheduler left on disk are deleted on first read so a box that ran the
+ * previous build does not carry them forever.
+ */
 
-import fs from "fs/promises";
-import { kvGet, kvSet } from "./kv-store";
 import * as config from "./config-store";
-import { getOllamaBaseUrl } from "./local-ai-runtime";
+import { kvDelete, kvGet, kvGetAll } from "./kv-store";
 import { isPreferenceLanguage } from "./preference-schema";
-import {
-  ensureFullPhraseSet,
-  INSPIRATION_PHRASES,
-  LANG_NAMES,
-  PHRASE_CATEGORIES,
-  type MascotPhraseSet,
-} from "./mascot-phrases";
+import { VALIDATOR_VERSION } from "./mascot-language";
+import { mergeWithPack } from "./mascot-packs";
+import { type MascotPhraseSet } from "./mascot-phrases";
 
-const KV_PHRASE_KEY = "clawbox-mascot-phrase-set";
-const KV_CONVO_LINES_KEY = "clawbox-mascot-convo-lines";
-const KV_LAST_FAILURE_KEY = "clawbox-mascot-phrase-last-failure";
+/** Where the lines came from. Only one source left. */
+export type PhraseSource = "pack";
 
-const FULL_REGEN_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
-const DAILY_TOPUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 1 day
-// After a failed generation (timeout, OOM-slow inference, bad output) do NOT
-// retry in the background for this long. Without this, a stale cache + a
-// failing model retried on every mascot fetch — reloading a multi-GB model
-// into RAM every ~90s and swap-spiraling 8GB Jetsons.
-const FAILURE_BACKOFF_MS = 12 * 60 * 60 * 1000; // 12 hours
-const GENERATION_TIMEOUT_MS = 60_000;
-const MAX_PHRASES_PER_CATEGORY = 24; // cap so the bag doesn't grow forever
-const TARGET_NEW_PER_CATEGORY = 8; // model is asked to produce ~8 fresh entries per category
-// Don't start a generation unless the box has this much RAM to spare —
-// loading even a 1-2GB model on a memory-pressured Jetson pushes the whole
-// device into swap.
-const MIN_AVAILABLE_MEM_KB = 3 * 1024 * 1024; // 3 GB
+export interface PhraseMeta {
+  source: PhraseSource;
+  reason: string;
+  locale: string;
+  validatorVersion: number;
+}
 
-const OPENCLAW_WORKSPACE_DIR = "/home/clawbox/.openclaw/workspace";
+/** `meta.reason` for every response: the packs are the vocabulary. */
+export const PACK_ONLY_REASON = "pack-only";
 
 /**
- * Select a small Ollama model for fast generation. Tiny instruct models
- * (≤2B) ONLY — 3B+ models take minutes on a loaded Orin Nano and blow the
- * 60s timeout, and an arbitrary user-pulled model (7B+) can OOM the box.
- * If none of these is installed we skip generation entirely and the mascot
- * keeps using the built-in inspiration phrases.
+ * KV written by the generator that no longer exists. The un-prefixed entries
+ * are older still — they predate the per-locale envelopes.
  */
-const PREFERRED_MODELS = [
-  "llama3.2:1b",
-  "qwen2.5:1.5b",
-  "gemma3:1b",
-  "gemma2:2b",
+const LEGACY_EXACT_KEYS = [
+  "clawbox-mascot-phrase-set",
+  "clawbox-mascot-convo-lines",
+  "clawbox-mascot-phrase-last-failure",
+];
+const LEGACY_PREFIXES = [
+  "clawbox-mascot-phrase-set:",
+  "clawbox-mascot-phrase-failure:",
 ];
 
-interface PhraseCacheEnvelope {
-  phrases: MascotPhraseSet;
-  language: string;
-  lastFullRegen: number;
-  lastTopUp: number;
-}
+let legacyPurged = false;
 
 /**
- * In-flight generation guard so concurrent GETs don't kick off multiple
- * regenerations of the same payload.
- */
-let inFlightGeneration: Promise<void> | null = null;
-
-// ── Cache I/O ──────────────────────────────────────────────────────────
-
-function readCache(): PhraseCacheEnvelope | null {
-  const raw = kvGet(KV_PHRASE_KEY);
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as PhraseCacheEnvelope;
-    if (!parsed.phrases || typeof parsed.lastFullRegen !== "number") return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function writeCache(envelope: PhraseCacheEnvelope): void {
-  kvSet(KV_PHRASE_KEY, JSON.stringify(envelope));
-}
-
-// ── Ollama call ────────────────────────────────────────────────────────
-
-async function pickOllamaModel(): Promise<string | null> {
-  try {
-    const res = await fetch(`${getOllamaBaseUrl()}/api/tags`, {
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!res.ok) return null;
-    const data = await res.json() as { models?: { name: string }[] };
-    const installed = (data.models ?? []).map(m => m.name);
-    if (installed.length === 0) return null;
-    for (const preferred of PREFERRED_MODELS) {
-      if (installed.includes(preferred)) return preferred;
-    }
-    // No tiny model installed — do NOT fall back to an arbitrary installed
-    // model: it may be far too large for phrase generation on this hardware.
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * True when the box has enough free RAM to load a small model without
- * swapping. Fails open on non-Linux (dev machines) or unreadable meminfo.
- */
-async function hasMemoryHeadroom(): Promise<boolean> {
-  try {
-    const meminfo = await fs.readFile("/proc/meminfo", "utf-8");
-    const m = meminfo.match(/^MemAvailable:\s+(\d+)\s*kB/m);
-    if (!m) return true;
-    const availableKb = parseInt(m[1], 10);
-    if (availableKb >= MIN_AVAILABLE_MEM_KB) return true;
-    console.warn(`[mascot-phrases] skipping generation: only ${Math.round(availableKb / 1024)}MB RAM available`);
-    return false;
-  } catch {
-    return true;
-  }
-}
-
-function readLastFailure(): number {
-  const raw = kvGet(KV_LAST_FAILURE_KEY);
-  const ts = raw ? parseInt(raw, 10) : NaN;
-  return Number.isFinite(ts) ? ts : 0;
-}
-
-function recordFailure(): void {
-  kvSet(KV_LAST_FAILURE_KEY, String(Date.now()));
-}
-
-function clearFailure(): void {
-  kvSet(KV_LAST_FAILURE_KEY, "0");
-}
-
-interface GenerationContext {
-  language: string;
-  languageName: string;
-  userName: string | null;
-  workspaceMemory: string;
-  recentSnippets: string[];
-}
-
-async function gatherContext(): Promise<GenerationContext> {
-  // Read straight from the store, so this bypasses the validation the
-  // /setup-api/preferences route applies — and buildPrompt interpolates the
-  // raw code into the model prompt. Re-check it here so a locale written
-  // before that validation existed falls back to English instead of arriving
-  // as prompt text.
-  const storedLanguage = await config.get("pref:ui_language");
-  const language = isPreferenceLanguage(storedLanguage) ? storedLanguage : "en";
-  const languageName = LANG_NAMES[language] ?? "English";
-  const userNameRaw = (await config.get("pref:ui_user_name") as string | null) ?? null;
-  const userName = userNameRaw && userNameRaw.trim().length > 0 ? userNameRaw.trim() : null;
-
-  // OpenClaw workspace memory — concatenate USER.md + SOUL.md + MEMORY.md
-  // if present, capped to keep prompts small.
-  const memoryParts: string[] = [];
-  for (const file of ["USER.md", "SOUL.md", "MEMORY.md"]) {
-    try {
-      const content = await fs.readFile(`${OPENCLAW_WORKSPACE_DIR}/${file}`, "utf-8");
-      memoryParts.push(`### ${file}\n${content.trim()}`);
-    } catch { /* file may not exist yet */ }
-  }
-  const workspaceMemory = memoryParts.join("\n\n").slice(0, 2000);
-
-  // Recent chat snippets the user has shared (from ChatPopup auto-capture)
-  const snippetsRaw = kvGet(KV_CONVO_LINES_KEY);
-  let recentSnippets: string[] = [];
-  if (snippetsRaw) {
-    try {
-      const parsed = JSON.parse(snippetsRaw) as { lines?: string[] };
-      recentSnippets = (parsed.lines ?? []).slice(-12);
-    } catch { /* ignore */ }
-  }
-
-  return { language, languageName, userName, workspaceMemory, recentSnippets };
-}
-
-function buildPrompt(ctx: GenerationContext, mode: "full" | "topup"): string {
-  const inspirationLines = (Object.entries(INSPIRATION_PHRASES) as [keyof MascotPhraseSet, string[]][])
-    .map(([cat, list]) => `${cat}: ${list.slice(0, 6).map(s => `"${s}"`).join(", ")}`)
-    .join("\n");
-
-  const memBlock = ctx.workspaceMemory
-    ? `\nWHAT THE DEVICE KNOWS ABOUT THE USER (OpenClaw workspace memory):\n${ctx.workspaceMemory}\n`
-    : "";
-
-  const snippetsBlock = ctx.recentSnippets.length > 0
-    ? `\nRECENT THINGS THE USER HAS DISCUSSED WITH THE ASSISTANT (use as flavor — do NOT quote verbatim):\n- ${ctx.recentSnippets.join("\n- ")}\n`
-    : "";
-
-  const intent = mode === "topup"
-    ? `Generate a FRESH BATCH of new phrases. The cache already has older phrases — produce different ones, varying mood and topic. Tie a few of them subtly to what the user has been working on (without quoting verbatim).`
-    : `Generate a complete starter set of phrases for every category.`;
-
-  return `You are writing speech-bubble lines for a sarcastic crab mascot living on a private home AI device called ClawBox. The crab's vibe is "lazy, sarcastic, scandalous" — affectionate, terse, slightly chaotic.
-
-${intent}
-
-OUTPUT LANGUAGE: ${ctx.languageName} (${ctx.language}). Write phrases in ${ctx.languageName}. Emoji are fine and encouraged. Keep technical/programming terms in English (e.g. "deploy", "bug", "404").
-
-CONSTRAINTS:
-- Each phrase must be SHORT — under 60 characters, fits in a small speech bubble.
-- No URLs, no markdown, no triple backticks.
-- For "nameGreetings": every entry MUST contain the literal token {name} (curly braces included). The crab will substitute the user's name at render time.
-- For "nameFallbacks": single-word friendly placeholder names ONLY (e.g. "boss", "captain"). These are used when the user hasn't set their name.
-- Per category, produce ${mode === "topup" ? `${TARGET_NEW_PER_CATEGORY}-${TARGET_NEW_PER_CATEGORY + 4}` : `8-12`} unique entries.
-- Do NOT copy the inspiration phrases verbatim — use them as TONAL REFERENCE only.
-
-INSPIRATION (style/tone reference, English originals — translate the *vibe*, not the words):
-${inspirationLines}
-${memBlock}${snippetsBlock}
-Output ONLY a single JSON object, no prose, in this exact shape:
-{
-  "sass": [...],
-  "idle": [...],
-  "sleep": [...],
-  "jump": [...],
-  "dance": [...],
-  "facepalm": [...],
-  "nameGreetings": [...],
-  "nameFallbacks": [...],
-  "power": [...]
-}`;
-}
-
-async function callOllama(model: string, prompt: string): Promise<MascotPhraseSet | null> {
-  try {
-    const res = await fetch(`${getOllamaBaseUrl()}/api/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        prompt,
-        stream: false,
-        format: "json",
-        // Unload the model right after the call — the default keep_alive
-        // (5m) holds gigabytes of RAM hostage on an 8GB box for a feature
-        // that runs once a day.
-        keep_alive: 0,
-        options: {
-          temperature: 0.9,
-          top_p: 0.95,
-          num_predict: 1500,
-        },
-      }),
-      signal: AbortSignal.timeout(GENERATION_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      console.error(`[mascot-phrases] Ollama generate failed: ${res.status}`);
-      return null;
-    }
-    const data = await res.json() as { response?: string };
-    if (!data.response) return null;
-    let parsed: Partial<MascotPhraseSet>;
-    try {
-      parsed = JSON.parse(data.response) as Partial<MascotPhraseSet>;
-    } catch (parseErr) {
-      // Distinguish a malformed model output from a network/transport
-      // failure — the former isn't a real error from our side, just the
-      // small local LLM occasionally producing non-JSON despite
-      // `format: "json"`. Logging both the raw response and the parse
-      // error makes triage straightforward.
-      console.error(
-        "[mascot-phrases] Ollama response JSON parse failed:",
-        parseErr instanceof Error ? parseErr.message : parseErr,
-        "raw:", data.response.slice(0, 500),
-      );
-      return null;
-    }
-    return ensureFullPhraseSet(parsed);
-  } catch (err) {
-    console.error("[mascot-phrases] Ollama call failed:", err instanceof Error ? err.message : err);
-    return null;
-  }
-}
-
-// ── Public API ─────────────────────────────────────────────────────────
-
-function isStale(envelope: PhraseCacheEnvelope | null, language: string): { stale: boolean; mode: "full" | "topup" } {
-  if (!envelope) return { stale: true, mode: "full" };
-  if (envelope.language !== language) return { stale: true, mode: "full" };
-  const now = Date.now();
-  if (now - envelope.lastFullRegen >= FULL_REGEN_INTERVAL_MS) return { stale: true, mode: "full" };
-  if (now - envelope.lastTopUp >= DAILY_TOPUP_INTERVAL_MS) return { stale: true, mode: "topup" };
-  return { stale: false, mode: "topup" };
-}
-
-/**
- * Merge a freshly-generated batch into the existing cache. For "full" mode
- * the new batch replaces the cache. For "topup" mode the new batch is
- * appended (newest first), capped at MAX_PHRASES_PER_CATEGORY per category.
- */
-function mergeBatch(existing: MascotPhraseSet, fresh: MascotPhraseSet, mode: "full" | "topup"): MascotPhraseSet {
-  if (mode === "full") return fresh;
-  const merged: MascotPhraseSet = { ...existing };
-  for (const cat of PHRASE_CATEGORIES) {
-    const seen = new Set<string>();
-    const combined: string[] = [];
-    // Newest first — fresh wins on duplicates
-    for (const s of [...fresh[cat], ...existing[cat]]) {
-      if (!seen.has(s)) { seen.add(s); combined.push(s); }
-      if (combined.length >= MAX_PHRASES_PER_CATEGORY) break;
-    }
-    merged[cat] = combined;
-  }
-  return merged;
-}
-
-/**
- * Trigger a generation if the cache is stale. No-ops if a generation is
- * already in flight. Does not throw — failures are logged and the cache
- * is left untouched.
- */
-export function maybeRegenerateInBackground(): Promise<void> {
-  if (inFlightGeneration) return inFlightGeneration;
-  inFlightGeneration = (async () => {
-    try {
-      const ctx = await gatherContext();
-      const cached = readCache();
-      const { stale, mode } = isStale(cached, ctx.language);
-      if (!stale) return;
-
-      // Failure backoff: a stale cache + a failing/slow model must not turn
-      // every mascot fetch into a fresh multi-GB model load.
-      if (Date.now() - readLastFailure() < FAILURE_BACKOFF_MS) return;
-
-      if (!(await hasMemoryHeadroom())) {
-        recordFailure(); // treat memory pressure like a failure: back off
-        return;
-      }
-
-      const model = await pickOllamaModel();
-      if (!model) return; // no suitable tiny model — keep falling back to inspiration
-
-      const prompt = buildPrompt(ctx, mode);
-      const fresh = await callOllama(model, prompt);
-      if (!fresh) {
-        recordFailure();
-        return;
-      }
-      clearFailure();
-
-      const now = Date.now();
-      const existingPhrases = cached?.phrases ?? INSPIRATION_PHRASES;
-      const merged = mergeBatch(existingPhrases, fresh, mode);
-
-      writeCache({
-        phrases: merged,
-        language: ctx.language,
-        lastFullRegen: mode === "full" ? now : (cached?.lastFullRegen ?? now),
-        lastTopUp: now,
-      });
-    } catch (err) {
-      // Background regen is best-effort; any failure here (gatherContext,
-      // pickOllamaModel network blip, writeCache disk error, …) must NOT
-      // reject the returned promise — callers fire-and-forget it and the
-      // cache simply stays as-is until the next tick.
-      console.error("[mascot-phrases-server] maybeRegenerateInBackground failed:", err);
-    } finally {
-      inFlightGeneration = null;
-    }
-  })();
-  return inFlightGeneration;
-}
-
-/**
- * Force a full regen regardless of cache state. Returns the new phrase set,
- * or null if generation failed (caller should fall back to inspiration).
+ * Drop the old generator's leftovers, once per process.
  *
- * Concurrent callers share a single in-flight generation — duplicate clicks
- * from the Settings UI must not spawn parallel Ollama runs (the model on a
- * Jetson is single-tenant and the second call would just queue + waste tokens).
+ * Deleted rather than ignored: nothing can rewrite or expire them any more, so
+ * left alone they are unreachable data that outlives every code path that
+ * understood it.
  */
-let inFlightForceRegen: Promise<MascotPhraseSet | null> | null = null;
-export function forceRegenerate(): Promise<MascotPhraseSet | null> {
-  if (inFlightForceRegen) return inFlightForceRegen;
-  inFlightForceRegen = (async () => {
-    try {
-      // Explicit user action bypasses the failure backoff, but still
-      // refuses to load a model into a memory-pressured box.
-      if (!(await hasMemoryHeadroom())) return null;
-      const ctx = await gatherContext();
-      const model = await pickOllamaModel();
-      if (!model) return null;
-      const prompt = buildPrompt(ctx, "full");
-      const fresh = await callOllama(model, prompt);
-      if (!fresh) {
-        recordFailure();
-        return null;
-      }
-      clearFailure();
-      const now = Date.now();
-      writeCache({
-        phrases: fresh,
-        language: ctx.language,
-        lastFullRegen: now,
-        lastTopUp: now,
-      });
-      return fresh;
-    } finally {
-      inFlightForceRegen = null;
+function purgeGeneratorKeys(): void {
+  if (legacyPurged) return;
+  legacyPurged = true;
+  try {
+    const stale = [
+      ...LEGACY_EXACT_KEYS.filter((key) => kvGet(key) !== null),
+      ...LEGACY_PREFIXES.flatMap((prefix) => Object.keys(kvGetAll(prefix))),
+    ];
+    for (const key of stale) kvDelete(key);
+    if (stale.length > 0) {
+      console.info(`[mascot-phrases] dropped ${stale.length} key(s) from the removed phrase generator`);
     }
-  })();
-  return inFlightForceRegen;
+  } catch (err) {
+    console.warn("[mascot-phrases] could not purge generator keys:", err);
+  }
 }
 
 /**
- * Read the current phrase set, kicking off a background regen if stale.
- * Always returns a fully-populated set — falls back to inspiration when
- * the cache is empty.
+ * The locale to speak.
+ *
+ * `requested` wins when it names a language the device ships: the client knows
+ * which language it is rendering, which can be ahead of the stored preference
+ * by a few hundred milliseconds right after a switch. The stored value is read
+ * straight from the config store, bypassing the validation
+ * `/setup-api/preferences` applies, so it is re-checked here.
  */
-export function getMascotPhrases(): { phrases: MascotPhraseSet; meta: { generated: boolean; language: string | null; lastFullRegen: number | null; lastTopUp: number | null } } {
-  const cached = readCache();
-  // Schedule a background regen if needed — fire-and-forget, don't await.
-  void maybeRegenerateInBackground();
-  if (!cached) {
-    return {
-      phrases: INSPIRATION_PHRASES,
-      meta: { generated: false, language: null, lastFullRegen: null, lastTopUp: null },
-    };
-  }
+async function resolveLocale(requested?: string | null): Promise<string> {
+  if (isPreferenceLanguage(requested)) return requested;
+  const stored = await config.get("pref:ui_language");
+  return isPreferenceLanguage(stored) ? stored : "en";
+}
+
+/**
+ * The phrase set for `requestedLocale` — always complete, always in that
+ * locale. `mergeWithPack(null, locale)` is the locale's own pack topped up
+ * from the language-free neutral pack, so no category can come back empty.
+ */
+export async function getMascotPhrases(
+  requestedLocale?: string | null,
+): Promise<{ phrases: MascotPhraseSet; meta: PhraseMeta }> {
+  purgeGeneratorKeys();
+  const locale = await resolveLocale(requestedLocale);
   return {
-    phrases: ensureFullPhraseSet(cached.phrases),
+    phrases: await mergeWithPack(null, locale),
     meta: {
-      generated: true,
-      language: cached.language,
-      lastFullRegen: cached.lastFullRegen,
-      lastTopUp: cached.lastTopUp,
+      source: "pack",
+      reason: PACK_ONLY_REASON,
+      locale,
+      validatorVersion: VALIDATOR_VERSION,
     },
   };
 }

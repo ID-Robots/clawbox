@@ -4,7 +4,9 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import StatusMessage from "./StatusMessage";
 import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
-import AIProviderIcon from "./AIProviderIcon";
+import { notifyProvidersChanged } from "@/lib/ui-events";
+import { humanizeApiError } from "@/lib/api-error-message";
+import { isClawboxAiImageModelId } from "@/lib/clawbox-ai-models";
 import HermesProviderConfig from "./HermesProviderConfig";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 import {
@@ -21,10 +23,19 @@ import {
   extractProviderModelId,
   isCatalogProvider,
   isValidModelId,
+  isModelUsableOnSubscription,
+  SUBSCRIPTION_SURFACE,
 } from "@/lib/provider-models";
+import { chatgptReferenceProvider } from "@/lib/chatgpt-subscription";
 import { useProviderCatalog } from "@/hooks/useProviderCatalog";
+import { HeaderDropdown, type HeaderDropdownOption } from "./HeaderDropdown";
 import { ButtonSpinner } from "./ButtonSpinner";
+import { ConfiguringOverlay, CONFIGURING_STEP_DELAYS, GENERIC_CONFIGURING_STEP_KEYS } from "./ConfiguringOverlay";
 import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
+import ProviderRadioRow from "./ProviderRadioRow";
+import ProviderConnectionLabel from "./ProviderConnectionLabel";
+import ProviderDefaultHero from "./ProviderDefaultHero";
+import { useProviderStatus } from "@/hooks/useProviderStatus";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
@@ -33,7 +44,8 @@ import { cachedEdition, fetchHarness } from "@/lib/client-harness";
 // the Hermes provider panel renders the SAME experience instead of a lookalike.
 import {
   CLAWAI_TIER_STORAGE_KEY,
-  normalizeClawaiUiTier,
+  readStoredUiTier,
+  resolveUiTier,
   type ClawaiTier,
 } from "@/lib/clawbox-ai-tiers";
 
@@ -100,7 +112,13 @@ function getConnectButtonLabel(providerName?: string | null) {
   return providerName ? `Connect to ${providerName}` : "Connect";
 }
 
-const CONFIGURING_STEP_DELAYS = [0, 2000, 5000, 12000, 22000];
+/**
+ * How often the plan card re-asks the portal while mounted (TASK-516). Slow on
+ * purpose: the tier it protects changes on an upgrade, not on a timer, and
+ * every tick is a portal round-trip. What it must beat is "forever", which is
+ * what a mount-only read gave a Settings window the desktop never unmounts.
+ */
+const TIER_REFRESH_MS = 30_000;
 
 type ConfiguringKind = "generic" | "ollama" | "llamacpp";
 
@@ -111,150 +129,6 @@ interface ConfiguringState {
   detail: string | null;
   progressPercent: number | null;
   completed: boolean;
-}
-
-function ConfiguringOverlay({
-  provider,
-  steps,
-  phase,
-  detail,
-  progressPercent,
-  completed,
-  t,
-}: {
-  provider: string;
-  steps: string[];
-  phase: number;
-  detail: string | null;
-  progressPercent: number | null;
-  completed: boolean;
-  t: (key: string, params?: Record<string, string | number>) => string;
-}) {
-  const [dots, setDots] = useState("");
-  const providerName = PROVIDERS.find((p) => p.id === provider)?.name ?? "AI";
-
-  const overlayRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    // Trap focus inside overlay
-    overlayRef.current?.focus();
-  }, []);
-
-  useEffect(() => {
-    const id = setInterval(() => setDots((d) => (d.length >= 3 ? "" : d + ".")), 500);
-    return () => clearInterval(id);
-  }, []);
-
-  return (
-    <div ref={overlayRef} tabIndex={-1} className="flex flex-col items-center gap-6 px-2 pt-2 pb-6 outline-none">
-      <style>{`
-        @keyframes aimodels-check-draw { to { stroke-dashoffset: 0 } }
-        @keyframes aimodels-fade-in { from { opacity: 0; transform: translateY(var(--lift)) } to { opacity: 1; transform: translateY(0) } }
-        .aimodels-fade-in { animation: aimodels-fade-in var(--d-3) var(--ease-entrance) both }
-      `}</style>
-
-      {/* The provider mark, and nothing orbiting it. Two counter-rotating
-          dot rings and a pulsing halo ran at the same speed at 0% and at
-          99% of a gateway restart — perpetual motion bound to no state,
-          while the checklist and the percentage below it were doing the
-          actual reporting. The mark sits in the product's own tile
-          instead, and turns cyan (DONE) when the work lands. */}
-      <div
-        className={`flex h-[72px] w-[72px] items-center justify-center rounded-[var(--r-3)] ${
-          completed ? "bg-[var(--cyan-wash)]" : "bg-[var(--fill-2)]"
-        }`}
-        style={{ transition: "background-color var(--d-3) var(--ease-standard)" }}
-      >
-        {completed ? (
-          <svg width="44" height="44" viewBox="0 0 56 56" fill="none" className="aimodels-fade-in">
-            <circle cx="28" cy="28" r="25" stroke="var(--cyan-bright)" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "aimodels-check-draw var(--d-5) var(--ease-emphasis) 100ms forwards" }} />
-            <path d="M17 28l7 7 15-15" stroke="var(--cyan-bright)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "aimodels-check-draw var(--d-3) var(--ease-entrance) var(--d-5) forwards" }} />
-          </svg>
-        ) : (
-          <AIProviderIcon provider={provider} size={44} className="aimodels-fade-in" />
-        )}
-      </div>
-
-      {/* Provider name */}
-      <div className="text-center aimodels-fade-in" style={{ animationDelay: "var(--stagger)" }}>
-        <h2 className="text-[length:var(--t-6)] leading-[1.15] font-bold text-[var(--text-primary)] mb-2">
-          {completed ? t("connected") : t("ai.settingUp", { provider: providerName })}
-        </h2>
-        <p className="text-[length:var(--t-4)] leading-[1.6] text-[var(--text-secondary)]">
-          {completed
-            ? detail || t("ai.configured")
-            : detail || `${t("ai.configuringAssistant")}${dots}`}
-        </p>
-      </div>
-
-      {/* Progress steps */}
-      <ul className="w-full max-w-[280px] space-y-2 list-none">
-        {steps.map((step, i) => {
-          const stepDone = completed || i < phase;
-          const stepNow = !completed && i === phase;
-          const reached = completed || i <= phase;
-          return (
-            <li
-              key={i}
-              className={`flex items-center gap-2 text-[length:var(--t-2)] ${
-                reached ? "opacity-100" : "opacity-0 translate-y-1"
-              }`}
-              style={{
-                transition: "opacity var(--d-2) var(--ease-standard), transform var(--d-2) var(--ease-standard)",
-                transitionDelay: `calc(${Math.min(i, 3)} * var(--stagger))`,
-              }}
-            >
-              {stepDone ? (
-                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--cyan-wash)] text-[var(--cyan-bright)] shrink-0">
-                  <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>check</span>
-                </span>
-              ) : stepNow ? (
-                <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                  <span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent animate-spin" />
-                </span>
-              ) : (
-                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[var(--fill-1)] shrink-0">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--fill-4)]" />
-                </span>
-              )}
-              <span className={stepDone ? "text-[var(--cyan-bright)]" : stepNow ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}>
-                {step}
-              </span>
-            </li>
-          );
-        })}
-      </ul>
-
-      {progressPercent !== null && !completed && (
-        <div className="w-full max-w-[280px]">
-          <div className="flex items-center justify-between gap-2 text-[length:var(--t-1)] text-[var(--text-muted)] mb-2">
-            <span className="truncate">{providerName}</span>
-            <span className="tabular-nums shrink-0">{progressPercent}%</span>
-          </div>
-          {/* Linear, because --ease-truth is the only honest curve for a
-              bar that reports someone else's progress: an easing curve
-              would invent a velocity the box never reported. */}
-          <div className="w-full h-1 bg-[var(--fill-2)] rounded-[var(--r-full)] overflow-hidden">
-            <div
-              className="h-full bg-[var(--coral-bright)] rounded-[var(--r-full)]"
-              style={{ width: `${progressPercent}%`, transition: "width var(--d-3) var(--ease-truth)" }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Local providers (llama.cpp / Ollama) compile and download multi-GB
-         models — can take 10-15 min on Jetson. Cloud providers finish in
-         seconds, so they get the shorter generic copy. */}
-      {!completed && phase >= 1 && (
-        <p className="text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)] text-center aimodels-fade-in">
-          {provider === "llamacpp" || provider === "ollama"
-            ? t("ai.pleaseDontCloseLocal")
-            : t("ai.pleaseDontClose")}
-        </p>
-      )}
-    </div>
-  );
 }
 
 const PROVIDERS: Provider[] = [
@@ -437,16 +311,7 @@ export default function AIModelsStep({
     },
     [allowedProviders, defaultProviderId],
   );
-  const genericSteps = useMemo(
-    () => [
-      t("ai.credentialsVerified"),
-      t("ai.updatingConfig"),
-      t("ai.restartingGateway"),
-      t("ai.warmingUp"),
-      t("ai.almostReady"),
-    ],
-    [t],
-  );
+  const genericSteps = useMemo(() => GENERIC_CONFIGURING_STEP_KEYS.map((key) => t(key)), [t]);
   const ollamaInstallSteps = useMemo(
     () => [
       "Preparing Ollama",
@@ -518,9 +383,17 @@ export default function AIModelsStep({
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{
-    type: "success" | "error";
+    type: "success" | "error" | "info";
     message: string;
   } | null>(null);
+  /**
+   * A save that SUCCEEDED but did not achieve all of it — today only the
+   * OpenAI auth-order preference, which the configure route reports in
+   * `warning` because the credential is stored either way. Held here rather
+   * than shown immediately: the success overlay is still running, and a notice
+   * painted underneath it is a notice nobody reads.
+   */
+  const [saveWarning, setSaveWarning] = useState<string | null>(null);
 
   const [selectedOllamaModel, setSelectedOllamaModel] = useState("llama3.2:3b");
   const [selectedLlamaCppModel, setSelectedLlamaCppModel] = useState("");
@@ -530,19 +403,28 @@ export default function AIModelsStep({
   // from the currently-configured model so their existing pick survives;
   // if the current model isn't in the catalog (user typed a custom ID),
   // we flip into custom-input mode so it isn't silently overwritten.
-  // Provider+authMode selects the effective catalog. Subscription mode for
-  // OpenAI routes through the `codex` namespace (ChatGPT backend),
-  // whose catalog is completely different from the token-mode `openai`
-  // API catalog — `gpt-5.4` only exists via codex, `gpt-5` only via the
-  // public API. Matching the catalog to the actual namespace prevents
-  // the picker from offering IDs that the upstream will reject.
-  // Resolve which catalog namespace the picker should pull from. Differs
-  // from `selectedProvider` for OpenAI in subscription/OAuth mode, where
-  // the routeable namespace is `codex` (ChatGPT backend) rather
-  // than `openai` (api.openai.com). Same swap the configure route applies.
+  // Provider+authMode selects the effective CATALOGUE. For OpenAI the two auth
+  // modes offer different model sets — `gpt-5.4-mini` only on the ChatGPT
+  // subscription, the `-pro` tiers only on the API key — so the picker must not
+  // offer ids the chosen credential will reject. (`gpt-5` is NOT one of those:
+  // it is in no openai enumeration on the pinned core, only an OpenRouter slug.
+  // TASK-705.)
+  //
+  // `codex` is the catalogue id for the subscription, and ONLY that: OpenClaw 2
+  // retired the namespace and both lanes are written `openai/<id>`
+  // (src/lib/chatgpt-subscription.ts). Anything that turns a catalogue id back
+  // into a model reference — or a reference back into a catalogue's model id,
+  // like the seeding effect below — has to go through
+  // `chatgptReferenceProvider`.
   const catalogProvider = useMemo<string | null>(() => {
-    if (selectedProvider === "openai" && authMode === "subscription") {
-      return "codex";
+    if (authMode === "subscription" && selectedProvider) {
+      // SUBSCRIPTION_SURFACE is the one table for "what does signing in change
+      // about which models this provider can run". `catalogProvider` is its
+      // wholesale-swap column (openai -> codex); its other columns are applied
+      // by the catalog route as an `availableOnSubscription` stamp, not by
+      // swapping, because the save namespace does not move with them.
+      const swap = SUBSCRIPTION_SURFACE[selectedProvider]?.catalogProvider;
+      if (swap) return swap;
     }
     return isCatalogProvider(selectedProvider) ? selectedProvider : null;
   }, [selectedProvider, authMode]);
@@ -561,6 +443,59 @@ export default function AIModelsStep({
   // this — `selectedModelId` / `customModelId` live above it either way.
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
+  // ── Connection state, for the hero and every row ─────────────────────────
+  //
+  // The same aggregate the Hermes panel reads: ONE call to
+  // /setup-api/providers/status for every provider at once, re-read on the
+  // shared providers-changed signal. It is presentation ONLY here — this panel
+  // never POSTs /providers/default, because on OpenClaw picking a radio means
+  // "configure this one", not "switch to it", and that verb is not something a
+  // restyle gets to change.
+  //
+  // Not fetched on the Hermes branch (HermesProviderConfig owns the same hook
+  // and would double the request), nor on Settings -> Local AI, whose single
+  // on-device row is not a "which provider answers" question and whose section
+  // already carries its own status card.
+  const providerStatusEnabled = configureScope !== "local" && edition !== null && edition !== "hermes";
+  const { summary: providerStatus } = useProviderStatus({ enabled: providerStatusEnabled });
+  const statusById = useMemo(
+    () => new Map((providerStatus?.providers ?? []).map((row) => [row.id, row])),
+    [providerStatus],
+  );
+  const defaultRow = useMemo(
+    () => providerStatus?.providers.find((row) => row.isDefault) ?? null,
+    [providerStatus],
+  );
+  /** A row's connection state, as a dot AND a word. */
+  const rowStatus = useCallback((id: string) => {
+    const row = statusById.get(id);
+    return row ? <ProviderConnectionLabel state={row.state} className="shrink-0" /> : null;
+  }, [statusById]);
+
+  // "Change model" sends the customer to the model picker they already know
+  // rather than growing a second one in the hero. Bumped as a counter, not a
+  // boolean, so pressing it again re-scrolls after they have clicked away.
+  const [focusModelRequest, setFocusModelRequest] = useState(0);
+  // The last request this effect actually landed. The counter never returns to
+  // zero, and the effect has to watch the row/catalog/picker state because the
+  // picker is not in the DOM until all three have settled — so without this,
+  // every later click on ANY provider row would re-run the effect, scroll the
+  // page and steal focus into that provider's model field, long after the one
+  // "Change model" press that asked for it.
+  const handledFocusRequestRef = useRef(0);
+  useEffect(() => {
+    if (!focusModelRequest) return;
+    if (handledFocusRequestRef.current === focusModelRequest) return;
+    // Re-runs as the row switches and its catalog lands, because the picker
+    // does not exist in the DOM until both have happened. The request is only
+    // marked handled once the element is really there, so the retry survives.
+    const el = document.getElementById("ai-provider-model");
+    if (!el) return;
+    handledFocusRequestRef.current = focusModelRequest;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.focus();
+  }, [focusModelRequest, selectedProvider, activeCatalog, modelPickerOpen]);
+
   useEffect(() => {
     if (!activeCatalog || !selectedProvider) {
       setSelectedModelId("");
@@ -570,11 +505,29 @@ export default function AIModelsStep({
       return;
     }
     if (modelTouched) return;
-    // Extract modelId under the catalog's namespace, NOT the selected
-    // provider's name — for openai+subscription these differ
-    // (codex vs openai).
-    const currentModelId = extractProviderModelId(currentModel, activeCatalog.provider);
+    // Extract modelId under the namespace the model is REFERENCED by, which is
+    // not the catalogue's id for the ChatGPT subscription: its catalogue is
+    // `codex` while OpenClaw 2 writes `openai/<id>`
+    // (src/lib/chatgpt-subscription.ts). Comparing against the catalogue id
+    // read every configured ChatGPT model as "not ours" and reset the picker
+    // to the catalogue default — which the next save on this screen then
+    // wrote over the model the owner had chosen.
+    const currentModelId = extractProviderModelId(
+      currentModel,
+      chatgptReferenceProvider(activeCatalog.provider),
+    );
     if (!currentModelId) {
+      setSelectedModelId(activeCatalog.defaultModelId);
+      setCustomModelId("");
+      setUseCustomModel(false);
+      return;
+    }
+    // A model the box is pinned to but cannot chat with is not a "custom id
+    // the owner typed" — seeding it here pre-fills the field with an id the
+    // configure route refuses, so Save 400s on a value this panel supplied and
+    // the owner's API key never reaches disk. Fall through to the curated
+    // default instead: on this box that IS the repair.
+    if (isClawboxAiImageModelId(currentModelId)) {
       setSelectedModelId(activeCatalog.defaultModelId);
       setCustomModelId("");
       setUseCustomModel(false);
@@ -592,11 +545,22 @@ export default function AIModelsStep({
     }
   }, [activeCatalog, currentModel, modelTouched, selectedProvider]);
   const [configuringState, setConfiguringState] = useState<ConfiguringState | null>(null);
-  const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(() => {
-    if (typeof window === "undefined") return "flash";
-    return normalizeClawaiUiTier(window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY)) ?? "flash";
-  });
+  // Seeded from local storage because that is all this panel can know before it
+  // has asked the box anything; the effect below reconciles it against the
+  // portal-confirmed account as soon as an answer arrives. Local storage alone
+  // is NOT the answer for a paired box — see TASK-468.
+  const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(() => readStoredUiTier());
+  // Whether the box has been TOLD what the account is on. The seed above is a
+  // stored intent, not an answer: it printed as "Pro plan · €9/month" on a box
+  // whose own portal page said Max. Until the reconcile below hears from the
+  // portal the summary says where the plan comes from instead of naming one.
+  const [clawaiPlanKnown, setClawaiPlanKnown] = useState(false);
+  // Set the moment the user touches the plan picker. The reconcile below must
+  // never yank the card out from under a pick that already happened — on the
+  // wizard this picker is someone CHOOSING a plan they do not have yet.
+  const userPickedTierRef = useRef(false);
   const persistClawaiTier = useCallback((tier: ClawaiTier) => {
+    userPickedTierRef.current = true;
     setClawaiTier(tier);
     if (typeof window !== "undefined") {
       try {
@@ -609,6 +573,7 @@ export default function AIModelsStep({
   }, []);
   // OAuth redirect flow state (Anthropic)
   const [oauthStarted, setOauthStarted] = useState(false);
+  const [oauthUrl, setOauthUrl] = useState<string | null>(null);
   const [authCode, setAuthCode] = useState("");
   const [exchanging, setExchanging] = useState(false);
 
@@ -640,7 +605,7 @@ export default function AIModelsStep({
   // through a ref rather than a forward reference; the hook's own start/stop/
   // reset identities are stable.
   const clawaiFinishRef = useRef<{
-    complete: () => void;
+    complete: (warning?: string) => void;
     error: (message: string) => void;
     configuring: () => void;
   }>({ complete: () => {}, error: () => {}, configuring: () => {} });
@@ -651,7 +616,10 @@ export default function AIModelsStep({
     onStart: () => setStatus(null),
     onBusyChange: setSaving,
     onConfiguring: () => clawaiFinishRef.current.configuring(),
-    onComplete: () => clawaiFinishRef.current.complete(),
+    // The warning travels: a ClawBox AI sign-in is a `subscription` save, so it
+    // takes the doctor stop and the deferred session sweep — the one path most
+    // likely to produce the sentence, and until now the one that dropped it.
+    onComplete: (warning) => clawaiFinishRef.current.complete(warning),
     onError: (message) => clawaiFinishRef.current.error(message),
   });
   // Stable identities (see the hook) — pulled out so effects/callbacks can
@@ -665,6 +633,76 @@ export default function AIModelsStep({
     setSaving(false);
     setStatus((current) => (current?.type === "error" ? null : current));
   }, [normalizedCurrentProvider, stopClawaiLogin, resetClawaiLogin]);
+
+  // ── Make the plan card agree with the account ─────────────────────────────
+  //
+  // This panel used to seed the plan purely from local storage and never ask
+  // the box anything, so on a browser that had never stored a tier — every
+  // customer's first visit, and every visit after clearing site data — it fell
+  // back to the hardcoded "flash" and rendered "Pro plan · €9/month". On a Max
+  // box that sat directly under a MAX badge in the same panel, contradicting
+  // it, and the same state is what `payload.clawaiTier` writes on save, so a
+  // save from that screen downgraded a €49 account off the frontier weights
+  // without saying so. (TASK-468.)
+  //
+  // `resolveUiTier` is the rule the Hermes panel has always used; it now lives
+  // in the shared tier module so these two panels cannot drift again. It reads
+  // the account only when the box is actually paired, so the wizard's
+  // choose-a-plan flow on an unpaired box is untouched.
+  //
+  // Not once per mount but on a slow poll (TASK-516): the desktop keeps the
+  // Settings window mounted while it is "closed", so a mount-only read froze
+  // the allowance at whatever the page load saw. The one moment the line is
+  // needed — right after the chat refused a picture at the cap — it showed the
+  // morning's number and contradicted the assistant on the same screen. The
+  // interval matches how the Voice and Local Models panels stay honest, and it
+  // pauses while the tab is hidden so a background desktop does not poll the
+  // portal all day; coming back to the tab refreshes immediately.
+  useEffect(() => {
+    let controller: AbortController | null = null;
+    const refresh = () => {
+      controller?.abort();
+      const own = new AbortController();
+      controller = own;
+      fetch("/setup-api/ai-models/status", { cache: "no-store", signal: own.signal })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (!data || typeof data !== "object") return;
+          // Only a live portal answer may move the card. `tierSource: "picker"`
+          // means the status route never reached the portal this cycle, and the
+          // stored device tier cannot tell Free from "we never asked" — guessing
+          // from it is how a Free user got shown a paid plan in the first place.
+          if (data.clawaiConfigured !== true || data.tierSource !== "portal") return;
+          // The account is now known, whoever ends up deciding what the card
+          // shows — so this is set BEFORE the pick guard below, not after it.
+          setClawaiPlanKnown(true);
+          // The tier guard sits at resolution time, not at fetch time: a pick
+          // made while this request was in flight must win over its answer.
+          if (userPickedTierRef.current) return;
+          setClawaiTier(resolveUiTier(true, data.clawaiAccountTier ?? null));
+        })
+        .catch(() => {
+          // Offline or mid-restart: keep the stored intent rather than blanking
+          // or guessing at someone's subscription.
+        });
+    };
+    // The mount read gets the same visibility gate as the ticks: a panel
+    // mounting in a background tab waits for `visibilitychange` like any
+    // other hidden refresh would.
+    if (typeof document === "undefined" || document.visibilityState !== "hidden") refresh();
+    const interval = setInterval(() => {
+      if (typeof document === "undefined" || document.visibilityState !== "hidden") refresh();
+    }, TIER_REFRESH_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      controller?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     fetch("/setup-api/ai-models/oauth/providers")
@@ -684,10 +722,13 @@ export default function AIModelsStep({
 
   const showError = useCallback((message: string) => {
     setConfiguringState(null);
+    // A failure never inherits the previous save's warning.
+    setSaveWarning(null);
     setStatus({ type: "error", message });
   }, []);
 
   const showConfiguring = useCallback((kind: ConfiguringKind = "generic") => {
+    setSaveWarning(null);
     tryCloseOAuthWindow(oauthWindowRef);
     setSaving(false);
     setExchanging(false);
@@ -720,7 +761,8 @@ export default function AIModelsStep({
     });
   }, [getStepsForKind, selectedProvider]);
 
-  const showSuccessAndContinue = useCallback(() => {
+  const showSuccessAndContinue = useCallback((warning?: unknown) => {
+    setSaveWarning(typeof warning === "string" && warning.trim() ? warning : null);
     tryCloseOAuthWindow(oauthWindowRef);
     resetClawaiLogin();
     // Dispatch the gateway-restart signal as soon as we know the configure
@@ -732,6 +774,13 @@ export default function AIModelsStep({
     if (configureScope === "primary" && typeof window !== "undefined") {
       window.dispatchEvent(new Event("clawbox:primary-ai-configured"));
     }
+    // "The providers changed." Emitted HERE rather than from each host, because
+    // this is the one point every OpenClaw configure success passes through —
+    // pasted key, provider OAuth, and the ClawBox AI device login alike — and
+    // both the wizard and the embedded Settings panel reach it. A host-side
+    // emit would have to be repeated per host and would miss whichever one was
+    // added next.
+    notifyProvidersChanged();
     completeConfiguring();
   }, [completeConfiguring, configureScope, resetClawaiLogin]);
 
@@ -749,10 +798,25 @@ export default function AIModelsStep({
     };
   }, [showConfiguring, showError, showSuccessAndContinue]);
 
+  // Route errors are English sentences written for whoever is reading them —
+  // fine for the ones nobody can act on, wrong for the ones we know how to say
+  // in the customer's language. A route that returns a `code` gets translated;
+  // everything else falls through to the text it sent, as before.
+  const TRANSLATED_ERROR_CODES: Record<string, string> = useMemo(
+    () => ({ local_ai_runtime_unavailable: "ai.localRuntimeUnavailable" }),
+    [],
+  );
+
   const extractError = useCallback(async (res: Response, fallback: string) => {
     const data = await res.json().catch(() => ({}));
-    return typeof data.error === "string" ? data.error : fallback;
-  }, []);
+    const key = typeof data.code === "string" ? TRANSLATED_ERROR_CODES[data.code] : undefined;
+    if (key) return t(key);
+    // The whole body, not `data.error`: `humanizeApiError` reads the sentence
+    // out of whichever field carries it and answers `fallback` when none does,
+    // so a shape this component has not met renders as the fallback rather
+    // than as its own JSON.
+    return humanizeApiError(data, fallback);
+  }, [TRANSLATED_ERROR_CODES, t]);
 
   // Ollama hook
   const ollamaCallbacks = useMemo<OllamaCallbacks>(() => ({
@@ -772,9 +836,11 @@ export default function AIModelsStep({
     ollamaPulling,
     ollamaPullProgress,
     ollamaSaving,
+    ollamaMaxParamBillions,
     checkOllamaStatus,
     handleOllamaSearchChange,
     pullOllamaModel,
+    cancelOllamaPull,
     saveOllamaConfig,
     deleteOllamaModel,
     formatOllamaBytes,
@@ -794,6 +860,7 @@ export default function AIModelsStep({
     llamaCppProgress,
     checkLlamaCppStatus,
     saveLlamaCppConfig,
+    activateLocalOnly,
   } = useLlamaCppModels(llamaCppCallbacks, configureScope);
 
   const getAvailableAuthOptionsForProvider = useCallback((providerId: string | null) => {
@@ -813,6 +880,8 @@ export default function AIModelsStep({
 
   const syncProviderSelection = useCallback((providerId: string) => {
     stopPolling();
+    oauthStartControllerRef.current?.abort();
+    tryCloseOAuthWindow(oauthWindowRef);
     setSelectedProvider(providerId);
     setAuthMode(getAvailableAuthOptionsForProvider(providerId)[0]?.mode ?? "token");
     setModelTouched(false);
@@ -820,6 +889,7 @@ export default function AIModelsStep({
     setShowKey(false);
     setStatus(null);
     setOauthStarted(false);
+    setOauthUrl(null);
     setAuthCode("");
     setDeviceCode(null);
     setDeviceUrl(null);
@@ -891,8 +961,12 @@ export default function AIModelsStep({
   useEffect(() => {
     if (configuringKind !== "generic" || configuringCompleted) return;
 
+    // Every row except the last one is timed. The last row belongs to
+    // `completeConfiguring`, so "Almost ready" appears when the request has
+    // actually come back and never before it.
+    const lastTimedIndex = CONFIGURING_STEP_DELAYS.length - 2;
     const timers = CONFIGURING_STEP_DELAYS.map((delay, index) =>
-      index === 0
+      index === 0 || index > lastTimedIndex
         ? null
         : setTimeout(() => {
             setConfiguringState((current) => {
@@ -939,7 +1013,15 @@ export default function AIModelsStep({
   ]);
 
   useEffect(() => {
-    if (selectedProvider !== "llamacpp" || !llamaCppSaving) return;
+    // Deliberately NOT gated on `selectedProvider` any more. `llamaCppSaving`
+    // is set by exactly one thing — this hook's install — so it is the whole
+    // condition. "Skip — I'll use only local AI" runs that install with a
+    // DIFFERENT radio still selected (ClawBox AI is the wizard's default and
+    // the customer never left it), and under the old gate its NDJSON status
+    // lines landed in `llamaCppProgress` and were simply never painted: an
+    // install that can spend minutes provisioning sat behind a form that
+    // looked idle.
+    if (!llamaCppSaving) return;
 
     const next = getLlamaCppOverlayProgress(llamaCppProgress, llamaCppInstallSteps.length);
     setConfiguringState({
@@ -950,7 +1032,7 @@ export default function AIModelsStep({
       progressPercent: next.progressPercent,
       completed: false,
     });
-  }, [llamaCppInstallSteps.length, llamaCppProgress, llamaCppSaving, selectedProvider]);
+  }, [llamaCppInstallSteps.length, llamaCppProgress, llamaCppSaving]);
 
   const selectProvider = useCallback((id: string) => {
     userSelectedProviderRef.current = true;
@@ -960,6 +1042,21 @@ export default function AIModelsStep({
     setShowMoreProviders(false);
     syncProviderSelection(id);
   }, [syncProviderSelection]);
+
+  /**
+   * The hero's one action. It selects the default provider's row (so the row's
+   * own controls, including the model picker, are on screen), forces that
+   * picker open past its one-line summary, and scrolls to it.
+   *
+   * Every step of that is something the customer can already do by hand; the
+   * button just does it in one gesture. Nothing is saved and no default moves.
+   */
+  const changeModel = useCallback(() => {
+    if (!defaultRow) return;
+    selectProvider(defaultRow.id);
+    setModelPickerOpen(true);
+    setFocusModelRequest((n) => n + 1);
+  }, [defaultRow, selectProvider]);
 
   const saveProviderConfig = useCallback(async (payload: Record<string, unknown>) => {
     saveControllerRef.current?.abort();
@@ -980,9 +1077,9 @@ export default function AIModelsStep({
       const data = await res.json();
       if (controller.signal.aborted) return;
       if (data.success) {
-        showSuccessAndContinue();
+        showSuccessAndContinue(data.warning);
       } else {
-        showError(data.error || "Failed to configure");
+        showError(humanizeApiError(data.error, "Failed to configure"));
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
@@ -992,11 +1089,110 @@ export default function AIModelsStep({
     }
   }, [configureScope, extractError, showConfiguring, showError, showSuccessAndContinue]);
 
+  const selected = allowedProviders.find((p) => p.id === selectedProvider);
+  // Filter out subscription option for providers whose OAuth isn't configured on the backend
+  const effectiveAuthOptions = selected?.authOptions.filter((opt) => {
+    if (opt.mode === "subscription" && availableOAuth !== null && selected.id !== "clawai") {
+      // ClawBox AI's Subscription tab routes through our own
+      // /clawai/start + /clawai/poll endpoints — there's no third-party
+      // OAuth client to gate on, so the upstream `availableOAuth` list
+      // doesn't apply. Other providers stay gated by it because their
+      // subscription flow needs configured OAuth client credentials.
+      return availableOAuth.includes(selected.id);
+    }
+    return true;
+  }) ?? [];
+  const activeAuth =
+    effectiveAuthOptions.find((a) => a.mode === authMode) ??
+    effectiveAuthOptions[0];
+  const currentAuthMode = activeAuth?.mode ?? authMode;
+  const isSubscription = currentAuthMode === "subscription";
+
+  // The one rule, named once — and now named in provider-models.ts, next to
+  // the SUBSCRIPTION_SURFACE table it reads, because the chat header's inline
+  // model switcher has to apply the same rule to the same catalogue.
+  const isModelUsable = useCallback(
+    (model: { availableOnSubscription?: boolean }) =>
+      isModelUsableOnSubscription(model, isSubscription),
+    [isSubscription],
+  );
+
+  /**
+   * The curated model id the picker SHOWS and the save path SENDS — one value,
+   * so the screen can never promise a model the request does not carry.
+   *
+   * Derived rather than corrected by an effect: reaching the Subscription tab
+   * with an API-key-only model already picked (Claude Mythos 5, chosen on the
+   * API Key tab moments earlier) used to leave it selected AND saveable, and a
+   * state write from an effect would still leave one render where the blocked
+   * id was live. `""` means the catalogue holds nothing this auth mode can run;
+   * every caller below treats that as "send no model" rather than sending one
+   * the customer has just been told is unavailable.
+   */
+  /**
+   * The catalog default when this credential can route it, else the first model
+   * that it can, else `""`. The ONE fallback in this component — the curated
+   * picker and the blank-custom-field path both take it, so neither can quietly
+   * resurrect `activeCatalog.defaultModelId` when that default is a model the
+   * picker has just greyed out.
+   */
+  const usableDefaultModelId = useMemo(() => {
+    if (!activeCatalog) return "";
+    const usable = activeCatalog.models.filter(isModelUsable);
+    return (usable.find((m) => m.id === activeCatalog.defaultModelId) ?? usable[0])?.id ?? "";
+  }, [activeCatalog, isModelUsable]);
+
+  const effectiveModelId = useMemo(() => {
+    const requested = selectedModelId.trim();
+    if (!activeCatalog || useCustomModel) return requested;
+    const picked = activeCatalog.models.find((m) => m.id === requested);
+    if (picked && isModelUsable(picked)) return picked.id;
+    return usableDefaultModelId;
+  }, [activeCatalog, selectedModelId, useCustomModel, isModelUsable, usableDefaultModelId]);
+
+  /**
+   * The catalogue HAS models and this auth mode can run none of them.
+   *
+   * Not gated on `useCustomModel`: a blank custom field falls back to the
+   * catalogue too, so custom mode is not an exemption from the question.
+   *
+   * `models.length > 0` is load-bearing, not an oversight. An EMPTY catalogue
+   * means the device could not enumerate one — that is "we do not know what
+   * this credential can run", not "it can run nothing", and refusing the
+   * sign-in on no data would be the same lie as offering Mythos was, pointing
+   * the other way. On that path the save simply sends no `model` and the
+   * server applies its own provider default, which is what it did before any
+   * of this. (`useProviderCatalog` always falls back to the curated arrays in
+   * provider-models.ts, so today this is unreachable — the condition is here
+   * to keep it unreachable for the right reason.)
+   *
+   * A `fallback` catalogue is excluded for the same reason an empty one is: the
+   * curated cold-start rows are not this box's catalogue, so "this credential
+   * can run none of them" is a verdict about a list the device never confirmed.
+   */
+  const noUsableCatalogModel = Boolean(
+    activeCatalog
+    && !activeCatalog.fallback
+    && activeCatalog.models.length > 0
+    && !usableDefaultModelId,
+  );
+
   const getRequestedCatalogModelId = useCallback((fallbackToDefault = false) => {
     if (!activeCatalog) return "";
-    const requestedId = useCustomModel ? customModelId.trim() : selectedModelId.trim();
-    return requestedId || (fallbackToDefault ? activeCatalog.defaultModelId : "");
-  }, [activeCatalog, customModelId, selectedModelId, useCustomModel]);
+    if (useCustomModel) {
+      const typed = customModelId.trim();
+      // A blank custom field falls back to a model this credential can actually
+      // route — never to the raw catalog default, which the picker may have
+      // just greyed out.
+      return typed || (fallbackToDefault ? usableDefaultModelId : "");
+    }
+    // No `fallbackToDefault` on the curated path: `effectiveModelId` already
+    // resolves to the catalog default when this credential can route it, so
+    // the only way it is empty is that NOTHING in the catalogue can — and
+    // falling back to the default there would post the very model the picker
+    // has just greyed out.
+    return effectiveModelId;
+  }, [activeCatalog, customModelId, effectiveModelId, usableDefaultModelId, useCustomModel]);
 
   const saveModel = async () => {
     if (!selectedProvider) return showError(t("ai.selectProvider"));
@@ -1011,7 +1207,11 @@ export default function AIModelsStep({
     } else if (activeCatalog) {
       const requestedId = getRequestedCatalogModelId();
       if (!requestedId) {
-        return showError(`Please choose a model for ${selectedProvider}`);
+        // A typed custom id is always allowed through — the refusal is only for
+        // "we have nothing to send", and which message depends on why.
+        return showError(noUsableCatalogModel
+          ? t("ai.modelNoneAvailable")
+          : `Please choose a model for ${selectedProvider}`);
       }
       if (!isValidModelId(activeCatalog.provider, requestedId)) {
         return showError(`Invalid model ID for ${activeCatalog.provider}: ${requestedId}`);
@@ -1040,16 +1240,62 @@ export default function AIModelsStep({
     selectProvider(normalizedRequestedProvider);
   }, [allowedProviders, providerSelectionRequest, requestedProviderId, selectProvider]);
 
-  const handleSkipAction = useCallback(() => {
+  /**
+   * One button, two meanings — and only one of them is a decline.
+   *
+   * In the embedded Local-AI scope the label is a plain t("skip"), which claims
+   * nothing beyond moving on, so it still only moves on.
+   *
+   * In the wizard the label is t("ai.skipUseLocalOnly") — "Skip — I'll use only
+   * local AI" — which is a CHOICE of provider wearing a skip's clothes. It used
+   * to only advance, and the box it left behind had
+   * `agents.defaults.model.primary` set to `llamacpp/gemma4-e2b-it-q4_0` with
+   * `models.providers` still EMPTY: nothing had registered the provider that
+   * name resolves through, so every chat turn died with "Unknown model:
+   * llamacpp/gemma4-e2b-it-q4_0" on a box whose GGUF had been on disk the whole
+   * time. So configure it here, through the same request Settings → Local AI →
+   * "Make primary" sends (see `activateLocalOnly`).
+   */
+  const handleSkipAction = useCallback(async () => {
     setStatus(null);
     stopPolling();
-    onNext?.();
-  }, [onNext, stopPolling]);
+    // Only the wizard's primary-scope step makes the local-AI promise, and only
+    // a step that was actually given `llamacpp` to offer can keep it. A
+    // cloud-only `providerIds` list still gets the honest no-op rather than an
+    // install of a provider this screen is not configuring.
+    const canConfigureLocal =
+      configureScope !== "local"
+      && allowedProviders.some((provider) => provider.id === "llamacpp");
+    if (!canConfigureLocal) {
+      onNext?.();
+      return;
+    }
+    // The selected radio is deliberately left alone: the customer never chose
+    // it and moving it would abort a half-finished OAuth and discard a typed
+    // key (see syncProviderSelection). The progress overlay does not need it —
+    // its effect keys on `llamaCppSaving` alone.
+    //
+    // Deliberately no onNext() here either: the hook's callbacks own both
+    // terminal transitions. Success runs showSuccessAndContinue → the overlay's
+    // completion → onNext, so the wizard advances only once the box can
+    // actually answer; failure runs showError, which keeps the customer on this
+    // step with the reason instead of advancing a wizard that configured
+    // nothing and calling that "use only local AI".
+    await activateLocalOnly();
+  }, [activateLocalOnly, allowedProviders, configureScope, onNext, stopPolling]);
 
   // Save token received from any OAuth flow (device or redirect)
   const saveOAuthToken = useCallback(async (
     tokenData: { access_token?: string; id_token?: string; refresh_token?: string; expires_in?: number; projectId?: string; oauthHandoff?: boolean }
   ) => {
+    if (noUsableCatalogModel && !getRequestedCatalogModelId(true)) {
+      // Every model in the catalogue sits outside this sign-in's surface and
+      // the customer has not typed one of their own. Say so, rather than
+      // configuring the provider and letting the server's own default — which
+      // comes from the same catalogue — fail at the first turn. Before the
+      // controller, so a refused save leaves no live one behind.
+      return showError(t("ai.modelNoneAvailable"));
+    }
     saveControllerRef.current?.abort();
     const controller = new AbortController();
     saveControllerRef.current = controller;
@@ -1057,11 +1303,12 @@ export default function AIModelsStep({
     showConfiguring();
 
     try {
-      // For subscription flows (ChatGPT/Codex OAuth), include the
-      // user's model pick so the backend writes codex/<chosen>
-      // instead of the PROVIDERS subscriptionOverride default. Without
-      // this, picking a model in the wizard would silently be ignored
-      // for OAuth providers.
+      // For subscription flows (ChatGPT OAuth), include the user's model pick
+      // so the backend writes the chosen id instead of the PROVIDERS
+      // subscriptionOverride default. Without this, picking a model in the
+      // wizard would silently be ignored for OAuth providers. The reference
+      // the backend writes is `openai/<chosen>` — the `codex` namespace this
+      // comment used to name is retired (src/lib/chatgpt-subscription.ts).
       const subscriptionModel = getRequestedCatalogModelId(true);
       // Device-auth (server-side handoff): the provider tokens were persisted
       // to a server-only file by device-poll, so we send no token fields —
@@ -1101,15 +1348,15 @@ export default function AIModelsStep({
       const saveData = await saveRes.json();
       if (controller.signal.aborted) return;
       if (saveData.success) {
-        showSuccessAndContinue();
+        showSuccessAndContinue(saveData.warning);
       } else {
-        showError(saveData.error || "Failed to save token");
+        showError(humanizeApiError(saveData.error, "Failed to save token"));
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
-  }, [configureScope, extractError, getRequestedCatalogModelId, selectedProvider, showConfiguring, showError, showSuccessAndContinue]);
+  }, [configureScope, extractError, getRequestedCatalogModelId, noUsableCatalogModel, selectedProvider, showConfiguring, showError, showSuccessAndContinue, t]);
 
   // --- Device auth flow (OpenAI, Google) ---
 
@@ -1167,7 +1414,7 @@ export default function AIModelsStep({
       // Unexpected response
       if (data.error) {
         stopPolling();
-        showError(data.error);
+        showError(humanizeApiError(data.error, "Sign-in did not complete"));
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
@@ -1216,13 +1463,33 @@ export default function AIModelsStep({
 
   // --- Redirect OAuth flow (Anthropic) ---
 
+  /**
+   * Start redirect OAuth without losing the click's browser user activation.
+   *
+   * The authorization URL comes from an awaited device request. Opening it
+   * only after that await lets popup blockers reject a legitimate sign-in, so
+   * reserve a blank tab synchronously and navigate it when the URL arrives.
+   * The rendered URL remains a direct recovery path when even that reservation
+   * is blocked (or an embedded browser refuses scripted windows entirely).
+   */
   const startOAuth = async () => {
     oauthStartControllerRef.current?.abort();
     const controller = new AbortController();
     oauthStartControllerRef.current = controller;
 
+    tryCloseOAuthWindow(oauthWindowRef);
+    let preparedWindow: Window | null = null;
+    try {
+      preparedWindow = window.open("about:blank", "_blank");
+      if (preparedWindow) oauthWindowRef.current = preparedWindow;
+    } catch {
+      // Embedded browsers may reject window.open itself. The direct link shown
+      // after the request is the recovery path, so the request still proceeds.
+    }
+
     setStatus(null);
     setOauthStarted(false);
+    setOauthUrl(null);
     setAuthCode("");
     try {
       const res = await fetch("/setup-api/ai-models/oauth/start", {
@@ -1231,15 +1498,38 @@ export default function AIModelsStep({
         body: JSON.stringify({ provider: selectedProvider }),
         signal: controller.signal,
       });
-      if (controller.signal.aborted) return;
-      if (!res.ok) return showError(await extractError(res, "Failed to start OAuth"));
+      if (controller.signal.aborted) {
+        if (oauthWindowRef.current === preparedWindow) tryCloseOAuthWindow(oauthWindowRef);
+        return;
+      }
+      if (!res.ok) {
+        const message = await extractError(res, "Failed to start OAuth");
+        if (oauthWindowRef.current === preparedWindow) tryCloseOAuthWindow(oauthWindowRef);
+        return showError(message);
+      }
       const data = await res.json();
-      if (controller.signal.aborted) return;
-      if (data.url) {
-        oauthWindowRef.current = window.open(data.url, "_blank");
+      if (controller.signal.aborted) {
+        if (oauthWindowRef.current === preparedWindow) tryCloseOAuthWindow(oauthWindowRef);
+        return;
+      }
+      const authorizationUrl = typeof data.url === "string" && data.url ? data.url : null;
+      if (authorizationUrl) {
+        setOauthUrl(authorizationUrl);
+        if (preparedWindow && !preparedWindow.closed) {
+          try {
+            preparedWindow.location.replace(authorizationUrl);
+          } catch {
+            // The direct link below remains usable if the reserved tab was
+            // closed or its WindowProxy cannot be navigated.
+          }
+        }
         setOauthStarted(true);
+      } else {
+        if (oauthWindowRef.current === preparedWindow) tryCloseOAuthWindow(oauthWindowRef);
+        showError("Unexpected response from OAuth");
       }
     } catch (err) {
+      if (oauthWindowRef.current === preparedWindow) tryCloseOAuthWindow(oauthWindowRef);
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
@@ -1274,7 +1564,7 @@ export default function AIModelsStep({
       // complete the config through the same server-side handoff the
       // device-code flow uses. projectId (non-secret) is relayed for Google.
       if (tokenData.status !== "complete") {
-        return showError(tokenData.error || "Sign-in did not complete");
+        return showError(humanizeApiError(tokenData.error, "Sign-in did not complete"));
       }
       await saveOAuthToken({ oauthHandoff: true, projectId: tokenData.projectId });
     } catch (err) {
@@ -1295,25 +1585,30 @@ export default function AIModelsStep({
     llamacpp: "GGUF + llama.cpp for 8GB devices",
   };
 
-  const selected = allowedProviders.find((p) => p.id === selectedProvider);
-  // Filter out subscription option for providers whose OAuth isn't configured on the backend
-  const effectiveAuthOptions = selected?.authOptions.filter((opt) => {
-    if (opt.mode === "subscription" && availableOAuth !== null && selected.id !== "clawai") {
-      // ClawBox AI's Subscription tab routes through our own
-      // /clawai/start + /clawai/poll endpoints — there's no third-party
-      // OAuth client to gate on, so the upstream `availableOAuth` list
-      // doesn't apply. Other providers stay gated by it because their
-      // subscription flow needs configured OAuth client credentials.
-      return availableOAuth.includes(selected.id);
-    }
-    return true;
-  }) ?? [];
-  const activeAuth =
-    effectiveAuthOptions.find((a) => a.mode === authMode) ??
-    effectiveAuthOptions[0];
-  const currentAuthMode = activeAuth?.mode ?? authMode;
-  const isSubscription = currentAuthMode === "subscription";
   const useDeviceAuth = isSubscription && DEVICE_AUTH_PROVIDERS.has(selectedProvider ?? "");
+
+  // A model the SUBSCRIPTION surface does not carry is SHOWN, not hidden, and
+  // it says why. `availableOnSubscription === undefined` means the box could
+  // not enumerate that surface — unknown is not "no", so nothing gets marked
+  // and the customer keeps the whole list.
+  const modelOptions: HeaderDropdownOption[] = useMemo(
+    () => (activeCatalog?.models ?? []).map((option) => {
+      const blocked = !isModelUsable(option);
+      return {
+        id: option.id,
+        label: option.label,
+        // The live catalog ships no hint for most providers, and the old
+        // `{label} — {hint}` template rendered a dangling em-dash on every one
+        // of those rows. Falling back to the model id also tells the two rows
+        // that both label themselves "Claude Haiku 4.5" apart.
+        hint: option.hint || option.id,
+        disabled: blocked,
+        unavailableReason: blocked ? t("ai.modelNeedsApiKey") : undefined,
+      };
+    }),
+    [activeCatalog, isModelUsable, t],
+  );
+  const hasBlockedModel = modelOptions.some((option) => option.disabled);
 
   const oauthLabels: Record<string, {
     button: string;
@@ -1358,8 +1653,8 @@ export default function AIModelsStep({
     if (!activeCatalog || !selected) return null;
     const modelPickerExpanded = modelPickerOpen || useCustomModel;
     const currentModelLabel =
-      activeCatalog.models.find((option) => option.id === selectedModelId)?.label
-      || selectedModelId
+      activeCatalog.models.find((option) => option.id === effectiveModelId)?.label
+      || effectiveModelId
       || activeCatalog.defaultModelId;
     if (!modelPickerExpanded) {
       return (
@@ -1371,14 +1666,17 @@ export default function AIModelsStep({
         >
           <span className="flex min-w-0 flex-col">
             <span className="text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)]">
-              Model
+              {t("ai.model")}
             </span>
-            <span className="truncate text-[length:var(--t-4)] text-[var(--text-primary)]">
+            {/* Wrapped, not clipped: this line is the model id, which is the
+                one thing a customer opens this button to read, and "Change"
+                beside it never shrinks. Same call as the provider hero. */}
+            <span className="break-words text-[length:var(--t-4)] text-[var(--text-primary)]">
               {currentModelLabel}
             </span>
           </span>
           <span className="shrink-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)]">
-            Change
+            {t("ai.modelChange")}
           </span>
         </button>
       );
@@ -1389,24 +1687,25 @@ export default function AIModelsStep({
           htmlFor="ai-provider-model"
           className="block text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)] mb-2"
         >
-          Model
+          {t("ai.model")}
         </label>
         {!useCustomModel ? (
-          <select
+          // NOT a native <select>. Its <option> list is painted by the browser
+          // — white ground, pale text, no way to theme it — so on this dark
+          // wizard the OPEN list was unreadable, and a native option cannot
+          // carry the second line that says why a row is unavailable.
+          <HeaderDropdown
             id="ai-provider-model"
-            value={selectedModelId}
-            onChange={(e) => {
+            variant="field"
+            hermes={edition === "hermes"}
+            ariaLabel={t("ai.model")}
+            value={effectiveModelId}
+            options={modelOptions}
+            onChange={(id) => {
               setModelTouched(true);
-              setSelectedModelId(e.target.value);
+              setSelectedModelId(id);
             }}
-            className="w-full min-h-[48px] px-4 py-3 bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
-          >
-            {activeCatalog.models.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.label} — {option.hint}
-              </option>
-            ))}
-          </select>
+          />
         ) : (
           <input
             id="ai-provider-model"
@@ -1436,14 +1735,19 @@ export default function AIModelsStep({
             className="mt-2 bg-transparent p-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] hover:text-orange-300 cursor-pointer border-none"
           >
             {useCustomModel
-              ? "Pick from curated list"
-              : "Enter a custom model ID…"}
+              ? t("ai.modelCuratedToggle")
+              : t("ai.modelCustomToggle")}
           </button>
+        )}
+        {hasBlockedModel && !useCustomModel && (
+          <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-secondary)]">
+            {t("ai.modelSubscriptionNote")}
+          </p>
         )}
         <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">
           {selected.id === "openrouter"
-            ? "OpenRouter exposes 340+ models. You can switch models later from the chat window."
-            : "You can switch between the curated models from the chat window anytime."}
+            ? t("ai.modelHelpOpenRouter")
+            : t("ai.modelHelp")}
         </p>
       </div>
     );
@@ -1545,6 +1849,16 @@ export default function AIModelsStep({
         </button>
       ) : (
         <div>
+          {oauthUrl && (
+            <a
+              href={oauthUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={`mb-3 inline-flex ${QUIET_LINK_CLASS}`}
+            >
+              {t("ai.openAuthPage")}
+            </a>
+          )}
           {/* A numbered list, not three lines separated by <br>: the steps
               are an ordered list, so a screen reader should be told how
               many there are and which one it is on. */}
@@ -1592,17 +1906,50 @@ export default function AIModelsStep({
   );
 
   const handleConfiguringDone = useCallback(() => {
+    // A warning REPLACES the "Configured" line rather than joining it: the
+    // save did land, and repeating that while withholding the part that did
+    // not is how a non-fatal failure stays invisible. Amber, not green.
+    const settled: { type: "success" | "info"; message: string } = saveWarning
+      ? { type: "info", message: saveWarning }
+      : { type: "success", message: t("ai.configured") };
     if (embedded) {
       setConfiguringState(null);
-      setStatus({ type: "success", message: t("ai.configured") });
+      setStatus(settled);
       onConfigured?.();
     } else if (onNext) {
+      // The wizard advances off this step, so nothing rendered here survives
+      // the transition. The device-auth card it lands on has no manual
+      // continue control, so HOLDING here would strand a first-run owner
+      // behind a link labelled "Skip — use local only".
+      //
+      // What is being traded, stated plainly rather than wished away: the
+      // wizard branch discards whatever `saveWarning` holds. There are two
+      // producers, and neither is worth stopping a first-run wizard for.
+      //
+      // The gateway warning is unreachable here: since TASK-608 the configure
+      // route passes `awaitReady: false` when setup is not complete, so
+      // `GatewayNotReadyError` is never produced on this screen. Deliberate —
+      // a slow gateway must not stop a first-run wizard, and the box recovers
+      // within seconds. A gateway that never comes back is not silent either;
+      // it surfaces at the chat the wizard hands off to, which cannot open a
+      // session without one. (The ChatGPT-order warning is a Settings-only
+      // state and really does reappear there.)
+      //
+      // The unresolvable-primary warning (TASK-705) IS reachable here, and it
+      // is dropped rather than shown: it says an id is in no catalogue the box
+      // has, and the answer to that is to pick a model — which is the very
+      // screen the owner is on, and the Settings row they will land on next.
+      // Holding the wizard on it would strand them behind a card with no
+      // continue control. Its four other call sites (the ClawBox AI poll, the
+      // llama.cpp install route, the Ollama hook) drop it too; carrying it
+      // through all of them is its own change.
+      if (saveWarning) console.warn("[ai-models] configure warning:", saveWarning);
       onNext();
     } else {
       setConfiguringState(null);
-      setStatus({ type: "success", message: t("ai.configured") });
+      setStatus(settled);
     }
-  }, [embedded, onNext, onConfigured, t]);
+  }, [embedded, onNext, onConfigured, saveWarning, t]);
 
   useEffect(() => {
     if (!configuringState?.completed) return;
@@ -1610,6 +1957,12 @@ export default function AIModelsStep({
     return () => clearTimeout(timer);
   }, [configuringState?.completed, handleConfiguringDone]);
 
+  // EVERY provider this panel was asked to offer, including one the box can
+  // currently run no model from (TASK-668). This is the CONNECT list, and
+  // connecting is the way out of that state: saving a cloud provider writes its
+  // configured model rows and `models.mode: "merge"`, which is what makes it
+  // routable again. Hiding it here would leave a box with no door — the
+  // Providers strip above drops such a row precisely because this one does not.
   const baseProviders = providerIdSet ? allowedProviders : PROVIDERS;
   // The list opens on the provider that is actually in play and keeps the rest
   // one tap behind the same toggle that used to reveal only the secondary
@@ -1632,6 +1985,7 @@ export default function AIModelsStep({
   const shouldShowMoreProviders = providerListCollapsed;
   const resolvedTitle = title ?? t("ai.title");
   const resolvedDescription = description ?? t("ai.description");
+  const Title = embedded ? "h2" : "h1";
   const embeddedConnectLabel = t("settings.connect");
 
   // Edition resolves asynchronously (see the /harness/active effect above).
@@ -1691,7 +2045,17 @@ export default function AIModelsStep({
   // "Gemma 4" row with the whole cloud provider list (Anthropic, OpenAI,
   // DeepSeek, ClawBox AI…), which is not what "Local AI" means.
   if (edition === "hermes" && configureScope !== "local") {
-    return <HermesProviderConfig embedded={embedded} onNext={onNext} testId={testId} />;
+    return <HermesProviderConfig
+      embedded={embedded}
+      onNext={onNext}
+      testId={testId}
+      // The wizard's heading and intro, so step 4 reads alike on both editions;
+      // Settings passes nothing and keeps the panel's own title.
+      title={embedded ? undefined : resolvedTitle}
+      description={embedded ? undefined : resolvedDescription}
+      requestedProviderId={requestedProviderId}
+      providerSelectionRequest={providerSelectionRequest}
+    />;
   }
 
   return (
@@ -1700,6 +2064,7 @@ export default function AIModelsStep({
         {configuringState && (
           <ConfiguringOverlay
             provider={configuringState.provider}
+            providerName={PROVIDERS.find((p) => p.id === configuringState.provider)?.name ?? "AI"}
             steps={getStepsForKind(configuringState.kind)}
             phase={configuringState.phase}
             detail={configuringState.detail}
@@ -1710,16 +2075,45 @@ export default function AIModelsStep({
         )}
         {/* Hide form content when configuring overlay is shown */}
         <div className={configuringState ? "invisible h-0 overflow-hidden" : ""}>
-        <h1 className="text-[length:var(--t-6)] leading-[1.15] font-bold font-display mb-2">
+        {/* Embedded in Settings this card is one panel among several and the
+            window around it owns the page's h1, so the title drops a level
+            rather than making the document claim two titles. */}
+        <Title className="text-[length:var(--t-6)] leading-[1.15] font-bold font-display mb-2">
           {resolvedTitle}
-        </h1>
+        </Title>
         <p className="text-[length:var(--t-4)] leading-[1.6] text-[var(--text-secondary)] mb-6">
           {resolvedDescription}
         </p>
 
-        <div role="radiogroup" aria-label="AI Provider" className="border border-[var(--border-subtle)] rounded-[var(--r-1)] bg-[var(--bg-deep)]/50 overflow-hidden">
+        {/* THE HERO — what is answering right now: vendor, model, connection,
+            in one line of sight. Absent until the box HAS a default, which is
+            the honest state through most of first-run setup, and absent on
+            Settings -> Local AI, where the box's cloud default is not the
+            question the page is asking. */}
+        {defaultRow && configureScope !== "local" && (
+          <ProviderDefaultHero
+            row={defaultRow}
+            model={currentModel ?? ""}
+            // "Change model" scrolls to the model picker — which exists only
+            // for a provider this panel has a row AND a catalog for, and only
+            // in Settings (picking a default model is a post-setup concern the
+            // wizard deliberately hides). An action that cannot land anywhere
+            // is worse than no action, so it is simply not offered otherwise.
+            onChangeModel={
+              embedded
+              && baseProviders.some((provider) => provider.id === defaultRow.id)
+              && isCatalogProvider(defaultRow.id)
+              && defaultRow.id !== "clawai"
+                ? changeModel
+                : undefined
+            }
+          />
+        )}
+
+        <div role="radiogroup" aria-label={t("settings.providers.radioGroupLabel")} className="border border-[var(--border-subtle)] rounded-[var(--r-1)] bg-[var(--bg-deep)]/50 overflow-hidden">
           {displayedProviders.map((provider) => {
             const isSelected = selectedProvider === provider.id;
+            const isDefault = statusById.get(provider.id)?.isDefault ?? false;
             // ClawBox AI's row is shared verbatim with the Hermes provider panel
             // (same component, not a lookalike) so the two can never drift.
             if (provider.id === "clawai") {
@@ -1729,59 +2123,32 @@ export default function AIModelsStep({
                   radioName="ai-provider"
                   selected={isSelected}
                   onSelect={() => selectProvider(provider.id)}
+                  isDefault={isDefault}
+                  statusSlot={rowStatus(provider.id)}
                 />
               );
             }
             return (
-              <label
+              <ProviderRadioRow
                 key={provider.id}
-                className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-[var(--hair)] last:border-b-0 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--coral-bright)] has-[:focus-visible]:ring-inset ${
-                  isSelected
-                    ? "bg-[var(--coral-wash)]"
-                    : "hover:bg-[var(--fill-3)]"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="ai-provider"
-                  value={provider.id}
-                  checked={isSelected}
-                  onChange={() => selectProvider(provider.id)}
-                  className="sr-only"
-                />
-                <span
-                  aria-hidden="true"
-                  className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] ${
-                    isSelected
-                      ? "border-[var(--coral-bright)]"
-                      : "border-[var(--border-subtle)]"
-                  }`}
-                >
-                  {isSelected && (
-                    <span className="w-2.5 h-2.5 rounded-full bg-[var(--coral-bright)]" />
-                  )}
-                </span>
-                <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-[var(--r-1)] bg-[var(--fill-2)] shrink-0">
-                  <AIProviderIcon provider={provider.id} size={22} />
-                </span>
-                <div className="flex-1 min-w-0">
-                  <span className="flex flex-wrap items-center gap-2 text-[length:var(--t-4)] font-semibold text-[var(--text-primary)]">
-                    {provider.name}
-                    {provider.id === "llamacpp" && (
-                      /* Cyan is DONE-and-verified everywhere else in the box;
-                         "runs entirely on this device" is the one other fact
-                         it is allowed to carry, and it is the fact this row
-                         exists to state. */
-                      <span className="px-1.5 py-0.5 text-[length:var(--t-1)] font-bold uppercase tracking-[0.06em] rounded-[var(--r-1)] bg-[var(--cyan-wash)] text-[var(--cyan-bright)] leading-none">
-                        {t("ai.fullyLocal")}
-                      </span>
-                    )}
+                radioName="ai-provider"
+                value={provider.id}
+                selected={isSelected}
+                onSelect={() => selectProvider(provider.id)}
+                isDefault={isDefault}
+                name={provider.name}
+                description={providerDesc[provider.id] ?? provider.description}
+                statusSlot={rowStatus(provider.id)}
+                badges={provider.id === "llamacpp" ? (
+                  /* Cyan is DONE-and-verified everywhere else in the box;
+                     "runs entirely on this device" is the one other fact it is
+                     allowed to carry, and it is the fact this row exists to
+                     state. */
+                  <span className="px-1.5 py-0.5 text-[length:var(--t-1)] font-bold uppercase tracking-[0.06em] rounded-[var(--r-1)] bg-[var(--cyan-wash)] text-[var(--cyan-bright)] leading-none">
+                    {t("ai.fullyLocal")}
                   </span>
-                  <span className="block text-[length:var(--t-2)] leading-[1.45] text-[var(--text-muted)]">
-                    {providerDesc[provider.id] ?? provider.description}
-                  </span>
-                </div>
-              </label>
+                ) : null}
+              />
             );
           })}
           {shouldShowMoreProviders && (
@@ -1818,6 +2185,8 @@ export default function AIModelsStep({
               handleOllamaSearchChange={handleOllamaSearchChange}
               clearSearch={clearSearch}
               pullOllamaModel={pullOllamaModel}
+              cancelOllamaPull={cancelOllamaPull}
+              maxParamBillions={ollamaMaxParamBillions}
               formatOllamaBytes={formatOllamaBytes}
               radioGroupName="ollama-model"
               buttonSpinner={ButtonSpinner}
@@ -1851,12 +2220,15 @@ export default function AIModelsStep({
                     key={opt.mode}
                     onClick={() => {
                       stopPolling();
+                      oauthStartControllerRef.current?.abort();
+                      tryCloseOAuthWindow(oauthWindowRef);
                       setAuthMode(opt.mode);
                       setModelTouched(false);
                       setApiKey("");
                       setShowKey(false);
                       setStatus(null);
                       setOauthStarted(false);
+                      setOauthUrl(null);
                       setAuthCode("");
                       setDeviceCode(null);
                       setDeviceUrl(null);
@@ -1913,7 +2285,7 @@ export default function AIModelsStep({
                   <button
                     type="button"
                     onClick={() => setShowKey((v) => !v)}
-                    aria-label={showKey ? "Hide key" : "Show key"}
+                    aria-label={showKey ? t("login.hideKey") : t("login.showKey")}
                     className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-10 h-10 rounded-[var(--r-1)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-3)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                   >
                     <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>{showKey ? "visibility_off" : "visibility"}</span>
@@ -1934,7 +2306,11 @@ export default function AIModelsStep({
             until the shared card can move with it. */}
         {selected?.id === "clawai" && (
           <div className="mt-3 rounded-[var(--r-1)] border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
-            <ClawboxAiPlanPicker tier={clawaiTier} onTierChange={persistClawaiTier} />
+            <ClawboxAiPlanPicker
+              tier={clawaiTier}
+              onTierChange={persistClawaiTier}
+              planKnown={clawaiPlanKnown}
+            />
 
             {/* Subscription / API Key tabs — same shape as the OpenAI
                 provider, so users get one mental model for "device-flow
@@ -2002,7 +2378,7 @@ export default function AIModelsStep({
                         saveModel();
                       }
                     }}
-                    placeholder="Paste your portal token"
+                    placeholder={t("ai.pastePortalToken")}
                     spellCheck={false}
                     autoComplete="off"
                     className="w-full min-h-[48px] px-4 py-3 pr-12 text-[length:var(--t-4)] bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[var(--text-primary)] outline-none transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] focus:border-[var(--coral-bright)] placeholder:text-[var(--text-muted)]"
@@ -2010,7 +2386,7 @@ export default function AIModelsStep({
                   <button
                     type="button"
                     onClick={() => setShowKey((v) => !v)}
-                    aria-label={showKey ? "Hide token" : "Show token"}
+                    aria-label={showKey ? t("login.hideToken") : t("login.showToken")}
                     className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-10 h-10 rounded-[var(--r-1)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-3)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
                   >
                     <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>
@@ -2019,7 +2395,7 @@ export default function AIModelsStep({
                   </button>
                 </div>
                 <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">
-                  Issue a token in the <a href={PORTAL_LOGIN_URL} target="_blank" rel="noopener noreferrer" className="text-[var(--coral-bright)] underline">ClawBox portal</a> and paste it here.
+                  {t("ai.issueTokenPrefix")} <a href={PORTAL_LOGIN_URL} target="_blank" rel="noopener noreferrer" className="text-[var(--coral-bright)] underline">{t("ai.clawboxPortal")}</a> {t("ai.issueTokenSuffix")}
                 </p>
               </div>
             )}
@@ -2085,9 +2461,15 @@ export default function AIModelsStep({
             <button
               type="button"
               onClick={handleSkipAction}
-              disabled={saving}
+              // In the wizard this button now installs, starts and registers the
+              // local model, which takes tens of seconds — so it stays down for
+              // its own work as well as the Connect button's. The progress and
+              // any failure are reported by the same overlay and status line
+              // every other configure on this step uses.
+              disabled={saving || llamaCppSaving !== false}
               className="min-h-[40px] px-3 rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-2)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] disabled:cursor-not-allowed"
             >
+              {llamaCppSaving !== false && ButtonSpinner}
               {configureScope === "local" ? t("skip") : t("ai.skipUseLocalOnly")}
             </button>
           </div>

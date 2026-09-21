@@ -1,0 +1,345 @@
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import { describeChatFailure, describeFallbackReply } from "@/lib/chat-error-text";
+import { sanitizeErrorMessage } from "@/lib/safe-error-text";
+import { translations } from "@/lib/translations";
+
+// The exact two lines a customer saw in the transcript on .177, beta ff04cee,
+// after a New chat reset landed on a turn that was already running. Kept
+// verbatim rather than paraphrased: the point of this test is that THIS string
+// never reaches a chat bubble again.
+const TAKEOVER_RAW =
+  "session file changed while embedded prompt lock was released: "
+  + "/home/clawbox/.openclaw/agents/main/sessions/3b45304b-89ff-496c-a392-4e1719de0878.jsonl";
+const FOLLOWUP_RAW =
+  "⚠️ Agent failed before reply: " + TAKEOVER_RAW + ".\nLogs: openclaw logs --follow";
+
+/** Everything the acceptance matrix's leak check looks for. */
+function leaks(text: string): boolean {
+  return /\/home\/clawbox/.test(text)
+    || /\.jsonl/.test(text)
+    || /\.openclaw\//.test(text)
+    || /openclaw logs/.test(text)
+    || /\bagent:[\w.-]+:/.test(text)
+    || /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i.test(text);
+}
+
+describe("describeChatFailure", () => {
+  it("never renders the session-takeover error a customer actually saw", () => {
+    for (const raw of [TAKEOVER_RAW, FOLLOWUP_RAW]) {
+      const shown = describeChatFailure(raw);
+      expect(leaks(shown)).toBe(false);
+      expect(shown).not.toContain("embedded prompt lock");
+    }
+  });
+
+  it("offers both recoveries: retry for the collision, New chat for the wedge", () => {
+    // TASK-512: a session on .177 wedged so that EVERY turn died with this
+    // error for ten hours — one tab, one gateway, nothing "open somewhere
+    // else" — and the only cure was New chat, which nothing on screen named.
+    // So the line must offer the retry (cures a real one-off collision) AND
+    // the New chat escape hatch (cures the wedge).
+    const shown = describeChatFailure(TAKEOVER_RAW);
+    expect(shown).toMatch(/send it again/i);
+    expect(shown).toMatch(/new chat/i);
+  });
+
+  it("does not assert an unchecked cause as established fact", () => {
+    // The box has not checked for another tab and, in the wedged case, there
+    // is none — the cause is internal. Presenting a guess as the diagnosis
+    // sent the owner hunting a phantom window while the real recovery sat one
+    // click away. Causes may be OFFERED ("that can happen when…"), never
+    // STATED ("this chat was…" / "the conversation changed outside…").
+    const shown = describeChatFailure(TAKEOVER_RAW);
+    expect(shown).not.toMatch(/was open somewhere else/i);
+    expect(shown).not.toMatch(/changed outside/i);
+    expect(shown).toMatch(/can happen/i);
+  });
+
+  it("says the same thing for the followup wording", () => {
+    expect(describeChatFailure(FOLLOWUP_RAW)).toBe(describeChatFailure(TAKEOVER_RAW));
+  });
+
+  it("keeps a message that is genuinely useful to the customer", () => {
+    // Replacing this with the generic line would throw away the one thing that
+    // tells them what to change.
+    expect(describeChatFailure("Request exceeds the size limit"))
+      .toBe("Error: Request exceeds the size limit");
+  });
+
+  it("falls back rather than going silent", () => {
+    // A turn that just stops with no bubble is worse than a vague one: the
+    // customer cannot tell whether the box is thinking or dead.
+    for (const raw of [undefined, null, "", "   ", 42, {}]) {
+      const shown = describeChatFailure(raw);
+      expect(shown.length).toBeGreaterThan(0);
+      expect(shown).toMatch(/send it again/i);
+    }
+  });
+
+  it("maps an Anthropic 429 to a calm, actionable rate-limit sentence", () => {
+    // TASK: an Anthropic 429 reached the owner as "The agent run failed before
+    // producing a reply." — a generic dead-end. The gateway had already worded
+    // the real cause ("API rate limit reached. Please try again later.");
+    // reason=rate_limit / a bare 429 carry the same signal. Whichever wording
+    // reaches us, the customer must be told it is a rate limit, that the box is
+    // fine, and what to do — wait, or switch provider in Settings.
+    for (const raw of [
+      "API rate limit reached. Please try again later.",
+      "rate_limit",
+      "429 Error",
+      "Error: 429 Too Many Requests",
+    ]) {
+      const shown = describeChatFailure(raw);
+      expect(shown).toMatch(/rate[ -]?limit/i);
+      expect(shown).toMatch(/settings/i);
+      // Says the box itself is not broken.
+      expect(shown).toMatch(/nothing is (wrong|broken)|not broken|is fine/i);
+      // A rate limit is transient — never the generic "log has the details".
+      expect(shown).not.toMatch(/stayed in this box's log/i);
+    }
+  });
+
+  it("does not leak anything unsafe on the rate-limit path", () => {
+    // The rate-limit sentence is authored by us, but the matcher must not let a
+    // rate-limit-shaped string smuggle a path/UUID/CLI line onto the screen.
+    const shown = describeChatFailure(
+      "429 rate limit on run 3b45304b-89ff-496c-a392-4e1719de0878; "
+      + "see /home/clawbox/.openclaw/logs; Logs: openclaw logs --follow",
+    );
+    expect(leaks(shown)).toBe(false);
+    expect(shown).toMatch(/rate[ -]?limit/i);
+  });
+
+  it("does not misfire on ordinary text that merely mentions limits", () => {
+    // "Request exceeds the size limit" is a size limit, not a rate limit — it
+    // must keep its own useful passthrough, not get swallowed by the new case.
+    expect(describeChatFailure("Request exceeds the size limit"))
+      .toBe("Error: Request exceeds the size limit");
+  });
+
+  it("drops anything that carries an internal handle, whatever the wording", () => {
+    for (const raw of [
+      "run 3b45304b-89ff-496c-a392-4e1719de0878 failed",
+      "lane task error: lane=session:agent:main:main",
+      "could not write /home/clawbox/.openclaw/media/x.png",
+      "Logs: openclaw logs --follow",
+      "POST https://clawbox.com/api/ai returned 500",
+      "Bearer claw_abc123 rejected",
+    ]) {
+      const shown = describeChatFailure(raw);
+      expect(leaks(shown)).toBe(false);
+      expect(shown).not.toContain("claw_");
+      expect(shown).not.toContain("https://");
+    }
+  });
+});
+
+describe("sanitizeErrorMessage — handles added for TASK-440", () => {
+  it("rejects a bare internal handle with no path attached", () => {
+    // The UUID reached the transcript alongside a path this time. It would have
+    // reached it alone had the message been worded slightly differently.
+    expect(sanitizeErrorMessage("run 3b45304b-89ff-496c-a392-4e1719de0878 failed")).toBeNull();
+    expect(sanitizeErrorMessage("lane=session:agent:main:main timed out")).toBeNull();
+  });
+
+  it("rejects an instruction to open a terminal", () => {
+    expect(sanitizeErrorMessage("Logs: openclaw logs --follow")).toBeNull();
+    expect(sanitizeErrorMessage("run openclaw doctor to repair")).toBeNull();
+  });
+
+  it("still passes plain operational text", () => {
+    expect(sanitizeErrorMessage("Request exceeds the size limit")).toBe("Request exceeds the size limit");
+    expect(sanitizeErrorMessage("The model is busy, try again")).toBe("The model is busy, try again");
+  });
+});
+
+describe("describeChatFailure — a refused ClawBox AI credential", () => {
+  // TASK-419. The whole customer-visible failure in one line: the box showed a
+  // healthy paid badge and then answered a message with
+  //   "Error: HTTP 403: Invalid token"
+  //   "Error: Agent failed before reply: HTTP 403: Invalid token. Logs: openclaw logs --follow"
+  // Nothing there is wrong, and nothing there is usable. The remedy is a
+  // screen this customer already has open.
+  it("names the reconnect screen instead of relaying the status line", () => {
+    for (const raw of [
+      "HTTP 403: Invalid token",
+      "Agent failed before reply: HTTP 403: Invalid token",
+      "HTTP 401: missing_token",
+      "401 Unauthorized",
+    ]) {
+      const text = describeChatFailure(raw);
+      expect(text).toMatch(/Settings/);
+      expect(text).toMatch(/Providers/);
+      expect(text).not.toContain("403");
+      expect(text).not.toContain("401");
+      expect(text).not.toMatch(/openclaw/i);
+    }
+  });
+
+  it("leaves a 403 that is not about the credential alone", () => {
+    // Both reach this function through the Hermes adapter, and both used to
+    // fall to the calm generic line. Turning them into "your sign-in is dead"
+    // would send a customer to re-link a paid account over a web page.
+    for (const raw of [
+      "tool browser_open failed: 403 Forbidden (https://news.example.com)",
+      "web_fetch: the site returned 403 Forbidden",
+      "HTTP 403 — Just a moment…",
+    ]) {
+      expect(describeChatFailure(raw)).not.toMatch(/Settings/);
+    }
+  });
+
+  it("leaves an unrelated failure alone", () => {
+    // Narrow on purpose: "limit" and "token" are ordinary words in this
+    // codebase's error strings, and a greedy match would swallow a message
+    // whose remedy is different.
+    expect(describeChatFailure("Request exceeds the size limit")).toBe(
+      "Error: Request exceeds the size limit",
+    );
+    expect(describeChatFailure("context window exceeded: 403000 tokens")).not.toMatch(/Settings/);
+  });
+});
+
+/**
+ * A ClawBox AI allowance refusal. It also arrives as a 429, and the generic
+ * "wait a minute and send it again" is the wrong advice for a window that
+ * frees up days from now — so the turn names WHICH allowance is spent and
+ * WHEN it frees up, in the owner's language and clock.
+ */
+describe("describeChatFailure — a spent ClawBox AI allowance", () => {
+  // Later the same day, read in UTC so the clock is the same on every machine.
+  const RESET = "2026-09-17T10:30:00.000Z";
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.parse("2026-09-17T09:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  const envelope = (code: string, message: string, resetAt: string | null = RESET) =>
+    `429 ${JSON.stringify({ error: { message, type: "usage_limit", code, ...(resetAt ? { resetAt } : {}) } })}`;
+  const en = (key: string, params?: Record<string, string | number>) => {
+    let str = translations.en[key] ?? key;
+    for (const [k, v] of Object.entries(params ?? {})) str = str.replaceAll(`{${k}}`, String(v));
+    return str;
+  };
+
+  it("names the weekly chat allowance and when it frees up", () => {
+    const shown = describeChatFailure(envelope("weekly_limit_exceeded", "Weekly token allowance used up."), undefined, { t: en, locale: "en", timeZone: "UTC" });
+    expect(shown).toContain("this week's ClawBox AI chat allowance is used up");
+    expect(shown).toContain("It frees up at 10:30.");
+    expect(shown).toContain("Settings, under Providers");
+    // Not the generic throttling sentence it would otherwise fall to.
+    expect(shown).not.toContain("rate-limiting");
+  });
+
+  it("tells a burst refusal apart from a spent week", () => {
+    const shown = describeChatFailure(envelope("burst_limit_exceeded", "Short-term burst limit reached"), undefined, { t: en, locale: "en", timeZone: "UTC" });
+    expect(shown).toContain("5-hour burst limit is reached");
+    expect(shown).toContain("Your weekly allowance still has room");
+  });
+
+  it("names the memory indexing allowance", () => {
+    const shown = describeChatFailure(envelope("embeddings_weekly_limit_exceeded", "Memory indexing allowance used up."), undefined, { t: en, locale: "en", timeZone: "UTC" });
+    expect(shown).toContain("memory indexing allowance is used up");
+  });
+
+  it("promises no hour the refusal did not carry", () => {
+    const shown = describeChatFailure(envelope("weekly_limit_exceeded", "out", null), undefined, { t: en, locale: "en", timeZone: "UTC" });
+    expect(shown).toContain("It frees up as older usage leaves the rolling window.");
+    expect(shown).not.toMatch(/\d{2}:\d{2}/);
+  });
+
+  it("speaks the owner's language when the chat hands in its translator", () => {
+    const de = (key: string, params?: Record<string, string | number>) => {
+      let str = translations.de[key] ?? key;
+      for (const [k, v] of Object.entries(params ?? {})) str = str.replaceAll(`{${k}}`, String(v));
+      return str;
+    };
+    const shown = describeChatFailure(envelope("weekly_limit_exceeded", "Weekly token allowance used up."), undefined, { t: de, locale: "de", timeZone: "UTC" });
+    expect(shown).toContain(translations.de["chat.allowanceWeekly"]);
+    expect(shown).toContain("Es wird um 10:30 frei.");
+  });
+
+  it("falls back to English with no translator, or one that does not know the key", () => {
+    const raw = envelope("weekly_limit_exceeded", "Weekly token allowance used up.");
+    expect(describeChatFailure(raw)).toContain("this week's ClawBox AI chat allowance is used up");
+    expect(describeChatFailure(raw, undefined, { t: (key) => key, locale: "en" })).toContain("this week's ClawBox AI chat allowance is used up");
+  });
+
+  it("keeps an ordinary rate limit on its own sentence", () => {
+    expect(describeChatFailure("API rate limit reached. Please try again later.", undefined, { t: en, locale: "en", timeZone: "UTC" })).toContain("rate-limiting");
+  });
+});
+
+describe("the provider's own words, scrubbed with the repo's one inventory", () => {
+  // The pre-scrub used to be a regex of its own (`claw_`/`sk-` and nothing
+  // else), a third copy of "what may not reach a person" beside
+  // incident-sanitize.ts and safe-error-text.ts. It now calls
+  // `redactCredentialShapes`, so every shape THAT module knows is taken out of
+  // a bubble too — and a shape added there reaches this path with no second
+  // edit. `sanitizeErrorMessage` is still the wall behind it: an unstripped
+  // `claw_`/`sk-`/`Bearer ` rejects the whole message to GENERIC.
+  const detailWith = (body: string) =>
+    describeChatFailure("The agent run failed before producing a reply.", {
+      reason: "format",
+      provider: "openai",
+      model: "openai/gpt-5.5",
+      detail: `HTTP 400: ${JSON.stringify({ error: { message: body } })}`,
+    });
+
+  it("keeps the sentence and drops the credential, for shapes only the wider inventory knew", () => {
+    for (const [body, secret] of [
+      ["Incorrect API key provided: ghp_abcdefghijklmnopqrst", "ghp_"],
+      ["Token github_pat_11ABCDEFG0aaaaaaaaaaaa was refused", "github_pat_"],
+      ["Bad credential xoxb-1111111111-abcdefghijkl", "xoxb-"],
+    ] as const) {
+      const shown = detailWith(body);
+      expect(shown).not.toContain(secret);
+      // The refusal is still explained, not swallowed into the generic line.
+      expect(shown).toMatch(/gpt-5\.5/);
+    }
+  });
+
+  it("strips a bearer token whole and keeps what the provider said around it", () => {
+    // The inventory takes the entire `Bearer sk-…` shape out BEFORE the
+    // whole-message reject list runs, so this never reaches GENERIC: the
+    // provider's one remaining word is quoted and the refusal is still
+    // explained. Pinned to the exact sentence, so a redaction regression that
+    // let some other text through could not pass on "no key fragment" alone.
+    expect(detailWith("Bearer sk-abcdefghijklmnop rejected")).toBe(
+      "That message did not go through — OpenAI rejected the request for gpt-5.5: “rejected”. Pick another model in the header, or send it again.",
+    );
+  });
+});
+
+describe("a provider echoing the key it refused, masked", () => {
+  // Verbatim from OpenAI through the gateway on a box (2026-09-17). Two things
+  // have to happen to it: the masked key goes, and the developer-facing URL
+  // sentence goes — and the ORDER matters, because the shared inventory's
+  // token alphabet includes `.` and so eats the full stop the URL rule cuts at.
+  const DETAIL =
+    "unexpected status 401 Unauthorized: Incorrect API key provided: claw_08d*************************765e."
+    + " You can find your API key at https://platform.openai.com/account/api-keys.,"
+    + " url: https://api.openai.com/v1/responses, cf-ray: a3c7c040e8e4bc1a-SOF,"
+    + " request id: req_000000000000000000000000";
+
+  it("keeps the provider's sentence and nothing else", () => {
+    // Through the fallback note, which is where this detail actually reaches a
+    // person: `describeChatFailure` answers a 401 with the reconnect sentence
+    // before the provider's own words are ever quoted.
+    const shown = describeFallbackReply({
+      reason: "auth",
+      provider: "openai",
+      model: "openai/gpt-6-astra",
+      servedModel: "deepseek/deepseek-v4-flash",
+      detail: DETAIL,
+    }) ?? "";
+    expect(shown).toContain("Incorrect API key provided");
+    expect(shown).not.toContain("claw_");
+    expect(shown).not.toContain("*");
+    expect(shown).not.toMatch(/https?:\/\//);
+    expect(shown).not.toContain("cf-ray");
+    expect(shown).not.toContain("req_");
+  });
+});

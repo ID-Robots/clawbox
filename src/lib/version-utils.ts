@@ -18,3 +18,33 @@ export function cleanVersion(v: string | null | undefined): string | null {
     .trim();
   return cleaned || null;
 }
+
+/**
+ * Reduce the Hermes agent's `--version` banner to a bare version tag.
+ *
+ * `hermes --version` is a multi-line report, not a version string:
+ *
+ *   Hermes Agent v0.21.1 (2026.9.7) · upstream ead7e91d · local 2237be35 (+32678 carried commits)
+ *   Install directory: /home/clawbox/.hermes/hermes-agent
+ *   Install method: git
+ *
+ * The separator between the fields is upstream's to change — banners carrying
+ * an em dash and a middle dot have both been seen — so nothing here may depend
+ * on it: the version is the first semver-ish token on line one.
+ *
+ * Only the tag belongs in an About row, and `cleanVersion` cannot get it:
+ * its rules are shaped for OpenClaw/git-describe output, and none of them
+ * match here — the parenthesised build date is mid-line, not at the end.
+ *
+ * Returns null for empty input so callers keep their own fallback.
+ */
+export function parseHermesVersion(raw: string | null | undefined): string | null {
+  const line = (raw || "").split(/\r?\n/, 1)[0]?.trim();
+  if (!line) return null;
+  // First semver-ish token, keeping the leading "v" when Hermes printed one.
+  const match = line.match(/\bv?\d+\.\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.]+)?\b/);
+  if (match) return match[0];
+  // Unrecognised banner: show it rather than "not installed" — the agent did
+  // answer — but cap it so a runaway line can't blow out the row.
+  return line.length > 64 ? `${line.slice(0, 64)}…` : line;
+}

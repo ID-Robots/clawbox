@@ -1,12 +1,16 @@
 "use client";
 
-import { useState, useEffect, useCallback, useId, useRef, useMemo } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useId, useRef, useMemo } from "react";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR } from "@/lib/store-categories";
+import { clawhubSkillUrl } from "@/lib/clawhub-url";
+import { categoryLabelFromKey } from "@/lib/hermes-skill-facets";
+import { announceSkillChange } from "@/lib/skill-change-message";
 
 const STORE_API = "/setup-api/apps/store";
-const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
+const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
 // Upstream `/api/store/apps` caps any single response at 200 apps and offers
 // no `offset`/`page` parameter, so on the "All" view we walk through each
 // category (also capped at 200) to surface more of the 6000+ catalogue as
@@ -14,7 +18,7 @@ const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
 // firehose page we already have.
 const STORE_PAGE_LIMIT = 200;
 
-// Brand orange from openclawhardware.dev
+// Brand orange from clawbox.com
 const BRAND_ORANGE = "#fe6e00";
 const BRAND_ORANGE_LIGHT = "#ff8b1a";
 
@@ -62,6 +66,21 @@ function parseInstalls(installs?: string): number {
   return unit === "k" ? n * 1e3 : unit === "m" ? n * 1e6 : n;
 }
 
+// Ordering is applied when a list is BUILT (the fresh page, an explicit sort
+// pick, each load-more batch on its own) and never on render — re-sorting the
+// whole loaded set as batches arrive inserted newcomers above what the user
+// was reading. "popular" keeps ClawHub's own order (already roughly
+// install-count desc).
+function sortApps(list: StoreApp[], sortBy: SortBy): StoreApp[] {
+  if (sortBy === "popular") return list;
+  if (sortBy === "name") return [...list].sort((a, b) => a.name.localeCompare(b.name));
+  // rating: parse the install count once per app (tiebreak), not per comparison.
+  return list
+    .map(a => ({ a, installs: parseInstalls(a.installs) }))
+    .sort((x, y) => (y.a.rating - x.a.rating) || (y.installs - x.installs))
+    .map(x => x.a);
+}
+
 interface ApiCategory {
   id: string;
   name: string;
@@ -81,6 +100,8 @@ interface AppDetail {
   updatedAt?: string;
   installsAllTime?: number;
   executesCode?: boolean;
+  /** The publisher ClawHub itself names — null when it could not name one. */
+  ownerHandle?: string | null;
   clawhubUrl?: string;
 }
 
@@ -102,42 +123,41 @@ function apiToStoreApp(app: ApiApp): StoreApp {
   };
 }
 
+// One source only: the icon route walks local-then-remote itself, so the
+// client never needs a second URL to fall back to — just the letter tile.
 function StoreAppIcon({ appId, name, color, size = "w-12 h-12" }: { appId: string; name: string; color: string; size?: string }) {
-  const sources = [`/setup-api/apps/icon/${appId}`];
-  const [srcIdx, setSrcIdx] = useState(0);
   const [failed, setFailed] = useState(false);
-
-  const src = sources[srcIdx];
-  if (!failed) {
-    return (
-      <div className={`${size} shrink-0 rounded-xl flex items-center justify-center text-white font-bold text-lg overflow-hidden`} style={{ backgroundColor: color }}>
+  return (
+    <div className={`${size} shrink-0 rounded-xl flex items-center justify-center text-white font-bold text-lg overflow-hidden`} style={{ backgroundColor: color }}>
+      {failed ? name[0] : (
         <img
-          src={src}
+          src={`/setup-api/apps/icon/${appId}`}
           alt={name}
           className="w-full h-full object-cover"
-          onError={() => {
-            if (srcIdx + 1 < sources.length) {
-              setSrcIdx(srcIdx + 1);
-            } else {
-              setFailed(true);
-            }
-          }}
+          onError={() => setFailed(true)}
         />
-      </div>
-    );
-  }
-  return (
-    <div className={`${size} shrink-0 rounded-xl flex items-center justify-center text-white font-bold text-lg`} style={{ backgroundColor: color }}>
-      {name[0]}
+      )}
     </div>
   );
 }
 
+/** One publisher's skill under an ambiguous slug, from the install route's 409. */
+interface PublisherMatch {
+  ownerHandle: string;
+  /** `@owner/slug` — what the install route takes as `appId` on the re-post. */
+  ref: string;
+  url?: string;
+}
+
 interface InstallProgress {
   appId: string;
-  status: "installing" | "success" | "error";
+  status: "installing" | "success" | "error" | "ambiguous";
   message?: string;
   rateLimited?: boolean;
+  /** False when retrying the same request cannot succeed (Retry is hidden). */
+  retryable?: boolean;
+  /** The publishers to choose between when the slug is ambiguous on ClawHub. */
+  matches?: PublisherMatch[];
 }
 
 interface AppStoreProps {
@@ -147,25 +167,43 @@ interface AppStoreProps {
 }
 
 export default function AppStore({ installedAppIds, onInstall, onUninstall }: AppStoreProps) {
-  const { t } = useT();
+  const { t, locale } = useT();
+  const tr = useTr();
   const [search, setSearch] = useState("");
   const [installProgress, setInstallProgress] = useState<Record<string, InstallProgress>>({});
   const [category, setCategory] = useState<string>("All");
-  const [sortBy, setSortBy] = useState<SortBy>("popular");
+  // Top rated on open: an unranked list of 9,000 skills is a list nobody can
+  // act on, and rating is the signal a first-time visitor actually wants.
+  const [sortBy, setSortBy] = useState<SortBy>("rating");
   const [apps, setApps] = useState<StoreApp[]>([]);
   const [categories, setCategories] = useState<ApiCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  // A failed list fetch is a state of its own — an empty grid after it would
+  // read as "no apps found", which claims an empty catalogue when the store
+  // was simply unreachable. `attempt` is the Retry button's fetch-effect dep.
+  const [loadError, setLoadError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const [totalApps, setTotalApps] = useState(0);
   const [selectedApp, setSelectedApp] = useState<StoreApp | null>(null);
   const [detail, setDetail] = useState<AppDetail | null>(null);
   const [confirmInstall, setConfirmInstall] = useState<StoreApp | null>(null);
   // Categories still to lazy-fetch when the user scrolls the "All" view.
-  // Resets to the full list on every category/search change. We append in
-  // queue order so the user sees a stable, growing list rather than a
-  // reshuffle.
+  // Resets to the full list on every category/search change. Each batch is
+  // appended below what is already on screen (sorted within itself by
+  // `sortApps`), so the user sees a stable, growing list rather than a
+  // reshuffle — the whole list re-sorts only on an explicit sort pick.
   const [pendingCategories, setPendingCategories] = useState<string[]>([]);
   const seenSlugsRef = useRef<Set<string>>(new Set());
+  // Installed ids the catalogue answered 404 for. Most of what is installed on
+  // a box is not a store skill at all — an app the coding agent built is an id
+  // in `installed_apps` and nothing on ClawHub — and every visit to Installed
+  // asked about each of them again, so the tab fired the same three failing
+  // requests (and three console errors) every time it was opened.
+  const unknownSlugsRef = useRef<Set<string>>(new Set());
+  // The active sort, readable from the fetch effect and loadMore without
+  // making either re-run on a sort change (same pattern as loadMoreRef below).
+  const sortByRef = useRef(sortBy);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -174,6 +212,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     const controller = new AbortController();
     const doFetch = async () => {
       setLoading(true);
+      setLoadError(false);
       try {
         const params = new URLSearchParams({ limit: String(STORE_PAGE_LIMIT) });
         if (category && category !== "All") params.set("category", category);
@@ -181,11 +220,18 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         const res = await fetch(`${STORE_API}?${params}`, { signal: controller.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data: ApiResponse = await res.json();
-        const fresh = data.apps.map(apiToStoreApp);
+        // A response whose filter was abandoned must not overwrite the list
+        // the next filter is already building. `fetch` normally rejects when
+        // aborted, but a mock, cache hit, or fully-received body may still
+        // resolve after cleanup has fired.
+        if (controller.signal.aborted) return;
+        const fresh = sortApps(data.apps.map(apiToStoreApp), sortByRef.current);
         setApps(fresh);
         seenSlugsRef.current = new Set(fresh.map(a => a.id));
         if (data.categories.length > 0) setCategories(data.categories);
-        setTotalApps(data.total);
+        // The header's count is the CATALOGUE size; a search/category fetch
+        // answers the filter's total and must not rewrite it.
+        if (category === "All" && !search) setTotalApps(data.total);
         // Only the firehose "All" view (no search) gets the per-category
         // sweep — a category-filtered or search-filtered request already
         // exhausts what the upstream can return for that scope.
@@ -197,14 +243,88 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
           console.error("[AppStore] fetch failed:", err);
+          // A failed re-fetch must not leave the previous scope's cards on
+          // screen under the new filter — the same stale-response rule the
+          // load-more cancellation below enforces.
+          setLoadError(true);
+          setApps([]);
+          seenSlugsRef.current = new Set();
+          setPendingCategories([]);
         }
       } finally {
-        setLoading(false);
+        // The replacement request owns loading now. Clearing it from this
+        // stale effect would flash an empty-state over its in-flight result.
+        if (!controller.signal.aborted) setLoading(false);
       }
     };
     const timer = setTimeout(doFetch, search ? 300 : 0);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [category, search]);
+  }, [category, search, attempt]);
+
+  /**
+   * Complete the Installed view from its real source of truth: installed ids.
+   *
+   * The catalogue's first response is capped at 200 rows. Filtering only that
+   * page made a perfectly healthy installed skill disappear whenever its row
+   * lived in a later category batch. The per-slug endpoint is deliberately
+   * used here so entering Installed fetches only the missing rows, while rows
+   * already present in `apps` remain instant and incur no extra request.
+   */
+  useEffect(() => {
+    if (category !== "Installed") return;
+
+    const missingIds = installedAppIds.filter(
+      (id) => !seenSlugsRef.current.has(id) && !unknownSlugsRef.current.has(id),
+    );
+    if (missingIds.length === 0) {
+      setLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setLoading(true);
+
+    void Promise.all(missingIds.map(async (id): Promise<StoreApp | null> => {
+      try {
+        const res = await fetch(`${STORE_API}?slug=${encodeURIComponent(id)}`, { signal: controller.signal });
+        // 404 is the ordinary answer for a locally built app, and it is a
+        // FACT about this id: asking again on the next visit cannot change it.
+        if (res.status === 404) { unknownSlugsRef.current.add(id); return null; }
+        if (!res.ok) return null;
+        const app = await res.json() as Partial<ApiApp>;
+        if (
+          app.slug !== id
+          || typeof app.name !== "string"
+          || typeof app.summary !== "string"
+          || typeof app.category !== "string"
+          || typeof app.rating !== "number"
+          || typeof app.installs !== "string"
+        ) return null;
+        return apiToStoreApp(app as ApiApp);
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          console.error(`[AppStore] installed app lookup failed for ${id}:`, err);
+        }
+        return null;
+      }
+    })).then((found) => {
+      if (controller.signal.aborted) return;
+      const additions = found.filter((app): app is StoreApp => app !== null);
+      if (additions.length === 0) return;
+      additions.forEach((app) => seenSlugsRef.current.add(app.id));
+      setApps((current) => {
+        const currentIds = new Set(current.map((app) => app.id));
+        const unseen = additions.filter((app) => !currentIds.has(app.id));
+        return unseen.length > 0
+          ? [...current, ...sortApps(unseen, sortByRef.current)]
+          : current;
+      });
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false);
+    });
+
+    return () => controller.abort();
+  }, [category, installedAppIds]);
 
   // Pull richer per-skill metadata when a detail view opens (featured, dates,
   // precise install count, executes-code). Best-effort — the modal still works
@@ -250,7 +370,9 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         additions.push(apiToStoreApp(raw));
       }
       if (additions.length > 0) {
-        setApps(prev => [...prev, ...additions]);
+        // Sorted within the batch, appended below everything already
+        // rendered — never merged into it (see the pendingCategories comment).
+        setApps(prev => [...prev, ...sortApps(additions, sortByRef.current)]);
       }
     } catch (err) {
       // Aborts are expected (category/search changed mid-flight); only
@@ -322,38 +444,92 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     onClose: dismissConfirmInstall,
   });
 
-  const handleInstall = useCallback(async (app: StoreApp) => {
+  // Grid ↔ detail navigation gives focus back on both crossings, the way the
+  // Hermes skill store does (HermesSkillsStore.tsx). Opening a card unmounts
+  // the grid, so focus fell to <body>: a keyboard user had to Tab in from the
+  // top of the document and a screen reader announced nothing. The detail's
+  // heading takes it instead — it says what just opened, and the next Tab is
+  // Back. Back unmounts the detail the same way, so the card the owner came
+  // from is found again by id once the grid is back.
+  const returnFocusId = useRef<string | null>(null);
+  const detailHeadingRef = useRef<HTMLHeadingElement>(null);
+  const openDetail = useCallback((app: StoreApp) => {
+    returnFocusId.current = app.id;
+    setSelectedApp(app);
+  }, []);
+  useEffect(() => {
+    if (selectedApp) detailHeadingRef.current?.focus();
+  }, [selectedApp]);
+  useLayoutEffect(() => {
+    if (selectedApp || !scrollContainerRef.current) return;
+    const id = returnFocusId.current;
+    if (!id) return;
+    returnFocusId.current = null;
+    // Matched on the dataset rather than through a built selector: a slug is
+    // ClawHub's to shape and is not guaranteed to be selector-safe.
+    for (const node of scrollContainerRef.current.querySelectorAll<HTMLElement>("[data-app-open]")) {
+      if (node.dataset.appOpen === id) {
+        node.focus();
+        break;
+      }
+    }
+  }, [selectedApp]);
+
+  const clearProgress = useCallback((appId: string) => {
+    setInstallProgress(prev => { const n = { ...prev }; delete n[appId]; return n; });
+  }, []);
+
+  // `ref` is the `@owner/slug` a publisher pick posts back; a first attempt
+  // sends the bare slug and lets the route resolve the publisher.
+  const handleInstall = useCallback(async (app: StoreApp, ref?: string) => {
     setConfirmInstall(null);
     setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "installing" } }));
     try {
       const res = await fetch("/setup-api/apps/install", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ appId: app.id }),
+        body: JSON.stringify({ appId: ref ?? app.id }),
       });
-      const data = await res.json();
-      if (!res.ok || (data.clawhub && !data.clawhub.success)) {
-        const rateLimited = !!data.clawhub?.rateLimited;
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.ok === false || (data?.clawhub && !data.clawhub.success)) {
+        // A 409 "ambiguous" is not a failure to retry: ClawHub lists several
+        // publishers for this slug and the choice is the owner's. The picker
+        // stays up until they pick or dismiss — no auto-clear timer.
+        const matches = Array.isArray(data?.matches)
+          ? (data.matches as PublisherMatch[]).filter(m => m && typeof m.ownerHandle === "string" && typeof m.ref === "string")
+          : [];
+        if (data?.code === "ambiguous" && matches.length > 0) {
+          setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "ambiguous", matches } }));
+          return;
+        }
+        const rateLimited = data?.code === "rate_limited" || !!data?.clawhub?.rateLimited;
+        // Absent on an older server: assume retryable, which keeps the old
+        // behaviour of always offering Retry.
+        const retryable = typeof data?.retryable === "boolean" ? data.retryable
+          : typeof data?.clawhub?.retryable === "boolean" ? data.clawhub.retryable
+          : true;
         const errMsg = rateLimited
           ? t("store.rateLimited")
-          : (data.clawhub?.error || data.error || t("store.installFailed"));
-        setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "error", message: errMsg, rateLimited } }));
+          : (data?.clawhub?.error || data?.error || t("store.installFailed"));
+        setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "error", message: errMsg, rateLimited, retryable } }));
         // Linger longer on rate-limit so the user has time to read it before
         // hitting Retry — the typical ClawHub bucket refills within ~10s.
-        setTimeout(() => setInstallProgress(prev => { const n = { ...prev }; delete n[app.id]; return n; }), rateLimited ? 12000 : 6000);
+        setTimeout(() => clearProgress(app.id), rateLimited ? 12000 : 6000);
         return;
       }
       setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "success" } }));
       onInstall(app);
       // Notify chat to refresh agent skills
-      window.dispatchEvent(new CustomEvent('clawbox-skill-installed', { detail: { action: 'install', name: app.name, id: app.id } }));
-      setTimeout(() => setInstallProgress(prev => { const n = { ...prev }; delete n[app.id]; return n; }), 2000);
+      // The store installs OpenClaw skills; it is registered on no other
+      // harness (`store` is OpenClaw-only), so the kind is not in doubt.
+      announceSkillChange({ action: 'install', name: app.name, id: app.id, kind: 'skill' });
+      setTimeout(() => clearProgress(app.id), 2000);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Network error";
       setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "error", message: msg } }));
-      setTimeout(() => setInstallProgress(prev => { const n = { ...prev }; delete n[app.id]; return n; }), 6000);
+      setTimeout(() => clearProgress(app.id), 6000);
     }
-  }, [onInstall, t]);
+  }, [clearProgress, onInstall, t]);
 
   const categoryTabs = ["All", ...categories.map(c => c.name)];
   const categoryIdMap: Record<string, string> = {};
@@ -369,22 +545,29 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
 
   const activeCategoryLabel = category === "All" || category === "Installed" ? category : categories.find(c => c.id === category)?.name || category;
 
-  // ClawHub ignores sort params, so we filter + sort the loaded set
-  // client-side. "popular" keeps ClawHub's own order (already roughly
-  // install-count desc). Memoized so an incidental re-render (install progress,
-  // modal open) doesn't re-filter/re-sort the whole loaded catalogue.
+  // ClawHub stamps category ids on apps that its own categories list omits
+  // ("ai" on thousands of them), so an unlisted id gets a readable label
+  // instead of the raw slug. Used by the cards and the detail view alike.
+  const categoryLabel = (id: string) => categories.find(c => c.id === id)?.name || categoryLabelFromKey(id);
+
+  // An explicit sort pick is the one place a full reshuffle of the loaded set
+  // is what the user asked for; everything else keeps `apps` in display order
+  // (see sortApps).
+  const handleSortChange = (next: SortBy) => {
+    setSortBy(next);
+    sortByRef.current = next;
+    setApps(prev => sortApps(prev, next));
+  };
+
+  // ClawHub ignores sort params, so `apps` is kept sorted client-side as it is
+  // built — this only applies the Installed filter. Memoized so an incidental
+  // re-render (install progress, modal open) doesn't re-filter the whole
+  // loaded catalogue.
   const displayApps = useMemo(() => {
-    const filtered = category === "Installed"
+    return category === "Installed"
       ? apps.filter(app => installedAppIds.includes(app.id)).filter(app => !search || app.name.toLowerCase().includes(search.toLowerCase()))
       : apps;
-    if (sortBy === "popular") return filtered;
-    if (sortBy === "name") return [...filtered].sort((a, b) => a.name.localeCompare(b.name));
-    // rating: parse the install count once per app (tiebreak), not per comparison.
-    return filtered
-      .map(a => ({ a, installs: parseInstalls(a.installs) }))
-      .sort((x, y) => (y.a.rating - x.a.rating) || (y.installs - x.installs))
-      .map(x => x.a);
-  }, [apps, installedAppIds, search, category, sortBy]);
+  }, [apps, installedAppIds, search, category]);
 
   const renderInstallButton = (app: StoreApp, compact = false) => {
     const isInstalled = installedAppIds.includes(app.id);
@@ -392,6 +575,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     const isInstalling = progress?.status === "installing";
     const isError = progress?.status === "error";
     const isSuccess = progress?.status === "success";
+    const isAmbiguous = progress?.status === "ambiguous";
 
     if (isInstalled && !progress) {
       return (
@@ -419,16 +603,41 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         </span>
       );
     }
+    if (isAmbiguous && progress.matches) {
+      return (
+        <div className="flex flex-col gap-1.5 min-w-0" onClick={(e) => e.stopPropagation()}>
+          <span className="text-xs text-white/60">{t("store.choosePublisher")}</span>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {progress.matches.map((m) => (
+              <button key={m.ref}
+                onClick={(e) => { e.stopPropagation(); handleInstall(app, m.ref); }}
+                className="px-2 py-0.5 rounded text-xs font-medium transition-colors cursor-pointer"
+                style={{ backgroundColor: `${BRAND_ORANGE}1a`, color: BRAND_ORANGE_LIGHT }}>
+                @{m.ownerHandle}
+              </button>
+            ))}
+            <button onClick={(e) => { e.stopPropagation(); clearProgress(app.id); }}
+              className="px-2 py-0.5 rounded text-xs text-white/40 hover:text-white/70 transition-colors cursor-pointer">
+              {t("cancel")}
+            </button>
+          </div>
+        </div>
+      );
+    }
     if (isError) {
       return (
         <div className={`flex items-center gap-2 ${compact ? "" : "flex-wrap"}`}>
           <span className="text-xs text-red-400 line-clamp-1" title={progress.message}>
             {progress.message}
           </span>
-          <button onClick={(e) => { e.stopPropagation(); requestInstall(app); }}
-            className="px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer shrink-0">
-            {t("store.retry")}
-          </button>
+          {/* No Retry on a definitive refusal — repeating the same request
+              cannot make ClawHub grow the skill. */}
+          {progress.retryable !== false && (
+            <button onClick={(e) => { e.stopPropagation(); requestInstall(app); }}
+              className="px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer shrink-0">
+              {t("store.retry")}
+            </button>
+          )}
         </div>
       );
     }
@@ -457,7 +666,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       <div
         ref={confirmPanelRef}
         role="dialog" aria-modal="true" aria-labelledby={confirmTitleId}
-        className="bg-[#1a1e2e] border border-white/10 rounded-2xl p-6 max-w-sm mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+        className="bg-[var(--bg-elevated)] border border-white/10 rounded-2xl p-6 max-w-sm mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
           <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: BRAND_ORANGE }}>
             <span className="material-symbols-rounded text-white" style={{ fontSize: 22 }} aria-hidden="true">download</span>
@@ -496,20 +705,38 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   // Detail view
   if (selectedApp) {
     const isInstalled = installedAppIds.includes(selectedApp.id);
-    const catName = categories.find(c => c.id === selectedApp.category)?.name || selectedApp.category;
+    const catName = categoryLabel(selectedApp.category);
     // installsAllTime from the detail endpoint is unreliable — it comes back 0
     // even for apps with thousands of installs — so only trust it when positive
     // and otherwise fall back to the list's bucketed "2800+" string. One value
     // feeds both the header and the Downloads stat so they can't disagree.
-    const installDisplay = detail?.installsAllTime && detail.installsAllTime > 0 ? detail.installsAllTime.toLocaleString() : selectedApp.installs;
+    const installDisplay = detail?.installsAllTime && detail.installsAllTime > 0 ? detail.installsAllTime.toLocaleString(locale) : selectedApp.installs;
+    // The publisher namespace is what makes a ClawHub URL real. Best is the
+    // handle ClawHub itself named (`ownerHandle`, via the detail proxy); the
+    // store's `developer` is a guess that is only for an old server whose
+    // LOADED detail has no ownerHandle field at all — an explicit null means
+    // ClawHub could not name the publisher, and rebuilding the link from
+    // `developer` would resurrect the dead URL the server removed. While the
+    // detail is still in flight (`detail === null`) nothing is known yet, so
+    // the guess must not fire either — a click in that window would open the
+    // dead page under a "view on ClawHub" label. The store's own page is the
+    // honest fallback — labelled as the store page, not as ClawHub. See
+    // src/lib/clawhub-url.ts.
+    const hubUrl = clawhubSkillUrl(selectedApp.id, detail?.ownerHandle || undefined)
+      || (detail === null || "ownerHandle" in detail ? undefined : clawhubSkillUrl(selectedApp.id, selectedApp.developer))
+      || selectedApp.url;
+    const hubIsClawhub = !!hubUrl && hubUrl.startsWith("https://clawhub.ai/");
+
     return (
-      <div className="h-full flex flex-col bg-[#0f1219] text-white" data-testid="app-store">
+      <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white" data-testid="app-store">
         {confirmModal}
         {/* Back header */}
         <div className="shrink-0 px-4 py-3 border-b border-white/10 flex items-center gap-3">
-          <button onClick={() => setSelectedApp(null)}
+          {/* The glyph is a Material ligature, so without a name of its own
+              the button is announced as "arrow_back". */}
+          <button type="button" onClick={() => setSelectedApp(null)} aria-label={t("store.back")}
             className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 transition-colors cursor-pointer">
-            <span className="material-symbols-rounded text-white/70" style={{ fontSize: 20 }}>arrow_back</span>
+            <span className="material-symbols-rounded text-white/70" style={{ fontSize: 20 }} aria-hidden="true">arrow_back</span>
           </button>
           <span className="text-sm font-medium text-white/70">{t("store.appStore")}</span>
         </div>
@@ -520,7 +747,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             <StoreAppIcon appId={selectedApp.id} name={selectedApp.name} color={selectedApp.color} size="w-20 h-20" />
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-xl font-bold">{selectedApp.name}</h2>
+                <h2 ref={detailHeadingRef} tabIndex={-1} className="text-xl font-bold focus:outline-none">{selectedApp.name}</h2>
                 {detail?.featured && (
                   <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold" style={{ backgroundColor: `${BRAND_ORANGE}26`, color: BRAND_ORANGE_LIGHT }}>{t("store.featured")}</span>
                 )}
@@ -535,7 +762,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
               <div className="flex items-center gap-3 mt-2 flex-wrap">
                 <div className="flex items-center gap-1 text-yellow-400 text-sm">
                   <span>★</span>
-                  <span className="font-semibold">{selectedApp.rating}</span>
+                  <span className="font-semibold">{selectedApp.rating.toFixed(1)}</span>
                 </div>
                 {installDisplay && (
                   <span className="text-xs text-white/40">{t("store.installs", { count: installDisplay })}</span>
@@ -565,10 +792,22 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             </div>
           </div>
 
-          {/* Description */}
+          {/* Description. The store summary is hard-capped at 200 chars
+              upstream, often mid-word — mark the cut, and put the link to the
+              full write-up right under it rather than at the bottom. */}
           <div className="mb-6">
             <h3 className="text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">{t("store.about")}</h3>
-            <p className="text-sm text-white/70 leading-relaxed whitespace-pre-line">{selectedApp.description}</p>
+            <p className="text-sm text-white/70 leading-relaxed whitespace-pre-line">
+              {selectedApp.description}{selectedApp.description.length >= 200 && "…"}
+            </p>
+            {hubUrl && (
+              <a href={hubUrl} target="_blank" rel="noopener noreferrer"
+                className="mt-2 inline-flex items-center gap-1.5 text-xs transition-colors"
+                style={{ color: BRAND_ORANGE_LIGHT }}>
+                {hubIsClawhub ? t("store.viewOnHub") : t("store.viewInStore")}
+                <span className="material-symbols-rounded" style={{ fontSize: 12 }}>open_in_new</span>
+              </a>
+            )}
           </div>
 
           {/* Info grid */}
@@ -605,22 +844,15 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             </div>
           )}
 
-          {/* Store link — prefer the canonical ClawHub page (full write-up). */}
-          {(detail?.clawhubUrl || selectedApp.url) && (
-            <a href={detail?.clawhubUrl || selectedApp.url} target="_blank" rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-xs transition-colors"
-              style={{ color: BRAND_ORANGE_LIGHT }}>
-              {t("store.viewOnHub")}
-              <span className="material-symbols-rounded" style={{ fontSize: 12 }}>open_in_new</span>
-            </a>
-          )}
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full flex flex-col bg-[#0f1219] text-white" data-testid="app-store">
+    // @container on the root so the header can size itself to the WINDOW, not
+    // the viewport — this is a desktop window the owner can resize freely.
+    <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white @container" data-testid="app-store">
       {confirmModal}
       {/* Header */}
       <div className="shrink-0 px-4 py-3 border-b border-white/10">
@@ -630,44 +862,52 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           </div>
           <div>
             <h1 className="text-lg font-semibold">{t("store.title")}</h1>
-            <p className="text-xs text-white/50">{t("store.poweredBy", { count: totalApps || "500+" })}</p>
+            {/* No made-up count: before the first successful load (and after a
+                failed one) the subtitle carries no number at all. The count is
+                formatted in the UI's locale the way the detail view formats
+                installs — "9397" up here beside "18,389" down there read as
+                two conventions on one screen. */}
+            <p className="text-xs text-white/50">{totalApps > 0 ? t("store.poweredBy", { count: totalApps.toLocaleString(locale) }) : t("store.poweredByNoCount")}</p>
           </div>
         </div>
 
-        <div className="relative mb-3">
-          <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-white/40" style={{ fontSize: 16 }}>search</span>
-          <input
-            type="text"
-            placeholder={t("store.searchApps")}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full h-9 pl-9 pr-3 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/40 focus:outline-none"
-            style={{ ["--tw-ring-color" as string]: BRAND_ORANGE }}
-            onFocus={(e) => (e.currentTarget.style.borderColor = `${BRAND_ORANGE}80`)}
-            onBlur={(e) => (e.currentTarget.style.borderColor = "")}
-          />
-        </div>
-
-        <div className="flex items-center justify-end gap-2 mb-2">
-          <span className="text-xs text-white/40">{t("store.sort")}</span>
+        {/* Search and sort share one row: the sort had a whole line to itself
+            and a label the select already says. */}
+        <div className="flex items-center gap-2 mb-2">
+          <div className="relative flex-1 min-w-0">
+            <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-white/40" style={{ fontSize: 16 }}>search</span>
+            <input
+              type="text"
+              placeholder={t("store.searchApps")}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full h-9 pl-9 pr-3 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/40 focus:outline-none"
+              style={{ ["--tw-ring-color" as string]: BRAND_ORANGE }}
+              onFocus={(e) => (e.currentTarget.style.borderColor = `${BRAND_ORANGE}80`)}
+              onBlur={(e) => (e.currentTarget.style.borderColor = "")}
+            />
+          </div>
           <select
             value={sortBy}
-            onChange={(e) => setSortBy(e.target.value as SortBy)}
+            onChange={(e) => handleSortChange(e.target.value as SortBy)}
             aria-label={t("store.sort")}
-            className="h-7 px-2 bg-white/5 border border-white/10 rounded-md text-xs text-white/80 focus:outline-none cursor-pointer"
+            className="h-9 px-2 shrink-0 bg-white/5 border border-white/10 rounded-lg text-xs text-white/80 focus:outline-none cursor-pointer"
           >
-            <option value="popular" className="bg-[#1a1e2e]">{t("store.sortPopular")}</option>
-            <option value="rating" className="bg-[#1a1e2e]">{t("store.sortRating")}</option>
-            <option value="name" className="bg-[#1a1e2e]">{t("store.sortName")}</option>
+            <option value="rating" className="bg-[var(--bg-elevated)]">{t("store.sortRating")}</option>
+            <option value="popular" className="bg-[var(--bg-elevated)]">{t("store.sortPopular")}</option>
+            <option value="name" className="bg-[var(--bg-elevated)]">{t("store.sortName")}</option>
           </select>
         </div>
 
-        <div className="flex flex-wrap gap-1.5 pb-1">
+        {/* Fourteen categories wrapped to three rows on a phone and pushed the
+            apps off the screen. Narrow: one row that scrolls sideways. Wide:
+            wrap as before, since there is room. */}
+        <div className="flex gap-1.5 pb-1 overflow-x-auto @2xl:flex-wrap @2xl:overflow-x-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {["Installed", ...categoryTabs].map((cat) => (
             <button
               key={cat}
               onClick={() => handleCategoryClick(cat)}
-              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors cursor-pointer ${
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors cursor-pointer shrink-0 ${
                 activeCategoryLabel === cat
                   ? "text-white"
                   : "bg-white/5 text-white/60 hover:bg-white/10"
@@ -684,7 +924,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 @container">
         {loading && apps.length === 0 ? (
           <div className="flex items-center justify-center py-12">
-            <div className="w-6 h-6 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
+            <div className="w-6 h-6 border-2 border-white/20 rounded-full motion-safe:animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
           </div>
         ) : (
           <div className="grid grid-cols-1 @sm:grid-cols-2 @3xl:grid-cols-3 @5xl:grid-cols-4 gap-3">
@@ -697,8 +937,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
               return (
                 <div
                   key={app.id}
-                  onClick={() => setSelectedApp(app)}
-                  className={`rounded-xl border p-3 transition-all duration-300 cursor-pointer ${
+                  className={`relative rounded-xl border p-3 transition-all duration-300 ${
                     isInstalling ? "scale-[0.98]" : ""
                   } ${
                     isError
@@ -717,25 +956,47 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1 min-w-0">
-                            <h3 className="font-medium text-sm truncate">{app.name}</h3>
+                            {/* The card is the way into the detail view, and
+                                as a div with an onClick it was unreachable from
+                                the keyboard: Tab landed on the Install button
+                                inside it, so Enter would start an install while
+                                the detail stayed out of reach. A stretched
+                                button on the name — the Hermes store's shape —
+                                keeps the whole card opening by mouse with
+                                exactly ONE tab stop for it and nothing
+                                interactive nested: a `role=button` on the card
+                                itself would make its children presentational,
+                                and VoiceOver then neither reaches the Install
+                                button nor hears the heading. The install row
+                                sits above the overlay. */}
+                            <h3 className="font-medium text-sm min-w-0">
+                              <button
+                                type="button"
+                                onClick={() => openDetail(app)}
+                                data-app-open={app.id}
+                                className="text-left w-full truncate cursor-pointer after:absolute after:inset-0 after:rounded-xl focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-white/40"
+                              >
+                                {app.name}
+                              </button>
+                            </h3>
                             {app.official && (
                               <span title={t("store.official")} aria-label={t("store.official")} className="shrink-0 inline-flex" style={{ color: BRAND_ORANGE_LIGHT }}>
                                 <span className="material-symbols-rounded" style={{ fontSize: 14 }}>verified</span>
                               </span>
                             )}
                           </div>
-                          <span className="block text-xs text-white/40 truncate">{categories.find(c => c.id === app.category)?.name || app.category}</span>
+                          <span className="block text-xs text-white/40 truncate">{categoryLabel(app.category)}</span>
                         </div>
                         <div className="flex flex-col items-end gap-0.5 shrink-0">
                           <div className="flex items-center gap-0.5 text-yellow-400 text-xs">
                             <span>★</span>
-                            <span>{app.rating}</span>
+                            <span>{app.rating.toFixed(1)}</span>
                           </div>
                           {app.installs && <span className="text-[10px] text-white/40">{app.installs}</span>}
                         </div>
                       </div>
                       <p className="text-xs text-white/50 mt-1 line-clamp-2">{app.description}</p>
-                      <div className="mt-2 flex items-center gap-2">
+                      <div className="mt-2 flex items-center gap-2 relative z-10">
                         {renderInstallButton(app, true)}
                       </div>
                     </div>
@@ -746,9 +1007,46 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           </div>
         )}
 
-        {!loading && displayApps.length === 0 && (
+        {/* A load failure is its own state; "No apps found" is reserved for a
+            successful fetch that genuinely matched nothing. The Installed view
+            never fetches, so it keeps its own empty copy even after a failure. */}
+        {!loading && loadError && category !== "Installed" && (
+          <div className="text-center py-12">
+            <span className="material-symbols-rounded text-white/30" style={{ fontSize: 40 }} aria-hidden="true">cloud_off</span>
+            <p className="text-sm text-white/50 mt-2">{t("store.loadError")}</p>
+            <button onClick={() => setAttempt(a => a + 1)}
+              className="mt-3 px-4 py-1.5 rounded-lg text-sm font-medium transition-colors cursor-pointer"
+              style={{ backgroundColor: `${BRAND_ORANGE}1a`, color: BRAND_ORANGE_LIGHT }}>
+              {t("store.retry")}
+            </button>
+          </div>
+        )}
+
+        {/* "You haven't installed any apps yet" is only true when nothing is
+            installed. A box whose desktop is full of apps the coding agent
+            built has plenty installed and none of it on ClawHub, and telling
+            that owner they have installed nothing is simply wrong. */}
+        {!loading && displayApps.length === 0 && (category === "Installed" || !loadError) && (
           <div className="text-center py-12 text-white/40">
-            <p className="text-sm">{t("store.noAppsFound")}</p>
+            <p className="text-sm" data-testid="store-empty-state">
+              {category !== "Installed"
+                ? t("store.noAppsFound")
+                : installedAppIds.length === 0
+                  ? t("store.noInstalledApps")
+                  : search
+                    // The Installed view is cut by the search box as well, so
+                    // an empty list here is just as likely to mean "nothing
+                    // you typed matched" — including a box whose installed
+                    // apps ALL have store listings. Answering that with "these
+                    // apps did not come from the store" states something the
+                    // list does not show and that may be flatly untrue, so a
+                    // search gets the answer every other tab gives it.
+                    ? t("store.noAppsFound")
+                    : tr(
+                      "store.installedNotFromStore",
+                      "The apps installed on this box did not come from the store — an app built here has no store listing.",
+                    )}
+            </p>
           </div>
         )}
 
@@ -757,7 +1055,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         {category === "All" && !search && pendingCategories.length > 0 && (
           <div ref={sentinelRef} className="flex items-center justify-center py-6">
             {loadingMore && (
-              <div className="w-5 h-5 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
+              <div className="w-5 h-5 border-2 border-white/20 rounded-full motion-safe:animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
             )}
           </div>
         )}

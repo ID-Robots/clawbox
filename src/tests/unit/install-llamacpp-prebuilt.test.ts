@@ -2,8 +2,7 @@ import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * Building llama.cpp on the device costs 18m51s, measured on an Orin Nano, and
  * produces an identical result on every unit — so install.sh can accept a
@@ -15,6 +14,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
  * the prebuilt falls through to the source build, because a slow install beats
  * a device with no working inference binary.
  */
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const INSTALL_SH = path.join(process.cwd(), "install.sh");
 
 /** Run install_prebuilt_llamacpp in isolation. Returns its exit code + output. */

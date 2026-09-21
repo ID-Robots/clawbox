@@ -60,9 +60,12 @@ export function isSafePasswordChars(s: string): boolean {
  */
 export async function verifyPassword(password: string): Promise<boolean> {
   return new Promise((resolve) => {
+    // killSignal: unix_chkpwd ignores SIGTERM (PAM's setup_signals), so the
+    // default kill signal never ends it and `timeout` would be decorative.
     const child = spawn("/usr/sbin/unix_chkpwd", [getSystemUsername(), "nonull"], {
       stdio: ["pipe", "pipe", "pipe"],
       timeout: 5000,
+      killSignal: "SIGKILL",
     });
     child.stdin.end(password + "\0");
     child.on("close", (code) => resolve(code === 0));

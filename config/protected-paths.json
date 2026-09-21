@@ -1,0 +1,130 @@
+{
+  "_readme": [
+    "THE DEFINITION of the paths the on-device agent may never delete, overwrite,",
+    "truncate or move, and of the command tokens that do those four things. No",
+    "second copy of this table exists; JSON because its three readers are three",
+    "languages:",
+    "  scripts/register-mcp.sh                     approvals.deny in ~/.hermes/config.yaml (Python)",
+    "  scripts/openclaw-plugins/clawbox-path-guard a before_tool_call hook (JavaScript)",
+    "  src/tests/unit/protected-paths.test.ts      one case table through both (TypeScript)",
+    "WHY: on 2026-09-02 a Hermes turn asked to 'delete the largest of those files'",
+    "ran rm on a 3.2 GB Gemma GGUF with no confirmation, mid-turn, while another",
+    "turn was still running (TASK-605). The owner's ruling of 2026-09-04 is",
+    "deliberately narrow - a hard deny on the local-model folder and the ClawBox",
+    "tree, no prompt anywhere else, 'narrower, but silent when it bites'."
+  ],
+
+  "_pathRoots": [
+    "Matched anywhere in a path, and only where the root ENDS a path segment (see",
+    "pathTerminators), so '~/clawbox-notes.txt' is not the ClawBox tree.",
+    "'/clawbox' is the checkout in every spelling the agent can write (~/clawbox,",
+    "$HOME/clawbox, /home/clawbox/clawbox) plus /etc/clawbox, the root-owned",
+    "edition lock. The two model stores are inside the tree on a stock box",
+    "(install.sh: step_llamacpp_model, step_embed_model) and so already covered by",
+    "'/clawbox'; they are listed separately because the file the incident",
+    "destroyed was in a SECOND checkout, ~/check-acbuild/data/llamacpp/models/, and",
+    "the ruling names the model folder wherever it is.",
+    "DELIBERATELY ABSENT: ~/.cache/huggingface/hub/, where the Kokoro and",
+    "faster-whisper weights land. That is a cache the installer re-fetches, and",
+    "denying rm on it would block the documented repair for a corrupt download."
+  ],
+  "pathRoots": ["/clawbox", "/llamacpp/models", "/embed/models"],
+
+  "_writableSubpaths": [
+    "The carve-outs inside the ClawBox tree, for PATHS ONLY - a file tool's",
+    "target, or a working directory. `data/` lives inside the checkout on a",
+    "shipped box, so `/clawbox` covers it, and five of its subtrees are",
+    "deliberately writable: src/lib/file-guard.ts DATA_DIR_PUBLIC_SUBTREES names",
+    "them and the Files app shows them. `code_project_init` hands the agent",
+    "absolute paths under data/code-projects and tells it to edit them with its",
+    "own file tools - there is no code_file_write tool - so denying writes there",
+    "would take multi-file web apps off the OpenClaw edition altogether.",
+    "NOT applied to command text. A shell `rm` inside the tree is what cost a",
+    "customer a 3.2 GB download; a code project's files are written by file",
+    "tools, never by `rm`, so the two harnesses go on answering commands the",
+    "same way and only the path-shaped checks carry the exception.",
+    "data/llamacpp and data/embed are absent on purpose: they are the model",
+    "store, and they have roots of their own."
+  ],
+  "writableSubpaths": [
+    "/clawbox/data/webapps",
+    "/clawbox/data/icons",
+    "/clawbox/data/catalog-cache",
+    "/clawbox/data/code-projects",
+    "/clawbox/data/coding-agent-artifacts"
+  ],
+
+  "_pathTerminators": [
+    "What may follow a root for it to be that directory rather than a longer name.",
+    "A root at the very end of the command line counts too - that is the",
+    "'rm -rf ~/clawbox' spelling, which no trailing-separator rule would catch.",
+    "TAB, NEWLINE and CR are in here with the space, and they are the ones that",
+    "matter most: a newline is not an exotic spelling, it is how a typed command",
+    "is DELIVERED. process({action:'write', data:'rm -rf ~/clawbox\\n'}) types",
+    "exactly that into a live pty and a script body separates its commands the",
+    "same way. With only a space here the whole checkout - the most destructive",
+    "spelling there is - was allowed: on OpenClaw in every one of those",
+    "spellings, and on Hermes wherever the whitespace is not the last character.",
+    "Hermes' own matcher is 'candidate = command_variant.lower().strip()'",
+    "(tools/approval.py:647 in the installed 0.20.5, _match_user_deny_rule), so",
+    "a TRAILING newline it already caught and a mid-script or tab one it did",
+    "not - which is also why the parity test lowercases and trims before it",
+    "hands a case to fnmatch.",
+    "Both readers splice this string in verbatim: the plugin as a JavaScript Set",
+    "and register-mcp.sh as an fnmatch class '[' + this + ']'. Python's fnmatch",
+    "carries literal control characters inside a class and PyYAML round-trips",
+    "them as \\t \\n \\r escapes, so nothing here needs escaping on either side -",
+    "but a character that is special to fnmatch WOULD, so weigh that before",
+    "adding one."
+  ],
+  "pathTerminators": "/ \t\n\r;&|'\")",
+
+  "_verbFirstTokens": [
+    "Destroy-then-path spellings. Each carries its own trailing space so 'rm '",
+    "cannot match 'rmdir' - which is absent anyway, because it removes only EMPTY",
+    "directories and cannot cost anyone a model file. 'dd' is absent because 'dd '",
+    "also matches 'git add ', and 'cp' because it reads as often as it writes",
+    "('cp ~/clawbox/config/x /tmp/' copies OUT of the tree). 'sed -i' has no",
+    "trailing space on purpose, so it also catches 'sed -i.bak' and \"sed -i''\";",
+    "it is in because an in-place edit is the spelling an agent reaches for first",
+    "when asked to 'fix' a file in the tree. 'install', 'ln -sf' and 'dd of=' are",
+    "the same operation and are NOT caught - see the PR body's residual, which",
+    "wants a destination-argument rule rather than more verbs."
+  ],
+  "verbFirstTokens": ["rm ", "unlink ", "shred ", "truncate ", "mv ", "tee ", "sed -i"],
+
+  "_tokenBoundary": [
+    "What may come immediately BEFORE a token for it to be that command. The",
+    "trailing space in 'rm ' stops it matching 'rmdir'; without a left boundary",
+    "it still matched inside 'confirm the models', 'xterm -e ls' and",
+    "'grep -rn \"rm \" ~/clawbox/scripts' - three pieces of ordinary work, refused",
+    "by a rule documented as un-liftable. Written as an fnmatch negated class",
+    "because the Hermes side is fnmatch and both sides lowercase first."
+  ],
+  "tokenBoundary": "!a-z0-9_-",
+
+  "_pathFirstTokens": [
+    "Path-then-destroy spellings: 'cd <protected> && rm <file>', and find's own",
+    "'-delete'. Shorter than the list above because this direction is the loose",
+    "one - it also matches 'cat ~/clawbox/notes && rm /tmp/scratch'. Worth paying",
+    "for the tokens that actually destroy a file after a cd, not for 'tee' or",
+    "'truncate', which nobody reaches for that way."
+  ],
+  "pathFirstTokens": ["rm ", "mv ", "-delete"],
+
+  "_redirectionPrefixes": [
+    "A redirection into a protected path truncates or creates a file there.",
+    "Anchored tightly - the prefix is immediately followed by the root - rather",
+    "than the loose 'a > anywhere before the root' this started as: that form also",
+    "denied 'df -h > /tmp/d && du -sh ~/clawbox/data/llamacpp/models/', the",
+    "harmless exploration the incident turn did before it deleted anything.",
+    "Only the '~' forms are listed because Hermes folds the resolved home into",
+    "'~/' before matching, so '> /home/clawbox/clawbox/x' arrives as '> ~/clawbox/x';",
+    "a bare '>' would only fire for a filesystem root literally named /clawbox.",
+    "'>>' and '2>' are covered because these are substring matches. A quoted or",
+    "variable target ('> \"$HOME/clawbox/x\"') is NOT covered on the Hermes side,",
+    "which matches command text; the OpenClaw hook is handed the working directory",
+    "and the parameters structurally and has no such hole."
+  ],
+  "redirectionPrefixes": [">~", "> ~"]
+}

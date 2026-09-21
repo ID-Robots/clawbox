@@ -1,9 +1,20 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import {
+  EXPLICIT_MODEL_PICKS_KEY,
+  clawboxAiModelIdOf,
+  picksWithoutProvider,
+  readExplicitModelPicks,
+} from "@/lib/explicit-model-pick";
 import { get, setMany } from "@/lib/config-store";
+import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
+// The recorded PLAN. This route writes the credential in a batch of its own, so
+// it owes the plan the same treatment the model picks get — see TASK-744.
+import { CLAWAI_PLAN_TIER_KEY } from "@/lib/clawai-plan-tier";
 import { hermesConfigGet } from "@/lib/hermes-config-cache";
 import { getActiveHarness } from "@/lib/harness";
+import { getCodingAgentStatus } from "@/lib/coding-agent";
 import {
   CLAWAI_PROVIDER,
   ClawaiApplyError,
@@ -49,17 +60,35 @@ export async function GET() {
   const blocked = await requireHermes();
   if (blocked) return blocked;
 
-  const [token, tierStored] = await Promise.all([readToken(), readStoredTier()]);
+  const [token, tierStored, picks] = await Promise.all([
+    readToken(),
+    readStoredTier(),
+    readExplicitModelPicks(),
+  ]);
   const tier: ClawboxAiTier = tierStored ?? "flash";
   // Memoised against config.yaml's mtime: this GET runs on every chat open and
   // every Settings visit, and the CLI spawn behind it costs ~600 ms each time.
-  const active = (await hermesConfigGet("model.provider")) === CLAWAI_PROVIDER;
+  // The second key is free once the first has warmed that cache.
+  const [activeProvider, storedModel] = await Promise.all([
+    hermesConfigGet("model.provider"),
+    hermesConfigGet("model.default"),
+  ]);
+  const active = activeProvider === CLAWAI_PROVIDER;
   return NextResponse.json({
     hasToken: Boolean(token),
     tier,
     tierStored,
     active,
-    model: clawaiModelForTier(tier),
+    // The model this box RUNS for ClawBox AI, which is no longer the same
+    // question as which tier the badge shows: an explicit pick outlives the
+    // badge (TASK-713), and the panel renders this string as "Model: …".
+    // While ClawBox AI is the ACTIVE provider the harness's own `model.default`
+    // is the answer — no derivation can beat what the box is configured with.
+    // Otherwise it is what a link would write: the owner's pick if there is one,
+    // else the badge's default.
+    model: (active && storedModel.trim())
+      || clawboxAiModelIdOf(picks.clawai)
+      || clawaiModelForTier(tier),
   });
 }
 
@@ -100,11 +129,65 @@ export async function POST(request: Request) {
   const suppliedToken = typeof (body as { token?: unknown } | null)?.token === "string"
     ? ((body as { token?: string }).token || "").trim()
     : "";
+  // Storing it first is also why the coding-agent verdict has to be sampled
+  // HERE rather than inside the apply. The ClawBox MCP server registers
+  // `coding_agent_run`/`_status`/`_stop` only when `getCodingAgentStatus().ready`
+  // is true, and `ready` is `enabled` AND the harness installed AND ClawBox AI
+  // connected — where "connected" IS the `clawai_token` the next line stores.
+  // Read it a line later and the answer is always true, the apply's
+  // before/after guard sees no change, and a box whose switch was already on
+  // ends up with a panel that says ready over an agent that still has none of
+  // the three tools. Left undefined on the no-token path, where the apply's own
+  // snapshot is taken before any write and is honest; and on a probe that threw,
+  // which must not turn a link into a 500.
+  let codingAgentReadyBefore: boolean | undefined;
+  // The SAME hazard, one field over: the apply drops the stored model pick when
+  // the ClawBox AI account changes, and it cannot see that change if this route
+  // has already written the new token into the store it would read (TASK-713).
+  // Captured here, ahead of that write, and handed over explicitly.
+  let previousClawaiToken: string | undefined;
   if (suppliedToken) {
     if (!isPlausibleClawaiToken(suppliedToken)) {
       return NextResponse.json({ error: "That doesn't look like a ClawBox AI token." }, { status: 400 });
     }
-    await setMany({ clawai_token: suppliedToken });
+    codingAgentReadyBefore = await getCodingAgentStatus()
+      .then((status) => status.ready)
+      .catch(() => undefined);
+    previousClawaiToken = await readToken();
+    // The pick goes with the account, and it goes in THIS write. The apply
+    // below clears it too, but only in its own final `setMany`, behind a step
+    // loop that is fatal on any failing `hermes config set` — so a step that
+    // fails after this line would answer 502 having stored account B's token
+    // beside account A's pick, and this route never rolls the token back. Every
+    // later link would then read `previousToken === trimmed`, see no account
+    // change, and write A's model as B's default for good (TASK-713).
+    const replacedAccount = Boolean(previousClawaiToken && previousClawaiToken !== suppliedToken);
+    const picksWithoutClawai = replacedAccount
+      ? picksWithoutProvider(await readExplicitModelPicks(), CLAWAI_PROVIDER)
+      : null;
+    await setMany({
+      clawai_token: suppliedToken,
+      ...(picksWithoutClawai ? { [EXPLICIT_MODEL_PICKS_KEY]: picksWithoutClawai } : {}),
+      // The recorded PLAN goes in THIS batch too, for the reason the picks do:
+      // `applyClawaiToHermes` retires it in its own final `setMany`, and that
+      // one sits behind a step loop that is fatal on any failing
+      // `hermes config set`. A step that failed after this line would leave
+      // account B's token beside account A's plan — and both boot scripts read
+      // that plan as this box's entitlement, so a Free box would go on arming
+      // and keeping a cloud voice its credential is answered 403 for
+      // (TASK-744). Only on an account CHANGE — and the apply's own batch keeps
+      // the same rule, so a re-paste of the same token or a tier-pill change
+      // leaves a plan that is still true exactly where it is.
+      ...(replacedAccount ? { [CLAWAI_PLAN_TIER_KEY]: undefined } : {}),
+    });
+    // A refusal the proxy gave the token being replaced is about that token,
+    // not this one. Dropped here as well as in `applyClawaiToHermes`, because a
+    // paste that never reaches the apply still changed the credential — and
+    // under the same condition the apply uses, because a re-paste of the very
+    // bytes the proxy refused replaces nothing: the mark is about the
+    // CREDENTIAL, and retiring it here would re-arm the boot scripts' image
+    // path against a token that is still dead.
+    if (previousClawaiToken !== suppliedToken) await forgetClawaiCredentialRefusal();
   }
 
   const token = suppliedToken || (await readToken());
@@ -118,7 +201,43 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await applyClawaiToHermes(token, tier);
+    const result = await applyClawaiToHermes(token, tier, {
+      codingAgentReadyBefore,
+      previousClawaiToken,
+    });
+    // THE CLOUD DEFAULTS (the owner's decision of 2026-09-14). Linking a
+    // subscription is the moment the cloud voice, cloud transcription and cloud
+    // embeddings become available — or become a different account's. The
+    // applier never demotes and never overrides a pick the owner made, and
+    // never rejects; the boot hook runs the same pass on every start, so a box
+    // this misses is put right by its next restart.
+    //
+    // DETACHED, not awaited. The save has already landed by this line, and the
+    // applier is three capability probes deep: the embedder probe alone waits up
+    // to 8 s, and each openclaw CLI write behind it costs 10–12 s normally
+    // against a 30 s timeout. Awaiting it held this response for as long as the
+    // slowest of those, for an answer the caller does not read. The boot hook is
+    // the retry path if the process dies before the work finishes.
+    void import("@/lib/clawai-cloud-defaults")
+      .then(({ applyClawaiCloudDefaults }) =>
+        applyClawaiCloudDefaults({
+          trigger: "link",
+          // ONLY a supplied token can have changed the credential here. A
+          // tier-only POST — `{ tier }` with no `token`, which is what the tier
+          // pill sends — leaves `previousClawaiToken` undefined while `token`
+          // resolves to the value already stored, and the bare `!==` read that
+          // as a credential change on every such save. The applier answers a
+          // change by dropping the cached embedder probe, so the tier pill was
+          // throwing away a valid probe and buying a fresh round trip each time.
+          credentialChanged: Boolean(suppliedToken) && previousClawaiToken !== suppliedToken,
+        }),
+      )
+      .catch((err) => {
+        console.warn(
+          "[hermes/clawai] could not apply the ClawBox AI cloud defaults:",
+          err instanceof Error ? err.message : err,
+        );
+      });
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     // Only OUR own error text is safe to echo — a raw spawn error can carry the

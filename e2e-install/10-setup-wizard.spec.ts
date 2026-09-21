@@ -26,7 +26,7 @@ import {
   readInstallLog,
   waitForHttpReady,
 } from "./helpers/container";
-import { getStatus } from "./helpers/setup-api";
+import { getStatus, getStatusAuthed } from "./helpers/setup-api";
 
 const env = loadEnvTest();
 
@@ -99,7 +99,21 @@ test.describe("fresh-install setup wizard (UI)", () => {
       await hotspotSwitch.click();
       await expect(hotspotSwitch).toHaveAttribute("aria-checked", "false");
     }
-    await page.getByRole("button", { name: /^Connect$/ }).click();
+    await page.getByRole("button", { name: /^Save & Continue$/ }).click();
+
+    // Connect no longer saves: the system password this step sets is
+    // write-only afterwards, so the wizard reads it back and waits for a
+    // deliberate acknowledgement first (CredentialsWriteDownDialog.tsx).
+    // The hotspot is off above, so only the system password is on the card.
+    const writeDown = page.getByTestId("credentials-writedown-dialog");
+    await expect(writeDown).toBeVisible({ timeout: 15_000 });
+    await expect(writeDown.getByTestId("writedown-system-value")).toHaveText("clawbox-e2e-pass");
+    await expect(writeDown.getByTestId("writedown-hotspot-value")).toHaveCount(0);
+    // The checkbox itself, not its label: on a build where the input was a
+    // clipped sr-only box the label intercepted this click and it timed out.
+    await writeDown.getByRole("checkbox").click();
+    await expect(writeDown.getByTestId("writedown-ack")).toBeChecked();
+    await writeDown.getByTestId("writedown-continue").click();
 
     // ── Step 4: Primary AI Models ────────────────────────────────
     // Credentials step Connects by posting to
@@ -152,6 +166,26 @@ test.describe("fresh-install setup wizard (UI)", () => {
       await page.getByRole("textbox", { name: /Bot Token/i })
         .fill(env.TELEGRAM_BOT_TOKEN);
       await page.getByRole("button", { name: /Connect|Save/i }).click();
+
+      // A Telegram bot token has a single getUpdates lease. CI's shared secret
+      // can legitimately be in use by another run/device; the product now
+      // reports that as a readiness failure instead of the old false success.
+      // Exercise that explicit recovery path when it occurs, but do not turn a
+      // malformed-token/configure failure into a skip: only the overlay's exact
+      // readiness-timeout message is accepted here.
+      const telegramOutcome = await Promise.race([
+        page.waitForURL("/", { timeout: 110_000 }).then(() => "connected" as const),
+        telegramStep.getByText(
+          "Telegram was saved, but its messaging service did not become ready in time. Retry or skip for now.",
+          { exact: true },
+        )
+          .waitFor({ state: "visible", timeout: 110_000 })
+          .then(() => "readiness-timeout" as const),
+      ]);
+      if (telegramOutcome === "readiness-timeout") {
+        console.warn("[setup] shared Telegram bot is already polling elsewhere; exercising Skip recovery");
+        await telegramStep.getByRole("button", { name: /Skip for now/i }).click();
+      }
     } else {
       await page.getByRole("button", { name: /Skip for now/i }).click();
     }
@@ -172,11 +206,43 @@ test.describe("fresh-install setup wizard (UI)", () => {
   });
 
   test("setup is complete after the wizard", async () => {
+    // The wizard's progress flags are public — /login reads them with no
+    // session to decide whether to bounce an unfinished setup to /setup.
     const status = await getStatus();
     expect(status.setup_complete).toBe(true);
     expect(status.wifi_configured).toBe(true);
     expect(status.password_configured).toBe(true);
-    expect(status.ai_model_configured).toBe(true);
+
+    // Which provider the box got wired to is NOT public, so ask the way the
+    // desktop asks: with a session.
+    const authed = await getStatusAuthed();
+    expect(authed.ai_model_configured).toBe(true);
+  });
+
+  test("setup status does not leak provider detail to an anonymous caller", async () => {
+    // /setup-api/setup/status is public by design and is also served through
+    // the cloudflared tunnel, so whatever it returns unauthenticated is
+    // readable by anyone holding that URL. It must carry the wizard's progress
+    // and nothing else. The wizard above configured OpenAI, so if the trim
+    // regressed, `ai_model_provider` is sitting right here. TASK-446.
+    const anonymous = (await getStatus()) as unknown as Record<string, unknown>;
+
+    for (const field of [
+      "local_ai_configured",
+      "local_ai_provider",
+      "local_ai_model",
+      "ai_model_configured",
+      "ai_model_provider",
+      "telegram_configured",
+    ]) {
+      expect(anonymous, `${field} must not be readable without a session`).not.toHaveProperty(field);
+    }
+    expect(JSON.stringify(anonymous)).not.toContain("openai");
+
+    // ...and the same box does hand all of it back once you authenticate, so
+    // this is a gate, not a removed feature.
+    const authed = await getStatusAuthed();
+    expect(authed.ai_model_configured).toBe(true);
   });
 });
 
@@ -196,4 +262,3 @@ function loadEnvTest(): Record<string, string | undefined> {
   }
   return out;
 }
-

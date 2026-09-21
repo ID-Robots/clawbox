@@ -6,6 +6,10 @@ summary: "How to update your ClawBox — the System Update app, the SSH alternat
 
 Keeping your ClawBox current gets you the newest features and fixes. Updates never touch your data — settings, AI keys, chats, and channel tokens live outside the app code and are preserved.
 
+<Frame caption="The System Update app: what is installed, what is waiting, and one button to take it">
+  <img src="/images/4.0/system-update.png" alt="The System Update window reporting that a rebuild is available because the build being served was made from a different commit than the code on disk, with an Update everything button and rows for the ClawBox device and the agent." />
+</Frame>
+
 ## Update from the ClawBox screen (recommended)
 
 <Steps>
@@ -34,10 +38,19 @@ Same update, no browser needed:
 
 ```bash
 ssh clawbox@YOUR_BOX_IP        # your system password from setup
-sudo clawbox update
+sudo bash /home/clawbox/clawbox/install.sh
 ```
 
 The password prompt won't show characters as you type — that's normal. Let the installer finish completely (it prints numbered steps), then the box reboots.
+
+<Note>
+There is **no `clawbox` command on `PATH`**. The CLI wrapper exists in the checkout and is
+run through Bun — `bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts update` — but all it
+does is re-run `install.sh` with `sudo`, so calling the installer directly is equivalent
+and works in a non-interactive SSH session too. On a [Hermes](/editions/hermes) box the CLI
+path refuses; use **Settings → System Update** or the installer command above, which reads
+the edition lock and runs the edition-correct steps.
+</Note>
 
 ## An update got stuck, or the box misbehaves afterward
 

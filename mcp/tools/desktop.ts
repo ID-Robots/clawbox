@@ -4,16 +4,33 @@
 // answers 404 "Not found", which a small model reads as "no such app" and
 // retries forever — and a chronically-404ing tool is exactly what trips
 // Hermes' per-server circuit breaker and takes EVERY ClawBox tool offline.
+// STORE_EDITION_RULE below is what turns that 404 into "stop".
 
-import { apiGet, apiPost } from "../lib/api";
-import { ToolError } from "../lib/errors";
-import { json, text, type Registrar } from "../lib/register";
-import { zBool, zConfirm, zEnumOf, zInt, zOptText, zSlug, zText } from "../lib/schema";
-import { builtInApps, type McpContext } from "../lib/context";
+import { apiGet, apiPost, CLAWBOX_ROOT } from "../lib/api";
+import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
+import { fitRows } from "../lib/guard";
+import { json, LIST_MAX_CHARS, text, type Registrar } from "../lib/register";
+import { INSTALLED_APP_ID_RE, zBool, zConfirm, zEnumOf, zInstalledAppId, zInt, zOptText, zSlug, zText } from "../lib/schema";
+import { builtInApps, openedAppNotice, UNKNOWN_HARNESS_NOTE, type McpContext } from "../lib/context";
+import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../../src/lib/desktop-app-editions";
+import type { InstalledHermesSkill } from "../../src/lib/hermes-skills";
 
 const UI_PICKUP_DELAY_MS = 2_500;
 
-/** The desktop picks pending actions up out of the KV store. */
+/**
+ * Hand the desktop an action. This process cannot append to the owner-notice
+ * ring itself (src/lib/pending-actions.ts — the web server's file, and one
+ * writer is what keeps it consistent), so it posts the action under the
+ * legacy single-slot key and /setup-api/kv folds it into the ring, where
+ * every open desktop picks it up.
+ *
+ * A notice pushed from here can never be CLICKABLE: that route strips the
+ * `action` field a notice may carry, because `ui_notify`'s text is the
+ * agent's and a click destination would be a target it chose on the owner's
+ * desktop. Only ClawBox's in-process producers attach one, through
+ * notifyOwner() (src/lib/email-notify.ts) and the allowlist in
+ * src/lib/notify-action.ts.
+ */
 async function pushUiAction(action: Record<string, unknown>): Promise<void> {
   await apiPost(
     "/setup-api/kv",
@@ -27,22 +44,96 @@ interface PrefsBody {
   installed_meta?: unknown;
 }
 
-/** Webapps and store apps the user has installed, by id. */
-async function installedAppIds(): Promise<string[]> {
+/**
+ * Webapps and store apps the user has installed AND the desktop would open, by
+ * id.
+ *
+ * `installed_apps` alone is not that list. A store-installed OpenClaw skill is
+ * unusable on Hermes — its window shells out to the openclaw binary — so the
+ * desktop drops it from `getAllApps()` through `isInstalledAppVisible`, and a
+ * gate that checked only membership answered "Opened <name>" over a window
+ * that never appeared. Both facts come out of one preferences read.
+ *
+ * `harness: null` asks for the list UNFILTERED, which is what a REMOVAL wants:
+ * an app this harness cannot open is still the owner's to delete.
+ */
+async function installedAppIds(harness: string | null): Promise<string[]> {
   const prefs = await apiGet<PrefsBody>("/setup-api/preferences", {
-    query: { keys: "installed_apps" },
+    query: { keys: "installed_apps,installed_meta" },
     timeoutMs: 10_000,
   }).catch(() => null);
   const raw = prefs?.installed_apps;
-  return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
+  const meta = (prefs?.installed_meta ?? {}) as Record<string, { webappUrl?: unknown } | undefined>;
+  const ids = Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
+  return ids.filter((id) => isInstalledAppVisible(meta[id], harness));
 }
 
+/**
+ * The rows of /setup-api/hermes/skills/installed this tool reads. `id` is the
+ * hub lock key — the only string skill_uninstall resolves — and `name` is
+ * SKILL.md's, which is not always the same one (a ClawHub `martin-weather`
+ * shows as `weather`). Taken from the route's own type so the two cannot drift.
+ */
 interface InstalledSkillsBody {
-  skills?: { name: string; category?: string }[];
+  skills?: Pick<InstalledHermesSkill, "id" | "name">[];
 }
+
+// /setup-api/code answers 404 for a project id that does not exist. Without a
+// rule that is the generic "this endpoint is not available on this device"
+// mapping, which sends the agent to device_status to re-check its EDITION over
+// a typo'd id it could have fixed itself.
+const CODE_RULES: ErrorRule[] = [
+  {
+    status: 404,
+    code: "NOT_FOUND",
+    message: "There is no code project with that id on this ClawBox.",
+    next: "Call code_project_list for the ids that exist here, or create one with code_project_init.",
+  },
+];
+
+// openclawAppsGuard() answers 404 `{"error":"Not found","code":"not_openclaw"}`
+// from every store route. Matched on the CODE, not the status: the store routes
+// also 404 for an app id that does not exist, and the two need opposite advice.
+// The tools are registered off an edition probe taken once when the MCP child
+// spawned, so the window is a device whose harness changed since then.
+const STORE_EDITION_RULE: ErrorRule = {
+  status: 404,
+  match: /"code"\s*:\s*"not_openclaw"/,
+  code: "NOT_SUPPORTED_HERE",
+  message: "This ClawBox is not running the OpenClaw harness, so it has no app store.",
+  next:
+    "Do not retry and do not call the app store tools again this session. "
+    + "Call device_status and tell the user which harness the device is on.",
+};
+
+const WEBAPP_RULES: ErrorRule[] = [
+  {
+    status: 404,
+    code: "NOT_FOUND",
+    message: "There is no web app with that id on this ClawBox.",
+    next: "Call ui_list_apps for the ids that exist here, or create the app first with webapp_create.",
+  },
+];
+
+/**
+ * What one `agent_skills` row costs once `JSON.stringify(…, null, 2)` has
+ * wrapped it: the quoted-and-escaped string, four spaces of indent, a comma and
+ * a newline. `JSON.stringify` on the row itself rather than `row.length + 8`,
+ * because a card name comes from a third party's SKILL.md and every `"` or `\`
+ * in it costs an extra character, every control character up to five — an
+ * estimate is a guess about exactly the input somebody else writes.
+ */
+const skillRowCost = (row: string): number => JSON.stringify(row).length + 6;
 
 export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
-  const apps = builtInApps(ctx.edition);
+  // The APP harness, not the tool-set edition: an unreadable edition lock
+  // resolves the tool set to hermes (the smaller, nested one) and must not
+  // therefore hide `store`/`openclaw`/`memory-shard` from a box that has them
+  // or advertise `hermes` on a box that may not. `null` shows what both
+  // harnesses have, the answer the desktop uses while its own fetch is in
+  // flight. A startup snapshot, like the registration itself — on the dual SKU
+  // a harness switched after this child spawned is seen at the next restart.
+  const apps = builtInApps(ctx.appHarness);
   const builtInIds = apps.map((a) => a.id);
   const appLine = apps.map((a) => a.id).join(", ");
 
@@ -54,40 +145,59 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     },
     { editions: ["openclaw", "hermes"], readOnly: false, profile: "core" },
     async ({ app_id }: { app_id: string }) => {
-      if (!/^(installed-)?[a-z0-9][a-z0-9-]{0,63}$/.test(app_id)) {
-        throw new ToolError(
-          "BAD_ARGUMENT",
-          "That is not a valid app id.",
-          `Call ui_list_apps and pass an id from its list. Built-in ids: ${appLine}.`,
-        );
-      }
       // Order matters: check the app EXISTS on this edition before writing the
       // pending action. The previous version wrote first and then answered
       // "Opening X" for apps that are not installed on this harness at all.
+      //
+      // A built-in is gated on MEMBERSHIP, never on a slug shape. It used to be
+      // matched against a hyphen-only regex first, which rejected
+      // `system_update` — an id this tool's own description advertises — as
+      // "not a valid app id", and then told the agent to pass an id from that
+      // same list. The shape check survives only where it is the injection
+      // guard: an `installed-<id>` the caller invented.
       const isInstalled = app_id.startsWith("installed-");
-      if (!isInstalled && !builtInIds.includes(app_id)) {
-        throw new ToolError(
-          "NOT_FOUND",
-          "There is no such app on this ClawBox.",
-          `Call ui_list_apps to see what exists here. Built-in ids: ${appLine}.`,
-        );
-      }
       if (isInstalled) {
-        const ids = await installedAppIds();
+        if (!INSTALLED_APP_ID_RE.test(app_id)) {
+          throw new ToolError(
+            "BAD_ARGUMENT",
+            "That is not a valid installed-app id.",
+            "Call ui_list_apps and pass an id from its installed_apps list, unchanged.",
+          );
+        }
+        const ids = await installedAppIds(ctx.appHarness);
         if (!ids.includes(app_id.slice("installed-".length))) {
           throw new ToolError(
             "NOT_FOUND",
-            "That installed app is not on this device.",
+            "That installed app is not on this device, or this harness cannot open it.",
             "Call ui_list_apps to see which installed apps exist, and use one of those ids.",
           );
         }
+      } else if (!builtInIds.includes(app_id)) {
+        // AN UNDETERMINED HARNESS IS NOT "NO SUCH APP". The box may well have
+        // this one — the harness simply could not be resolved — and saying it
+        // does not exist tells the agent as a durable fact that a dual box has
+        // no dashboard, which is how it stops asking. The CLI has drawn this
+        // distinction since the gate existed; the tool now says the same
+        // sentence, from the same constant.
+        throw ctx.appHarness === null && HARNESS_ONLY_APP_IDS.includes(app_id)
+          ? new ToolError(
+            "NOT_FOUND",
+            `Cannot open "${app_id}" right now. ${UNKNOWN_HARNESS_NOTE}`,
+            "Do not conclude the device lacks this app. Report the reason to the user and try again once the device can name its harness.",
+          )
+          : new ToolError(
+            "NOT_FOUND",
+            "There is no such app on this ClawBox.",
+            `Call ui_list_apps to see what exists here. Built-in ids: ${appLine}.`,
+          );
       }
       await pushUiAction({ type: "open_app", appId: app_id });
       if (app_id === "browser") {
         return text("Opened the Browser Setup panel. That is the settings panel — to actually browse the web, use browser_open.");
       }
-      const known = apps.find((a) => a.id === app_id);
-      return text(`Opened ${known?.name ?? app_id} on the desktop.`);
+      // The same sentence `clawbox app open` prints, from one place — an
+      // `external` app is hedged about on both surfaces or on neither.
+      return text(openedAppNotice(apps.find((a) => a.id === app_id), app_id));
     },
   );
 
@@ -95,25 +205,104 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "ui_list_apps",
     "List what is available on this ClawBox desktop: the built-in apps, and everything the user has installed or you have built. Call this before ui_open_app so you use an id that exists here.",
     {},
-    { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 4_000 },
+    // The cap skill_list carries, for the same volume and the same reason. This
+    // answer is JSON, so capText()'s hard slice does not merely shorten it — it
+    // stops mid-object and the agent has no app list at all, on a tool that
+    // takes no arguments and cannot "narrow the query". The rows below are
+    // compact for the same reason, and the skills list is bounded to what fits
+    // rather than left to the slicer.
+    { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: LIST_MAX_CHARS },
     async () => {
       const builtIn = apps.map((a) => ({ id: a.id, name: a.name, what: a.description }));
-      const installed = (await installedAppIds()).map((id) => ({ id: `installed-${id}`, name: id }));
+      const installed = (await installedAppIds(ctx.appHarness)).map((id) => ({ id: `installed-${id}`, name: id }));
       // On Hermes the agent's own capabilities come from the skills store, not
       // from ~/.openclaw/skills (which does not exist there — listing it was
       // why installed skills always showed up empty on a Hermes device).
       let skills: string[] = [];
+      // Whether the list was READ, as opposed to being empty. `[]` for a failed
+      // read is the false-success shape this file warns about three lines down.
+      let skillsRead = true;
       if (ctx.edition === "hermes") {
         const body = await apiGet<InstalledSkillsBody>("/setup-api/hermes/skills/installed", {
           timeoutMs: 10_000,
         }).catch(() => null);
-        skills = (body?.skills ?? []).map((s) => s.name);
+        skillsRead = body !== null;
+        // BOTH names, in skill_list's own shape — for any name short enough to
+        // print whole: the lock id leads, because it is the one string
+        // skill_uninstall resolves, and the display name is added only when it
+        // differs. Printing the display name alone put the two agent-facing
+        // lists on different strings for one skill; printing a pretty-printed
+        // {id, name} pair for each of ~82 rows overran this tool's output cap
+        // and truncated the JSON mid-object.
+        //
+        // The name is NOT flattened or bounded here as skill_list now does it,
+        // and does not need to be: these rows are JSON-escaped, so a newline in
+        // a card name cannot forge a row, and a row too long for the budget is
+        // skipped whole by fitRows. A very long name is therefore the one case
+        // where the two lists print different strings.
+        skills = (body?.skills ?? []).map((s) => (s.name === s.id ? s.id : `${s.id} (${s.name})`));
       }
-      return json({
-        built_in: builtIn,
-        installed_apps: installed,
-        ...(ctx.edition === "hermes" ? { agent_skills: skills } : {}),
-      });
+      // Fit the answer by MEASURING it, never by modelling the serializer.
+      //
+      // The apps are what this tool is FOR — ui_open_app takes their ids — so
+      // the skills give way first and the apps only after them; `built_in` is
+      // never dropped, since an id this build advertises has to be openable.
+      // And `installed_apps` is bounded too: it is the one list here that grows
+      // without bound over a device's life (every webapp_create, every
+      // app_install), so leaving it to capText left the JSON sliced mid-object
+      // on exactly the input that gets long — and on the OpenClaw edition,
+      // which has no agent_skills at all, that was every input.
+      const render = (
+        keptSkills: string[],
+        keptApps: typeof installed,
+      ): ReturnType<typeof json> => {
+        const skillsMissing = skills.length - keptSkills.length;
+        const appsMissing = installed.length - keptApps.length;
+        return json({
+          built_in: builtIn,
+          installed_apps: keptApps,
+          ...(appsMissing ? { installed_apps_not_listed: appsMissing } : {}),
+          ...(ctx.edition === "hermes" && skillsRead ? { agent_skills: keptSkills } : {}),
+          ...(ctx.edition === "hermes" && skillsRead && skillsMissing
+            ? { agent_skills_not_listed: skillsMissing }
+            : {}),
+          // An unreadable skills list is not a device with no skills, and the
+          // two used to be the same bytes. The key is left OUT rather than sent
+          // empty, so an older reader cannot mistake one for the other either.
+          ...(ctx.edition === "hermes" && !skillsRead ? { agent_skills_unavailable: true } : {}),
+          // Said out loud rather than five apps quietly missing from the list:
+          // the agent cannot tell "this box has no dashboard" from "nobody could
+          // say" unless one of them is written down.
+          ...(ctx.appHarness === null ? { note: UNKNOWN_HARNESS_NOTE } : {}),
+        });
+      };
+      const size = (result: ReturnType<typeof json>): number => {
+        const part = result.content[0];
+        return part.type === "text" ? part.text.length : 0;
+      };
+      // Seed from an estimate so the exact loop below only has to nudge, then
+      // shrink against the real string until it fits.
+      let keptSkills = fitRows(skills, LIST_MAX_CHARS - size(render([], installed)), skillRowCost).kept;
+      // The apps are NOT seeded, only nudged, so this loop is O(n) renders of
+      // the whole payload in the app count — 27 ms at 400 installed apps on a
+      // dev PC, 3.3 s at 4 000, and a Jetson core is several times slower.
+      // Deliberately left: a compact `JSON.stringify(app)` badly underestimates
+      // what the pretty-printed object costs, so that seed would keep almost
+      // everything and buy nothing, and a seed worth having needs a measured
+      // per-app cost. The option that needs NO cost model is a binary search
+      // for the cut point — it measures the real render() exactly as this loop
+      // does and turns O(n) renders into O(log n) with nothing to estimate
+      // wrong. `installed_apps` is the one list here that grows without bound
+      // over a device's life, so that is the shape to reach for when it starts
+      // to matter.
+      let keptApps = installed;
+      let out = render(keptSkills, keptApps);
+      while (size(out) > LIST_MAX_CHARS && (keptSkills.length || keptApps.length)) {
+        if (keptSkills.length) keptSkills = keptSkills.slice(0, -1);
+        else keptApps = keptApps.slice(0, -1);
+        out = render(keptSkills, keptApps);
+      }
+      return out;
     },
   );
 
@@ -142,6 +331,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       const body = await apiGet("/setup-api/apps/store", {
         query: { ...(query ? { q: query } : {}), limit },
         timeoutMs: 20_000,
+        rules: [STORE_EDITION_RULE],
       });
       return json(body);
     },
@@ -150,10 +340,40 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
     "app_install",
     "Install an app from the ClawBox app store. Takes the exact id from app_search. Tell the user what it does before installing it.",
-    { app_id: zSlug("App id from app_search") },
+    {
+      app_id: zSlug("App id from app_search"),
+      owner: zOptText(64, "ClawHub publisher handle. Only needed when a previous call answered that more than one publisher uses this id."),
+    },
     { editions: ["openclaw"], readOnly: false },
-    async ({ app_id }: { app_id: string }) => {
-      await apiPost("/setup-api/apps/install", { appId: app_id }, { timeoutMs: 120_000 });
+    async ({ app_id, owner }: { app_id: string; owner?: string }) => {
+      try {
+        await apiPost(
+          "/setup-api/apps/install",
+          { appId: app_id, ...(owner ? { owner } : {}) },
+          { timeoutMs: 120_000, rules: [STORE_EDITION_RULE] },
+        );
+      } catch (err) {
+        // ClawHub namespaces skills by publisher, so a slug more than one
+        // publisher uses answers 409 `ambiguous` with the candidates. The
+        // generic CONFLICT mapping says "do not retry" — here the retry with
+        // an owner is exactly the fix, so name the handles.
+        if (err instanceof ApiError && err.status === 409 && /"code"\s*:\s*"ambiguous"/.test(err.body)) {
+          let handles = "";
+          try {
+            const parsed = JSON.parse(err.body) as { matches?: { ownerHandle?: unknown }[] };
+            handles = (parsed.matches ?? [])
+              .map((m) => (typeof m.ownerHandle === "string" ? m.ownerHandle : ""))
+              .filter(Boolean)
+              .join(", ");
+          } catch { /* the message below still stands without the list */ }
+          throw new ToolError(
+            "CONFLICT",
+            `More than one ClawHub publisher uses the id "${app_id}"${handles ? ` (publishers: ${handles})` : ""}.`,
+            "Ask the user which publisher they want, then call app_install again with that handle as `owner`.",
+          );
+        }
+        throw err;
+      }
       return text(`Installed "${app_id}". Open it with ui_open_app using "installed-${app_id}".`);
     },
   );
@@ -173,10 +393,16 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     ctx.edition === "hermes"
       ? "Remove an app icon from the ClawBox desktop: a web app you built, or something the user installed. It does NOT remove one of your own skills — use skill_uninstall for those. Call ui_list_apps first to get the id, and ask the user to confirm."
       : "Remove an app the user installed from the ClawBox app store, or a web app you built, from the desktop. Call ui_list_apps first to get the id, and ask the user to confirm.",
-    { app_id: zSlug("App id, as ui_list_apps reports it without the installed- prefix") },
+    // The producers' alphabet, not zSlug's: `ui_open_app` and `clawbox app
+    // open` accept `Foo_Bar` and `_drafts`, so removal must too — an app the
+    // agent can create and open and cannot delete is the worse half of the
+    // defect this file's widening fixed. The membership check below is
+    // deliberately unfiltered for the same reason.
+    { app_id: zInstalledAppId("App id, as ui_list_apps reports it without the installed- prefix") },
     { editions: ["openclaw", "hermes"], readOnly: false, destructive: true },
     async ({ app_id }: { app_id: string }) => {
-      const installed = await installedAppIds();
+      // Unfiltered: removing an app this harness cannot open is legitimate.
+      const installed = await installedAppIds(null);
       if (!installed.includes(app_id)) {
         throw new ToolError(
           "NOT_FOUND",
@@ -186,7 +412,105 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
             : "Call ui_list_apps and use an id from its installed_apps list, without the \"installed-\" prefix.",
         );
       }
-      await apiPost("/setup-api/apps/uninstall", { appId: app_id }, { timeoutMs: 60_000 });
+      const removed = await apiPost<{ skillRemoved?: boolean | null; skillHalfChecked?: boolean }>(
+        "/setup-api/apps/uninstall",
+        { appId: app_id },
+        {
+          timeoutMs: 60_000,
+          // The route refuses rather than half-uninstalling when it cannot
+          // read the device's OpenClaw configuration or remove the skill
+          // folder. Unmapped, a 503 falls through to the generic
+          // ENDPOINT_DOWN — "the ClawBox service did not complete this
+          // request. Call clawbox_health, then retry once" — which sends the
+          // agent to a health check over a route that answered precisely, and
+          // says nothing about the app still being installed.
+          //
+          // TWO rules, because the route's two refusals are not the same fact
+          // and one sentence for both is a false report either way. `fs.rm`
+          // deletes as it WALKS, so `skill_remove_failed` may already have
+          // removed part of the skill folder — telling the agent "nothing was
+          // removed" there is the same lie this PR removes from the route
+          // itself. `config_unreadable` really did touch nothing: it is
+          // answered before the first deletion. Matched on the body, in order,
+          // by `matchRule` (mcp/lib/errors.ts).
+          rules: [
+            {
+              status: 503,
+              match: /"code"\s*:\s*"skill_remove_failed"/,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox stopped part-way through the removal: the app's skill folder could not be fully removed and some of it may already be gone. The app is still on the desktop.",
+              next: "Wait a few seconds and call app_uninstall once more. If it refuses again, tell the user the app is still on the desktop, that part of its skill folder may already be deleted, and quote what the device said.",
+            },
+            {
+              status: 503,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox could not finish the removal, so nothing was removed and the app is still on the desktop.",
+              next: "Wait a few seconds and call app_uninstall once more. If it refuses again, tell the user the app is still installed and what the device said.",
+            },
+            // The route's outer catch (500 `uninstall_failed`) says whether the
+            // skill folder had already gone before the failure. Unmapped it
+            // fell through to the generic ENDPOINT_DOWN — "call clawbox_health,
+            // then retry once" — sending the agent to a health check over a
+            // route that had just answered precisely, and saying nothing about
+            // the app being half removed. `matchRule` compares the status
+            // before the body, so the two 503s above cannot swallow these.
+            //
+            // TWO rules again, for the reason the 503s are two: the route's own
+            // 500 body words the cases apart (`skillRemoved === true` → "after
+            // the skill folder had already been removed"), and one "may already
+            // be gone" sentence for both would claim a half-removed skill on
+            // the hermes SKU, where no skills path is ever resolved. The first
+            // rule wants BOTH fields and asks for them as two INDEPENDENT
+            // lookaheads: a forward scan would have tied this sentence to the
+            // order of an object literal in the route that nothing pins, so
+            // moving `skillRemoved` above `code` there — a shared failure-body
+            // helper would — silently dropped to the second rule. That fallback
+            // is a DEGRADED answer, not an equally true one: "nothing is known
+            // to have been removed" is false of a `uninstall_failed` carrying
+            // `skillRemoved: true`, which is the whole reason there are two.
+            {
+              status: 500,
+              match: /(?=[\s\S]*"code"\s*:\s*"uninstall_failed")(?=[\s\S]*"skillRemoved"\s*:\s*true)/,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox failed part-way through the uninstall, after the app's skill folder had already been removed: the app is only partly gone and is still on the desktop.",
+              next: "Call app_uninstall once more — the rest of the cleanup is repeatable. If it fails again, tell the user the app's skill is already deleted while the app is still on the desktop, and quote what the device said.",
+            },
+            {
+              status: 500,
+              match: /"code"\s*:\s*"uninstall_failed"/,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox could not finish the uninstall, so nothing is known to have been removed and the app is still on the desktop.",
+              next: "Call app_uninstall once more. If it fails again, tell the user the app is still installed and quote what the device said.",
+            },
+          ],
+        },
+      );
+      // Anything but a 2xx has thrown by here, so the desktop entry IS gone.
+      // The SKILL half depends on what was there. `skillRemoved: false` — the
+      // id is in the desktop's list and no skill of that name was on disk — is
+      // the one an agent must not report as a skill removal, because the next
+      // thing it does is tell the user the skill is gone. `null` is an
+      // uninstall with no skill half to report on at all (the hermes SKU, or a
+      // web app), and says nothing about skills for the same reason: an
+      // absence report about something that never existed reads as a partial
+      // failure.
+      // `skillHalfChecked: false` is the one answer where `null` does NOT mean
+      // "no skill half to report on": the device's OpenClaw configuration
+      // could not be read, so the route removed the web app and never got to
+      // look for a skill of the same id (one id can be both). Saying "Removed"
+      // and no more would be a false success over a skill still on disk and
+      // still loaded, so the agent gets the fact to relay. Undefined-safe, so
+      // an older route degrades to the plain sentence below.
+      if (removed?.skillHalfChecked === false) {
+        return text(
+          `Removed "${app_id}" from the desktop. The device's OpenClaw configuration could not be read, so its skills were not checked: if this app also had a skill of that name, it is still installed. Do not call app_uninstall again — the desktop entry is already gone, so it would answer that there is no such app. Tell the user the skill may still be on the device and has to be removed from the Terminal once the configuration is readable again.`,
+        );
+      }
+      if (removed?.skillRemoved === false) {
+        return text(
+          `Removed "${app_id}" from the desktop. There was no skill of that name on disk, so nothing was removed from the agent's skills.`,
+        );
+      }
       return text(`Removed "${app_id}" from the desktop.`);
     },
   );
@@ -231,12 +555,17 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "webapp_update",
     "Replace the HTML of a web app you created earlier with webapp_create. The whole document is replaced, so send the complete HTML, not just the changed part.",
     {
-      app_id: zSlug("The id you passed to webapp_create"),
+      // Widened for the same reason `app_uninstall` was: `APP_ID_RE` is what
+      // /setup-api/webapps enforces, and it mints ids with upper case and
+      // underscores. An app this family LISTS and OPENS must be one it can
+      // also act on. (`webapp_create` stays narrow — constraining what the
+      // agent MINTS is a choice; refusing what the device made is a defect.)
+      app_id: zInstalledAppId("The id you passed to webapp_create"),
       html: zText(400_000, "The complete replacement HTML"),
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
     async ({ app_id, html }: { app_id: string; html: string }) => {
-      await apiPost("/setup-api/webapps", { appId: app_id, html }, { timeoutMs: 30_000 });
+      await apiPost("/setup-api/webapps", { appId: app_id, html }, { timeoutMs: 30_000, rules: WEBAPP_RULES });
       return text(`Updated the web app "${app_id}". The user may need to reopen its window to see the change.`);
     },
   );
@@ -244,11 +573,29 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
   // ── Code projects ──────────────────────────────────────────────────────────
 
   const codeApi = <T = unknown>(action: string, body: Record<string, unknown> = {}, timeoutMs = 30_000) =>
-    apiPost<T>("/setup-api/code", { action, ...body }, { timeoutMs });
+    apiPost<T>("/setup-api/code", { action, ...body }, { timeoutMs, rules: CODE_RULES });
+
+  // The one string in this whole server that HAS to be absolute.
+  //
+  // The agent edits project files with its harness's own file tools, and those
+  // resolve a relative path against the HARNESS process's working directory —
+  // /home/clawbox on a Hermes device — while the project lives under the WEB
+  // tier's, /home/clawbox/clawbox. Handing out "data/code-projects/<id>/" made
+  // every read answer "File not found" and every write report verified:true
+  // into /home/clawbox/data/..., a parallel tree code_project_build never looks
+  // at: three success messages and an untouched scaffold on the desktop.
+  //
+  // The route now reports its own absolute directory, which is the only place
+  // that actually knows it; CLAWBOX_ROOT is the fallback for an older device
+  // whose /setup-api/code predates that field.
+  const projectDirOf = (projectId: string, reported?: unknown): string =>
+    typeof reported === "string" && reported.startsWith("/")
+      ? reported
+      : `${CLAWBOX_ROOT}/data/code-projects/${projectId}`;
 
   reg.tool(
     "code_project_init",
-    "Start a multi-file web app project on the ClawBox. It creates a folder of starter files and returns its path; write the files with your own file-editing tools, then call code_project_build to install it on the desktop. Call clawbox_context first for the storage rules.",
+    "Start a multi-file web app project on the ClawBox. It creates a folder of starter files and returns the ABSOLUTE path of that folder; edit the files with your own file-editing tools using that absolute path exactly as given, never a shortened or relative form, then call code_project_build to install it on the desktop. Call clawbox_context first for the storage rules.",
     {
       project_id: zSlug("Unique id, lowercase with hyphens"),
       name: zText(60, "Name shown under the desktop icon"),
@@ -258,12 +605,13 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     { editions: ["openclaw", "hermes"], readOnly: false, maxChars: 3_000 },
     async ({ project_id, name, template, color }: { project_id: string; name: string; template: string; color?: string }) => {
       const iconColor = color && /^#[0-9a-fA-F]{6}$/.test(color) ? color : "#f97316";
-      await codeApi("init", { projectId: project_id, name, template, color: iconColor });
-      const files = await codeApi<{ files?: { name: string; type: string }[] }>("file-list", { projectId: project_id });
-      const list = (files.files ?? []).map((f) => `  ${f.name}${f.type === "directory" ? "/" : ""}`).join("\n");
+      const created = await codeApi<{ path?: string }>("init", { projectId: project_id, name, template, color: iconColor });
+      const files = await codeApi<{ files?: { name: string; type: string }[]; path?: string }>("file-list", { projectId: project_id });
+      const dir = projectDirOf(project_id, created.path ?? files.path);
+      const list = (files.files ?? []).map((f) => `  ${dir}/${f.name}${f.type === "directory" ? "/" : ""}`).join("\n");
       return text(
-        `Created the project "${name}".\nIts files live in data/code-projects/${project_id}/ inside the ClawBox project folder:\n${list}\n`
-        + `Edit them there, then call code_project_build with the id "${project_id}".`,
+        `Created the project "${name}".\nIts files live in ${dir}/ — these are full paths, use them exactly as written:\n${list}\n`
+        + `Read and edit them with your own file tools at those absolute paths, then call code_project_build with the id "${project_id}".`,
       );
     },
   );
@@ -274,18 +622,30 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 3_000 },
     async () => {
-      const data = await codeApi<{ projects?: { projectId: string; name: string; updated: string }[] }>("list-projects");
+      const data = await codeApi<{ projects?: { projectId: string; name: string; updated: string; path?: string }[] }>("list-projects");
       const projects = data.projects ?? [];
       if (!projects.length) return text("There are no code projects on this ClawBox yet. Create one with code_project_init.");
-      return json(projects.map((p) => ({ id: p.projectId, name: p.name, updated: p.updated })));
+      return json(
+        projects.map((p) => ({
+          id: p.projectId,
+          name: p.name,
+          updated: p.updated,
+          // Absolute, for the same reason code_project_init reports one.
+          path: projectDirOf(p.projectId, p.path),
+        })),
+      );
     },
   );
 
   reg.tool(
     "code_project_build",
-    "Bundle a code project into a single page and install it on the ClawBox desktop. Call this after every set of edits — the desktop shows the last build, not the source files.",
+    "Bundle a code project into a single page and install it on the ClawBox desktop. Call this after every set of edits — the desktop shows the last build, not the source files. The source files are the ones under the absolute path code_project_init and code_project_list report; edits written anywhere else are not part of the build.",
     {
-      project_id: zSlug("The project id from code_project_list"),
+      // From `code_project_list`, so it carries whatever alphabet
+      // /setup-api/code minted it with (`APP_ID_RE`: upper case and
+      // underscores included). Refusing it here made the tool reject an id
+      // its own sibling had just reported.
+      project_id: zInstalledAppId("The project id from code_project_list"),
       open_after_build: zBool(true, "Open it on the desktop after building."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
@@ -317,7 +677,11 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "code_project_delete",
     "Delete a code project and all of its source files from the ClawBox. This cannot be undone. Ask the user to confirm before calling it.",
     {
-      project_id: zSlug("The project id from code_project_list"),
+      // From `code_project_list`, so it carries whatever alphabet
+      // /setup-api/code minted it with (`APP_ID_RE`: upper case and
+      // underscores included). Refusing it here made the tool reject an id
+      // its own sibling had just reported.
+      project_id: zInstalledAppId("The project id from code_project_list"),
       confirm: zConfirm("Must be true. Set it only when the user asked for this project to be deleted."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, destructive: true },

@@ -53,10 +53,29 @@ test.describe("clawbox-cli (MCP user-space wrapper)", () => {
       timeoutMs: 30_000,
     });
 
-    // Header carries the edition, so a reader knows which app set this is.
+    // Header carries the edition, so a reader knows which app set this is —
+    // and, when the two differ, the harness the apps belong to: on the premium
+    // `dual` SKU the list follows the ACTIVE harness, so the line reads
+    // "(dual edition, running hermes)".
     expect(out).toMatch(
-      new RegExp(`^Built-in apps \\(${edition} edition\\):`, "im"),
+      new RegExp(`^Built-in apps \\(${edition} edition[,)]`, "im"),
     );
+    // The harness the header NAMED, or null when it named none. Not `?? edition`:
+    // on the `dual` SKU the edition is not a harness, so that fallback ran the
+    // OpenClaw assertions below over a header that had just said "harness
+    // undetermined" — asserting `openclaw —` and `store —` are listed on a box
+    // that could not say which harness it was running.
+    const harness = /^Built-in apps \([^,)]+(?:, running (\w+))?\)/im.exec(out)?.[1]
+      ?? (edition === "dual" ? null : edition);
+    // A dual box that cannot name its harness is a FAULT on an installed image,
+    // not a shape to branch on: /setup-api/harness/active is served by the same
+    // web server this CLI just reached, so a silence here means the box came up
+    // wrong. Fail with the header rather than picking an arm.
+    expect(
+      harness,
+      `a ${edition} box must name the harness its app list follows; header was: `
+      + `${/^Built-in apps \(.*\):/im.exec(out)?.[0] ?? "(no header)"}`,
+    ).not.toBeNull();
 
     // Common apps — listed on every edition.
     for (const id of ["settings", "terminal", "files", "browser", "vnc"]) {
@@ -67,9 +86,10 @@ test.describe("clawbox-cli (MCP user-space wrapper)", () => {
 
     // Harness-specific apps. A Hermes box has the skills app and neither the
     // OpenClaw chat app nor the store; listing an app whose backend isn't
-    // installed would point the agent at a window that cannot open. The
-    // premium `dual` edition resolves to the OpenClaw set.
-    if (edition === "hermes") {
+    // installed would point the agent at a window that cannot open. Branch on
+    // the HARNESS the header reports rather than on the edition: a `dual` box
+    // follows whichever harness is running.
+    if (harness === "hermes") {
       expect(out).toMatch(/^\s+hermes-skills — /m);
       expect(out).not.toMatch(/^\s+openclaw — /m);
       expect(out).not.toMatch(/^\s+store — /m);
@@ -122,5 +142,100 @@ test.describe("clawbox-cli (MCP user-space wrapper)", () => {
       user: "clawbox",
       timeoutMs: 30_000,
     });
+  });
+});
+
+/**
+ * The MCP server itself, spoken to over stdio the way a harness speaks to it —
+ * on an INSTALLED box, where the edition lock, the bearer file and the device
+ * API are the real ones rather than the postures the unit suites build.
+ *
+ * The client runs from the checkout so the SDK resolves out of its
+ * node_modules; the script travels as bash's `$0`, so no quoting of it is
+ * needed. Only read-only tools are called.
+ */
+const PROJECT_DIR = "/home/clawbox/clawbox";
+const BUN = "/home/clawbox/.bun/bin/bun";
+
+const MCP_SESSION = `
+(async () => {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["run", "mcp/clawbox-mcp.ts"],
+    cwd: ${JSON.stringify(PROJECT_DIR)},
+    stderr: "ignore",
+  });
+  const client = new Client({ name: "e2e-install", version: "1.0.0" });
+  await client.connect(transport);
+  const { tools } = await client.listTools();
+  const calls = {};
+  for (const name of ["memory_shard_status", "local_ai_status", "clawbox_ai_usage", "anthropic_accounts"]) {
+    const result = await client.callTool({ name, arguments: {} });
+    const first = Array.isArray(result.content) ? result.content[0] : null;
+    calls[name] = { isError: result.isError === true, text: first && first.type === "text" ? first.text : "" };
+  }
+  console.log(JSON.stringify({ names: tools.map((t) => t.name), calls }));
+  await client.close();
+  process.exit(0);
+})().catch((err) => { console.error(err); process.exit(1); });
+`;
+
+interface McpSession {
+  names: string[];
+  calls: Record<string, { isError: boolean; text: string }>;
+}
+
+test.describe("clawbox MCP server over stdio (TASK-899)", () => {
+  test("the tool-surface check passes on the installed box", async () => {
+    // Throws — and fails the test — on a non-zero exit, which is how the
+    // checker reports a contract or gate problem.
+    const out = await dockerExec(
+      ["bash", "-c", `cd ${PROJECT_DIR} && exec ${BUN} run mcp/check-tools.ts`],
+      { user: "clawbox", timeoutMs: 180_000 },
+    );
+    expect(out).toMatch(/Tool contract OK\./);
+  });
+
+  test("the agent can read Memory Shard, Local AI, its ClawBox AI allowance and the Anthropic account pool", async () => {
+    const raw = await dockerExec(
+      ["bash", "-c", `cd ${PROJECT_DIR} && exec ${BUN} -e "$0"`, MCP_SESSION],
+      { user: "clawbox", timeoutMs: 180_000 },
+    );
+    const session = JSON.parse(raw.trim().split("\n").pop() ?? "{}") as McpSession;
+
+    // Registered on every box, whatever is switched on.
+    for (const name of ["memory_shard_status", "local_ai_status", "clawbox_ai_usage", "anthropic_accounts"]) {
+      expect(session.names, `${name} should be offered`).toContain(name);
+      expect(session.calls[name]?.isError, `${name} answered an error: ${session.calls[name]?.text}`).toBe(false);
+    }
+
+    // The coding-agent family moves as ONE gate: the owner's switch and a
+    // ready harness. Whichever way this box is set, the new tools follow it.
+    const codingOn = session.names.includes("coding_agent_run");
+    for (const name of ["coding_run_list", "coding_agent_resume", "coding_project_status"]) {
+      expect(session.names.includes(name), `${name} should follow coding_agent_run`).toBe(codingOn);
+    }
+
+    const memory = JSON.parse(session.calls.memory_shard_status.text) as Record<string, unknown>;
+    expect(memory).toHaveProperty("switched_on");
+    expect(memory).toHaveProperty("indexing");
+    expect(String(memory.guidance)).toMatch(/Memory Shard|indexing/);
+
+    const local = JSON.parse(session.calls.local_ai_status.text) as { engines?: { id: string }[] };
+    expect(Array.isArray(local.engines)).toBe(true);
+    expect(local.engines?.map((e) => e.id)).toContain("llamacpp");
+
+    // An unlinked test box answers in prose; a linked one answers the plan.
+    const usage = session.calls.clawbox_ai_usage.text;
+    expect(usage).toMatch(/ClawBox AI|clawbox\.com|"plan"/);
+
+    // The Anthropic account pool (TASK-902): "none connected" in prose on a
+    // box without one, the count that can answer on a box with one — and in
+    // either case never an email and never a credential.
+    const accounts = session.calls.anthropic_accounts.text;
+    expect(accounts).toMatch(/No Anthropic account is connected|"can_answer"/);
+    expect(accounts).not.toMatch(/sk-ant-|@|token/i);
   });
 });

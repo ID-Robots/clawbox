@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
+vi.mock("@/lib/openclaw-gateway-ws", () => ({
+  waitForGatewayRpcReady: vi.fn().mockResolvedValue(true),
+  gatewayWsCall: vi.fn(),
+  gatewayWsPatchConfig: vi.fn(),
+  GatewayWsUnavailableError: class GatewayWsUnavailableError extends Error {},
+  GatewayRpcError: class GatewayRpcError extends Error {},
+}));
+
 vi.mock("@/lib/clawai-connect", () => ({
   createClawAiUserCode: vi.fn(() => "ABCD-1234"),
   createClawAiDeviceId: vi.fn(() => "device-id-xyz"),
@@ -37,7 +45,7 @@ describe("ClawBox AI device-auth routes", () => {
   it("issues a user_code via the upstream device-start endpoint", async () => {
     const fetchMock = vi.fn(async (input: string | URL) => {
       const url = input.toString();
-      if (url === "https://openclawhardware.dev/api/clawbox-ai/device-start") {
+      if (url === "https://clawbox.com/api/clawbox-ai/device-start") {
         return new Response(JSON.stringify({
           user_code: "PORT-1A2B",
           device_id: "upstream-device-id",
@@ -58,7 +66,7 @@ describe("ClawBox AI device-auth routes", () => {
 
     expect(response.status).toBe(200);
     expect(body.user_code).toBe("PORT-1A2B");
-    expect(body.verification_url).toContain("https://openclawhardware.dev/portal/connect");
+    expect(body.verification_url).toContain("https://clawbox.com/portal/connect");
     expect(body.interval).toBe(4);
     expect(mockWriteClawAiSession).toHaveBeenCalledWith(expect.objectContaining({
       device_id: "upstream-device-id",
@@ -110,7 +118,7 @@ describe("ClawBox AI device-auth routes", () => {
     });
     const fetchMock = vi.fn(async (input: string | URL) => {
       const url = input.toString();
-      if (url === "https://openclawhardware.dev/api/clawbox-ai/device-poll") {
+      if (url === "https://clawbox.com/api/clawbox-ai/device-poll") {
         return new Response(JSON.stringify({ status: "pending" }), { status: 200 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -141,7 +149,7 @@ describe("ClawBox AI device-auth routes", () => {
     });
     const fetchMock = vi.fn(async (input: string | URL) => {
       const url = input.toString();
-      if (url === "https://openclawhardware.dev/api/clawbox-ai/device-poll") {
+      if (url === "https://clawbox.com/api/clawbox-ai/device-poll") {
         return new Response(JSON.stringify({
           status: "complete",
           access_token: "portal-token-123",

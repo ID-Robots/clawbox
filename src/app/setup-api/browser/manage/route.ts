@@ -8,8 +8,16 @@ import fs from "fs/promises";
 import path from "path";
 import type { OpenClawConfig } from "@/lib/openclaw-config";
 import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
+import { CONFIG_ROOT } from "@/lib/config-store";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
-import { findClawboxBrowserPids, terminateClawboxBrowser } from "@/lib/process-match";
+import { findClawboxBrowserPids, terminateClawboxBrowser, terminateForeignCdpBrowser } from "@/lib/process-match";
+import { findPlaywrightChromium } from "@/lib/cdp-probe";
+import {
+  getBrowserAutoOpen,
+  getBrowserSetupComplete,
+  getBrowserStartUrl,
+  writeBrowserLaunchEnv,
+} from "@/lib/browser-setup";
 
 const exec = promisify(execFile);
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
@@ -52,35 +60,18 @@ function integrationIsAlwaysOn(): boolean {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-async function findPlaywrightChromium(): Promise<string | null> {
-  try {
-    const entries = await fs.readdir(PLAYWRIGHT_BROWSERS_DIR, { withFileTypes: true });
-    const candidates: string[] = [];
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-
-      // Playwright 1.50+ ships Chrome-for-Testing under chrome-linux64/ on
-      // amd64 and chrome-linux-arm64/ on arm64; older builds used
-      // chrome-linux/. Probe all three.
-      for (const relativePath of ["chrome-linux/chrome", "chrome-linux64/chrome", "chrome-linux-arm64/chrome"]) {
-        const candidate = path.join(PLAYWRIGHT_BROWSERS_DIR, entry.name, relativePath);
-        try {
-          await fs.access(candidate, fsConstants.X_OK);
-          candidates.push(candidate);
-          break;
-        } catch {}
-      }
-    }
-
-    return candidates.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })).at(-1) ?? null;
-  } catch {
-    return null;
-  }
-}
-
 async function installPlaywrightChromium(): Promise<void> {
-  const playwrightBin = path.join(process.cwd(), "node_modules", ".bin", "playwright");
+  // The checkout, not the cwd. In production the cwd is `.next/standalone`
+  // (Next's standalone server.js chdirs there) and scripts/postbuild.sh copies
+  // only the `playwright` and `playwright-core` PACKAGES into that tree — it
+  // creates no `node_modules/.bin` — so this path was a guaranteed ENOENT on
+  // every box. The caller swallows that into a console.warn and still answers
+  // `{ ok: true }` off whatever apt/snap Chromium is around, which on Ubuntu
+  // 24.04 is the snap wrapper `isServiceSafeChromium()` refuses: the one
+  // browser that would have worked could never be installed. Measured
+  // read-only on the OpenClaw box 2026-09-05 — present and executable in the
+  // checkout, absent under `.next/standalone`.
+  const playwrightBin = path.join(CONFIG_ROOT, "node_modules", ".bin", "playwright");
   await fs.access(playwrightBin, fsConstants.X_OK);
   await exec(playwrightBin, ["install", "chromium"], {
     timeout: 300000,
@@ -92,28 +83,77 @@ async function installPlaywrightChromium(): Promise<void> {
   });
 }
 
-async function checkChromium(): Promise<{ installed: boolean; path?: string; version?: string }> {
-  const playwrightChromium = await findPlaywrightChromium();
-  if (playwrightChromium) {
-    try {
-      const { stdout: ver } = await exec(playwrightChromium, ["--version"], { timeout: 5000 });
-      return { installed: true, path: playwrightChromium, version: ver.trim() };
-    } catch {
-      return { installed: true, path: playwrightChromium };
-    }
+interface ChromiumInfo {
+  installed: boolean;
+  path?: string;
+  version?: string;
+  /**
+   * Whether clawbox-browser.service could actually start this binary — see
+   * isServiceSafeChromium(). Absent when nothing is installed.
+   */
+  serviceSafe?: boolean;
+}
+
+/**
+ * Can a SYSTEM SERVICE start this binary?
+ *
+ * scripts/launch-browser.sh refuses the snap wrapper, because snap's cgroup
+ * confinement makes Chromium fail under systemd. So a device can report
+ * Chromium as installed and still have clawbox-browser.service exit 1 the
+ * moment the owner presses Open — which the panel used to discover as a 500
+ * ten seconds later. This asks the script's own question before anything is
+ * started.
+ */
+async function isServiceSafeChromium(bin: string): Promise<boolean> {
+  if (bin.startsWith("/snap/")) return false;
+  let handle;
+  try {
+    // One open handle for both the size and the bytes, rather than a stat
+    // followed by a read of the same name: between the two calls the name can
+    // come to mean a different file, and the size that said "small enough to
+    // read" would then be vouching for something else entirely.
+    handle = await fs.open(bin, "r");
+    const info = await handle.stat();
+    // Only a wrapper SCRIPT is small enough to be worth reading; a real
+    // Chromium is a hundred megabytes and cannot be a snap shim.
+    if (info.size > 64 * 1024) return true;
+    const text = await handle.readFile("utf-8");
+    return !/\/snap\/bin\/chromium|snap run chromium/.test(text);
+  } catch {
+    // Unreadable says nothing about snap either way; let the launch script
+    // have the last word rather than refuse a browser that may be fine.
+    return true;
+  } finally {
+    await handle?.close().catch(() => {});
   }
+}
+
+/** One found binary, with its version if it will say and whether a service
+ *  could start it. */
+async function describeChromium(binPath: string, serviceSafe?: boolean): Promise<ChromiumInfo> {
+  const safe = serviceSafe ?? await isServiceSafeChromium(binPath);
+  try {
+    const { stdout: ver } = await exec(binPath, ["--version"], { timeout: 5000 });
+    return { installed: true, path: binPath, version: ver.trim(), serviceSafe: safe };
+  } catch {
+    return { installed: true, path: binPath, serviceSafe: safe };
+  }
+}
+
+async function checkChromium(): Promise<ChromiumInfo> {
+  // Full chrome only: this is the browser the owner will see in a window,
+  // and a headless shell cannot open one.
+  const playwrightChromium = findPlaywrightChromium(PLAYWRIGHT_BROWSERS_DIR, { preferHeadless: false });
+  // The Playwright runtime is the build install.sh puts there precisely
+  // because a service can start it, so it needs no snap test.
+  if (playwrightChromium) return describeChromium(playwrightChromium, true);
 
   // Check known paths directly first (fast, no subprocess), then fall back to `which`
   const knownPaths = ["/usr/bin/chromium-browser", "/snap/bin/chromium", "/usr/bin/chromium", "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"];
   for (const p of knownPaths) {
     try {
       await fs.access(p, fsConstants.X_OK);
-      try {
-        const { stdout: ver } = await exec(p, ["--version"], { timeout: 5000 });
-        return { installed: true, path: p, version: ver.trim() };
-      } catch {
-        return { installed: true, path: p };
-      }
+      return describeChromium(p);
     } catch {}
   }
   // Fallback: use `which` for non-standard installs
@@ -122,14 +162,7 @@ async function checkChromium(): Promise<{ installed: boolean; path?: string; ver
     try {
       const { stdout } = await exec("which", [bin], { timeout: 3000 });
       const found = stdout.trim();
-      if (found) {
-        try {
-          const { stdout: ver } = await exec(found, ["--version"], { timeout: 5000 });
-          return { installed: true, path: found, version: ver.trim() };
-        } catch {
-          return { installed: true, path: found };
-        }
-      }
+      if (found) return describeChromium(found);
     } catch {}
   }
   return { installed: false };
@@ -144,26 +177,28 @@ async function cleanBrowserLocks() {
 }
 
 /** Check if browser is running and CDP is accessible */
-async function getBrowserStatus(): Promise<{ running: boolean; pid?: number; cdpReady: boolean }> {
-  // Identify the browser by its executable + our profile dir / CDP port, never
-  // by a regex over whole command lines — see src/lib/process-match.ts. The
+async function getBrowserStatus(): Promise<{ running: boolean; pid?: number; cdpReady: boolean; agentBrowsing?: boolean }> {
+  // Identify the browser by its executable + our profile dir, never by a
+  // regex over whole command lines — see src/lib/process-match.ts. The
   // harness runs each chat turn as `hermes chat -q <user's message>`, so a
   // command-line pattern is matchable from a chat message.
   const browserMatch = { profileDir: PROFILE_DIR, cdpPort: CDP_PORT };
 
-  // CDP answering is the authoritative "it is up and usable" signal; the pid
-  // is only a label for the UI. One scan serves both answers — this route is
-  // polled every 5s while the Browser panel is open, and the scan reads /proc.
   let cdpReady = false;
   try {
     const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(2000) });
     cdpReady = res.ok;
   } catch {}
 
+  // "Running" means OUR desktop browser process exists — the one on the
+  // clawbox-browser profile. The CDP port answering is NOT that proof: the
+  // agent's own headless browser binds the same port whenever it browses
+  // before the owner opens the desktop browser, and reporting that as a
+  // running desktop browser (green tick, PID, Close button) was TASK-515.
   // findClawboxBrowserPids handles its own I/O failures and returns [].
   const pids = await findClawboxBrowserPids(browserMatch);
-  if (cdpReady) return { running: true, pid: pids[0], cdpReady: true };
-  if (pids.length > 0) return { running: true, pid: pids[0], cdpReady: false };
+  if (pids.length > 0) return { running: true, pid: pids[0], cdpReady };
+  if (cdpReady) return { running: false, cdpReady: true, agentBrowsing: true };
   return { running: false, cdpReady: false };
 }
 
@@ -195,11 +230,13 @@ export async function GET() {
     // there is no ~/.openclaw/openclaw.json to hold a tools profile, and the
     // sqlite flag only ever recorded the OpenClaw switch. Skip them rather than
     // derive a "disabled" answer from files this edition does not keep.
-    const [chromium, browser, config, persistedEnabled] = await Promise.all([
+    const [chromium, browser, config, persistedEnabled, autoOpen, startUrl] = await Promise.all([
       checkChromium(),
       getBrowserStatus(),
       alwaysOn ? Promise.resolve({} as OpenClawConfig) : readOpenClawConfig(),
       alwaysOn ? Promise.resolve(null) : getPersistedBrowserEnabled(),
+      getBrowserAutoOpen(),
+      getBrowserStartUrl(),
     ]);
 
     const enabled = alwaysOn || (persistedEnabled ?? (config.tools?.profile === "full"));
@@ -210,6 +247,12 @@ export async function GET() {
       enabled,
       alwaysOn,
       cdpPort: CDP_PORT,
+      // The wizard's flag, and the two settings the app reads on the same
+      // poll it already runs — one answer, so the face it shows and the state
+      // it shows can never come from two different moments.
+      setupComplete: await getBrowserSetupComplete(enabled && chromium.installed),
+      autoOpen,
+      startUrl,
     });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : "Status check failed" }, { status: 500 });
@@ -264,7 +307,7 @@ export async function POST(req: Request) {
       case "enable": {
         const chromium = await checkChromium();
         if (!chromium.installed) {
-          return NextResponse.json({ error: "Chromium not installed" }, { status: 400 });
+          return NextResponse.json({ error: "Chromium not installed", code: "chromium_not_installed" }, { status: 400 });
         }
 
         await fs.mkdir(PROFILE_DIR, { recursive: true });
@@ -340,20 +383,68 @@ export async function POST(req: Request) {
       }
 
       case "open-browser": {
-        // Check if already running via CDP
+        // Already running means OUR desktop browser answers — not merely that
+        // something answers the CDP port (TASK-515: the agent's headless
+        // browser satisfies a port probe, which made this button a no-op that
+        // then reported success).
         const existing = await getBrowserStatus();
-        if (existing.cdpReady) {
+        if (existing.running && existing.cdpReady) {
           return NextResponse.json({ ok: true, alreadyRunning: true, pid: existing.pid, cdpPort: CDP_PORT });
         }
 
         const chromium = await checkChromium();
         if (!chromium.installed || !chromium.path) {
-          return NextResponse.json({ error: "Chromium not installed" }, { status: 400 });
+          return NextResponse.json({ error: "Chromium not installed", code: "chromium_not_installed" }, { status: 400 });
+        }
+        // Refuse in no time rather than start a service that exits 1 and
+        // answer "Browser failed to start. Check /tmp/clawbox-browser.log"
+        // ten seconds later — a true sentence that names the wrong remedy.
+        if (chromium.serviceSafe === false) {
+          return NextResponse.json(
+            {
+              error: "Only the snap build of Chromium is installed, and a system service cannot start it. Install the Playwright Chromium runtime.",
+              code: "chromium_not_service_safe",
+            },
+            { status: 400 },
+          );
+        }
+
+        // If the agent's headless browser holds the CDP port, the desktop
+        // browser could start but never bind it — the two browsers would then
+        // permanently diverge (separate profiles, separate logins). The owner
+        // explicitly asked for a window, so close the headless one first; the
+        // agent relaunches on demand and will attach to the desktop window,
+        // which is the shared-browser state the panel describes.
+        if (existing.agentBrowsing) {
+          const cleared = await terminateForeignCdpBrowser({ profileDir: PROFILE_DIR, cdpPort: CDP_PORT });
+          if (cleared > 0) console.log(`[browser] closed ${cleared} headless agent browser process(es) holding CDP :${CDP_PORT}`);
+          // Wait for the port to actually free before launching against it. If
+          // it never frees, fail honestly — starting the service anyway would
+          // let the readiness probe mistake the foreign browser's answer for a
+          // successful desktop launch, which is the exact lie this task removes.
+          let portFree = false;
+          for (let i = 0; i < 5; i++) {
+            try {
+              await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(1000) });
+              await new Promise(r => setTimeout(r, 1000));
+            } catch { portFree = true; break; }
+          }
+          if (!portFree) {
+            return NextResponse.json(
+              { error: `The assistant's background browser is still holding CDP port ${CDP_PORT}. Try again in a moment.` },
+              { status: 409 },
+            );
+          }
         }
 
         await fs.mkdir(PROFILE_DIR, { recursive: true });
 
         await cleanBrowserLocks();
+
+        // systemd starts the browser, not us, so the owner's start page has to
+        // be on disk before the unit runs — scripts/launch-browser.sh sources
+        // this file the way it already sources the VNC display.
+        await writeBrowserLaunchEnv(await getBrowserStartUrl());
 
         try {
           console.log(`[browser] Starting clawbox-browser.service (CDP port ${CDP_PORT})`);

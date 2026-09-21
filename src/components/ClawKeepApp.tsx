@@ -1,8 +1,37 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { copyToClipboard } from "@/lib/clipboard";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
+import { backupSourceFor } from "@/lib/harness/backup-source";
+import { deriveProtection, isBackupRunning, type ProtectionState } from "@/lib/clawkeep-protection";
+import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, FIELD } from "./coding-agent-ui";
+import ClawKeepWizard from "./ClawKeepWizard";
+import { PairChallengeCard, type PairStartResponse } from "./ClawKeepPairChallengeCard";
+import {
+  CARD,
+  ClawKeepModalPortal,
+  ConfirmDialog,
+  Stat,
+  WEEKDAY_LABEL_KEYS,
+  formatBytes,
+  formatNextRun,
+  jsonOrError,
+  timeAgo,
+} from "./clawkeep-ui";
+
+/**
+ * Is anything still missing before a backup can run?
+ *
+ * Reads the server's answer when it gave one, and otherwise falls back to the
+ * pre-Hermes meaning of the status object — "the openclaw CLI is on PATH" —
+ * so a browser holding a cached bundle against an older server still gates the
+ * button the way that server intends, rather than enabling it on a box that
+ * cannot archive.
+ */
+function archiverReady(status: ClawKeepStatus): boolean {
+  return status.archiverReady ?? status.openclawInstalled;
+}
 
 type ScheduleFrequency = "daily" | "weekly";
 interface ClawKeepSchedule {
@@ -15,6 +44,9 @@ interface ClawKeepSchedule {
 }
 interface ClawKeepStatus {
   paired: boolean;
+  /** False until the owner has been through the setup wizard. Optional so a
+   *  status from an older server still renders the dashboard. */
+  setupComplete?: boolean;
   configured: boolean;
   server: string;
   lastBackupAtMs: number;
@@ -29,10 +61,21 @@ interface ClawKeepStatus {
   uploadStartedAtMs: number;
   openclawInstalled: boolean;
   daemonInstalled: boolean;
-  /** False on an edition with no OpenClaw to back up (Hermes). */
-  supportedOnEdition?: boolean;
+  /** Which agent this box archives — decides the wording throughout. */
+  agent?: "openclaw" | "hermes";
+  /** Everything the archiver needs is present. On OpenClaw that means the
+   *  `openclaw` CLI; on Hermes the archiver is inside the daemon, so there is
+   *  nothing extra to install. Optional so a status from an older server
+   *  (which had neither field) still renders. */
+  archiverReady?: boolean;
+  /** A snapshot from this box carries provider keys. Drives the warning that
+   *  a backup is a credential. */
+  backupContainsCredentials?: boolean;
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
+  /** When auto-backup was last armed or tightened. Optional so a status from
+   *  an older server still renders; see deriveProtection() for what it guards. */
+  scheduleArmedAtMs?: number;
   /** True when the device has a stored backup-encryption passphrase. The
    * "Run a backup now" button is gated on this; without it the runner
    * refuses to run since unencrypted backups would leak to the operator. */
@@ -51,27 +94,10 @@ const STEP_LABEL_KEYS: Record<string, string> = {
   "checking-stats": "clawkeep.step.checkingStats",
 };
 
-// If a "running" status hasn't been refreshed in this many ms, assume the
-// daemon crashed (systemd timer kill, OOM, …) and stop showing the
-// progress panel — otherwise reopens would spin forever after a fault.
-//
-// Real backups on Jetson finish in 2-5 minutes (archive build + upload to
-// R2 over a typical home connection). 30 minutes is a comfortable upper
-// bound — a backup that genuinely takes longer almost always means the
-// upload is stuck, in which case the user wants the "Reset stuck backup"
-// affordance below, not a 4-hour spinner that pretends progress is fine.
-const STALE_RUNNING_MS = 30 * 60 * 1000;
 // Show a "Looks stuck?" reset button after this much wall-clock time on
 // the same heartbeat. Tighter than STALE_RUNNING_MS so the user has a
 // recovery path *before* the panel auto-hides.
 const RESET_HINT_AFTER_MS = 6 * 60 * 1000;
-
-function isBackupRunning(status: ClawKeepStatus | null): boolean {
-  if (!status) return false;
-  if (status.lastHeartbeatStatus !== "running") return false;
-  if (!status.lastHeartbeatAtMs) return false;
-  return Date.now() - status.lastHeartbeatAtMs < STALE_RUNNING_MS;
-}
 
 interface CloudSnapshot {
   name: string;
@@ -88,69 +114,104 @@ interface RestoreResponse {
   archive: string;
   archiveBytes: number;
   assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
+  /** Restarts that could NOT be taken — the owner has to act. */
   restartErrors: string[];
+  /**
+   * Restarts that WERE taken and have not finished. Absent from older servers,
+   * which folded these into `restartErrors` and told the owner to run
+   * `systemctl restart` over a service that was already restarting.
+   */
+  restartPending?: string[];
+  /** Members the daemon could not recreate. Absent from older servers. */
+  skippedMembers?: string[];
 }
 
-interface PairStartResponse {
-  user_code: string;
-  verification_url: string;
-  interval: number;
-  code_length: number;
-}
 
 interface PairPollResponse {
   status: "pending" | "configuring" | "complete" | "error";
   error?: string;
 }
 
+/**
+ * The owner-facing sentence for a failed backup, in the owner's own language.
+ *
+ * The route classifies `clawkeepd`'s `EXIT_*` taxonomy into a stable `code`
+ * (TASK-672); this is the one place that turns a code into words. Several codes
+ * share a sentence on purpose — "the archive could not be built" and "openssl
+ * refused" are the same fact to the person looking at the panel, and inventing
+ * a distinct line per exit code in ten languages would say less, not more. The
+ * server's English sentence is the fallback, for a code from a newer build.
+ */
+function backupErrorText(
+  code: string | undefined,
+  serverSentence: string | undefined,
+  t: (key: string) => string,
+): string {
+  switch (code) {
+    case "quota_full":
+      return t("clawkeep.error.outOfSpace");
+    case "tier_limit":
+      // A different remedy from "out of space": the account has room, the plan
+      // does not cover this backup.
+      return t("clawkeep.error.planLimit");
+    case "pairing_revoked":
+      return t("clawkeep.error.pairingRejected");
+    case "token_unreadable":
+      return t("clawkeep.error.pairingFile");
+    case "offline":
+    case "timed_out":
+    case "portal_error":
+      return t("clawkeep.error.cannotReach");
+    case "backup_failed":
+    case "archive_failed":
+    case "upload_failed":
+    case "encryption_failed":
+    case "config_error":
+    case "daemon_missing":
+      return t("clawkeep.error.didNotFinish");
+    default:
+      // `not_paired` keeps the server's sentence: it is the one failure the
+      // panel already had words for, and its own card says the same thing.
+      return serverSentence || t("clawkeep.error.didNotFinish");
+  }
+}
+
+/**
+ * A backup that WORKED. Since TASK-672 a failed run is a non-2xx carrying one
+ * owner-facing sentence and a stable `code`, so `jsonOrError` throws it into
+ * the page's error banner — the same place every other ClawKeep failure lands
+ * — instead of this card rendering `ok:false` over the daemon's raw log line.
+ */
 interface BackupResponse {
-  ok: boolean;
+  ok: true;
   exitCode: number;
   stdoutTail: string;
   stderrTail: string;
 }
 
-const CARD = "rounded-xl border border-white/10 bg-[var(--bg-deep)]/70 p-4";
+/**
+ * The name of the agent this box runs, for the strings that name it.
+ *
+ * Eight ClawKeep strings say "OpenClaw" out loud — "Protect my OpenClaw",
+ * "Your OpenClaw is safe in the ClawBox cloud", "This replaces your current
+ * OpenClaw state". On a Hermes box every one of them named software the device
+ * does not run. They now interpolate `{agent}`, which keeps each locale's
+ * existing wording and case endings intact — it is the brand that varies, not
+ * the sentence.
+ *
+ * A context rather than a prop because the eight sites sit in five different
+ * components, and this is a property of the DEVICE, not of any one card.
+ * "OpenClaw" is the default because that is what a box is unless its status
+ * says otherwise, and it is what every one of these strings used to say.
+ */
+const AgentLabelContext = createContext("OpenClaw");
 
-type Translator = (key: string, params?: Record<string, string | number>) => string;
-
-function timeAgo(ms: number, t: Translator): string {
-  if (!ms) return t("clawkeep.never");
-  const diff = Date.now() - ms;
-  if (diff < 0) return t("clawkeep.inFuture");
-  const minutes = Math.floor(diff / 60_000);
-  const hours = Math.floor(diff / 3_600_000);
-  const days = Math.floor(diff / 86_400_000);
-  if (minutes < 1) return t("clawkeep.justNow");
-  if (minutes < 60) return t("clawkeep.minutesAgo", { count: minutes });
-  if (hours < 24) return t("clawkeep.hoursAgo", { count: hours });
-  return t("clawkeep.daysAgo", { count: days });
+function useAgentLabel(): string {
+  return useContext(AgentLabelContext);
 }
 
-function formatBytes(n: number): string {
-  if (!n || n < 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let i = 0;
-  let v = n;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-async function jsonOrError<T>(resp: Response): Promise<T> {
-  if (!resp.ok) {
-    let detail = resp.statusText;
-    try {
-      const body = (await resp.json()) as { error?: string };
-      if (body.error) detail = body.error;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(detail || `HTTP ${resp.status}`);
-  }
-  return (await resp.json()) as T;
+function agentLabelFor(agent: ClawKeepStatus["agent"]): string {
+  return agent === "hermes" ? "Hermes" : "OpenClaw";
 }
 
 export default function ClawKeepApp() {
@@ -160,6 +221,10 @@ export default function ClawKeepApp() {
   // outer full-app login gate was tried and removed — it duplicated the
   // inline UX and broke local-only flows where ClawBox AI isn't required.
   const [status, setStatus] = useState<ClawKeepStatus | null>(null);
+  // Which agent this box archives, for the strings that name it. Read before
+  // the status has landed too, hence the optional chain — the default is the
+  // word every one of those strings used to be hardcoded to.
+  const agent = agentLabelFor(status?.agent);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"" | "pair" | "backup" | "unpair" | "restore">("");
   const [backupResult, setBackupResult] = useState<BackupResponse | null>(null);
@@ -190,6 +255,19 @@ export default function ClawKeepApp() {
     onConfirm: () => void;
   } | null>(null);
   const pollIntervalRef = useRef<number | null>(null);
+  // One clock for every judgement this window draws — the protection verdict,
+  // the "how long ago" beside it, and whether a backup is still in flight.
+  // Sampled on a tick of its own rather than read during render: a box whose
+  // daemon is gone answers /setup-api/clawkeep with the same bytes for ever,
+  // and a refresh that throws leaves `status` untouched, so a verdict drawn
+  // only from new data would freeze. Seeded with the current time so a lapsed
+  // box never flashes green on first paint. A minute is finer than anything it
+  // decides (a 36 h window, a 1 h run cap) and coarse enough to cost nothing.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -217,7 +295,10 @@ export default function ClawKeepApp() {
   // `status` changes, so the period re-evaluates the moment a backup starts or
   // ends.
   useEffect(() => {
-    const intervalMs = isBackupRunning(status) ? 3000 : 10000;
+    // Reads the clock directly rather than `nowMs`: this is an effect, not a
+    // render, and taking `nowMs` as a dependency would tear the poll down and
+    // re-arm it every minute.
+    const intervalMs = isBackupRunning(status, Date.now()) ? 3000 : 10000;
     // Skip a tick if the previous refresh is still in flight, so a slow/hung
     // fetch can't stack concurrent requests on the Jetson.
     let inFlight = false;
@@ -340,21 +421,39 @@ export default function ClawKeepApp() {
     setBackupResult(null);
     try {
       const trimmed = label?.trim();
-      const result = await jsonOrError<BackupResponse>(
-        await fetch("/setup-api/clawkeep/backup", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(trimmed ? { label: trimmed } : {}),
-        }),
-      );
-      setBackupResult(result);
+      const res = await fetch("/setup-api/clawkeep/backup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(trimmed ? { label: trimmed } : {}),
+      });
+      if (!res.ok) {
+        // The route answers a stable `code` beside its English sentence
+        // precisely so a client never has to read the English — and this panel
+        // is otherwise entirely in the owner's language, so it must not be the
+        // one client that discards it. The server's own sentence is the LAST
+        // resort, for a code this build does not know.
+        const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+        if (body.code === "needs_passphrase") {
+          // There is a modal for exactly this, reached today only by a status
+          // check that can be seconds stale. The failure itself can open it.
+          setPassphraseSetup({ onSaved: () => { void runBackupNowRef.current(label); } });
+          return;
+        }
+        setError(backupErrorText(body.code, body.error, t));
+        return;
+      }
+      setBackupResult((await res.json()) as BackupResponse);
       await refresh();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy("");
     }
-  }, [refresh]);
+  }, [refresh, t]);
+  // `needs_passphrase` re-runs the backup after the modal saves, and the
+  // callback cannot name itself.
+  const runBackupNowRef = useRef(runBackupNow);
+  useEffect(() => { runBackupNowRef.current = runBackupNow; }, [runBackupNow]);
 
   const onResetStuck = useCallback(() => {
     // Surface a dire-warning confirm because a stuck heartbeat *might*
@@ -436,17 +535,17 @@ export default function ClawKeepApp() {
 
   const onRestore = useCallback(
     (name: string) => {
-      // The restore is destructive — we move ~/.openclaw aside and replace
-      // it with the snapshot's contents, then bounce the gateway. Route
-      // the confirm through our themed dialog instead of window.confirm
-      // so the look matches the rest of the app on every browser.
+      // The restore is destructive — we move the agent's state directory aside
+      // and replace it with the snapshot's contents, then bounce the service
+      // that holds it open. Route the confirm through our themed dialog
+      // instead of window.confirm so the look matches on every browser.
       setConfirmPending({
         title: t("clawkeep.confirm.restoreTitle", { name }),
         body: (
           <>
-            <p>{t("clawkeep.confirm.restoreBody1")}</p>
+            <p>{t("clawkeep.confirm.restoreBody1", { agent })}</p>
             <p className="mt-2 text-[var(--text-muted)]">
-              {t("clawkeep.confirm.restoreBody2")}
+              {t("clawkeep.confirm.restoreBody2", { agent })}
             </p>
           </>
         ),
@@ -470,12 +569,15 @@ export default function ClawKeepApp() {
         },
       });
     },
-    [performRestore, t],
+    // `agent` is interpolated into the confirmation copy, so a stale closure
+    // would name the wrong agent in the one dialog that warns the customer
+    // their state is about to be replaced.
+    [performRestore, t, agent],
   );
 
   if (!status && !error) {
     return (
-      <div className="h-full w-full flex items-center justify-center text-[var(--text-muted)]">
+      <div className="h-full w-full flex items-center justify-center text-[var(--text-muted)] bg-[var(--bg-deep)]">
         {t("clawkeep.loading")}
       </div>
     );
@@ -483,14 +585,14 @@ export default function ClawKeepApp() {
 
   if (!status) {
     return (
-      <div className="h-full w-full flex items-center justify-center p-6">
+      <div className="h-full w-full flex items-center justify-center p-6 bg-[var(--bg-deep)]">
         <div className={`${CARD} max-w-md text-sm`}>
           <p className="text-red-300">⚠️ {t("clawkeep.loadFailed")}</p>
           {error && <p className="mt-2 text-xs text-[var(--text-muted)]">{error}</p>}
           <button
             type="button"
             onClick={refresh}
-            className="mt-3 px-3 py-1.5 rounded-md bg-orange-500 text-white text-xs font-semibold"
+            className={`${BTN_PRIMARY} mt-3`}
           >
             {t("clawkeep.retry")}
           </button>
@@ -499,26 +601,88 @@ export default function ClawKeepApp() {
     );
   }
 
-  // ClawKeep archives the OpenClaw agent through the openclaw CLI. On an edition
-  // that ships no OpenClaw (Hermes) the feature genuinely cannot run, so say so
-  // honestly and stop here — rather than dropping to the setup card that told
-  // the user to `npm install -g openclaw`, which would contradict this SKU.
-  if (status.supportedOnEdition === false) {
+  // The front door: an owner who has not been through setup gets the wizard
+  // rather than a dashboard of things that cannot happen yet.
+  //
+  // ONE question, the same one BrowserApp, CodingAgentApp and MemoryShardApp
+  // ask. This used to also require `!status.paired`, and that conjunct was the
+  // defect: re-evaluated on every status poll, the wizard's own pairing step
+  // falsified the condition keeping it on screen, dropping the owner onto the
+  // dashboard two steps early at "Protection Lapsed". The legacy case that
+  // conjunct existed for — a box paired before this wizard shipped — is now
+  // answered where it belongs, by `getClawKeepSetupComplete`, so it cannot
+  // fight the wizard's own progress. The wizard already skips the pair step on
+  // a paired box.
+  if (status.setupComplete === false) {
     return (
-      <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
-        <div className="min-h-full w-full flex items-center justify-center p-6">
-          <div className="w-full max-w-2xl">
-            <EditionUnavailableCard />
+      <AgentLabelContext.Provider value={agent}>
+        <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-deep)] text-gray-200 @container" data-testid="clawkeep-panel">
+          <div className="mx-auto w-full max-w-2xl px-5 py-4 min-h-full flex flex-col">
+            <ClawKeepWizard
+              status={status}
+              agent={agent}
+              onStatusChanged={refresh}
+              onDone={() => { void refresh(); }}
+            />
           </div>
         </div>
-      </div>
+      </AgentLabelContext.Provider>
     );
   }
 
   return (
-    <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
-      <div className="min-h-full w-full flex items-center justify-center p-6">
-        <div className="w-full max-w-2xl space-y-4">
+    <AgentLabelContext.Provider value={agent}>
+    {/* The Coding Agent's frame: top-anchored, one header row that says what
+        this is and whether it is paired, with everything you can do from here
+        beside it, and the cards below starting clean. It used to centre
+        itself vertically in the window and put Portal / Unpair as two
+        full-width buttons between the cards. */}
+    <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-deep)] text-gray-200 @container" data-testid="clawkeep-panel">
+      <div className="mx-auto w-full max-w-2xl px-5 py-4">
+        {/* `relative`: the backup-contents popover hangs from this row, the
+            full content width, so it cannot run off a phone's screen the way
+            a popover anchored to the ? button 200 px in did. */}
+        <div className="relative flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pb-3 mb-4 border-b border-white/[0.06]">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20, fontVariationSettings: "'FILL' 1" }} aria-hidden="true">shield_lock</span>
+            <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">ClawKeep</h1>
+            <span
+              data-testid="clawkeep-state"
+              className={`inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider border rounded-full pl-1.5 pr-2 py-0.5 ${
+                status.paired ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/[0.07]" : "text-[var(--text-muted)] border-white/15"
+              }`}
+            >
+              <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${status.paired ? "bg-emerald-400" : "bg-[var(--text-muted)]"}`} />
+              {status.paired ? t("clawkeep.state.paired") : t("clawkeep.state.unpaired")}
+            </span>
+            <BackupContentsInfo status={status} />
+          </div>
+          {status.paired && !pairChallenge && (
+            <div className="flex items-center gap-2 shrink-0">
+              <a
+                href={`${status.server}/portal/clawkeep`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={BTN_SECONDARY}
+                title={t("clawkeep.portalTitle")}
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">dashboard</span>
+                {t("clawkeep.portal")}
+                <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 12 }} aria-hidden="true">open_in_new</span>
+              </a>
+              <button
+                type="button"
+                disabled={busy === "unpair"}
+                onClick={onUnpair}
+                className={BTN_DANGER}
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">link_off</span>
+                {busy === "unpair" ? t("clawkeep.unpairing") : t("clawkeep.unpairButton")}
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="space-y-4">
           {error && (
             <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
               ⚠️ {error}
@@ -545,10 +709,11 @@ export default function ClawKeepApp() {
                 // mid-run. The local `busy` flag is only authoritative right
                 // after a click, before the daemon has heartbeat-published its
                 // "running" state.
+                nowMs={nowMs}
                 busyKind={
                   busy === "restore"
                     ? "restore"
-                    : busy === "backup" || isBackupRunning(status)
+                    : busy === "backup" || isBackupRunning(status, nowMs)
                     ? "backup"
                     : null
                 }
@@ -557,38 +722,29 @@ export default function ClawKeepApp() {
                 schedule={status.schedule}
                 nextRunAtMs={status.nextRunAtMs}
                 onSaved={(next) => {
-                  setStatus((prev) => prev ? { ...prev, schedule: next.schedule, nextRunAtMs: next.nextRunAtMs } : prev);
+                  setStatus((prev) => prev
+                    ? {
+                      ...prev,
+                      schedule: next.schedule,
+                      nextRunAtMs: next.nextRunAtMs,
+                      // Without this the shield would judge the new, tighter
+                      // window against the OLD arm stamp and lapse the box on
+                      // the same click. It comes from the route rather than
+                      // this clock: the browser's and the box's are not the
+                      // same clock, and a save that armed nothing returns the
+                      // OLD stamp — which is the point.
+                      scheduleArmedAtMs: next.scheduleArmedAtMs,
+                    }
+                    : prev);
                 }}
                 onError={setError}
               />
-              <div className="flex gap-2">
-                <a
-                  href={`${status.server}/portal/clawkeep`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-white/10 bg-white/[0.03] text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] hover:border-white/20 transition-colors cursor-pointer"
-                  title={t("clawkeep.portalTitle")}
-                >
-                  <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">dashboard</span>
-                  <span className="font-medium">{t("clawkeep.portal")}</span>
-                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
-                </a>
-                <button
-                  type="button"
-                  disabled={busy === "unpair"}
-                  onClick={onUnpair}
-                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-red-500/20 bg-red-500/[0.06] text-sm text-red-300/80 hover:text-red-200 hover:bg-red-500/10 hover:border-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
-                >
-                  <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">link_off</span>
-                  <span className="font-medium">{busy === "unpair" ? t("clawkeep.unpairing") : t("clawkeep.unpairButton")}</span>
-                </button>
-              </div>
             </>
           ) : (
             <PairCard onPair={onPair} busy={busy === "pair"} />
           )}
 
-          {(!status.openclawInstalled || !status.daemonInstalled) && <SystemCard status={status} />}
+          {(!archiverReady(status) || !status.daemonInstalled) && <SystemCard status={status} />}
 
           {backupResult && <BackupResultCard result={backupResult} />}
           {restoreResult && <RestoreResultCard result={restoreResult} />}
@@ -598,6 +754,7 @@ export default function ClawKeepApp() {
               onClose={() => setRestoreOpen(false)}
               onPick={(name) => onRestore(name)}
               onError={setError}
+              agent={status.agent === "hermes" ? "hermes" : "openclaw"}
             />
           )}
         </div>
@@ -654,30 +811,22 @@ export default function ClawKeepApp() {
         />
       )}
     </div>
+    </AgentLabelContext.Provider>
   );
 }
 
-const WEEKDAY_LABEL_KEYS = [
-  "clawkeep.weekday.sun",
-  "clawkeep.weekday.mon",
-  "clawkeep.weekday.tue",
-  "clawkeep.weekday.wed",
-  "clawkeep.weekday.thu",
-  "clawkeep.weekday.fri",
-  "clawkeep.weekday.sat",
-];
+/** What PUT /setup-api/clawkeep/schedule answers with. `scheduleArmedAtMs` is
+ *  load-bearing — the shield reads it — so it is declared, not assumed. */
+interface ScheduleSaveResponse {
+  schedule: ClawKeepSchedule;
+  nextRunAtMs: number;
+  scheduleArmedAtMs: number;
+}
 
-function formatNextRun(ms: number, t: Translator): string {
-  if (!ms) return "—";
-  const diff = ms - Date.now();
-  if (diff <= 0) return t("clawkeep.anyMoment");
-  const totalMin = Math.round(diff / 60_000);
-  const days = Math.floor(totalMin / (60 * 24));
-  const hours = Math.floor((totalMin % (60 * 24)) / 60);
-  const mins = totalMin % 60;
-  if (days > 0) return t("clawkeep.inDays", { days, hours });
-  if (hours > 0) return t("clawkeep.inHours", { hours, mins });
-  return t("clawkeep.inMinutes", { mins });
+function sameSchedule(a: ClawKeepSchedule, b: ClawKeepSchedule): boolean {
+  return a.enabled === b.enabled && a.frequency === b.frequency
+    && a.timeOfDay === b.timeOfDay && a.weekday === b.weekday
+    && a.retentionKeepLast === b.retentionKeepLast;
 }
 
 function ScheduleCard({
@@ -688,15 +837,19 @@ function ScheduleCard({
 }: {
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
-  onSaved: (next: { schedule: ClawKeepSchedule; nextRunAtMs: number }) => void;
+  onSaved: (next: ScheduleSaveResponse) => void;
   onError: (msg: string) => void;
 }) {
   const { t } = useT();
   const [draft, setDraft] = useState<ClawKeepSchedule>(schedule);
   const [saving, setSaving] = useState(false);
-  // Re-sync the draft when the parent re-fetches (e.g. after a backup run
-  // bumped nextRunAtMs server-side).
-  useEffect(() => { setDraft(schedule); }, [schedule]);
+  const previousSchedule = useRef(schedule);
+  // A background status poll must not discard an owner's unsaved input.
+  useEffect(() => {
+    const previous = previousSchedule.current;
+    previousSchedule.current = schedule;
+    setDraft(current => sameSchedule(current, previous) ? schedule : current);
+  }, [schedule]);
 
   const dirty =
     draft.enabled !== schedule.enabled
@@ -709,7 +862,7 @@ function ScheduleCard({
     const payload = override ?? draft;
     setSaving(true);
     try {
-      const body = await jsonOrError<{ schedule: ClawKeepSchedule; nextRunAtMs: number }>(
+      const body = await jsonOrError<ScheduleSaveResponse>(
         await fetch("/setup-api/clawkeep/schedule", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -729,7 +882,7 @@ function ScheduleCard({
     <div className={`${CARD} space-y-4`}>
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-gray-100">{t("clawkeep.schedule.title")}</h3>
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t("clawkeep.schedule.title")}</h3>
           <p className="text-xs text-[var(--text-muted)] mt-0.5">
             {draft.enabled
               ? t("clawkeep.schedule.nextRun", { when: formatNextRun(nextRunAtMs, t) })
@@ -737,9 +890,17 @@ function ScheduleCard({
           </p>
         </div>
         <label className="relative inline-flex items-center cursor-pointer">
+          {/* The input IS the hit target, not a 1x1 `sr-only` box behind one.
+              Sized to the track and merely transparent, so a click anywhere on
+              the switch lands on the control itself rather than on whatever
+              element happens to sit over the hidden input's corner — which is
+              what `elementFromPoint` resolves, and therefore what a pointer
+              driven by coordinates (an automated check, an assistive pointer,
+              a stylus) actually hits. `peer` still styles the track below. */}
           <input
             type="checkbox"
-            className="sr-only peer"
+            className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
+            aria-label={t("clawkeep.schedule.title")}
             checked={draft.enabled}
             disabled={saving}
             onChange={(e) => {
@@ -748,7 +909,7 @@ function ScheduleCard({
               void save(next);
             }}
           />
-          <span className="w-10 h-6 bg-white/10 rounded-full peer-checked:bg-emerald-500 transition-colors" />
+          <span className="w-10 h-6 bg-white/10 rounded-full peer-checked:bg-emerald-500 transition-colors peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[var(--coral-bright)]" />
           <span className="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-4" />
         </label>
       </div>
@@ -764,7 +925,7 @@ function ScheduleCard({
                 className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
                   draft.frequency === freq
                     ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
-                    : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                    : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-white/5"
                 }`}
               >
                 {freq === "daily" ? t("clawkeep.schedule.daily") : t("clawkeep.schedule.weekly")}
@@ -778,7 +939,7 @@ function ScheduleCard({
               type="time"
               value={draft.timeOfDay}
               onChange={(e) => setDraft((d) => ({ ...d, timeOfDay: e.target.value }))}
-              className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+              className={`${FIELD} text-sm`}
             />
             <span className="text-xs text-[var(--text-muted)]">{t("clawkeep.schedule.deviceLocal")}</span>
           </div>
@@ -795,7 +956,7 @@ function ScheduleCard({
                     className={`px-2.5 py-1 rounded-md text-xs border cursor-pointer ${
                       draft.weekday === idx
                         ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
-                        : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                        : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-white/5"
                     }`}
                   >
                     {t(labelKey)}
@@ -809,7 +970,7 @@ function ScheduleCard({
 
       {/* Retention applies to every backup (manual or scheduled), so it lives
           outside the enabled-only block. */}
-      <div className="space-y-1.5 pt-1 border-t border-white/5">
+      <div className="space-y-1.5 pt-1 border-t border-[var(--border-subtle)]">
         <div className="flex items-center gap-3 flex-wrap">
           <label htmlFor="clawkeep-keep-last" className="text-xs text-[var(--text-muted)]">
             {t("clawkeep.schedule.keepLast")}
@@ -824,7 +985,7 @@ function ScheduleCard({
               const n = Math.max(0, Math.floor(Number(e.target.value)));
               setDraft((d) => ({ ...d, retentionKeepLast: Number.isFinite(n) ? n : 0 }));
             }}
-            className="w-20 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+            className={`${FIELD} w-20 text-sm`}
           />
           <span className="text-xs text-[var(--text-muted)]">
             {t("clawkeep.schedule.keepLastUnit")}
@@ -843,7 +1004,7 @@ function ScheduleCard({
             type="button"
             disabled={saving}
             onClick={() => save()}
-            className="px-3 py-1.5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold disabled:opacity-50 cursor-pointer"
+            className={BTN_PRIMARY}
           >
             {saving ? t("clawkeep.schedule.saving") : t("clawkeep.schedule.save")}
           </button>
@@ -853,258 +1014,27 @@ function ScheduleCard({
   );
 }
 
-function ConfirmDialog({
-  title,
-  body,
-  confirmLabel,
-  danger,
-  onCancel,
-  onConfirm,
-}: {
-  title: string;
-  body: React.ReactNode;
-  confirmLabel: string;
-  danger?: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const { t } = useT();
-  // Esc closes via a global listener (the dialog itself doesn't focus a
-  // text input, so an inline onKeyDown wouldn't fire reliably). Enter is
-  // handled by whichever button has focus — autoFocus puts it on Confirm
-  // but tabbing to Cancel and pressing Enter must cancel, not confirm.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
-
-  const confirmClasses = danger
-    ? "bg-red-500 hover:bg-red-400 text-white"
-    : "bg-emerald-500 hover:bg-emerald-400 text-black";
-
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="clawkeep-confirm-title"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
-      onClick={onCancel}
-    >
-      <div
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-3 px-5 pt-5">
-          <div
-            className={`shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${
-              danger ? "bg-red-500/15 text-red-300" : "bg-emerald-500/15 text-emerald-300"
-            }`}
-            aria-hidden="true"
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 22 }}>
-              {danger ? "warning" : "help"}
-            </span>
-          </div>
-          <h2 id="clawkeep-confirm-title" className="text-base font-semibold text-gray-100 break-words">
-            {title}
-          </h2>
-        </div>
-        <div className="px-5 pt-3 pb-4 text-sm leading-relaxed text-[var(--text-secondary)]">
-          {body}
-        </div>
-        <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
-          >
-            {t("clawkeep.cancel")}
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            autoFocus
-            className={`px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer ${confirmClasses}`}
-          >
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
   const { t } = useT();
+  const agent = useAgentLabel();
   return (
-    <div
-      className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-12 pb-8`}
-    >
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-80 h-80 bg-[radial-gradient(circle,rgba(249,115,22,0.4),transparent_70%)] blur-3xl opacity-70"
-      />
-      <div className="relative w-44 h-44 flex items-center justify-center mb-4">
-        <div
+    <div className={`${CARD} flex flex-col items-center text-center py-8`}>
+      <div className="w-16 h-16 rounded-full flex items-center justify-center bg-gradient-to-br from-orange-400 via-orange-500 to-amber-600 shadow-[0_0_28px_rgba(249,115,22,0.35)]">
+        <span
+          className="material-symbols-rounded text-white"
+          style={{ fontSize: 36, fontVariationSettings: "'FILL' 1, 'wght' 600" }}
           aria-hidden="true"
-          className="clawkeep-shield-ring absolute inset-0 rounded-full border-2 border-orange-400/60 bg-orange-500/10"
-        />
-        <div
-          aria-hidden="true"
-          className="clawkeep-shield-ring-delayed absolute inset-0 rounded-full border-2 border-orange-400/60 bg-orange-500/10"
-        />
-        <div className="clawkeep-shield-breathe relative w-32 h-32 rounded-full flex items-center justify-center bg-gradient-to-br from-orange-400 via-orange-500 to-amber-600 shadow-[0_0_60px_rgba(249,115,22,0.45)]">
-          <span
-            className="material-symbols-rounded text-white drop-shadow-[0_0_10px_rgba(249,115,22,0.55)]"
-            style={{ fontSize: 76, fontVariationSettings: "'FILL' 1, 'wght' 600" }}
-            aria-hidden="true"
-          >
-            shield_lock
-          </span>
-        </div>
+        >
+          shield_lock
+        </span>
       </div>
-      <h2 className="relative text-3xl font-bold font-display">{t("clawkeep.pair.title")}</h2>
-      <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {t("clawkeep.pair.description")}
+      <h2 className="mt-4 text-lg font-semibold text-[var(--text-primary)]">{t("clawkeep.pair.title")}</h2>
+      <p className="mt-1 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
+        {t("clawkeep.pair.description", { agent })}
       </p>
-      <button
-        type="button"
-        onClick={onPair}
-        disabled={busy}
-        className="relative mt-7 px-6 py-2.5 rounded-full bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-white text-sm font-semibold shadow-lg cursor-pointer"
-      >
+      <button type="button" onClick={onPair} disabled={busy} className={`${BTN_PRIMARY} mt-5`}>
         {busy ? t("clawkeep.pair.connecting") : t("clawkeep.pair.button")}
       </button>
-    </div>
-  );
-}
-
-function PairChallengeCard({
-  challenge,
-  phase,
-  onCancel,
-  onGetNewCode,
-  busy,
-}: {
-  challenge: PairStartResponse;
-  phase: "" | "pending" | "configuring";
-  onCancel: () => void;
-  onGetNewCode: () => void;
-  busy: boolean;
-}) {
-  const { t } = useT();
-  const code = challenge.user_code;
-  const [copied, setCopied] = useState(false);
-  const copyTimerRef = useRef<number | null>(null);
-
-  const flashCopied = useCallback(() => {
-    setCopied(true);
-    if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
-    copyTimerRef.current = window.setTimeout(() => setCopied(false), 1500);
-  }, []);
-
-  // Auto-copy when a fresh code lands. Mirrors what the user just told the
-  // portal to expect — they can paste straight into the portal field
-  // without re-typing. Re-runs only when the code itself changes so a
-  // re-render (e.g. phase transition) doesn't keep stomping the clipboard.
-  useEffect(() => {
-    if (!code) return;
-    let cancelled = false;
-    void copyToClipboard(code).then((ok) => {
-      if (!cancelled && ok) flashCopied();
-    });
-    return () => {
-      cancelled = true;
-      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
-    };
-  }, [code, flashCopied]);
-
-  const onCopyClick = useCallback(async () => {
-    const ok = await copyToClipboard(code);
-    if (ok) flashCopied();
-  }, [code, flashCopied]);
-
-  return (
-    <div className={`${CARD} space-y-3`}>
-      <p className="text-xs text-[var(--text-muted)] leading-relaxed">
-        {t("clawkeep.pair.intro")}
-      </p>
-      <div className="p-4 bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded-lg text-center">
-        <a
-          href={challenge.verification_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center justify-center gap-2 w-full px-4 py-3 bg-[var(--coral-bright)] hover:bg-orange-500 text-white font-medium rounded-lg transition-colors text-sm no-underline"
-        >
-          {t("ai.openAuthPage")}
-          <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 16 }}>
-            open_in_new
-          </span>
-        </a>
-        <p className="text-xs text-[var(--text-secondary)] mt-4 mb-2">
-          {t("clawkeep.pair.thenEnterCode")}
-        </p>
-        <div className="px-4 py-3 bg-[var(--bg-surface)] rounded-lg inline-flex items-center gap-2">
-          <span
-            className="text-2xl font-mono font-bold text-gray-100 tracking-widest select-all"
-            aria-label={t("clawkeep.pair.codeAriaLabel")}
-          >
-            {code}
-          </span>
-          <button
-            type="button"
-            onClick={onCopyClick}
-            aria-label={copied ? t("clawkeep.pair.codeCopied") : t("clawkeep.pair.copyCode")}
-            className="ml-1 px-2 py-1 text-xs font-medium text-[var(--coral-bright)] bg-[var(--bg-deep)] border border-[var(--border-subtle)] rounded hover:bg-[var(--bg-surface)] cursor-pointer transition-colors"
-          >
-            {copied ? t("clawkeep.pair.copied") : t("clawkeep.pair.copy")}
-          </button>
-        </div>
-        <p className="mt-2 text-xs text-[var(--text-muted)]">
-          {t("clawkeep.pair.codeExpires")}
-        </p>
-      </div>
-
-      {phase && (
-        <div
-          className="flex items-center gap-2 text-xs text-[var(--text-secondary)]"
-          role="status"
-          aria-live="polite"
-        >
-          <span
-            aria-hidden="true"
-            className="inline-block w-3 h-3 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin"
-          />
-          {phase === "configuring"
-            ? t("clawkeep.pair.savingToken")
-            : t("clawkeep.pair.waitingAuthorization")}
-        </div>
-      )}
-
-      <div className="flex items-center gap-3">
-        <button
-          type="button"
-          onClick={onGetNewCode}
-          disabled={busy}
-          className="bg-transparent border-none text-[var(--coral-bright)] text-xs underline cursor-pointer p-0 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {t("clawkeep.pair.getNewCode")}
-        </button>
-        <span className="text-xs text-[var(--text-muted)]">·</span>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="bg-transparent border-none text-xs text-[var(--text-muted)] hover:text-gray-200 cursor-pointer p-0"
-        >
-          {t("clawkeep.cancel")}
-        </button>
-      </div>
     </div>
   );
 }
@@ -1134,6 +1064,7 @@ function BackupProgressPanel({
   onReset?: () => void;
 }) {
   const { t } = useT();
+  const agent = useAgentLabel();
   // `nowMs` is sampled by the 1s tick so render stays pure (no `Date.now()`
   // reads at render time — the React compiler rule that flags those is on).
   // It's the only thing the panel uses time for: deriving the upload MB/s
@@ -1162,7 +1093,7 @@ function BackupProgressPanel({
   const isBackup = kind === "backup";
   const fallback = isBackup
     ? t("clawkeep.progress.backupFallback")
-    : t("clawkeep.progress.restoreFallback");
+    : t("clawkeep.progress.restoreFallback", { agent });
   const stepLabel = explicitStepLabel || fallback;
 
   // Backup = green (we're actively protecting). Restore = orange (recovery
@@ -1198,7 +1129,7 @@ function BackupProgressPanel({
         <div className="flex-1 min-w-0">
           <div className={`text-base font-semibold ${palette.text}`}>
             {isBackup
-              ? t("clawkeep.progress.backupTitle")
+              ? t("clawkeep.progress.backupTitle", { agent })
               : t("clawkeep.progress.restoreTitle")}
           </div>
           <div className="text-xs text-[var(--text-muted)] mt-0.5">
@@ -1240,9 +1171,12 @@ function BackupProgressPanel({
           ? t("clawkeep.progress.backupHint")
           : t("clawkeep.progress.restoreHint")}
       </p>
-      {/* "Looks stuck?" recovery link. Surfaces after ~6 minutes on the
-          same heartbeat (real Jetson backups complete in 2-5 min) — gives
-          the user a way out before the 30-minute auto-stale kicks in.
+      {/* "Looks stuck?" recovery link. Surfaces after RESET_HINT_AFTER_MS on
+          the same heartbeat — a way out long before STALE_RUNNING_MS retires
+          the pulse on its own. It is only ever an OFFER: the ~6 minutes was
+          chosen when a Jetson backup took 2-5 min, and a 12 GB archive
+          (TASK-675) legitimately runs for well over an hour, so the link has
+          to sit beside a healthy long run without claiming anything about it.
           Only on backup; restore has its own swap-cant-be-interrupted
           hint above and a reset there would be actively dangerous. */}
       {isBackup && onReset && heartbeatAtMs > 0
@@ -1261,38 +1195,15 @@ function BackupProgressPanel({
   );
 }
 
-type ProtectionState = "protected" | "lapsed" | "unprotected";
-
-function deriveProtection(status: ClawKeepStatus): ProtectionState {
-  if (status.lastHeartbeatStatus === "error") return "lapsed";
-  if (status.lastBackupAtMs > 0) return "protected";
-  return "unprotected";
-}
-
 interface ProtectionCopy {
   headlineKey: string;
   subheadKey: string;
   badgeKey: string;
   iconName: string;
   badgeClass: string;
-  haloClass: string;
-  ringClass: string;
   discClass: string;
   iconClass: string;
-  primaryClass: string;
 }
-
-// Lapsed and unprotected share an "at-risk" red palette; only headline/
-// subhead/icon/badge differ. Spread a single base into both.
-const RED_PALETTE = {
-  badgeClass: "bg-red-500/15 text-red-300 border-red-500/30",
-  haloClass: "bg-[radial-gradient(circle,rgba(239,68,68,0.45),transparent_70%)]",
-  ringClass: "border-red-400/60 bg-red-500/10",
-  discClass:
-    "bg-gradient-to-br from-red-400 via-red-500 to-rose-600 shadow-[0_0_60px_rgba(239,68,68,0.45)]",
-  iconClass: "text-white drop-shadow-[0_0_10px_rgba(239,68,68,0.55)]",
-  primaryClass: "bg-red-500 hover:bg-red-400",
-} as const;
 
 const COPY_BY_STATE: Record<ProtectionState, ProtectionCopy> = {
   protected: {
@@ -1301,26 +1212,32 @@ const COPY_BY_STATE: Record<ProtectionState, ProtectionCopy> = {
     badgeKey: "clawkeep.badge.protected",
     iconName: "verified_user",
     badgeClass: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
-    haloClass: "bg-[radial-gradient(circle,rgba(16,185,129,0.45),transparent_70%)]",
-    ringClass: "border-emerald-400/60 bg-emerald-500/10",
     discClass:
-      "bg-gradient-to-br from-emerald-400 via-emerald-500 to-teal-600 shadow-[0_0_60px_rgba(16,185,129,0.45)]",
+      "bg-gradient-to-br from-emerald-400 via-emerald-500 to-teal-600 shadow-[0_0_28px_rgba(16,185,129,0.35)]",
     iconClass: "text-white drop-shadow-[0_0_10px_rgba(16,185,129,0.55)]",
-    primaryClass: "bg-emerald-500 hover:bg-emerald-400",
   },
+  // Amber, not red: a box that was protected and has drifted is a different
+  // thing from one that never was, and the two used to be indistinguishable
+  // at a glance because they shared a palette.
   lapsed: {
-    ...RED_PALETTE,
     headlineKey: "clawkeep.status.lapsed",
     subheadKey: "clawkeep.status.lapsedSub",
     badgeKey: "clawkeep.badge.atRisk",
     iconName: "gpp_maybe",
+    badgeClass: "bg-amber-500/15 text-amber-300 border-amber-500/30",
+    discClass:
+      "bg-gradient-to-br from-amber-400 via-amber-500 to-orange-600 shadow-[0_0_28px_rgba(245,158,11,0.35)]",
+    iconClass: "text-white drop-shadow-[0_0_10px_rgba(245,158,11,0.55)]",
   },
   unprotected: {
-    ...RED_PALETTE,
     headlineKey: "clawkeep.status.unprotected",
     subheadKey: "clawkeep.status.unprotectedSub",
     badgeKey: "clawkeep.badge.unprotected",
     iconName: "gpp_bad",
+    badgeClass: "bg-red-500/15 text-red-300 border-red-500/30",
+    discClass:
+      "bg-gradient-to-br from-red-400 via-red-500 to-rose-600 shadow-[0_0_28px_rgba(239,68,68,0.35)]",
+    iconClass: "text-white drop-shadow-[0_0_10px_rgba(239,68,68,0.55)]",
   },
 };
 
@@ -1330,14 +1247,19 @@ function DashboardCard({
   onOpenRestore,
   onResetStuck,
   busyKind,
+  nowMs,
 }: {
   status: ClawKeepStatus;
   onBackup: (label?: string) => void;
   onOpenRestore: () => void;
   onResetStuck: () => void;
   busyKind: "backup" | "restore" | null;
+  /** The window's shared clock — see ClawKeepApp. Passed in so the verdict and
+   *  the "when" printed beside it cannot be drawn from two different reads. */
+  nowMs: number;
 }) {
   const { t } = useT();
+  const agent = agentLabelFor(status.agent);
   // Optional "Name this backup" field for the manual run — passed to the
   // daemon as the snapshot label. Cleared after we hand it off.
   const [backupName, setBackupName] = useState("");
@@ -1356,18 +1278,35 @@ function DashboardCard({
     );
   }
 
-  const disabled = !status.daemonInstalled || !status.openclawInstalled;
+  const disabled = !status.daemonInstalled || !archiverReady(status);
   // No snapshots → restore nothing. Hide rather than offer an action that's
   // guaranteed to be empty.
   const canRestore = !disabled && status.snapshotCount > 0;
 
-  const state = deriveProtection(status);
-  const copy = COPY_BY_STATE[state];
+  const protection = deriveProtection(status, nowMs);
+  const copy = COPY_BY_STATE[protection.state];
+  // A backup that simply aged out needs its own sentence: the generic "your
+  // last backup didn't complete" is wrong when the last one completed fine
+  // and nothing has run since.
+  const subheadKey = protection.reason === "stale"
+    ? "clawkeep.status.staleSub"
+    : protection.reason === "blocked"
+    ? "clawkeep.status.blockedSub"
+    // A green shield over a box with auto-backup off is the truth about the
+    // snapshot in the cloud and silence about what happens next. Nothing will
+    // make a newer one, and the window that called this box protected is the
+    // no-schedule week rather than the cadence it used to keep — so one click
+    // on the switch turns a five-day-stale nightly box green. The verdict is
+    // deliberately left alone (judging a box its owner took off auto-backup
+    // against the cadence they abandoned would cry wolf at every manual box);
+    // what changes is that the card stops saying "safe, the works" and says
+    // how old the backup is and that nothing is scheduled.
+    : protection.state === "protected" && !status.schedule?.enabled
+    ? "clawkeep.status.protectedOffSub"
+    : copy.subheadKey;
 
   return (
-    <div
-      className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-12 pb-8`}
-    >
+    <div className={`${CARD} relative flex flex-col items-center text-center pt-8 pb-6`}>
       {/* Status badge top-right — small, clean, antivirus-style */}
       <div
         className={`absolute top-3 right-3 px-2 py-0.5 rounded-full border text-[10px] font-semibold tracking-wider ${copy.badgeClass}`}
@@ -1375,52 +1314,36 @@ function DashboardCard({
         {t(copy.badgeKey)}
       </div>
 
-      {/* Halo glow behind the shield */}
+      {/* The shield itself — one disc with a slow breathe; the halo and the
+          radiating rings that used to surround it were the only decoration of
+          their kind on the desktop. */}
       <div
-        aria-hidden="true"
-        className={`pointer-events-none absolute top-0 left-1/2 -translate-x-1/2 w-80 h-80 ${copy.haloClass} blur-3xl opacity-70`}
-      />
-
-      {/* The shield itself */}
-      <div className="relative w-44 h-44 flex items-center justify-center mb-4">
-        {/* Two outward-radiating rings — staggered so a wave is always mid-flight */}
-        <div
+        className={`clawkeep-shield-breathe relative w-20 h-20 rounded-full flex items-center justify-center ${copy.discClass}`}
+      >
+        <span
+          className={`material-symbols-rounded ${copy.iconClass}`}
+          style={{ fontSize: 44, fontVariationSettings: "'FILL' 1, 'wght' 600, 'GRAD' 0" }}
           aria-hidden="true"
-          className={`clawkeep-shield-ring absolute inset-0 rounded-full border-2 ${copy.ringClass}`}
-        />
-        <div
-          aria-hidden="true"
-          className={`clawkeep-shield-ring-delayed absolute inset-0 rounded-full border-2 ${copy.ringClass}`}
-        />
-        {/* Solid disc with a slow breathe */}
-        <div
-          className={`clawkeep-shield-breathe relative w-32 h-32 rounded-full flex items-center justify-center ${copy.discClass}`}
         >
-          <span
-            className={`material-symbols-rounded ${copy.iconClass}`}
-            style={{ fontSize: 76, fontVariationSettings: "'FILL' 1, 'wght' 600, 'GRAD' 0" }}
-            aria-hidden="true"
-          >
-            {copy.iconName}
-          </span>
-        </div>
+          {copy.iconName}
+        </span>
       </div>
 
-      <h2 className="relative text-3xl font-bold font-display mt-2">{t(copy.headlineKey)}</h2>
-      <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {t(copy.subheadKey)}
+      <h2 className="relative text-lg font-semibold text-[var(--text-primary)] mt-4">{t(copy.headlineKey)}</h2>
+      <p className="relative mt-1 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
+        {t(subheadKey, { agent, when: timeAgo(status.lastBackupAtMs, t, nowMs) })}
       </p>
 
       {/* Stats strip — compact, equal-width, no card chrome to keep the eye on the shield */}
-      <div className="relative mt-6 grid grid-cols-3 gap-6 w-full max-w-md text-center">
-        <Stat label={t("clawkeep.stat.lastBackup")} value={timeAgo(status.lastBackupAtMs, t)} />
+      <div className="relative mt-5 grid grid-cols-3 gap-6 w-full max-w-md text-center">
+        <Stat label={t("clawkeep.stat.lastBackup")} value={timeAgo(status.lastBackupAtMs, t, nowMs)} />
         <Stat label={t("clawkeep.stat.cloudUsage")} value={formatBytes(status.cloudBytes)} />
         <Stat label={t("clawkeep.stat.snapshots")} value={status.snapshotCount.toString()} />
       </div>
 
       {/* Optional name for this backup → becomes the snapshot's label */}
       {!disabled && (
-        <div className="relative mt-6 w-full max-w-xs">
+        <div className="relative mt-5 w-full max-w-xs">
           <label
             htmlFor="clawkeep-backup-name"
             className="block text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1"
@@ -1434,28 +1357,28 @@ function DashboardCard({
             maxLength={120}
             onChange={(e) => setBackupName(e.target.value)}
             placeholder={t("clawkeep.backup.namePlaceholder")}
-            className="w-full px-3 py-2 rounded-lg bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-emerald-500/50"
+            className={`${FIELD} w-full text-sm placeholder:text-[var(--text-muted)]/60`}
           />
         </div>
       )}
 
       {/* Action row */}
-      <div className="relative mt-5 flex flex-wrap items-center justify-center gap-3">
+      <div className="relative mt-4 flex flex-wrap items-center justify-center gap-2">
         <button
           type="button"
           onClick={() => onBackup(backupName)}
           disabled={disabled}
-          className={`px-6 py-2.5 rounded-full ${copy.primaryClass} disabled:opacity-50 text-white text-sm font-semibold shadow-lg transition-colors cursor-pointer`}
+          className={BTN_PRIMARY}
         >
-          {state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw")}
+          {protection.state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw", { agent })}
         </button>
         {canRestore && (
           <button
             type="button"
             onClick={onOpenRestore}
-            className="px-6 py-2.5 rounded-full border border-white/15 bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] hover:border-white/25 transition-colors cursor-pointer flex items-center gap-1.5"
+            className={BTN_SECONDARY}
           >
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
               cloud_download
             </span>
             {t("clawkeep.restoreFromSnapshot")}
@@ -1466,43 +1389,128 @@ function DashboardCard({
   );
 }
 
-function EditionUnavailableCard() {
+/**
+ * What travels in a snapshot from THIS box, and the warning that goes with it.
+ *
+ * Behind a question mark beside the title rather than a card of its own: the
+ * owner asked for the list to stay out of the way until asked for. It is
+ * still rendered rather than left implicit because the archive holds the
+ * box's provider keys: the customer is entitled to know that before they
+ * schedule a nightly upload, and to know it again before they hand a restore
+ * file to anyone. The list is per-edition and comes from `backupSourceFor`,
+ * whose Hermes half is pinned by test to the archiver's own asset list — so
+ * this can never drift into describing a backup we do not actually make.
+ */
+function BackupContentsInfo({ status }: { status: ClawKeepStatus }) {
   const { t } = useT();
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const source = backupSourceFor(status.agent === "hermes" ? "hermes" : "openclaw");
+
+  // A click anywhere else, or Escape, closes it — the same manners as the
+  // desktop's own menus.
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   return (
-    <div className={`${CARD} space-y-2`}>
-      <div className="flex items-center gap-2">
-        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">
-          cloud_off
-        </span>
-        <h2 className="font-semibold text-[var(--text-primary)]">{t("clawkeep.edition.unsupportedTitle")}</h2>
-      </div>
-      <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
-        {t("clawkeep.edition.unsupportedBody")}
-      </p>
+    <div ref={rootRef} className="shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label={t("clawkeep.contents.show")}
+        title={t("clawkeep.contents.show")}
+        data-testid="clawkeep-contents-toggle"
+        className={`inline-flex h-6 w-6 items-center justify-center rounded-full border text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors cursor-pointer ${open ? "border-white/25 bg-white/[0.06]" : "border-white/15"}`}
+      >
+        <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">question_mark</span>
+      </button>
+      {open && (
+        <div
+          role="dialog"
+          aria-label={t("clawkeep.contents.title")}
+          data-testid="clawkeep-contents-popover"
+          className="absolute left-0 top-full z-30 mt-2 w-full max-w-[22rem] rounded-xl border border-white/10 bg-[var(--bg-elevated)] p-4 shadow-2xl space-y-2"
+        >
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
+              inventory_2
+            </span>
+            <h2 className="text-sm font-semibold text-[var(--text-primary)]">
+              {t("clawkeep.contents.title")}
+            </h2>
+          </div>
+          <ul className="text-sm text-[var(--text-secondary)] space-y-1 list-disc list-inside">
+            {source.includesKeys.map((key) => <li key={key}>{t(key)}</li>)}
+          </ul>
+          {source.excludesKeys.length > 0 && (
+            <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+              {t("clawkeep.contents.excludes")}{" "}
+              {source.excludesKeys.map((key) => t(key)).join("; ")}.
+            </p>
+          )}
+          {status.backupContainsCredentials !== false && (
+            <p className="text-xs text-amber-200/90 leading-relaxed">
+              🔒 {t("clawkeep.contents.credentialWarning")}
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
+
+/** The one install command this card may print — see the note in SystemCard. */
+const OPENCLAW_INSTALL_COMMAND = "sudo bash ~/clawbox/install.sh --step openclaw_install";
 
 function SystemCard({ status }: { status: ClawKeepStatus }) {
   const { t } = useT();
   return (
     <div className={`${CARD} space-y-2 border-amber-500/20 bg-amber-500/5`}>
-      <h2 className="font-semibold text-amber-200">⚙️ {t("clawkeep.system.setupNeeded")}</h2>
+      <h2 className="text-sm font-semibold text-amber-200">⚙️ {t("clawkeep.system.setupNeeded")}</h2>
       <ul className="text-sm text-amber-100 space-y-1">
-        {!status.openclawInstalled && (
+        {/* Only on the edition that HAS a separate CLI. On Hermes the archiver
+            ships inside the daemon, so telling the owner to
+            `npm install -g openclaw` would be an instruction that contradicts
+            their SKU and fixes nothing.
+
+            THE DEVICE'S OWN STEP, never a bare `npm install -g openclaw`. The
+            distro npm's default prefix is /usr, so the bare command fails
+            EACCES as the box's user and, retried with sudo, leaves a SECOND
+            root-owned core at /usr/bin/openclaw that no update ever moves —
+            the core the web server then ran instead of the managed one
+            (2026-09-18, "Credential migration failed"). Adding `--prefix
+            ~/.npm-global` would land in the right place with the wrong core:
+            npm's `latest`, not the PIN, under a gateway that restarts into it
+            within seconds, which the next update then downgrades over state a
+            newer core migrated — the same failure in time rather than in
+            space. `openclaw_install` installs the pinned core, staged and
+            gated, into the prefix the gateway runs. */}
+        {status.agent !== "hermes" && !status.openclawInstalled && (
           <li>
-            <code className="bg-black/30 px-1 rounded">openclaw</code>{" "}
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">openclaw</code>{" "}
             {t("clawkeep.system.notOnPath")}{" "}
-            <code className="bg-black/30 px-1 rounded">npm install -g openclaw</code>.
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">{OPENCLAW_INSTALL_COMMAND}</code>.
           </li>
         )}
         {!status.daemonInstalled && (
           <li>
-            <code className="bg-black/30 px-1 rounded">clawkeepd</code>{" "}
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">clawkeepd</code>{" "}
             {t("clawkeep.system.notOnPathFrom")}{" "}
-            <code className="bg-black/30 px-1 rounded">clawbox/clawkeep</code>{" "}
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">clawbox/clawkeep</code>{" "}
             {t("clawkeep.system.run")}{" "}
-            <code className="bg-black/30 px-1 rounded">pip install --user .</code>.
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">pip install --user .</code>.
           </li>
         )}
       </ul>
@@ -1510,35 +1518,26 @@ function SystemCard({ status }: { status: ClawKeepStatus }) {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  // Wrapper div is load-bearing — each `<Stat>` is one cell of a 3-col grid.
-  return (
-    <div>
-      <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{label}</div>
-      <div className="mt-1 text-base font-semibold text-gray-100 truncate">{value}</div>
-    </div>
-  );
-}
-
 function BackupResultCard({ result }: { result: BackupResponse }) {
   const { t } = useT();
-  const tail = result.stderrTail || result.stdoutTail || t("clawkeep.result.noOutput");
+  const tail = result.stdoutTail || result.stderrTail || t("clawkeep.result.noOutput");
   return (
-    <div
-      className={`${CARD} ${
-        result.ok ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/30 bg-red-500/5"
-      }`}
-    >
-      <h2 className="font-semibold">
-        {result.ok
-          ? t("clawkeep.result.backupOk")
-          : t("clawkeep.result.backupFailed", { code: result.exitCode })}
-      </h2>
-      <pre className="mt-2 text-[11px] font-mono text-gray-200/90 whitespace-pre-wrap max-h-48 overflow-auto bg-black/30 p-2 rounded">
+    <div className={`${CARD} border-emerald-500/30 bg-emerald-500/5`}>
+      <h2 className="font-semibold">{t("clawkeep.result.backupOk")}</h2>
+      <pre className="mt-2 text-[11px] font-mono text-gray-200/90 whitespace-pre-wrap max-h-48 overflow-auto bg-[var(--bg-elevated)] p-2 rounded">
         {tail}
       </pre>
     </div>
   );
+}
+
+/** The unit named by the first restart entry (`"<unit>: <detail>"`), so the
+ *  remedy — or the "still coming back" line — names the one that is actually
+ *  involved rather than a guess that is wrong on half the fleet. Falls back to
+ *  the OpenClaw unit only when the string is not in the expected shape. */
+function restartUnit(entries: string[]): string {
+  const unit = entries[0]?.split(":")[0]?.trim();
+  return unit && unit.length > 0 ? unit : "clawbox-gateway.service";
 }
 
 function RestoreResultCard({ result }: { result: RestoreResponse }) {
@@ -1548,7 +1547,7 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
       <h2 className="font-semibold">{t("clawkeep.result.restoreOk")}</h2>
       <p className="text-sm text-[var(--text-muted)]">
         {t("clawkeep.result.restoredPrefix")}{" "}
-        <code className="bg-black/30 px-1 rounded">{result.archive}</code>{" "}
+        <code className="bg-[var(--bg-elevated)] px-1 rounded">{result.archive}</code>{" "}
         ({formatBytes(result.archiveBytes)}).
       </p>
       <ul className="text-xs space-y-1">
@@ -1566,8 +1565,34 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
       {result.restartErrors.length > 0 && (
         <p className="text-xs text-amber-300">
           ⚠️ {t("clawkeep.result.restartFailed", { count: result.restartErrors.length })}{" "}
-          <code className="bg-black/30 px-1 rounded">sudo systemctl restart clawbox-gateway</code>{" "}
+          {/* The unit is READ OFF the failure, not hardcoded. Each entry is
+              `<unit>: <detail>`, and which unit holds the restored state is
+              per-edition — `clawbox-gateway` does not exist on Hermes, so
+              printing it there told the owner to run a command that cannot
+              work. Naming the unit that actually failed cannot drift. */}
+          <code className="bg-[var(--bg-elevated)] px-1 rounded">
+            sudo systemctl restart {restartUnit(result.restartErrors)}
+          </code>{" "}
           {t("clawkeep.result.manually")}
+        </p>
+      )}
+      {(result.restartPending?.length ?? 0) > 0 && (
+        <p className="text-xs text-[var(--text-muted)]" data-testid="clawkeep-restart-pending">
+          {/* No ⚠️ and no command. The unit WAS restarted; it is re-reading the
+              state files this restore just wrote, which is the slowest start
+              this box performs. The manual `systemctl restart` the failure
+              line prints would kill it mid-start and, repeated, trip
+              StartLimitBurst — so the one thing this line must never do is
+              read like that one. */}
+          {t("clawkeep.result.restartPending", { unit: restartUnit(result.restartPending!) })}
+        </p>
+      )}
+      {(result.skippedMembers?.length ?? 0) > 0 && (
+        <p className="text-xs text-amber-300">
+          {/* A restore that could not recreate part of the archive is NOT a
+              clean success. Saying so here is the whole point of carrying
+              `skippedMembers` out of the daemon. */}
+          ⚠️ {t("clawkeep.result.skipped", { count: result.skippedMembers!.length })}
         </p>
       )}
     </div>
@@ -1594,10 +1619,13 @@ function RestoreModal({
   onClose,
   onPick,
   onError,
+  agent,
 }: {
   onClose: () => void;
   onPick: (name: string) => void;
   onError: (msg: string) => void;
+  /** Which agent this box archives — decides where "moved aside to" points. */
+  agent: "openclaw" | "hermes";
 }) {
   const { t } = useT();
   const [snapshots, setSnapshots] = useState<CloudSnapshot[] | null>(null);
@@ -1694,30 +1722,27 @@ function RestoreModal({
     }
   }, [load]);
 
-  // Esc closes the modal — basic dialog hygiene; the click-on-backdrop
-  // handler covers the mouse path.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Use the desktop's shared capture-phase trap so Escape closes only this
+  // picker, never the chat behind it, and focus cannot reach live-state actions
+  // outside the dialog. Restore focus to the trigger when the picker closes.
+  const panelRef = useModalDialog<HTMLDivElement>({ onClose });
 
   return (
+    <ClawKeepModalPortal>
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("clawkeep.restoreModal.aria")}
+      className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-xl rounded-2xl border border-white/10 bg-[#0d1117] shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("clawkeep.restoreModal.aria")}
+        className="w-full max-w-xl rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <header className="relative px-6 pt-6 pb-4 border-b border-white/5">
+        <header className="relative px-6 pt-6 pb-4 border-b border-[var(--border-subtle)]">
           <div
             aria-hidden="true"
             className="pointer-events-none absolute -top-16 -right-16 w-56 h-56 bg-[radial-gradient(circle,rgba(16,185,129,0.18),transparent_70%)] blur-2xl"
@@ -1759,7 +1784,7 @@ function RestoreModal({
             <div className="py-12 flex flex-col items-center gap-3 text-sm text-[var(--text-muted)]">
               <div
                 aria-hidden="true"
-                className="w-8 h-8 rounded-full border-2 border-white/10 border-t-emerald-400 animate-spin"
+                className="w-8 h-8 rounded-full border-2 border-[var(--border-subtle)] border-t-emerald-400 animate-spin"
               />
               <span>{t("clawkeep.restoreModal.fetching")}</span>
             </div>
@@ -1793,10 +1818,10 @@ function RestoreModal({
                 return (
                   <li
                     key={s.name}
-                    className="rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3"
+                    className="rounded-xl border border-[var(--border-subtle)] bg-white/[0.02] px-4 py-3"
                   >
                     <div className="flex items-center gap-3">
-                      <div className="shrink-0 w-10 h-10 rounded-lg bg-white/[0.04] border border-white/5 flex items-center justify-center">
+                      <div className="shrink-0 w-10 h-10 rounded-lg bg-white/[0.04] border border-[var(--border-subtle)] flex items-center justify-center">
                         <span
                           className={`material-symbols-rounded ${locked ? "text-amber-300" : "text-[var(--text-muted)]"}`}
                           style={{ fontSize: 20, fontVariationSettings: "'FILL' 1" }}
@@ -1819,7 +1844,7 @@ function RestoreModal({
                                 if (e.key === "Escape") setEditing(null);
                               }}
                               placeholder={t("clawkeep.snapshot.renamePlaceholder")}
-                              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
                             />
                             <button
                               type="button"
@@ -1832,7 +1857,7 @@ function RestoreModal({
                             <button
                               type="button"
                               onClick={() => setEditing(null)}
-                              className="shrink-0 px-2.5 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 cursor-pointer"
+                              className="shrink-0 px-2.5 py-1.5 rounded-md border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] hover:bg-white/5 cursor-pointer"
                             >
                               {t("clawkeep.cancel")}
                             </button>
@@ -1857,18 +1882,24 @@ function RestoreModal({
                                 </span>
                               )}
                             </div>
-                            <div className="mt-0.5 text-[11px] text-[var(--text-muted)] flex items-center gap-2">
+                            <div className="mt-0.5 text-[11px] text-[var(--text-muted)] flex items-center gap-2 min-w-0">
                               {/* When a custom label is shown above, surface the
-                                  timestamp here so the user still sees when it ran. */}
+                                  timestamp here so the user still sees when it ran.
+                                  It is the one part of this line that can be long
+                                  (a name the parser does not recognise is shown
+                                  whole), so it is the part that gives way: the
+                                  size and the age stay on one line, or "7.8 MB"
+                                  and "2d ago" break into two-line columns beside
+                                  a wrapped filename. */}
                               {s.label && s.label.trim() && (
                                 <>
-                                  <span>{timestampLabel}</span>
-                                  <span aria-hidden="true">·</span>
+                                  <span className="min-w-0 truncate" title={timestampLabel}>{timestampLabel}</span>
+                                  <span aria-hidden="true" className="shrink-0">·</span>
                                 </>
                               )}
-                              <span>{formatBytes(s.size_bytes)}</span>
-                              <span aria-hidden="true">·</span>
-                              <span>{timeAgo(s.last_modified_ms, t)}</span>
+                              <span className="shrink-0 whitespace-nowrap">{formatBytes(s.size_bytes)}</span>
+                              <span aria-hidden="true" className="shrink-0">·</span>
+                              <span className="shrink-0 whitespace-nowrap">{timeAgo(s.last_modified_ms, t)}</span>
                             </div>
                           </>
                         )}
@@ -1893,7 +1924,7 @@ function RestoreModal({
                           onClick={() =>
                             setEditing({ name: s.name, text: s.label && s.label.trim() ? s.label : "" })
                           }
-                          className="px-3 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
+                          className="px-3 py-1.5 rounded-md border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
                         >
                           {t("clawkeep.snapshot.rename")}
                         </button>
@@ -1901,7 +1932,7 @@ function RestoreModal({
                           type="button"
                           disabled={rowBusy}
                           onClick={() => void doToggleLock(s)}
-                          className="px-3 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
+                          className="px-3 py-1.5 rounded-md border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
                         >
                           {locked ? t("clawkeep.snapshot.unlock") : t("clawkeep.snapshot.lock")}
                         </button>
@@ -1918,7 +1949,7 @@ function RestoreModal({
                             <button
                               type="button"
                               onClick={() => setConfirmDelete(null)}
-                              className="px-3 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 cursor-pointer"
+                              className="px-3 py-1.5 rounded-md border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] hover:bg-white/5 cursor-pointer"
                             >
                               {t("clawkeep.cancel")}
                             </button>
@@ -1943,17 +1974,24 @@ function RestoreModal({
           )}
         </div>
 
-        <footer className="px-6 py-3 border-t border-white/5 bg-white/[0.02] text-[11px] text-[var(--text-muted)] flex items-center gap-2">
+        <footer className="px-6 py-3 border-t border-[var(--border-subtle)] bg-white/[0.02] text-[11px] text-[var(--text-muted)] flex items-center gap-2">
           <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
             info
           </span>
           <span>
             {t("clawkeep.restoreModal.footerPrefix")}{" "}
-            <code className="bg-black/40 px-1 rounded">~/.openclaw.bak-restore-*</code>.
+            {/* Per-edition: a Hermes box has no `~/.openclaw`, and this is the
+                one line a customer reads if a restore goes wrong. */}
+            {/* One expression, not `{...}/*...`: a `/*` sitting in JSX children
+                right after a closing brace opens a comment. */}
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">
+              {`${backupSourceFor(agent).stateDir}/*.bak-restore-*`}
+            </code>.
           </span>
         </footer>
       </div>
     </div>
+    </ClawKeepModalPortal>
   );
 }
 
@@ -1985,18 +2023,7 @@ function SetPassphraseModal({
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
-  // Esc cancels the modal (consistent with ConfirmDialog and RestoreModal).
-  // Skip while a save is in flight so the user can't half-cancel a request.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !submitting) {
-        e.preventDefault();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel, submitting]);
+  const panelRef = useModalDialog<HTMLFormElement>({ onClose: () => { if (!submitting) onCancel(); } });
 
   const canSubmit =
     pw.length >= 8 && pw === confirm && acknowledged && !submitting;
@@ -2030,10 +2057,15 @@ function SetPassphraseModal({
   };
 
   return (
+    <ClawKeepModalPortal>
     <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
       <form
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("clawkeep.encryption.setTitle")}
         onSubmit={submit}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl"
+        className="max-h-[calc(100dvh-2rem)] overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
       >
         <h2 className="text-base font-semibold text-white mb-1">
           {t("clawkeep.encryption.setTitle")}
@@ -2067,7 +2099,7 @@ function SetPassphraseModal({
           autoFocus
           autoComplete="new-password"
           aria-describedby="clawkeep-passphrase-hint"
-          className="w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
+          className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
           placeholder={t("clawkeep.encryption.passphrasePlaceholder")}
         />
         {/* Live "min length" feedback. Mirrors the canSubmit gate so the
@@ -2097,7 +2129,7 @@ function SetPassphraseModal({
           value={confirm}
           onChange={(e) => setConfirm(e.target.value)}
           autoComplete="new-password"
-          className="w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
+          className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
           placeholder={t("clawkeep.encryption.confirmPlaceholder")}
         />
         {confirm.length > 0 && pw !== confirm && (
@@ -2128,6 +2160,7 @@ function SetPassphraseModal({
           <button
             type="button"
             onClick={onCancel}
+            disabled={submitting}
             className="px-3 py-1.5 rounded-md text-xs font-medium text-white/70 bg-white/5 hover:bg-white/10 cursor-pointer"
           >
             {t("clawkeep.cancel")}
@@ -2142,6 +2175,7 @@ function SetPassphraseModal({
         </div>
       </form>
     </div>
+    </ClawKeepModalPortal>
   );
 }
 
@@ -2168,20 +2202,7 @@ function RestorePassphraseModal({
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(initialError ?? null);
 
-  // Esc cancels the modal (consistent with ConfirmDialog/RestoreModal).
-  // Skip while a decrypt+restore is in flight — interrupting via Esc
-  // wouldn't actually abort the underlying CLI subprocess and would
-  // leave the user thinking they cancelled when they didn't.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !submitting) {
-        e.preventDefault();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel, submitting]);
+  const panelRef = useModalDialog<HTMLFormElement>({ onClose: () => { if (!submitting) onCancel(); } });
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2200,10 +2221,15 @@ function RestorePassphraseModal({
   const descSuffix = t("clawkeep.encryption.enterDescriptionSuffix");
 
   return (
+    <ClawKeepModalPortal>
     <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
       <form
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("clawkeep.encryption.enterTitle")}
         onSubmit={submit}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl"
+        className="max-h-[calc(100dvh-2rem)] overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
       >
         <h2 className="text-base font-semibold text-white mb-1">
           {t("clawkeep.encryption.enterTitle")}
@@ -2218,7 +2244,7 @@ function RestorePassphraseModal({
           onChange={(e) => setPw(e.target.value)}
           autoFocus
           autoComplete="off"
-          className="w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
+          className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
           placeholder={t("clawkeep.encryption.passphraseLabel")}
         />
         {err && <p className="mt-2 text-xs text-red-300">{err}</p>}
@@ -2248,5 +2274,6 @@ function RestorePassphraseModal({
         </div>
       </form>
     </div>
+    </ClawKeepModalPortal>
   );
 }

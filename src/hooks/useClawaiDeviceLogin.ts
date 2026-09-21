@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClawaiTier } from "@/lib/clawbox-ai-tiers";
+import { humanizeApiError } from "@/lib/api-error-message";
 
 // ClawBox AI device-authorisation state machine (RFC 8628 style), lifted out of
 // AIModelsStep so the OpenClaw wizard and the Hermes provider panel run the
@@ -19,7 +20,13 @@ export interface ClawaiDeviceLoginOptions {
   onBusyChange?: (busy: boolean) => void;
   /** Token landed; the device is finishing configuration. */
   onConfiguring?: () => void;
-  onComplete: () => void;
+  /**
+   * The save landed. `warning` is what it could NOT do — the configure route's
+   * own sentence, carried through the session record because the configure
+   * runs off the request that started it — and a host that renders a warning
+   * shows that instead of a plain success.
+   */
+  onComplete: (warning?: string) => void;
   onError: (message: string) => void;
 }
 
@@ -89,12 +96,15 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
-      const data = await response.json().catch(() => ({})) as { status?: string; error?: string };
+      // `unknown` on `error`, deliberately: the poll route relays a failure
+      // raised four hops upstream, and the type here was never a guarantee
+      // about what is in the field — only about what this file expected.
+      const data = await response.json().catch(() => ({})) as { status?: string; error?: unknown; warning?: unknown };
 
       if (data.status === "complete") {
         stop();
         cbRef.current.onBusyChange?.(false);
-        cbRef.current.onComplete();
+        cbRef.current.onComplete(typeof data.warning === "string" && data.warning.trim() ? data.warning : undefined);
         return;
       }
       if (data.status === "configuring") {
@@ -113,7 +123,7 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
         stop();
         cbRef.current.onBusyChange?.(false);
         setDeviceCode(null);
-        cbRef.current.onError(data.error || "ClawBox AI authorisation failed");
+        cbRef.current.onError(humanizeApiError(data.error, "ClawBox AI authorisation failed"));
         return;
       }
       // Pending (or a transient upstream blip): schedule the next tick.
@@ -147,8 +157,8 @@ export function useClawaiDeviceLogin(options: ClawaiDeviceLoginOptions): ClawaiD
       });
       if (controller.signal.aborted) return;
       if (!response.ok) {
-        const data = await response.json().catch(() => ({})) as { error?: string };
-        throw new Error(typeof data.error === "string" ? data.error : "Failed to start ClawBox AI authorisation");
+        const data = await response.json().catch(() => ({})) as { error?: unknown };
+        throw new Error(humanizeApiError(data.error, "Failed to start ClawBox AI authorisation"));
       }
       const data = await response.json() as { user_code?: string; verification_url?: string; interval?: number };
       if (!data.user_code || !data.verification_url) {

@@ -16,6 +16,8 @@ import { DATA_DIR } from "@/lib/config-store";
 
 export const CHPASSWD_INPUT_PATH = path.join(DATA_DIR, ".chpasswd-input");
 export const CHPASSWD_SERVICE_NAME = "clawbox-root-update@chpasswd.service";
+/** The step name behind that unit, for `startRootStep()`. */
+export const CHPASSWD_STEP = "chpasswd";
 
 // POSIX-portable username (useradd's default policy). The username reaches us
 // via env vars (CLAWBOX_USER/SUDO_USER/USER), so validate before composing

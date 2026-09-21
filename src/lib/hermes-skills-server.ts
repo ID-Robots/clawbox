@@ -22,21 +22,64 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { NextResponse } from 'next/server';
+import { matchRemovableSkill } from '@/lib/hermes-skills';
 import type { InstalledHermesSkill, ScanFinding, SkillOrigin } from '@/lib/hermes-skills';
 import { parseSkillFrontmatter, type SkillFrontmatter } from '@/lib/hermes-skill-frontmatter';
+import { removeSkillDir } from '@/lib/hermes-skill-manifest';
 import { getActiveHarness } from '@/lib/harness';
+import { hermesConfigGet } from '@/lib/hermes-config-cache';
+import { isValidSkillName, MAX_FACET_SELECTION, REQUEST_REFUSAL } from '@/lib/hermes-skills';
 
 /**
  * Defense-in-depth gate for the skills-store routes: the store is a Hermes
  * feature, so refuse when the active harness isn't Hermes. Returns a 404
  * response to return early, or null to proceed. (On a dual box Hermes is
  * installed, so without this the CLI would run even with the store UI hidden.)
+ *
+ * The body carries `code: 'not_hermes'` so a machine caller can tell this 404
+ * apart from the ones the handlers themselves raise for an id they could not
+ * find. Both are 404 with a JSON `error` string, and the MCP's generic mapping
+ * reads any such body as "the id was wrong" — advice that sends the agent
+ * round the same guard again, since every skills route sits behind it. The
+ * status and the human-readable string are unchanged: the browser and
+ * `src/middleware.ts` see exactly what they saw before.
  */
 export async function hermesSkillsGuard(): Promise<NextResponse | null> {
   if ((await getActiveHarness()) !== 'hermes') {
-    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    return NextResponse.json({ error: 'Not found', code: 'not_hermes' }, { status: 404 });
   }
   return null;
+}
+
+/**
+ * The refusal a skills route answers when the CALLER's input is wrong.
+ *
+ * One shape for all of them, so a client can branch on the code and name the
+ * field instead of string-matching the sentence. The sentence itself stays
+ * exactly what it was — the browser's fallback, and the log's — and never
+ * carries a value the caller sent, so a rejected input cannot be echoed back
+ * into the page.
+ */
+export function invalidArgument(field: string, error: string): NextResponse {
+  return NextResponse.json({ error, code: REQUEST_REFUSAL.invalidArgument, field }, { status: 400 });
+}
+
+/**
+ * Its sibling for the one refusal that is not a bad value but too many good
+ * ones. Separate because the remedy is: untick one, not correct one — and
+ * because the rail renders up to MAX_FACET_VALUES options per group while the
+ * route accepts MAX_FACET_SELECTION, so the owner can reach it by clicking.
+ */
+export function tooManyFacets(field: string): NextResponse {
+  return NextResponse.json(
+    {
+      error: `Too many ${field} filters — at most ${MAX_FACET_SELECTION} at a time.`,
+      code: REQUEST_REFUSAL.tooManyFacets,
+      field,
+      limit: MAX_FACET_SELECTION,
+    },
+    { status: 400 },
+  );
 }
 
 export const HERMES_HOME =
@@ -75,15 +118,79 @@ interface HubLock {
   installed?: Record<string, HubLockEntry>;
 }
 
-/** Read the authoritative hub lock file. Missing/unparsable → empty. */
-export async function readHubLock(): Promise<Record<string, HubLockEntry>> {
+/**
+ * Read the authoritative hub lock file, keeping "could not read it" apart from
+ * "it lists nothing".
+ *
+ * The same distinction `pathState` below makes, for the same reason. A lock
+ * that is missing, truncated, mid-write, EACCES or EIO carries no information
+ * about what is installed, and a caller that reads it as an empty lock
+ * concludes that everything was removed. That is survivable behind a clean
+ * `exit 0`; it is not behind a SIGKILL, where a partial write is exactly what
+ * a deadline lands in the middle of.
+ */
+export async function readHubLockState(): Promise<
+  { ok: true; installed: Record<string, HubLockEntry> } | { ok: false }
+> {
+  let raw: string;
   try {
-    const raw = await fs.readFile(HUB_LOCK_PATH, 'utf8');
-    const parsed = JSON.parse(raw) as HubLock;
-    return parsed && typeof parsed.installed === 'object' && parsed.installed ? parsed.installed : {};
-  } catch {
-    return {};
+    raw = await fs.readFile(HUB_LOCK_PATH, 'utf8');
+  } catch (err) {
+    // ENOENT is the only one that proves a lock does not exist — a device with
+    // no store installs. Everything else is the file refusing to be read.
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, installed: {} };
+    return { ok: false };
   }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    // `typeof [] === 'object'`, so the array check is not pedantry: a lock that
+    // parsed as an array would otherwise be read as a readable one with no
+    // entries — the very "unreadable means everything went" answer this
+    // function exists to refuse.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false };
+    const installed = (parsed as HubLock).installed;
+    if (installed === undefined) return { ok: true, installed: {} };
+    if (!installed || typeof installed !== 'object' || Array.isArray(installed)) return { ok: false };
+    return { ok: true, installed };
+  } catch {
+    // Truncated or mid-write: the one shape that used to read as "empty".
+    return { ok: false };
+  }
+}
+
+/**
+ * The lenient wrapper every existing caller uses: missing/unparsable → empty.
+ * Correct wherever an unreadable lock and an empty one lead to the same safe
+ * action (listing nothing, or reporting nothing installed) — and NOT correct
+ * where the emptiness is taken as evidence that a removal happened; those
+ * callers ask `readHubLockState` instead.
+ */
+export async function readHubLock(): Promise<Record<string, HubLockEntry>> {
+  const state = await readHubLockState();
+  return state.ok ? state.installed : {};
+}
+
+/**
+ * The lock entry stored under exactly `key` in a lock ALREADY READ, or
+ * undefined.
+ *
+ * Every lookup into `installed` goes through here because the key is caller
+ * data: a plain `installed[key]` answers '__proto__', 'constructor' and
+ * 'toString' out of Object.prototype even for a lock that lists none of them,
+ * and an inherited member is not an installed skill.
+ *
+ * It takes the lock rather than reading one so a caller can ask about a
+ * SNAPSHOT: the install route reads the lock before the CLI runs, to tell an
+ * entry this request created from one that was already there, and a fresh
+ * `readHubLock()` afterwards would answer about a file the CLI has rewritten.
+ */
+export function hubLockEntry(
+  installed: Record<string, HubLockEntry>,
+  key: string,
+): HubLockEntry | undefined {
+  if (!Object.prototype.hasOwnProperty.call(installed, key)) return undefined;
+  const entry = new Map(Object.entries(installed)).get(key);
+  return entry && typeof entry === 'object' ? entry : undefined;
 }
 
 /** True when a skill matching `name` OR `identifier` is present in the lock. */
@@ -98,14 +205,78 @@ export async function isInHubLock(name: string, identifier?: string): Promise<bo
   return false;
 }
 
+/**
+ * Every lock key whose entry records `identifier`, in lock order.
+ *
+ * Normally 0 or 1: a store id lands under one key. It can be more, because
+ * `/setup-api/hermes/skills/install` passes a caller's `name` through to
+ * `hermes skills install --name`, so one store id can be installed twice under
+ * two keys. Only `resolveLockKey` reads this — it is naming a skill the install
+ * route has just created, so the first is right there. The uninstall side is
+ * deleting and goes through `matchRemovableSkill`, which refuses a tie.
+ */
+function lockKeysForIdentifier(
+  installed: Record<string, HubLockEntry>,
+  identifier: string,
+): string[] {
+  const keys: string[] = [];
+  for (const [key, entry] of Object.entries(installed)) {
+    if (entry.identifier === identifier) keys.push(key);
+  }
+  return keys;
+}
+
 /** Resolve the lock key (the `uninstall` argument) for an identifier or name. */
 export async function resolveLockKey(idOrName: string): Promise<string | null> {
   const lock = await readHubLock();
   if (Object.prototype.hasOwnProperty.call(lock, idOrName)) return idOrName;
-  for (const [key, entry] of Object.entries(lock)) {
-    if (entry.identifier === idOrName) return key;
-  }
-  return null;
+  return lockKeysForIdentifier(lock, idOrName)[0] ?? null;
+}
+
+/**
+ * The lock key an /uninstall argument names — key, store identifier or DISPLAY
+ * name — or the keys it could not be told apart from.
+ *
+ * `hermes skills uninstall` resolves one string and one only: the lock key. The
+ * three that reach this device for a single skill are not always the same
+ * string, and the third one is the only one a customer ever sees. A ClawHub
+ * install lands flat under its slug and records that slug as both the key and
+ * the identifier (pinned by skills-install-clawhub.test.ts's fakeHermes) while its SKILL.md
+ * names it whatever the author wrote: `martin-weather` in the lock, `weather`
+ * on the card. The key and the identifier are the pass `resolveLockKey` makes
+ * for the install route (its `lockName` resolution), on the same scan; the display
+ * name is the one that route has no use for and this one cannot do without.
+ *
+ * Past the exact lock key the tiers are `matchRemovableSkill`'s, the same
+ * function the agent's skill_uninstall applies to the same device state a
+ * moment earlier — literally one rule, so the tool cannot refuse what this
+ * resolves and cannot resolve what this refuses.
+ *
+ * A TIE IS ANSWERED, NEVER BROKEN, across every non-unique key and BETWEEN
+ * them: two entries sharing an identifier, two rows showing one display name,
+ * and one row's identifier equal to another row's display name. This ends in a
+ * delete and nothing in the request says which was meant. An exact lock key is
+ * not a tie — it is a JSON object key, unique by construction — so it settles
+ * the question even when another card shows that same string.
+ *
+ * Only HUB rows are searched by display name, and a builtin sharing that name
+ * does NOT block the hub row: a builtin cannot be removed under any string, so
+ * the removable row is the only actionable reading, and it is the one the
+ * Skills page and skill_uninstall have always acted on. What the caller passed
+ * comes back in `requested` so a client can see that a display name was
+ * resolved. A string nothing hub-installed answers to is returned unchanged, so
+ * the builtin and not-installed answers downstream are what they were.
+ */
+export async function resolveUninstallKey(
+  idOrName: string,
+): Promise<{ key: string } | { ambiguous: string[] }> {
+  const lock = await readHubLock();
+  // The lock itself for tier 1, because it needs no disk walk and an unreadable
+  // lock has to degrade to the pre-F-09 answer (the argument, straight through).
+  if (Object.prototype.hasOwnProperty.call(lock, idOrName)) return { key: idOrName };
+  const match = matchRemovableSkill(await enumerateInstalledSkills(), idOrName);
+  if (match.kind === 'ambiguous') return { ambiguous: match.ids };
+  return { key: match.kind === 'one' ? match.row.id : idOrName };
 }
 
 /**
@@ -123,6 +294,85 @@ export async function readBundledManifestNames(): Promise<Set<string>> {
     }
   } catch {
     /* no manifest → nothing is provably bundled */
+  }
+  return out;
+}
+
+/**
+ * Skill names Hermes has been told NOT to load, from `skills.disabled` (and the
+ * per-platform `skills.platform_disabled` map) in ~/.hermes/config.yaml. The
+ * agent honours these at load time — agent/skill_utils.py:437
+ * `get_disabled_skill_names()`, consumed by skill_commands.py:483 — so a skill
+ * on this list is installed but inert.
+ *
+ * Read through `hermes config get`, which is the same store the CLI writes and
+ * is memoised on config.yaml's mtime, rather than parsing the YAML here: an
+ * earlier attempt at ad-hoc YAML parsing in this repo was reverted for being
+ * order-dependent (see hermes-config-cache.ts).
+ *
+ * The CLI has no `--json`, so the printed form of a list value is not
+ * contractual. Parse tolerantly — JSON array, Python repr, or a separated list
+ * — and drop anything that is not a valid skill name, so a surprise format can
+ * only ever produce an EMPTY set (every skill reported enabled, which is the
+ * status quo) and never phantom names.
+ */
+export function parseDisabledSkillList(raw: string): Set<string> {
+  const out = new Set<string>();
+  const text = (raw || '').trim();
+  if (!text || /^config key not set/i.test(text) || text === 'null' || text === 'None') return out;
+  let tokens: string[];
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    tokens = Array.isArray(parsed) ? parsed.map(String) : [String(parsed)];
+  } catch {
+    tokens = text.replace(/^[[(]|[\])]$/g, '').split(/[,\s]+/);
+  }
+  for (const token of tokens) {
+    const name = token.trim().replace(/^["']|["']$/g, '');
+    if (isValidSkillName(name)) out.add(name);
+  }
+  return out;
+}
+
+export async function readDisabledSkillNames(): Promise<Set<string>> {
+  // Only the GLOBAL list. `skills.platform_disabled` is a `{platform: [names]}`
+  // map, and a skill switched off for Telegram is still live for the chat this
+  // store belongs to — reporting it as disabled here would be a different
+  // untruth from the one being fixed. (It is also unparseable without knowing
+  // which keys are platform names and which are skills, and a guess there would
+  // mark a skill CALLED `telegram` disabled.)
+  return parseDisabledSkillList(await hermesConfigGet('skills.disabled'));
+}
+
+/**
+ * Every skill name that already exists on this device OUTSIDE the hub — the
+ * bundled set plus anything the agent wrote locally.
+ *
+ * This is the guard the installer does not have. Hermes' own collision check
+ * consults the hub lock (hermes_cli/skills_hub.py:673-681), which by
+ * construction contains only store installs: on a stock device the lock is
+ * `{"installed": {}}` while 82 bundled skills sit on disk, so the check is
+ * structurally blind to all of them. Meanwhile a non-`official` install lands
+ * FLAT at ~/.hermes/skills/<name>, which sorts before productivity/<name> in
+ * the agent's `sorted(matches)` dedup walk (agent/skill_utils.py:1226 +
+ * skill_commands.py:480-492) — so a one-file store stub silently displaces the
+ * 17-file bundled `pdf` skill and nothing anywhere says so.
+ */
+export async function readShadowableSkillNames(): Promise<Set<string>> {
+  const [bundled, disk, lock] = await Promise.all([
+    readBundledManifestNames(),
+    walkAllSkillDirs(),
+    readHubLock(),
+  ]);
+  const out = new Set(bundled);
+  for (const s of disk) {
+    // A hub-installed skill is replaceable through the store, so it is not a
+    // shadowing conflict — updating one is the normal path.
+    if (Object.prototype.hasOwnProperty.call(lock, s.name)) continue;
+    out.add(s.name);
+    // The directory name and the frontmatter name can differ; the agent dedups
+    // on the FRONTMATTER name, so that is the one a collision is measured on.
+    if (s.frontmatter.name) out.add(s.frontmatter.name);
   }
   return out;
 }
@@ -254,6 +504,17 @@ export async function enumerateOfficialSkills(): Promise<OfficialSkillOnDisk[]> 
     }
   }
   return out;
+}
+
+/**
+ * Absolute directory of an `official` skill inside the agent checkout, or null
+ * when the catalog's path escapes it. This is the device's OFFLINE copy of the
+ * authoritative file list for that skill — what a completeness check compares
+ * an `official` install against without needing the network.
+ */
+export function officialSkillDir(indexPath: string): string | null {
+  if (typeof indexPath !== 'string' || !indexPath || indexPath.length > 300) return null;
+  return resolveInside(AGENT_ROOT, indexPath);
 }
 
 export interface ScanReport {
@@ -415,9 +676,205 @@ function platformIncompatible(platforms: string[]): boolean {
   return platforms.length > 0 && !platforms.includes('linux');
 }
 
+/**
+ * Which category bucket a hub-installed skill belongs in.
+ *
+ * `install_path.split('/')[0]` was the whole rule, and it is right only when
+ * the skill landed inside a category directory. Hermes applies an automatic
+ * category to `official` installs ONLY (hermes_cli/skills_hub.py:668-672);
+ * every clawhub / github / skills.sh / browse-sh install lands FLAT, so the
+ * install path IS the skill slug and each such install minted its own
+ * one-item category. On a stock box with three genuine single-item categories,
+ * a handful of installs made the Installed filter mostly noise
+ * (`agent-monitor`, `algorithmic-art`, … each with a count of 1).
+ *
+ * So: use the install path only when it actually names a parent directory,
+ * fall back to the category the registry recorded in the lock's metadata, then
+ * to the disk walk's directory when that names anything but the skill itself,
+ * and otherwise bucket the skill under `hub` with everything else that came
+ * from the store.
+ */
+export function hubCategory(name: string, entry: HubLockEntry, diskCategory?: string): string {
+  const parts = (entry.install_path || '').split('/').filter(Boolean);
+  if (parts.length > 1) return parts[0];
+  const hermesMeta = entry.metadata?.hermes;
+  const declared =
+    hermesMeta && typeof hermesMeta === 'object'
+      ? (hermesMeta as Record<string, unknown>).category
+      : undefined;
+  if (typeof declared === 'string' && declared.trim() && declared.trim() !== name) {
+    return declared.trim().slice(0, 64);
+  }
+  // The disk walk's category is the TOP-LEVEL directory, which for a flat
+  // install is the skill's own slug — the value that minted the junk
+  // categories. It only counts when it names something other than the skill.
+  if (diskCategory && diskCategory !== name) return diskCategory;
+  return 'hub';
+}
+
+/**
+ * Rewrite one lock entry's `files[]` after the install route has completed a
+ * download the Hermes fetcher truncated.
+ *
+ * The lock is Hermes' file, and this is the one field ClawBox corrects in it:
+ * the finding was not only that two of four files were missing, but that
+ * lock.json recorded `files: ["SKILL.md", "templates/viewer.html"]` and every
+ * surface downstream — the store's file count, `skill_info` — repeated that as
+ * if it were the whole skill. Leaving the entry alone would fix the disk and
+ * keep the lie.
+ *
+ * Read-modify-write of the single entry, and a no-op if the entry is gone (an
+ * uninstall raced us) or the file cannot be parsed.
+ */
+export async function updateLockFiles(name: string, files: string[]): Promise<boolean> {
+  let doc: HubLock;
+  try {
+    doc = JSON.parse(await fs.readFile(HUB_LOCK_PATH, 'utf8')) as HubLock;
+  } catch {
+    return false;
+  }
+  const installed = doc?.installed;
+  if (!installed || typeof installed !== 'object') return false;
+  // `name` reaches here from the install request body, so the entry is looked
+  // up through an own-key map rather than by `installed[name]`. On a lock that
+  // has no such entry, `installed['__proto__']` is not undefined — it is
+  // Object.prototype, which is truthy, and the assignment below would then hang
+  // a `files` property off every object in the process. Object.entries() only
+  // ever yields own enumerable keys, so no inherited member can be selected.
+  const entry = hubLockEntry(installed, name);
+  if (!entry) return false;
+  entry.files = files.slice(0, 500).sort();
+  try {
+    await fs.writeFile(HUB_LOCK_PATH, JSON.stringify(doc, null, 1));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Absolute install directory of a hub lock entry, or null when unresolvable. */
+export function lockInstallDir(entry: HubLockEntry | undefined): string | null {
+  if (!entry?.install_path) return null;
+  return resolveInside(SKILLS_DIR, entry.install_path);
+}
+
 let installedCache: { key: string; value: InstalledHermesSkill[] } | null = null;
 const INSTALLED_TTL_MS = 10_000;
 let installedCacheAt = 0;
+
+// ── Removing a skill: the post-condition both routes need ───────────────────
+//
+// Removing a Hermes skill has TWO halves. `hermes skills uninstall` drops the
+// LOCK ENTRY — what every store surface lists — and is supposed to delete the
+// DIRECTORY, which is what the agent actually loads. It exits 0 whether it did
+// either, so neither half may be inferred from its exit code, and a directory
+// left behind is loaded by the agent with no lock entry to show for it.
+//
+// PR #517 established that for the install route's rollback and left the
+// uninstall route checking only the lock. One implementation, used by both, is
+// what stops the two answering differently about the same device state.
+
+/**
+ * What the skill directory is doing after a removal.
+ *
+ * Four states, not two, because "not known to be there" is not "gone" — and
+ * because there are two different ways not to know, which a caller writing a
+ * sentence for the customer cannot tell apart from one label:
+ *
+ * - `unchecked` — nothing ever looked. A lock entry that names no
+ *   `install_path` gives the removal nothing to aim at, so nothing about the
+ *   directory was checked and nothing about it may be claimed.
+ * - `unknown` — something looked and the device would not answer: the removal
+ *   believed it worked and the confirming `stat` failed with anything other
+ *   than ENOENT (see `pathState`). The entry DOES name a location here, and the
+ *   files are most likely still at it.
+ *
+ * They were one value, and the install route's refusal named the first as the
+ * cause of both — telling a customer whose skill was still on the device that
+ * the entry named no location. Neither surface has to guess now.
+ */
+export type SkillRemovalDir = 'present' | 'absent' | 'unchecked' | 'unknown';
+
+/** What a removal ACHIEVED, as opposed to what the CLI printed about it. */
+export interface SkillRemovalVerdict {
+  /** No lock entry survived and no directory is known to have. */
+  clean: boolean;
+  /** The hub lock still lists the skill — every store surface calls it installed. */
+  lockEntry: boolean;
+  /** The skill directory is still on disk — the agent would load it. */
+  dir: SkillRemovalDir;
+}
+
+/**
+ * Is this path there? Three answers, because a failed `stat` has two meanings.
+ *
+ * ENOENT is the only one that proves absence. EACCES, ENOTDIR, EIO and a
+ * timed-out network mount all mean the question could not be answered — and on
+ * this device family that is not hypothetical: the root-owned subtree that
+ * defeats the CLI's own `fs.rm` is exactly the kind of tree a stat can fail on.
+ * Reading any of them as "not there" is how a caller ends up deleting an
+ * installation it could not see.
+ */
+export type PathState = 'present' | 'absent' | 'unknown';
+
+export async function pathState(p: string): Promise<PathState> {
+  try {
+    await fs.stat(p);
+    return 'present';
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'unknown';
+  }
+}
+
+/**
+ * Take the second swing at the directory, then report what is left of the skill.
+ *
+ * Call this AFTER `hermes skills uninstall` has run and only once the lock half
+ * is believed to have worked: it deletes the directory the entry names, and
+ * deleting the files under a lock entry that survived would manufacture exactly
+ * the half-removed state this exists to detect.
+ *
+ * The lock question is asked about the KEY, never the identifier. The key came
+ * out of the lock, so the CLI can only have removed that one key; matching on
+ * the identifier as well scans every other entry and can therefore only produce
+ * FALSE failures — a second copy of the same store id under a different name
+ * would report a completed removal as incomplete.
+ */
+export async function verifySkillRemoval(
+  lockKey: string,
+  entry: HubLockEntry | undefined,
+): Promise<SkillRemovalVerdict> {
+  const installPath = entry?.install_path;
+  // `unchecked` until something actually looks. With no `install_path` there is
+  // nothing to look at, and the honest answer is not `absent`: the CLI may well
+  // have left a directory behind at a location this route was never told.
+  let dir: SkillRemovalDir = 'unchecked';
+  if (installPath) {
+    // Two things can leave the directory behind, so both are checked: a path
+    // `removeSkillDir` will not resolve (it answers false and removes nothing),
+    // and a removal it believes it made — `fs.rm` on a tree it cannot fully
+    // traverse, the root-owned subdirectory case this device family produces.
+    const removed = await removeSkillDir(SKILLS_DIR, installPath);
+    const abs = lockInstallDir(entry);
+    if (!removed) {
+      dir = 'present';
+    } else if (abs !== null) {
+      // A stat that could not answer is `unknown`, NOT `unchecked`: the check
+      // ran, the entry named the location it ran on, and only the answer is
+      // missing. Nothing may call that "no location was named".
+      dir = await pathState(abs);
+    }
+  }
+  invalidateInstalledCache();
+  // Read the lock AFTER the CLI, never before: it is the only thing that says
+  // whether the store will still list this skill.
+  const lockEntry = Object.prototype.hasOwnProperty.call(await readHubLock(), lockKey);
+  // Neither unanswered state is a failure on its own. The store lists what the
+  // lock lists, so a vanished lock entry means the customer sees nothing and
+  // has nothing to act on; refusing here would report a failure over a removal
+  // that did its job.
+  return { clean: !lockEntry && dir !== 'present', lockEntry, dir };
+}
 
 /** Drop the installed-skill caches — called right after an install/uninstall. */
 export function invalidateInstalledCache(): void {
@@ -436,7 +893,14 @@ async function installedCacheKey(): Promise<string> {
       return '-';
     }
   };
-  return `${await stat(HUB_LOCK_PATH)}|${await stat(SKILLS_DIR)}`;
+  // config.yaml is in the key because `enabled` is read from `skills.disabled`
+  // there: without it, switching a skill off left the tab claiming it was live
+  // for the length of the TTL.
+  return [
+    await stat(HUB_LOCK_PATH),
+    await stat(SKILLS_DIR),
+    await stat(path.join(HERMES_HOME, 'config.yaml')),
+  ].join('|');
 }
 
 /**
@@ -454,10 +918,11 @@ export async function enumerateInstalledSkills(): Promise<InstalledHermesSkill[]
     return installedCache.value;
   }
 
-  const [disk, lock, bundled] = await Promise.all([
+  const [disk, lock, bundled, disabled] = await Promise.all([
     walkAllSkillDirs(),
     readHubLock(),
     readBundledManifestNames(),
+    readDisabledSkillNames(),
   ]);
 
   const byName = new Map<string, InstalledHermesSkill>();
@@ -480,18 +945,17 @@ export async function enumerateInstalledSkills(): Promise<InstalledHermesSkill[]
       platforms: fm.platforms.length ? fm.platforms : undefined,
       tags: fm.tags.length ? fm.tags.slice(0, 6) : undefined,
       incompatible: platformIncompatible(fm.platforms),
-      enabled: true,
+      enabled: !disabled.has(s.name) && !disabled.has(fm.name || s.name),
     });
   }
 
   for (const [name, entry] of Object.entries(lock)) {
     const existing = byName.get(name);
     const report = scanReportFromLock(entry);
-    const category = entry.install_path ? entry.install_path.split('/')[0] : existing?.category || 'hub';
     byName.set(name, {
       id: name,
       name: entry.name || existing?.name || name,
-      category: existing?.category || category,
+      category: hubCategory(name, entry, existing?.category),
       description: existing?.description,
       source: entry.source || 'hub',
       identifier: entry.identifier,
@@ -505,7 +969,7 @@ export async function enumerateInstalledSkills(): Promise<InstalledHermesSkill[]
       platforms: existing?.platforms,
       tags: existing?.tags,
       incompatible: existing?.incompatible,
-      enabled: true,
+      enabled: !disabled.has(name) && !disabled.has(entry.name || name),
     });
   }
 

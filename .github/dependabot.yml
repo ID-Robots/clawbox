@@ -1,16 +1,13 @@
 # Dependabot config. Posture: security-first, low-churn.
 #
-# Two jobs only:
-#   1. Real vulnerabilities — security-update PRs. These need BOTH "Dependabot
-#      alerts" AND "Dependabot security updates" enabled in Settings → Code
-#      security (admin toggles) — alerts alone surface the CVE but don't open a
-#      PR. They ALWAYS target the default branch, ignore the groups/ignore rules
-#      below, and only bump package-lock.json — run `bun install` to refresh
-#      bun.lock before merging one.
-#   2. Routine version updates — grouped minor+patch ONLY. Major bumps are
-#      ignored on purpose: on an edge-deployed device OS, framework major jumps
-#      (e.g. TypeScript 5→7, or @types/node overshooting the Node 22 runtime)
-#      are opt-in, not automatic. Bump majors by hand when you actually want one.
+# All dependency changes are reviewed and tested on beta before release.
+# Keep Dependabot alerts enabled, but automatic SECURITY UPDATE PRs disabled
+# in repository Settings > Code security: GitHub always targets those at the
+# default branch and ignores target-branch. The setting is repository-owned,
+# not controlled by this YAML. Triage alerts into tested beta fixes instead.
+# Scheduled Bun/Actions version PRs below target beta; majors stay opt-in.
+# Keep package-lock.json synchronized for the dependency graph, and validate
+# the authoritative bun.lock with bun install --frozen-lockfile before a PR.
 version: 2
 updates:
   # Version updates for the bun-managed app. bun.lock is authoritative
@@ -38,14 +35,14 @@ updates:
       - dependency-name: "@novnc/novnc"
         update-types: ["version-update:semver-minor"]
 
-  # npm entry exists ONLY for security-update PRs (the bun ecosystem doesn't
-  # support them; package-lock.json is kept in sync for this + the dependency
-  # graph). Limit 0 disables version updates to avoid duplicate PRs that
-  # leave bun.lock stale.
+  # Disable duplicate npm version PRs. This does NOT disable security PRs;
+  # the repository setting above does. Keep an explicit beta target so this
+  # entry cannot send version updates to main if its limit is later raised.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
+    target-branch: "beta"
     open-pull-requests-limit: 0
 
   # GitHub Actions pins (checkout, setup-node, gh-pages, …). Minor+patch only;

@@ -46,7 +46,9 @@ describe("/setup-api/ai-models/status", () => {
     vi.stubGlobal("fetch", fetchSpy);
     const mod = await import("@/app/setup-api/ai-models/status/route");
     GET = mod.GET;
-    resetPortalTierCache = mod._resetPortalTierCache;
+    // The portal-tier cache lives in the shared lib, not the route — a
+    // route.ts may only export handlers and route config.
+    resetPortalTierCache = (await import("@/lib/clawbox-ai-portal-tier"))._resetPortalTierCache;
     resetPortalTierCache();
   });
 
@@ -226,6 +228,132 @@ describe("/setup-api/ai-models/status", () => {
       expect(mockSetConfigValue).not.toHaveBeenCalled();
     });
 
+    // TASK-744. The badge above is `mapPortalTier`, which prefers the portal's
+    // `deviceTier` stamp on purpose — it answers "what should this box default
+    // to", and a Max subscriber is allowed to run Flash here. Two boot scripts
+    // decide an ENTITLEMENT from a stamp in this store and one of them DELETES
+    // the cloud voice when it is not met, so the PLAN has to be written down
+    // beside the badge; this poll is the only thing on the box that ever gets a
+    // portal answer to write.
+    /**
+     * Every config-store key this poll actually wrote — a DELETE included.
+     * `expect.anything()` does not match `undefined`, so the "did not write"
+     * assertions below cannot be expressed with it.
+     */
+    const keysWritten = () => mockSetConfigValue.mock.calls.map(([key]) => key);
+
+    it("records the PLAN beside the device badge", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      // KEY-KEYED, not one answer for every key: a mock that answers the same
+      // value everywhere would let this pass over a writer that read
+      // `clawai_tier` where it meant `clawai_plan_tier`.
+      const stamps: Record<string, unknown> = {};
+      mockGetConfigValue.mockImplementation(async (key: string) => stamps[key] ?? null);
+      fetchSpy.mockResolvedValue(new Response(
+        // The exact shape TASK-744 is about: Max plan, box stamped Flash.
+        JSON.stringify({ tier: "max", deviceTier: "flash" }),
+        { status: 200 },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_tier", "flash");
+      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_plan_tier", "pro");
+    });
+
+    it("records an UNPAID plan as such, not as an absent one", async () => {
+      // The cancelled subscription. `mapPortalTier` and `mapPortalPlanTier`
+      // both answer null for a Free account, and an absent key already means
+      // "the portal has never answered for this box" — so without a positive
+      // word the two are indistinguishable and neither boot script can ever
+      // withdraw a cancelled subscription's cloud voice.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      // Key-keyed, like its sibling above: both arms answering the same value
+      // would let this pass over a writer that read the wrong key.
+      const stamps: Record<string, unknown> = { clawai_tier: "pro", clawai_plan_tier: "pro" };
+      mockGetConfigValue.mockImplementation(async (key: string) => stamps[key] ?? null);
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "free", deviceTier: null }),
+        { status: 200 },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_plan_tier", "free");
+    });
+
+    it.each([
+      ["a plan name this build has never seen", { tier: "enterprise" }],
+      ["a response with no tier field at all", { deviceTier: "pro" }],
+    ])("records NO plan for %s", async (_label, body) => {
+      // The other half of the unpaid word. `mapPortalPlanTier` cannot tell a
+      // cancelled account from a response this build cannot read, and only the
+      // first may reach the store: both boot scripts treat a recorded plan as
+      // one they were told, and one of them deletes the cloud voice over it.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(null);
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+
+      await GET();
+
+      expect(keysWritten()).not.toContain("clawai_plan_tier");
+    });
+
+    it("keeps a plan it was correctly told when one answer cannot be read", async () => {
+      // "We cannot tell" may not overwrite "we were told", about the same
+      // account: this is a poll, not a link, so a plan already on record still
+      // belongs to the credential this box holds. Deleting it would put the
+      // Voice panel back to telling a Max subscriber his plan has no cloud
+      // voice, and stop the boot script arming it, over one unreadable answer.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      const stamps: Record<string, unknown> = { clawai_tier: "flash", clawai_plan_tier: "pro" };
+      mockGetConfigValue.mockImplementation(async (key: string) => stamps[key] ?? null);
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify({ tier: "enterprise" }), { status: 200 }));
+
+      await GET();
+
+      expect(keysWritten()).not.toContain("clawai_plan_tier");
+    });
+
+    it("does not write a plan for a credential the box no longer holds", async () => {
+      // The re-link race, on the plan. The poll asks about the token the box
+      // held when the request started; four seconds later it has been
+      // re-linked. Writing then puts a RETIRED account's plan on record, and
+      // the next boot decides this box's entitlement from it — a retired Pro
+      // plan withdrawing a Max subscriber's voice, which is TASK-744 again.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(null);
+      const { noteClawaiCredentialReplaced } = await import("@/lib/clawai-plan-tier");
+      fetchSpy.mockImplementation(async () => {
+        // The re-link lands while this lookup is still on the wire.
+        noteClawaiCredentialReplaced();
+        return new Response(JSON.stringify({ tier: "pro", deviceTier: "flash" }), { status: 200 });
+      });
+
+      await GET();
+
+      expect(keysWritten()).not.toContain("clawai_plan_tier");
+      // AND THE BADGE BESIDE IT, which is the half a guard on the plan alone
+      // would miss: the two are read together by both boot scripts and one of
+      // them deletes on the pair, so writing the RETIRED account's badge while
+      // correctly skipping its plan leaves the ARM falling back to a badge
+      // belonging to a token this box no longer holds.
+      expect(keysWritten()).not.toContain("clawai_tier");
+    });
+
+    it("records no plan at all when the portal did not answer", async () => {
+      // The false-failure guard, at the writer. An unreachable portal must not
+      // put a plan on record, because the boot scripts read a recorded plan as
+      // having been TOLD — and one of them deletes a working voice over it.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(null);
+      fetchSpy.mockResolvedValue(new Response("nope", { status: 503 }));
+
+      await GET();
+
+      expect(keysWritten()).not.toContain("clawai_plan_tier");
+    });
+
     it("queries the portal even when local picker is unset so Free → Paid upgrades are visible without re-login", async () => {
       // Free users who paired without picking a paid pill ALSO need the
       // portal lookup so a later upgrade is detected without forcing
@@ -297,6 +425,349 @@ describe("/setup-api/ai-models/status", () => {
 
       expect(body.clawaiTier).toBe("pro");
       expect(body.tierSource).toBe("picker");
+    });
+
+    it("says the credential was REJECTED, not merely that the portal was quiet", async () => {
+      // TASK-419. The tier must not move — a Max owner whose token was
+      // revoked still pays for Max, and demoting him here is the bug that
+      // reasoning was written to prevent. What the response owes the customer
+      // is the OTHER half: the portal ANSWERED, and what it said was no.
+      // Beta reported exactly the same payload for "portal said no" and
+      // "portal never answered", so Settings painted a healthy paid badge
+      // over a credential the box had just been told was dead.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ error: { code: "invalid_token", type: "auth_error" } }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      ));
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.clawaiTokenRejected).toBe(true);
+      // Unchanged, on purpose.
+      expect(body.clawaiTier).toBe("pro");
+      expect(body.tierSource).toBe("picker");
+    });
+
+    it("writes the portal's refusal where the root boot script can read it", async () => {
+      // TASK-727. The pre-start decides on every gateway start whether to
+      // declare the agent's image path, and the pinned core has no back-off to
+      // fall back on — so "the portal refused this credential" has to leave
+      // this process. `clawai_credential_refused_at` is the same store the tier
+      // stamp above uses, and `CLAWBOX_DEVICE_STORE` is the same file.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(undefined);
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ error: { code: "invalid_token", type: "auth_error" } }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        expect.any(Number),
+      );
+    });
+
+    it("clears it again the moment the portal accepts the credential", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      // A refusal is on record; the tier is the one the portal is about to
+      // confirm, so the tier write below cannot be what is asserted.
+      mockGetConfigValue.mockImplementation(async (key: string) =>
+        key === "clawai_credential_refused_at" ? 1_788_000_000_000 : "pro");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "pro" }),
+        { status: 200 },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_credential_refused_at", undefined);
+    });
+
+    it("does not write down a refusal the portal module deliberately did not remember", async () => {
+      // The re-link race, and the reason this persists off
+      // `clawaiTokenRejectedByPortal()` rather than off the lookup's own
+      // `rejected`. A poll goes out with the OLD token; while its 403 is in
+      // flight the new token is proven good, so `fetchPortalTier` returns the
+      // verdict to its caller and deliberately does NOT remember it. Writing it
+      // to disk anyway would stand the image path down at the very restart the
+      // re-link triggers.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(undefined);
+      let releaseOldTokenRefusal: () => void = () => {};
+      const oldTokenAnswered = new Promise<void>((resolve) => { releaseOldTokenRefusal = resolve; });
+      fetchSpy.mockImplementation(async (_url: string, init?: RequestInit) => {
+        const auth = String((init?.headers as Record<string, string> | undefined)?.Authorization ?? "");
+        if (auth.includes("claw_NEW")) {
+          return new Response(JSON.stringify({ tier: "max", deviceTier: "pro" }), { status: 200 });
+        }
+        await oldTokenAnswered;
+        return new Response(
+          JSON.stringify({ error: { code: "invalid_token" } }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        );
+      });
+
+      const inFlight = GET();
+      // The re-link lands while that 403 is still on the wire.
+      const portal = await import("@/lib/clawbox-ai-portal-tier");
+      await portal.fetchPortalTier("claw_NEW");
+      releaseOldTokenRefusal();
+      await inFlight;
+
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        expect.anything(),
+      );
+    });
+
+    it("does not let a slow portal answer erase a refusal recorded since it was asked", async () => {
+      // The re-link race, the other half. The poll asks about the credential the
+      // box held when the request started; four seconds later the device has
+      // been re-linked and the NEW credential refused. A clear here would be a
+      // verdict about a token the box no longer holds erasing one about the
+      // token it does — and the next gateway start would re-arm the image path
+      // over a credential the proxy refuses.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      const stamps: Record<string, unknown> = { clawai_tier: "pro" };
+      mockGetConfigValue.mockImplementation(async (key: string) => stamps[key]);
+      mockSetConfigValue.mockImplementation(async (key: string, value: unknown) => {
+        if (value === undefined) delete stamps[key];
+        else stamps[key] = value;
+      });
+      fetchSpy.mockImplementation(async () => {
+        // A refusal of the credential the box holds NOW lands while this
+        // lookup is still on the wire.
+        stamps.clawai_credential_refused_at = Date.now() + 1;
+        return new Response(JSON.stringify({ tier: "max", deviceTier: "pro" }), { status: 200 });
+      });
+
+      await GET();
+
+      expect(stamps.clawai_credential_refused_at).toBeTypeOf("number");
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        undefined,
+      );
+    });
+
+    it("records nothing when the portal merely failed to answer", async () => {
+      // The false-failure half of the persisted fact: an unreachable portal
+      // would stand the image path down at the next boot on a box whose
+      // credential is perfectly good.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(undefined);
+      fetchSpy.mockResolvedValue(new Response("upstream is down", { status: 503 }));
+
+      await GET();
+
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        expect.anything(),
+      );
+    });
+
+    it("does not call an unreachable portal a rejection", async () => {
+      // The false-failure half. A 500, a timeout or a dead uplink says nothing
+      // about the credential, and telling a customer on a train to re-link a
+      // perfectly good device is the same lie in the other direction.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response("upstream is down", { status: 503 }));
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.clawaiTokenRejected).toBe(false);
+      expect(body.clawaiTier).toBe("pro");
+      expect(body.tierSource).toBe("picker");
+    });
+
+    it("does not accuse a credential the portal never refused", async () => {
+      // The healthy direction, and the one that would make this field a
+      // liability if it were wrong: a 200 says the token works, and nothing
+      // downstream may be told otherwise.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "pro" }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+      expect(body.clawaiTokenRejected).toBe(false);
+      expect(body.tierSource).toBe("portal");
+    });
+
+    it("does not call an interception page a rejection", async () => {
+      // A corporate proxy, a hotel captive portal or a CDN anti-bot page can
+      // answer 403 to this GET. Only the portal's OWN auth error counts —
+      // otherwise the box tells an owner with a perfectly valid token to
+      // re-link the device, which is this bug pointing the other way.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response(
+        "<html><body>Attention Required! | Cloudflare</body></html>",
+        { status: 403, headers: { "content-type": "text/html" } },
+      ));
+
+      const body = await (await GET()).json();
+      expect(body.clawaiTokenRejected).toBe(false);
+      expect(body.clawaiTier).toBe("pro");
+    });
+
+    it("stops accusing the OLD token once a new one works", async () => {
+      // A device holds one ClawBox AI credential. Re-linking mints a new one,
+      // and the rejection recorded against the retired one must not keep the
+      // Providers strip in "Needs sign-in" for the rest of its cache window —
+      // re-linking is the remedy the failure text prints.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ error: { code: "invalid_token" } }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      ));
+      expect((await (await GET()).json()).clawaiTokenRejected).toBe(true);
+
+      mockReadConfig.mockResolvedValue({
+        ...clawaiConfigBase,
+        models: { providers: { deepseek: { apiKey: "claw_relinked456" } } },
+      } as never);
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "pro" }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+      expect(body.clawaiTokenRejected).toBe(false);
+      const { clawaiTokenRejectedByPortal } = await import("@/lib/clawbox-ai-portal-tier");
+      expect(clawaiTokenRejectedByPortal()).toBe(false);
+    });
+
+    it("ignores a rejection that lands after another token was proven good", async () => {
+      // Completion order is not arrival order. A re-link starts a lookup for
+      // the new token while the old one's is still in flight; if the old one
+      // comes back 403 afterwards, remembering it would make the Providers
+      // strip say "Needs sign-in" about a device that was just successfully
+      // re-linked.
+      const portal = await import("@/lib/clawbox-ai-portal-tier");
+      let releaseOld: () => void = () => {};
+      const oldPending = new Promise<void>((resolve) => { releaseOld = resolve; });
+
+      fetchSpy.mockImplementation(async (url: unknown, init?: unknown) => {
+        const auth = (init as { headers?: Record<string, string> } | undefined)?.headers?.Authorization;
+        if (auth?.endsWith("claw_old111")) {
+          await oldPending;
+          return new Response(
+            JSON.stringify({ error: { code: "invalid_token" } }),
+            { status: 403, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ tier: "max", deviceTier: "pro" }), { status: 200 });
+      });
+
+      const stale = portal.fetchPortalTier("claw_old111");
+      await portal.fetchPortalTier("claw_new222");
+      expect(portal.clawaiTokenRejectedByPortal()).toBe(false);
+
+      releaseOld();
+      await expect(stale).resolves.toMatchObject({ source: "unreachable", rejected: true });
+      // The caller that asked about the old token is told the truth; nothing
+      // else is.
+      expect(portal.clawaiTokenRejectedByPortal()).toBe(false);
+    });
+
+    it("does not buffer an oversized refusal body looking for a code", async () => {
+      // An interception appliance can answer 401/403 with a full HTML page, and
+      // the 4 s fetch timeout bounds duration, not bytes.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ error: { code: "invalid_token" }, pad: "x".repeat(8192) }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      ));
+
+      const body = await (await GET()).json();
+      // Past the cap it is not the envelope we are looking for: unreachable,
+      // not rejected — the safe direction.
+      expect(body.clawaiTokenRejected).toBe(false);
+      expect(body.clawaiTier).toBe("pro");
+    });
+
+    it("surfaces the portal's entitlement list beside the badge", async () => {
+      // The badge is the device-pair stamp; the list is what the account may
+      // actually run. A Max account paired while it was on the Pro plan reads
+      // "flash" and still carries the Pro id — the picker gates on the list.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({
+          tier: "max",
+          deviceTier: "flash",
+          allowedModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+        }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiAccountTier).toBe("flash");
+      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+    });
+
+    it("fills the list from the badge when the portal answered without one", async () => {
+      // An older portal build publishes no `allowedModels`. There the badge is
+      // all the entitlement there has ever been, so nothing that used to be
+      // refused may quietly become allowed — but this is the ANSWERED branch
+      // only; an unreachable portal still yields null.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "pro", deviceTier: "flash" }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash"]);
+    });
+
+    it("keeps the Max id in that fallback when the PLAN is Max and only the device stamp is Flash", async () => {
+      // TASK-691, reached through the compatibility door. `mapPortalTier`
+      // prefers `deviceTier` on purpose, so deriving the fallback list from the
+      // badge alone gave a Max subscriber `["deepseek-v4-flash"]` — which the
+      // boot guard reads as a POSITIVE refusal and writes his primary model
+      // down on, under a message telling him to buy the plan he already has.
+      // The plan is what an entitlement may be read from.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "flash" }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+
+      // The BADGE still follows the device stamp — that is its job.
+      expect(body.clawaiAccountTier).toBe("flash");
+      expect(body.clawaiAllowedModels).toEqual(["deepseek-v4-flash", "deepseek-v4-pro"]);
+    });
+
+    it("says null — not an empty list — when the portal could not be asked", async () => {
+      // Null is "not answered". An empty list would read as "nothing is
+      // allowed" and lock the box out of its own models.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockRejectedValue(new Error("ETIMEDOUT"));
+
+      const body = await (await GET()).json();
+
+      expect(body.clawaiTier).toBe("pro");
+      expect(body.clawaiAllowedModels).toBeNull();
     });
 
     it("negative-caches an unreachable verdict so back-to-back polls don't hammer the portal", async () => {

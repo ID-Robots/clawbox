@@ -4,10 +4,70 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import fsP from "fs/promises";
+import { getCpuCoreUsage, getCpuUsage } from "@/lib/cpu-usage";
 
 const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Remember one async answer for a few seconds, and let concurrent callers share
+ * the read that is already in flight.
+ *
+ * Two surfaces poll this route every 3 s while their panel is open — Settings >
+ * System (`SettingsApp.tsx`) and the System app (`SystemApp.tsx`) — and each
+ * request spawned its own `df` and `ps aux --sort=-%cpu`. Measured on an Orin
+ * Nano: 2.8 ms and 28.5 ms per run, four processes every three seconds for two
+ * answers that barely move.
+ *
+ * ONE window for both, and a short one. A longer window for the disk buys
+ * almost nothing — `ps` is 91% of the cost — and it would make the payload's
+ * own `timestamp` a lie: the System app draws it as "last updated", and a disk
+ * figure half a minute old under a stamp that says "now" is how a `disk_cleanup`
+ * that worked reads as one that did nothing. Five seconds is inside the jitter
+ * of the 3 s poll that reads it.
+ *
+ * A FAILURE is remembered too, but for less. Caching only successes means the
+ * harder the box is struggling — a `fork` refused with EAGAIN under memory
+ * pressure is exactly when this matters — the more often it is asked to spawn,
+ * which is the wrong way round. Same success/failure split, and the same
+ * reasoning, as the memos in `hermes-telegram.ts` and `openclaw-channels.ts`.
+ *
+ * Callers share the value rather than a copy; nothing here mutates it, the
+ * route only serialises it.
+ */
+const STATS_TTL_MS = 5_000;
+const STATS_FAILURE_TTL_MS = 3_000;
+
+function memoAsync<T>(read: () => Promise<T>): () => Promise<T> {
+  let cached: { at: number; ok: true; value: T } | { at: number; ok: false; err: unknown } | null = null;
+  let inFlight: Promise<T> | null = null;
+
+  return () => {
+    // `age >= 0` because Date.now() is wall-clock: an RTC corrected BACKWARDS
+    // by NTP would otherwise pin the entry until the clock caught up.
+    const age = cached ? Date.now() - cached.at : Infinity;
+    if (cached && age >= 0 && age < (cached.ok ? STATS_TTL_MS : STATS_FAILURE_TTL_MS)) {
+      return cached.ok ? Promise.resolve(cached.value) : Promise.reject(cached.err);
+    }
+    if (inFlight) return inFlight;
+
+    const promise = read().then(
+      (value) => {
+        cached = { at: Date.now(), ok: true, value };
+        inFlight = null;
+        return value;
+      },
+      (err) => {
+        cached = { at: Date.now(), ok: false, err };
+        inFlight = null;
+        throw err;
+      },
+    );
+    inFlight = promise;
+    return promise;
+  };
+}
 
 interface DiskMount {
   filesystem: string;
@@ -33,55 +93,31 @@ interface ProcessEntry {
   command: string;
 }
 
-async function getCpuUsage(): Promise<number> {
-  try {
-    const stat1 = fs.readFileSync("/proc/stat", "utf-8");
-    const line1 = stat1.split("\n")[0];
-    const parts1 = line1.trim().split(/\s+/).slice(1).map(Number);
-    const idle1 = parts1[3];
-    const total1 = parts1.reduce((a, b) => a + b, 0);
-
-    // Sample /proc/stat twice with a non-blocking 200ms gap. A synchronous
-    // busy-wait here would freeze the single Node event loop on every poll.
-    await new Promise((r) => setTimeout(r, 200));
-
-    const stat2 = fs.readFileSync("/proc/stat", "utf-8");
-    const line2 = stat2.split("\n")[0];
-    const parts2 = line2.trim().split(/\s+/).slice(1).map(Number);
-    const idle2 = parts2[3];
-    const total2 = parts2.reduce((a, b) => a + b, 0);
-
-    const dIdle = idle2 - idle1;
-    const dTotal = total2 - total1;
-
-    if (dTotal === 0) return 0;
-    return Math.round(((dTotal - dIdle) / dTotal) * 100);
-  } catch {
-    // Fallback: use load average approximation
-    const cpuCount = os.cpus().length;
-    return Math.min(100, Math.round((os.loadavg()[0] / cpuCount) * 100));
+async function readDiskUsage(): Promise<DiskMount[]> {
+  const { stdout: output } = await execFileAsync(
+    "df",
+    ["-h", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs"],
+    { encoding: "utf-8", timeout: 5000 },
+  );
+  const lines = output.trim().split("\n").slice(1); // skip header
+  const result: DiskMount[] = [];
+  for (const line of lines) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 6) continue;
+    const [filesystem, size, used, avail, usePercentStr, mountpoint] = parts;
+    const usePercent = parseInt(usePercentStr.replace("%", ""), 10) || 0;
+    // Filter out uninteresting mounts
+    if (mountpoint.startsWith("/sys") || mountpoint.startsWith("/proc") || mountpoint.startsWith("/dev/")) continue;
+    result.push({ filesystem, size, used, avail, usePercent, mountpoint });
   }
+  return result.slice(0, 8); // max 8 mounts
 }
+
+const diskUsage = memoAsync(readDiskUsage);
 
 async function getDiskUsage(): Promise<DiskMount[]> {
   try {
-    const { stdout: output } = await execFileAsync(
-      "df",
-      ["-h", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs"],
-      { encoding: "utf-8", timeout: 5000 },
-    );
-    const lines = output.trim().split("\n").slice(1); // skip header
-    const result: DiskMount[] = [];
-    for (const line of lines) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length < 6) continue;
-      const [filesystem, size, used, avail, usePercentStr, mountpoint] = parts;
-      const usePercent = parseInt(usePercentStr.replace("%", ""), 10) || 0;
-      // Filter out uninteresting mounts
-      if (mountpoint.startsWith("/sys") || mountpoint.startsWith("/proc") || mountpoint.startsWith("/dev/")) continue;
-      result.push({ filesystem, size, used, avail, usePercent, mountpoint });
-    }
-    return result.slice(0, 8); // max 8 mounts
+    return await diskUsage();
   } catch {
     return [];
   }
@@ -129,27 +165,55 @@ function getNetworkInterfaces(): NetworkInterface[] {
   return result;
 }
 
-async function getTopProcesses(): Promise<ProcessEntry[]> {
+/** How many rows each of the two lists carries. */
+const TOP_PROCESS_ROWS = 10;
+
+function parsePsLine(line: string): ProcessEntry | null {
+  const parts = line.trim().split(/\s+/);
+  const [user, pid, cpu, mem, , , , , , , ...cmdParts] = parts;
+  if (!pid) return null;
+  return {
+    pid,
+    user: user || "",
+    cpu: parseFloat(cpu) || 0,
+    mem: parseFloat(mem) || 0,
+    command: cmdParts.join(" ").slice(0, 60) || parts[10] || "?",
+  };
+}
+
+/**
+ * The busiest processes, by CPU and by memory, from ONE `ps`.
+ *
+ * `ps aux` is 91% of this route's cost (28.5 ms on an Orin Nano against 2.8 ms
+ * for `df`), and the second ordering is a sort of a list already in hand — so
+ * the memory list is free, and spawning a second `ps --sort=-%mem` for it would
+ * roughly double what the two panels that poll this every three seconds cost.
+ *
+ * Both orderings matter on this box and for different reasons: CPU is what a
+ * slow desktop looks like, and MEMORY is what an OOM-killed update looks like
+ * on 7.4 GB shared with a language model.
+ */
+async function readTopProcesses(): Promise<{ byCpu: ProcessEntry[]; byMemory: ProcessEntry[] }> {
+  const { stdout: output } = await execFileAsync("ps", ["aux", "--sort=-%cpu"], {
+    encoding: "utf-8",
+    timeout: 5000,
+  });
+  const all = output.trim().split("\n").slice(1)
+    .map(parsePsLine)
+    .filter((p): p is ProcessEntry => p !== null);
+  return {
+    byCpu: all.slice(0, TOP_PROCESS_ROWS),
+    byMemory: [...all].sort((a, b) => b.mem - a.mem).slice(0, TOP_PROCESS_ROWS),
+  };
+}
+
+const topProcesses = memoAsync(readTopProcesses);
+
+async function getTopProcesses(): Promise<{ byCpu: ProcessEntry[]; byMemory: ProcessEntry[] }> {
   try {
-    const { stdout: output } = await execFileAsync("ps", ["aux", "--sort=-%cpu"], {
-      encoding: "utf-8",
-      timeout: 5000,
-    });
-    // Skip the header, keep the top 10 by CPU (the old `| head -11` limit).
-    const lines = output.trim().split("\n").slice(1, 11);
-    return lines.map((line) => {
-      const parts = line.trim().split(/\s+/);
-      const [user, pid, cpu, mem, , , , , , , ...cmdParts] = parts;
-      return {
-        pid: pid || "",
-        user: user || "",
-        cpu: parseFloat(cpu) || 0,
-        mem: parseFloat(mem) || 0,
-        command: cmdParts.join(" ").slice(0, 60) || parts[10] || "?",
-      };
-    }).filter((p) => p.pid);
+    return await topProcesses();
   } catch {
-    return [];
+    return { byCpu: [], byMemory: [] };
   }
 }
 
@@ -175,15 +239,6 @@ function getUptime(): string {
     if (h > 0) parts.push(`${h}h`);
     parts.push(`${m}m`);
     return parts.join(" ");
-  }
-}
-
-async function getKernelRelease(): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync("uname", ["-r"], { encoding: "utf-8", timeout: 3000 });
-    return stdout.trim();
-  } catch {
-    return os.release();
   }
 }
 
@@ -221,30 +276,78 @@ function getSwapUsage(): { used: number; total: number; percent: number } {
   }
 }
 
-export async function GET() {
+/**
+ * GET /setup-api/system/stats
+ *
+ * `?processes=0` and `?perCore=0` leave the busiest-processes lists and the
+ * per-core row out of the answer.
+ *
+ * OPT-OUT, deliberately, not opt-in: every existing reader — the System app,
+ * About, the MCP tools — asks for no parameters and must keep getting the whole
+ * payload it always got. Only the caller that knows it is not going to draw
+ * something says so.
+ *
+ * It exists because Settings → System now keeps both of those blocks behind
+ * their own buttons, collapsed by default, and a collapsed block must not be
+ * paid for every three seconds: `ps aux` is 91% of this route's cost (28.5 ms
+ * on an Orin Nano against 2.8 ms for `df`), and it was being spawned twice a
+ * second across the two panels that poll here for a table nobody had opened.
+ *
+ * The keys are OMITTED rather than sent empty. `processes: []` is a claim — "we
+ * looked and the box is idle" — and this route already uses the empty list to
+ * mean exactly that (a `ps` that failed). Absent means "not asked for", which
+ * is a different fact, and readers already tolerate it: `processesByMemory` has
+ * been optional since it was added.
+ */
+export async function GET(request?: Request) {
   try {
+    // Optional, and read defensively, because this parameter is an
+    // OPTIMISATION and never a requirement: a caller with no readable URL —
+    // a direct `GET()` from a test, anything that invokes the handler without
+    // a Request — must get the whole payload rather than a 500. "Could not
+    // read the query string" can only ever mean "send everything".
+    let wantProcesses = true;
+    let wantPerCore = true;
+    try {
+      const params = new URL(request!.url).searchParams;
+      wantProcesses = params.get("processes") !== "0";
+      wantPerCore = params.get("perCore") !== "0";
+    } catch {
+      // Defaults above stand.
+    }
+
     const cpus = os.cpus();
     const totalMem = os.totalmem();
     const freeMem = os.freemem();
     const usedMem = totalMem - freeMem;
 
-    // Gather everything that touches the event loop (the 200ms CPU sample,
-    // temp/gpu reads, and the promisified execFile shells) in parallel so we
-    // never block the single Node process.
-    const [cpuUsage, temp, gpuUsage, kernel, storage, processes] = await Promise.all([
-      getCpuUsage(),
+    // CPU usage is a cached-delta read now (src/lib/cpu-usage.ts) — no sleep, no
+    // await. Everything below it still touches the event loop (temp/gpu reads,
+    // promisified execFile shells) so it stays in one Promise.all.
+    const cpuUsage = getCpuUsage();
+    // Per core, from the same /proc/stat read discipline — no sleep, no spawn.
+    // Skipped entirely when the caller is not drawing it: cheap is not free,
+    // and its delta baseline is its own (`lastCoreSamples`), so not calling it
+    // simply means the first request after the panel is opened has nothing to
+    // diff and answers empty — which is the state this route already documents
+    // and the reader already draws as "no row yet, real figures in 3 s".
+    const cpuCores = wantPerCore ? getCpuCoreUsage() : null;
+    const [temp, gpuUsage, storage, processes] = await Promise.all([
       getTemperature(),
       getGpuUsage(),
-      getKernelRelease(),
       getDiskUsage(),
-      getTopProcesses(),
+      wantProcesses ? getTopProcesses() : Promise.resolve(null),
     ]);
 
     const stats = {
       overview: {
         hostname: os.hostname(),
         os: `${os.type()} ${os.release()}`,
-        kernel,
+        // `uname -r` and os.release() are the same string — both are the
+        // `release` field of the utsname the kernel answers with (verified on
+        // an Orin Nano: 5.15.185-tegra from each). Spawning a process for it,
+        // two lines under a call that already has the answer, was pure cost.
+        kernel: os.release(),
         uptime: getUptime(),
         arch: os.arch(),
         platform: os.platform(),
@@ -255,6 +358,18 @@ export async function GET() {
         cores: cpus.length,
         loadAvg: os.loadavg().map((v) => v.toFixed(2)),
         speed: cpus[0]?.speed || 0,
+        // One entry per core, or empty where there is no reading to give:
+        // /proc/stat unreadable, or nothing to diff it against yet — the first
+        // request of a process, which every server restart (so every in-app
+        // update) creates. Never a row of zeros, which would be a claim that
+        // the box is idle, and never a partly-carried row. Readers draw no
+        // per-core row on an empty list; a polling one has real figures on its
+        // next 3 s request.
+        //
+        // `undefined` when the caller asked for no per-core reading, which
+        // JSON.stringify drops — the key is absent rather than an empty row
+        // claiming there was nothing to measure.
+        ...(cpuCores ? { perCore: cpuCores } : {}),
       },
       memory: {
         total: totalMem,
@@ -267,7 +382,12 @@ export async function GET() {
       gpu: { usage: gpuUsage },
       storage,
       network: getNetworkInterfaces(),
-      processes,
+      // `processes` stays the by-CPU list it has always been, so every existing
+      // reader is untouched; the memory ordering arrives beside it. Both keys
+      // are absent — not empty — for a caller that asked for neither.
+      ...(processes
+        ? { processes: processes.byCpu, processesByMemory: processes.byMemory }
+        : {}),
       timestamp: Date.now(),
     };
 

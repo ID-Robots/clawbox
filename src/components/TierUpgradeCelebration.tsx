@@ -45,7 +45,7 @@ type DialogAction =
   | { type: "CLOSE" };
 
 // Local reducer for the dialog's open/close lifecycle. CodeRabbit's
-// review on PR #132 suggested wiring this through `useWindows.ts`,
+// review on PR #132 suggested wiring this through a window-state hook,
 // but that hook is purpose-built for desktop windows with z-order /
 // minimize / maximize semantics — none of which apply to a transient
 // centred modal. A local reducer captures the spirit of the
@@ -255,14 +255,14 @@ function CelebrationShell({ tone, badge, headline, body, primary, onClose }: She
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={descriptionId}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl text-center"
+        className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] p-6 shadow-2xl text-center"
       >
         <div className="flex flex-col items-center gap-4 mb-5">
           <img
             src="/clawbox-crab.png"
             alt=""
-            width={72}
-            height={72}
+            width={55}
+            height={55}
             className={"select-none pointer-events-none " + glowClass}
           />
           <span

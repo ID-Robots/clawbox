@@ -137,8 +137,20 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         configureReject(new Error("aborted"));
         return;
       }
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({}));
+      // 502 = the token was saved but the gateway is not serving it yet, and
+      // that is not a failed save. Qualified by the BODY, not by the status
+      // alone: the route's own `success` AND the warning that explains the 502.
+      // A cloudflared or nginx 502 has an HTML body, which the `.catch` above
+      // turns into `{}` — a request that may never have reached the box must
+      // not advance the wizard past the step that was meant to prove the token
+      // works. Same guard as SettingsApp's copy of this save.
+      const gatewayPending =
+        res.status === 502 &&
+        data.success === true &&
+        typeof data.warning === "string" &&
+        data.warning.length > 0;
+      if (!res.ok && !gatewayPending) {
         configureReject(new Error(data.error || "configure failed"));
         setConfiguring(false);
         setStatus({
@@ -147,7 +159,6 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
         });
         return;
       }
-      const data = await res.json();
       if (controller.signal.aborted) {
         configureReject(new Error("aborted"));
         return;
@@ -191,7 +202,17 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
     <div className="w-full max-w-[520px]" data-testid="setup-step-telegram">
       <div className="card-surface rounded-[var(--r-3)] p-5 sm:p-8 relative overflow-hidden">
         {configuring && (
-          <TelegramConfiguringOverlay waitFor={configurePromise} onDone={onNext} />
+          <TelegramConfiguringOverlay
+            waitFor={configurePromise}
+            onDone={onNext}
+            onTimeout={() => {
+              saveControllerRef.current?.abort();
+              setSaving(false);
+              setConfiguring(false);
+              setConfigurePromise(undefined);
+              setStatus({ type: "error", message: t("telegram.readinessTimeout") });
+            }}
+          />
         )}
         <div className={configuring ? "invisible h-0 overflow-hidden" : ""}>
         {/* font-bold / font-semibold / font-normal below are --w-head /
@@ -332,7 +353,7 @@ export default function TelegramStep({ onNext }: TelegramStepProps) {
           <button
             type="button"
             onClick={() => setShowToken((v) => !v)}
-            aria-label={showToken ? "Hide token" : "Show token"}
+            aria-label={showToken ? t("login.hideToken") : t("login.showToken")}
             aria-controls="telegram-bot-token"
             className="absolute right-[var(--s-1)] top-1/2 -translate-y-1/2 grid place-items-center w-10 h-10 rounded-[var(--r-1)] bg-transparent border-none cursor-pointer text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-3)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--coral-ring)]"
             style={{ transition: CONTROL_TRANSITION }}

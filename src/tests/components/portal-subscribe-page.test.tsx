@@ -13,6 +13,6 @@ describe("PortalSubscribePage", () => {
     expect(getByText("Upgrade to ClawBox AI Max with the same email you used to buy your ClawBox.")).toBeInTheDocument();
     expect(getByText("Use the same email address as your ClawBox purchase to unlock the bonus.")).toBeInTheDocument();
     expect(getAllByText("Maximum usage").length).toBeGreaterThan(0);
-    expect(getByRole("link", { name: /Sign in to subscribe/i })).toHaveAttribute("href", "https://openclawhardware.dev/portal");
+    expect(getByRole("link", { name: /Sign in to subscribe/i })).toHaveAttribute("href", "https://clawbox.com/portal");
   });
 });

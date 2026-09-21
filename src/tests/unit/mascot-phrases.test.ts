@@ -1,40 +1,29 @@
 import { describe, expect, it } from "vitest";
 import {
-  ensureFullPhraseSet,
-  INSPIRATION_PHRASES,
   LANG_NAMES,
+  MAX_PHRASE_LENGTH,
+  MIN_SURVIVORS_PER_CATEGORY,
   PHRASE_CATEGORIES,
-  type MascotPhraseSet,
+  isValidPhrase,
+  mergeWithPackSync,
+  sanitizeCategory,
+  stripEchoes,
+  validateBatch,
 } from "@/lib/mascot-phrases";
+import { en } from "@/lib/mascot-packs/en";
+import { neutral } from "@/lib/mascot-packs/neutral";
+import { PREFERENCE_LANGUAGES } from "@/lib/preference-schema";
 
-describe("INSPIRATION_PHRASES", () => {
-  it("has at least one entry in every category so the mascot never picks from an empty bag", () => {
-    for (const cat of PHRASE_CATEGORIES) {
-      expect(INSPIRATION_PHRASES[cat].length, `${cat} should be non-empty`).toBeGreaterThan(0);
-    }
-  });
-
-  it("nameGreetings entries all contain the {name} token (the renderer substitutes it at runtime)", () => {
-    for (const tpl of INSPIRATION_PHRASES.nameGreetings) {
-      expect(tpl, `"${tpl}" missing {name}`).toContain("{name}");
-    }
-  });
-
-  it("nameFallbacks are single-word friendly placeholders (no whitespace, no template tokens)", () => {
-    for (const name of INSPIRATION_PHRASES.nameFallbacks) {
-      expect(name).not.toMatch(/\s/);
-      expect(name).not.toContain("{");
-    }
+describe("PHRASE_CATEGORIES", () => {
+  it("is exactly the set of keys a pack must define", () => {
+    expect([...PHRASE_CATEGORIES].sort()).toEqual(Object.keys(en).sort());
+    expect([...PHRASE_CATEGORIES].sort()).toEqual(Object.keys(neutral).sort());
   });
 });
 
 describe("LANG_NAMES", () => {
-  it("covers every locale the i18n provider supports", () => {
-    // Match the union in src/lib/i18n.tsx — keeping this list in sync
-    // prevents a missing locale from silently falling back to "English"
-    // when the LLM prompt is built.
-    const expected = ["en", "bg", "de", "es", "fr", "it", "ja", "nl", "sv", "zh"];
-    expect(Object.keys(LANG_NAMES).sort()).toEqual(expected.sort());
+  it("covers every locale the device ships", () => {
+    expect(Object.keys(LANG_NAMES).sort()).toEqual([...PREFERENCE_LANGUAGES].sort());
   });
 
   it("never has an empty display name", () => {
@@ -44,87 +33,280 @@ describe("LANG_NAMES", () => {
   });
 });
 
-describe("PHRASE_CATEGORIES", () => {
-  it("equals the runtime keys of INSPIRATION_PHRASES", () => {
-    expect([...PHRASE_CATEGORIES].sort()).toEqual(Object.keys(INSPIRATION_PHRASES).sort());
+describe("isValidPhrase", () => {
+  it("accepts a normal line for its own locale", () => {
+    expect(isValidPhrase("Ship faster, humans.", "sass", "en")).toBe(true);
+    expect(isValidPhrase("Стига си скролвал 😤", "sass", "bg")).toBe(true);
+  });
+
+  it("rejects a line written in another script", () => {
+    expect(isValidPhrase("Здрасти, {name}! 🇧🇬", "nameGreetings", "en")).toBe(false);
+    expect(isValidPhrase("шефе", "nameFallbacks", "en")).toBe(false);
+  });
+
+  it("rejects blanks, non-strings and anything that outgrows a speech bubble", () => {
+    expect(isValidPhrase("   ", "sass", "en")).toBe(false);
+    expect(isValidPhrase(42, "sass", "en")).toBe(false);
+    expect(isValidPhrase(null, "sass", "en")).toBe(false);
+    expect(isValidPhrase("x".repeat(MAX_PHRASE_LENGTH + 1), "sass", "en")).toBe(false);
+    expect(isValidPhrase("x".repeat(MAX_PHRASE_LENGTH), "sass", "en")).toBe(true);
+  });
+
+  it("enforces the per-category rules", () => {
+    expect(isValidPhrase("Hello!", "nameGreetings", "en")).toBe(false);
+    expect(isValidPhrase("Hello {name}!", "nameGreetings", "en")).toBe(true);
+    expect(isValidPhrase("dear friend", "nameFallbacks", "en")).toBe(false);
+    expect(isValidPhrase("friend", "nameFallbacks", "en")).toBe(true);
+  });
+
+  it("rejects placeholder tokens the renderer would never substitute", () => {
+    // Only `{name}`, and only in nameGreetings, is ever substituted. Anything
+    // else reaches the bubble as literal braces.
+    expect(isValidPhrase("Hi {user}!", "sass", "en")).toBe(false);
+    expect(isValidPhrase("Working, {name}?", "sass", "en")).toBe(false);
+    expect(isValidPhrase("Hey {name} {user}", "nameGreetings", "en")).toBe(false);
+    expect(isValidPhrase("Hey {name}!", "nameGreetings", "en")).toBe(true);
+  });
+
+  it("classifies decomposed (NFD) accented text by its base script, not as mixed", () => {
+    // "Kapitän" with the umlaut as a combining mark: the é/ä accent is its own
+    // code point, which the per-character script test would bucket as "other".
+    const nfd = "Kapitän";
+    expect(nfd.normalize("NFC")).not.toBe(nfd);
+    expect(isValidPhrase(nfd, "sass", "de")).toBe(true);
   });
 });
 
-describe("ensureFullPhraseSet", () => {
-  it("returns the inspiration set verbatim when called with null", () => {
-    const out = ensureFullPhraseSet(null);
-    expect(out).toEqual(INSPIRATION_PHRASES);
+describe("sanitizeCategory", () => {
+  it("trims, drops invalid entries and de-duplicates while keeping order", () => {
+    const out = sanitizeCategory(
+      ["  keep me  ", "keep me", "", 7, "x".repeat(80), "Здрасти", "and me"],
+      "sass",
+      "en",
+    );
+    expect(out).toEqual(["keep me", "and me"]);
   });
 
-  it("returns the inspiration set verbatim when called with undefined", () => {
-    const out = ensureFullPhraseSet(undefined);
-    expect(out).toEqual(INSPIRATION_PHRASES);
+  it("returns an empty array for anything that is not an array", () => {
+    expect(sanitizeCategory(null, "sass", "en")).toEqual([]);
+    expect(sanitizeCategory("nope", "sass", "en")).toEqual([]);
+  });
+});
+
+describe("validateBatch (INV-6 — nothing unvalidated reaches the cache)", () => {
+  const good = (prefix: string) => [`${prefix} one`, `${prefix} two`, `${prefix} three`, `${prefix} four`];
+
+  it("keeps categories that have survivors and drops the ones left empty", () => {
+    const result = validateBatch(
+      {
+        sass: good("sass"),
+        idle: good("idle"),
+        jump: good("jump"),
+        dance: ["x".repeat(80)], // nothing valid survives
+      },
+      "en",
+    );
+    expect(result.ok).toBe(true);
+    expect(Object.keys(result.categories).sort()).toEqual(["idle", "jump", "sass"]);
+    expect(result.categories.sass).toHaveLength(4);
+    expect(result.dropped).toBe(1);
   });
 
-  it("backfills missing categories from inspiration so every bag stays non-empty", () => {
-    const out = ensureFullPhraseSet({ sass: ["custom sass line"] });
-    expect(out.sass).toEqual(["custom sass line"]);
-    // Untouched categories must come from inspiration.
-    expect(out.idle).toEqual(INSPIRATION_PHRASES.idle);
-    expect(out.nameGreetings).toEqual(INSPIRATION_PHRASES.nameGreetings);
+  // The regression this whole gate got wrong: the per-category bar was four,
+  // which the on-device model never clears once its pack echoes are stripped.
+  // One NEW line in a category is a real addition — the pack tops the category
+  // back up on the way to the bubble, so a thin category cannot make the crab
+  // repeat itself.
+  it("keeps a category that produced a single new line", () => {
+    const result = validateBatch({ sass: ["just the one"], idle: ["one here too"], jump: ["and one"] }, "en");
+    expect(result.ok).toBe(true);
+    expect(result.categories.sass).toEqual(["just the one"]);
+    expect(MIN_SURVIVORS_PER_CATEGORY).toBe(1);
   });
 
-  it("ignores empty arrays — they should not blank out the inspiration fallback", () => {
-    const out = ensureFullPhraseSet({ sass: [], idle: ["only idle"] });
-    expect(out.sass).toEqual(INSPIRATION_PHRASES.sass);
-    expect(out.idle).toEqual(["only idle"]);
+  it("discards a batch that could not fill three categories", () => {
+    const result = validateBatch({ sass: good("sass"), idle: ["x".repeat(80)] }, "en");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("too-few-categories");
+    expect(result.categories).toEqual({});
   });
 
-  it("filters out non-string entries so a bad LLM payload cannot inject objects/numbers", () => {
-    // The model is asked for { sass: [...] } but if it returns a junk
-    // payload (e.g. mixed types), we strip everything that isn't a
-    // non-empty short string before keeping the array.
-    const out = ensureFullPhraseSet({
-      sass: [
-        "good line",
-        "" as unknown as string,                        // empty
-        42 as unknown as string,                        // wrong type
-        "x".repeat(200) as unknown as string,           // too long (>120)
-        null as unknown as string,                      // null
-        "another good one",
-      ] as string[],
-    });
-    expect(out.sass).toEqual(["good line", "another good one"]);
+  it("discards a batch whose entries are in the wrong script", () => {
+    const result = validateBatch(
+      { sass: good("sass"), idle: good("idle"), jump: good("jump") },
+      "bg",
+    );
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("too-few-categories");
   });
 
-  it("falls back to inspiration when filtering empties the category entirely", () => {
-    const out = ensureFullPhraseSet({
-      sass: ["x".repeat(200), 7 as unknown as string],
-    });
-    expect(out.sass).toEqual(INSPIRATION_PHRASES.sass);
+  it("discards a Latin-locale batch the model answered in English", () => {
+    const english = [
+      "You have to ship this",
+      "Just make the thing",
+      "What about the tests?",
+      "They know what you did",
+    ];
+    const result = validateBatch({ sass: english, idle: english, jump: english }, "de");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("wrong-language");
   });
 
-  it("strips nameGreetings entries missing the {name} token (would render literally otherwise)", () => {
-    const out = ensureFullPhraseSet({
-      nameGreetings: [
-        "Hello {name}!",
-        "Hello!",                  // missing token — must be dropped
-        "{name} ✨",
-      ],
-    });
-    expect(out.nameGreetings).toEqual(["Hello {name}!", "{name} ✨"]);
+  it("does not flag a real German batch", () => {
+    const german = ["Kaffee zuerst ☕", "Nicht schon wieder 🙄", "Läuft bei mir 😎", "Feierabend! 🎉"];
+    const result = validateBatch({ sass: german, idle: german, jump: german }, "de");
+    expect(result.ok).toBe(true);
   });
 
-  it("falls back to inspiration nameGreetings when none of the incoming entries have {name}", () => {
-    const out = ensureFullPhraseSet({
-      nameGreetings: ["plain hello", "no token here"],
-    });
-    expect(out.nameGreetings).toEqual(INSPIRATION_PHRASES.nameGreetings);
+  it("can be asked to skip the stopword probe (cache re-validation)", () => {
+    const english = ["You have to ship this", "Just make the thing", "What about the tests?", "They know"];
+    expect(validateBatch({ sass: english, idle: english, jump: english }, "de", { stopwordProbe: false }).ok).toBe(true);
+  });
+});
+
+describe("stripEchoes", () => {
+  it("removes lines the pack already has and keeps the new ones", () => {
+    const result = stripEchoes(
+      { sass: [en.sass[0], "A line the pack has never seen.", en.sass[1]] },
+      en,
+    );
+    expect(result.sass).toEqual(["A line the pack has never seen."]);
   });
 
-  it("does not mutate the input nor the inspiration constant (immutability check)", () => {
-    const inspirationSnapshot = JSON.stringify(INSPIRATION_PHRASES);
-    const incoming: Partial<MascotPhraseSet> = { sass: ["a", "b"] };
-    const incomingSnapshot = JSON.stringify(incoming);
+  it("matches on case and collapsed whitespace, not byte equality", () => {
+    const result = stripEchoes({ sass: [`  ${en.sass[0].toUpperCase()}  `] }, en);
+    expect(result.sass).toEqual([]);
+  });
 
-    ensureFullPhraseSet(incoming);
+  it("treats a pack line with an emoji glued on as an echo", () => {
+    // Measured on the reference box: the model returns "I do all the work
+    // here. \u{1F644}" against the pack's "I do all the work here.". A trailing
+    // emoji is decoration, not a new line, and keeping both variants is how
+    // the crab ends up saying the same thing twice in a row.
+    const result = stripEchoes(
+      { sass: [`${en.sass[0]} \u{1F644}`, `${en.sass[1]}\u{1F4A8}`, "Genuinely different."] },
+      en,
+    );
+    expect(result.sass).toEqual(["Genuinely different."]);
+  });
 
-    expect(JSON.stringify(INSPIRATION_PHRASES)).toBe(inspirationSnapshot);
-    expect(JSON.stringify(incoming)).toBe(incomingSnapshot);
+  it("treats a difference in end punctuation alone as an echo", () => {
+    const bare = en.sass[0].replace(/[.!?]+$/, "");
+    const result = stripEchoes({ sass: [`${bare}!`, `${bare}?!`] }, en);
+    expect(result.sass).toEqual([]);
+  });
+
+  it("keeps emoji-only lines apart from each other", () => {
+    // The idle pack is mostly bare emoji. Stripping every pictograph folds
+    // them all to the empty string, which would make each one an echo of all
+    // the others — so those fall back to the plain fold.
+    const result = stripEchoes({ idle: ["\u{1F634}", "\u{1F914}"] }, { ...en, idle: ["\u{1F914}"] });
+    expect(result.idle).toEqual(["\u{1F634}"]);
+  });
+
+  it("compares within a category, not across the whole pack", () => {
+    // A power line is not an echo just because some other category has it.
+    const result = stripEchoes({ sass: [en.power[0]] }, en);
+    expect(result.sass).toEqual([en.power[0]]);
+  });
+
+  it("leaves categories the batch did not supply absent", () => {
+    const result = stripEchoes({ sass: ["something new entirely"] }, en);
+    expect(result.idle).toBeUndefined();
+    expect(Object.keys(result)).toEqual(["sass"]);
+  });
+
+  it("passes non-strings through for validateBatch to drop and count", () => {
+    const result = stripEchoes({ sass: [42, en.sass[0], "new"] as unknown as string[] }, en);
+    expect(result.sass).toEqual([42, "new"]);
+  });
+
+  it("turns an all-echo batch into one validateBatch rejects", () => {
+    // The end-to-end point: a run that only parroted the tone reference is a
+    // failed run, not a cacheable one.
+    const echo = { sass: en.sass.slice(0, 6), idle: en.idle.slice(0, 6), jump: en.jump.slice(0, 6) };
+    expect(validateBatch(echo, "en").ok).toBe(true);
+    expect(validateBatch(stripEchoes(echo, en), "en").ok).toBe(false);
+  });
+
+  // The other half of that: a run that echoed MOST of the pack but landed a
+  // few genuinely new lines is a success. This is what the on-device model
+  // actually produces — roughly three quarters echo — and demanding four new
+  // lines per category turned every real run into an error message.
+  it("keeps a mostly-echo batch that still produced new lines", () => {
+    const mostlyEcho = {
+      sass: [...en.sass.slice(0, 6), "A line the pack has never seen."],
+      idle: [...en.idle.slice(0, 6), "Another brand new one."],
+      jump: [...en.jump.slice(0, 6), "Third of its kind."],
+    };
+    const stripped = stripEchoes(mostlyEcho, en);
+    const result = validateBatch(stripped, "en");
+    expect(result.ok).toBe(true);
+    expect(result.categories.sass).toEqual(["A line the pack has never seen."]);
+  });
+
+  it("also strips lines an earlier run already cached", () => {
+    // Top-up mode: a line yesterday's run produced is not new today, and
+    // counting it as new would put the survivor gate back to measuring
+    // something other than what it claims.
+    const cached = { sass: ["Cached from yesterday."] };
+    const result = stripEchoes({ sass: ["Cached from yesterday.", "Genuinely new."] }, en, cached);
+    expect(result.sass).toEqual(["Genuinely new."]);
+  });
+
+  it("tolerates a missing second source", () => {
+    const result = stripEchoes({ sass: [en.sass[0], "new"] }, en, null);
+    expect(result.sass).toEqual(["new"]);
+  });
+});
+
+describe("mergeWithPackSync (INV-3 — always complete, never another language)", () => {
+  it("fills every missing category from the pack", () => {
+    const merged = mergeWithPackSync({ sass: ["a fresh line"] }, en, "en");
+    expect(merged.idle).toEqual(en.idle);
+    for (const category of PHRASE_CATEGORIES) {
+      expect(merged[category].length, category).toBeGreaterThan(0);
+    }
+  });
+
+  it("ADDS generated lines to the pack rather than replacing it", () => {
+    // A full regen used to substitute its output for the pack outright, which
+    // SHRANK the repertoire — a measured English box went from 102 hand-written
+    // lines to 72 generated ones, most of them near-copies of the pack lines the
+    // prompt had shown the model as a tone reference. Net: fewer, samier lines.
+    const merged = mergeWithPackSync({ sass: ["a fresh line"] }, en, "en");
+    expect(merged.sass).toEqual(["a fresh line", ...en.sass]);
+    expect(merged.sass.length).toBeGreaterThan(en.sass.length);
+  });
+
+  it("de-duplicates a generated line the model copied straight off the pack", () => {
+    const merged = mergeWithPackSync({ sass: [en.sass[0]] }, en, "en");
+    expect(merged.sass).toEqual(en.sass);
+  });
+
+  it("drops incoming entries in the wrong language and uses the pack instead", () => {
+    const merged = mergeWithPackSync({ sass: ["Здрасти!", "шефе"] }, en, "en");
+    expect(merged.sass).toEqual(en.sass);
+  });
+
+  it("returns a complete set for null / undefined input", () => {
+    for (const input of [null, undefined]) {
+      const merged = mergeWithPackSync(input, en, "en");
+      for (const category of PHRASE_CATEGORIES) {
+        expect(merged[category].length, category).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("falls back to the neutral pack when the pack itself cannot supply a category", () => {
+    const brokenPack = { ...en, sass: ["x".repeat(200)] };
+    const merged = mergeWithPackSync(null, brokenPack, "en");
+    expect(merged.sass).toEqual(neutral.sass);
+  });
+
+  it("never hands out a set that aliases the module-level packs", () => {
+    const merged = mergeWithPackSync(null, en, "en");
+    merged.sass.push("mutated by a caller");
+    expect(en.sass).not.toContain("mutated by a caller");
   });
 });

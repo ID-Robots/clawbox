@@ -2,10 +2,14 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 // config-store backs the stored active_harness; mock it so we control the value.
 const mockGet = vi.fn();
-const mockSet = vi.fn();
+const mockSwap = vi.fn();
 vi.mock("@/lib/config-store", () => ({
   get: (...a: unknown[]) => mockGet(...a),
-  set: (...a: unknown[]) => mockSet(...a),
+  // `getActiveHarnessSource` reads the store tri-state, so that "we could not
+  // read it" is not served as "the default harness" to anything that BRANDS
+  // the box. These cases are about the LOCK, so the store always answers.
+  getKnown: async (...a: unknown[]) => ({ value: await mockGet(...a), known: true }),
+  swap: (...a: unknown[]) => mockSwap(...a),
 }));
 
 // Control the dual-license verdict directly (the real module verifies an
@@ -30,7 +34,7 @@ async function loadHarness(edition?: string) {
 describe("harness edition lock", () => {
   beforeEach(() => {
     mockGet.mockReset();
-    mockSet.mockReset();
+    mockSwap.mockReset();
     licenseValid = false;
   });
   afterEach(() => {
@@ -45,7 +49,7 @@ describe("harness edition lock", () => {
     mockGet.mockResolvedValue("hermes"); // stale config ignored on a locked device
     expect(await h.getActiveHarness()).toBe("openclaw");
     await expect(h.setActiveHarness("hermes")).rejects.toThrow(LOCKED);
-    expect(mockSet).not.toHaveBeenCalled();
+    expect(mockSwap).not.toHaveBeenCalled();
   });
 
   it("locks to hermes on the hermes edition", async () => {
@@ -55,7 +59,7 @@ describe("harness edition lock", () => {
     mockGet.mockResolvedValue("openclaw");
     expect(await h.getActiveHarness()).toBe("hermes");
     await expect(h.setActiveHarness("openclaw")).rejects.toThrow(LOCKED);
-    expect(mockSet).not.toHaveBeenCalled();
+    expect(mockSwap).not.toHaveBeenCalled();
   });
 
   it("dual WITHOUT a valid license degrades to locked single (default harness)", async () => {
@@ -64,7 +68,7 @@ describe("harness edition lock", () => {
     expect(h.isSingleHarnessEdition()).toBe(true);
     expect(h.lockedHarness()).toBe("openclaw");
     await expect(h.setActiveHarness("hermes")).rejects.toThrow(LOCKED);
-    expect(mockSet).not.toHaveBeenCalled();
+    expect(mockSwap).not.toHaveBeenCalled();
   });
 
   it("stays locked on dual when the licence verdict is unavailable", async () => {
@@ -77,7 +81,7 @@ describe("harness edition lock", () => {
     expect(h.isDualUnlocked()).toBe(false);
     expect(h.isSingleHarnessEdition()).toBe(true);
     await expect(h.setActiveHarness("hermes")).rejects.toThrow(LOCKED);
-    expect(mockSet).not.toHaveBeenCalled();
+    expect(mockSwap).not.toHaveBeenCalled();
   });
 
   it("dual WITH a valid license unlocks the switcher", async () => {
@@ -87,8 +91,23 @@ describe("harness edition lock", () => {
     expect(h.lockedHarness()).toBeNull();
     mockGet.mockResolvedValue("hermes");
     expect(await h.getActiveHarness()).toBe("hermes"); // honors stored value
-    await h.setActiveHarness("openclaw");
-    expect(mockSet).toHaveBeenCalledWith("active_harness", "openclaw");
+    mockSwap.mockResolvedValue("hermes");
+    // The write answers with what it REPLACED — the caller's "did this change
+    // anything" cannot be answered by a read it made earlier.
+    expect(await h.setActiveHarness("openclaw")).toBe("hermes");
+    expect(mockSwap).toHaveBeenCalledWith("active_harness", "openclaw");
+  });
+
+  it("reports the default as the predecessor when the store held no harness", async () => {
+    // A box that has never switched, or one whose stored value is not a
+    // harness at all: the same answer `getActiveHarness` gives it, so a
+    // re-select of the default is still correctly read as "nothing moved".
+    licenseValid = true;
+    const h = await loadHarness("dual");
+    mockSwap.mockResolvedValue(undefined);
+    expect(await h.setActiveHarness("hermes")).toBe("openclaw");
+    mockSwap.mockResolvedValue("nonsense");
+    expect(await h.setActiveHarness("hermes")).toBe("openclaw");
   });
 
   it("treats an unknown edition value as the native openclaw edition", async () => {

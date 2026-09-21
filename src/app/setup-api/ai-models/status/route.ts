@@ -1,9 +1,30 @@
 import { NextResponse } from "next/server";
 import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
-import { normalizeClawboxAiTier, type ClawboxAiTier } from "@/lib/clawbox-ai-models";
+import {
+  CLAWBOX_AI_FLASH_MODEL_ID,
+  CLAWBOX_AI_PRO_MODEL_ID,
+  normalizeClawboxAiTier,
+  type ClawboxAiTier,
+} from "@/lib/clawbox-ai-models";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
+// Portal tier resolution lives in @/lib/clawbox-ai-portal-tier so the
+// configure route can reach the same answer from the same cache (TASK-481).
+import { clawaiTokenRejectedByPortal, fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
+import { profileProviderId } from "@/lib/chatgpt-subscription";
+// The portal's verdict on this box's credential, written where the ROOT boot
+// script can read it: `scripts/gateway-pre-start.sh` decides on every gateway
+// start whether to declare the agent's image path, and the pinned core has no
+// back-off of its own to fall back on (TASK-727).
+import {
+  clearPersistedClawaiCredentialRefusal,
+  persistClawaiCredentialRefusal,
+} from "@/lib/clawai-credential-refusal";
+// The portal's PLAN, written where the same two boot scripts can read it. The
+// tier stamp beside it is a device DEFAULT and may not be refused on — see
+// `clawai-plan-tier.ts` and TASK-744.
+import { clawaiPlanGeneration, persistClawaiPlanTier } from "@/lib/clawai-plan-tier";
 
 export const dynamic = "force-dynamic";
 
@@ -27,187 +48,30 @@ const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 // from `models.providers.deepseek.apiKey` in openclaw.json instead.
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
 
-// Portal endpoint that maps a `claw_*` token to its current subscription
-// state. Authoritative source for the device's tier badge — local config
-// only ever stored the user's wizard *selection*, which can drift from
-// what the portal actually grants (Free user pastes a token + clicks Max
-// pill → local says "pro" but token entitles only Free).
-const PORTAL_DEVICE_INFO_URL =
-  process.env.CLAWBOX_AI_DEVICE_INFO_URL?.trim()
-  || "https://openclawhardware.dev/api/clawbox-ai/device-info";
-
-// 120s TTL > 30s poll cadence so most polls land on a warm cache. The
-// portal's reconcile-tier already self-heals on its end inside its own
-// 60s window, so 120s here is still bounded by Stripe truth on the
-// far side.
-const PORTAL_TIER_CACHE_TTL_MS = 120_000;
-// 4s timeout — this fetch sits on the render path of the chat header
-// and Settings card. Anything longer stacks behind the 30s poll cadence
-// and stalls the badge update. On timeout we treat the portal as
-// unreachable and fall back to the picker selection.
-const PORTAL_FETCH_TIMEOUT_MS = 4_000;
-// Bound for the in-memory token cache. A single device only has one
-// active claw_ token at a time, so this only matters under factory-
-// reset / multi-account dev churn — but a long-running process would
-// otherwise leak entries forever.
-const PORTAL_TIER_CACHE_MAX_ENTRIES = 64;
-// Short negative-cache window for tokens whose last portal lookup
-// resolved to `unreachable` (4xx auth failure, 5xx, or network
-// error). With useClawboxLogin polling every 30s, this caps the
-// per-device portal load during a sustained auth-failure or
-// outage at ~1 request per 30s (down from 1-per-poll). Smaller
-// than PORTAL_TIER_CACHE_TTL_MS because the positive cache is
-// safe to hold longer; an unreachable verdict needs to clear
-// quickly enough that recovery (token re-pair, portal recovers)
-// shows up on the next poll, not minutes later.
-const PORTAL_UNREACHABLE_TTL_MS = 30_000;
-
-interface DeviceInfoResponse {
-  tier?: string;
-  deviceTier?: string | null;
-}
-
-type PortalLookup =
-  | { source: "portal"; tier: ClawboxAiTier | null }
-  | { source: "unreachable" };
-
-interface PortalCacheEntry {
-  tier: ClawboxAiTier | null;
-  expiresAt: number;
-}
-
-const portalTierCache = new Map<string, PortalCacheEntry>();
-// token → epoch-ms timestamp when its unreachable verdict expires.
-// Separate from portalTierCache because the value is "we tried and
-// it failed, don't try again yet" rather than "the answer is null".
-const portalUnreachableCache = new Map<string, number>();
-const inFlightPortalLookups = new Map<string, Promise<PortalLookup>>();
-
 /**
- * Writes a token's resolved tier into the in-memory cache, sweeping
- * expired entries and enforcing the size cap before insertion. Map
- * iteration order is insertion order, so the first key returned by
- * `keys()` is the oldest.
+ * The entitlement list a device-info answer without `allowedModels` implies.
  *
- * @param token Portal token (`claw_*`) used as the cache key.
- * @param tier Resolved tier (or `null` for Free / no entitlement).
- * @param now Current epoch ms; used both for expiry comparison and to
- *   set the new entry's `expiresAt`.
+ * Only the compatibility path uses this. A portal that publishes the real list
+ * always wins, and a portal that could not be reached gets no list at all.
+ *
+ * It reaches the Max id when EITHER reading of the response does, and that
+ * "either" is load-bearing in both directions. The device stamp alone is what
+ * the old badge rule used, and deriving the list from it reproduced TASK-691
+ * through this very door: a Max subscriber whose box is stamped
+ * `deviceTier: "flash"` — a state `mapPortalTier` preserves on purpose — would
+ * get `["deepseek-v4-flash"]`, which the boot guard reads as a positive refusal
+ * and WRITES his primary model down on. The plan alone would be the mirror
+ * mistake: a box the portal stamped `"pro"` used to be allowed to run the Max
+ * model under the old rule, and a compatibility path must not start refusing
+ * something that used to work. So: the more permissive of the two.
  */
-function rememberTier(token: string, tier: ClawboxAiTier | null, now: number) {
-  for (const [key, entry] of portalTierCache) {
-    if (entry.expiresAt <= now) portalTierCache.delete(key);
-  }
-  while (portalTierCache.size >= PORTAL_TIER_CACHE_MAX_ENTRIES) {
-    const oldest = portalTierCache.keys().next().value;
-    if (oldest === undefined) break;
-    portalTierCache.delete(oldest);
-  }
-  portalTierCache.set(token, { tier, expiresAt: now + PORTAL_TIER_CACHE_TTL_MS });
-}
-
-/**
- * Maps the portal's `device-info` response to the local `ClawboxAiTier`
- * enum the UI badges already understand. Prefers the device-pair stamp
- * (`deviceTier`) when present; otherwise translates the user's plan
- * name (`tier`) to its corresponding device-tier. The local enum is
- * `"flash"` (Pro plan / V4 Flash model) and `"pro"` (Max plan / V4 Pro
- * model); Free / unpaid resolves to `null` (no paid badge rendered).
- *
- * @param body Parsed JSON from `/api/clawbox-ai/device-info`.
- * @returns The badge-facing tier, or `null` for Free.
- */
-function mapPortalTier(body: DeviceInfoResponse): ClawboxAiTier | null {
-  const plan = (body.tier ?? "").trim().toLowerCase();
-  // Subscription plan is the source of truth — a stale or bogus
-  // deviceTier stamp on a Free account must never grant a paid badge.
-  if (plan !== "pro" && plan !== "max") return null;
-  // Paid: prefer the explicit device-pair stamp (lets Max subs run
-  // flash); otherwise map plan → device tier.
-  const stamped = normalizeClawboxAiTier(body.deviceTier);
-  if (stamped) return stamped;
-  return plan === "max" ? "pro" : "flash";
-}
-
-/**
- * Resolves a `claw_*` token's current tier against the portal, with
- * a short in-memory cache and concurrent-request de-duplication.
- *
- * Cache semantics:
- *   - 200 OK: parsed tier is cached for `PORTAL_TIER_CACHE_TTL_MS`.
- *   - Non-200 / network error: token is marked unreachable for
- *     `PORTAL_UNREACHABLE_TTL_MS` so we don't hit the portal every
- *     30 s status poll during a sustained auth failure or outage.
- *     A successful 200 clears the unreachable mark so recovery is
- *     responsive.
- *
- * 401/403 are deliberately treated the same as 5xx/network errors
- * (unreachable) rather than as a definitive "Free" verdict — see
- * the non-200 branch in the body for the rationale.
- *
- * @param token The bearer token to look up.
- * @returns Either a definitive `{ source: "portal", tier }` answer or
- *   `{ source: "unreachable" }` when the portal couldn't respond.
- */
-async function fetchPortalTier(token: string): Promise<PortalLookup> {
-  const now = Date.now();
-  const cached = portalTierCache.get(token);
-  if (cached && cached.expiresAt > now) return { source: "portal", tier: cached.tier };
-
-  const unreachableUntil = portalUnreachableCache.get(token);
-  if (unreachableUntil !== undefined && unreachableUntil > now) {
-    return { source: "unreachable" };
-  }
-
-  const existing = inFlightPortalLookups.get(token);
-  if (existing) return existing;
-
-  const promise = (async (): Promise<PortalLookup> => {
-    const markUnreachable = (): PortalLookup => {
-      portalUnreachableCache.set(token, now + PORTAL_UNREACHABLE_TTL_MS);
-      return { source: "unreachable" };
-    };
-    try {
-      const res = await fetch(PORTAL_DEVICE_INFO_URL, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(PORTAL_FETCH_TIMEOUT_MS),
-      });
-      if (res.ok) {
-        const body = await res.json() as DeviceInfoResponse;
-        const tier = mapPortalTier(body);
-        rememberTier(token, tier, now);
-        portalUnreachableCache.delete(token);
-        return { source: "portal", tier };
-      }
-      // 401/403 is ambiguous: it can mean genuinely Free OR token
-      // revoked / migrated / corrupted on a still-paid account. We
-      // can't tell from the response alone, and treating it as
-      // "Free" silently downgrades paid users with broken auth (and
-      // fires the downgrade-celebration popup). Mark unreachable
-      // instead so callers preserve localTier.
-      return markUnreachable();
-    } catch {
-      return markUnreachable();
-    }
-  })();
-
-  inFlightPortalLookups.set(token, promise);
-  try {
-    return await promise;
-  } finally {
-    inFlightPortalLookups.delete(token);
-  }
-}
-
-/**
- * Test-only escape hatch — clears both the value cache and any
- * in-flight lookups so vitest's `beforeEach` can start each test from
- * a clean module-state. Not for production use.
- */
-export function _resetPortalTierCache() {
-  portalUnreachableCache.clear();
-  portalTierCache.clear();
-  inFlightPortalLookups.clear();
+function allowedModelsForCompat(
+  deviceTier: ClawboxAiTier | null,
+  planTier: ClawboxAiTier | null,
+): string[] {
+  return deviceTier === "pro" || planTier === "pro"
+    ? [CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID]
+    : [CLAWBOX_AI_FLASH_MODEL_ID];
 }
 
 function normalizeProvider(provider: string | null): string | null {
@@ -264,8 +128,7 @@ async function resolveOpenclawAiState(): Promise<ResolvedAiState> {
   let activeKey: string | undefined;
   if (primaryProviderHint) {
     activeKey = profileKeys.find((key) => {
-      const entry = profiles[key];
-      const entryProvider = normalizeProvider(entry?.provider ?? key.split(":")[0]);
+      const entryProvider = normalizeProvider(profileProviderId(key, profiles[key]));
       return entryProvider === primaryProviderHint;
     });
   }
@@ -283,11 +146,9 @@ async function resolveOpenclawAiState(): Promise<ResolvedAiState> {
   const clawaiToken = typeof clawaiTokenCandidate === "string" && clawaiTokenCandidate.startsWith("claw_")
     ? clawaiTokenCandidate
     : null;
-  const hasClawaiProfile = profileKeys.some((key) => {
-    const entry = profiles[key];
-    const entryProvider = normalizeProvider(entry?.provider ?? key.split(":")[0]);
-    return entryProvider === "clawai";
-  });
+  const hasClawaiProfile = profileKeys.some(
+    (key) => normalizeProvider(profileProviderId(key, profiles[key])) === "clawai",
+  );
 
   return { provider, mode, model, hasClawaiProfile, clawaiToken };
 }
@@ -342,6 +203,19 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
 
   let clawaiAccountTier: ClawboxAiTier | null = null;
   let accountTierSource: "portal" | "picker" = "picker";
+  // The portal's own list of model ids this token may run. NULL MEANS "NOT
+  // ANSWERED" — no token, portal unreachable, or a portal build that does not
+  // publish the field — and no caller may read that as a refusal. It is
+  // deliberately not backed by a local fallback the way the tier badge is: a
+  // remembered entitlement is a guess, and a guess is what locked a Max owner
+  // out of the model he pays for (TASK-691).
+  let clawaiAllowedModels: string[] | null = null;
+  // Did the portal REFUSE this device's credential? False until it says so, so
+  // a box that has not asked yet — no token, portal never reached — never
+  // accuses a credential that may be fine. See TASK-419: the answer used to be
+  // thrown away, and the badge went on saying "Connected · Pro" while every
+  // turn came back "HTTP 403: Invalid token".
+  let clawaiTokenRejected = false;
   if (state.hasClawaiProfile) {
     clawaiAccountTier = localTier;
     // Ask the portal whenever a clawai token is paired, regardless
@@ -350,17 +224,76 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
     // mapPortalTier now gates non-null returns on a paid plan, so
     // a bogus deviceTier stamp can no longer promote a Free user.
     if (state.clawaiToken) {
+      // When this poll's question was ASKED. The answer can take up to the
+      // portal fetch's four-second timeout, and a re-link plus a refusal of the
+      // NEW credential can both land inside that window — see
+      // `clearPersistedClawaiCredentialRefusal`.
+      const askedAt = Date.now();
+      // The credential counter as it stands NOW, for the plan write below. Same
+      // window and same hazard as `askedAt` above: the portal takes up to four
+      // seconds and the box can be re-linked inside that time.
+      const askedAtGeneration = clawaiPlanGeneration();
       const lookup = await fetchPortalTier(state.clawaiToken);
       if (lookup.source === "portal") {
         clawaiAccountTier = lookup.tier;
+        // A portal that answered but published no list is not "unknown": it is
+        // an older portal build, and there the badge IS all the entitlement
+        // there has ever been. Fill the list from it so nothing that used to
+        // be refused silently becomes allowed on such a deployment. Only the
+        // portal-ANSWERED branch does this — an unreachable portal stays null,
+        // which is the whole point of the change.
+        clawaiAllowedModels = lookup.allowedModels
+          ?? allowedModelsForCompat(lookup.tier, lookup.planTier);
         accountTierSource = "portal";
         // Persist the portal-confirmed tier so the portal-unreachable
         // fallback reflects the last *confirmed* tier, not a stale
         // configure-time value (which flapped a Free badge to Pro and
         // re-fired the celebration). Write only on change to avoid churn.
-        if (lookup.tier !== localTier) {
+        //
+        // GUARDED THE SAME WAY as the plan below, and by the same snapshot. The
+        // two stamps are read together by both boot scripts and one of them
+        // deletes on the pair, so they have to describe the same ACCOUNT: an
+        // unguarded badge write would land the RETIRED account's badge beside a
+        // plan write that was correctly skipped, and the arm would then fall
+        // back to a badge belonging to a token this box no longer holds.
+        if (askedAtGeneration === clawaiPlanGeneration() && lookup.tier !== localTier) {
           await setConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY, lookup.tier).catch(() => {});
         }
+        // The PLAN, beside the badge and never instead of it. The two boot
+        // scripts decide an ENTITLEMENT — whether this box may keep a cloud
+        // voice at all, and one of them DELETES the definition when it may not
+        // — and the badge above is a device DEFAULT that a Max subscriber is
+        // allowed to have set to Flash. Only the portal-ANSWERED branch writes
+        // it: the wizard's plan picker is a guess the account has not been
+        // consulted about (TASK-481), and an `unreachable` verdict is the
+        // not-knowing the key exists to keep distinguishable. `planVerdict`
+        // rather than `planTier`, because that one answers `null` to a
+        // genuinely unpaid account, to an ABSENT `tier` and to a plan word this
+        // build has never seen alike — and only the first is a downgrade.
+        await persistClawaiPlanTier({ verdict: lookup.planVerdict }, askedAtGeneration);
+        // The portal ANSWERED about the credential this box holds, so any
+        // refusal recorded against it is over. Same poll, same store, same
+        // "write only on change" discipline as the tier stamp above — the
+        // helper reads before it writes.
+        await clearPersistedClawaiCredentialRefusal(askedAt);
+      } else {
+        clawaiTokenRejected = lookup.rejected;
+        // `rejected` is the PORTAL naming this credential as the reason, never
+        // a bare 401/403 off the wire (see `portalRefusedTheToken`) — the same
+        // bar `noteClawaiCredentialRefused` insists on.
+        //
+        // Persisted off `clawaiTokenRejectedByPortal()` rather than off
+        // `lookup.rejected`, because those two are not the same fact.
+        // `fetchPortalTier` hands the CALLER a verdict it deliberately did not
+        // REMEMBER when a credential has been proven good since that lookup
+        // was sent — the generation guard that exists so a delayed 403 for the
+        // retired token cannot be read as a verdict on the one the box holds
+        // now. Writing `lookup.rejected` to disk would defeat exactly that: a
+        // re-link on the Settings page races the poll it is running, and the
+        // box would stand its image path down at the very restart the re-link
+        // triggers. The module's own guarded reader is the one that answers
+        // "is a rejection ON RECORD for the credential this box holds".
+        if (clawaiTokenRejectedByPortal()) await persistClawaiCredentialRefusal();
       }
     }
   }
@@ -381,12 +314,22 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
     model: state.model,
     clawaiTier,
     clawaiAccountTier,
+    // Model ids the portal says this account may run, or null when it did not
+    // say. The picker gates on this, never on the tier badge above.
+    clawaiAllowedModels,
     // Whether *any* clawai profile is configured. Distinguishes
     // "no ClawBox AI account at all" (false) from "Free user with
     // a paired clawai token" (true, clawaiAccountTier=null) — the
     // hook needs this to gate ClawKeep / Remote Desktop sign-in
     // prompts independently of paid-tier checks.
     clawaiConfigured: state.hasClawaiProfile,
+    // The portal answered and refused this device's token. Deliberately NOT
+    // folded into `connected` or `clawaiConfigured`: a rejected credential is
+    // still a configured one, and the gates hanging off those two (ClawKeep,
+    // Remote Desktop, the whole "has this box been linked" question) must not
+    // flip on an auth error. This is the one field that says the credential
+    // does not work, and the surfaces that claim health read it.
+    clawaiTokenRejected,
     tierSource,
   }, {
     headers: {
@@ -407,7 +350,11 @@ export async function GET() {
     return await buildStatusResponse(state);
   } catch {
     return NextResponse.json(
-      { connected: false, provider: null, providerLabel: null, mode: null, model: null, clawaiTier: null, clawaiAccountTier: null, clawaiConfigured: false, tierSource: "picker" },
+      {
+        connected: false, provider: null, providerLabel: null, mode: null, model: null,
+        clawaiTier: null, clawaiAccountTier: null, clawaiAllowedModels: null,
+        clawaiConfigured: false, clawaiTokenRejected: false, tierSource: "picker",
+      },
       {
         headers: {
           "Cache-Control": "no-store",

@@ -9,10 +9,16 @@ import {
   type LocalAiProvider,
 } from "@/lib/local-ai-runtime";
 import {
+  applyOllamaThinkingToChatBody,
   applyThinkingToChatBody,
+  chatBodyModelId,
   isChatCompletionsPath,
   MAX_REWRITABLE_BODY_BYTES,
 } from "@/lib/local-ai-thinking";
+import { ollamaModelCanThink } from "@/lib/ollama-capabilities";
+import { getEmbedBaseUrl, getEmbedBatch, getEmbedRootUrl } from "@/lib/embed-server";
+import { isEmbeddingsPath, rewriteEmbeddingsBody } from "@/lib/embed-query-instruction";
+import { EMBED_FIT_MARGIN, createLlamaServerFitTransport, fitEmbeddingInputs } from "@/lib/embed-input-fit";
 
 /** True when Content-Length already says the body is too big to buffer. */
 function declaredOverCap(request: Request, maxBytes: number): boolean {
@@ -52,10 +58,20 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<stri
   return Buffer.concat(chunks, total).toString("utf-8");
 }
 
+function upstreamBaseUrl(provider: LocalAiProvider): string {
+  switch (provider) {
+    case "llamacpp":
+      return getLlamaCppBaseUrl();
+    case "embed":
+      return getEmbedBaseUrl();
+    default:
+      return getOllamaBaseUrl();
+  }
+}
+
 function buildUpstreamUrl(provider: LocalAiProvider, pathSegments: string[], search: string): string {
-  const baseUrl = provider === "llamacpp" ? getLlamaCppBaseUrl() : getOllamaBaseUrl();
   const suffix = pathSegments.map((segment) => encodeURIComponent(segment)).join("/");
-  return `${baseUrl.replace(/\/+$/, "")}/${suffix}${search}`;
+  return `${upstreamBaseUrl(provider).replace(/\/+$/, "")}/${suffix}${search}`;
 }
 
 function forwardHeaders(request: Request): Headers {
@@ -109,6 +125,41 @@ function trackResponseBody(body: ReadableStream<Uint8Array> | null, provider: Lo
   });
 }
 
+/**
+ * Translate a buffered chat-completions body for whichever backend will serve
+ * it. Both translations are in src/lib/local-ai-thinking.ts; this is only the
+ * part that has to reach the network.
+ */
+async function rewriteChatBody(provider: LocalAiProvider, raw: string): Promise<string> {
+  if (provider === "llamacpp") return applyThinkingToChatBody(raw);
+  // No field, nothing to decide — and, more importantly, no reason to spend a
+  // round trip on the capability probe. Most turns take this branch.
+  if (!raw.includes('"reasoning_effort"')) return raw;
+  // Cached per model, so a warm conversation pays for the probe once a minute
+  // at most; a failed probe answers null and the body is forwarded verbatim.
+  const canThink = await ollamaModelCanThink(chatBodyModelId(raw));
+  return applyOllamaThinkingToChatBody(raw, canThink);
+}
+
+/**
+ * An embeddings body for the memory embedder: restore the qwen3 query
+ * instruction OpenClaw's ollama adapter used to add (and its openai-compatible
+ * adapter does not), then trim any input that would not fit the server's
+ * batch. Both are in their own modules; this is only the part that touches the
+ * request. The tokenizer round trips share the request's abort signal so a
+ * client that has given up does not keep them going, with a timeout of their
+ * own for a server that has stopped answering.
+ */
+async function rewriteEmbeddingsRequestBody(raw: string, signal: AbortSignal): Promise<string> {
+  const prefixed = rewriteEmbeddingsBody(raw);
+  const transport = createLlamaServerFitTransport(
+    getEmbedRootUrl(),
+    AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+  );
+  const { body } = await fitEmbeddingInputs(prefixed, getEmbedBatch() - EMBED_FIT_MARGIN, transport);
+  return body;
+}
+
 export async function proxyLocalAiRequest(
   request: Request,
   provider: LocalAiProvider,
@@ -143,19 +194,39 @@ export async function proxyLocalAiRequest(
       headers: forwardHeaders(request),
       cache: "no-store",
       redirect: "manual",
+      // A client that gives up (OpenClaw aborts a query at 60 s) takes the
+      // upstream call with it, so the use ends and the idle timer re-arms
+      // instead of waiting on an answer nobody will read.
+      signal: request.signal,
     };
 
     if (request.method !== "GET" && request.method !== "HEAD" && request.body) {
-      // Chat completions are the only path with a chat template to influence,
-      // so they are the only one we buffer — everything else keeps streaming.
-      // See src/lib/local-ai-thinking.ts for why the rewrite exists at all
-      // (llama.cpp ignores `reasoning_effort`; `chat_template_kwargs` is the
-      // field it actually reads).
-      // An oversized body is forwarded untouched rather than refused: a turn
-      // that runs with the server's default thinking setting beats no turn.
-      const rewritable = provider === "llamacpp"
-        && request.method === "POST"
-        && isChatCompletionsPath(pathSegments)
+      const embeddings = provider === "embed" && request.method === "POST" && isEmbeddingsPath(pathSegments);
+
+      // Chat completions are buffered so their thinking can be rewritten;
+      // embeddings for the memory embedder are buffered so the query prefix
+      // can be restored and oversized inputs trimmed. Everything else keeps
+      // streaming. See src/lib/local-ai-thinking.ts for what each chat
+      // backend needs: llama.cpp ignores `reasoning_effort` and reads
+      // `chat_template_kwargs`, while Ollama reads `reasoning_effort` and 400s
+      // every value but `none` on a model that cannot think.
+      //
+      // An oversized CHAT body is forwarded untouched rather than refused: a
+      // turn that runs with the server's default thinking setting beats no
+      // turn. An oversized EMBEDDINGS body is refused: forwarded untouched it
+      // would index every query without its instruction and let a long input
+      // fail on the server, both silently — and OpenClaw never sends one
+      // (its batches stop at 8,000 bytes of text).
+      if (embeddings && declaredOverCap(request, MAX_REWRITABLE_BODY_BYTES)) {
+        endLocalAiUse(provider);
+        return NextResponse.json(
+          { error: "Request body too large for the memory embedder" },
+          { status: 413 },
+        );
+      }
+
+      const rewritable = request.method === "POST"
+        && (embeddings || isChatCompletionsPath(pathSegments))
         && !declaredOverCap(request, MAX_REWRITABLE_BODY_BYTES);
 
       if (rewritable) {
@@ -173,7 +244,9 @@ export async function proxyLocalAiRequest(
         }
         // A string body — fetch sets Content-Length from it, replacing the
         // client's header that forwardHeaders stripped.
-        init.body = applyThinkingToChatBody(raw);
+        init.body = embeddings
+          ? await rewriteEmbeddingsRequestBody(raw, request.signal)
+          : await rewriteChatBody(provider, raw);
       } else {
         init.body = request.body;
         init.duplex = "half";

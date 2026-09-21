@@ -2,6 +2,30 @@
 
 import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
 import { useT } from "@/lib/i18n";
+import { DESKTOP_LAYERS } from "@/lib/window-snap";
+import type { Protection, ProtectionReason } from "@/lib/clawkeep-protection";
+
+/** The reasons that put a shield in an at-risk state. `ok` is not among them. */
+type AtRiskReason = Exclude<ProtectionReason, "ok">;
+
+/**
+ * What the shield says out loud for each way a box can be unprotected. The
+ * amber "has drifted" shield and the red "never protected" one used to share
+ * one sentence — "ClawKeep backup overdue" — so the distinction between them
+ * reached only people who can see the difference between amber and red
+ * (WCAG 2.2 SC 1.4.1). "Overdue" was also wrong for a run that ran and failed,
+ * for one refusing to start, and for a backup that was never scheduled.
+ *
+ * Keyed on the at-risk reasons alone: an unprotected shield must never be able
+ * to fall back to a reassuring "Open ClawKeep", so the type refuses the entry
+ * rather than the code having to remember not to use it.
+ */
+const AT_RISK_TITLE_KEY: Record<AtRiskReason, string> = {
+  stale: "shelf.clawkeepStale",
+  error: "shelf.clawkeepFailed",
+  blocked: "shelf.clawkeepBlocked",
+  never: "shelf.clawkeepNeverBackedUp",
+};
 
 interface ShelfApp {
   id: string;
@@ -21,7 +45,16 @@ interface ChromeShelfProps {
   onLauncherClick: () => void;
   onTrayClick: () => void;
   onClawKeepShieldClick?: () => void;
-  clawkeepStatus?: { stale: boolean; busy: boolean; restoring: boolean };
+  clawkeepStatus?: {
+    /** The shared protection verdict (see `deriveProtection`), whole or not at
+     *  all — null while it is not yet known: on a box that is not paired, or
+     *  before the first status arrives. State and reason travel together so a
+     *  shield can never be at risk without a sentence to say why. */
+    protection?: Protection | null;
+    unconfigured?: boolean;
+    busy: boolean;
+    restoring: boolean;
+  };
   onPinApp?: (id: string) => void;
   onUnpinApp?: (id: string) => void;
   onCloseApp?: (id: string) => void;
@@ -40,7 +73,7 @@ export default function ChromeShelf({
   onLauncherClick,
   onTrayClick,
   onClawKeepShieldClick,
-  clawkeepStatus = { stale: false, busy: false, restoring: false },
+  clawkeepStatus = { protection: null, unconfigured: false, busy: false, restoring: false },
   onPinApp,
   onUnpinApp,
   onCloseApp,
@@ -57,8 +90,9 @@ export default function ChromeShelf({
   const openedAt = useRef(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
-  // Phone portrait: hide chat crab + ClawKeep shield to fit launcher / clock /
-  // fullscreen / power. Tablet portrait and phone landscape keep the full bar.
+  // Phone portrait: hide the ClawKeep shield and the clock to fit the bar.
+  // The chat crab STAYS — a phone lands in the chat and this is its way back
+  // from the desktop. Tablet portrait and phone landscape keep the full bar.
   const [isPortraitPhone, setIsPortraitPhone] = useState(false);
 
   useEffect(() => {
@@ -94,11 +128,21 @@ export default function ChromeShelf({
       setCtxMenu(null);
       setShelfMenu(null);
     };
+    // Escape dismisses a menu, like it does everywhere else on the desktop.
+    // Neither of these menus takes focus, so there was no key handler anywhere
+    // to hear it and a click outside was the only way out.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setCtxMenu(null);
+      setShelfMenu(null);
+    };
     window.addEventListener("click", close);
     window.addEventListener("contextmenu", close);
+    window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("click", close);
       window.removeEventListener("contextmenu", close);
+      window.removeEventListener("keydown", onKey);
     };
   }, [ctxMenu, shelfMenu]);
 
@@ -109,22 +153,41 @@ export default function ChromeShelf({
   const pinnedApps = isMobile
     ? apps.filter(a => a.id === "settings" && a.isPinned !== false)
     : apps.filter(a => a.isPinned !== false);
+  // Every OPEN app on the phone, whether the desktop shelf pins it or not —
+  // an unpinned Settings is still open, and an open app the bar does not draw
+  // is one that vanishes the moment it is switched away from.
   const unpinnedApps = isMobile
-    ? apps.filter(a => a.isOpen && a.id !== "settings")
+    ? apps.filter(a => a.isOpen && !pinnedApps.some(p => p.id === a.id))
     : apps.filter(a => a.isPinned === false);
-  // Priority: restoring (orange) > backup running (green) > stale/red > ok.
+  // Priority: restoring (orange) > backup running (green) > lapsed (amber)
+  // > never-protected (red) > ok.
   // Restore is the rarer, longer, more user-blocking operation, so it wins
   // even if a backup heartbeat happens to be in flight at the same time.
-  const stale = clawAiAuthenticated && clawkeepStatus.stale;
+  const protection = clawkeepStatus.protection;
+  const atRisk = clawAiAuthenticated
+    && !!protection && protection.state !== "protected" && protection.reason !== "ok";
+  // Never-paired is not "overdue": nothing is late on a box that has never
+  // been set up. It gets its own invitation and a calm colour instead of the
+  // red alert a genuinely missed backup earns.
+  const needsSetup = clawAiAuthenticated && !atRisk && !!clawkeepStatus.unconfigured;
   const baseTitle = !clawAiAuthenticated
     ? t("shelf.connectClawBoxAI")
-    : stale
-    ? t("shelf.clawkeepStale")
+    : atRisk
+    ? t(AT_RISK_TITLE_KEY[protection!.reason as AtRiskReason])
+    : needsSetup
+    ? t("shelf.clawkeepNotSetUp")
     : t("shelf.openClawKeep");
-  const mode: "restoring" | "busy" | "alert" | "ok" =
+  // A box that WAS protected and has drifted is not the same as one that
+  // never was — the card says so in amber, and the shelf has to agree or the
+  // distinction only exists on the screen the owner has not opened.
+  const lapsed = atRisk && protection!.state === "lapsed";
+  const mode: "restoring" | "busy" | "lapsed" | "alert" | "setup" | "ok" =
     clawkeepStatus.restoring ? "restoring"
     : clawkeepStatus.busy ? "busy"
-    : !clawAiAuthenticated || clawkeepStatus.stale ? "alert"
+    : !clawAiAuthenticated ? "alert"
+    : lapsed ? "lapsed"
+    : atRisk ? "alert"
+    : needsSetup ? "setup"
     : "ok";
   // Tailwind JIT can only see *literal* class strings, so each variant
   // ships its full pulse/icon class names rather than composing them.
@@ -141,10 +204,28 @@ export default function ChromeShelf({
       pulseDelayed: "bg-emerald-400/15",
       tooltip: t("shelf.clawkeepBusy"),
     },
+    // Was protected, has drifted. The colour is the only thing this entry
+    // changes: `baseTitle` already names the cause, so a screen reader is told
+    // amber from red rather than being left to see it.
+    lapsed: {
+      icon: "text-amber-400 clawkeep-shelf-glow-orange",
+      pulse: "bg-amber-400/25",
+      pulseDelayed: "bg-amber-400/20",
+      tooltip: baseTitle,
+    },
     alert: {
       icon: "text-red-500 clawkeep-shelf-glow-red",
       pulse: "bg-red-500/25",
       pulseDelayed: "bg-red-500/20",
+      tooltip: baseTitle,
+    },
+    // Never paired. It blinks so the invitation is noticed on a shelf the owner
+    // is not looking at — but ORANGE, not the red a genuinely missed backup
+    // earns: nothing is wrong yet, there is just something to set up.
+    setup: {
+      icon: "text-orange-300 clawkeep-shelf-glow-orange",
+      pulse: "bg-orange-400/25",
+      pulseDelayed: "bg-orange-400/20",
       tooltip: baseTitle,
     },
     ok: {
@@ -195,7 +276,7 @@ export default function ChromeShelf({
         openedAt.current = Date.now();
         setCtxMenu({ x: e.clientX, y: e.clientY, app });
       }}
-      className="relative w-11 h-11 flex items-center justify-center rounded-lg hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer group"
+      className="relative shrink-0 w-11 h-11 flex items-center justify-center rounded-lg hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer group"
       title={app.name}
       aria-label={app.name}
     >
@@ -234,9 +315,16 @@ export default function ChromeShelf({
 
   return (
     <>
+      {/* `data-mascot-ground` marks the surface a Hermes pet walks on. The
+          mascot measures THIS element — its top edge is the pet's ground line
+          and its width is how far the pet may roam — so the pet keeps standing
+          on the shelf as the safe-area inset or the viewport changes. Nothing
+          reads it on OpenClaw: the crab keeps the desktop floor. */}
       <div
-        className="fixed bottom-0 left-0 right-0 flex items-center justify-center px-2 z-[10000]"
+        data-mascot-ground
+        className="fixed bottom-0 left-0 right-0 flex items-center justify-center px-2"
         style={{
+          zIndex: DESKTOP_LAYERS.shelf,
           height: "calc(56px + env(safe-area-inset-bottom))",
           paddingBottom: "env(safe-area-inset-bottom)",
           background: "rgba(17, 24, 39, 0.55)",
@@ -252,8 +340,12 @@ export default function ChromeShelf({
       >
         {isMobile ? (
           <>
-            {/* Every mobile bar button shares a 40×40 container for a single baseline. */}
-            <div className="absolute left-2 flex items-center">
+            {/* Every mobile bar button shares a 40×40 container for a single
+                baseline. Three in-flow flex items rather than two absolute
+                clusters around a centred one: the app row in the middle has
+                to be bounded by the launcher and the tray, or a fifth open app
+                would sit under the power button. */}
+            <div className="flex-none flex items-center">
               <button
                 onClick={onLauncherClick}
                 className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
@@ -266,18 +358,35 @@ export default function ChromeShelf({
                 </div>
               </button>
             </div>
-            {showChatButton && !isPortraitPhone && (
-              <button
-                onClick={onChatClick}
-                data-testid="shelf-chat-button"
-                className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-                title={t("shelf.chat")}
-                aria-label={t("shelf.chat")}
-              >
-                <img src="/clawbox-crab.png" alt="Chat" className="w-10 h-10 object-contain" />
-              </button>
-            )}
-            <div className="absolute right-2 flex items-center gap-1">
+            {/* Settings and the apps that are OPEN — the row `pinnedApps` and
+                `unpinnedApps` are filtered for above and that this bar never
+                drew: nothing said which apps were open, and an app minimized
+                with "Switch app" vanished without a trace. It scrolls past
+                what it cannot fit, centred `safe` so the first entry stays
+                reachable once it overflows. */}
+            <div
+              className="flex-1 min-w-0 flex items-center justify-center-safe gap-1 overflow-x-auto px-1"
+              data-testid="shelf-mobile-apps"
+            >
+              {pinnedApps.map(renderApp)}
+              {unpinnedApps.map(renderApp)}
+            </div>
+            {/* The tray, in the desktop bar's order. The chat crab sits HERE,
+                fixed, never in the row: with a handful of apps open the row
+                overflows, and the one button that opens the assistant would
+                scroll out of sight with them. */}
+            <div className="flex-none flex items-center gap-1">
+              {showChatButton && (
+                <button
+                  onClick={onChatClick}
+                  data-testid="shelf-chat-button"
+                  className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+                  title={t("shelf.chat")}
+                  aria-label={t("shelf.chat")}
+                >
+                  <img src="/clawbox-crab.png" alt="Chat" className="w-[21px] h-[21px] object-contain" />
+                </button>
+              )}
               {!isPortraitPhone && renderShieldButton()}
               {!isPortraitPhone && (
                 <button
@@ -311,27 +420,19 @@ export default function ChromeShelf({
             </div>
           </>
         ) : <>
-        {/* Launcher button — left, mobile only (desktop renders it inline) */}
-        <div className="absolute left-2 flex items-center sm:hidden">
-          <button
-            onClick={onLauncherClick}
-            className="w-11 h-11 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-            title={t("shelf.appLauncher")}
-            aria-label={t("shelf.appLauncher")}
-            data-testid="shelf-launcher-button"
-          >
-            <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-white/20 to-white/5 border border-white/10">
-              <span className="material-symbols-rounded text-white/80" style={{ fontSize: 22 }}>apps</span>
-            </div>
-          </button>
-        </div>
+        {/* One launcher button per shelf. A second, `sm:hidden` copy used to sit
+            at the left of this branch — dead weight, since anything narrower
+            than 768px renders the mobile bar above instead, but always in the
+            DOM: two elements answered `shelf-launcher-button`, which is a
+            strict-locator failure for a test and a duplicated "App Launcher"
+            control for assistive tech. */}
 
         {/* Centered: pinned + open apps */}
         <div className="flex items-center gap-1">
           {/* Launcher button — desktop only (inline) */}
           <button
             onClick={onLauncherClick}
-            className="w-11 h-11 hidden sm:flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+            className="w-11 h-11 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
             title={t("shelf.appLauncher")}
             aria-label={t("shelf.appLauncher")}
             data-testid="shelf-launcher-button"
@@ -366,7 +467,7 @@ export default function ChromeShelf({
               title={t("shelf.chat")}
               aria-label={t("shelf.chat")}
             >
-              <img src="/clawbox-crab.png" alt="Chat" className="w-10 h-10 object-contain" />
+              <img src="/clawbox-crab.png" alt="Chat" className="w-[21px] h-[21px] object-contain" />
             </button>
           )}
           {renderShieldButton()}
@@ -404,8 +505,9 @@ export default function ChromeShelf({
       {/* Shelf context menu */}
       {ctxMenu && (
         <div
-          className="fixed z-[99999] min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          className="fixed min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
           style={{
+            zIndex: DESKTOP_LAYERS.menu,
             left: Math.min(ctxMenu.x, window.innerWidth - 200),
             top: ctxMenu.y - 8,
             transform: "translateY(-100%)",
@@ -479,8 +581,9 @@ export default function ChromeShelf({
       {/* Shelf context menu (right-click on empty shelf area) */}
       {shelfMenu && (
         <div
-          className="fixed z-[99999] min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          className="fixed min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
           style={{
+            zIndex: DESKTOP_LAYERS.menu,
             left: Math.min(shelfMenu.x, window.innerWidth - 200),
             top: shelfMenu.y - 8,
             transform: "translateY(-100%)",

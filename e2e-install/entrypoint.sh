@@ -21,7 +21,12 @@ if [ ! -f "$PROJECT_DIR/install.sh" ]; then
   (
     cd "$SRC_DIR"
     # Using tar avoids rsync as a dependency and handles dotfiles cleanly.
-    tar --exclude=node_modules --exclude=.next --exclude=.git/logs -cf - . \
+    # `--exclude=.next` is an exact-name match and does NOT cover `.next-old`,
+    # the build install.sh parks during a rebuild — seeding one into the
+    # container would hand production-server.js a parked build to reclaim on
+    # first boot. `.dockerignore` keeps it out of the image too; the pair has to
+    # stay in step.
+    tar --exclude=node_modules --exclude=.next --exclude=.next-old --exclude=.git/logs -cf - . \
       | (cd "$PROJECT_DIR" && tar -xf -)
   )
   chown -R clawbox:clawbox "$PROJECT_DIR"
@@ -38,6 +43,41 @@ mkdir -p /etc/clawbox
 cat > /etc/clawbox/test-mode.env <<EOF
 CLAWBOX_TEST_MODE=1
 NETWORK_INTERFACE=${NETWORK_INTERFACE:-eth0}
+CLAWBOX_TEST_NO_GPU=1
+EOF
+# CLAWBOX_TEST_NO_GPU=1: this container has no GPU by construction, so the
+# only on-device TTS engine (Kokoro, CUDA) declines here on every run. The
+# installer records a declined Kokoro as a mute box on real hardware; this
+# knob tells it the mute box is the harness's documented state, not a defect,
+# so service validation does not fail every run over it. It is a separate
+# knob from CLAWBOX_TEST_MODE on purpose: the unit tests run the installer's
+# functions under test mode and pin the real-hardware rule.
+
+# The full installer still deploys clawbox-ap.service so upgrade paths can
+# verify its unit file, but this container has no WiFi radio and the install
+# harness intentionally excludes the service from active-service validation.
+# Keep the real root-update/systemd restart path while replacing only the
+# impossible hardware boundary; otherwise each settings write waits ~34s for
+# start-ap.sh retries that cannot succeed and whose failure is already ignored.
+mkdir -p /etc/systemd/system/clawbox-ap.service.d
+cat > /etc/systemd/system/clawbox-ap.service.d/e2e-no-radio.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=/bin/true
+ExecStop=
+ExecStop=/bin/true
+EOF
+
+# Docker networking is already configured before PID 1 starts. Ubuntu's
+# NetworkManager-wait-online helper cannot classify the synthetic eth0 link
+# and burns its full 60-second timeout on every tested reboot before allowing
+# clawbox-setup.service to start. Preserve the network-online dependency graph
+# but satisfy the impossible hardware probe immediately in this container.
+mkdir -p /etc/systemd/system/NetworkManager-wait-online.service.d
+cat > /etc/systemd/system/NetworkManager-wait-online.service.d/e2e-docker-network.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=/bin/true
 EOF
 
 # Hand off to systemd.

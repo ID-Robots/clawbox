@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { ClawKeepError, runBackup } from "@/lib/clawkeep";
+import { ClawKeepError, backupExitError, clawKeepErrorBody, runBackup } from "@/lib/clawkeep";
 
 export const dynamic = "force-dynamic";
 
@@ -9,9 +9,38 @@ export const dynamic = "force-dynamic";
 // runs a full backup synchronously (openclaw backup create + S3 PUT) and
 // returns the daemon's exit code.
 //
-// On Jetson a real backup can take minutes — the request stays open until
-// the daemon finishes. The UI should call this with no client-side timeout
-// (or an explicit one matching the systemd unit's TimeoutStartSec=4h).
+// On Jetson a real backup can take minutes — the request stays open until the
+// daemon finishes. The UI should call this with no client-side timeout: the
+// bridge's own kill timer (BACKUP_RUN_CAP_MS) is the real ceiling and has an
+// owner-facing answer of its own, 504 `timed_out`. It is now the same four
+// hours `clawkeep/systemd/clawkeepd.service` declares: those timers are not
+// installed on a ClawBox, so this timer is the only ceiling ClawBox ITSELF
+// imposes on a run, scheduled or by hand — and at the old 60 minutes it
+// killed the 12 GB backups TASK-675 exists to support. It is not the only
+// ceiling that exists: the daemon's own per-step caps bind independently
+// (`clawkeep/clawkeep/limits.py`), and are what is left if the worker holding
+// this timer is replaced mid-run.
+//
+// A box with no pairing is refused with 409 `not_paired` before the daemon is
+// started: `clawkeepd` would have loaded the token, failed and exited 65, and
+// returning that exit code inside a 200 body made a backup that never began
+// arrive as a success.
+//
+// Every OTHER non-zero exit is classified too (TASK-672). `backupExitError`
+// maps the daemon's own `EXIT_*` taxonomy — plus the two codes the bridge
+// synthesises itself, 124 for our kill timer and 127 for a daemon that could
+// not be started — onto a status, a stable `code` and one owner-facing
+// sentence. No failure leaves here as 2xx, and no FAILURE carries `stderrTail`:
+// that is the daemon's log line, written for an operator, and it has put an
+// absolute device path in front of the customer.
+//
+// The 200 still carries it, deliberately and with a known cost: `clawkeepd`
+// logs through `logging.basicConfig`, i.e. stderr, so a backup that SUCCEEDED
+// after warning ("failed to remove staging archive /home/…", "retention prune
+// failed (continuing)") still shows that line inside the panel's green card.
+// Whether the owner should see the daemon's tail on a run that worked is a
+// product decision, not a bug fix — TASK-672 says so in as many words — so it
+// is left alone here rather than changed in passing.
 export async function POST(request: NextRequest) {
   try {
     let body: unknown = {};
@@ -50,10 +79,22 @@ export async function POST(request: NextRequest) {
       label = obj.label;
     }
     const result = await runBackup({ idle, label });
+    const failure = backupExitError(result.exitCode);
+    if (failure) {
+      // The daemon's output stays in the server log, where an operator can
+      // read it; the owner gets the sentence and the code.
+      console.warn(
+        `[clawkeep] backup exited ${result.exitCode}: ${result.stderr.slice(-2000)}`,
+      );
+      return NextResponse.json(
+        { ...clawKeepErrorBody(failure, "Backup failed"), exitCode: result.exitCode },
+        { status: failure.status, headers: { "Cache-Control": "no-store" } },
+      );
+    }
     return NextResponse.json(
       {
         exitCode: result.exitCode,
-        ok: result.exitCode === 0,
+        ok: true,
         stdoutTail: result.stdout.slice(-2000),
         stderrTail: result.stderr.slice(-2000),
       },
@@ -62,7 +103,7 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     const status = err instanceof ClawKeepError ? err.status : 500;
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Backup failed" },
+      clawKeepErrorBody(err, "Backup failed"),
       { status, headers: { "Cache-Control": "no-store" } },
     );
   }

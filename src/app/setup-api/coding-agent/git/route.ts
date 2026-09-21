@@ -1,0 +1,178 @@
+import { NextResponse } from "next/server";
+import { hasOwnerSession } from "@/lib/owner-session";
+import { BACKUP_MESSAGE, backupToGitHub, disconnectGitHub, githubStatus } from "@/lib/coding-github";
+import { noteGitHubAccountChanged } from "@/lib/project-import";
+import { openProjectPullRequest } from "@/lib/coding-pr";
+import { CodingAgentError, httpStatusForCodingError, resolveWorkingDirectory } from "@/lib/coding-agent";
+import { gitChanges, gitFileDiff, gitInfo, gitLog } from "@/lib/coding-git";
+import { requireSession } from "@/lib/route-auth";
+
+export const dynamic = "force-dynamic";
+
+/**
+ * GET  → whether a GitHub account is connected, and the command that connects
+ *        one. Read-only, so middleware's cookie-or-bearer gate is the whole
+ *        gate: the assistant needs to know whether a backup is even possible
+ *        before offering one.
+ *
+ * POST { projectId | directory } → push that folder to GitHub, creating a
+ *        PRIVATE repository the first time.
+ *
+ * POST is OWNER-ONLY. A push sends the folder's contents to a server outside
+ * the house, and it is not reversible in the way a local commit is — a secret
+ * a run wrote into a file by mistake is on GitHub the moment it is pushed,
+ * private repo or not. The owner decides that, not a task that may itself
+ * have come from an email or a web page.
+ *
+ * DELETE → disconnect the account. Owner-only for the same reason as the
+ *        switch: the agent must not be able to change the owner's credentials,
+ *        in either direction.
+ *
+ * No token is ever handled here. gh holds the credential and lends it to git;
+ * this route only asks gh whether it has one.
+ */
+export async function GET(request: Request) {
+  // With ?projectId= or ?directory=: the FOLDER's git block for the project
+  // page — branch, commit count, origin, newest commit — through the same
+  // resolver a run uses, so this cannot describe a folder a run could not
+  // reach. Session-gated: it names remotes and commit subjects.
+  const url = new URL(request.url);
+  const projectId = url.searchParams.get("projectId");
+  const directory = url.searchParams.get("directory");
+  if (projectId || directory) {
+    const unauthorized = await requireSession(request);
+    if (unauthorized) return unauthorized;
+    try {
+      const resolved = await resolveWorkingDirectory({ projectId, directory });
+      // The workspace beside the git block: `?changes` lists what changed
+      // (the working tree, or with `&ref=<sha>` one commit) with the recent
+      // commits to pick from; `?diff=<file>` is one file's unified diff.
+      const ref = url.searchParams.get("ref");
+      const diffFile = url.searchParams.get("diff");
+      if (diffFile !== null) {
+        const diff = await gitFileDiff(resolved.directory, diffFile, ref);
+        if (!diff) return NextResponse.json({ error: "No diff for that file", kind: "not_found" }, { status: 404 });
+        return NextResponse.json({ diff });
+      }
+      if (url.searchParams.has("changes")) {
+        const [changes, log] = await Promise.all([gitChanges(resolved.directory, ref), gitLog(resolved.directory)]);
+        return NextResponse.json({ changes, log });
+      }
+      return NextResponse.json({ git: await gitInfo(resolved.directory) });
+    } catch (err) {
+      if (err instanceof CodingAgentError) {
+        return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
+      }
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "Could not read the project's git state" },
+        { status: 500 },
+      );
+    }
+  }
+  try {
+    return NextResponse.json(await githubStatus());
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Could not read the GitHub connection" },
+      { status: 500 },
+    );
+  }
+}
+
+export async function DELETE(request: Request) {
+  if (!(await hasOwnerSession(request))) {
+    return NextResponse.json(
+      { error: "Disconnecting GitHub needs a signed-in browser session.", kind: "owner_only" },
+      { status: 403 },
+    );
+  }
+  // Whatever gh answers, its credential may already be gone: a listing still
+  // out was started for an account this box may no longer be able to name.
+  noteGitHubAccountChanged();
+  const out = await disconnectGitHub();
+  if (!out.ok) {
+    // A dead uplink is not a broken box: 503 says "transient, try again",
+    // which is what the owner should do, and the detail no longer claims gh
+    // is missing when the logout simply timed out.
+    return NextResponse.json(
+      { error: out.detail, kind: out.kind },
+      { status: out.kind === "gh_unreachable" ? 503 : 500 },
+    );
+  }
+  console.error("[coding-agent] GitHub disconnected by the owner");
+  return NextResponse.json(await githubStatus());
+}
+
+export async function POST(request: Request) {
+  if (!(await hasOwnerSession(request))) {
+    return NextResponse.json(
+      { error: "Backing up to GitHub needs a signed-in browser session.", kind: "owner_only" },
+      { status: 403 },
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  // Same guard as the enable route: a JSON string or number is valid JSON
+  // and reading fields off it must answer 400, not crash into a 500.
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  const fields = body as { projectId?: unknown; directory?: unknown; action?: unknown };
+  if (fields.action !== undefined && fields.action !== "backup" && fields.action !== "pr") {
+    return NextResponse.json({ error: "Invalid request body", kind: "invalid" }, { status: 400 });
+  }
+
+  try {
+    // The same resolver a run uses, so a backup cannot reach a folder a run
+    // could not have worked in.
+    const { directory } = await resolveWorkingDirectory({
+      projectId: typeof fields.projectId === "string" ? fields.projectId : null,
+      directory: typeof fields.directory === "string" ? fields.directory : null,
+    });
+    if (fields.action === "pr") {
+      // The project page's Create PR: the branch the project is on, against
+      // the remote's default. `no_remote` and `on_base` are the request being
+      // wrong as it stands (409); a timed-out local probe is worth a retry (503).
+      const pr = await openProjectPullRequest(directory);
+      if (!pr.ok) {
+        return NextResponse.json({ error: pr.detail, kind: pr.reason }, { status: pr.transient ? 503 : 409 });
+      }
+      console.error(`[coding-agent] ${pr.existing ? "found" : "opened"} pull request #${pr.number} for ${directory} (${pr.branch} → ${pr.base})`);
+      return NextResponse.json(pr);
+    }
+    const outcome = await backupToGitHub(directory);
+    if (!outcome.pushed) {
+      // 409 means "the request cannot be satisfied as it stands" — true of a
+      // folder with no commits, false of a network that is merely down. That
+      // one gets 503, so nothing tells the owner to install a gh they have.
+      //
+      // `transient` covers the same class one layer down: a local `git
+      // rev-parse` our own timer killed has no reason of its own to report, and
+      // answering 409 would tell the owner their request was wrong about a
+      // request that was fine.
+      const retryable = outcome.reason === "gh_unreachable" || outcome.transient === true;
+      return NextResponse.json(
+        // `kind` keeps the token — the card branches on it. `error` is the
+        // half a person reads, and must never be an identifier.
+        { error: outcome.detail ?? BACKUP_MESSAGE[outcome.reason], kind: outcome.reason },
+        { status: retryable ? 503 : 409 },
+      );
+    }
+    console.error(`[coding-agent] backed up ${directory} to ${outcome.repo}${outcome.created ? " (new repo)" : ""}`);
+    return NextResponse.json(outcome);
+  } catch (err) {
+    if (err instanceof CodingAgentError) {
+      // The resolver throws only invalid/not_found, so the table answers 400/404 here.
+      return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
+    }
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Could not back up to GitHub" },
+      { status: 500 },
+    );
+  }
+}
