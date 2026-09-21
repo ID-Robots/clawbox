@@ -1,5 +1,5 @@
 /**
- * The delivery pipeline's stage machine, walked without a run, a Vercel account
+ * The delivery pipeline's stage machine, walked without a run, a deployment
  * or a browser.
  *
  * That is the whole point of the module being pure: the ORDER and the routing
@@ -64,7 +64,7 @@ describe("the order the owner asked for", () => {
   });
 
   it("settles when a SKIPPED stage is the last one, not just a passed one", () => {
-    // The whole tail can be skipped — that is what the box-wide Vercel switch
+    // The whole tail can be skipped — that is what a box with no deployment
     // does. `complete` runs nothing and answers no outcome, so a skip that
     // merely ENTERED it would leave the pipeline `running` with a settled run
     // and nothing left to move it.
@@ -72,7 +72,7 @@ describe("the order the owner asked for", () => {
     pass(p, "build");
     pass(p, "review");
     const skip = (stage: PipelineStage) => {
-      const t = decidePipeline(p, stage, { kind: "skipped", detail: "vercel_disabled: the integration is off." });
+      const t = decidePipeline(p, stage, { kind: "skipped", detail: "deploy_unavailable: there is no deployment integration." });
       if (t.action === "enter") enterStage(p, t.stage);
       return t;
     };
@@ -86,7 +86,7 @@ describe("the order the owner asked for", () => {
     // The skipped stages say so, and say why.
     for (const stage of ["deploy_preview", "verify_preview", "deploy_production", "verify_production"] as const) {
       expect(stepFor(p, stage).state, stage).toBe("skipped");
-      expect(stepFor(p, stage).detail, stage).toContain("vercel_disabled");
+      expect(stepFor(p, stage).detail, stage).toContain("deploy_unavailable");
     }
   });
 
@@ -142,7 +142,7 @@ describe("what sends the work back, and what does not", () => {
   it("is not recorded by a failure that ENDS the pipeline", () => {
     const p = made({ maxRounds: 3 });
     pass(p, "build"); pass(p, "review"); pass(p, "deploy_preview"); pass(p, "verify_preview");
-    decidePipeline(p, "deploy_production", { kind: "failed", reason: "Vercel refused it" });
+    decidePipeline(p, "deploy_production", { kind: "failed", reason: "the host refused it" });
     expect(p.sentBackFrom).toBeNull();
   });
 
@@ -188,7 +188,7 @@ describe("what sends the work back, and what does not", () => {
   it("a PRODUCTION failure ends it rather than rebuilding a live domain again", () => {
     const p = made({ maxRounds: 3 });
     pass(p, "build"); pass(p, "review"); pass(p, "deploy_preview"); pass(p, "verify_preview");
-    const t = decidePipeline(p, "deploy_production", { kind: "failed", reason: "Vercel refused it" });
+    const t = decidePipeline(p, "deploy_production", { kind: "failed", reason: "the host refused it" });
     expect(t).toEqual({ action: "settled", status: "failed" });
     // The rounds were there and deliberately not spent.
     expect(p.round).toBe(0);
@@ -239,7 +239,7 @@ describe("a stage this box cannot run at all", () => {
   it("is `blocked`, not `failed`, and never loops", () => {
     const p = made({ maxRounds: 3 });
     pass(p, "build"); pass(p, "review");
-    const t = decidePipeline(p, "deploy_preview", { kind: "blocked", reason: "No Vercel project is attached." });
+    const t = decidePipeline(p, "deploy_preview", { kind: "blocked", reason: "There is no deployment integration." });
     expect(t).toEqual({ action: "settled", status: "blocked" });
     expect(p.status).toBe("blocked");
     expect(p.round).toBe(0);
@@ -368,7 +368,7 @@ describe("reading a record back off disk", () => {
     addEvidence(p, "review", { kind: "run", ref: "run-abc12345", detail: "the review pass" });
     p.lastVerification = {
       ok: false,
-      url: "https://x.vercel.app/",
+      url: "https://x.example.com/",
       status: 200,
       reason: "not there",
       // A record read back off disk always carries the field: absent means
@@ -434,7 +434,7 @@ describe("what the harness is told when the work comes back", () => {
       maxRounds: 2,
       buildLog: "error TS2304: Cannot find name 'Invoice'",
       verification: {
-        url: "https://x.vercel.app/invoices",
+        url: "https://x.example.com/invoices",
         status: 200,
         missing: ["Invoice"],
         description: "A blank white page with a heading.",

@@ -139,7 +139,6 @@ const ALL_CAPABILITIES: Posture = {
   capabilities: { screenGrabber: "scrot", imageConvert: true, journal: true, du: true },
   emailCanRead: true,
   codingAgent: true,
-  codingVercel: true,
   canGenerateImages: true,
   providers: ["anthropic", "openai"],
 };
@@ -158,7 +157,6 @@ const NO_CAPABILITIES: Posture = {
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   emailCanRead: false,
   codingAgent: false,
-  codingVercel: false,
   canGenerateImages: false,
   providers: [],
 };
@@ -186,11 +184,6 @@ const PROBE_GATED_COMMON = [
   "coding_secret_list",
   // Deploying what a run built is the other half of handing it the task, so it
   // is behind the same switch: a box whose coding agent is off has nothing the
-  // assistant would be deploying.
-  "coding_deploy_preview", "coding_deploy_production",
-  // Reading a project's Vercel state sits under the SAME two switches as the
-  // deploy tools: off, the route answers 409 `vercel_disabled` on every call.
-  "coding_vercel_status",
   // Following every run, resuming one, and the project matrix: the same family
   // and the same switch — a box whose coding agent is off has no run to list
   // or resume, and its routes refuse the call anyway.
@@ -227,7 +220,6 @@ const PROBE_GATED_TOOLS: Record<Ed, readonly string[]> = {
  * off, to say so.
  */
 const UNGATED_COMMON = [
-  "clawbox_incidents_list", "clawbox_incident_report",
   "memory_shard_status", "local_ai_status", "clawbox_ai_usage",
   // The Anthropic account pool's state (TASK-902): "no account connected" is
   // an answer, and a queue needs it most on the box where every one is limited.

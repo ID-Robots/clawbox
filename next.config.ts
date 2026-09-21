@@ -70,7 +70,7 @@ const nextConfig: NextConfig = {
   // How wide the instrumentation half is, measured on Next 16.3.3 (TASK-725):
   // src/instrumentation-node.ts resolves path.join(CONFIG_ROOT, 'scripts',
   // 'terminal-server.mjs') and CONFIG_ROOT is read from the environment
-  // (src/lib/config-store.ts), so @vercel/nft cannot resolve it and emits the
+  // (src/lib/config-store.ts), so Next's dependency tracer cannot resolve it and emits the
   // WHOLE project directory as an asset directory. instrumentation.js.nft.json
   // listed 6186 files — src/, scripts/, bench/, docs-site/, e2e/, .git … and,
   // during an update, all 4202 files of the previous build parked at

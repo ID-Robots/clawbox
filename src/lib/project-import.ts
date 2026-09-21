@@ -503,7 +503,7 @@ async function claimTarget(projectsRoot: string, folder: string): Promise<{ ok: 
  * a project's `.git/config` FIRST, by design, so an address the box wrote here
  * came back as "the project's own identity" and outranked the Commit author
  * setting the owner had filled in. Every commit in an imported project was then
- * authored by an address that belongs to nobody, and failed the Vercel
+ * authored by an address that belongs to nobody, and failed a host's
  * deployment check — the exact fault the resolver exists to prevent, reached
  * through the one door it did not watch.
  */

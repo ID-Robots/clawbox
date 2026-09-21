@@ -11,7 +11,6 @@ import CodingAgentSecretsCard from "./CodingAgentSecretsCard";
 // The toggle lives in its own module now — the secrets card draws one too.
 import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
-import ImprovementProgramCard from "./ImprovementProgramCard";
 import HelpTip from "./HelpTip";
 import { PaidPlanNotice } from "./PaidFeatureGate";
 import { enableBlockedBy, type PlanGate } from "@/lib/paid-plan-gate";
@@ -159,12 +158,6 @@ export interface AgentStatus {
    *  switches — a server that predates the field is a box already driving the
    *  screen, so the fallback below is `?? true`. */
   realBrowser?: boolean;
-  /** Is the Vercel integration part of this box at all: the project page's
-   *  link card, the Deploy buttons, the run's deployment card, the pipeline's
-   *  deploy-and-check stages. Optional, and OFF when absent — it is standing
-   *  consent, not a preference, so the fallback is `?? false`. The device
-   *  answers `true` on its own for a box that already has a link. */
-  vercelEnabled?: boolean;
   // The owner's standing permission rules are deliberately NOT here, though the
   // status payload carries them: CodingAgentRulesCard reads and writes its own
   // route. This panel serialises its setting writes through one chain so two
@@ -701,7 +694,7 @@ export default function CodingAgentSettingsPanel({
             Left blank, a project's own git config decides and the placeholder
             catches what is left — which is what every box did before this
             existed. It is worth filling in for one concrete reason, and the
-            hint says it: Vercel's GitHub integration refuses a deployment
+            hint says it: a host's GitHub integration refuses a deployment
             whose git author cannot deploy the project, so the box's own
             bookkeeping commits fail the check on a pull request it opened. */}
         {typeof status?.maxGitAuthorChars === "number" && (
@@ -993,49 +986,6 @@ export default function CodingAgentSettingsPanel({
           />
         </div>
 
-        {/* Deploying to Vercel, as one box-wide answer — and a BETA flag. Above
-            the pull-request controls because it is the same question one level
-            up — where this box's work is allowed to go — and off unless the
-            owner says otherwise: `?? false`, because it is standing consent for
-            pushing their code to another company's account, not a preference
-            about how a run works. Off hides the link card, the Deploy buttons,
-            the run's deployment card, the delete dialog's link lines and the
-            pipeline's deploy stages; the per-project settings live behind it,
-            so there is nothing left to switch. The badge and the line under
-            the row are visible rather than in the help tip, because "this is
-            experimental and off by default" is what an owner needs to know
-            BEFORE reaching for the switch, not after wondering why it is off;
-            this is the only place the integration is offered — the setup
-            wizard never mentions it. */}
-        <div className="flex items-start justify-between gap-4 mt-4">
-          <div className="min-w-0 flex items-center gap-1.5 flex-wrap">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.vercelEnabledLabel")}
-            </span>
-            <span
-              className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-1.5 py-0.5 text-amber-300 border-amber-400/40"
-              data-testid="coding-agent-vercel-beta"
-            >
-              {t("codingAgent.vercelBetaBadge")}
-            </span>
-            <HelpTip
-              text={t("codingAgent.vercelEnabledHint")}
-              label={t("codingAgent.vercelEnabledLabel")}
-              testId="coding-agent-vercel-enabled-help"
-            />
-          </div>
-          <Switch
-            checked={status?.vercelEnabled ?? false}
-            busy={busy === "vercelEnabled"}
-            disabled={!status || saving}
-            label={t("codingAgent.vercelEnabledLabel")}
-            testId="coding-agent-vercel-enabled"
-            onChange={(next) => void saveSetting({ vercelEnabled: next }, "vercelEnabled", t("codingAgent.vercelEnabledFailed"))}
-          />
-        </div>
-        <p className="mt-1 text-[11px] text-[var(--text-muted)] leading-relaxed" data-testid="coding-agent-vercel-beta-hint">
-          {t("codingAgent.vercelBetaHint")}
-        </p>
 
         {/* Branch -> pull request -> wait for Actions -> merge. Under the
             review pass because it runs after it, and the review's verdict is
@@ -1333,13 +1283,6 @@ export default function CodingAgentSettingsPanel({
         </div>
       )}
 
-      {/* The ClawBox Improvement Program, directly under GitHub because that is
-          the credential its reports ride on (`gh issue create`). Not behind
-          `github?.installed`: the choice is the owner's whether or not gh is
-          on the box yet, and the card itself says when GitHub is missing. It
-          lived in Settings → System until the move here; the wizard's
-          improvement step asks the same question once, on first run. */}
-      <ImprovementProgramCard />
     </div>
   );
 }

@@ -56,7 +56,6 @@ const ctx = (edition: "openclaw" | "hermes", install: McpContext["install"] = ed
   providers: ["clawai", "openai"],
   emailCanRead: false,
   codingAgent: false,
-  codingVercel: false,
   canGenerateImages: true,
 });
 

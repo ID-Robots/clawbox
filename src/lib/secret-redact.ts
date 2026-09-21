@@ -1,8 +1,8 @@
 /**
  * Keeping an injected secret out of a run's own output.
  *
- * WHY. A run that is handed `VERCEL_TOKEN` in its environment will sooner or
- * later print it: `env | grep VERCEL`, a curl with `-v`, a build tool that
+ * WHY. A run that is handed `DEPLOY_TOKEN` in its environment will sooner or
+ * later print it: `env | grep DEPLOY`, a curl with `-v`, a build tool that
  * echoes its configuration, a stack trace from a client that puts the token in
  * the request it is complaining about. Every one of those lines reaches the
  * runner's stream parser and becomes a progress line, a summary, or the text of

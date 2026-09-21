@@ -115,7 +115,7 @@ export function getLlamaCppLaunchSpec(alias = getDefaultLlamaCppModel()): LlamaC
     hfBinPath: process.env.HF_BIN?.trim() || DEFAULT_HF_BIN,
     // The checkout, not the cwd. In production the cwd is `.next/standalone`
     // (Next's standalone server.js chdirs there), so this resolved to a path
-    // whose only occupant is whatever @vercel/nft happened to trace in — a
+    // whose only occupant is whatever Next's dependency tracer happened to trace in — a
     // build artefact that refreshes on a full rebuild and not before. Every
     // other path in this spec already comes from CONFIG_ROOT via DATA_DIR;
     // the launcher script was the one that did not, so the script and the

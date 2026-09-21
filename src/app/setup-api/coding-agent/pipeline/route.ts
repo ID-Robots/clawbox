@@ -31,7 +31,7 @@ export const dynamic = "force-dynamic";
  *  - GET is open to the owner's session AND to the MCP bearer. It is how the
  *    assistant answers "how is it going", it changes nothing, and everything in
  *    it — stage names, deployment ids, the addresses this box checked — was
- *    written by this box. No credential and no Vercel account name is in it.
+ *    written by this box. No credential and no hosting-account name is in it.
  *  - POST `approve_production` carries the whole production fence, because that
  *    is exactly what it is: the owner's session, this box's own origin, and an
  *    explicit `confirm: true`. It is the "Deploy to production" button the

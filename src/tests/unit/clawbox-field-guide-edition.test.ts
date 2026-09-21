@@ -66,7 +66,6 @@ const ctx = (edition: Ed, install: Install = edition): McpContext => ({
   providers: ["clawai"],
   emailCanRead: true,
   codingAgent: true,
-  codingVercel: true,
   canGenerateImages: true,
 });
 

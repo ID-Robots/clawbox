@@ -105,10 +105,10 @@ describe("the list", () => {
   });
 
   it("shows a name and its scope, and never a value", async () => {
-    secrets = [{ name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
+    secrets = [{ name: "DEPLOY_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
     await mounted();
     const row = await screen.findByTestId("coding-agent-secret-row");
-    expect(row).toHaveTextContent("VERCEL_TOKEN");
+    expect(row).toHaveTextContent("DEPLOY_TOKEN");
     expect(row).toHaveTextContent("Every project on this box");
     expect(document.body.textContent).not.toContain(TOKEN);
   });
@@ -150,7 +150,7 @@ describe("saving one", () => {
   it("clears the value field and never reads one back into it", async () => {
     await mounted();
     const value = screen.getByTestId("coding-agent-secret-value") as HTMLInputElement;
-    fireEvent.change(screen.getByTestId("coding-agent-secret-name"), { target: { value: "VERCEL_TOKEN" } });
+    fireEvent.change(screen.getByTestId("coding-agent-secret-name"), { target: { value: "DEPLOY_TOKEN" } });
     fireEvent.change(value, { target: { value: TOKEN } });
     fireEvent.click(screen.getByTestId("coding-agent-secret-add"));
 
@@ -158,7 +158,7 @@ describe("saving one", () => {
     expect(value).toHaveValue("");
     expect(screen.getByTestId("coding-agent-secret-name")).toHaveValue("");
     // The confirmation names the entry and says the value is gone for good.
-    expect(screen.getByTestId("coding-agent-secrets-saved")).toHaveTextContent("VERCEL_TOKEN");
+    expect(screen.getByTestId("coding-agent-secrets-saved")).toHaveTextContent("DEPLOY_TOKEN");
     expect(document.body.textContent).not.toContain(TOKEN);
     // And the row that appears holds no value either.
     expect(await screen.findByTestId("coding-agent-secret-row")).not.toHaveTextContent(TOKEN);
@@ -184,7 +184,7 @@ describe("saving one", () => {
 
   it("asks for the value before posting an empty one", async () => {
     await mounted();
-    fireEvent.change(screen.getByTestId("coding-agent-secret-name"), { target: { value: "VERCEL_TOKEN" } });
+    fireEvent.change(screen.getByTestId("coding-agent-secret-name"), { target: { value: "DEPLOY_TOKEN" } });
     fireEvent.click(screen.getByTestId("coding-agent-secret-add"));
     await waitFor(() => expect(screen.getByTestId("coding-agent-secrets-error")).toHaveTextContent("Type the value first."));
     expect(calls).toHaveLength(0);
@@ -270,7 +270,7 @@ describe("a refusal", () => {
   });
 
   it("keeps the list it last knew when the read itself fails", async () => {
-    secrets = [{ name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
+    secrets = [{ name: "DEPLOY_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
     await mounted();
     await screen.findByTestId("coding-agent-secret-row");
     // A card that claimed the list was empty would invite the owner to
@@ -278,7 +278,7 @@ describe("a refusal", () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ error: "gone" }, 500)));
     fireEvent.click(screen.getByTestId("coding-agent-secrets-inject"));
     await waitFor(() => expect(screen.getByTestId("coding-agent-secrets-error")).toBeInTheDocument());
-    expect(screen.getByTestId("coding-agent-secret-row")).toHaveTextContent("VERCEL_TOKEN");
+    expect(screen.getByTestId("coding-agent-secret-row")).toHaveTextContent("DEPLOY_TOKEN");
   });
 });
 
@@ -325,7 +325,7 @@ describe("the fields have names of their own", () => {
 
 describe("one write at a time", () => {
   it("disables the other controls while a write is in flight", async () => {
-    secrets = [{ name: "VERCEL_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
+    secrets = [{ name: "DEPLOY_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1 }];
     await mounted();
     // `let` with a narrowing assignment inside the closure reads as `never` to
     // TypeScript; the box keeps the resolver at a type the caller can call.

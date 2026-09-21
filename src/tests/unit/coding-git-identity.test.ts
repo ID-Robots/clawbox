@@ -3,9 +3,9 @@
  *
  * The defect this pins: every commit the coding agent made on the owner's
  * behalf was authored `ClawBox Coding Agent <coding-agent@clawbox.local>`, an
- * address that belongs to nobody. On a project wired to the Vercel GitHub
+ * address that belongs to nobody. On a project wired to a host's GitHub
  * integration that fails the deployment check — "Git author must have access
- * to the project on Vercel to create deployments" — so the agent's own
+ * to the project to create deployments" — so the agent's own
  * bookkeeping commits blocked the pull requests it had just opened.
  *
  * What is asserted here is the resolution ORDER and that it reaches real
@@ -226,7 +226,7 @@ describe("resolving the commit identity", () => {
     // the placeholder, so the rule above did not catch it: every folder the
     // owner imported came back as "a project with an identity of its own",
     // outranked the setting, and went on committing as an address no GitHub
-    // account owns — failing the very Vercel check this resolver exists to pass.
+    // account owns — failing the very deployment check this resolver exists to pass.
     const imported = repo({ ...PROJECT_IMPORT_PLACEHOLDER });
     expect((await identityOf(imported)).source).toBe("placeholder");
 

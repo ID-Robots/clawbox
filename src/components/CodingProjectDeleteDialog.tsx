@@ -52,7 +52,6 @@ export interface ProjectDeletePreview {
     any: boolean;
   };
   liveRuns: { id: string; task: string }[];
-  vercelLinked: boolean;
   secretNames: string[];
   runCount: number;
   retentionDays: number;
@@ -70,9 +69,8 @@ export interface ProjectDeleteOutcome {
   trashPath: string;
   retentionDays: number;
   retentionMax: number;
-  vercelLinkRemoved: boolean;
   secretsRemoved: string[];
-  /** Another project of the same name still uses the secrets and link, so they stayed. */
+  /** Another project of the same name still uses the secrets, so they stayed. */
   metadataKeptFor: string | null;
   /** Older removals the count bound took early to make room for this one. */
   prunedEarly: string[];
@@ -87,20 +85,10 @@ export interface CodingProjectDeleteDialogProps {
   onClose: () => void;
   /** Called once the folder is gone, with the box's own answer. */
   onDeleted: (outcome: ProjectDeleteOutcome) => void;
-  /**
-   * The box-wide Vercel integration, as the host read it (`status.vercelEnabled`
-   * in CodingAgentApp). OFF when absent — `false`, the reading every other
-   * Vercel surface takes — and while off neither the preview's "its link is
-   * taken down" line nor the outcome's is drawn, whatever the route answered:
-   * the integration is a beta flag the owner has not turned on, so nothing on
-   * this dialog may name it. The route answers both `false` for the same box;
-   * the prop is what keeps that true against a server that predates the gate.
-   */
-  vercelEnabled?: boolean;
 }
 
 export default function CodingProjectDeleteDialog({
-  folder, kind, name, onClose, onDeleted, vercelEnabled = false,
+  folder, kind, name, onClose, onDeleted,
 }: CodingProjectDeleteDialogProps) {
   const { t, locale } = useT();
   const titleId = useId();
@@ -267,21 +255,18 @@ export default function CodingProjectDeleteDialog({
                 {t("codingAgent.delete.purged", { names: done.prunedEarly.join(", ") })}
               </p>
             )}
-            {((vercelEnabled && done.vercelLinkRemoved) || done.secretsRemoved.length > 0 || done.runsKept > 0 || done.metadataKeptFor) && (
+            {(done.secretsRemoved.length > 0 || done.runsKept > 0 || done.metadataKeptFor) && (
               <ul className="mt-2 space-y-1 text-[11px] text-[var(--text-muted)]">
-                {vercelEnabled && done.vercelLinkRemoved && <li>{t("codingAgent.delete.vercelRemoved")}</li>}
                 {done.secretsRemoved.length > 0 && (
                   <li>{t("codingAgent.delete.secretsRemoved", { names: done.secretsRemoved.join(", ") })}</li>
                 )}
                 {done.runsKept > 0 && <li>{t("codingAgent.delete.runsKept", { n: done.runsKept })}</li>}
                 {/* The credentials stayed because another project answers to
                     the same name. Said plainly, or "no secrets went" would read
-                    as "there were none". The link is named only where the
-                    owner has the integration on; off, the sentence is about
-                    the secrets alone. */}
+                    as "there were none". */}
                 {done.metadataKeptFor && (
                   <li data-testid="coding-agent-delete-metadata-kept">
-                    {t(vercelEnabled ? "codingAgent.delete.metadataKept" : "codingAgent.delete.metadataKeptSecrets")}
+                    {t("codingAgent.delete.metadataKeptSecrets")}
                   </li>
                 )}
               </ul>
@@ -337,7 +322,6 @@ export default function CodingProjectDeleteDialog({
                         month's guarantee, which the count bound can cut to
                         minutes — see the library header. */}
                     <li>{t("codingAgent.delete.willMove", { days: preview.retentionDays, max: preview.retentionMax })}</li>
-                    {vercelEnabled && preview.vercelLinked && <li>{t("codingAgent.delete.willRemoveVercel")}</li>}
                     {preview.secretNames.length > 0 && (
                       <li>{t("codingAgent.delete.willRemoveSecrets", { names: preview.secretNames.join(", ") })}</li>
                     )}

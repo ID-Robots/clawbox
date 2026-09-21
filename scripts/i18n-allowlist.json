@@ -46,7 +46,6 @@
     { "key": "codingAgent.rulesPlaceholder", "locales": "*", "reason": "A permission rule in the agent's own syntax." },
     { "key": "codingAgent.secretsNamePlaceholder", "locales": "*", "reason": "An environment variable name." },
     { "key": "codingAgent.tokensWord", "locales": ["es", "nl", "sv"], "reason": "\"tokens\" is the loanword in these languages." },
-    { "key": "codingAgent.vercelBetaBadge", "locales": ["de", "es", "it", "sv"], "reason": "\"Beta\" is the same word in these languages." },
     { "key": "codingAgent.wrapper", "locales": "*", "reason": "claude-ds is the name of an executable on the box." },
     { "key": "credentials.writeDownHotspot", "locales": ["de", "it", "nl"], "reason": "\"Hotspot\" is the loanword in these languages." },
     { "key": "files.desktop", "locales": ["de"], "reason": "\"Desktop\" is also the name of the folder on disk." },

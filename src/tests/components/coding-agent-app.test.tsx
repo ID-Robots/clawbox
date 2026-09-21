@@ -89,17 +89,11 @@ function json(body: unknown, status = 200) {
 let posts: { url: string; body: unknown }[];
 /** Every git-block read, query string included — which project it asked about. */
 let gitReads: string[];
-/** Every Vercel-link read, the same way — which project each card asked about. */
-let vercelReads: string[];
 
 /** The device, as far as this component can tell. */
-/**
- * Past the GitHub step and through the Improvement Program step, onto the
- * project folder. The programme's Next is a write, so the folder is awaited.
- */
-async function passImprovementStep() {
+/** Past the GitHub step, onto the project folder. */
+async function passGithubStep() {
   fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
-  fireEvent.click(await screen.findByTestId("coding-agent-wizard-improvement-next"));
   await screen.findByTestId("coding-agent-wizard-folder");
 }
 
@@ -107,7 +101,7 @@ function stubFetch(
   // `setupComplete` defaults to true: every test below is about a box whose
   // owner has been through the wizard, which is also what the route answers
   // for any box with the switch on. Pass false to get the wizard itself.
-  status: { enabled: boolean; readiness: typeof READY | typeof NOT_READY; setupComplete?: boolean; vercelEnabled?: boolean },
+  status: { enabled: boolean; readiness: typeof READY | typeof NOT_READY; setupComplete?: boolean },
   runsArg: unknown[] = [],
   opts: {
     artifacts?: Record<string, string>; projects?: unknown[]; projectsDir?: string | null; transcriptPath?: string;
@@ -126,7 +120,6 @@ function stubFetch(
   let improvementMode = "off";
   posts = [];
   gitReads = [];
-  vercelReads = [];
   const projects = {
     directory: opts.projectsDir === undefined ? "/home/clawbox/Projects" : opts.projectsDir,
     projects: opts.projects ?? [],
@@ -159,10 +152,6 @@ function stubFetch(
     effort: "ultracode",
     effortLevels: ["low", "xhigh", "max", "ultracode"],
     reviewPass: false,
-    // The box-wide Vercel switch. ON unless a test says otherwise: every case
-    // below but one is about a box that deploys, and the device migrates a box
-    // that already has a link to `true` before it answers.
-    vercelEnabled: status.vercelEnabled ?? true,
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -196,7 +185,6 @@ function stubFetch(
           trashPath: `/home/clawbox/clawbox/data/deleted-projects/${body.folder}--20260913T120000Z`,
           retentionDays: 30,
           retentionMax: 10,
-          vercelLinkRemoved: false,
           secretsRemoved: [],
           metadataKeptFor: null,
           prunedEarly: [],
@@ -213,7 +201,6 @@ function stubFetch(
         size: { bytes: 2048, files: 7, truncated: false },
         unsaved: { dirty: [], dirtyCount: 0, dirtyTruncated: false, unpushed: 0, stashes: 0, ignored: [], ignoredCount: 0, ignoredTruncated: false, worktrees: [], notARepository: false, any: false },
         liveRuns: [],
-        vercelLinked: false,
         secretNames: [],
         runCount: 0,
         retentionDays: 30,
@@ -227,27 +214,6 @@ function stubFetch(
     if (url.startsWith("/setup-api/coding-agent/tree?")) {
       return json({ listing: { path: "", truncated: false, ...(opts.tree ?? { entries: [] }) } });
     }
-    // The deploy half first: the plain `startsWith` below would swallow it.
-    // Nothing here is about deploying, so the panel is told there is nothing
-    // to show and draws its buttons quietly.
-    if (url.startsWith("/setup-api/coding-agent/vercel/deploy")) {
-      // Recorded like its sibling below, so a test can say "this box asked
-      // Vercel nothing at all" and mean the whole family.
-      vercelReads.push(url);
-      return json({ error: "unexpected" }, 404);
-    }
-    if (url.startsWith("/setup-api/coding-agent/vercel")) {
-      vercelReads.push(url);
-      // The link names the project it belongs to, so the card on screen says
-      // WHICH project it is about — a stale card left behind by a switch is
-      // then visible rather than merely countable.
-      const params = new URL(url, "http://box").searchParams;
-      const which = params.get("projectId") ?? (params.get("directory") ?? "").split("/").pop() ?? "";
-      return json({
-        link: { projectId: `vercel-${which}`, teamId: null, tokenSecretName: "VERCEL_TOKEN" },
-        readiness: null,
-      });
-    }
     if (url.startsWith("/setup-api/coding-agent/git?")) {
       // The route answers `{ git }` for the one project the query names, and
       // `{ changes, log }` when the workspace's Changes tab asks.
@@ -259,12 +225,6 @@ function stubFetch(
     }
     if (url === "/setup-api/coding-agent/git" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as { action?: string };
-      posts.push({ url, body });
-      // Create PR: the branch's pull request, opened on GitHub.
-      if (body.action === "pr") return json({ number: 12, url: "https://github.com/yalexx/site/pull/12", existing: false, branch: "clawbox/run-1", base: "master" });
-      // A backup: the folder is pushed, private, to a repo named after it.
-      return json({ repo: "owner/site", created: true });
-    }
     if (url === "/setup-api/coding-agent/git") {
       return json(opts.github ?? { installed: false, connected: false, login: null, loginCommand: "gh auth login" });
     }
@@ -329,9 +289,6 @@ function stubFetch(
       // The route answers the whole status, re-read after the change.
       return json(payload());
     }
-    // The Improvement Program: the wizard's second step reads it on mount and
-    // writes the owner's answer on Next; the settings page embeds its card.
-    if (url === "/setup-api/improvement-program") {
       if (init?.method === "POST") {
         const body = JSON.parse(String(init.body)) as { mode: string };
         posts.push({ url, body });
@@ -359,7 +316,6 @@ function stubFetch(
 beforeEach(() => {
   posts = [];
   gitReads = [];
-  vercelReads = [];
 });
 
 afterEach(() => {
@@ -413,21 +369,13 @@ describe("CodingAgentApp", () => {
       // GitHub is what a run pushes with, not what it needs to start, so the
       // step can be passed without an account.
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
-      // The Improvement Program comes next — right after GitHub, on whose
-      // credential its reports go out — with Automatic proposed; Next writes
-      // the answer and lands on the folder.
-      expect(screen.getByTestId("coding-agent-wizard-improvement-auto")).toHaveAttribute("aria-checked", "true");
-      fireEvent.click(screen.getByTestId("coding-agent-wizard-improvement-next"));
-      expect(await screen.findByTestId("coding-agent-wizard-folder")).toBeInTheDocument();
-      expect(screen.getByTestId("coding-agent-wizard-browse")).toBeInTheDocument();
-      expect(posts.find((p) => p.url === "/setup-api/improvement-program")?.body).toEqual({ mode: "auto" });
     });
 
     it("proposes Ultracode and says what it costs", async () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      await passImprovementStep();
+      await passGithubStep();
       expect(screen.getByTestId("coding-agent-wizard-effort-ultracode")).toHaveAttribute("aria-pressed", "true");
       expect(screen.getByTestId("coding-agent-wizard-effort-low")).toHaveAttribute("aria-pressed", "false");
       // The owner is told before they choose, not by a bill afterwards.
@@ -439,7 +387,7 @@ describe("CodingAgentApp", () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      await passImprovementStep();
+      await passGithubStep();
       fireEvent.change(screen.getByTestId("coding-agent-wizard-folder"), { target: { value: "/home/clawbox/Projects" } });
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/enable")).toBe(true));
@@ -467,7 +415,7 @@ describe("CodingAgentApp", () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      await passImprovementStep();
+      await passGithubStep();
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-skip"));
@@ -486,7 +434,7 @@ describe("CodingAgentApp", () => {
       stubFetch({ enabled: false, readiness: READY, setupComplete: false });
       render(<CodingAgentApp />);
       await leaveWizardIntro();
-      await passImprovementStep();
+      await passGithubStep();
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-run"));
@@ -1829,182 +1777,7 @@ describe("the summary and the report", () => {
   });
 });
 
-/**
- * The box-wide Vercel switch, as the app reads it (`status.vercelEnabled`).
- *
- * The owner's ruling: only show the Vercel UI if the integration is on. Not a
- * disabled button and not an empty card — the surfaces are not rendered at all,
- * on the project's page and on a run's.
- */
-describe("the box-wide Vercel integration", () => {
-  /** The run's page, for a run that has a deployment and a pipeline on it. */
-  const DEPLOYED = {
-    ...RUN,
-    id: "run-deployed1",
-    vercel: {
-      phase: "ready", url: "https://site-abc.vercel.app", inspectorUrl: null,
-      deploymentId: "dpl_1", target: "preview", projectId: "prj_1", teamId: null,
-      branch: null, startedAt: 1, endedAt: 2, detail: null, by: "owner", promotion: null,
-    },
-    pipeline: {
-      stage: "complete", status: "complete", startedAt: 1, endedAt: 2, round: 0, maxRounds: 2,
-      deadlineAt: 9_999_999_999_999, verify: { path: "/", expect: ["Invoice"] }, production: false,
-      failure: null, productionApprovedAt: null, lastVerification: null,
-      steps: [{ stage: "build", state: "passed", attempt: 1, startedAt: 1, endedAt: 2, detail: null, evidence: [] }],
-    },
-  };
-
-  async function openDeployedRun(vercelEnabled: boolean) {
-    stubFetch({ enabled: true, readiness: READY, vercelEnabled }, [DEPLOYED], { projects: [SITE_PROJECT] });
-    render(<CodingAgentApp />);
-    await openRuns();
-    fireEvent.click(await screen.findByTestId(`coding-agent-details-${DEPLOYED.id}`));
-    return screen.findByTestId("coding-agent-run-page");
-  }
-
-  it("draws the run's deployment card and its pipeline strip when it is ON", async () => {
-    const page = await openDeployedRun(true);
-    expect(within(page).getByTestId("coding-agent-deploy")).toBeInTheDocument();
-    expect(within(page).getByTestId("coding-agent-pipeline")).toBeInTheDocument();
-    // And the Deploy panel asked the device about this run's project. (It
-    // draws nothing here: the stub answers that route 404, which is the
-    // "nothing to deploy" case, so what is pinned is that it ASKED.)
-    await waitFor(() => expect(vercelReads.some((u) => u.includes("/vercel/deploy"))).toBe(true));
-  });
-
-  it("draws none of the three when it is OFF", async () => {
-    const page = await openDeployedRun(false);
-    // The run still renders — its work happened, and the record still carries
-    // the deployment that was made while the integration was on.
-    expect(page).toBeInTheDocument();
-    expect(within(page).queryByTestId("coding-agent-deploy")).toBeNull();
-    expect(within(page).queryByTestId("coding-agent-pipeline")).toBeNull();
-    expect(within(page).queryByTestId("coding-agent-deploy-actions")).toBeNull();
-    // Nothing on this page asked Vercel anything.
-    expect(vercelReads).toEqual([]);
-  });
-
-  it("keeps the project page's link card off, and the rest of the page on", async () => {
-    stubFetch({ enabled: true, readiness: READY, vercelEnabled: false }, [], { projects: [SITE_PROJECT] });
-    render(<CodingAgentApp />);
-    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
-    const page = await screen.findByTestId("coding-agent-project-page");
-    expect(within(page).getByTestId("coding-agent-workspace")).toBeInTheDocument();
-    expect(screen.queryByTestId("coding-agent-vercel-card")).toBeNull();
-    // And the card never asked its route, so a box with the integration off
-    // makes no Vercel request at all.
-    expect(vercelReads).toEqual([]);
-  });
-
-  it("names Vercel NOWHERE while it is OFF — the project page, the run page and the delete dialog alike", async () => {
-    // The integration is a BETA flag, off by default, and "off" means the
-    // feature is not on the box: not a card, not a button, not a line in a
-    // dialog. This walks the three surfaces in one sitting, against a route
-    // that still CLAIMS a link (an older server, or one that predates the
-    // gate), so what is pinned is the app's own silence and not the route's.
-    const SHOP = { ...PROJECT, folder: "shop", directory: "/home/clawbox/Projects/shop", name: "My Shop" };
-    stubFetch({ enabled: true, readiness: READY, vercelEnabled: false }, [DEPLOYED], {
-      projects: [SITE_PROJECT, SHOP],
-      deletePreview: {
-        folder: "shop",
-        kind: "folder",
-        directory: "/home/clawbox/Projects/shop",
-        size: { bytes: 2048, files: 7, truncated: false },
-        unsaved: { dirty: [], dirtyCount: 0, dirtyTruncated: false, unpushed: 0, stashes: 0, ignored: [], ignoredCount: 0, ignoredTruncated: false, worktrees: [], notARepository: false, any: false },
-        liveRuns: [],
-        vercelLinked: true,
-        secretNames: ["VERCEL_TOKEN"],
-        runCount: 0,
-        retentionDays: 30,
-        retentionMax: 10,
-        trashCount: 0,
-        wouldPurge: [],
-        refusal: null,
-      },
-    });
-    render(<CodingAgentApp />);
-    const VERCEL_IDS = [
-      "coding-agent-vercel-card", "coding-agent-vercel-project", "coding-agent-deploy",
-      "coding-agent-deploy-actions", "coding-agent-pipeline",
-    ];
-    const none = () => { for (const id of VERCEL_IDS) expect(screen.queryByTestId(id)).toBeNull(); };
-
-    // The project page.
-    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
-    const project = await screen.findByTestId("coding-agent-project-page");
-    expect(project.textContent).not.toMatch(/vercel/i);
-    none();
-
-    // The run page, for a run whose record carries a deployment and a pipeline.
-    await openRuns();
-    fireEvent.click(await screen.findByTestId(`coding-agent-details-${DEPLOYED.id}`));
-    await screen.findByTestId("coding-agent-run-page");
-    none();
-
-    // The delete dialog, over a preview that names a link. Home is two
-    // breadcrumb steps up — the sidebar's Home exists only in a wide window.
-    fireEvent.click(screen.getByTestId("coding-agent-run-back"));
-    await screen.findByTestId("coding-agent-project-page");
-    fireEvent.click(screen.getByTestId("coding-agent-project-back"));
-    fireEvent.click(await screen.findByTestId("coding-agent-delete-shop"));
-    const facts = await screen.findByTestId("coding-agent-delete-facts");
-    expect(facts.textContent).not.toContain(t("codingAgent.delete.willRemoveVercel"));
-    // The secrets line is still there — it is the link that is off the box,
-    // not the folder's own credentials.
-    expect(facts.textContent).toContain(t("codingAgent.delete.willRemoveSecrets", { names: "VERCEL_TOKEN" }));
-    expect(screen.getByRole("dialog").textContent).not.toMatch(/vercel link/i);
-    expect(vercelReads).toEqual([]);
-  });
-});
-
 describe("projects", () => {
-  it("keeps ONE Vercel card when the sidebar switches from project to project", async () => {
-    // The owner's report: every switch of the project folder left one more
-    // "Vercel deploys" card on the page. The card and its routes are per
-    // project and fine — the fault was two SIBLINGS under one parent carrying
-    // the same React key, which makes the reconciler lose the first of them:
-    // it is neither matched nor deleted, so its DOM node stays behind while a
-    // fresh one mounts beside it. Only the sidebar shows it, because the home
-    // list remounts the whole page.
-    const RO = class {
-      private cb: ResizeObserverCallback;
-      constructor(cb: ResizeObserverCallback) { this.cb = cb; }
-      observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
-      unobserve() {}
-      disconnect() {}
-    };
-    vi.stubGlobal("ResizeObserver", RO);
-    try {
-      const other = { ...PROJECT, folder: "shop", name: "Shop", directory: "/home/clawbox/Projects/shop" };
-      stubFetch({ enabled: true, readiness: READY }, [], { projects: [PROJECT, other] });
-      render(<CodingAgentApp />);
-      const sidebar = await screen.findByTestId("coding-agent-sidebar");
-      const rail = await within(sidebar).findByTestId("coding-agent-sidebar-projects");
-
-      const openProject = async (name: string, folder: string) => {
-        fireEvent.click(within(rail).getByText(name));
-        await screen.findByTestId("coding-agent-project-page");
-        // Wait for THIS project's card to have read its link and drawn it…
-        await waitFor(() => {
-          const shown = screen.getAllByTestId("coding-agent-vercel-project").map((n) => n.textContent ?? "");
-          expect(shown.some((s) => s.includes(`vercel-${folder}`))).toBe(true);
-        });
-        // …and only then count: one card, and one workspace under it.
-        expect(screen.getAllByTestId("coding-agent-vercel-card")).toHaveLength(1);
-        expect(screen.getAllByTestId("coding-agent-workspace")).toHaveLength(1);
-      };
-
-      await openProject(PROJECT.name, PROJECT.directory.split("/").pop()!);
-      await openProject(other.name, "shop");
-      await openProject(PROJECT.name, PROJECT.directory.split("/").pop()!);
-      // The card really did re-read, per project — a card that never asked
-      // again would pass the count above while showing stale figures.
-      expect(vercelReads.length).toBeGreaterThanOrEqual(3);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
   it("lists each project with its name, last commit and badges, and opens the desktop app", async () => {
     stubFetch({ enabled: true, readiness: READY }, [], {
       projects: [

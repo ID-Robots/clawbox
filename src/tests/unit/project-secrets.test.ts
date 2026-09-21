@@ -92,7 +92,7 @@ function switchOn(on: boolean): void {
 
 describe("what reaches the disk", () => {
   it("keeps no cleartext, and gives the value back exactly", async () => {
-    await store.setSecret({ name: "VERCEL_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
 
     // THE headline assertion: the bytes the owner typed are not in the file,
     // under any key and in no encoding this store uses.
@@ -103,8 +103,8 @@ describe("what reaches the disk", () => {
     // …and the only way out is a run's environment.
     switchOn(true);
     const resolved = await store.resolveSecretsForRun({ project: null });
-    expect(resolved.env).toEqual({ VERCEL_TOKEN: TOKEN });
-    expect(resolved.names).toEqual(["VERCEL_TOKEN"]);
+    expect(resolved.env).toEqual({ DEPLOY_TOKEN: TOKEN });
+    expect(resolved.names).toEqual(["DEPLOY_TOKEN"]);
     expect(resolved.unreadable).toEqual([]);
   });
 
@@ -128,10 +128,10 @@ describe("what reaches the disk", () => {
   });
 
   it("never puts a value in a view, however the list is read", async () => {
-    await store.setSecret({ name: "VERCEL_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
     const list = await store.listSecrets();
     expect(JSON.stringify(list)).not.toContain(TOKEN);
-    expect(list[0]).toMatchObject({ name: "VERCEL_TOKEN", scope: store.BOX_SCOPE, inject: true, readable: true });
+    expect(list[0]).toMatchObject({ name: "DEPLOY_TOKEN", scope: store.BOX_SCOPE, inject: true, readable: true });
   });
 
   it("does not lose the owner's list when a save follows an unreadable store", async () => {

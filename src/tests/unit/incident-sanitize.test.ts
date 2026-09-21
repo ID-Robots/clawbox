@@ -1,5 +1,5 @@
 /**
- * The Improvement Program's redaction, class by class.
+ * The shared redaction of error text, class by class.
  *
  * Everything this module lets through ends up in a PUBLIC GitHub issue, so the
  * suite is written as a list of things that must never appear in the output

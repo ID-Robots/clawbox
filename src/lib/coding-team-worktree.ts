@@ -58,8 +58,8 @@ const out = (r: ChildResult) => r.stdout.trim();
  * environment `gitIn` builds requires: it carries nothing of the server's, so
  * a repository with no identity of its own answers "Committer identity
  * unknown" and the commit never happens. The placeholder that used to be
- * spelled out here also fails the Vercel deployment check on a project wired
- * to its GitHub integration, which is the reason this is resolved rather than
+ * spelled out here also fails a host's deployment check on a project wired to
+ * its GitHub integration, which is the reason this is resolved rather than
  * written down.
  *
  * A lookup git could not MAKE is reported rather than fallen back from: the

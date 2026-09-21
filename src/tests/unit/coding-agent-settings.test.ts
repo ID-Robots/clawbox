@@ -570,7 +570,7 @@ describe("working in a folder the owner already has", () => {
 
 describe("the commit author the box signs the owner's work as", () => {
   // Both halves are OPTIONAL and independently clearable, and the pair is what
-  // saves a project wired to the Vercel GitHub integration: its deployment
+  // saves a project wired to a host's GitHub integration: its deployment
   // check refuses a commit whose author cannot deploy the project, which is
   // what the placeholder address always was.
 

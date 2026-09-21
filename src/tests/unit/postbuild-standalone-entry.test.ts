@@ -14,7 +14,7 @@ import path from "path";
  * no build at all. Next's file tracing copies the parked one INTO the new
  * standalone tree — `src/instrumentation-node.ts` resolves
  * `path.join(CONFIG_ROOT, 'scripts', 'terminal-server.mjs')` and CONFIG_ROOT
- * comes from the environment, so @vercel/nft cannot resolve it and emits the
+ * comes from the environment, so Next's dependency tracer cannot resolve it and emits the
  * whole project directory as an asset directory. Reproduced on Next 16.3.3:
  * with a build parked beside it, `.next/server/instrumentation.js.nft.json`
  * lists 6186 files, 4202 of them `../../.next-old/**`.

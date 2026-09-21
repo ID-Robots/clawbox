@@ -3,41 +3,6 @@
  * Delegates to instrumentation-node.ts which is loaded via require()
  * to avoid Edge Runtime static analysis warnings.
  */
-export async function onRequestError(
-  error: unknown,
-  request?: { path?: string; method?: string },
-  context?: { routeType?: string },
-): Promise<void> {
-  // Next's own hook for a server-side error thrown in a route handler or a
-  // server component — the ONE place this app already funnels those, which is
-  // why the Improvement Program hangs its capture here rather than wrapping
-  // fifty routes. It was a required no-op export before.
-  //
-  // NODE ONLY, and a dynamic import: this module is loaded by the Edge runtime
-  // too, and the incident store is `fs` and `crypto`. A static import would put
-  // both into an Edge bundle that cannot have them.
-  if (process.env.NEXT_RUNTIME !== 'nodejs') return
-  try {
-    const { captureIncident } = await import('@/lib/incident-report')
-    await captureIncident({
-      source: 'clawbox',
-      message: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : null,
-      context: {
-        // The PATH, never the query — the sanitizer strips a query string
-        // anyway, and a route is the diagnosis.
-        path: typeof request?.path === 'string' ? request.path.split('?')[0] : 'unknown',
-        method: typeof request?.method === 'string' ? request.method : 'unknown',
-        routeType: typeof context?.routeType === 'string' ? context.routeType : 'unknown',
-      },
-      // One route that throws on every poll must not write on every poll.
-      throttleMs: 5 * 60_000,
-    })
-  } catch {
-    // A handler for errors must not add one. Next calls this from its own
-    // error path and a throw here would replace the real failure.
-  }
-}
 
 /**
  * The boot-time repairs of openclaw.json, one after the other.
@@ -285,6 +250,38 @@ export async function register() {
     if (seeded) console.log(`[instrumentation] Process timezone seeded from the applied zone: ${seeded}`)
   } catch (err) {
     console.error('[instrumentation] Could not seed the process timezone:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The one-shot migrations, on the first boot that carries each of them —
+    // see src/lib/boot-migrations.ts for why the marker is a list of ids.
+    // AWAITED, and early: these are repairs of stored state that the readers
+    // below (and the routes this server is about to answer) take as given, and
+    // a migration landing after a reader has already answered is the shape
+    // that leaves a box reporting one thing and doing another. It is one
+    // config read on a box that is up to date, which is every boot but one.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { runBootMigrations, dropRemovedConsentMigration } = require('./lib/boot-migrations')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DATA_DIR, get, set } = require('./lib/config-store')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fsp = require('fs').promises
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const nodePath = require('path')
+    const removeDataFile = async (name: string): Promise<boolean> => {
+      // `force` would answer "removed" for a file that was never there, and
+      // the answer is what decides whether the boot log says anything.
+      try {
+        await fsp.unlink(nodePath.join(DATA_DIR, name))
+        return true
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return false
+        throw err
+      }
+    }
+    const ran = await runBootMigrations([dropRemovedConsentMigration({ set, removeFile: removeDataFile })], { get, set })
+    if (ran.length > 0) console.log(`[instrumentation] Ran ${ran.length} one-shot migration(s): ${ran.join(', ')}`)
+  } catch (err) {
+    console.error('[instrumentation] Could not run the one-shot migrations:', err instanceof Error ? err.message : err)
   }
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports

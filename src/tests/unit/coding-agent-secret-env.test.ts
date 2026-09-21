@@ -48,8 +48,8 @@ describe("buildRunEnv and the owner's secrets", () => {
   });
 
   it("puts a resolved secret in the child's environment under its own name", () => {
-    const env = buildRunEnv({ effort: "high", secrets: { VERCEL_TOKEN: TOKEN } });
-    expect(env.VERCEL_TOKEN).toBe(TOKEN);
+    const env = buildRunEnv({ effort: "high", secrets: { DEPLOY_TOKEN: TOKEN } });
+    expect(env.DEPLOY_TOKEN).toBe(TOKEN);
   });
 
   it("never overwrites what the device itself wrote", () => {

@@ -219,7 +219,7 @@ function all(...expectations) {
 // with the fence down: a control character where a preference value belongs, a
 // string where a boolean does, a mode that is not one of the three. The gates
 // here are all checked before the body is validated — `preferences` on the key
-// PREFIX, `browser/setup` and `improvement-program` before the body is even
+// PREFIX and `browser/setup` before the body is even
 // read — so the 403 is still the thing being asserted. But a sweep must not be
 // the thing that wipes the desktop's app list on the day a fence regresses,
 // and a valid payload is exactly that: `{ installed_apps: "[]" }` would have
@@ -366,10 +366,6 @@ const AREAS = [
   ]],
   ["tunnel", [
     { name: "remote control reports itself", path: "/setup-api/tunnel/status", expect: ok("enabled", "cloudflaredInstalled") },
-  ]],
-  ["improvement-program", [
-    { name: "the mode reads back", path: "/setup-api/improvement-program", expect: all(ok("mode"), (res) => (["off", "ask", "auto"].includes(res.json.mode) ? true : `mode is \`${res.json.mode}\``)) },
-    { name: "the agent cannot opt the box in", path: "/setup-api/improvement-program", method: "POST", body: { mode: "__not_a_mode__" }, expect: ownerOnly() },
   ]],
   ["coding-agent", [
     { name: "the switch and readiness report", path: "/setup-api/coding-agent/status", expect: ok("enabled", "readiness") },
