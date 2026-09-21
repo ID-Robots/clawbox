@@ -316,7 +316,10 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
     }
   };
 
-  function run({ existingUnits = "ollama.service kokoro-server.service" } = {}) {
+  function run({
+    existingUnits = "ollama.service kokoro-server.service",
+    ramKb,
+  }: { existingUnits?: string; ramKb?: number } = {}) {
     const log = path.join(tmp, "systemctl.log");
     fs.writeFileSync(log, "");
     const script = [
@@ -327,6 +330,12 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
       'CLAWBOX_USER="$(id -un)"',
       `export PATH="${tmp}/bin:$PATH"`,
       ...sourceInstallShellFns(tmp),
+      // The gateway branch reads THIS machine's MemTotal, and a runner with
+      // 16 GB would never take it. Only the MemTotal program is answered;
+      // available_mb's own awk over the same file must still be the real one.
+      ...(ramKb === undefined
+        ? []
+        : [`awk() { case "$1" in *MemTotal*) echo ${ramKb} ;; *) command awk "$@" ;; esac; }`]),
       "free_memory_for_build 2>&1",
     ].join(NL);
     let code = 0;
@@ -355,6 +364,26 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
     const r = run();
     expect(r.calls).toContain("stop ollama.service");
     expect(r.calls.join(NL)).not.toMatch(/\bdisable\b/);
+  });
+
+  it("pauses the gateway on a box that cannot spare it (TASK-1022)", () => {
+    // On the 8 GB Jetson the agent was still resident while `next build` was
+    // killed for memory: gateway + local model + desktop against 7.4 GiB. Once
+    // the engines are down the gateway is the largest thing left, and it goes
+    // through the same pause/resume pair, so it comes back afterwards.
+    const r = run({ ramKb: 7_800_000, existingUnits: "ollama.service clawbox-gateway.service" });
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain("stop clawbox-gateway.service");
+  });
+
+  it("leaves the gateway up on a box with memory to spare", () => {
+    // An update must not take the assistant away from the owner for the length
+    // of a build that was never going to run out of memory. 12 GB is the same
+    // line ensure_build_swap draws, for the same reason.
+    const r = run({ ramKb: 16_000_000, existingUnits: "ollama.service clawbox-gateway.service" });
+    expect(r.code).toBe(0);
+    expect(r.calls.some((c) => c.includes("stop clawbox-gateway.service"))).toBe(false);
+    expect(r.out).toMatch(/Leaving clawbox-gateway\.service up/);
   });
 
   it("skips a unit the box does not have", () => {

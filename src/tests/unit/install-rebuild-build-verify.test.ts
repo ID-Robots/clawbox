@@ -625,6 +625,25 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
     expect(r.stderr).toMatch(/Restored the previous build; the dashboard answers on :80 again/);
   });
 
+  it("names the command and the KILL, not just a number, after an OOM (TASK-1022)", () => {
+    // 137 is 128+9 — the OOM killer, and on an 8 GB Jetson it is the most
+    // likely way this step ends. "Error: rebuild failed (exit 137)" was the
+    // whole of what an owner was told, and a number is not something they can
+    // act on. The sentence has to name WHAT died and WHY.
+    const r = run({ build: "oom-killed" });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/Error: rebuild failed \(exit 137\)/);
+    expect(r.stderr).toMatch(/bun run build was killed by the kernel \(SIGKILL\)/);
+    expect(r.stderr).toMatch(/ran out of memory/);
+  });
+
+  it("names bun install when that is what failed, not 'the rebuild'", () => {
+    // The four things that can fail in this window used to collapse into one
+    // sentence, so the banner never said which of them it was.
+    const r = run({ bunInstall: "fails" });
+    expect(r.stderr).toMatch(/Error: rebuild failed \(exit 1\) — bun install did not succeed\./);
+  });
+
   // The window the first version of this fix left open: `bun install` and
   // `ensure_node_pty` run AFTER clawbox-setup is stopped and BEFORE the restore
   // branch, and `ensure_node_pty` used to `exit 1` outright — jumping over the

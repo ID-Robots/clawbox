@@ -2073,9 +2073,27 @@ forget_paused_engines() {
 # that cannot stop one of its engines should still attempt the build it was
 # asked for, and the log says what happened.
 free_memory_for_build() {
-  local before after uid unit pid waited
+  local before after uid unit pid waited ram_kb
   before=$(available_mb)
   echo "Freeing memory for the build (${before} MB available)..."
+
+  # The agent itself, on a box that cannot spare it. The gateway holds a Node
+  # process plus whatever the assistant was last doing, and on the 8 GB Jetson
+  # of TASK-1022 it was still resident while `next build` was killed for
+  # memory. Paused through the same pair as every engine, so it comes back —
+  # and nothing between here and resume_paused_engines talks to it (the web
+  # server is already down, and bun install / next build never dial :18789).
+  #
+  # Only on a box that needs it: an update must not take the assistant away
+  # from the owner for the length of a build that was never going to run out.
+  # The threshold is ensure_build_swap's, read inline for the same reason that
+  # function reads it inline — each of these is extracted and run on its own.
+  ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  if [ "${ram_kb:-0}" -lt 12000000 ]; then
+    pause_engine_unit clawbox-gateway.service
+  else
+    echo "  Leaving clawbox-gateway.service up: this box has memory to spare"
+  fi
 
   pause_engine_unit ollama.service
   # The memory embedder is a system unit of its own (~2 GB on the GPU while
@@ -2696,7 +2714,7 @@ run_next_build() {
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"
-  local rc=0 built=0 reboot_follows=0
+  local rc=0 built=0 reboot_follows=0 failed_at="the rebuild"
   if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
 
   # Check before stopping the dashboard: zram alone did not prevent TASK-789.
@@ -2734,8 +2752,10 @@ do_rebuild() {
   echo "Running bun install..."
   if ! as_clawbox_login "cd $PROJECT_DIR && $BUN install"; then
     rc=1
+    failed_at="bun install"
   elif ! ensure_node_pty; then
     rc=1
+    failed_at="the node-pty rebuild"
   # A CONDITION, like its two neighbours above, and for a reason the neighbours
   # did not have: errexit is live in this function (both callers invoke it
   # bare), and set_previous_build_aside's `rm -rf` and `mv` can legitimately
@@ -2746,17 +2766,35 @@ do_rebuild() {
   elif ! set_previous_build_aside "$build_dir" "$kept_dir"; then
     echo "Error: could not set the current build aside" >&2
     rc=1
+    failed_at="setting the previous build aside"
   else
     echo "Running bun build..."
     built=1
     run_next_build || rc=$?
-    if [ "$rc" -eq 0 ] && ! verify_build_present "$PROJECT_DIR"; then
+    # An `if`, never `[ … ] && failed_at=…`: errexit is live in this function
+    # and a bare test that is FALSE would end the shell here, between the
+    # engine pause and the resume — the one state this arm exists to avoid.
+    if [ "$rc" -ne 0 ]; then
+      failed_at="bun run build"
+    elif ! verify_build_present "$PROJECT_DIR"; then
       rc=1
+      failed_at="bun run build (it exited 0 but left no .next/BUILD_ID)"
     fi
   fi
 
   if [ "$rc" -ne 0 ]; then
-    echo "Error: rebuild failed (exit $rc)" >&2
+    # Name WHAT failed and, when the kernel killed it, say so in words. A
+    # shell reports a signalled child as 128+N, and on an 8 GB Jetson running
+    # `next build` the overwhelmingly common N is 9 — the OOM killer. "exit
+    # 137" alone is a number an owner cannot act on, and it is the single most
+    # likely way this step ends on the hardware ClawBox ships on (TASK-1022).
+    if [ "$rc" -eq 137 ]; then
+      echo "Error: rebuild failed (exit 137) — $failed_at was killed by the kernel (SIGKILL): the device ran out of memory during the build." >&2
+    elif [ "$rc" -gt 128 ] && [ "$rc" -lt 160 ]; then
+      echo "Error: rebuild failed (exit $rc) — $failed_at was killed by signal $((rc - 128))." >&2
+    else
+      echo "Error: rebuild failed (exit $rc) — $failed_at did not succeed." >&2
+    fi
     restore_previous_build "$build_dir" "$kept_dir" "$built" || true
     # AFTER the restore, not before it: restore_previous_build gives the
     # dashboard a fixed twenty seconds to answer on :80 before it reports the
@@ -7238,7 +7276,15 @@ step_swapfile() {
 
   if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$file"; then
     echo "  Swapfile already active: $(swapon --show=NAME,SIZE --noheadings 2>/dev/null | awk -v f="$file" '$1 == f {print $2}')"
-    ensure_swapfile_fstab "$file" || return 1
+    # A failed fstab append is a WARNING here, never the step's failure: the
+    # swap the caller asked for is active NOW, which is everything a build
+    # needs. `|| return 1` made this branch abort the whole in-app update on
+    # any box whose /swapfile was enabled by hand with no fstab line — the
+    # rebuild runs as the unprivileged clawbox user, so the append can only
+    # fail there, and the box already had the 4G it was being failed over.
+    # ensure_swapfile_fstab prints its own reason; the reboot-survival half is
+    # picked up later by step_post_update, which runs this step as root.
+    ensure_swapfile_fstab "$file" || true
     return 0
   fi
 
@@ -7246,7 +7292,8 @@ step_swapfile() {
     # Left from an earlier install or a reboot that has not mounted it yet.
     if swapon --priority "$SWAPFILE_PRIORITY" "$file" 2>/dev/null; then
       echo "  Swapfile re-enabled: $file"
-      ensure_swapfile_fstab "$file" || return 1
+      # Warning only, for the reason spelled out in the already-active branch.
+      ensure_swapfile_fstab "$file" || true
       return 0
     fi
     echo "  Warning: $file exists but could not be enabled; leaving it alone"
@@ -7291,7 +7338,9 @@ step_swapfile() {
     echo "  Warning: swapon failed; leaving the box on zram alone"
     return 0
   fi
-  ensure_swapfile_fstab "$file" || return 1
+  # Warning only, same rule: swapon has already succeeded above, so the swap is
+  # active and the step did its job whether or not /etc/fstab could be written.
+  ensure_swapfile_fstab "$file" || true
   echo "  Swap is now $(free -h | awk '/^Swap:/{print $2}') ($(swapon --show=NAME --noheadings | wc -l) devices)"
 }
 
@@ -7301,12 +7350,32 @@ step_swapfile() {
 ensure_build_swap() {
   is_test_mode && return 0
   in_container && return 0
-  local ram_kb disk_swap_kb
+  local ram_kb disk_swap_kb min_kb
   ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
   [ "${ram_kb:-0}" -ge 12000000 ] && return 0
-  step_swapfile || return 1
+  if ! step_swapfile; then
+    # Say why, or the banner lies. `getStepFailureLine` in src/lib/updater.ts
+    # shows the newest journal line starting with "Error:"/"Fatal", and falls
+    # back to the LAST line only when nothing printed one. A bare `return 1`
+    # here printed no such line, so the banner became whichever of the step's
+    # own two streams landed last — stdout and stderr reach the journal as
+    # independent streams and their relative order is not guaranteed, which is
+    # how an owner was shown "Rebuild failed: Swapfile already active: 4G".
+    echo "Error: could not provision disk-backed swap for the build; see the swapfile step's warnings above." >&2
+    return 1
+  fi
   disk_swap_kb=$(swapon --show=NAME,SIZE --bytes --noheadings | awk '$1 !~ /^\/dev\/zram/ {sum += $2} END {printf "%.0f", sum / 1024}') || return 1
-  if [ "${disk_swap_kb:-0}" -lt 4194304 ]; then
+  # 4 GiB, less one MiB of tolerance for how swap is MEASURED. `swapon
+  # --show=SIZE --bytes` reports the USABLE area — the file minus its one-page
+  # header, rounded down to whole pages — so a genuine 4 GiB /swapfile measures
+  # 4194300 KiB, four KiB UNDER a literal 4194304. Measured 2026-09-21: an
+  # 8589934592-byte /swapfile (8388608 KiB) reads 8388604 KiB in /proc/swaps.
+  # A box with exactly `/swapfile 4G` therefore failed this gate on every Retry
+  # for ever, over a swapfile that was exactly the size being demanded — which
+  # is what kept TASK-1022's box un-updatable after its fstab line was added.
+  # The REQUIREMENT is unchanged at 4 GiB; only the slack in reading it is.
+  min_kb=$((4 * 1024 * 1024 - 1024))
+  if [ "${disk_swap_kb:-0}" -lt "$min_kb" ]; then
     echo "Error: build requires at least 4 GiB active disk-backed swap on this low-memory device; free disk space or repair swap and Retry. Dashboard has not been stopped." >&2
     return 1
   fi
@@ -7317,8 +7386,11 @@ ensure_swapfile_fstab() {
   local file="$1"
   grep -qs "^$file[[:space:]]" /etc/fstab && return 0
   # A read-only or full /etc is the case that matters: the swap is live now and
-  # would vanish at the next boot with nothing said. The append's status is the
-  # step's, and the step's is a warning at the caller — never a failed install.
+  # would vanish at the next boot with nothing said. The status is returned so a
+  # caller CAN react, but every caller treats it as a warning — never a failed
+  # install and never a failed update. The unprivileged rebuild path reaches
+  # this function and can never write /etc/fstab, so a hard failure here would
+  # only ever abort an update over swap the box already had (TASK-1022).
   if ! printf '%s none swap sw,pri=%s 0 0\n' "$file" "$SWAPFILE_PRIORITY" >> /etc/fstab; then
     echo "  Warning: could not record $file in /etc/fstab — the swap is active now but will not survive a reboot" >&2
     return 1

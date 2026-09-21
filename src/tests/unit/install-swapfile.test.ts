@@ -88,6 +88,15 @@ function runStep(opts: {
   detectVirtMissing?: boolean;
   readOnlyFstab?: boolean;
   fstab?: string;
+  /**
+   * Run the REBUILD's gate (`ensure_build_swap`) over the real step instead of
+   * the step alone. This is the caller whose exit code decides whether an
+   * in-app update proceeds, so it is the only place "the build continues" can
+   * honestly be asserted. Only meaningful with `existingFile: "active"`.
+   */
+  buildGate?: boolean;
+  /** Report the active file as 1 GiB, below the gate's 4 GiB floor. */
+  tooLittleSwap?: boolean;
 }) {
   const bin = path.join(tmp, "bin");
   fs.mkdirSync(bin, { recursive: true });
@@ -103,7 +112,10 @@ function runStep(opts: {
     fs.writeFileSync(p, `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
   };
   stub("swapon", opts.existingFile === "active"
-    ? `if [ "$1" = "--show=NAME" ]; then echo "${swapfile}"; exit 0; fi\nif [ "$1" = "--show=NAME,SIZE" ]; then echo "${swapfile} 8G"; exit 0; fi\nif [ "$1" = "--show=NAME,SIZE,USED,PRIO" ]; then echo "${swapfile} 8G 0B 1"; exit 0; fi\necho "swapon $*" >> "${tmp}/calls"; exit 0`
+    // `--bytes` is the REBUILD gate's own read (ensure_build_swap sums the
+    // non-zram devices in KiB); it answers the zram device too, so the gate's
+    // filter is exercised rather than assumed.
+    ? `if [ "$1" = "--show=NAME" ]; then echo "${swapfile}"; exit 0; fi\nif [ "$1" = "--show=NAME,SIZE" ] && [ "\${2:-}" = "--bytes" ]; then echo "/dev/zram0 4294967296"; echo "${swapfile} ${opts.tooLittleSwap ? 1073741824 : 4294967296}"; exit 0; fi\nif [ "$1" = "--show=NAME,SIZE" ]; then echo "${swapfile} ${opts.tooLittleSwap ? "1G" : "4G"}"; exit 0; fi\nif [ "$1" = "--show=NAME,SIZE,USED,PRIO" ]; then echo "${swapfile} 4G 0B -2"; exit 0; fi\necho "swapon $*" >> "${tmp}/calls"; exit 0`
     : `if [[ "$1" == --show* ]]; then exit 0; fi\necho "swapon $*" >> "${tmp}/calls"; exit ${opts.swaponFails ? 1 : 0}`);
   stub("mkswap", `echo "mkswap $*" >> "${tmp}/calls"; exit 0`);
   stub("df", `echo "Avail"; echo "${opts.availGb}G"`);
@@ -150,7 +162,15 @@ function runStep(opts: {
     shellCode(IN_CONTAINER),
     // The step's own path constants are the box's; the sandbox rewrites them.
     shellCode(STEP).replace(/\/swapfile/g, swapfile).replace(/\/etc\/fstab/g, fstab),
-    "step_swapfile",
+    ...(opts.buildGate
+      ? [
+          // The gate reads THIS machine's MemTotal and returns early above
+          // 12 GB, so a developer box would skip the branch under test.
+          'awk() { if [ "${2:-}" = /proc/meminfo ]; then echo 7800000; else command awk "$@"; fi; }',
+          shellCode(extractShellFunction("ensure_build_swap")),
+          "ensure_build_swap",
+        ]
+      : ["step_swapfile"]),
   ].join(NL);
 
   const res = spawnSync(BASH, ["-c", script], {
@@ -279,11 +299,12 @@ describe("step_swapfile stands down rather than harming the box", () => {
     expect(r.fstab).not.toMatch(/swapfile/);
   });
 
-  it("reports an fstab that cannot be written, so the caller warns", () => {
-    // The swap is live at that point; without the status the step would claim
-    // success and the file would quietly vanish at the next boot.
+  it("warns about an fstab it cannot write, and still reports the step done", () => {
+    // The swap is live at that point, which is everything the caller wanted.
+    // The warning is the whole report: it used to be the step's exit code too,
+    // and that is what TASK-1022 removed — see the block below.
     const r = runStep({ availGb: 400, readOnlyFstab: true });
-    expect(r.status).toBe(1);
+    expect(r.status).toBe(0);
     expect(r.out).toMatch(/will not survive a reboot/);
     expect(r.calls).toMatch(/swapon --priority 1/);
   });
@@ -303,5 +324,68 @@ describe("step_swapfile stands down rather than harming the box", () => {
     expect(r.out).toMatch(/Warning: swapon failed/);
     expect(r.fileExists).toBe(false);
     expect(r.fstab).not.toMatch(/swapfile/);
+  });
+});
+
+/**
+ * TASK-1022. Reproduced 2026-09-21 on a Jetson running v4.0.0: /swapfile 4G
+ * already active at priority -2, enabled by hand, with NO /etc/fstab line. The
+ * update's "Updating ClawBox and restarting" step died on the banner "Rebuild
+ * failed: Swapfile already active: 4G" — a box being refused an update over
+ * swap it already had.
+ *
+ * The rebuild runs as the UNPRIVILEGED clawbox user, so the fstab append in
+ * that branch can never succeed there; `ensure_swapfile_fstab || return 1`
+ * turned that certainty into a failed step, and ensure_build_swap turned the
+ * failed step into a failed update. The fstab line is a reboot-survival
+ * convenience, never a precondition for building.
+ */
+describe("an already-active swapfile never fails the update (TASK-1022)", () => {
+  it("adopts it, warns about the fstab it cannot write, and returns 0", () => {
+    const r = runStep({ availGb: 400, existingFile: "active", readOnlyFstab: true });
+    expect(r.status).toBe(0);
+    expect(r.out).toMatch(/Swapfile already active: 4G/);
+    expect(r.out).toMatch(/will not survive a reboot/);
+    // The swap the box already had is left exactly as it was.
+    expect(r.calls).not.toMatch(/mkswap/);
+    expect(r.calls).not.toMatch(/swapon --priority/);
+    expect(r.fileExists).toBe(true);
+  });
+
+  it("lets the REBUILD GATE through, which is the exit code the update reads", () => {
+    // ensure_build_swap is the caller that decides whether the update proceeds.
+    // Asserting step_swapfile alone would have left the regression reachable
+    // through its one caller that matters.
+    const r = runStep({ availGb: 400, existingFile: "active", readOnlyFstab: true, buildGate: true });
+    expect(r.status).toBe(0);
+    expect(r.out).toMatch(/will not survive a reboot/);
+    // The gate's own hard failure must NOT have been reached: 4 GiB is enough.
+    expect(r.out).not.toMatch(/build requires at least 4 GiB/);
+  });
+
+  it("still refuses a build that genuinely has too little disk-backed swap", () => {
+    // The one hard failure in the gate has to keep working, or this fix would
+    // have traded a spurious abort for an OOM-killed `next build`.
+    const r = runStep({ availGb: 400, existingFile: "active", buildGate: true, tooLittleSwap: true });
+    expect(r.status).toBe(1);
+    expect(r.out).toMatch(/build requires at least 4 GiB/);
+  });
+
+  it("records the fstab line on the root path, so the swap survives a reboot", () => {
+    // The unprivileged rebuild cannot write /etc/fstab, but step_post_update
+    // runs this same step as root on every update. Adopting the file there is
+    // what finally persists a hand-enabled swapfile — no second code path.
+    const r = runStep({ availGb: 400, existingFile: "active" });
+    expect(r.status).toBe(0);
+    expect(r.fstab).toMatch(/swapfile none swap sw,pri=1 0 0/);
+    expect(r.calls).not.toMatch(/mkswap/);
+  });
+
+  it("leaves no `|| return 1` on any fstab call inside the step", () => {
+    // The regression is one character of shell in three places; pin the shape
+    // rather than trusting three behavioural cases to cover every branch.
+    const body = shellCode(STEP);
+    expect(body).toMatch(/ensure_swapfile_fstab/);
+    expect(body).not.toMatch(/ensure_swapfile_fstab[^\n]*\|\|[^\n]*return 1/);
   });
 });

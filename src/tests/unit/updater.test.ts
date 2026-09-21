@@ -884,6 +884,93 @@ describe("updater", () => {
       expect(aptStep?.error).toBe("E: Could not get lock /var/lib/dpkg/lock-frontend");
     });
 
+    it("names the OOM kill rather than the progress line that happened to be last", async () => {
+      // TASK-1022, reproduced on an 8 GB Jetson: the rebuild was killed for
+      // memory, so the shell never reached its own `Error:` branch and there
+      // was no sentence to find. The fallback then showed an unrelated
+      // progress line — an owner was told "Rebuild failed: Swapfile already
+      // active: 4G" about a build the kernel had killed. systemd's epitaph is
+      // the only record of that kill, and the filter above drops it precisely
+      // because it carries the unit name, so it has to be read separately.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
+        "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": {
+          stdout: [
+            "  Swapfile already active: 4G",
+            "  Memory available for the build: 712 MB (was 690 MB)",
+            "Running bun build...",
+            "clawbox-root-update@apt_update.service: Main process exited, code=killed, status=9/KILL",
+            "clawbox-root-update@apt_update.service: Failed with result 'signal'.",
+            "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
+            "",
+          ].join("\n"),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().steps.find((s) => s.id === "apt_update")?.status).toBe("failed");
+      });
+
+      const aptStep = updater.getUpdateState().steps.find((step) => step.id === "apt_update");
+      expect(aptStep?.error).toContain("killed by the kernel (SIGKILL, exit 137)");
+      expect(aptStep?.error).toContain("ran out of memory");
+      // The line the old fallback would have picked.
+      expect(aptStep?.error).not.toBe("Running bun build...");
+    });
+
+    it("reads a signalled CHILD's 128+N the same way as a signalled shell", async () => {
+      // `code=exited, status=137` is the shell reporting a child the kernel
+      // killed; `code=killed, status=9` is the shell itself being killed. Both
+      // are the same fact for an owner, and only one of them was ever likely
+      // to leave an `Error:` line behind.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
+        "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": {
+          stdout: [
+            "Running bun build...",
+            "clawbox-root-update@apt_update.service: Main process exited, code=exited, status=137/n/a",
+            "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
+            "",
+          ].join("\n"),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().steps.find((s) => s.id === "apt_update")?.status).toBe("failed");
+      });
+
+      expect(updater.getUpdateState().steps.find((s) => s.id === "apt_update")?.error)
+        .toContain("ran out of memory");
+    });
+
     it("reports a budget overrun instead of the journal when a root step times out", async () => {
       // execFile kills the blocking `systemctl start` when OUR timeout
       // expires (err.killed) — the unit itself usually keeps running. The
