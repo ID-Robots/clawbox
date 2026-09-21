@@ -19,7 +19,9 @@ cd "$repo_root"
 # Only these are image references; a src= on some other element is not.
 image_re='\.(png|jpe?g|gif|webp|svg|avif|apng|bmp|ico)$'
 
-# Emits "<line>\t<raw attribute value>" for every candidate reference.
+# Emits "<line>\t<kind>\t<raw value>" per reference. The KIND matters: how a
+# value is split into paths differs per form, and splitting one like another
+# both invents missing files and hides real ones.
 extract_refs() {
   local file=$1
   {
@@ -27,8 +29,15 @@ extract_refs() {
     grep -noE "(src|srcset)[[:space:]]*=[[:space:]]*'[^']*'" "$file" || true
     grep -noE '!\[[^]]*\]\([^)]*\)' "$file" || true
   } | sed -E \
-      -e 's/^([0-9]+):(src|srcset)[[:space:]]*=[[:space:]]*.(.*).$/\1'$'\t''\3/' \
-      -e 's/^([0-9]+):!\[[^]]*\]\((.*)\)$/\1'$'\t''\2/'
+      -e 's/^([0-9]+):(src|srcset)[[:space:]]*=[[:space:]]*.(.*).$/\1'$'\t''\2'$'\t''\3/' \
+      -e 's/^([0-9]+):!\[[^]]*\]\((.*)\)$/\1'$'\t''md'$'\t''\2/'
+}
+
+# Strips leading and trailing whitespace.
+trim() {
+  local s=$1
+  s=${s#"${s%%[![:space:]]*}"}
+  printf '%s' "${s%"${s##*[![:space:]]}"}"
 }
 
 # A docs-site page is served with docs-site/ as the web root; a repo-root
@@ -57,20 +66,42 @@ checked=0
 missing=()
 
 for file in "${files[@]}"; do
-  while IFS=$'\t' read -r lineno raw; do
+  while IFS=$'\t' read -r lineno kind raw; do
     [ -n "${raw:-}" ] || continue
-    # srcset is a comma-separated candidate list, each with an optional
-    # "2x"/"640w" descriptor after the URL.
-    IFS=',' read -ra candidates <<<"$raw"
-    for candidate in "${candidates[@]}"; do
-      # Leading whitespace FIRST — a srcset list is "a.png 2x, b.png 1x", so
-      # every candidate after the comma starts with a space and taking the
-      # first token off it would yield the empty string. Then the first token,
-      # which drops a srcset descriptor and a ![alt](path "title") title.
-      candidate=${candidate#"${candidate%%[![:space:]]*}"}
-      ref=${candidate%%[[:space:]]*}
-      ref=${ref#<}
-      ref=${ref%>}
+
+    candidates=()
+    case $kind in
+      srcset)
+        # The ONE form where a comma separates paths and whitespace ends one:
+        # "a.png 2x, b.png 1x". Leading space is stripped before the
+        # descriptor is cut, or every candidate after a comma becomes empty.
+        IFS=',' read -ra parts <<<"$raw"
+        for part in "${parts[@]}"; do
+          part=$(trim "$part")
+          candidates+=("${part%%[[:space:]]*}")
+        done
+        ;;
+      md)
+        # ![alt](path "title") — an optional title follows whitespace — or
+        # ![alt](<path with spaces>), which is how markdown quotes a space.
+        raw=$(trim "$raw")
+        if [ "${raw#<}" != "$raw" ]; then
+          ref=${raw#<}
+          candidates+=("${ref%%>*}")
+        else
+          candidates+=("${raw%%[[:space:]]*}")
+        fi
+        ;;
+      *)
+        # A quoted src= is ONE path — commas and spaces are filename
+        # characters, not separators. Splitting it on either reported a legal
+        # "foo,bar.png" as a missing "bar.png" and let a genuinely missing
+        # "gone image.png" through unchecked.
+        candidates+=("$(trim "$raw")")
+        ;;
+    esac
+
+    for ref in "${candidates[@]}"; do
       ref=${ref%%\?*}   # query string
       ref=${ref%%\#*}   # fragment
       ref=${ref//%20/ } # the only escape our paths have ever used
