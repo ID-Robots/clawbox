@@ -44,9 +44,12 @@ and reboots the box.
     1. **Wi-Fi** — pick your network and enter its password. Ethernet is detected automatically. The
        box then leaves the hotspot to join your network, so you have to rejoin your own Wi-Fi before
        the wizard continues.
-    2. **Update** — the box pulls the current release. This is not optional and can reboot the box.
+    2. **Update** — the box pulls the current release; the screen names the version it is on and
+       the build it can move to. It can reboot the box. There is a **Skip**, but taking the update
+       here saves doing it from Settings afterwards.
     3. **Security** — set the device password. It is the same password for the browser login and for
-       SSH. You can also rename the setup hotspot and give it a password here.
+       SSH. You name the setup hotspot and give it its own password on the same screen, and
+       **Save & Continue** stays greyed out until both passwords are entered twice.
     4. **AI provider** — the step opens on **ClawBox AI** with its plan card; **Show more
        providers...** reveals the rest, and **Skip — I'll use only local AI** is at the bottom.
        See [Choose your AI provider](/setup/choose-ai-provider). On a
@@ -65,6 +68,104 @@ and reboots the box.
 <Check>
 A reply to your first message means your ClawBox is live. 🦀
 </Check>
+
+## The wizard, screen by screen
+
+These are the real screens, photographed on a freshly flashed box. Your own will differ in the
+version numbers, the network names and the clock.
+
+The strip across the top of every screen — **WiFi**, **Update**, **Security**, **AI Provider**,
+**Telegram** — is the whole wizard, and it tells you how far along you are.
+
+### Welcome
+
+<Frame caption="The first screen, with the Ethernet cable already detected">
+  <img src="/images/4.0/install/wizard-01-welcome-ethernet.png" alt="The setup wizard on its first step, WiFi: the crab mascot above the heading Welcome to ClawBox and the line Your Own AI, Running 24/7, a green dot beside the status Ethernet connected — ready to continue, and a Continue with Ethernet button badged RECOMMENDED." />
+</Frame>
+
+With a cable plugged in the box has already found its network and **Continue with Ethernet** takes
+you straight on. Without one, this is where you pick your Wi-Fi network and enter its password.
+
+### Update
+
+<Frame caption="The Update step before it starts: the version on the box, and the build it can move to">
+  <img src="/images/4.0/install/wizard-02-system-update.png" alt="The System Update step, headed Update your ClawBox with the latest software, drivers, and AI models, listing ClawBox at v4.0.0 with an arrow to the beta build it can move to and OpenClaw at 2026.9.3, above a Start Update button and a Skip button." />
+</Frame>
+
+The screen names both pieces it can update — ClawBox itself and the agent — and what each is on
+now. **Start Update** can reboot the box.
+
+### Security
+
+<Frame caption="The Security step: one password for the box, one for its hotspot">
+  <img src="/images/4.0/install/wizard-03-security.png" alt="The Security step headed Set a system password and configure your hotspot: an editable address field reading http dot slash slash clawbox dot local, a SYSTEM PASSWORD section with New Password and Confirm Password fields placeheld Minimum 8 characters, and a HOTSPOT SETTINGS section with the hotspot named ClawBox-Setup, its switch on, and Hotspot Password and Confirm Hotspot Password fields below it." />
+</Frame>
+
+The system password is the one you use for the browser login and for SSH. The hotspot keeps its own
+separate password, and the note under its name says changes apply the next time the hotspot starts.
+
+<Frame caption="The same step filled in — the fields never show the password back to you">
+  <img src="/images/4.0/install/wizard-04-security-filled.png" alt="The Security step with all four password fields filled in, each showing masked dots rather than readable characters, the Confirm Hotspot Password field outlined in orange where the cursor is, and the Save & Continue button below." />
+</Frame>
+
+**Save & Continue** stays greyed out until all four fields are filled — the helper line underneath
+spells out that it wants the system password and the hotspot password, each one twice.
+
+<Warning>
+After you press **Save & Continue** the wizard may sit on the Security step instead of moving on.
+Reload the page in your browser and it continues from the next step; the password you just set is
+already saved, so there is nothing to enter again.
+</Warning>
+
+### AI Provider
+
+<Frame caption="The AI Provider step opens on ClawBox AI">
+  <img src="/images/4.0/install/wizard-05-ai-provider.png" alt="The Connect AI Provider step with ClawBox AI selected and badged RECOMMENDED, described as all-in cloud AI for ClawBox with backups, remote desktop and full support and marked Not connected, a Show more providers link beneath it, Subscription and API Key tabs, a Get device code button, and a Skip — I'll use only local AI link at the bottom." />
+</Frame>
+
+On the **Subscription** tab the box asks the portal for a device code and finishes the handoff once
+you confirm it there; the **API Key** tab takes a key instead.
+
+<Frame caption="Show more providers opens the full list, on-device model first">
+  <img src="/images/4.0/install/wizard-06-ai-provider-list.png" alt="The provider list expanded: Gemma 4 badged FULLY LOCAL and described as GGUF plus llama.cpp for 8GB devices, then ClawBox AI badged RECOMMENDED, then OpenAI GPT, Anthropic Claude, Google Gemini and OpenRouter, each marked Not connected." />
+</Frame>
+
+**Gemma 4** at the top of the list is the one that runs on the box itself. The rest are cloud
+providers you connect with a subscription or a key — see
+[Choose your AI provider](/setup/choose-ai-provider).
+
+<Note>
+**Skip — I'll use only local AI** at the bottom of the step sometimes needs a second click before
+the wizard moves on. If the first click appears to do nothing, click it again.
+</Note>
+
+### Setting up the on-device model
+
+<Frame caption="Before it moves on, the box gets the local model ready">
+  <img src="/images/4.0/install/wizard-07-local-model-setup.png" alt="A progress card headed Connected! with the line AI model configured! Continuing, above a ticked checklist reading Checking local Gemma runtime, Provisioning offline Gemma 4, Starting llama.cpp runtime, Applying ClawBox configuration and Warming up local model." />
+</Frame>
+
+The checklist ticks its way through fetching the model, starting the runtime that serves it and
+warming it up. It moves on by itself when it is done.
+
+### Telegram
+
+<Frame caption="The Telegram step: make a bot, paste its token — or skip it">
+  <img src="/images/4.0/install/wizard-08-connect-telegram.png" alt="The Connect Telegram step badged RECOMMENDED, with a QR code beside three numbered instructions to scan the code or search @BotFather in Telegram, send slash newbot, and copy the Bot Token and paste it below, an Open @BotFather in Telegram button, a Bot Token field, and Connect and Skip for now buttons." />
+</Frame>
+
+The QR code opens [@BotFather](https://t.me/BotFather) on your phone. **Skip for now** is a real
+option — Telegram, [Discord, WhatsApp and email](/guides/messaging-channels) can all be connected
+later from Settings.
+
+### The desktop
+
+<Frame caption="Setup ends here: the desktop, with whatever the box still wants from you">
+  <img src="/images/4.0/install/wizard-09-first-desktop.png" alt="The ClawBox desktop at the end of setup, app icons down the left for Settings, OpenClaw, Chat, Store, Terminal, Coding Agent, Files, ClawKeep, Memory Shard and Browser, and two cards in the top right: Update available offering to install a newer build, and Free backup with ClawBox AI offering to open the AI Provider settings with ClawBox AI already selected." />
+</Frame>
+
+Both cards in the corner have a **Later**, and neither blocks anything. Open **Chat** and send your
+first message.
 
 ## Reaching the device afterwards
 
