@@ -787,11 +787,60 @@ function getStepFailureLine(logText: string, unit: string): string | null {
     .filter((line) => !line.startsWith(`${unit}:`)
       && !SYSTEMD_LIFECYCLE_LINE.test(line)
       && !SESSION_BOOKKEEPING_LINE.test(line));
-  if (lines.length === 0) return null;
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/^(?:error|fatal)\b/i.test(lines[i])) return lines[i];
   }
+  // Nothing in the step SAID why. Before falling back to whatever the step
+  // happened to print last, ask systemd how the process ended: a shell the OOM
+  // killer took never reaches its own `Error:` branch, so on the box that
+  // matters most there is no sentence to find. Without this, the banner became
+  // an unrelated progress line — "Rebuild failed: Swapfile already active: 4G"
+  // is what an owner was shown for an update killed for memory (TASK-1022).
+  const killed = getKillNote(logText);
+  if (killed) return killed;
+  if (lines.length === 0) return null;
   return lines[lines.length - 1];
+}
+
+/**
+ * systemd's epitaph for the step, which the filter above deliberately drops
+ * from the owner-facing line because it carries the unit name. It is the one
+ * record of a process that was KILLED rather than one that reported a failure:
+ * `…: Main process exited, code=killed, status=9/KILL` when the shell itself
+ * was signalled, and `code=exited, status=137/n/a` when it was a child the
+ * shell then reported as 128+9.
+ */
+const MAIN_PROCESS_EXIT_LINE = /Main process exited, code=(\w+), status=(\d+)/;
+
+/**
+ * systemd's verdict when the cgroup's own OOM event fired — the ONLY thing in
+ * a unit's journal that PROVES memory. `status=9/KILL` is equally the shape of
+ * a stop timeout, `systemctl kill`, a watchdog and an operator, and telling an
+ * owner their device ran out of memory over any of those sends them after a
+ * problem they do not have. An OOM is the likeliest end for the rebuild step
+ * on this hardware; likeliest is not the same as known.
+ */
+const OOM_RESULT_LINE = /Failed with result 'oom-kill'/;
+
+/**
+ * Deliberately says "the step", not "the build": this is the failure line for
+ * EVERY root step — apt_update and the rest — and only one of them is a build.
+ */
+function getKillNote(logText: string): string | null {
+  const match = logText.match(MAIN_PROCESS_EXIT_LINE);
+  if (!match) return null;
+  const status = Number(match[2]);
+  if (!Number.isFinite(status)) return null;
+  const signal = match[1] === "killed"
+    ? status
+    : status > 128 && status < 160 ? status - 128 : null;
+  if (signal === null) return null;
+  if (signal !== 9) {
+    return `Error: the step was killed by signal ${signal} (exit ${128 + signal})`;
+  }
+  return OOM_RESULT_LINE.test(logText)
+    ? "Error: the step was killed by the kernel's OOM killer (exit 137) — the device ran out of memory. Free memory and Retry."
+    : "Error: the step was killed (SIGKILL, exit 137) without reporting a reason — the journal shows no OOM kill, so a stop or a timeout looks the same.";
 }
 
 /**

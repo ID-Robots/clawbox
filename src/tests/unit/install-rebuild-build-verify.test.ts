@@ -128,6 +128,15 @@ interface Scenario {
    */
   diskHeadroom?: "ample" | "tight";
   bunInstall?: "succeeds" | "fails";
+  /**
+   * Does the kernel log actually show an OOM kill?
+   *
+   * A SIGKILL is not evidence of one — a stop timeout, `systemctl kill` and an
+   * operator all arrive as signal 9 — so `oom_killer_in_kernel_log` is what
+   * decides whether the failure sentence may name memory, and it is stubbed
+   * here rather than left to read the machine running the suite.
+   */
+  oomEvidence?: boolean;
   /** Can `run_next_build` open its build log at all? */
   buildLog?: "writable" | "unwritable";
   nodePty?: "succeeds" | "fails";
@@ -193,6 +202,7 @@ function run(scenario: Scenario = {}): Run {
     startWorks = true,
     diskHeadroom = "ample",
     bunInstall = "succeeds",
+    oomEvidence = false,
     nodePty = "succeeds",
     buildLog = "writable",
     entry = "do_rebuild",
@@ -394,6 +404,11 @@ function run(scenario: Scenario = {}): Run {
     "# own rebuild step with every suite still green.",
     "ensure_build_swap() { return 0; }",
     "free_memory_for_build() { :; }",
+    // Stubbed unconditionally, like the pair above: unstubbed it would read
+    // the kernel log of whatever machine runs the suite, so a box that really
+    // had OOM-killed something in the last fifteen minutes would flip the
+    // assertion. `return 1` is "no OOM kill in the log".
+    `oom_killer_in_kernel_log() { return ${oomEvidence ? 0 : 1}; }`,
     'resume_paused_engines() { echo "RESUMED"; }',
     'forget_paused_engines() { echo "FORGOT"; }',
     "",
@@ -623,6 +638,36 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
     const r = run({ build: "oom-killed" });
     expect(restarted(r).length).toBeGreaterThan(0);
     expect(r.stderr).toMatch(/Restored the previous build; the dashboard answers on :80 again/);
+  });
+
+  it("names memory when the kernel log confirms the OOM kill (TASK-1022)", () => {
+    // "Error: rebuild failed (exit 137)" was the whole of what an owner was
+    // told, and a number is not something they can act on. With the kernel's
+    // own evidence the sentence may name WHAT died and WHY.
+    const r = run({ build: "oom-killed", oomEvidence: true });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/Error: rebuild failed \(exit 137\)/);
+    expect(r.stderr).toMatch(/bun run build was killed by the kernel's OOM killer/);
+    expect(r.stderr).toMatch(/ran out of memory/);
+  });
+
+  it("does NOT claim memory for a 137 the kernel log does not attribute", () => {
+    // A stop timeout, `systemctl kill`, a watchdog and an operator all arrive
+    // as signal 9 / exit 137. Asserting an OOM over any of those would send
+    // the owner after a problem they do not have — the kill is still named,
+    // the cause is not invented.
+    const r = run({ build: "oom-killed", oomEvidence: false });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/Error: rebuild failed \(exit 137\)/);
+    expect(r.stderr).toMatch(/bun run build was killed by signal 9/);
+    expect(r.stderr).not.toMatch(/ran out of memory/);
+  });
+
+  it("names bun install when that is what failed, not 'the rebuild'", () => {
+    // The four things that can fail in this window used to collapse into one
+    // sentence, so the banner never said which of them it was.
+    const r = run({ bunInstall: "fails" });
+    expect(r.stderr).toMatch(/Error: rebuild failed \(exit 1\) — bun install did not succeed\./);
   });
 
   // The window the first version of this fix left open: `bun install` and
