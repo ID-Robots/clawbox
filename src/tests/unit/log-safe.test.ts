@@ -61,3 +61,52 @@ describe("logSafe", () => {
     expect(out.length).toBeLessThan(LOG_FIELD_MAX_LENGTH + 40);
   });
 });
+
+/**
+ * TASK-1014 / CodeQL alerts 545 and 534 (js/log-injection).
+ *
+ * `logSafe` always replaced CR and LF — they are inside `\p{Cc}` — but a
+ * Unicode property escape is not something the scanner can read, so it judged
+ * the helper an unrelated branch and every caller kept its alert. That is why
+ * the maxParallelRuns line in setup-api/coding-agent/enable/route.ts had to
+ * drop its value from the log rather than sanitise it.
+ *
+ * The fix is a literal `[\r\n]` pass in front of the class. It changes no
+ * output — these pin that — and it is the shape a reader and a scanner can
+ * both check, so it is pinned as source too: dropping it back to one pass
+ * would silently re-open both alerts while every behavioural test stayed green.
+ */
+describe("the line-break pass", () => {
+  it("still replaces CR and LF exactly as the control class did", () => {
+    expect(logSafe(`a${CR}b`)).toBe(`a${REPLACEMENT}b`);
+    expect(logSafe(`a${LF}b`)).toBe(`a${REPLACEMENT}b`);
+    expect(logSafe(`${CR}${LF}`)).toBe(`${REPLACEMENT}${REPLACEMENT}`);
+  });
+
+  it("is idempotent and length-preserving, so no index can shift", () => {
+    const value = `id${CR}${LF}forged: line`;
+    const once = logSafe(value);
+    expect(once).toHaveLength(value.length);
+    expect(logSafe(once)).toBe(once);
+  });
+
+  it("cannot be used to forge a second log record", () => {
+    const forged = logSafe(`run-abc12345${CR}${LF}[Browser] download saved for attacker`);
+    expect(forged).not.toContain(LF);
+    expect(forged).not.toContain(CR);
+  });
+
+  it("names the line breaks literally, where the scanner can read them", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const source = fs.readFileSync(
+      path.join(process.cwd(), "src/lib/log-safe.ts"),
+      "utf-8",
+    );
+    // A literal character class over CR and LF, applied with .replace …
+    expect(source).toMatch(/const LINE_BREAKS = \/\[\\r\\n\]\/g;/);
+    expect(source).toMatch(/\.replace\(LINE_BREAKS, REPLACEMENT\)/);
+    // … and the broader control class still runs after it, not instead of it.
+    expect(source).toMatch(/\.replace\(CONTROL_CHARACTERS, REPLACEMENT\)/);
+  });
+});

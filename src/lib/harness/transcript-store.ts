@@ -281,20 +281,38 @@ export async function appendTranscript(
  * after it. Costs one `stat` and a single-byte read per append.
  */
 async function healTruncatedTail(file: string): Promise<void> {
-  const stat = await fsp.stat(file).catch(() => null);
-  if (!stat || stat.size === 0) return;
+  // ONE descriptor for all three steps — measure, read the last byte, repair.
+  //
+  // This was `stat(path)`, then `open(path)` to read the byte, then
+  // `appendFile(path)` to write it: three lookups of the same NAME, with the
+  // OFFSET read from the first used against the third. The trim below rewrites
+  // this file through a rename, so the name really can point at a new inode
+  // between those calls, and the repair would then be written at the previous
+  // file's length — into the middle of a good record rather than onto the end
+  // of a broken one. Against one handle the size, the byte and the write all
+  // describe the same inode.
+  //
+  // "r+", never "a+": `a+` CREATES, and this runs before the append that is
+  // supposed to create the file with mode 0600. A file conjured here would be
+  // born at the umask's mode instead, and `appendFile`'s `mode` only applies
+  // when IT creates the file — so the customer's transcript would sit at 0644
+  // until the chmod after it. A missing file is ENOENT, caught below, and left
+  // for the append to make.
   let handle: import("fs/promises").FileHandle | null = null;
   try {
-    handle = await fsp.open(file, "r");
+    handle = await fsp.open(file, "r+");
+    const stat = await handle.stat();
+    if (stat.size === 0) return;
     const buffer = Buffer.alloc(1);
     await handle.read(buffer, 0, 1, stat.size - 1);
     if (buffer[0] === 0x0a) return;
+    // At the size this same handle reported, which IS the end of this inode.
+    await handle.write("\n", stat.size, "utf8");
   } catch {
     return;
   } finally {
     await handle?.close().catch(() => {});
   }
-  await fsp.appendFile(file, "\n", { encoding: "utf8" });
 }
 
 /**
@@ -303,26 +321,41 @@ async function healTruncatedTail(file: string): Promise<void> {
  * SIZE-TRIGGERED, never per-append. The trim is a read-modify-rewrite of the
  * whole conversation, which is exactly the work JSONL was chosen to avoid; run
  * on every turn it would put that cost back on a Jetson for no benefit. One
- * `stat` per append is the price, and it only pays out once every few hundred
- * messages.
+ * open-and-fstat per append is the price, and it only pays out once every few
+ * hundred messages.
  */
 async function trimIfOversized(file: string): Promise<void> {
-  const stat = await fsp.stat(file).catch(() => null);
-  if (!stat) return;
-  // The RECORD cap needs enforcing too, and the byte cap alone never reached
-  // it: 500 short turns is far under 2 MB, so a long conversation of small
-  // messages was never compacted — and because every append refreshes the
-  // file's mtime, the retention sweep never reached that older content either.
-  // Counting lines per append is the read the size trigger exists to avoid, so
-  // the count is carried in memory and only re-derived when this process has
-  // not seen the file before.
-  let records = recordCounts.get(file);
-  if (records === undefined) {
-    records = await countRecords(file);
-    recordCounts.set(file, records);
+  // ONE descriptor for the size that DECIDES the trim and the bytes the trim
+  // is computed from. `stat(path)` then `readFile(path)` measured one version
+  // and rewrote another: an append landing between them meant the records
+  // added in that window were read, dropped by the `slice(-MAX_RECORDS)`
+  // below, and then written away by the rename — a message the customer sent
+  // vanishing because the trim happened to be running. `fstat` on the open
+  // handle and `readFile` from it see the same inode.
+  let raw: string | null = null;
+  let handle: import("fs/promises").FileHandle | null = null;
+  try {
+    handle = await fsp.open(file, "r");
+    const stat = await handle.stat();
+    // The RECORD cap needs enforcing too, and the byte cap alone never reached
+    // it: 500 short turns is far under 2 MB, so a long conversation of small
+    // messages was never compacted — and because every append refreshes the
+    // file's mtime, the retention sweep never reached that older content
+    // either. Counting lines per append is the read the size trigger exists to
+    // avoid, so the count is carried in memory and only re-derived when this
+    // process has not seen the file before.
+    let records = recordCounts.get(file);
+    if (records === undefined) {
+      records = await countRecords(file);
+      recordCounts.set(file, records);
+    }
+    if (stat.size <= MAX_BYTES && records <= MAX_RECORDS) return;
+    raw = await handle.readFile("utf8");
+  } catch {
+    return;
+  } finally {
+    await handle?.close().catch(() => {});
   }
-  if (stat.size <= MAX_BYTES && records <= MAX_RECORDS) return;
-  const raw = await fsp.readFile(file, "utf8").catch(() => null);
   if (raw === null) return;
   const lines = raw.split("\n").filter((line) => line.trim().length > 0);
   const kept = lines.slice(-MAX_RECORDS);

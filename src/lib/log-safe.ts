@@ -23,6 +23,19 @@
 // lastIndex, so it is stateless here; .test on the same object would not be.
 const CONTROL_CHARACTERS = /\p{Cc}/gu;
 
+// The line breaks, named LITERALLY and replaced first.
+//
+// They are already a subset of `\p{Cc}` above, so this pass changes nothing
+// about the output — it changes who can READ the guarantee. `js/log-injection`
+// recognises a `.replace()` whose pattern it can see matching "\n" or "\r" and
+// treats the result as sanitised; it cannot resolve a Unicode property escape,
+// so with `\p{Cc}` alone it judged `logSafe` an unrelated branch and every
+// caller still carried the alert. That is why the maxParallelRuns line in
+// setup-api/coding-agent/enable/route.ts had to drop its number from the log
+// entirely rather than sanitise it. Spelling the pair out restores the helper
+// as the answer to log injection, which is what it was written to be.
+const LINE_BREAKS = /[\r\n]/g;
+
 // U+FFFD REPLACEMENT CHARACTER — the conventional stand-in for a character that
 // cannot be shown. Written by code point rather than as a literal so the glyph
 // does not read as mojibake in an editor.
@@ -32,12 +45,14 @@ const REPLACEMENT = String.fromCharCode(0xfffd);
 export const LOG_FIELD_MAX_LENGTH = 200;
 
 export function logSafe(value: string, maxLength: number = LOG_FIELD_MAX_LENGTH): string {
-  if (value.length <= maxLength) return value.replace(CONTROL_CHARACTERS, REPLACEMENT);
+  if (value.length <= maxLength) {
+    return value.replace(LINE_BREAKS, REPLACEMENT).replace(CONTROL_CHARACTERS, REPLACEMENT);
+  }
   // Cut first, then sanitise the head only. Every character the pattern matches
   // is one UTF-16 code unit replaced by one, so sanitising cannot change any
   // index and no match can straddle the cut — this gives the same string as
   // sanitising the whole value would, without walking a caller-sized input to
   // produce a bounded line. An execFile error message can be a megabyte.
-  const head = value.slice(0, maxLength).replace(CONTROL_CHARACTERS, REPLACEMENT);
+  const head = value.slice(0, maxLength).replace(LINE_BREAKS, REPLACEMENT).replace(CONTROL_CHARACTERS, REPLACEMENT);
   return `${head}...[+${value.length - maxLength} chars]`;
 }

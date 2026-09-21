@@ -2,7 +2,7 @@ import { getAll } from "@/lib/config-store";
 import { boundPreferenceText } from "@/lib/preference-schema";
 import { setPreferences } from "@/lib/preference-store";
 import { createSerialLock } from "@/lib/serial-lock";
-import { ensureWebappIcon } from "@/lib/webapp-icon";
+import { ensureWebappIcon, safeAppId } from "@/lib/webapp-icon";
 
 /**
  * One registration at a time in this process.
@@ -19,6 +19,27 @@ import { ensureWebappIcon } from "@/lib/webapp-icon";
  * comes through.
  */
 const withRegistration = createSerialLock();
+
+/**
+ * Names that are not app ids, however well they match the alphabet.
+ *
+ * `safeAppId` rebuilds an id out of `[A-Za-z0-9_-]`, and every character of
+ * `__proto__`, `constructor` and `prototype` is in that set — so the rebuild
+ * that keeps an id out of a PATH does nothing to keep it out of a SLOT on
+ * `Object.prototype`, and this function writes the id as an object key and
+ * reads it back as one.
+ *
+ * The object literal below is not itself the pollution primitive: a COMPUTED
+ * key (`[appId]:`) defines an own property rather than moving the prototype,
+ * unlike the bare `__proto__:` form. The refusal is here because the id does
+ * not stop at this function. It is written into `installed_meta`, read back
+ * by the desktop, and enumerated by the middleware to build the public-webapp
+ * set — and an id that names a slot every object already has would make each
+ * of those readers wrong in its own way. One refusal at the single door every
+ * writer of `installed_apps`/`installed_meta` comes through is cheaper than
+ * three readers that each have to know.
+ */
+const RESERVED_APP_IDS = new Set(["__proto__", "constructor", "prototype"]);
 
 interface InstalledMeta {
   name: string;
@@ -54,6 +75,15 @@ export async function registerWebappInPreferences(
     description?: string;
   } = {},
 ): Promise<void> {
+  // The id is REBUILT from the alphabet and then checked against the reserved
+  // names above, before it is used as a key or carried into a URL. Callers
+  // validate too (the webapps route tests APP_ID_RE), but this is the one door
+  // every writer of the registry comes through, so it is where the answer has
+  // to be the same for all of them.
+  const id = safeAppId(appId);
+  if (id === null || RESERVED_APP_IDS.has(id)) {
+    throw new Error(`Invalid app id: ${appId}`);
+  }
   await withRegistration(async () => {
   // One read of the config, not three — config-store.get() re-reads and
   // re-parses the whole file on each call, and reading the three keys together
@@ -67,22 +97,22 @@ export async function registerWebappInPreferences(
   // POST /setup-api/preferences, and the update carries over every entry read
   // above alongside the one being added.
   await setPreferences({
-    "pref:installed_apps": installedApps.includes(appId) ? installedApps : [...installedApps, appId],
+    "pref:installed_apps": installedApps.includes(id) ? installedApps : [...installedApps, id],
     "pref:installed_meta": {
       ...installedMeta,
-      [appId]: {
+      [id]: {
         // A rebuild re-registers the app; the owner's launch/public flags on
         // the previous entry survive it, everything else is the fresh build's.
-        ...(installedMeta[appId]?.launch ? { launch: installedMeta[appId].launch } : {}),
-        ...(installedMeta[appId]?.public ? { public: true } : {}),
-        name: boundPreferenceText(name, appId),
+        ...(installedMeta[id]?.launch ? { launch: installedMeta[id].launch } : {}),
+        ...(installedMeta[id]?.public ? { public: true } : {}),
+        name: boundPreferenceText(name, id),
         color: opts.color || "#f97316",
         iconUrl: opts.iconUrl || "",
-        webappUrl: opts.webappUrl || `/setup-api/webapps?app=${appId}`,
+        webappUrl: opts.webappUrl || `/setup-api/webapps?app=${encodeURIComponent(id)}`,
       },
     },
     // A freshly (re)created app shouldn't stay hidden.
-    "pref:hidden_installed": hiddenInstalled.filter((id) => id !== appId),
+    "pref:hidden_installed": hiddenInstalled.filter((hidden) => hidden !== id),
   });
   });
 
@@ -95,7 +125,7 @@ export async function registerWebappInPreferences(
   // one stat when the icon already exists, so a re-register costs nothing; the
   // `.catch` is belt and braces against an unhandled rejection.
   if (!opts.iconUrl) {
-    void ensureWebappIcon(appId, { name, color: opts.color, description: opts.description })
+    void ensureWebappIcon(id, { name, color: opts.color, description: opts.description })
       .catch(() => {});
   }
 }

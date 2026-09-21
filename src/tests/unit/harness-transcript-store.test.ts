@@ -297,3 +297,117 @@ describe("transcript store", () => {
     expect(store.TRANSCRIPT_DIR).toBe(path.join(root, "data", "chat-transcripts"));
   });
 });
+
+/**
+ * TASK-1014 / CodeQL alerts 335, 336 and 337 (js/file-system-race,
+ * transcript-store.ts).
+ *
+ * Both helpers used to look the file up by NAME several times over — `stat`
+ * for the size, `open` for the byte, `appendFile` for the repair; `stat` for
+ * the size, `readFile` for the content — and use a number taken from one
+ * lookup against a later one. The trim rewrites this file through a rename, so
+ * the name really can point at a new inode in between. Each now works from a
+ * single descriptor: `fstat` and the read/write describe the same inode.
+ *
+ * These pin the arithmetic that rewrite depends on, which is where a mistake
+ * would land: the repair is written AT the size the same handle reported, so
+ * an off-by-one would tear the file rather than heal it.
+ */
+describe("transcript store — single-descriptor repair and trim", () => {
+  let root: string;
+  let store: typeof import("@/lib/harness/transcript-store");
+
+  const dir = () => path.join(root, "data", "chat-transcripts");
+  const file = () => path.join(dir(), "desktop.jsonl");
+  const lines = () => fs.readFileSync(file(), "utf-8").split("\n").filter((l) => l.length > 0);
+
+  beforeEach(async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-transcript-race-"));
+    process.env.CLAWBOX_ROOT = root;
+    vi.resetModules();
+    store = await import("@/lib/harness/transcript-store");
+  });
+
+  afterEach(() => {
+    delete process.env.CLAWBOX_ROOT;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("closes a torn tail with exactly one newline, losing nothing either side", async () => {
+    await store.appendTranscript({ role: "user", text: "first", timestamp: 1 });
+    fs.appendFileSync(file(), '{"role":"assistant","text":"torn');
+    await store.appendTranscript({ role: "assistant", text: "third", timestamp: 3 });
+
+    const raw = fs.readFileSync(file(), "utf-8");
+    // The repair went at the END of the torn line, not over it and not at 0.
+    expect(raw).toContain('{"role":"assistant","text":"torn\n');
+    expect(raw).not.toContain("\n\n");
+    expect(raw.endsWith("\n")).toBe(true);
+    expect(lines()).toHaveLength(3);
+    // The good records either side of the damage both survive.
+    expect((await store.readTranscript()).map((r) => r.text)).toEqual(["first", "third"]);
+  });
+
+  it("adds no newline to a file that already ends in one", async () => {
+    await store.appendTranscript({ role: "user", text: "first", timestamp: 1 });
+    const before = fs.readFileSync(file(), "utf-8");
+    await store.appendTranscript({ role: "user", text: "second", timestamp: 2 });
+    const after = fs.readFileSync(file(), "utf-8");
+
+    expect(after.startsWith(before)).toBe(true);
+    expect(after).not.toContain("\n\n");
+    expect(lines()).toHaveLength(2);
+  });
+
+  it("does not conjure the file — the append is what creates it, at 0600", async () => {
+    // The repair runs BEFORE the append on every turn, including the first.
+    // Opening it "a+" would create the file here instead, at whatever the
+    // umask allows, and `appendFile`'s mode only applies when IT creates the
+    // file — so the customer's words would land in a file this store never
+    // chose the permissions for.
+    expect(fs.existsSync(file())).toBe(false);
+    await store.appendTranscript({ role: "user", text: "my address is…", timestamp: 1 });
+    expect(fs.statSync(file()).mode & 0o777).toBe(store.TRANSCRIPT_LIMITS.FILE_MODE);
+  });
+
+  it("heals a tail that is a single unterminated byte", async () => {
+    fs.mkdirSync(dir(), { recursive: true });
+    fs.writeFileSync(file(), "x", { mode: 0o600 });
+    await store.appendTranscript({ role: "user", text: "after", timestamp: 1 });
+
+    expect(fs.readFileSync(file(), "utf-8").startsWith("x\n")).toBe(true);
+    expect((await store.readTranscript()).map((r) => r.text)).toEqual(["after"]);
+  });
+
+  it("leaves every surviving line of a trimmed file parseable", async () => {
+    // The trim measures, reads, slices and renames. Measuring one version and
+    // rewriting another is how a half-line ends up in the output.
+    const chunk = "y".repeat(60_000);
+    for (let i = 0; i < 40; i++) {
+      await store.appendTranscript({ role: "assistant", text: `${i}:${chunk}`, timestamp: i });
+    }
+
+    expect(fs.statSync(file()).size).toBeLessThanOrEqual(store.TRANSCRIPT_LIMITS.MAX_BYTES);
+    for (const line of lines()) {
+      expect(() => JSON.parse(line)).not.toThrow();
+    }
+    // No temp file left beside it, and the newest turn is still the last one.
+    expect(fs.readdirSync(dir())).toEqual(["desktop.jsonl"]);
+    const rows = await store.readTranscript(500);
+    expect(rows[rows.length - 1].text.startsWith("39:")).toBe(true);
+  });
+
+  it("keeps the record count right across a trim, so the next append still lands", async () => {
+    const chunk = "z".repeat(60_000);
+    for (let i = 0; i < 40; i++) {
+      await store.appendTranscript({ role: "assistant", text: `${i}:${chunk}`, timestamp: i });
+    }
+    const afterTrim = (await store.readTranscript(500)).length;
+    await store.appendTranscript({ role: "user", text: "one more", timestamp: 99 });
+
+    const rows = await store.readTranscript(500);
+    expect(rows[rows.length - 1].text).toBe("one more");
+    expect(rows.length).toBeLessThanOrEqual(afterTrim + 1);
+    for (const line of lines()) expect(() => JSON.parse(line)).not.toThrow();
+  });
+});

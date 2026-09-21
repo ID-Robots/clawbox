@@ -73,17 +73,33 @@ export async function GET(
   // `immutable` a browser that had seen the first icon would show it for a
   // year without asking. `no-cache` costs one conditional request per icon
   // per desktop load, answered 304 from a stat when nothing changed.
+  // ONE descriptor for the ETag and the bytes.
+  //
+  // `stat(path)` followed by `readFile(path)` is two lookups of the same name,
+  // and the file under an id CHANGES — that is the whole reason this is
+  // `no-cache` with a validator rather than `immutable`. A write landing
+  // between the two calls served the OLD file's size and mtime as the ETag
+  // with the NEW file's bytes as the body, and the browser then cached those
+  // bytes under that validator: every later conditional request answers 304
+  // and the wrong picture stays on the desktop until the file changes again.
+  // `fstat` on an open handle describes the very inode the bytes are read
+  // from, so the validator and the body can no longer come from two versions.
   try {
-    const stat = await fs.stat(iconPath);
-    const etag = `"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
-    const cacheHeaders = { ETag: etag, "Cache-Control": "public, no-cache" };
-    if (req.headers.get("if-none-match") === etag) {
-      return new NextResponse(null, { status: 304, headers: cacheHeaders });
+    const handle = await fs.open(iconPath, "r");
+    try {
+      const stat = await handle.stat();
+      const etag = `"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+      const cacheHeaders = { ETag: etag, "Cache-Control": "public, no-cache" };
+      if (req.headers.get("if-none-match") === etag) {
+        return new NextResponse(null, { status: 304, headers: cacheHeaders });
+      }
+      const data = await handle.readFile();
+      return new NextResponse(data, {
+        headers: { "Content-Type": "image/png", ...cacheHeaders },
+      });
+    } finally {
+      await handle.close();
     }
-    const data = await fs.readFile(iconPath);
-    return new NextResponse(data, {
-      headers: { "Content-Type": "image/png", ...cacheHeaders },
-    });
   } catch {
     // Not cached locally
   }

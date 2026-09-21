@@ -26,6 +26,36 @@ import { CODING_AGENT_ARTIFACTS_SUBTREE } from "@/lib/file-guard";
  */
 export const ARTIFACT_RUN_ID_RE = /^run-[a-z0-9]{8}$/;
 
+/** The alphabet a run id's suffix is made of — the `[a-z0-9]` of the regex above. */
+const RUN_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+/** `run-` + eight characters. */
+const RUN_ID_PREFIX = "run-";
+const RUN_ID_SUFFIX_CHARS = 8;
+
+/**
+ * Rebuild a run id out of the alphabet, or null.
+ *
+ * The same discipline `safeAppId` (webapp-icon.ts) and `safeTranscriptKey`
+ * (harness/transcript-key.ts) apply, and for the same reason: a `.test()`
+ * guard leaves the CALLER's string in play, so the value that goes on to be
+ * joined into a path is still the one that arrived over the wire. Here the
+ * characters are taken from the alphabet's own copy, so what reaches
+ * `path.join` is made of those characters rather than merely having matched
+ * them — no separator, no dot, nothing that could walk out of the root.
+ */
+export function safeRunId(runId: unknown): string | null {
+  if (typeof runId !== "string") return null;
+  if (runId.length !== RUN_ID_PREFIX.length + RUN_ID_SUFFIX_CHARS) return null;
+  if (!runId.startsWith(RUN_ID_PREFIX)) return null;
+  let safe = RUN_ID_PREFIX;
+  for (const ch of runId.slice(RUN_ID_PREFIX.length)) {
+    const at = RUN_ID_ALPHABET.indexOf(ch);
+    if (at < 0) return null;
+    safe += RUN_ID_ALPHABET[at];
+  }
+  return safe;
+}
+
 /** Fifty files per run is plenty of history; a run writing hundreds is misbehaving. */
 export const MAX_ARTIFACTS = 50;
 const MAX_NAME_CHARS = 100;
@@ -102,10 +132,24 @@ export function artifactMimeType(name: string): string | null {
   return INLINE_IMAGE_MIME[ext] ?? INLINE_AUDIO_MIME[ext] ?? null;
 }
 
-/** The run's evidence folder. Throws on a malformed id — callers validate first. */
+/**
+ * The run's evidence folder. Throws on a malformed id — callers validate first.
+ *
+ * THE one place a run id becomes a path, so the containment lives here rather
+ * than at each of the five filesystem calls downstream. Two guards, both
+ * load-bearing: the id is REBUILT from the alphabet (so no separator can be in
+ * it), and the folder that rebuild produces is then asserted to sit under the
+ * artifacts root. The second cannot fail given the first — it is the assertion
+ * that says so, next to the join it is about, for the reader and for the
+ * scanner that has to see it.
+ */
 export function artifactsDir(runId: string): string {
-  if (!ARTIFACT_RUN_ID_RE.test(runId)) throw new Error(`not a run id: ${runId}`);
-  return path.join(artifactsRoot(), runId);
+  const safe = safeRunId(runId);
+  if (safe === null) throw new Error(`not a run id: ${runId}`);
+  const root = path.resolve(artifactsRoot());
+  const dir = path.resolve(root, safe);
+  if (!dir.startsWith(root + path.sep)) throw new Error(`not a run id: ${runId}`);
+  return dir;
 }
 
 export function artifactKind(name: string): ArtifactKind {
