@@ -30,6 +30,21 @@ you have told it so it can find it later. And it fits on a phone.
   fetch only the local runtime and the small on-device model. Everything else
   is installed when you ask for it, which made updates much shorter.
 
+## What the ClawBox AI plans include
+
+ClawBox AI is the subscription that turns on the cloud side of the box. The
+plans cover, in 4.0:
+
+- **Image generation** in the chat.
+- **Cloud voice**, spoken replies without an on-device voice engine.
+- **Voice transcription** for voice notes and the microphone.
+- **Memory indexing**, the cloud embedding index behind Memory Shard.
+- **Coding Agent**, on the Pro and Max plans.
+- **Memory Shard**, on the Pro and Max plans.
+- **Persistent links** for the ClawBox web UI, a `<boxHandle>.clawbox.tech`
+  address that stays the same across restarts, on the Pro and Max plans.
+- **One-click switch between OpenClaw and Hermes**, on the Max plan only.
+
 ## What's new by area
 
 ### Coding agent
@@ -150,9 +165,9 @@ you have told it so it can find it later. And it fits on a phone.
 ### AI models
 
 - ClawBox AI answers with **DeepSeek V4 Flash** (`deepseek-v4-flash`) by
-  default, on the Free and Pro plans. The Max plan adds **DeepSeek V4 Pro**
-  (`deepseek-v4-pro`). Both declare a 1,000,000 token context window and
-  393,216 max output tokens.
+  default, on the Free and Pro plans. The Max plan uses **DeepSeek 4.1**. The
+  models declare a 1,000,000 token context window and 393,216 max output
+  tokens.
 - **Change model without restarting anything.** Provider, model and reasoning
   effort are three pills under the chat composer. Picking a different one
   applies to the running agent, with no gateway restart and no reconnect.
@@ -343,7 +358,8 @@ One API route was removed:
 Two ClawBox AI model aliases are retired upstream:
 
 - `deepseek-chat` and `deepseek-reasoner` both resolved to V4 Flash on the
-  proxy and are retired. Use `deepseek-v4-flash` and `deepseek-v4-pro`. A box
+  proxy and are retired. Use `deepseek-v4-flash`, or on the Max plan the DeepSeek 4.1
+  model the portal lists. A box
   that never had these written into its config is unaffected.
 - Image generation moved from the `openai` provider to `litellm` for
   `gpt-image-1-mini`. The device migrates this itself on update.

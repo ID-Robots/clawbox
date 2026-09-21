@@ -370,7 +370,9 @@ Node.js runs the production server because Bun doesn't support `http.Server` upg
 | **Language** | TypeScript 5 |
 | **Runtime & tooling** | Node.js 24 (production), Bun (dev/build/packages) |
 | **AI Engine** | [OpenClaw](https://github.com/openclaw/openclaw) or [Hermes Agent](https://nousresearch.com), via MCP |
-| **ClawBox AI** | DeepSeek V4 Flash by default (`deepseek-v4-flash`), V4 Pro on the Max plan |
+| **ClawBox AI** | DeepSeek V4 Flash by default (`deepseek-v4-flash`), DeepSeek 4.1 on the Max plan |
+
+ClawBox AI plans also cover image generation, cloud voice, voice transcription and memory indexing; the Coding Agent, Memory Shard and persistent `<boxHandle>.clawbox.tech` links need Pro or Max; the one-click OpenClaw/Hermes switch needs Max.
 | **Local Models** | llama.cpp (Gemma 4 E2B ships preinstalled) + Ollama · Kokoro TTS · faster-whisper STT · Qwen3 embeddings |
 | **Coding Agent** | Headless Claude Code (`claude-ds`) in a git worktree, `gh` for pull requests |
 | **Backups** | ClawKeep (Python) → Cloudflare R2 |
@@ -494,7 +496,7 @@ No. The hardware is a **one-time purchase (€749)**. Optional ClawBox AI plans 
 Yes, for local models. **Gemma 4 E2B** (`gemma4-e2b-it-q4_0`, a 3.1 GB Q4_0 build) ships preinstalled on the box's own llama.cpp, and on the OpenClaw and dual editions **Local-only mode** routes every request to it with the cloud providers switched off. Internet is needed only for updates, messaging integrations, browser automation, and optional cloud AI providers.
 
 **Which AI model answers by default?**
-On ClawBox AI it is **DeepSeek V4 Flash** (`deepseek-v4-flash`), with a 1M-token context window. The Max plan adds **DeepSeek V4 Pro** (`deepseek-v4-pro`). You can instead use your own Anthropic, OpenAI, Google or OpenRouter key, sign in with a Claude Pro/Max, ChatGPT Plus/Pro or Google One AI Premium subscription you already pay for, or stay entirely on the box.
+On ClawBox AI it is **DeepSeek V4 Flash** (`deepseek-v4-flash`), with a 1M-token context window. The Max plan uses **DeepSeek 4.1**. You can instead use your own Anthropic, OpenAI, Google or OpenRouter key, sign in with a Claude Pro/Max, ChatGPT Plus/Pro or Google One AI Premium subscription you already pay for, or stay entirely on the box.
 
 **What is the Coding Agent?**
 A headless Claude Code run you hand a whole task to. It works in a git worktree copy of your project (`<project>/.clawbox/worktrees/<runId>`) so it never edits your checkout under you, opens a pull request with `gh`, and then runs an automatic review pass that adversarially reviews its own diff. Runs continue in the background, several can run at once, and you can send a message to one mid-flight to steer it. It needs a Pro or Max plan. Each run keeps its screenshots, test output and a `report.md` in its own evidence folder.
