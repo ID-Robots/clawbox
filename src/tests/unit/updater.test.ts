@@ -901,7 +901,8 @@ describe("updater", () => {
             "  Memory available for the build: 712 MB (was 690 MB)",
             "Running bun build...",
             "clawbox-root-update@apt_update.service: Main process exited, code=killed, status=9/KILL",
-            "clawbox-root-update@apt_update.service: Failed with result 'signal'.",
+            // systemd's cgroup OOM verdict — the evidence, not the inference.
+            "clawbox-root-update@apt_update.service: Failed with result 'oom-kill'.",
             "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
             "",
           ].join("\n"),
@@ -926,10 +927,53 @@ describe("updater", () => {
       });
 
       const aptStep = updater.getUpdateState().steps.find((step) => step.id === "apt_update");
-      expect(aptStep?.error).toContain("killed by the kernel (SIGKILL, exit 137)");
+      expect(aptStep?.error).toContain("OOM killer");
       expect(aptStep?.error).toContain("ran out of memory");
       // The line the old fallback would have picked.
       expect(aptStep?.error).not.toBe("Running bun build...");
+    });
+
+    it("does NOT claim memory for a SIGKILL the journal does not attribute", async () => {
+      // A stop timeout, `systemctl kill`, a watchdog and an operator all land
+      // as signal 9 / exit 137. Reporting "the device ran out of memory" over
+      // any of those sends the owner after a problem they do not have, so the
+      // sentence names memory only on systemd's own `result 'oom-kill'`.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
+        "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": {
+          stdout: [
+            "Running bun build...",
+            "clawbox-root-update@apt_update.service: Main process exited, code=killed, status=9/KILL",
+            "clawbox-root-update@apt_update.service: Failed with result 'signal'.",
+            "",
+          ].join("\n"),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().steps.find((s) => s.id === "apt_update")?.status).toBe("failed");
+      });
+
+      const error = updater.getUpdateState().steps.find((s) => s.id === "apt_update")?.error;
+      // The kill is still reported — it is the only thing that happened.
+      expect(error).toContain("SIGKILL, exit 137");
+      expect(error).not.toContain("ran out of memory");
+      // And it is "the step": this line serves every root step, not just a build.
+      expect(error).not.toContain("the build");
     });
 
     it("reads a signalled CHILD's 128+N the same way as a signalled shell", async () => {
@@ -944,6 +988,7 @@ describe("updater", () => {
           stdout: [
             "Running bun build...",
             "clawbox-root-update@apt_update.service: Main process exited, code=exited, status=137/n/a",
+            "clawbox-root-update@apt_update.service: Failed with result 'oom-kill'.",
             "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
             "",
           ].join("\n"),

@@ -808,11 +808,24 @@ function getStepFailureLine(logText: string, unit: string): string | null {
  * record of a process that was KILLED rather than one that reported a failure:
  * `…: Main process exited, code=killed, status=9/KILL` when the shell itself
  * was signalled, and `code=exited, status=137/n/a` when it was a child the
- * shell then reported as 128+9. On an 8 GB Jetson running `next build`, signal
- * 9 is the OOM killer — so say that, rather than leaving the owner a number.
+ * shell then reported as 128+9.
  */
 const MAIN_PROCESS_EXIT_LINE = /Main process exited, code=(\w+), status=(\d+)/;
 
+/**
+ * systemd's verdict when the cgroup's own OOM event fired — the ONLY thing in
+ * a unit's journal that PROVES memory. `status=9/KILL` is equally the shape of
+ * a stop timeout, `systemctl kill`, a watchdog and an operator, and telling an
+ * owner their device ran out of memory over any of those sends them after a
+ * problem they do not have. An OOM is the likeliest end for the rebuild step
+ * on this hardware; likeliest is not the same as known.
+ */
+const OOM_RESULT_LINE = /Failed with result 'oom-kill'/;
+
+/**
+ * Deliberately says "the step", not "the build": this is the failure line for
+ * EVERY root step — apt_update and the rest — and only one of them is a build.
+ */
 function getKillNote(logText: string): string | null {
   const match = logText.match(MAIN_PROCESS_EXIT_LINE);
   if (!match) return null;
@@ -822,11 +835,12 @@ function getKillNote(logText: string): string | null {
     ? status
     : status > 128 && status < 160 ? status - 128 : null;
   if (signal === null) return null;
-  if (signal === 9) {
-    return "Error: the build was killed by the kernel (SIGKILL, exit 137) — the device ran out of memory. "
-      + "Close other apps, or free memory, and Retry; the previous build has been restored.";
+  if (signal !== 9) {
+    return `Error: the step was killed by signal ${signal} (exit ${128 + signal})`;
   }
-  return `Error: the build was killed by signal ${signal} (exit ${128 + signal})`;
+  return OOM_RESULT_LINE.test(logText)
+    ? "Error: the step was killed by the kernel's OOM killer (exit 137) — the device ran out of memory. Free memory and Retry."
+    : "Error: the step was killed (SIGKILL, exit 137) without reporting a reason — the journal shows no OOM kill, so a stop or a timeout looks the same.";
 }
 
 /**

@@ -2711,6 +2711,18 @@ run_next_build() {
 # `do_rebuild [--reboot-follows]`. The flag is the caller telling this function
 # that a reboot comes next, which decides one thing only: whether the engines
 # freed for the build are started again here or left to systemd.
+# Did the kernel's OOM killer actually take something recently?
+#
+# A SIGKILL on its own does NOT prove it. `systemctl stop`'s timeout,
+# `systemctl kill`, a watchdog and an operator all reach the shell as signal 9
+# — exit 137 — and a sentence that ASSERTS "the device ran out of memory" over
+# any of those sends the owner after a problem they do not have. The kernel
+# says so itself when it was memory, so ask it rather than inferring it.
+oom_killer_in_kernel_log() {
+  { journalctl -k --since "-15min" --no-pager 2>/dev/null || dmesg 2>/dev/null; } \
+    | grep -qiE 'out of memory: killed process|oom-kill:'
+}
+
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"
@@ -2783,15 +2795,17 @@ do_rebuild() {
   fi
 
   if [ "$rc" -ne 0 ]; then
-    # Name WHAT failed and, when the kernel killed it, say so in words. A
-    # shell reports a signalled child as 128+N, and on an 8 GB Jetson running
-    # `next build` the overwhelmingly common N is 9 — the OOM killer. "exit
-    # 137" alone is a number an owner cannot act on, and it is the single most
-    # likely way this step ends on the hardware ClawBox ships on (TASK-1022).
-    if [ "$rc" -eq 137 ]; then
-      echo "Error: rebuild failed (exit 137) — $failed_at was killed by the kernel (SIGKILL): the device ran out of memory during the build." >&2
-    elif [ "$rc" -gt 128 ] && [ "$rc" -lt 160 ]; then
-      echo "Error: rebuild failed (exit $rc) — $failed_at was killed by signal $((rc - 128))." >&2
+    # Name WHAT failed and, when it was signalled, say so. A shell reports a
+    # signalled child as 128+N, and "exit 137" alone is a number an owner
+    # cannot act on. Memory is named ONLY on the kernel's own evidence: an
+    # OOM is the likeliest end for this step on the hardware ClawBox ships on,
+    # but it is not the only thing that arrives as signal 9 (TASK-1022).
+    local sig=0
+    if [ "$rc" -gt 128 ] && [ "$rc" -lt 160 ]; then sig=$((rc - 128)); fi
+    if [ "$sig" -eq 9 ] && oom_killer_in_kernel_log; then
+      echo "Error: rebuild failed (exit $rc) — $failed_at was killed by the kernel's OOM killer: the device ran out of memory during the build." >&2
+    elif [ "$sig" -ne 0 ]; then
+      echo "Error: rebuild failed (exit $rc) — $failed_at was killed by signal $sig (no OOM kill in the kernel log; a stop, a timeout or an operator looks the same)." >&2
     else
       echo "Error: rebuild failed (exit $rc) — $failed_at did not succeed." >&2
     fi
