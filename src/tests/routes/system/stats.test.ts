@@ -13,7 +13,10 @@ const mockFs = vi.mocked(fs);
 const mockExecSync = vi.mocked(execSync);
 
 describe("GET /setup-api/system/stats", () => {
-  let systemStatsGet: () => Promise<Response>;
+  let systemStatsGet: (request?: Request) => Promise<Response>;
+
+  /** A request carrying a query string, for the opt-out below. */
+  const ask = (query: string) => new Request(`http://localhost/setup-api/system/stats?${query}`);
 
   beforeEach(async () => {
     vi.resetModules();
@@ -250,5 +253,63 @@ SwapFree:        1500000 kB`;
 
     expect(res.status).toBe(200);
     expect(body.storage).toEqual([]);
+  });
+
+  /**
+   * `?processes=0` / `?perCore=0` — what Settings → System sends while those
+   * blocks are collapsed, so a panel nobody has opened is not computed on the
+   * box. `ps aux` is 91% of this route's cost and it was being spawned every
+   * three seconds for a table that was not on screen.
+   */
+  describe("the collapsed-panel opt-out", () => {
+    it("spawns no ps and omits both process keys when asked not to", async () => {
+      mockExecSync.mockClear();
+      const body = await (await systemStatsGet(ask("processes=0"))).json();
+
+      // ABSENT, not empty: this route already uses `processes: []` to mean "we
+      // ran ps and the box is idle", and "not asked for" is a different fact.
+      expect(body).not.toHaveProperty("processes");
+      expect(body).not.toHaveProperty("processesByMemory");
+      // The point of the parameter — the shell is never spawned.
+      expect(mockExecSync.mock.calls.filter(([cmd]) => String(cmd).startsWith("ps"))).toHaveLength(0);
+      // Everything else still answers.
+      expect(body.cpu).toBeDefined();
+      expect(body.memory).toBeDefined();
+    });
+
+    it("omits the per-core row when asked not to, and keeps the aggregate", async () => {
+      const body = await (await systemStatsGet(ask("perCore=0"))).json();
+
+      expect(body.cpu).not.toHaveProperty("perCore");
+      // The aggregate CPU figure is a different reading and is always drawn.
+      expect(typeof body.cpu.usage).toBe("number");
+      expect(body.processes).toBeInstanceOf(Array);
+    });
+
+    it("drops both when both are declined", async () => {
+      const body = await (await systemStatsGet(ask("processes=0&perCore=0"))).json();
+
+      expect(body).not.toHaveProperty("processes");
+      expect(body.cpu).not.toHaveProperty("perCore");
+      expect(body.overview).toBeDefined();
+      expect(body.storage).toBeInstanceOf(Array);
+    });
+
+    it("sends everything for any other value, and for a caller with no URL at all", async () => {
+      // OPT-OUT: only the exact string "0" declines. Every existing reader —
+      // the System app, About, the MCP tools — asks for no parameters and must
+      // keep the payload it has always had, and a handler invoked without a
+      // Request must answer rather than 500.
+      const explicit = await (await systemStatsGet(ask("processes=1&perCore=1"))).json();
+      expect(explicit.processes).toBeInstanceOf(Array);
+      expect(explicit.cpu.perCore).toBeInstanceOf(Array);
+
+      const nonsense = await (await systemStatsGet(ask("processes=no"))).json();
+      expect(nonsense.processes).toBeInstanceOf(Array);
+
+      const bare = await systemStatsGet();
+      expect(bare.status).toBe(200);
+      expect((await bare.json()).processes).toBeInstanceOf(Array);
+    });
   });
 });

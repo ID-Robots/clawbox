@@ -90,10 +90,15 @@ function jsonResponse(data: unknown) {
   return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(data) });
 }
 
+/** Every stats URL this render asked for, in order — the collapse contract is
+ *  about what is REQUESTED, not only about what is drawn. */
+let statsUrls: string[] = [];
+
 function serve(stats: unknown) {
+  statsUrls = [];
   vi.stubGlobal("fetch", vi.fn((input: string | URL | undefined) => {
     const url = String(input ?? "");
-    if (url === "/setup-api/system/stats") return jsonResponse(stats);
+    if (url.startsWith("/setup-api/system/stats")) { statsUrls.push(url); return jsonResponse(stats); }
     if (url === "/setup-api/update/status") return jsonResponse({ phase: "idle", steps: [] });
     if (url.startsWith("/setup-api/update/versions")) {
       return jsonResponse({ clawbox: { current: "v1.0.0", target: null }, openclaw: { current: "1.0.0", target: null } });
@@ -110,13 +115,47 @@ async function openSection(section: "system" | "harness") {
   window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section } }));
 }
 
+/**
+ * Both figure blocks are COLLAPSED when the page opens (owner's ask), so every
+ * assertion about their contents has to press their button first. The blocks
+ * are also not merely hidden: while shut, the poll tells the server not to
+ * compute them, which is why `statsUrls` is checked alongside the DOM.
+ */
+async function expand(which: "per-core" | "processes") {
+  await userEvent.click(await screen.findByTestId(`settings-${which}-toggle`));
+}
+
+/** The query the most recent stats poll actually sent. */
+function lastStatsQuery(): URLSearchParams {
+  return new URLSearchParams(statsUrls[statsUrls.length - 1]?.split("?")[1] ?? "");
+}
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Settings → System, the figures page", () => {
   beforeEach(() => serve(statsResponse({ cpu: { usage: 12, model: "ARMv8", cores: 6, loadAvg: ["2.69", "2.10", "1.90"], speed: 1800, perCore: [93, 4, 51, 0, 12, 7] } })));
 
+  it("opens with both blocks shut, and asks the box to compute neither", async () => {
+    // The whole point of the buttons. `ps aux` is 91% of the stats route's
+    // cost and it was being spawned every three seconds for a table nobody had
+    // opened, so a shut block must be absent from the REQUEST and not merely
+    // hidden in the DOM.
+    await openSection("system");
+    await screen.findByTestId("settings-per-core");
+
+    expect(screen.queryByText("93%")).toBeNull();
+    expect(screen.queryByText("llama-server --alias gemma")).toBeNull();
+    expect(screen.getByTestId("settings-per-core-toggle")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("settings-processes-toggle")).toHaveAttribute("aria-expanded", "false");
+
+    const query = lastStatsQuery();
+    expect(query.get("perCore")).toBe("0");
+    expect(query.get("processes")).toBe("0");
+  });
+
   it("draws a bar for every core, with the load averages beside them", async () => {
     await openSection("system");
+    await expand("per-core");
     const panel = await screen.findByTestId("settings-per-core");
     for (const busy of ["93%", "4%", "51%", "0%", "12%", "7%"]) {
       expect(within(panel).getByText(busy)).toBeInTheDocument();
@@ -124,15 +163,32 @@ describe("Settings → System, the figures page", () => {
     // All three load averages, not just the one-minute figure the aggregate
     // CPU row already shows.
     expect(within(panel).getByText(/2\.69 · 2\.10 · 1\.90/)).toBeInTheDocument();
+    // Opening is what makes the box measure it.
+    expect(lastStatsQuery().get("perCore")).toBe("1");
+    // …and only it. The other block is still shut and still not computed.
+    expect(lastStatsQuery().get("processes")).toBe("0");
+  });
+
+  it("stops asking for the figures again once the block is shut", async () => {
+    await openSection("system");
+    await expand("per-core");
+    expect(lastStatsQuery().get("perCore")).toBe("1");
+
+    await expand("per-core");
+    expect(screen.getByTestId("settings-per-core-toggle")).toHaveAttribute("aria-expanded", "false");
+    expect(lastStatsQuery().get("perCore")).toBe("0");
+    expect(screen.queryByText("93%")).toBeNull();
   });
 
   it("lists the busiest processes with their pid and figures", async () => {
     await openSection("system");
+    await expand("processes");
     const panel = await screen.findByTestId("settings-processes");
     expect(within(panel).getByText("llama-server --alias gemma")).toBeInTheDocument();
     expect(within(panel).getByText("1201")).toBeInTheDocument();
     expect(within(panel).getByText("42.5")).toBeInTheDocument();
     expect(within(panel).getByText("3.1")).toBeInTheDocument();
+    expect(lastStatsQuery().get("processes")).toBe("1");
   });
 
   it("says which figure is which, for a reader who cannot see the columns", async () => {
@@ -141,6 +197,7 @@ describe("Settings → System, the figures page", () => {
     // scoped headers is what associates them, and the unit is said once in the
     // header rather than on every cell.
     await openSection("system");
+    await expand("processes");
     const panel = await screen.findByTestId("settings-processes");
     // By its accessible name: the headers say what a cell is, and this says
     // what the table is.
@@ -156,6 +213,7 @@ describe("Settings → System, the figures page", () => {
       processesByMemory: BY_MEMORY,
     }));
     await openSection("system");
+    await expand("processes");
     const panel = await screen.findByTestId("settings-processes");
     // The CPU ordering is what it opens on, and the biggest memory user is not
     // in it — which is the point of the toggle.
@@ -168,17 +226,26 @@ describe("Settings → System, the figures page", () => {
 });
 
 describe("Settings → System against a server that predates the new figures", () => {
-  it("draws no per-core row rather than a row of empty bars", async () => {
+  it("draws no per-core bars rather than a row of empty ones", async () => {
     // A box mid-update runs a bundle and a server a version apart, and an
     // unreadable /proc/stat answers the same way. Six bars at 0% would be a
     // claim that the machine is idle; nothing is the honest answer.
+    //
+    // The CARD itself now stays either way, because it carries the button that
+    // is the only way back in — withholding it would leave an owner who opened
+    // the page against an older server with no way to ask again. What is
+    // withheld is the row.
     serve(statsResponse());
     await openSection("system");
-    await screen.findByTestId("settings-processes");
-    expect(screen.queryByTestId("settings-per-core")).toBeNull();
+    await expand("per-core");
+    const panel = await screen.findByTestId("settings-per-core");
+    expect(within(panel).queryByText("%")).toBeNull();
+    // Said, rather than left blank: an open card with nothing in it reads as
+    // broken, and the real bars are one 3 s poll away.
+    expect(within(panel).getByRole("status")).toHaveTextContent("Checking");
   });
 
-  it("draws no per-core row when the reading itself is empty", async () => {
+  it("draws no per-core bars when the reading itself is empty", async () => {
     // The wire shape of a just-restarted box: no previous /proc/stat sample to
     // diff, so the server sends `perCore: []` rather than a zero per core. The
     // aggregate tile still shows its load-average figure — 19% here — which is
@@ -187,27 +254,42 @@ describe("Settings → System against a server that predates the new figures", (
       cpu: { usage: 19, model: "ARMv8", cores: 6, loadAvg: ["1.15", "1.02", "0.98"], speed: 1800, perCore: [] },
     }));
     await openSection("system");
-    await screen.findByTestId("settings-processes");
-    expect(screen.queryByTestId("settings-per-core")).toBeNull();
+    await expand("per-core");
+    const panel = await screen.findByTestId("settings-per-core");
+    expect(within(panel).getByRole("status")).toHaveTextContent("Checking");
     // The aggregate figure is still there — withholding the per-core row is not
-    // withholding the card.
+    // withholding the rest of the page.
     expect(screen.getByText("19%")).toBeInTheDocument();
   });
 
   it("offers no ordering toggle when only one ordering was sent", async () => {
     serve(statsResponse());
     await openSection("system");
+    await expand("processes");
     const panel = await screen.findByTestId("settings-processes");
     expect(within(panel).queryByRole("button", { name: "By memory" })).toBeNull();
     // …and still lists what it did get.
     expect(within(panel).getByText("node production-server.js")).toBeInTheDocument();
   });
 
-  it("draws no process table at all when the box could not run ps", async () => {
+  it("draws no process table when the box could not run ps", async () => {
     serve(statsResponse({ processes: [] }));
     await openSection("system");
-    await screen.findByText(/ARMv8/);
-    expect(screen.queryByTestId("settings-processes")).toBeNull();
+    await expand("processes");
+    const panel = await screen.findByTestId("settings-processes");
+    expect(within(panel).queryByRole("table")).toBeNull();
+    expect(within(panel).getByRole("status")).toHaveTextContent("Checking");
+  });
+
+  it("keeps the ordering toggle out of a block nobody has opened", async () => {
+    // It reorders a table that is not on screen; offering it there would be a
+    // control with nothing to act on.
+    serve(statsResponse({ processesByMemory: BY_MEMORY }));
+    await openSection("system");
+    const panel = await screen.findByTestId("settings-processes");
+    expect(within(panel).queryByRole("button", { name: "By memory" })).toBeNull();
+    await expand("processes");
+    expect(within(panel).getByRole("button", { name: "By memory" })).toBeInTheDocument();
   });
 });
 

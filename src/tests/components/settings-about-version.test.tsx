@@ -61,7 +61,7 @@ async function openAboutVersions(versions: unknown) {
     const url = input.toString();
     if (url === "/setup-api/update/versions") return jsonResponse(versions);
     if (url === "/setup-api/update/status") return jsonResponse({ phase: "idle", steps: [] });
-    if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+    if (url.startsWith("/setup-api/system/stats")) return jsonResponse(statsResponse);
     return jsonResponse({});
   }));
 
