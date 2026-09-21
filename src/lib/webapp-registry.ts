@@ -41,6 +41,19 @@ const withRegistration = createSerialLock();
  */
 const RESERVED_APP_IDS = new Set(["__proto__", "constructor", "prototype"]);
 
+/**
+ * Whether an id names a slot every object already has.
+ *
+ * Exported so the create route can answer 400 — a reserved id is bad INPUT,
+ * and the throw below would otherwise reach that route's generic handler as a
+ * 500. The refusal still lives here as well: `registerServerApp` and
+ * `deployWebapp` also come through this door, and a guard only the HTTP layer
+ * applies is one the other two callers do not have.
+ */
+export function isReservedAppId(id: string): boolean {
+  return RESERVED_APP_IDS.has(id);
+}
+
 interface InstalledMeta {
   name: string;
   color: string;
