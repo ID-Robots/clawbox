@@ -27,7 +27,17 @@ async function listen(): Promise<{ port: number; close: () => Promise<void> }> {
 const pushed = vi.hoisted(() => [] as Record<string, unknown>[]);
 vi.mock("@/lib/pending-actions", () => ({ pushPendingAction: async (a: Record<string, unknown>) => { pushed.push(a); return a; } }));
 // The registry draws an icon for every app that reaches the desktop; not here.
-vi.mock("@/lib/webapp-icon", () => ({ ensureWebappIcon: async () => undefined }));
+// Only `ensureWebappIcon` is stubbed — it draws a picture with the box's image
+// model, which a unit test must not do. The REST of the module stays real, and
+// deliberately so: TASK-1014 gave the registry an id rebuilt by `safeAppId`
+// (CodeQL alert 511, js/remote-property-injection), and a hand-written stand-in
+// for it would be a second spelling of the rule this suite exists to exercise.
+// Listing the exports one by one is also what broke here — the factory answered
+// every name it had been told about and `undefined` for the one it had not.
+vi.mock("@/lib/webapp-icon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/webapp-icon")>()),
+  ensureWebappIcon: async () => undefined,
+}));
 
 let lib: typeof import("@/lib/app-proxy");
 let base: string;

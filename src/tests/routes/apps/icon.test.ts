@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 vi.mock("fs/promises", () => ({
   default: {
+    open: vi.fn(),
     stat: vi.fn(),
     readFile: vi.fn(),
     mkdir: vi.fn().mockResolvedValue(undefined),
@@ -24,15 +25,29 @@ vi.stubGlobal("fetch", mockFetch);
 import fs from "fs/promises";
 import { getAll } from "@/lib/config-store";
 
-/** A local icon on disk, as `fs.stat` would describe it. */
+// TASK-1014 / CodeQL alert 405. The route reads a cached icon through ONE
+// descriptor — `open`, `fstat` on the handle, `readFile` from that handle —
+// so that the validator and the bytes describe the same inode. A local icon is
+// therefore mocked as the handle the route opens, not as separate answers to
+// `stat(path)` and `readFile(path)`; those two never describe one file here.
+// The race this shape closes is pinned against a real disk in
+// src/tests/routes/apps-icon.test.ts.
+const handleReadFile = vi.fn();
+const handleClose = vi.fn();
+
+/** A local icon on disk, as the descriptor the route opens describes it. */
 function localIcon(size: number, mtimeMs: number) {
-  vi.mocked(fs.stat).mockResolvedValue({ size, mtimeMs } as never);
-  vi.mocked(fs.readFile).mockResolvedValue(Buffer.from("PNG") as never);
+  handleReadFile.mockResolvedValue(Buffer.from("PNG"));
+  handleClose.mockResolvedValue(undefined);
+  vi.mocked(fs.open).mockResolvedValue({
+    stat: async () => ({ size, mtimeMs }),
+    readFile: handleReadFile,
+    close: handleClose,
+  } as never);
 }
 
 function noLocalIcon() {
-  vi.mocked(fs.stat).mockRejectedValue(new Error("ENOENT"));
-  vi.mocked(fs.readFile).mockRejectedValue(new Error("ENOENT"));
+  vi.mocked(fs.open).mockRejectedValue(new Error("ENOENT"));
 }
 
 /** Let the fire-and-forget disk write (or its absence) settle. */
@@ -77,7 +92,10 @@ describe("/setup-api/apps/icon/[appId]", () => {
     );
     expect(again.status).toBe(304);
     expect(again.headers.get("ETag")).toBe(etag);
-    expect(vi.mocked(fs.readFile)).toHaveBeenCalledTimes(1);
+    // The body was read once across the two requests; the 304 cost a fstat.
+    expect(handleReadFile).toHaveBeenCalledTimes(1);
+    // Both requests let go of the descriptor they opened.
+    expect(handleClose).toHaveBeenCalledTimes(2);
 
     // A different file under the same id is a different tag.
     localIcon(9876, 1756000005000);

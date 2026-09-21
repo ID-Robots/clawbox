@@ -354,10 +354,10 @@ export async function POST(request: Request) {
       // for anything else — but CodeQL could not see that, and at the time
       // this was written it did not read `logSafe` as a sanitiser either, so
       // `js/log-injection` stood over any shape that carried the request's
-      // value into the log. (TASK-1014 gave `logSafe` a literal CR/LF pass
-      // the scanner CAN read, so the line above this block now sanitises
-      // rather than omits; this one is left as it is because the saved number
-      // adds nothing the re-read status does not already carry.)
+      // value into the log. (TASK-1014 gave `logSafe` one literal pass per
+      // line break, which the scanner CAN read, so the line above this block
+      // now sanitises rather than omits; this one is left as it is because the
+      // saved number adds nothing the re-read status does not already carry.)
       // The answer this route returns is the re-read status, which says the
       // saved number, and `data/config.json` holds it; the log line is here to
       // record that the owner changed it, which it still does.

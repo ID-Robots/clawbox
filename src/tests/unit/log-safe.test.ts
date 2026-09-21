@@ -71,10 +71,17 @@ describe("logSafe", () => {
  * the maxParallelRuns line in setup-api/coding-agent/enable/route.ts had to
  * drop its value from the log rather than sanitise it.
  *
- * The fix is a literal `[\r\n]` pass in front of the class. It changes no
- * output — these pin that — and it is the shape a reader and a scanner can
- * both check, so it is pinned as source too: dropping it back to one pass
- * would silently re-open both alerts while every behavioural test stayed green.
+ * The first fix put ONE character class in front of it, and that was not
+ * enough: the scanner resolves a replaced pattern only when it is a constant,
+ * and a class is no more a constant than a property escape is. Alerts 566 and
+ * 567 replaced 545 and 534 at the new line numbers, their taint path stepping
+ * straight through both passes.
+ *
+ * What the scanner does read is one line break per literal, inline at the
+ * call. That changes no output — the cases below pin that — and because
+ * nothing observable distinguishes it from the shapes that failed, it is
+ * pinned as source too: folding the pair back into a constant or a class
+ * would re-open both alerts while every behavioural test stayed green.
  */
 describe("the line-break pass", () => {
   it("still replaces CR and LF exactly as the control class did", () => {
@@ -103,10 +110,14 @@ describe("the line-break pass", () => {
       path.join(process.cwd(), "src/lib/log-safe.ts"),
       "utf-8",
     );
-    // A literal character class over CR and LF, applied with .replace …
-    expect(source).toMatch(/const LINE_BREAKS = \/\[\\r\\n\]\/g;/);
-    expect(source).toMatch(/\.replace\(LINE_BREAKS, REPLACEMENT\)/);
-    // … and the broader control class still runs after it, not instead of it.
-    expect(source).toMatch(/\.replace\(CONTROL_CHARACTERS, REPLACEMENT\)/);
+    // One line break per literal pattern, inline at the call — and in BOTH
+    // branches of the cap, since a value over the limit is sanitised on its
+    // own line and a pass missing there would sanitise nothing.
+    expect(source.match(/\.replace\(\/\\n\/g, REPLACEMENT\)/g) ?? []).toHaveLength(2);
+    expect(source.match(/\.replace\(\/\\r\/g, REPLACEMENT\)/g) ?? []).toHaveLength(2);
+    // … and the broader control class still runs after them, not instead.
+    expect(source.match(/\.replace\(CONTROL_CHARACTERS, REPLACEMENT\)/g) ?? []).toHaveLength(2);
+    // Naming the pattern is what hid it from the scanner last time.
+    expect(source).not.toMatch(/const LINE_BREAKS/);
   });
 });
