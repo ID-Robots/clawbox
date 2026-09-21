@@ -30,6 +30,21 @@ you have told it so it can find it later. And it fits on a phone.
   fetch only the local runtime and the small on-device model. Everything else
   is installed when you ask for it, which made updates much shorter.
 
+## What the ClawBox AI plans include
+
+ClawBox AI is the subscription that turns on the cloud side of the box. The
+plans cover, in 4.0:
+
+- **Image generation** in the chat.
+- **Cloud voice**, spoken replies without an on-device voice engine.
+- **Voice transcription** for voice notes and the microphone.
+- **Memory indexing**, the cloud embedding index behind Memory Shard.
+- **Coding Agent**, on the Pro and Max plans.
+- **Memory Shard**, on the Pro and Max plans.
+- **Persistent links** for the ClawBox web UI, a `<boxHandle>.clawbox.tech`
+  address that stays the same across restarts, on the Pro and Max plans.
+- **One-click switch between OpenClaw and Hermes**, on the Max plan only.
+
 ## What's new by area
 
 ### Coding agent

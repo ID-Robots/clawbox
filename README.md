@@ -371,6 +371,8 @@ Node.js runs the production server because Bun doesn't support `http.Server` upg
 | **Runtime & tooling** | Node.js 24 (production), Bun (dev/build/packages) |
 | **AI Engine** | [OpenClaw](https://github.com/openclaw/openclaw) or [Hermes Agent](https://nousresearch.com), via MCP |
 | **ClawBox AI** | DeepSeek V4 Flash by default (`deepseek-v4-flash`), DeepSeek 4.1 on the Max plan |
+
+ClawBox AI plans also cover image generation, cloud voice, voice transcription and memory indexing; the Coding Agent, Memory Shard and persistent `<boxHandle>.clawbox.tech` links need Pro or Max; the one-click OpenClaw/Hermes switch needs Max.
 | **Local Models** | llama.cpp (Gemma 4 E2B ships preinstalled) + Ollama · Kokoro TTS · faster-whisper STT · Qwen3 embeddings |
 | **Coding Agent** | Headless Claude Code (`claude-ds`) in a git worktree, `gh` for pull requests |
 | **Backups** | ClawKeep (Python) → Cloudflare R2 |
