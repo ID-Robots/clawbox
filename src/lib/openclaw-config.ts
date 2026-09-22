@@ -2183,9 +2183,19 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
     // while this function reported "already ours, nothing to do". The URL and the
     // key are therefore two reasons to write, not one — `scripts/gateway-pre-start.sh`
     // carries the same reconciliation for the boot path.
+    // A key that RESOLVES ELSEWHERE is not drift, and is not ours to flatten
+    // into a literal: OpenClaw accepts a SecretRef object ({source, provider,
+    // id}) and a `${VAR}` interpolation as credentials, and this function can
+    // resolve neither, so it cannot tell a stale one from a current one. Only
+    // the KEY-refresh reason is suppressed — an entry being moved ONTO the
+    // proxy from somewhere else still takes our bearer, because the bearer
+    // travels with the URL and the old credential is wrong whatever its shape.
     const token = getLocalAiToken();
+    const key = provider.apiKey;
+    const keyResolvesElsewhere = (typeof key === "object" && key !== null)
+      || (typeof key === "string" && /^\$\{.+\}$/.test(key));
     const movesUrl = provider.baseUrl !== proxyUrl;
-    const refreshesKey = provider.apiKey !== token;
+    const refreshesKey = !keyResolvesElsewhere && key !== token;
     if (!movesUrl && !refreshesKey) return false;
     if (routesToAnotherHost(provider, proxyUrl)) {
       // The URL is deliberately not logged: an owner-configured endpoint can

@@ -1756,6 +1756,32 @@ if isinstance(_lai_providers, dict):
             continue
         if _lai_entry.get("apiKey") == _lai_token:
             continue
+        # A key that RESOLVES ELSEWHERE is not drift, and is not ours to flatten
+        # into a literal. OpenClaw accepts a SecretRef object
+        # ({source, provider, id}) and a `${VAR}` interpolation as credentials —
+        # is_strong_gateway_token() at the top of this file already decides the
+        # same question the same way for the gateway token — and this block can
+        # resolve neither, so it cannot tell a stale one from a current one.
+        #
+        # Overwriting would be worse than an invisible edit to the operator's
+        # file. getLocalAiToken() (src/lib/local-ai-token.ts) prefers
+        # process.env.LOCAL_AI_TOKEN over the token FILE and returns before ever
+        # writing it, so on a box that sets it `${LOCAL_AI_TOKEN}` is the
+        # CORRECT key while data/.local-ai-token may hold a stale one — and
+        # replacing the first with the second would cause the exact 401 this
+        # block exists to remove. Checked BEFORE the token-file guard below so a
+        # correctly-referenced key never draws a warning, and silent: a
+        # resolvable reference is a working configuration, not a fault.
+        _lai_key_now = _lai_entry.get("apiKey")
+        if not (_lai_key_now is None or isinstance(_lai_key_now, str)):
+            continue
+        if (
+            isinstance(_lai_key_now, str)
+            and _lai_key_now.startswith("${")
+            and _lai_key_now.endswith("}")
+            and len(_lai_key_now) > 3
+        ):
+            continue
         # The token itself is never printed, here or in the warning below: the
         # journal keeps what it is given, and this is the credential the whole
         # local-AI path turns on.

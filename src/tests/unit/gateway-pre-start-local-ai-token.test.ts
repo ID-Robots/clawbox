@@ -210,6 +210,64 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — local-AI apiKey reconcili
     expect(changed).toBe(false);
   });
 
+  // --- keys that resolve somewhere else ---------------------------------
+
+  it("leaves a ${VAR} interpolation alone instead of flattening it to a literal", () => {
+    // getLocalAiToken() prefers process.env.LOCAL_AI_TOKEN over the token FILE
+    // and returns before ever writing it, so on a box that sets it this IS the
+    // current key while data/.local-ai-token may hold a stale one. Writing the
+    // file's value here would cause the very 401 this block exists to remove.
+    writeToken(TOKEN);
+    const entry = llamacpp("${LOCAL_AI_TOKEN}");
+    const { cfg, changed, log } = reconcile({
+      models: { providers: { llamacpp: entry } },
+    });
+
+    expect(changed).toBe(false);
+    expect(providerOf(cfg, "llamacpp")).toEqual(entry);
+    expect(log).toBe("");
+  });
+
+  it("leaves a SecretRef object alone", () => {
+    // OpenClaw resolves {source, provider, id} externally — the same shape
+    // is_strong_gateway_token() accepts for the gateway token.
+    writeToken(TOKEN);
+    const entry = {
+      baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama",
+      apiKey: { source: "file", provider: "ollama", id: "local-ai-token" },
+    };
+    const { cfg, changed } = reconcile({
+      models: { providers: { ollama: entry } },
+    });
+
+    expect(changed).toBe(false);
+    expect(providerOf(cfg, "ollama")).toEqual(entry);
+  });
+
+  it("does not warn about a referenced key when the token file is missing", () => {
+    // The reference is a working configuration; a warning every boot would be
+    // noise about a box that is fine.
+    writeToken(null);
+    const { changed, log } = reconcile({
+      models: { providers: { llamacpp: llamacpp("${LOCAL_AI_TOKEN}") } },
+    });
+
+    expect(changed).toBe(false);
+    expect(log).toBe("");
+  });
+
+  it("still repairs an empty-bodied ${} , which resolves to nothing", () => {
+    // `${}` is not an interpolation OpenClaw accepts (is_strong_gateway_token
+    // requires a non-empty body), so it is a broken literal, not a reference.
+    writeToken(TOKEN);
+    const { cfg, changed } = reconcile({
+      models: { providers: { llamacpp: llamacpp("${}") } },
+    });
+
+    expect(changed).toBe(true);
+    expect(providerOf(cfg, "llamacpp").apiKey).toBe(TOKEN);
+  });
+
   // --- entries that are not ours ----------------------------------------
 
   it("leaves an operator's own llama-server on loopback alone", () => {

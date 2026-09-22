@@ -1053,6 +1053,50 @@ describe("openclaw-config", () => {
       expect(written.models.providers.llamacpp.apiKey).toBe(getLocalAiToken());
     });
 
+    it("does not flatten a key that resolves elsewhere into a literal", async () => {
+      // OpenClaw accepts a `${VAR}` interpolation and a SecretRef object as
+      // credentials, and this function can resolve neither — so it cannot tell
+      // a stale one from a current one, and overwriting would destroy a working
+      // configuration that is deliberately indirect.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: {
+              baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+              apiKey: "${LOCAL_AI_TOKEN}",
+            },
+            ollama: {
+              baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama",
+              apiKey: { source: "file", provider: "ollama", id: "local-ai-token" },
+            },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(false);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it("still takes the bearer when the URL itself is being moved onto the proxy", async () => {
+      // The bearer travels WITH the URL: an entry adopted from somebody else's
+      // endpoint has a credential that is wrong whatever its shape, so the
+      // reference above must not become a way to keep a foreign key beside our
+      // proxy.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: { baseUrl: "http://127.0.0.1:8080/v1", apiKey: "${THEIR_TOKEN}" },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(true);
+
+      const { getLocalAiToken } = await import("@/lib/local-ai-token");
+      const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+      expect(written.models.providers.llamacpp.apiKey).toBe(getLocalAiToken());
+    });
+
     it("still refuses a drifted entry that carries a model row on another host", async () => {
       // The bearer is provider-wide, so refreshing it here would mail the NEW
       // token to that host on every turn of that row. A box that cannot answer
