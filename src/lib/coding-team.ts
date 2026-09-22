@@ -21,8 +21,10 @@
  * Guardrails (v0): the board refuses any message its sender's role may not
  * send and logs the refusal; a worker that hit a permission denial, or that
  * touched files outside its task's files_hint, raises an ALERT; after
- * MAX_ALERTS the team stops. A failed task fails the team unless other
- * tasks can still run; a task the reviewer rejects is re-posted once.
+ * MAX_ALERTS the team stops (a reviewer that could not start is alerted but
+ * not counted; one that waits for room is neither). A failed task fails the
+ * team unless other tasks can still run; a task the reviewer rejects is
+ * re-posted once.
  *
  * A team lives in this process; its board is on disk after every message.
  * A team the web server was restarted under is settled as failed on the
@@ -45,6 +47,7 @@ import {
   waitForRun,
   type CodingRun,
   type CodingRunSource,
+  type RunTeam,
 } from "@/lib/coding-agent";
 import { RUNNER_STEP } from "@/lib/coding-agent-progress";
 import { RunMessageError, teammatePrefix } from "@/lib/coding-run-messages";
@@ -95,6 +98,8 @@ const WAIT_SLICE_MS = 60_000;
 const SLOT_WAIT_MS = 15_000;
 /** How often a run that is HELD (paused by the owner) is looked at again. */
 const HELD_POLL_MS = 2_000;
+/** How often a reviewer waiting for room (the team's slots, the memory guard) asks again. */
+const REVIEWER_SLOT_POLL_MS = 3_000;
 /** A planner or a worker that has not settled by then is stopped and the team failed. */
 export const RUN_BUDGET_MS = 60 * 60_000;
 /** Sibling results quoted into a worker's task are cut here each. */
@@ -129,6 +134,13 @@ interface LiveTeam {
    * sends in flight cannot both take the last slot.
    */
   pendingMessages: Map<string, number>;
+  /**
+   * Alerts that do not count toward MAX_ALERTS: a reviewer that could not
+   * start is a review missed, not the team's work going wrong. Two of them
+   * and one real alert failed a team whose every deliverable was on disk
+   * (bench, 2026-09-22).
+   */
+  uncountedAlerts: number;
   done: Promise<void>;
 }
 
@@ -171,7 +183,7 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   const board = createBoard({ goal, projectId, directory, source: input.source }, input.source === "owner" ? OWNER : SYSTEM);
   saveBoard(board);
   const bus = new TeamBus(board);
-  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), done: Promise.resolve() };
+  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, done: Promise.resolve() };
   live.set(board.id, team);
   team.done = runTeam(team, input.source)
     .catch((err) => {
@@ -555,8 +567,9 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // shut out a valid third.
   const starting = new Set<string>();
   while (!team.stopRequested) {
-    if (board.alerts >= MAX_ALERTS) {
-      setTeamStatus(board, SYSTEM, "failed", `Stopped after ${board.alerts} alerts.`);
+    const counted = board.alerts - team.uncountedAlerts;
+    if (counted >= MAX_ALERTS) {
+      setTeamStatus(board, SYSTEM, "failed", `Stopped after ${counted} alerts.`);
       saveBoard(board);
       break;
     }
@@ -634,7 +647,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   let run: CodingRun;
   try {
     run = await startRun({
-      task: workerTask(board, task),
+      task: workerTask(board, task, worktree?.path ?? null),
       projectId: worktree ? null : board.projectId,
       directory,
       source,
@@ -728,23 +741,58 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   }
 }
 
-/** The reviewer's run and its verdict; the rule's acceptance when the run cannot say. */
+/**
+ * The reviewer's run and its verdict; the rule's acceptance when the run cannot say.
+ *
+ * A reviewer refused for ROOM — the team's slots are full, the memory guard
+ * says not yet — WAITS for it, asking again every few seconds up to the run
+ * budget: room frees as a sibling settles. Accepting by rule there skipped
+ * the review of a task that only finished at a busy moment, and its alert
+ * helped fail a team whose work was all verified (bench, 2026-09-22). Only a
+ * refusal that cannot clear on its own — a stranger's run on the box, the
+ * switch off — is "no reviewer": accepted by rule, with an alert the
+ * ceiling does not count.
+ */
 async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, work: { files: string[]; report: string }): Promise<{ verdict: "accepted" | "rejected"; notes: string }> {
   const { board, bus } = team;
-  let run: CodingRun;
-  try {
-    run = await startRun({
-      task: reviewerTask({ taskId: task.task_id, description: task.task_description, files: work.files, report: work.report, goal: board.goal }),
-      projectId: board.projectId,
-      directory: board.directory,
-      source,
-      team: { id: board.id, role: "reviewer", taskId: task.task_id },
-      readOnly: true,
-      extraBrief: REVIEWER_BRIEF,
-    });
-  } catch (err) {
-    bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No reviewer for ${task.task_id}: ${err instanceof Error ? err.message : String(err)}` });
+  const role: RunTeam = { id: board.id, role: "reviewer", taskId: task.task_id };
+  const start = async (): Promise<CodingRun | { reason: string; wait: boolean }> => {
+    // The orchestrator's own look first, as for a worker; the spawn asks
+    // again, and a refusal there that is still about room is the same wait.
+    const room = await teamSpawnSlot(role);
+    if (!room.ok) return room;
+    try {
+      return await startRun({
+        task: reviewerTask({ taskId: task.task_id, description: task.task_description, files: work.files, report: work.report, goal: board.goal }),
+        projectId: board.projectId,
+        directory: board.directory,
+        source,
+        team: role,
+        readOnly: true,
+        extraBrief: REVIEWER_BRIEF,
+      });
+    } catch (err) {
+      return { reason: err instanceof Error ? err.message : String(err), wait: err instanceof CodingAgentError && err.wait };
+    }
+  };
+  const noReviewer = (reason: string): { verdict: "accepted"; notes: string } => {
+    team.uncountedAlerts += 1;
+    bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No reviewer for ${task.task_id}: ${reason}` });
     return { verdict: "accepted", notes: "Accepted by rule: the reviewer could not start." };
+  };
+
+  const waitingSince = Date.now();
+  let run: CodingRun;
+  for (;;) {
+    // Never posted: the caller drops the verdict of a stopped team.
+    if (team.stopRequested) return { verdict: "accepted", notes: "The team was stopped before the review." };
+    const started = await start();
+    if ("id" in started) { run = started; break; }
+    if (!started.wait) return noReviewer(started.reason);
+    if (Date.now() - waitingSince >= RUN_BUDGET_MS) {
+      return noReviewer(`no room for ${Math.round(RUN_BUDGET_MS / 60_000)} minutes (${started.reason})`);
+    }
+    await sleep(REVIEWER_SLOT_POLL_MS);
   }
   const row = board.tasks.find((t) => t.task_id === task.task_id);
   if (row) row.reviewRunId = run.id;
@@ -806,8 +854,11 @@ async function settle(team: LiveTeam, runId: string): Promise<CodingRun | null> 
 
 // ─── Words ───────────────────────────────────────────────────────────────────
 
-/** One worker's task text: the goal, its own task, what teammates did, where to work. */
-export function workerTask(board: TeamBoard, task: TeamTask): string {
+/**
+ * One worker's task text: the goal, its own task, what teammates did, where to work.
+ * `folder` is the worker's own worktree, when it has one.
+ */
+export function workerTask(board: TeamBoard, task: TeamTask, folder: string | null = null): string {
   const done = board.tasks
     .filter((t) => t.task_id !== task.task_id && t.status === "complete" && t.result)
     .map((t) => `- ${t.task_id}: ${firstLine(t.result ?? "", RESULT_QUOTE_CHARS)}`);
@@ -818,6 +869,14 @@ export function workerTask(board: TeamBoard, task: TeamTask): string {
     `Your task (${task.task_id} of ${board.tasks.length}): ${task.task_description}`,
     `Team goal: ${board.goal}`,
   ];
+  // The hint is relative to the project, and a worker in a worktree took it
+  // as relative to the project folder: it read `<project>/styles.css`, was
+  // refused (the run is contained to its worktree), and the refusal was an
+  // alert (bench, 2026-09-22). Its own folder is named, and every path is
+  // said to be relative to it.
+  if (folder && folder !== board.directory) {
+    parts.push(`Your folder: ${folder} — your own working copy of the project. Every path in this task, the files below included, is relative to it; read and write there, never in ${board.directory} itself.`);
+  }
   if (task.files_hint.length) parts.push(`Files this task is expected to touch: ${task.files_hint.join(", ")}`);
   if (done.length) parts.push(`Already done by teammates:\n${done.join("\n")}`);
   if (task.attempts > 0 && task.review?.verdict === "rejected") parts.push(`A previous attempt was rejected: ${task.review.notes}`);

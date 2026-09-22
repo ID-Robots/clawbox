@@ -925,7 +925,10 @@ may not send — only the planner posts tasks, only the assigned worker moves
 one or submits a result, only the reviewer rules, only the owner stops — and
 logs every accepted message and every refusal (the audit trail). A worker
 that hit a permission denial or strayed outside its files raises an ALERT;
-three alerts stop the team. `coding_team_run` is for a goal that spans
+three alerts stop the team. A reviewer the box has no room for yet waits
+for room rather than being skipped; one that cannot start at all (another
+run holds the box, the switch is off) is an alert that does not count
+toward the three. `coding_team_run` is for a goal that spans
 several parts; `coding_agent_run` is still the tool for one focused change.
 `coding_team_status` answers the plan, each task's status, worker, reviewer
 and result, the alerts, the team's branch, `agents` (planner, workers,

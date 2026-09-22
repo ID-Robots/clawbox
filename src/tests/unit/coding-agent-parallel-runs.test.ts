@@ -22,6 +22,9 @@ vi.setConfig({ testTimeout: 40_000, hookTimeout: 40_000 });
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
 vi.mock("@/lib/browser-sessions", () => ({ closeSessionsForRun: vi.fn(async () => 0) }));
 vi.mock("@/lib/project-icon", () => ({ ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })) }));
+// A roomy box for a team's second run: the memory guard reads MemAvailable,
+// and the host's own is neither the fixture nor the same on every runner.
+vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
 
 type Lib = typeof import("@/lib/coding-agent");
 
@@ -245,6 +248,50 @@ describe("how many runs at once", () => {
       .rejects.toMatchObject({ kind: "busy" });
     fs.writeFileSync(flag, "go");
     await finished(a.id);
+  });
+
+  /**
+   * Bench, 2026-09-22: 5 of 6 teams lost a review to "Another coding run … is
+   * already working in that folder" — the team's own sibling, read as a
+   * stranger. A team's runs share the project; the orchestrator decides who
+   * writes where.
+   */
+  it("lets a team's reviewer start in the project beside a live run of the SAME team, and still refuses a run of no team there", async () => {
+    const flag = path.join(base, "go");
+    installWrapper([`echo '${result("done")}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+    makePlainProject("plain");
+    // Room for all three, so only the folder rule is in the way.
+    await lib.setMaxParallelRuns(4);
+    const team = "team-aaaa0001";
+    const first = await lib.startRun({ task: "review t1", directory: "plain", source: "owner", readOnly: true, team: { id: team, role: "reviewer", taskId: "t1" } });
+    const second = await lib.startRun({ task: "review t2", directory: "plain", source: "owner", readOnly: true, team: { id: team, role: "reviewer", taskId: "t2" } });
+    expect(second.status).toBe("running");
+    expect(second.directory).toBe(first.directory);
+    await expect(lib.startRun({ task: "mine", directory: "plain", source: "owner" }))
+      .rejects.toMatchObject({ kind: "busy", message: expect.stringMatching(/Another coding run \(run-\w+\) is already working in that folder/) });
+    fs.writeFileSync(flag, "go");
+    await finished(first.id);
+    await finished(second.id);
+  });
+
+  it("names the live run that holds a folder: the team's own never, a stranger's or another team's always", () => {
+    const dir = "/home/clawbox/Projects/site";
+    const mine = { id: "run-aaaaaaaa", status: "running" as const, directory: dir, team: { id: "team-aaaa0001", role: "worker" as const, taskId: "t1" } };
+    const foreign = { id: "run-bbbbbbbb", status: "running" as const, directory: dir, team: { id: "team-bbbb0002", role: "worker" as const, taskId: "t1" } };
+    const loner = { id: "run-cccccccc", status: "running" as const, directory: dir, team: null };
+    const reviewer = { id: "team-aaaa0001", role: "reviewer" as const, taskId: "t2" };
+    // Only the same team live: a reviewer of that team may start.
+    expect(lib.folderHolder([mine], dir, reviewer)).toBeNull();
+    // Same team AND another team live: the other team holds it.
+    expect(lib.folderHolder([mine, foreign], dir, reviewer)?.id).toBe("run-bbbbbbbb");
+    // A run of no team holds it against a team.
+    expect(lib.folderHolder([mine, loner], dir, reviewer)?.id).toBe("run-cccccccc");
+    // …and a run of no team is held off by any live run, a team's included.
+    expect(lib.folderHolder([mine], dir, null)?.id).toBe("run-aaaaaaaa");
+    // Settled runs, other folders and the run itself (a resume) hold nothing.
+    expect(lib.folderHolder([{ ...foreign, status: "completed" as const }], dir, reviewer)).toBeNull();
+    expect(lib.folderHolder([{ ...foreign, directory: `${dir}/.clawbox/worktrees/t1-1` }], dir, reviewer)).toBeNull();
+    expect(lib.folderHolder([loner], dir, null, "run-cccccccc")).toBeNull();
   });
 });
 
