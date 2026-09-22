@@ -400,7 +400,13 @@ describe("the MCP server's idle self-exit", () => {
     // false`.
     const h = await connected();
     expect(hasRunningJobs()).toBe(false);
-    const job = startJob("sleep 20", 20_000, "held open by this test", process.cwd(), false);
+    // Short, and left to FINISH ON ITS OWN rather than killed. `stopJob` writes
+    // `status = "failed"` synchronously, so killing it would put the registry
+    // where this case wants it before the wait below had looked once — proving
+    // nothing about the transition production actually depends on — and it
+    // would leave the job's own hard timer pending for its whole period, since
+    // `settle()` returns early once the status has already moved.
+    const job = startJob("sleep 1", 5_000, "held open by this test", process.cwd(), false);
     started.push(job);
     expect(hasRunningJobs()).toBe(true);
 
@@ -409,8 +415,7 @@ describe("the MCP server's idle self-exit", () => {
     expect(exits()).toBe(0);
     expect(clock.pending()).toBe(1);
 
-    stopJob(job);
-    await until(() => !hasRunningJobs(), "the killed job to be reaped");
+    await until(() => !hasRunningJobs(), "the job to end and the registry to mark it done");
 
     clock.advance(IDLE_MS - 1);
     expect(exits()).toBe(0);

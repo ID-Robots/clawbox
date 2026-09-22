@@ -59,8 +59,9 @@ itself. Ten minutes after the last **inbound JSON-RPC message** — a request, o
 a bare notification; anything the harness sends puts the clock back — and only
 if no request is in flight, it writes one line to stderr —
 `[clawbox-mcp] idle for 600s with no request in flight; exiting so the harness
-reconnects on the next call` — closes its transport and exits 0. Both harnesses treat that as an ordinary disconnect and reconnect on
-the next call (OpenClaw's gateway logs `[bundle-mcp] server "clawbox" closed;
+reconnects on the next call` — closes its transport and exits 0. Both harnesses
+treat that as an ordinary disconnect and reconnect on the next call (OpenClaw's
+gateway logs `[bundle-mcp] server "clawbox" closed;
 next request reconnects`); the reconnect costs 0.31–0.35 s to connect plus
 0.02 s to re-list the tools, paid once by whoever comes back after a long pause.
 The rule is edition-neutral — the same process, the same reconnect on Hermes —
