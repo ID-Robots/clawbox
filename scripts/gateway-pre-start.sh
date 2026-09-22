@@ -1587,6 +1587,188 @@ elif _wants_llamacpp and _llamacpp_gaps:
                     + ", ".join(_llamacpp_model_ids)
                 )
 
+# Reconciliation: models.providers.{llamacpp,ollama}.apiKey vs data/.local-ai-token.
+#
+# The repair above fires only on a SCHEMA GAP — no `baseUrl`, or a `models` list
+# OpenClaw would reject. An entry that is complete and merely STALE has no gap,
+# so until now nothing re-pointed its bearer, and a rebuilt board came up mute:
+# `data/.local-ai-token` is minted at first boot (same second as `.mcp-token`
+# and `.session-secret`) while the openclaw.json restored beside it still
+# carries the token of the image it was built from. The proxy validates
+# `Authorization` against that file (verifyLocalAiBearer, src/lib/local-ai-token.ts)
+# and answers 401 to everything else, so EVERY agent turn on the local model
+# dies before the model is ever reached and the web chat shows an
+# authentication error. Re-saving the provider through
+# POST /setup-api/ai-models/configure repaired it by hand, because that route
+# writes getLocalAiToken(); nothing did it on boot.
+#
+# This is for the two local providers exactly what the `mcp.servers.clawbox`
+# block near MCP_TOKEN_FILE is for the MCP bearer: a rotated secret cannot be
+# allowed to leave the config pointing at the previous one. Unlike the repair
+# above it runs on EVERY boot and does not care whether the entry is otherwise
+# complete — staleness is the whole failure mode.
+#
+# Bounded tightly on purpose, and only ever narrower than the repair above:
+#
+#   * ONLY an entry already pointing at THIS box's local-AI proxy. That is the
+#     one endpoint for which this file is the credential; an operator's own
+#     llama-server or ollama on loopback keeps the key they gave it. A baseUrl
+#     is never written here — a wrong endpoint is the repair's business.
+#   * NEVER over a missing or too-short token file. Writing "" would turn a key
+#     that might still be working into one that certainly is not.
+#   * NEVER onto an entry carrying a model row on another host: `apiKey` is
+#     PROVIDER-WIDE (OpenClaw resolves a row as `model.baseUrl ?? provider.baseUrl`
+#     and has no per-model credential slot), so such a row would be mailed this
+#     box's token on every turn. Same rule, same reason, as the repair above.
+#
+# Self-contained rather than sharing the repair's helpers: each of these regions
+# is extracted and executed on its own by its regression suite, which is also
+# why the OpenRouter repair further down repeats what it repeats.
+import urllib.parse as _lai_url
+
+_LAI_PROVIDERS = ("llamacpp", "ollama")
+
+
+def _lai_host(_raw):
+    try:
+        return (_lai_url.urlsplit(_raw).hostname or "").lower() or None
+    except ValueError:
+        return None
+
+
+def _lai_proxy_hosts():
+    """Loopback, plus the authority of an explicitly configured proxy root.
+
+    CLAWBOX_LOCAL_AI_PROXY_BASE_URL lives in $CLAWBOX_ROOT/.env, and NEITHER
+    gateway unit loads that file (see the longer note in the repair above), so
+    reading the process environment alone would miss it — and a box with a
+    custom proxy root would go on drifting with nothing said. One key is read,
+    never the whole file into the gateway's environment. The bare except is the
+    same precaution the repair takes: .env is clawbox-writable, and one
+    undecodable byte in it must not fail ExecStartPre under `set -euo pipefail`.
+    """
+    _hosts = {"127.0.0.1", "localhost", "::1"}
+    _root = (os.environ.get("CLAWBOX_LOCAL_AI_PROXY_BASE_URL") or "").strip()
+    if not _root:
+        try:
+            with open(os.path.join(_clawbox_root, ".env"), encoding="utf-8", errors="replace") as _lai_ef:
+                for _lai_line in _lai_ef:
+                    _lai_line = _lai_line.strip()
+                    if _lai_line.startswith("export "):
+                        _lai_line = _lai_line[len("export "):].strip()
+                    _lai_key, _, _lai_value = _lai_line.partition("=")
+                    if _lai_key.strip() != "CLAWBOX_LOCAL_AI_PROXY_BASE_URL":
+                        continue
+                    _lai_value = _lai_value.strip()
+                    if (
+                        len(_lai_value) >= 2
+                        and _lai_value[0] == _lai_value[-1]
+                        and _lai_value[0] in ("'", '"')
+                    ):
+                        _lai_value = _lai_value[1:-1]
+                    _root = _lai_value.strip()
+        except Exception:
+            _root = ""
+    if _root:
+        _root_host = _lai_host(_root)
+        if _root_host:
+            _hosts.add(_root_host)
+    return _hosts
+
+
+def _lai_is_our_proxy(_base_url, _provider_id, _hosts):
+    """OUR proxy for THIS provider — not merely something on loopback.
+
+    getLocalAiProxyBaseUrl() writes `<root>/setup-api/local-ai/<provider>` for
+    ollama and the same with a `/v1` suffix for llamacpp, so the path is what
+    separates our proxy from the operator's own `http://127.0.0.1:8080/v1`. The
+    segment boundary stops `/setup-api/local-ai/ollama-of-theirs` from passing
+    as `ollama`.
+    """
+    if _lai_host(_base_url) not in _hosts:
+        return False
+    try:
+        _path = _lai_url.urlsplit(_base_url).path or ""
+    except ValueError:
+        return False
+    _prefix = "/setup-api/local-ai/" + _provider_id
+    return _path == _prefix or _path.startswith(_prefix + "/")
+
+
+def _lai_row_on_another_host(_entry, _hosts):
+    # A row without an id is skipped: ModelDefinitionSchema requires a non-empty
+    # one, so it can never route a turn and can never receive the bearer. A URL
+    # that will not parse counts as foreign — guessing permissively is the wrong
+    # way to be wrong about a credential.
+    _rows = _entry.get("models")
+    for _lai_row in _rows if isinstance(_rows, list) else []:
+        if not isinstance(_lai_row, dict):
+            continue
+        _lai_rid = _lai_row.get("id")
+        if not (isinstance(_lai_rid, str) and _lai_rid.strip()):
+            continue
+        _lai_rb = _lai_row.get("baseUrl")
+        if not (isinstance(_lai_rb, str) and _lai_rb.strip()):
+            continue
+        if _lai_host(_lai_rb.strip()) not in _hosts:
+            return True
+    return False
+
+
+# Containers are READ, never created: a box with no `models.providers` has no
+# local provider to reconcile, and adding an empty one would be an edit to a
+# config this block was not asked to change.
+_lai_models = cfg.get("models")
+_lai_providers = _lai_models.get("providers") if isinstance(_lai_models, dict) else None
+if isinstance(_lai_providers, dict):
+    _lai_token_file = os.path.join(_clawbox_root, "data", ".local-ai-token")
+    try:
+        with open(_lai_token_file) as _lai_tf:
+            _lai_token = _lai_tf.read().strip()
+    except OSError:
+        _lai_token = ""
+    _lai_hosts = _lai_proxy_hosts()
+
+    for _lai_provider in _LAI_PROVIDERS:
+        _lai_entry = _lai_providers.get(_lai_provider)
+        if not isinstance(_lai_entry, dict):
+            continue
+        _lai_base = _lai_entry.get("baseUrl")
+        if not (isinstance(_lai_base, str) and _lai_base.strip()):
+            continue
+        if not _lai_is_our_proxy(_lai_base.strip(), _lai_provider, _lai_hosts):
+            continue
+        if _lai_entry.get("apiKey") == _lai_token:
+            continue
+        # The token itself is never printed, here or in the warning below: the
+        # journal keeps what it is given, and this is the credential the whole
+        # local-AI path turns on.
+        if len(_lai_token) < 16:
+            print(
+                "  WARN: models.providers." + _lai_provider + " points at this"
+                " box's local-AI proxy but " + _lai_token_file + " is missing or"
+                " too short to be a token this box wrote, so the configured key"
+                " is left as it is — the proxy will answer 401 to every turn of"
+                " the local model until that file is restored."
+            )
+            continue
+        if _lai_row_on_another_host(_lai_entry, _lai_hosts):
+            print(
+                "  Skipped the models.providers." + _lai_provider + ".apiKey"
+                " reconciliation: a model row under it names its own baseUrl on"
+                " another host, and this entry's key is the bearer for every row"
+                " of the entry. Remove that row's baseUrl, or give it one on this"
+                " box, to have the key refreshed on boot."
+            )
+            continue
+        _lai_entry["apiKey"] = _lai_token
+        changed = True
+        print(
+            "  Reconciled models.providers." + _lai_provider + ".apiKey with"
+            " data/.local-ai-token: the entry points at this box's local-AI"
+            " proxy, which accepts only the current bearer."
+        )
+
 # Model migration: legacy ChatGPT-subscription devices can have their active
 # model — or a fallback — stored as `openai/<gpt>` from before the setup UI
 # routed ChatGPT picks through Codex. On a device with ChatGPT (Codex OAuth)

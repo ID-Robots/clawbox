@@ -979,12 +979,21 @@ describe("openclaw-config", () => {
       await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(true);
     });
 
-    it("skips writes when local AI providers already point at the proxy", async () => {
+    it("skips writes when the entries are on the proxy AND carry the current bearer", async () => {
+      // Both halves matter. The URL alone used to end this function, which is
+      // exactly how a drifted key survived every boot — see the case below.
+      const { getLocalAiToken } = await import("@/lib/local-ai-token");
       mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
         models: {
           providers: {
-            llamacpp: { baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1" },
-            ollama: { baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama" },
+            llamacpp: {
+              baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+              apiKey: getLocalAiToken(),
+            },
+            ollama: {
+              baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama",
+              apiKey: getLocalAiToken(),
+            },
           },
         },
       }) as never);
@@ -992,6 +1001,75 @@ describe("openclaw-config", () => {
       const changed = await openclawConfig.ensureLocalAiProxyUrls();
 
       expect(changed).toBe(false);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it("refreshes a bearer that drifted under an entry already on the proxy", async () => {
+      // data/.local-ai-token is reminted at first boot of a rebuilt image while
+      // the openclaw.json restored beside it still carries the token of the
+      // image it was built from. The URL needs no repair, so this function
+      // answered "already ours, nothing to do" and the proxy went on 401ing
+      // every turn of the local model before the model was ever reached.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: {
+              baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+              apiKey: "a-token-from-the-previous-image",
+            },
+            ollama: {
+              baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama",
+              apiKey: "a-token-from-the-previous-image",
+            },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(true);
+
+      const { getLocalAiToken } = await import("@/lib/local-ai-token");
+      const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+      expect(written.models.providers.llamacpp.apiKey).toBe(getLocalAiToken());
+      expect(written.models.providers.ollama.apiKey).toBe(getLocalAiToken());
+      // ...and the URL it was already using is not disturbed on the way.
+      expect(written.models.providers.llamacpp.baseUrl)
+        .toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
+      expect(written.models.providers.ollama.baseUrl)
+        .toBe("http://127.0.0.1/setup-api/local-ai/ollama");
+    });
+
+    it("gives the bearer to an entry on the proxy that carries none", async () => {
+      // No Authorization header at all is the same 401 as the wrong one.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: { llamacpp: { baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1" } },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(true);
+
+      const { getLocalAiToken } = await import("@/lib/local-ai-token");
+      const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+      expect(written.models.providers.llamacpp.apiKey).toBe(getLocalAiToken());
+    });
+
+    it("still refuses a drifted entry that carries a model row on another host", async () => {
+      // The bearer is provider-wide, so refreshing it here would mail the NEW
+      // token to that host on every turn of that row. A box that cannot answer
+      // is the lesser of the two.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: {
+              baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+              apiKey: "a-token-from-the-previous-image",
+              models: [{ id: "remote", baseUrl: "https://models.example.net/v1" }],
+            },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(false);
       expect(mockFs.writeFile).not.toHaveBeenCalled();
     });
   });
