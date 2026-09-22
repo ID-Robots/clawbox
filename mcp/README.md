@@ -55,10 +55,11 @@ own lifetime, so nothing reaped them: measured on a v4.0.0 box, three turns on
 three keys left three `bun run mcp/clawbox-mcp.ts` processes alive — still all
 there after 90 s of silence — and a ten-prompt run left nine of them resident at
 63–70 MB each, cleared only by restarting the gateway. So the server ends
-itself. Ten minutes after the last request, with nothing in flight, it writes
-one line to stderr — `[clawbox-mcp] idle for 600s with no request in flight;
-exiting so the harness reconnects on the next call` — closes its transport and
-exits 0. Both harnesses treat that as an ordinary disconnect and reconnect on
+itself. Ten minutes after the last **inbound JSON-RPC message** — a request, or
+a bare notification; anything the harness sends puts the clock back — and only
+if no request is in flight, it writes one line to stderr —
+`[clawbox-mcp] idle for 600s with no request in flight; exiting so the harness
+reconnects on the next call` — closes its transport and exits 0. Both harnesses treat that as an ordinary disconnect and reconnect on
 the next call (OpenClaw's gateway logs `[bundle-mcp] server "clawbox" closed;
 next request reconnects`); the reconnect costs 0.31–0.35 s to connect plus
 0.02 s to re-list the tools, paid once by whoever comes back after a long pause.
@@ -71,7 +72,11 @@ once but leaves a detached shell whose handle and output live in this process,
 so the period simply starts again, as often as it takes, until `job_status`
 would call that job finished. (`bash` exists only where
 `CLAWBOX_MCP_CODING_TOOLS=1` registered the coding family; on a device in its
-shipped state there is no job to defer for, and the period always runs out.) Set
+shipped state there is no job to defer for, and the period always runs out.) And
+so does a **cancelled call whose handler has not stopped**: the host is sent no
+answer and the server lets go of the request id, but the abort the SDK raises is
+never handed to the handler, so the write or the fetch it is in the middle of
+keeps the process here until it settles. Set
 `CLAWBOX_MCP_IDLE_EXIT_MS` to another number of milliseconds to move it, or to
 `0` to switch it off and keep every server for the life of the harness.
 
@@ -1246,7 +1251,7 @@ and it drags server-only Next.js code into this stdio process.
 | `CLAWBOX_MCP_PROFILE` | `full` (default), `core` or `browser` pins the tool set (`browser` = the browser family only — what a delegated coding-agent run gets); `auto` makes it FOLLOW THE MODEL — a device whose active provider is the on-device one and whose model is small (≤8B, or a ≤16k context) registers `core`, everything else `full`. `auto` is opt-in because this process sees only the persisted provider, not the chat header's per-turn override. See `mcp/lib/profile.ts` and `docs/hermes-reasoning-levels.md`. |
 | `CLAWBOX_SMALL_MODEL_PROFILE` | `off` disables the `auto` selection above (the explicit pins still work). |
 | `CLAWBOX_MCP_CODING_TOOLS` | `1` registers the coding family — `bash`, `job_status`, `job_stop`, `read_file`, `write_file`, `edit_file`, `notebook_edit`, `web_fetch`, `web_search` — on **every** edition. Unset (the shipped state) they are registered on none, because both harnesses already ship a shell and file tools and the duplicates cost ≈ 12.5 KB of `tools/list` for prompts that chose the built-ins six times out of six. `list_directory`, `glob` and `grep` are *not* behind it on OpenClaw — see "Coding family". Read at registration time by this process, so it belongs in the server's own `env` block (Settings → MCP, or the Harness page), followed by a harness restart; `scripts/gateway-pre-start.sh` does not set it. |
-| `CLAWBOX_MCP_IDLE_EXIT_MS` | Milliseconds with **no request in flight** after which the server closes its transport and exits 0, so the harness reconnects on the next call. Default `600000` (10 min); `0` disables it. A value that is not a non-negative number falls back to the default rather than to `0`, and anything past `2147483647` (24.8 days, the longest delay a timer can hold — both runtimes turn a larger one into 1 ms) is clamped to it, so a bigger number never means a shorter wait. See "The server hangs up when it is idle". |
+| `CLAWBOX_MCP_IDLE_EXIT_MS` | Milliseconds with **no inbound JSON-RPC traffic and no request in flight** after which the server closes its transport and exits 0, so the harness reconnects on the next call. Default `600000` (10 min); `0` disables it. A value that is not a non-negative number falls back to the default rather than to `0`, and anything past `2147483647` (24.8 days, the longest delay a timer can hold — both runtimes turn a larger one into 1 ms) is clamped to it, so a bigger number never means a shorter wait. See "The server hangs up when it is idle". |
 
 ## Work owned by others
 

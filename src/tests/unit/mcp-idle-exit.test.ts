@@ -11,10 +11,15 @@
  *
  * What is held here is the rule, not the number: every request resets the
  * clock, a request still in flight defers the exit for as long as it runs (a
- * `bash` command that sleeps past the period must not be cut off), `0` disables
- * the whole thing, and arming it leaves any close handler already installed —
- * `armMailboxWatch`'s — still running. The clock is injected, so none of it
- * waits on a real timer.
+ * `bash` command that sleeps past the period must not be cut off), a CANCELLED
+ * request gives its id back but still defers while its handler runs on — the
+ * SDK's abort never reaches a handler — `0` disables the whole thing, and
+ * arming it leaves any close handler already installed — `armMailboxWatch`'s —
+ * still running.
+ *
+ * The idle clock is injected, so no case waits out a period. The one real wait
+ * in the file is a real background job being reaped, in the case that holds the
+ * production `busy` default: injecting that one would prove nothing about it.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -36,8 +41,8 @@ import {
   resolveIdleExitMs,
   type IdleExit,
 } from "../../../mcp/clawbox-mcp";
-import { hasRunningJobs } from "../../../mcp/lib/jobs";
-import { createRegistrar } from "../../../mcp/lib/register";
+import { hasRunningJobs, startJob, stopJob, type BgJob } from "../../../mcp/lib/jobs";
+import { createRegistrar, hasActiveToolCalls } from "../../../mcp/lib/register";
 import { registerEmailTools } from "../../../mcp/tools/email";
 
 const IDLE_MS = 60_000;
@@ -105,8 +110,22 @@ type Harness = {
 };
 
 const open: Harness[] = [];
+/** Real background jobs a case started, stopped here however the case ended. */
+const started: BgJob[] = [];
+
+/** Poll a real condition on the real clock. The injected clock drives nothing here. */
+async function until(ok: () => boolean, what: string, ms = 10_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!ok()) {
+    if (Date.now() > deadline) throw new Error(`timed out after ${ms}ms waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 
 afterEach(async () => {
+  for (const job of started.splice(0)) {
+    if (job.status === "running") stopJob(job);
+  }
   for (const h of open.splice(0)) {
     await h.close().catch(() => {});
   }
@@ -124,6 +143,12 @@ afterEach(async () => {
  * `slow` is a tool whose handler waits on a gate the test opens, which is the
  * only honest way to hold a request "in flight": the SDK decides when a
  * response goes out, and that decision is exactly what the deferral depends on.
+ *
+ * It is registered THROUGH THE REGISTRAR rather than straight onto the SDK,
+ * because mcp/lib/register.ts owns the tools/call dispatch on a real device and
+ * that dispatch is what counts a handler still running after its request was
+ * cancelled. A tool wired past it would let the cancellation case below pass
+ * over a server that exits out from under the work.
  */
 async function connected(): Promise<
   Harness & { openGate: () => void; gateWasOpened: () => boolean }
@@ -134,10 +159,12 @@ async function connected(): Promise<
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  server.registerTool("slow", { description: "waits until the test lets it go" }, async () => {
+  const reg = createRegistrar(server, "openclaw", "full");
+  reg.tool("slow", "Waits until the test lets it go.", {}, { readOnly: true }, async () => {
     await gate;
     return { content: [{ type: "text" as const, text: "woke" }] };
   });
+  reg.finalize();
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test-host", version: "0" });
@@ -289,11 +316,21 @@ describe("the MCP server's idle self-exit", () => {
     expect(exits()).toBe(1);
   });
 
-  it("releases a cancelled request, which the SDK never answers", async () => {
+  it("releases a cancelled request's id, and still waits for the handler it could not stop", async () => {
+    // Two rules meeting, and getting only the first of them right is a way to
+    // lose somebody's work.
+    //
     // `Protocol._onrequest` aborts a cancelled request and deliberately sends
-    // NOTHING back. An id left held by that would pin this process open for the
-    // life of the gateway — the exact shape the whole change exists to remove.
+    // NOTHING back, so an id left held by that would pin this process open for
+    // the life of the gateway — the exact shape the whole change exists to
+    // remove. It is released. But the abort the SDK raises is a signal
+    // `installCallHandler` never hands to the handler, so the handler runs ON:
+    // the `write_file` half-written, the `web_fetch` still open. Releasing the
+    // id and exiting on the next boundary would abandon it. `hasActiveToolCalls`
+    // is what still knows, and it defers exactly like a background job does.
     const h = await connected();
+    // No `busy` override anywhere in this case: it is the PRODUCTION default
+    // being asked, through the real dispatcher.
     const { idle, clock, exits } = arm(h);
 
     const abort = new AbortController();
@@ -306,9 +343,24 @@ describe("the MCP server's idle self-exit", () => {
     abort.abort(new Error("host gave up"));
     await expect(call).resolves.toBe("cancelled");
     await settle();
+    // The id is gone — nothing is waiting for an answer that will never come.
     expect(idle?.inFlight()).toBe(0);
+    expect(hasActiveToolCalls()).toBe(true);
 
-    clock.advance(IDLE_MS);
+    // And the process stays, period after period, while the handler is in it.
+    clock.advance(IDLE_MS * 5);
+    expect(exits()).toBe(0);
+    expect(h.gateWasOpened()).toBe(false);
+    expect(clock.pending()).toBe(1);
+
+    h.openGate();
+    await settle();
+    expect(hasActiveToolCalls()).toBe(false);
+
+    // Deferred by a whole period, so it goes at the next boundary and not before.
+    clock.advance(IDLE_MS - 1);
+    expect(exits()).toBe(0);
+    clock.advance(1);
     expect(exits()).toBe(1);
   });
 
@@ -338,10 +390,32 @@ describe("the MCP server's idle self-exit", () => {
     expect(exits()).toBe(1);
   });
 
-  it("asks about background jobs by default, so a caller cannot forget to", () => {
-    // The default is `hasRunningJobs`, not `() => false`: wiring it from
-    // main() instead would let the next caller orphan somebody's build.
+  it("asks the real job registry by default, so a caller cannot forget to", async () => {
+    // The default is `hasRunningJobs() || hasActiveToolCalls()`, not
+    // `() => false`, and wiring it from main() instead would let the next
+    // caller orphan somebody's build. Held with a REAL tracked job and NO
+    // `busy` override: a case that injected its own predicate proves the
+    // deferral works and says nothing about what production actually asks, so
+    // it would go on passing over a default that had quietly become `() =>
+    // false`.
+    const h = await connected();
     expect(hasRunningJobs()).toBe(false);
+    const job = startJob("sleep 20", 20_000, "held open by this test", process.cwd(), false);
+    started.push(job);
+    expect(hasRunningJobs()).toBe(true);
+
+    const { clock, exits } = arm(h);
+    clock.advance(IDLE_MS * 3);
+    expect(exits()).toBe(0);
+    expect(clock.pending()).toBe(1);
+
+    stopJob(job);
+    await until(() => !hasRunningJobs(), "the killed job to be reaped");
+
+    clock.advance(IDLE_MS - 1);
+    expect(exits()).toBe(0);
+    clock.advance(1);
+    expect(exits()).toBe(1);
   });
 
   it("does nothing at all when the period is 0", async () => {

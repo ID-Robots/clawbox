@@ -69,7 +69,7 @@ import { buildContext, type McpContext } from "./lib/context";
 import { installEdition, resolveAppHarness, resolveEdition, type Ed } from "./lib/edition";
 import { hasRunningJobs } from "./lib/jobs";
 import { resolveProfile } from "./lib/profile";
-import { createRegistrar, type Profile, type Registrar } from "./lib/register";
+import { createRegistrar, hasActiveToolCalls, type Profile, type Registrar } from "./lib/register";
 import { registerAiTools } from "./tools/ai";
 import { registerBrowserTools } from "./tools/browser";
 import { registerCodingTools } from "./tools/coding";
@@ -369,8 +369,10 @@ export interface IdleExitOptions {
   /** Overridden by tests only; production reads the env above. */
   idleMs?: number;
   /**
-   * Work this process owns that has no request outstanding. Defaults to
-   * `hasRunningJobs` — see the note on deferral in `armIdleExit`.
+   * Work this process owns that has no request outstanding: a running
+   * background job, or a handler still going after its request was cancelled.
+   * Defaults to `hasRunningJobs() || hasActiveToolCalls()` — see the note on
+   * deferral in `armIdleExit`.
    */
   busy?: () => boolean;
   /** The clock seam. Production uses `setTimeout`, `unref`ed. Tests pass a fake. */
@@ -428,7 +430,13 @@ export interface IdleExit {
  * without an answer (`Protocol._onrequest` aborts and deliberately sends
  * nothing), so `notifications/cancelled` releases its id by hand; without that,
  * one cancelled call would pin this process open for the life of the gateway,
- * which is the exact thing this function exists to stop.
+ * which is the exact thing this function exists to stop. RELEASING THE ID IS
+ * NOT THE WORK STOPPING, though: the abort the SDK raises is a signal
+ * `installCallHandler` never hands to a handler (mcp/lib/register.ts), so the
+ * cancelled write or fetch runs on with no id left to hold the clock down. That
+ * is the other half of `busy` — `hasActiveToolCalls()` counts the dispatches
+ * that have not settled, and the exit defers on them exactly as it defers on a
+ * background job, until the handler is actually done.
  *
  * `unref` for the same reason `watchEmailReadability` unrefs: a stdio server
  * exits when its transport closes, and nothing armed here may be the reason a
@@ -455,8 +463,9 @@ export function armIdleExit(
   const clearTimer =
     options.clearTimer ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   // Defaulted rather than wired from main(), so that a caller cannot forget it
-  // and orphan somebody's build.
-  const busy = options.busy ?? hasRunningJobs;
+  // and orphan somebody's build — or exit out from under a cancelled handler
+  // whose id this rule has already let go of.
+  const busy = options.busy ?? (() => hasRunningJobs() || hasActiveToolCalls());
   const log = options.log ?? ((line: string) => console.error(line));
   const exit =
     options.exit
