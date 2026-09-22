@@ -355,8 +355,16 @@ sudo chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
 # Where the rollback goes back to. A SHA is hex and nothing else; a branch name
 # git accepts can still hold characters the `bash -c` strings must not see, so
 # one outside the safe set is rolled back to as a detached HEAD instead.
+#
+# 40 hex digits (SHA-1) or 64 (SHA-256), with the length as an explicit test
+# rather than a bounded repeat `{40}`: `[[ =~ ]]` is glibc regex, which expands
+# one into an NFA state per repetition — the construct behind the 260 MB
+# TASK-1066 took out of scripts/run-tunnel.sh, which
+# src/tests/unit/shell-regex-hygiene.test.ts keeps out of every script. Same
+# accepted and rejected values as before.
 PREV_HEAD="$(run_as_clawbox "$GIT rev-parse --verify --quiet HEAD" 2>/dev/null || true)"
-if ! [[ "$PREV_HEAD" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+case "${#PREV_HEAD}" in 40|64) ;; *) PREV_HEAD="" ;; esac
+if ! [[ "$PREV_HEAD" =~ ^[0-9a-f]+$ ]]; then
   PREV_HEAD=""
   echo "[force-update] Warning: could not read the commit checked out now — a failed build cannot be rolled back" >&2
 fi
