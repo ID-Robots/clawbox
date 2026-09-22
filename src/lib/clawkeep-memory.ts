@@ -679,6 +679,13 @@ function identityChangedByUpdate(code: string): boolean {
 }
 
 /**
+ * Requested-provider values that name no provider at all, so the core picking
+ * one for itself cannot be a fallback. `none` is memory search switched off,
+ * which `health` already reports as unavailable.
+ */
+const PROVIDER_UNSPECIFIED = new Set(["", "auto", "default", "none"]);
+
+/**
  * Where the embedder runs, from the provider id the core reports.
  *
  * `openai-compatible` is one id for two things: ClawBox's own embedder behind
@@ -823,7 +830,21 @@ export async function parseMemoryStatus(
   // beside `provider` "ollama", and every surface used to show only the second
   // of those — so the panel named a model the owner never chose, and a full
   // reindex rebuilt the index with it.
-  const fellBack = Boolean(requestedProvider && provider && requestedProvider !== provider);
+  //
+  // A REQUEST THAT NAMED NO PROVIDER IS NOT ONE THAT WAS IGNORED. `auto` is a
+  // value this box's own boot script recognises and migrates
+  // (scripts/ensure-local-embeddings.sh, `""|auto|ollama`), and it means "pick
+  // one" — so the core resolving it to a concrete id is the configuration
+  // being honoured, not overridden. Called a fallback it would put an amber
+  // banner, a degraded chip and a "re-run setup" on the failure of every box
+  // that never pinned a provider. The comparison is case-insensitive for the
+  // same reason: a difference of spelling is not a difference of provider.
+  const fellBack = Boolean(
+    requestedProvider
+    && provider
+    && !PROVIDER_UNSPECIFIED.has(requestedProvider.toLowerCase())
+    && requestedProvider.toLowerCase() !== provider.toLowerCase(),
+  );
   const sources = Array.isArray(status.sources) ? status.sources.filter((v) => typeof v === "string") as string[] : [];
   const sourceCounts = Array.isArray(status.sourceCounts) ? status.sourceCounts : [];
   const sourceCount = sourceCounts.length || sources.length;
@@ -1298,9 +1319,16 @@ const INDEX_FAILED_FAILURE = {
  * customer checked it, found it healthy, and was left with a button that did
  * not help. Said here instead of left to the banner because the run line is
  * what a failed pass puts in front of the owner.
+ *
+ * DELIBERATELY NOT THE BANNER'S SENTENCE. The two fire together — the run code
+ * is decided from the same verdict the banner is drawn from — and the card
+ * showed the identical ninety characters twice, telling the owner to re-run
+ * setup in both. This one states what happened to the pass; the banner above it
+ * gives the instruction. It still stands alone, because a config put right
+ * between the pass and the render clears the banner and leaves this line.
  */
 const PROVIDER_MISMATCH_FAILURE = {
-  error: "Memory search is not using the embedding model you configured. Re-run Memory Shard setup.",
+  error: "Indexing failed: the embedding model in use is not the one you configured.",
   errorCode: "provider_mismatch" as const,
 };
 

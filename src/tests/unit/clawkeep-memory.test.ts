@@ -858,6 +858,25 @@ describe("an index the update left behind", () => {
     expect(status.errorCode).toBe("provider_mismatch");
   });
 
+  it("does not call a provider the config never pinned a fallback", async () => {
+    // `auto` is a value this box's own boot script recognises and migrates
+    // (scripts/ensure-local-embeddings.sh, `""|auto|ollama`). It means "pick
+    // one", so the core resolving it IS the configuration being honoured —
+    // and calling that a fallback would put an amber banner, a degraded chip
+    // and "re-run setup" on the failure of every box that never pinned one.
+    // The identity is left VALID: the point is that an otherwise healthy box
+    // stays healthy, so the assertion has to be able to tell the difference.
+    const status = await read(payloadWith({ status: "valid" }, { requestedProvider: "auto", provider: "ollama" }));
+    expect(status.errorCode).toBe("");
+    expect(status.health).toBe("healthy");
+  });
+
+  it("does not read a difference of spelling as a difference of provider", async () => {
+    const status = await read(payloadWith({ status: "valid" }, { requestedProvider: "Ollama", provider: "ollama" }));
+    expect(status.errorCode).toBe("");
+    expect(status.health).toBe("healthy");
+  });
+
   it("says nothing about a core that used the provider it was asked for", async () => {
     // The captured payload: requestedProvider and provider both "ollama".
     const status = await read(REAL_STATUS);
@@ -930,8 +949,11 @@ describe("what a disowned index makes Index now run", () => {
       const run = await settledMemoryRun(tmpDir);
       expect(run.status).toBe("failed");
       expect(run.errorCode).toBe("provider_mismatch");
-      expect(run.error).toContain("Re-run Memory Shard setup");
+      expect(run.error).toContain("not the one you configured");
       expect(run.error).not.toContain("Check that the embedding model");
+      // NOT the banner's sentence: the two fire together, and the card showed
+      // the same instruction twice. This line says what happened to the pass.
+      expect(run.error).not.toContain("Re-run Memory Shard setup");
     } finally {
       warn.mockRestore();
     }
