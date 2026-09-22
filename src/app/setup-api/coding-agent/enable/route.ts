@@ -28,6 +28,7 @@ import {
   setReviewPass,
   setReviewRounds,
   setSetupComplete,
+  setTeamDynamic,
   setTokenLimit,
 } from "@/lib/coding-agent";
 
@@ -75,6 +76,9 @@ function forbidden() {
  * POST { realBrowser: boolean } → does a run verify its work in the Chromium
  * on the owner's screen, or in a headless one nobody sees? ON when absent, for
  * the same reason as the media switches.
+ * POST { teamDynamic: boolean } → may a coding team's lead add or retire tasks
+ * while the team runs (one short read-only run after each worker settles).
+ * OFF when absent; a team reads it when it starts.
  * POST { autoPr: boolean } → branch, open a pull request into the repo's
  * default branch, wait for GitHub Actions, and merge when at least one real
  * check has passed. See @/lib/coding-pr for the guardrails.
@@ -163,6 +167,7 @@ export async function POST(request: Request) {
     generateImages?: unknown;
     generateAudio?: unknown;
     realBrowser?: unknown;
+    teamDynamic?: unknown;
     setupComplete?: unknown;
     clearHarnessFault?: unknown;
     provider?: unknown;
@@ -180,6 +185,7 @@ export async function POST(request: Request) {
   const hasGenImages = typeof fields.generateImages === "boolean";
   const hasGenAudio = typeof fields.generateAudio === "boolean";
   const hasRealBrowser = typeof fields.realBrowser === "boolean";
+  const hasTeamDynamic = typeof fields.teamDynamic === "boolean";
   // Only `true`. `false` is not the other half of a switch here — it would
   // mean "record a fault", and nothing outside the runner may do that.
   const clearsFault = fields.clearHarnessFault === true;
@@ -200,7 +206,7 @@ export async function POST(request: Request) {
     && (typeof fields.gitAuthorName === "string" || fields.gitAuthorName === null);
   const hasGitAuthorEmail = "gitAuthorEmail" in fields
     && (typeof fields.gitAuthorEmail === "string" || fields.gitAuthorEmail === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasGitAuthorName && !hasGitAuthorEmail && !clearsFault) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -208,7 +214,7 @@ export async function POST(request: Request) {
           + "{ effort: string }, { provider: string }, { maxTurns: number }, "
           + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
           + "{ generateImages: boolean }, { generateAudio: boolean }, "
-          + "{ realBrowser: boolean }, "
+          + "{ realBrowser: boolean }, { teamDynamic: boolean }, "
           + "{ reviewRounds: number }, "
           + "{ autoMerge: boolean }, { completionAttempts: number }, "
           + "{ maxParallelRuns: number }, "
@@ -359,6 +365,10 @@ export async function POST(request: Request) {
     if (hasRealBrowser) {
       const saved = await setRealBrowser(fields.realBrowser);
       console.error(`[coding-agent] runs will verify their work in the ${saved ? "desktop" : "headless"} browser, by the owner's choice`);
+    }
+    if (hasTeamDynamic) {
+      const saved = await setTeamDynamic(fields.teamDynamic);
+      console.error(`[coding-agent] the coding team's lead switched ${saved ? "on" : "off"} by the owner`);
     }
     if (clearsFault) {
       await clearHarnessFault();

@@ -14,7 +14,7 @@ export interface MemberRun {
 
 interface BoardRun {
   id: string;
-  role: "planner" | "worker" | "reviewer";
+  role: "planner" | "worker" | "reviewer" | "lead";
   taskId: string | null;
 }
 
@@ -77,7 +77,9 @@ export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpen
     ? t("codingAgent.team.rolePlanner")
     : m.role === "reviewer"
       ? t("codingAgent.team.roleReviewer", { task: m.taskId ?? "" })
-      : t("codingAgent.team.roleWorker", { task: m.taskId ?? "" });
+      : m.role === "lead"
+        ? t("codingAgent.team.roleLead", { task: m.taskId ?? "" })
+        : t("codingAgent.team.roleWorker", { task: m.taskId ?? "" });
   const isAt = (id: string) => { const s = statusOf(id); return s !== null && isLive(s); };
   const working = members.filter((m) => isAt(m.id)).length;
   const others = members.filter((m) => m.id !== runId);
@@ -93,6 +95,8 @@ export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpen
           reviewers={of("reviewer").length}
           activeReviewers={of("reviewer").filter((m) => isAt(m.id)).length}
           plannerActive={of("planner").some((m) => isAt(m.id))}
+          leads={of("lead").length}
+          leadActive={of("lead").some((m) => isAt(m.id))}
         />
       </div>
       <ul className="mt-2 space-y-0.5">

@@ -55,6 +55,7 @@ function stubFetch(
     maxTurns?: number;
     tokenLimit?: number | null;
     reviewPass?: boolean;
+    teamDynamic?: boolean;
     generateImages?: boolean;
     generateAudio?: boolean;
     realBrowser?: boolean;
@@ -100,6 +101,7 @@ function stubFetch(
   let maxTurns = status.maxTurns ?? 150;
   let tokenLimit: number | null = status.tokenLimit ?? null;
   let reviewPass = status.reviewPass ?? false;
+  let teamDynamic = status.teamDynamic;
   // The two that are ON when the device has never stored them.
   let generateImages = status.generateImages ?? true;
   let generateAudio = status.generateAudio ?? true;
@@ -130,6 +132,8 @@ function stubFetch(
     tokenLimit,
     minTokenLimit: 10_000,
     reviewPass,
+    // Absent unless the test says: an older server does not answer with it.
+    ...(teamDynamic === undefined ? {} : { teamDynamic }),
     generateImages,
     generateAudio,
     ...(opts.noRealBrowser ? {} : { realBrowser }),
@@ -189,6 +193,7 @@ function stubFetch(
       }
       if ("tokenLimit" in body) tokenLimit = body.tokenLimit;
       if (typeof body.reviewPass === "boolean") reviewPass = body.reviewPass;
+      if (typeof body.teamDynamic === "boolean") teamDynamic = body.teamDynamic;
       if (typeof body.generateImages === "boolean") generateImages = body.generateImages;
       if (typeof body.generateAudio === "boolean") generateAudio = body.generateAudio;
       if (typeof body.realBrowser === "boolean") realBrowser = body.realBrowser;
@@ -612,6 +617,32 @@ describe("the automatic review pass", () => {
     stubFetch({ enabled: true, readiness: READY, reviewPass: true });
     render(<CodingAgentSettingsPanel />);
     expect(await screen.findByRole("switch", { name: REVIEW })).toHaveAttribute("aria-checked", "true");
+  });
+});
+
+describe("the team lead's switch", () => {
+  const LEAD = translations.en["codingAgent.teamDynamicLabel"];
+
+  it("is off by default — also against a server that predates it — and turns on only after the route says so", async () => {
+    stubFetch({ enabled: true, readiness: READY });
+    render(<CodingAgentSettingsPanel />);
+    const toggle = await screen.findByRole("switch", { name: LEAD });
+    expect(LEAD).toBe("Let the team lead add or retire tasks while a team runs");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(toggle).toHaveAttribute("data-testid", "coding-agent-team-dynamic");
+    expect(screen.queryByText(translations.en["codingAgent.teamDynamicHint"])).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-team-dynamic-help"));
+    expect(screen.getByText(translations.en["codingAgent.teamDynamicHint"])).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { teamDynamic: true } }]));
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+  });
+
+  it("shows what the device has stored", async () => {
+    stubFetch({ enabled: true, readiness: READY, teamDynamic: true });
+    render(<CodingAgentSettingsPanel />);
+    expect(await screen.findByRole("switch", { name: LEAD })).toHaveAttribute("aria-checked", "true");
   });
 });
 

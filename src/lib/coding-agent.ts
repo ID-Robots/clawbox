@@ -597,6 +597,18 @@ export const CODING_AGENT_GEN_AUDIO_CONFIG_KEY = "coding_agent_generate_audio";
 export const CODING_AGENT_REAL_BROWSER_CONFIG_KEY = "coding_agent_real_browser";
 
 /**
+ * May a coding TEAM's lead change the plan while the team runs — add a task
+ * a finished one revealed, retire a pending one the goal no longer needs?
+ *
+ * OFF when absent: every lead turn is one more paid, read-only run after
+ * each worker settles, and a plan that moves under a running team is a
+ * different thing from the one the owner saw posted. Read once when a team
+ * starts and kept on its board (src/lib/coding-team.ts), so flipping it
+ * never changes a team already at work.
+ */
+export const CODING_TEAM_DYNAMIC_CONFIG_KEY = "coding_team_dynamic";
+
+/**
 
 /**
  * The owner's standing answer to "may a run do this?" — the permission rules
@@ -644,6 +656,7 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
+  CODING_TEAM_DYNAMIC_CONFIG_KEY,
   CODING_AGENT_ALLOW_RULES_CONFIG_KEY,
   // The commit identity is a SETTING — the owner chose who the box signs their
   // work as — so "start over" puts it back to the project's own git config and
@@ -1904,6 +1917,8 @@ export interface CodingAgentStatus {
   generateAudio: boolean;
   /** Does a run verify its work in the browser on the owner's screen? */
   realBrowser: boolean;
+  /** May a coding team's lead add or retire tasks while the team runs? Off unless the owner said so. */
+  teamDynamic: boolean;
   /** The owner's standing permission rules, in the order they saved them. */
   allowRules: string[];
   /** How many they may keep, so the editor can say so without guessing. */
@@ -2030,7 +2045,8 @@ export interface StartRunInput {
 /** A run's place in a coding team. */
 export interface RunTeam {
   id: string;
-  role: "planner" | "worker" | "reviewer";
+  /** `lead`: the planner back for a moment after a worker settled, deciding whether the plan still fits (read-only, like the planner and the reviewer). */
+  role: "planner" | "worker" | "reviewer" | "lead";
   taskId: string | null;
 }
 
@@ -2042,9 +2058,14 @@ export interface RunTeam {
  */
 export type CodingAgentErrorKind = "disabled" | "not_ready" | "busy" | "invalid" | "not_found" | "limited";
 
-/** Thrown by startRun/stopRun; the routes map `kind` to a status code. */
+/**
+ * Thrown by startRun/stopRun; the routes map `kind` to a status code.
+ * `wait` marks a refusal that clears on its own — a team's run refused for
+ * room (its slot count, the memory guard) — so the team's orchestrator waits
+ * for it rather than giving up on the run.
+ */
 export class CodingAgentError extends Error {
-  constructor(readonly kind: CodingAgentErrorKind, message: string) {
+  constructor(readonly kind: CodingAgentErrorKind, message: string, readonly wait = false) {
     super(message);
     this.name = "CodingAgentError";
   }
@@ -2448,6 +2469,19 @@ export async function setRealBrowser(on: unknown): Promise<boolean> {
     throw new CodingAgentError("invalid", "The browser switch must be true or false.");
   }
   await configSet(CODING_AGENT_REAL_BROWSER_CONFIG_KEY, on);
+  return on;
+}
+
+/** The team lead's switch. OFF unless it is exactly `true` — see its config key. */
+export async function getTeamDynamic(): Promise<boolean> {
+  return (await configGet(CODING_TEAM_DYNAMIC_CONFIG_KEY)) === true;
+}
+
+export async function setTeamDynamic(on: unknown): Promise<boolean> {
+  if (typeof on !== "boolean") {
+    throw new CodingAgentError("invalid", "The team lead switch must be true or false.");
+  }
+  await configSet(CODING_TEAM_DYNAMIC_CONFIG_KEY, on);
   return on;
 }
 
@@ -3348,6 +3382,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
+    teamDynamic: config[CODING_TEAM_DYNAMIC_CONFIG_KEY] === true,
     // The home, so a harness-project rule is still on the list the panels
     // read; the full context's directory walk is not worth it here.
     allowRules: normalizeAllowRules(config[CODING_AGENT_ALLOW_RULES_CONFIG_KEY], allowRuleHomeContext()),
@@ -3435,7 +3470,7 @@ function normalizeTeam(raw: unknown): RunTeam | null {
   // Every role the team has: a reviewer run reloaded without its team would
   // be resumed and settled as a project run — icon, review pass, pull
   // request — in a folder that is the team's.
-  if (t.role !== "planner" && t.role !== "worker" && t.role !== "reviewer") return null;
+  if (t.role !== "planner" && t.role !== "worker" && t.role !== "reviewer" && t.role !== "lead") return null;
   return { id: t.id, role: t.role, taskId: typeof t.taskId === "string" ? t.taskId : null };
 }
 
@@ -10499,7 +10534,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       // branch first; the tree is the only thing that was removed.
       inheritedWorktree = await reopenWorktree(previous);
       directory = await realDirectory(previous.directory);
-      releaseDirectory = assertDirectoryFree(directory);
+      releaseDirectory = assertDirectoryFree(directory, undefined, input.team ?? null, input.readOnly === true);
       projectId = previous.projectId;
       // A session poisoned by an authentication or transport failure REPLAYS
       // that failure on every resume — Claude Code persists it in the session,
@@ -10523,7 +10558,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       inherited = { provider: previous.provider, model: previous.requestedModel };
     } else {
       ({ directory, projectId } = await resolveWorkingDirectory(input));
-      releaseDirectory = assertDirectoryFree(directory);
+      releaseDirectory = assertDirectoryFree(directory, undefined, input.team ?? null, input.readOnly === true);
     }
 
     // Read once, here: a run keeps the settings it started with even if the
@@ -11281,7 +11316,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     } catch {
       throw new CodingAgentError("not_found", `The folder this run worked in is gone (${run.directory}), so it cannot be resumed. Start a new run instead.`);
     }
-    releaseDirectory = assertDirectoryFree(run.directory, run.id);
+    releaseDirectory = assertDirectoryFree(run.directory, run.id, run.team ?? null, run.readOnly === true);
     // The one place a run's permission rules are RE-READ rather than kept.
     //
     // Everything else about a run is frozen on its record precisely so the tools
@@ -11413,7 +11448,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     const tools = await requireSpawnTools();
     // The folder must still be there — it was only checked when drafted.
     run.directory = await realDirectory(run.directory);
-    releaseDirectory = assertDirectoryFree(run.directory, run.id);
+    releaseDirectory = assertDirectoryFree(run.directory, run.id, run.team ?? null, run.readOnly === true);
     // The copy of the project is made at START and not when the draft was
     // written: a draft may sit for days, and a worktree made for one that is
     // never started would be a branch and a folder nobody asked for.
@@ -11553,7 +11588,7 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     // what covers the gap there, so `startingRuns` is deliberately not read by
     // it or the two would double-count one worker.
     const slot = await teamSpawnSlot(team);
-    if (!slot.ok) throw new CodingAgentError("busy", slot.reason);
+    if (!slot.ok) throw new CodingAgentError("busy", slot.reason, slot.wait);
     return holdSpawnSlot();
   }
   const limit = await getMaxParallelRuns();
@@ -11593,6 +11628,35 @@ async function anthropicPoolWait(): Promise<number | null | undefined> {
 }
 
 /**
+ * The live run that keeps a run from starting in `directory`, or null.
+ *
+ * A run of a TEAM is not kept out by its own team: the team's runs share the
+ * project on purpose — its reviewers read the project while its workers write
+ * in worktrees beneath it, and several tasks can be in review at once — and
+ * the orchestrator already decides which of them may write where. Counting
+ * them as strangers refused the reviewer of every task that finished while a
+ * sibling's reviewer was still reading, and each refusal was a review skipped
+ * (bench, 2026-09-22). A run of no team, or of another team, is refused as
+ * before — and so are two WRITERS of one team in one folder (the owner
+ * resuming a worker that gave up while its sibling writes in the same
+ * in-place checkout): the exemption needs one of the two to be read-only.
+ */
+export function folderHolder<R extends Pick<CodingRun, "id" | "status" | "directory" | "team" | "readOnly">>(
+  runs: readonly R[],
+  directory: string,
+  team: RunTeam | null = null,
+  exceptRunId?: string,
+  readOnly = false,
+): R | null {
+  return runs.find((r) =>
+    isLive(r.status)
+    && r.id !== exceptRunId
+    && r.directory === directory
+    && !(team && r.team?.id === team.id && (readOnly || r.readOnly === true)),
+  ) ?? null;
+}
+
+/**
  * Refuse a second run in the SAME working folder.
  *
  * The concurrency limit above is about the box's memory; this is the rule it
@@ -11600,9 +11664,10 @@ async function anthropicPoolWait(): Promise<number | null | undefined> {
  * this never fires for it — it fires for the folders that keep the old
  * in-place behaviour (a plain folder with no git history, a code project
  * inside ClawBox's own checkout), where two runs really would edit each
- * other's half-written files and each settle would commit the other's.
+ * other's half-written files and each settle would commit the other's. A
+ * team's own runs do not count against each other — see `folderHolder`.
  */
-function assertDirectoryFree(directory: string, exceptRunId?: string): () => void {
+function assertDirectoryFree(directory: string, exceptRunId?: string, team: RunTeam | null = null, readOnly = false): () => void {
   // A project the owner is REMOVING right now, before the run store is asked.
   //
   // This is the run half of a mutual exclusion, and the removal holds the other
@@ -11616,7 +11681,7 @@ function assertDirectoryFree(directory: string, exceptRunId?: string): () => voi
       "That project folder is being removed right now. Wait for it to finish, or work somewhere else.",
     );
   }
-  const busy = loadRuns().find((r) => isLive(r.status) && r.id !== exceptRunId && r.directory === directory);
+  const busy = folderHolder(loadRuns(), directory, team, exceptRunId, readOnly);
   if (busy) {
     throw new CodingAgentError(
       "busy",

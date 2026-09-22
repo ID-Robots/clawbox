@@ -119,3 +119,44 @@ describe("sending", () => {
     expect(seen).toEqual(["task"]);
   });
 });
+
+describe("the lead's messages and the shape (TASK-1099)", () => {
+  it("validates the shape, a retirement and a final review, and a task's origin", () => {
+    const { validateMessage } = busLib;
+    expect(validateMessage({ type: "shape", parallelism: 0, review: "each", rationale: "" })).toMatch(/at least 1/);
+    expect(validateMessage({ type: "shape", parallelism: 2, review: "often", rationale: "" })).toMatch(/each, final, none/);
+    expect(validateMessage({ type: "shape", parallelism: 2, review: "each" })).toMatch(/rationale/);
+    expect(validateMessage({ type: "shape", parallelism: 2, review: "final", rationale: "" })).toBeNull();
+    expect(validateMessage({ type: "retire", task_id: "t01", reason: "" })).toMatch(/task_id/);
+    expect(validateMessage({ type: "retire", task_id: "t2" })).toMatch(/reason/);
+    expect(validateMessage({ type: "retire", task_id: "t2", reason: "" })).toBeNull();
+    expect(validateMessage({ type: "final_review", verdict: "fine", notes: "" })).toMatch(/accepted or rejected/);
+    expect(validateMessage({ type: "final_review", verdict: "accepted", notes: "" })).toBeNull();
+    expect(validateMessage({ type: "task", task_description: "x", origin: "boss" })).toMatch(/plan or lead/);
+    expect(validateMessage({ type: "task", task_description: "x", origin: "lead", note: 3 })).toMatch(/note/);
+  });
+
+  it("applies them in the right role and refuses — and logs — the wrong one", () => {
+    const board = boardLib.createBoard({ goal: "g", projectId: null, directory: "/p", source: "owner" }, { kind: "owner" });
+    const bus = new busLib.TeamBus(board);
+    const seen: string[] = [];
+    bus.subscribe((d) => seen.push(`${d.actor.kind}:${d.message.type}`));
+    bus.send({ kind: "planner" }, { type: "shape", parallelism: 1, review: "final", rationale: "One file." });
+    bus.send({ kind: "planner" }, { type: "task", task_description: "a" });
+    bus.send({ kind: "planner" }, { type: "task", task_description: "b" });
+    bus.send({ kind: "planner" }, { type: "task", task_description: "c", origin: "lead", note: "a gap" });
+    const retired = bus.send({ kind: "planner" }, { type: "retire", task_id: "t2", reason: "not needed" });
+    expect(retired.task).toMatchObject({ task_id: "t2", status: "retired" });
+    bus.send({ kind: "reviewer" }, { type: "final_review", verdict: "accepted", notes: "" });
+    expect(seen).toEqual(["planner:shape", "planner:task", "planner:task", "planner:task", "planner:retire", "reviewer:final_review"]);
+    expect(boardLib.loadBoard(board.id)).toMatchObject({ shape: { parallelism: 1, review: "final" }, finalReview: { verdict: "accepted" }, tasks: [{ status: "pending" }, { status: "retired" }, { origin: "lead" }] });
+
+    expect(() => bus.send(W, { type: "retire", task_id: "t1", reason: "" })).toThrow(/Only the planner retires/);
+    expect(() => bus.send({ kind: "planner" }, { type: "retire", task_id: "t2", reason: "" })).toThrow(/t2 is retired/);
+    expect(() => bus.send({ kind: "system" }, { type: "shape", parallelism: 2, review: "each", rationale: "" })).toThrow(/Only the planner shapes/);
+    expect(() => bus.send({ kind: "owner" }, { type: "final_review", verdict: "rejected", notes: "no" })).toThrow(/Only the reviewer/);
+    const alerts = board.log.filter((e) => e.type === "alert").map((e) => e.message);
+    expect(alerts).toHaveLength(4);
+    expect(alerts[0]).toMatch(/Refused retire from worker run-aaaaaaaa/);
+  });
+});
