@@ -23,8 +23,9 @@ import { canonicalPath, isProtectedResolvedPath } from "../../src/lib/file-guard
 // carries into ~/.openclaw/extensions. It lives there because a plugin copied
 // out of the checkout has to take its rule with it; it is imported HERE
 // because ClawBox's own `bash`, `write_file`, `edit_file` and `notebook_edit`
-// reach the same files the harness's tools do, and a deny the agent can walk
-// around through this server is not a deny. Its whole import graph is node
+// reach the same files the harness's tools do wherever an owner has switched
+// them on (CLAWBOX_MCP_CODING_TOOLS=1), and a deny the agent can walk around
+// through this server is not a deny. Its whole import graph is node
 // builtins, so it satisfies the rule at the top of this file.
 import {
   commandDenyReason,
