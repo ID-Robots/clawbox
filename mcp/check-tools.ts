@@ -732,7 +732,7 @@ async function main(): Promise<void> {
   // this BLOCKING step exited 1 with `"browser_view_local" is registered outside
   // a coding run` — a false failure blaming the code for the environment it was
   // invoked in, which is exactly the kind of check that gets switched off. It
-  // also removes the hazard in making the eight builds concurrent: the run
+  // also removes the hazard in making the twelve builds concurrent: the run
   // posture's variables are no longer the only thing separating it from the
   // others.
   const ambientKeys = [...Object.keys(RUN_ENV), CODING_TOOLS_ENV];

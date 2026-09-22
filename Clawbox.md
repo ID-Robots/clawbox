@@ -83,7 +83,7 @@ You control the entire OS through the **MCP server** (`mcp/clawbox-mcp.ts`). You
 - `logs_tail` — the last lines of one ClawBox service's log (when offered: probed at startup)
 - `update_check` — the installed version and whether an update is waiting
 <!-- edition:openclaw -->
-- Shell commands are your harness's own `exec` — ClawBox adds none of its own. Run it in the foreground for short jobs; long-running work belongs in `agent` (returns a `bg-N` task ID, poll with `task_status`). Surface and confirm anything destructive (`rm -rf`, `git push -f`, `git reset --hard`) before you run it. Protected device paths are refused for you whichever tool asks.
+- Shell commands are your harness's own `exec` — ClawBox adds none of its own. Run it in the foreground for short jobs; long-running work belongs in `agent` (returns a `bg-N` task ID, poll with `task_status`). Surface and confirm anything destructive (`rm -rf`, `git push -f`, `git reset --hard`) before you run it. Deleting, overwriting or moving the ClawBox install tree or the local-model folders is refused for you whichever tool asks; reading a credential file is **not** — that is what the ClawBox search tools below are for.
 <!-- /edition -->
 
 <!-- edition:openclaw -->
