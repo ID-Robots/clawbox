@@ -187,7 +187,9 @@ plans cover, in 4.0:
 - A failed turn now prints the provider's own reason instead of a generic
   failure, and a reply written by a fallback model says which model wrote it.
 - Third-party credentials are kept in OpenClaw 2's sqlite auth store.
-- OpenClaw is pinned to 2026.9.3.
+- OpenClaw is pinned to 2026.9.4 (state schema 17). An update now refuses up
+  front, before it changes anything, when the device's state database is on a
+  schema newer than the core it is about to install.
 
 ### Local AI
 

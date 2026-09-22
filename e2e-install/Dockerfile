@@ -29,7 +29,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
 
 # Node.js 22 — DELIBERATELY NOT the version install.sh ends up with.
 #
-# The pinned core (2026.9.3) needs `>=24.16.0 <25 || >=26.1.0`, so install.sh
+# The pinned core (2026.9.4) needs `>=24.16.0 <25 || >=26.1.0`, so install.sh
 # performs a Node MAJOR upgrade on its way through (TASK-788). Baking 24 in here
 # would satisfy the engine guard on its first call, and `setup_24.x` plus
 # `apt-get install nodejs` would then never execute in CI on either path — a
