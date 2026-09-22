@@ -60,8 +60,17 @@ function reapSpawned() {
 }
 
 // Belt and braces for the case afterEach cannot cover: vitest tearing the worker
-// down mid-test. Whatever afterEach already reaped is gone from the array.
-process.once("exit", reapSpawned);
+// down mid-test. Whatever afterEach already reaped is gone from the array. This
+// one swallows: an exception thrown from an `exit` listener is an uncaught
+// exception during shutdown, which would turn a green run red over a signal that
+// could not be delivered.
+process.once("exit", () => {
+  try {
+    reapSpawned();
+  } catch {
+    // Nothing useful left to do at exit.
+  }
+});
 
 const cf = (name: string) => path.join(root, "data", "cloudflared", name);
 
@@ -99,8 +108,13 @@ while true; do sleep 0.2; done
 afterEach(() => {
   // Before the temp dir goes: the leaked groups found on the box were still
   // running with the CLAWBOX_ROOT they had been started with already deleted.
-  reapSpawned();
-  rmSync(root, { recursive: true, force: true });
+  // `finally`, so a signal that could not be delivered is still reported but does
+  // not trade the process leak for a temp-dir one.
+  try {
+    reapSpawned();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function writeCredential(content = `hostname=${HOST}\ntoken=${TOKEN}\n`) {

@@ -71,7 +71,16 @@ function reapSpawned() {
 }
 
 // Belt and braces for what afterEach cannot cover: the worker torn down mid-test.
-process.once("exit", reapSpawned);
+// Swallows, because an exception thrown from an `exit` listener is an uncaught
+// exception during shutdown — a green run reported red over an undeliverable
+// signal.
+process.once("exit", () => {
+  try {
+    reapSpawned();
+  } catch {
+    // Nothing useful left to do at exit.
+  }
+});
 
 beforeEach(() => {
   root = mkdtempSync(path.join(os.tmpdir(), "clawbox-run-tunnel-"));
@@ -86,9 +95,14 @@ beforeEach(() => {
 
 afterEach(() => {
   // Before the temp dir goes: the strays on the box were still running against a
-  // CLAWBOX_ROOT that had already been deleted under them.
-  reapSpawned();
-  rmSync(root, { recursive: true, force: true });
+  // CLAWBOX_ROOT that had already been deleted under them. `finally`, so a signal
+  // that could not be delivered is still reported but does not trade the process
+  // leak for a temp-dir one.
+  try {
+    reapSpawned();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 const dataFile = (name: string) => path.join(root, "data", "cloudflared", name);
