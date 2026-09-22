@@ -12,8 +12,11 @@ import { DATA_DIR } from "./config-store";
 // a hard link to a secret already needs read access to create, a separate
 // fuller-privilege surface.)
 //
-// Two shapes of rule: named credential stores elsewhere in the home directory
-// are listed below, and the ClawBox data directory is covered by containment.
+// Three shapes of rule: named credential stores elsewhere in the home directory
+// are listed below, the ClawBox data directory is covered by containment, and
+// `~/.openclaw` — the agent's own state directory, which holds the device's
+// secrets and the agent's own working notes in the same folder — is containment
+// with an allow-list inside it (`isProtectedOpenclawPath`).
 
 /**
  * Credential stores in the home directory, as folder names relative to it.
@@ -23,6 +26,12 @@ import { DATA_DIR } from "./config-store";
  */
 export const PROTECTED_HOME_DIRS: readonly string[] = [
   ".ssh",
+  // The one entry with a carve-out inside it: `isProtectedOpenclawPath` opens
+  // the agent's own workspaces and refuses the rest. THIS LIST IS UNAFFECTED —
+  // it is also what src/lib/coding-agent.ts denies to a delegated coding run,
+  // whose deny is for the whole folder (a run is handed the assets it needs
+  // under data/coding-agent-inputs instead) and whose rule is the array, not
+  // the predicate.
   ".openclaw",
   // Hermes edition: ~/.hermes holds config.yaml (the ClawBox AI billing token,
   // the dashboard signing secret and its scrypt password hash), .env (provider
@@ -42,9 +51,30 @@ export const PROTECTED_HOME_DIRS: readonly string[] = [
   ".config/rclone",
 ];
 
+/**
+ * The OpenClaw agent's own state directory: the one entry above whose folder is
+ * not all credentials, and the only one with a carve-out inside it. Judged by
+ * `isProtectedOpenclawPath` rather than by the whole-folder rule below.
+ */
+const OPENCLAW_DIR = ".openclaw";
+
+/**
+ * The top segments inside `~/.openclaw` that hold the agent's own working
+ * notes rather than the device's secrets: its workspace, and a second agent's
+ * workspace beside it (`workspace-<name>`).
+ *
+ * Exported because mcp/lib/guard.ts matches the same names in a shell string,
+ * where there is no path to split — one definition, so the tool that opens a
+ * file and the pre-flight that vets a command line cannot disagree about which
+ * folder is the agent's.
+ */
+export const OPENCLAW_AGENT_SUBTREE_RE = /^workspace(-[^/]+)?$/;
+
 // Each folder matched as a whole path segment (or segments), anywhere in the
-// path — the same shape the hand-written patterns had.
-const PROTECTED_DIR_RES: RegExp[] = PROTECTED_HOME_DIRS.map(
+// path — the same shape the hand-written patterns had. `.openclaw` is left out
+// and judged separately: a single verdict for that whole folder has to be wrong
+// about one half of it (see `isProtectedOpenclawPath`).
+const PROTECTED_DIR_RES: RegExp[] = PROTECTED_HOME_DIRS.filter((dir) => dir !== OPENCLAW_DIR).map(
   (dir) => new RegExp(`(^|\\/)${dir.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}(\\/|$)`),
 );
 
@@ -177,11 +207,96 @@ function isProtectedDataDirPath(abs: string): boolean {
 const toPatternPath: (abs: string) => string =
   path.sep === "/" ? (abs) => abs : (abs) => abs.replace(/\\/g, "/");
 
+/**
+ * The `~/.openclaw` rule: containment with an allow-list, exactly the shape
+ * `DATA_DIR_PUBLIC_SUBTREES` has above, and for the same reason.
+ *
+ * That folder holds two unlike things side by side. `openclaw.json` carries the
+ * provider keys and the MCP bearer, `credentials/` and `auth-profile*` carry
+ * the rest, the per-agent `sessions/` folders are every word the owner has
+ * ever said to the box,
+ * and `extensions/` is the hook plugin that enforces TASK-605 — an agent that
+ * can rewrite its own guard has none. Beside them sits `workspace/`: the
+ * AGENTS.md, MEMORY.md, memory/ and skills/ the on-device agent is SUPPOSED to
+ * edit. One verdict for the whole tree has to be wrong about one of them, and
+ * the whole-folder deny was wrong about the half the agent owns — on the
+ * OpenClaw edition "add a line to your MEMORY.md" was refused by every file
+ * tool on the box (TASK-1072).
+ *
+ * EVERY `.openclaw` segment is judged, not the first: `…/workspace/.openclaw/
+ * credentials/x` names the carve-out and then leaves it again. A `..` after one
+ * is refused on the spelling alone, before anything resolves, for the same
+ * reason the directory rules match anywhere in the string — `workspace/../
+ * credentials` is not in the workspace, and a caller that has not normalised
+ * must not be told that it is.
+ *
+ * `~/.openclaw` ITSELF answers false, deliberately and for the reason DATA_DIR
+ * does: a listing is filtered entry by entry, so keeping the folder openable is
+ * what lets the workspace inside it be found at all, and nothing else in it
+ * survives the same filter. `isProtectedContainer` still says the folder may
+ * not be renamed or removed.
+ *
+ * `p` is a pattern path (see `toPatternPath`), already absolute and normalised
+ * by the caller.
+ */
+function isProtectedOpenclawPath(p: string): boolean {
+  // An indexOf before the split, for the same reason `isProtectedDataDirPath`
+  // is a prefix test: this runs once per entry of a listing, a glob or a grep,
+  // up to 20k of them, and all but a handful of those paths are nowhere near
+  // this folder. The substring test can only be loose (`.openclaw-notes.txt`),
+  // and the segment walk below is what decides.
+  if (!p.includes(OPENCLAW_DIR)) return false;
+  const segs = p.split("/");
+  for (let i = 0; i < segs.length; i += 1) {
+    if (segs[i] !== OPENCLAW_DIR) continue;
+    const rest = segs.slice(i + 1);
+    // The folder itself, with or without a trailing separator.
+    if (rest.length === 0 || (rest.length === 1 && rest[0] === "")) continue;
+    if (!OPENCLAW_AGENT_SUBTREE_RE.test(rest[0])) return true;
+    if (rest.includes("..")) return true;
+  }
+  return false;
+}
+
 function isProtected(abs: string): boolean {
   if (isProtectedDataDirPath(abs)) return true;
   const p = toPatternPath(abs);
+  // BEFORE the carve-out, so a credential basename inside the agent's own
+  // workspace is still a credential store. mcp/lib/guard.ts adds the dotenv and
+  // secret-name rules on top for the tool surface; this file is also the Files
+  // API's guard, where the owner browsing their own device is a different trust
+  // decision and always has been.
   if (PROTECTED_FILE_RES.some((re) => re.test(p))) return true;
+  if (isProtectedOpenclawPath(p)) return true;
   return PROTECTED_DIR_RES.some((re) => re.test(p));
+}
+
+/**
+ * Is this path inside the OpenClaw agent's own state directory at all?
+ *
+ * For a CALLER THAT HAS ALREADY BEEN REFUSED and is choosing what to say about
+ * it: a deny under `~/.openclaw` is worth a different next step from a deny
+ * under `~/.ssh`, because the harness's own file tools are not bound by this
+ * guard and the agent can still get there (mcp/lib/guard.ts `assertPathAllowed`).
+ */
+export function isOpenclawStatePath(abs: string): boolean {
+  return abs.includes(OPENCLAW_DIR) && toPatternPath(abs).split("/").includes(OPENCLAW_DIR);
+}
+
+/**
+ * Is this path inside one of the agent workspaces the carve-out opens?
+ *
+ * True for a path the carve-out COVERS, whatever some other rule then says
+ * about it — a `.env` in the workspace is a workspace file that is refused, not
+ * a credential store the agent should stay quiet about. Judged on the first
+ * `.openclaw` segment; `isProtectedFilePath` is what answers whether the path
+ * is actually allowed.
+ */
+export function isOpenclawWorkspacePath(abs: string): boolean {
+  if (!abs.includes(OPENCLAW_DIR)) return false;
+  const segs = toPatternPath(abs).split("/");
+  const at = segs.indexOf(OPENCLAW_DIR);
+  return at >= 0 && OPENCLAW_AGENT_SUBTREE_RE.test(segs[at + 1] ?? "");
 }
 
 /**
