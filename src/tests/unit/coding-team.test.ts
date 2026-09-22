@@ -481,6 +481,43 @@ describe("a reviewer that has to wait for room", () => {
     expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
   });
 
+  it("counts a sibling worker whose worktree is still being added, and asks again once that launch has landed", async () => {
+    // t1 and t2 side by side; t2's worktree is held until t1's reviewer has
+    // asked for a slot, so that ask lands while t2's launch is only reserved.
+    outcomes = [
+      { summary: PARALLEL_PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "app wired", filesTouched: ["app.js"] },
+    ];
+    let releaseT2!: () => void;
+    const t2Held = new Promise<void>((resolve) => { releaseT2 = resolve; });
+    plumbing.addWorkerWorktree.mockImplementation(async (dir: string, teamId: string, taskId: string, attempt: number) => {
+      if (taskId === "t2") await t2Held;
+      return { ok: true, path: `${dir}/.clawbox/worktrees/${taskId}-${attempt}`, branch: `clawbox/${teamId}-${taskId}-${attempt}` };
+    });
+    const t1ReviewerAsks: number[] = [];
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string; taskId: string | null }, starting?: number) => {
+      if (who.role !== "reviewer" || who.taskId !== "t1") return { ok: true };
+      t1ReviewerAsks.push(starting ?? 0);
+      releaseT2();
+      // What the real guard answers on a box with room for one run only.
+      return (starting ?? 0) >= 1
+        ? { ok: false, wait: true, reason: `Not enough free memory for another run beside the ${starting} going (900 MB free, 1200 MB needed).` }
+        : { ok: true };
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // The first ask counted t2's reserved launch; the next, after t2's run
+    // was live (the real slot counts that one as a run), no reservation.
+    expect(t1ReviewerAsks).toEqual([1, 0]);
+    expect(runner.teamSpawnSlot).toHaveBeenCalledWith({ id: board.id, role: "worker", taskId: "t2" }, 1);
+    expect(done.tasks.map((t) => t.review?.verdict)).toEqual(["accepted", "accepted", "accepted"]);
+    expect(done.tasks.every((t) => t.reviewRunId !== null && !/Accepted by rule/.test(t.review?.notes ?? ""))).toBe(true);
+    expect(done.alerts).toBe(0);
+  });
+
   it("waits too when the spawn itself refuses for room — the look and the spawn raced", async () => {
     const { CodingAgentError } = await import("@/lib/coding-agent");
     outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];

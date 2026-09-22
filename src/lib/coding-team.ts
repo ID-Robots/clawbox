@@ -562,9 +562,9 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   const inFlight = new Map<string, Promise<void>>();
   const slots = board.branch ? MAX_TEAM_WORKERS : 1;
   // Workers dispatched whose run is not persisted yet (a worktree being
-  // added): a reservation the spawn slot counts beside the live runs, and
-  // ONLY until the run is live — counted twice, two live workers would
-  // shut out a valid third.
+  // added): a reservation the spawn slot counts beside the live runs, for
+  // the next worker and for a sibling's reviewer alike, and ONLY until the
+  // run is live — counted twice, two live workers would shut out a valid third.
   const starting = new Set<string>();
   while (!team.stopRequested) {
     const counted = board.alerts - team.uncountedAlerts;
@@ -591,7 +591,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
         }
       }
       starting.add(task.task_id);
-      const work = workTask(team, task, source, () => starting.delete(task.task_id))
+      const work = workTask(team, task, source, starting, () => starting.delete(task.task_id))
         .catch((err) => {
           bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Task ${task.task_id} could not be worked: ${err instanceof Error ? err.message : String(err)}` });
         })
@@ -623,8 +623,12 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   saveBoard(board);
 }
 
-/** `onStarted` is called once the worker's run is persisted — the reservation it held is released there. */
-async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, onStarted?: () => void): Promise<void> {
+/**
+ * `starting` is the orchestrator's live set of worker launches not persisted
+ * yet, handed on to this task's reviewer; `onStarted` is called once the
+ * worker's run is persisted — the reservation it held is released there.
+ */
+async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, starting: ReadonlySet<string>, onStarted?: () => void): Promise<void> {
   const { board, bus } = team;
 
   // Its own worktree and branch, when the team has a branch to fork from.
@@ -735,7 +739,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
       bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: "The worker was refused an action or strayed outside its files; the task is offered once more." });
       return;
     }
-    const verdict = await reviewTask(team, task, source, { files, report: result });
+    const verdict = await reviewTask(team, task, source, { files, report: result }, starting);
     if (team.stopRequested) return;
     bus.send(REVIEWER, { type: "review", task_id: task.task_id, ...verdict });
   }
@@ -752,14 +756,20 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
  * refusal that cannot clear on its own — a stranger's run on the box, the
  * switch off — is "no reviewer": accepted by rule, with an alert the
  * ceiling does not count.
+ *
+ * `starting` is the orchestrator's live set of worker launches: a sibling
+ * whose worktree is still being added has no persisted run, and without its
+ * reservation the memory guard would see no run going and let the reviewer
+ * take the headroom that worker was dispatched against.
  */
-async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, work: { files: string[]; report: string }): Promise<{ verdict: "accepted" | "rejected"; notes: string }> {
+async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, work: { files: string[]; report: string }, starting: ReadonlySet<string>): Promise<{ verdict: "accepted" | "rejected"; notes: string }> {
   const { board, bus } = team;
   const role: RunTeam = { id: board.id, role: "reviewer", taskId: task.task_id };
   const start = async (): Promise<CodingRun | { reason: string; wait: boolean }> => {
     // The orchestrator's own look first, as for a worker; the spawn asks
     // again, and a refusal there that is still about room is the same wait.
-    const room = await teamSpawnSlot(role);
+    // The reservations are read on every ask: a launch lands while we wait.
+    const room = await teamSpawnSlot(role, starting.size);
     if (!room.ok) return room;
     try {
       return await startRun({
