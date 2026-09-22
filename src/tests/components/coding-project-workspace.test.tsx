@@ -366,6 +366,11 @@ describe("the Files tab's Markdown preview and its wrap", () => {
     expect(link).toHaveAttribute("href", "https://example.com/docs");
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    // It scrolls, so it carries a tab stop of its own, named by the file it
+    // shows — a long document has to be reachable from the keyboard.
+    expect(preview).toHaveAttribute("role", "region");
+    expect(preview).toHaveAttribute("tabindex", "0");
+    expect(preview).toHaveAttribute("aria-label", "notes.md");
     // Save belongs to both views; the wrap is the code view's alone.
     expect(within(view).getByTestId("coding-agent-file-save")).toBeInTheDocument();
     expect(within(view).queryByTestId("coding-agent-file-wrap")).toBeNull();
