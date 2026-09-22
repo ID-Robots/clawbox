@@ -99,6 +99,8 @@ const HELD_POLL_MS = 2_000;
 export const RUN_BUDGET_MS = 60 * 60_000;
 /** Sibling results quoted into a worker's task are cut here each. */
 const RESULT_QUOTE_CHARS = 400;
+/** A teammate at work is named by its run and its task's first line, cut here. */
+const TEAMMATE_QUOTE_CHARS = 160;
 
 export const WORKER_BRIEF = [
   "You are ONE WORKER of a small coding team. The task you were given is one part of a larger goal; other workers do the other parts in their own sessions, before or after you.",
@@ -818,13 +820,15 @@ export function workerTask(board: TeamBoard, task: TeamTask): string {
   ];
   if (task.files_hint.length) parts.push(`Files this task is expected to touch: ${task.files_hint.join(", ")}`);
   if (done.length) parts.push(`Already done by teammates:\n${done.join("\n")}`);
+  if (task.attempts > 0 && task.review?.verdict === "rejected") parts.push(`A previous attempt was rejected: ${task.review.notes}`);
   // Who else is at work, by the run id `team_message` needs: the one way a
   // worker learns which run to tell when it is blocked on a sibling's part.
+  // LAST, because the text is cut at MAX_TASK_CHARS from the end: a list a
+  // NOT_IN_TEAM refusal can also give must never push out a retry's reason.
   const working = board.tasks
     .filter((t) => t.task_id !== task.task_id && t.status === "in_progress" && t.assigned_to)
-    .map((t) => `- ${t.assigned_to} on ${t.task_id}: ${firstLine(t.task_description, RESULT_QUOTE_CHARS)}`);
+    .map((t) => `- ${t.assigned_to} on ${t.task_id}: ${firstLine(t.task_description, TEAMMATE_QUOTE_CHARS)}`);
   if (working.length) parts.push(`Teammates at work now (reach one with team_message, to="sibling"):\n${working.join("\n")}`);
-  if (task.attempts > 0 && task.review?.verdict === "rejected") parts.push(`A previous attempt was rejected: ${task.review.notes}`);
   let text = parts.join("\n\n");
   if (text.length > MAX_TASK_CHARS) text = `${text.slice(0, MAX_TASK_CHARS - 1)}…`;
   return text;

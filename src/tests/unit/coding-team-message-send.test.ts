@@ -334,4 +334,20 @@ describe("how a worker learns whom it can reach", () => {
     expect(text).not.toContain("on t3:");
     expect(team.workerTask(board, board.tasks[0])).not.toContain("Teammates at work now");
   });
+
+  it("never lets the list push a retry's rejection note out of the capped task text", async () => {
+    const boardLib = await import("@/lib/coding-team-board");
+    const board = boardLib.createBoard({ goal: `Build the shop. ${"Every page must work offline. ".repeat(110)}`, projectId: null, directory: "/p", source: "agent" }, { kind: "system" });
+    for (const description of [`Build the cart API. ${"x".repeat(900)}`, `Build the checkout page. ${"y".repeat(900)}`, "Fix the cart badge"]) boardLib.postTask(board, { kind: "planner" }, { task_description: description });
+    for (const [taskId, runId] of [["t1", "run-aaaaaaaa"], ["t2", "run-bbbbbbbb"]] as const) {
+      boardLib.assignTask(board, { kind: "system" }, taskId, runId);
+      boardLib.updateStatus(board, { kind: "worker", id: runId }, taskId, "in_progress");
+    }
+    const retry = board.tasks[2];
+    Object.assign(retry, { attempts: 1, review: { verdict: "rejected", notes: "The badge still counts removed items.", at: 1 } });
+    const text = team.workerTask(board, retry);
+    expect(text.length).toBeLessThanOrEqual(4_000);
+    expect(text).toContain("A previous attempt was rejected: The badge still counts removed items.");
+    expect(text).toContain("run-aaaaaaaa on t1");
+  });
 });
