@@ -2,8 +2,9 @@
 // the device and follow it to completion.
 //
 // Why these three tools are NOT part of mcp/tools/coding.ts: that family is the
-// agent's own hands (bash, read_file, …) and is OpenClaw-only because Hermes
-// ships its own. This family is a different thing — it hands a whole task to a
+// agent's own hands (bash, read_file, …), which both harnesses already have, so
+// it is registered on neither edition unless CLAWBOX_MCP_CODING_TOOLS=1 says
+// otherwise. This family is a different thing — it hands a whole task to a
 // second coding harness (`claude-ds`, Claude Code on the box's ClawBox AI
 // plan) and comes back for the result. Both editions have that harness, so
 // both editions get the tools.

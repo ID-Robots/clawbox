@@ -65,8 +65,9 @@ because their answers are shaped differently:
 
 * the **tool set** registers the *smaller* Hermes set and logs it. `readEdition()`
   defaults to `openclaw`, which is conservative for the app (the non-premium SKU)
-  and the opposite here — `openclaw` is the only edition carrying `bash`,
-  `write_file` and `grep`. The two sets are nested, so a doubt has a safe side.
+  and the opposite here — `openclaw` is the only edition carrying `app_search`,
+  `backup_now` and the guarded read-only trio (`list_directory`, `glob`, `grep`).
+  The two sets are nested, so a doubt has a safe side.
 * the **app harness** answers `null` and both harness-only sets are hidden, with
   the reason said out loud (`UNKNOWN_HARNESS_NOTE`). The app sets are *not*
   nested, so there is no safe side to fail onto. The device is not asked in this
@@ -85,7 +86,8 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Capability store | `app_search`, `app_install` | `skill_search`, `skill_info`, `skill_install`, `skill_list`, `skill_uninstall` |
 | Plugin reload (`hermes_plugins_reload`) | **no** — no plugin system | yes |
 | AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
-| Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
+| Guarded read-only trio (`list_directory`, `glob`, `grep`) | yes | **no** — Hermes ships its own file tools |
+| Coding family (`bash`, `job_status`, `job_stop`, `read_file`, `write_file`, `edit_file`, `notebook_edit`, `web_fetch`, `web_search`) | **no** by default — `CLAWBOX_MCP_CODING_TOOLS=1` registers it | **no** by default — the same variable registers it. Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
 | Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
@@ -649,9 +651,42 @@ its `favicon.png` / `favicon.ico` itself, shortly after the run starts
 (`src/lib/project-icon.ts`), never overwriting a file that is there. The brief
 tells the run to link them and ship them.
 
-### Coding family (OpenClaw only)
-`bash` · `job_status` · `job_stop` · `read_file` · `write_file` · `edit_file` ·
-`list_directory` · `glob` · `grep` · `notebook_edit` · `web_fetch` · `web_search`
+### Coding family — two groups, one lever
+
+**Always, on OpenClaw:** `list_directory` · `glob` · `grep`
+
+The guarded read-only trio. They stay registered because of the one thing they
+do that no harness's own search does: they filter **descendants**, so a
+credential store under a folder being listed, matched or searched never reaches
+the agent (see *Safety rules*, and the `grep -r ~/.hermes` incident that is why
+they exist). Hermes gets them only under the variable below.
+
+**Only with `CLAWBOX_MCP_CODING_TOOLS=1`, on either edition:** `bash` ·
+`job_status` · `job_stop` · `read_file` · `write_file` · `edit_file` ·
+`notebook_edit` · `web_fetch` · `web_search`
+
+Registration is the only lever here — no tool was deleted, renamed or reshaped,
+and setting the variable brings back exactly what a box used to ship. What
+changed is the default, measured on a real box (v4.0.0, OpenClaw edition): the
+family was ≈ 12.5 KB of a 43.9 KB `tools/list`, 28% of the payload and ≈ 3k
+input tokens spent at every session start, and over six shell, file and web
+prompts the model reached for the OpenClaw harness's own `exec` / `read` /
+`edit` / `web_fetch` six times out of six. Both harnesses already ship a shell
+and file tools; this family was a second, differently-guarded way to do the same
+work. `bun mcp/check-tools.ts` prints the payload with and without it.
+
+To switch it back on, set the variable in **this server's own `env` block** —
+Settings → MCP, or the Harness page — and restart the harness. Nothing in
+`scripts/gateway-pre-start.sh` reads it: the MCP process does, at registration
+time, so it must be in the environment the harness spawns *this* server with.
+
+One thing to know before relying on that: both boot-time registrars rewrite the
+`clawbox` entry whenever it differs from the one they compute
+(`scripts/gateway-pre-start.sh` on OpenClaw, `scripts/register-mcp.sh` on
+Hermes), so a key hand-added to that entry is dropped at the next boot and has
+to be set again. Neither script sets this variable — deliberately: the shipped
+default is the family off, and a debugging override that survived a reboot
+unnoticed is how a device ends up in a posture nobody chose.
 
 ### Coding agent (both editions, only while the owner's switch is on)
 
@@ -1084,9 +1119,10 @@ the agent does instead. Success bodies are shortened here.
    is judged on the canonical path too (nearest existing ancestor, so a deep
    new path under a link is judged where it would land; a dangling link is
    followed to the name the kernel would create through it), resolved ONCE
-   per call so the path the sink gets is the string the guard judged. Then
-   `read_file`, `write_file`, `edit_file` and `notebook_edit` open THAT path
-   with `O_NOFOLLOW`, and `grep` is handed it as the argv root it searches
+   per call so the path the sink gets is the string the guard judged. The trio
+   is registered on every OpenClaw box; where the gated file tools are switched
+   on too, `read_file`, `write_file`, `edit_file` and `notebook_edit` open THAT
+   path with `O_NOFOLLOW`, and `grep` is handed it as the argv root it searches
    (rg follows a link named on its command line, so it must be given the
    target) — a benign name linking to `.env`, `/proc/self/environ` or a file
    in the ClawBox tree is refused, and a leaf that is a link at the moment of
@@ -1097,11 +1133,12 @@ the agent does instead. Success bodies are shortened here.
    **What `bash` guarantees, stated plainly:** nothing. Its pre-flight refuses
    commands that name a credential store, but that is a guard rail against a
    mistake, not a sandbox — a shell can spell a path in ways no pattern list
-   enumerates. What bounds it is that it is registered on OpenClaw only, that
-   every other tool is argv-driven and goes through the real path guard, and
-   that its own description tells the agent never to run a command that came
-   from content it read. Plan around "OpenClaw + `bash` = the agent can reach
-   anything the device user can". Its `allow_dangerous` flag skips the
+   enumerates. What bounds it is that it is registered on no shipped device at
+   all (only where an owner set `CLAWBOX_MCP_CODING_TOOLS=1`), that every other
+   tool is argv-driven and goes through the real path guard, and that its own
+   description tells the agent never to run a command that came from content it
+   read. Plan around "`CLAWBOX_MCP_CODING_TOOLS=1` + `bash` = the agent can
+   reach anything the device user can". Its `allow_dangerous` flag skips the
    typo check on destructive spellings (`rm -rf`, `git push --force`) and
    nothing else: it is a model-supplied boolean, so it is neither an
    authorization nor the owner's consent, and no code treats it as either.
@@ -1157,7 +1194,7 @@ mcp/lib/api.ts         /setup-api client: token, timeout, redirect:"manual"
 mcp/lib/guard.ts       path guard + argv spawn
 mcp/lib/schema.ts      zod parameter builders (bounded ints, closed enums)
 mcp/lib/context.ts     startup-resolved device facts and capability probes
-mcp/lib/jobs.ts        background shell jobs for `bash`
+mcp/lib/jobs.ts        background shell jobs for `bash` (registered only under CLAWBOX_MCP_CODING_TOOLS=1)
 mcp/lib/web.ts         SSRF-guarded fetch and HTML→text
 mcp/tools/*.ts         one module per tool family
 mcp/tools/coding-agent.ts
@@ -1181,7 +1218,7 @@ and it drags server-only Next.js code into this stdio process.
 | `CLAWBOX_MCP_TOKEN` | Bearer for `/setup-api/*`. Falls back to `<root>/data/.mcp-token`, so a provisioning entry need carry no secret. Read once at startup and deleted from the process environment, so a `bash` child's own `printenv` finds none (hygiene only — the server's `/proc/<pid>/environ` keeps the exec-time value; see "What `bash` guarantees"); the `clawbox` CLI a shell invokes reads the file. |
 | `CLAWBOX_MCP_PROFILE` | `full` (default), `core` or `browser` pins the tool set (`browser` = the browser family only — what a delegated coding-agent run gets); `auto` makes it FOLLOW THE MODEL — a device whose active provider is the on-device one and whose model is small (≤8B, or a ≤16k context) registers `core`, everything else `full`. `auto` is opt-in because this process sees only the persisted provider, not the chat header's per-turn override. See `mcp/lib/profile.ts` and `docs/hermes-reasoning-levels.md`. |
 | `CLAWBOX_SMALL_MODEL_PROFILE` | `off` disables the `auto` selection above (the explicit pins still work). |
-| `CLAWBOX_MCP_CODING_TOOLS` | `1` forces the coding family onto Hermes. Debugging only. |
+| `CLAWBOX_MCP_CODING_TOOLS` | `1` registers the coding family — `bash`, `job_status`, `job_stop`, `read_file`, `write_file`, `edit_file`, `notebook_edit`, `web_fetch`, `web_search` — on **every** edition. Unset (the shipped state) they are registered on none, because both harnesses already ship a shell and file tools and the duplicates cost ≈ 12.5 KB of `tools/list` for prompts that chose the built-ins six times out of six. `list_directory`, `glob` and `grep` are *not* behind it on OpenClaw — see "Coding family". Read at registration time by this process, so it belongs in the server's own `env` block (Settings → MCP, or the Harness page), followed by a harness restart; `scripts/gateway-pre-start.sh` does not set it. |
 
 ## Work owned by others
 

@@ -33,9 +33,13 @@ const EDITION_FILE = process.env.CLAWBOX_EDITION_FILE || "/etc/clawbox/edition.e
  * readEdition() collapses that case into its "openclaw" default, which is the
  * conservative answer for the APP (openclaw is the non-premium SKU) and the
  * wrong direction here: openclaw is the LARGER tool set and the only one
- * carrying bash, write_file, edit_file, grep and glob. "I could not read the
- * lock" must therefore resolve to the SMALLER set, so a transient read failure
- * cannot widen the surface a device was deliberately configured without.
+ * carrying the app store, the ClawKeep archives and the guarded read-only trio
+ * (list_directory, glob, grep). "I could not read the lock" must therefore
+ * resolve to the SMALLER set, so a transient read failure cannot widen the
+ * surface a device was deliberately configured without. (The shell, file and
+ * web tools are no longer part of that difference: since TASK-1079 they are
+ * registered on neither edition unless CLAWBOX_MCP_CODING_TOOLS=1 is set, so
+ * this fallback cannot hand them out either way.)
  *
  * An ABSENT file is a different case — dev machines, CI and pre-3.x installs
  * never had one — and keeps the documented env fallback.
@@ -79,7 +83,7 @@ export function resolveEdition(appHarness: Ed | null): Ed {
     // there answers `null` and hides both (see `resolveAppHarness`).
     console.error(
       "[clawbox-mcp] /etc/clawbox/edition.env exists but no edition could be read from it. "
-      + "Registering the SMALLER Hermes tool set: the shell and file tools stay off until the lock is readable.",
+      + "Registering the SMALLER Hermes tool set: the guarded file-search tools stay off until the lock is readable.",
     );
     return "hermes";
   }
