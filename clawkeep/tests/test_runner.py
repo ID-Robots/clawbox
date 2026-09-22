@@ -81,10 +81,16 @@ def stub_manifest(monkeypatch: pytest.MonkeyPatch):
     after a successful upload. Stub the S3-backed manifest/list calls so the
     failure-matrix tests don't make real network calls on the post-upload
     path. Tests that exercise retention directly re-patch these inside a
-    `with patch(...)` block, which transparently overrides these stubs."""
+    `with patch(...)` block, which transparently overrides these stubs.
+
+    `stats` is stubbed for the same reason: a run now recounts the prefix
+    before its first heartbeat as well as after the upload, so every test that
+    gets as far as minting credentials would otherwise put a real
+    list_objects_v2 on the wire."""
     monkeypatch.setattr(s3, "read_manifest", lambda creds: {"version": 1, "snapshots": {}})
     monkeypatch.setattr(s3, "write_manifest", lambda creds, manifest: None)
     monkeypatch.setattr(s3, "list_snapshots", lambda creds: [])
+    monkeypatch.setattr(s3, "stats", lambda creds: CloudStats(cloud_bytes=0, snapshot_count=0))
 
 
 def test_happy_path(isolate_state: Path, tmp_path: Path) -> None:
@@ -327,11 +333,17 @@ def test_upload_failure_reports_error(isolate_state: Path, tmp_path: Path) -> No
         patch("clawkeep.runner.api.heartbeat", side_effect=fake_hb),
         patch("clawkeep.runner.openclaw.create_archive", return_value=archive),
         patch("clawkeep.runner.s3.upload", side_effect=S3Error("AccessDenied")),
-        patch("clawkeep.runner.s3.stats") as stats_mock,
+        patch(
+            "clawkeep.runner.s3.stats",
+            return_value=CloudStats(cloud_bytes=0, snapshot_count=0),
+        ) as stats_mock,
     ):
         rc = runner.run_once(cfg, "claw_x")
     assert rc == runner.EXIT_UPLOAD
-    stats_mock.assert_not_called()
+    # Once: the opening recount every run sends with its "running" heartbeat.
+    # The post-upload recount is not reached — there was no upload to count,
+    # and the error heartbeat below is the run's last word.
+    assert stats_mock.call_count == 1
     assert heartbeats[-1]["status"] == "error"
     assert "AccessDenied" in heartbeats[-1]["error"]
     # Cleanup must still run on the upload failure path — a half-finished
@@ -474,8 +486,214 @@ def test_idle_sends_when_stale(isolate_state: Path, tmp_path: Path) -> None:
     with (
         patch("clawkeep.runner.api.heartbeat") as hb,
         patch("clawkeep.runner.api.now_ms", return_value=10_000_000_000_000),
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
     ):
         rc = runner.run_idle(cfg, "claw_x")
     assert rc == runner.EXIT_OK
     hb.assert_called_once()
     assert hb.call_args.kwargs["status"] == "idle"
+
+
+# ── Usage is recounted from the bucket, never taken from the counter ───────
+#
+# TASK-1025. The portal's `cloudBytes` is an accumulator that heartbeats
+# write; it is wrong the moment an object is removed by anything other than
+# this daemon. A box that believed it showed "9.8 GB used, 2 snapshots" over a
+# prefix the portal's own page reported as empty — and because the portal
+# answers 402 to POST /credentials while that counter is over quota, the
+# counter being too high blocked the run that would have corrected it.
+
+
+def test_idle_recounts_the_prefix_and_reports_what_it_found(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """The idle tick is the only thing that runs on a box that isn't backing
+    up, so it is where a drifted number has to be put right — in the heartbeat
+    the portal stores AND in the state.json the panel reads."""
+    cfg = _cfg(tmp_path)
+    # What the box last recorded; since then the snapshots were freed.
+    state.save(
+        state.State(
+            last_heartbeat_at_ms=1_000,
+            last_cloud_bytes=9_800_000_000,
+            last_snapshot_count=2,
+        ),
+        isolate_state,
+    )
+    with (
+        patch("clawkeep.runner.api.heartbeat") as hb,
+        patch("clawkeep.runner.api.now_ms", return_value=10_000_000_000_000),
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch(
+            "clawkeep.runner.s3.stats",
+            return_value=CloudStats(cloud_bytes=0, snapshot_count=0),
+        ),
+    ):
+        rc = runner.run_idle(cfg, "claw_x")
+
+    assert rc == runner.EXIT_OK
+    kwargs = hb.call_args.kwargs
+    assert kwargs["status"] == "idle"
+    assert kwargs["cloud_bytes"] == 0
+    assert kwargs["snapshot_count"] == 0
+    final = state.load(isolate_state)
+    assert final.last_cloud_bytes == 0
+    assert final.last_snapshot_count == 0
+
+
+def test_idle_still_heartbeats_when_credentials_are_refused(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """Over quota, offline, revoked: no credentials means no recount, but the
+    device still owes the portal a "last seen". The recount is an addition to
+    the idle tick, not a new way for it to fail."""
+    cfg = _cfg(tmp_path)
+    state.save(
+        state.State(last_heartbeat_at_ms=1_000, last_cloud_bytes=9_800_000_000),
+        isolate_state,
+    )
+    with (
+        patch("clawkeep.runner.api.heartbeat") as hb,
+        patch("clawkeep.runner.api.now_ms", return_value=10_000_000_000_000),
+        patch(
+            "clawkeep.runner.api.mint_credentials",
+            side_effect=ApiError("quota_full", "quota full", 402),
+        ),
+        patch("clawkeep.runner.s3.stats") as stats,
+    ):
+        rc = runner.run_idle(cfg, "claw_x")
+
+    assert rc == runner.EXIT_OK
+    stats.assert_not_called()
+    kwargs = hb.call_args.kwargs
+    assert kwargs["status"] == "idle"
+    # Unsent rather than zeroed — the box has nothing true to say about usage
+    # here, and saying "0 B" would be a guess the portal would then store.
+    assert kwargs["cloud_bytes"] is None
+    assert kwargs["snapshot_count"] is None
+    assert state.load(isolate_state).last_cloud_bytes == 9_800_000_000
+
+
+def test_idle_keeps_a_recount_the_portal_never_heard(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """A recount is true for this box whether or not the heartbeat landed, so
+    the panel stops lying even while the portal is unreachable."""
+    cfg = _cfg(tmp_path)
+    state.save(
+        state.State(last_heartbeat_at_ms=1_000, last_cloud_bytes=9_800_000_000),
+        isolate_state,
+    )
+    with (
+        patch(
+            "clawkeep.runner.api.heartbeat",
+            side_effect=ApiError("network", "connection refused"),
+        ),
+        patch("clawkeep.runner.api.now_ms", return_value=10_000_000_000_000),
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch(
+            "clawkeep.runner.s3.stats",
+            return_value=CloudStats(cloud_bytes=512, snapshot_count=1),
+        ),
+    ):
+        rc = runner.run_idle(cfg, "claw_x")
+
+    assert rc == runner.EXIT_NETWORK
+    final = state.load(isolate_state)
+    assert final.last_cloud_bytes == 512
+    assert final.last_snapshot_count == 1
+    # The heartbeat never landed, so "last seen" must NOT be stamped as fresh.
+    assert final.last_heartbeat_at_ms == 1_000
+
+
+def test_idle_recount_failure_does_not_cost_the_heartbeat(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    state.save(
+        state.State(last_heartbeat_at_ms=1_000, last_cloud_bytes=9_800_000_000),
+        isolate_state,
+    )
+    with (
+        patch("clawkeep.runner.api.heartbeat") as hb,
+        patch("clawkeep.runner.api.now_ms", return_value=10_000_000_000_000),
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.s3.stats", side_effect=S3Error("ListBucket forbidden")),
+    ):
+        rc = runner.run_idle(cfg, "claw_x")
+
+    assert rc == runner.EXIT_OK
+    assert hb.call_args.kwargs["status"] == "idle"
+    assert hb.call_args.kwargs["cloud_bytes"] is None
+    # Untouched rather than zeroed: a failed LIST is not evidence of an empty
+    # bucket.
+    assert state.load(isolate_state).last_cloud_bytes == 9_800_000_000
+
+
+def test_run_opens_with_a_recount_not_the_counter(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """The run's first heartbeat carries what the prefix holds *before* this
+    backup adds to it, so the portal is corrected even by a run that goes on
+    to fail — the shape of run an account at its limit produces."""
+    cfg = _cfg(tmp_path)
+    archive = _archive(tmp_path)
+    heartbeats: list[dict] = []
+
+    def fake_hb(server: str, token: str, **kw: object) -> None:
+        heartbeats.append(dict(kw))
+
+    state.save(state.State(last_cloud_bytes=9_800_000_000, last_snapshot_count=2), isolate_state)
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat", side_effect=fake_hb),
+        patch("clawkeep.runner.openclaw.create_archive", return_value=archive),
+        patch("clawkeep.runner.s3.upload"),
+        patch(
+            "clawkeep.runner.s3.stats",
+            side_effect=[
+                CloudStats(cloud_bytes=0, snapshot_count=0),        # before upload
+                CloudStats(cloud_bytes=12, snapshot_count=1),       # after upload
+            ],
+        ),
+    ):
+        rc = runner.run_once(cfg, "claw_x")
+
+    assert rc == runner.EXIT_OK
+    opening = heartbeats[0]
+    assert opening["status"] == "running"
+    # CREDS.cloudBytes is 1_234 and state said 9.8 GB — neither is the answer.
+    assert opening["cloud_bytes"] == 0
+    assert opening["snapshot_count"] == 0
+    assert heartbeats[-1]["cloud_bytes"] == 12
+
+
+def test_failed_run_still_corrects_usage(isolate_state: Path, tmp_path: Path) -> None:
+    """A box whose backups fail is exactly the box whose usage looks full.
+    The opening recount lands in state.json regardless of how the run ends."""
+    cfg = _cfg(tmp_path)
+    heartbeats: list[dict] = []
+
+    def fake_hb(server: str, token: str, **kw: object) -> None:
+        heartbeats.append(dict(kw))
+
+    state.save(state.State(last_cloud_bytes=9_800_000_000, last_snapshot_count=2), isolate_state)
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat", side_effect=fake_hb),
+        patch(
+            "clawkeep.runner.openclaw.create_archive",
+            side_effect=OpenclawError("disk full"),
+        ),
+        patch(
+            "clawkeep.runner.s3.stats",
+            return_value=CloudStats(cloud_bytes=0, snapshot_count=0),
+        ),
+    ):
+        rc = runner.run_once(cfg, "claw_x")
+
+    assert rc == runner.EXIT_OPENCLAW
+    assert heartbeats[0]["cloud_bytes"] == 0
+    final = state.load(isolate_state)
+    assert final.last_cloud_bytes == 0
+    assert final.last_snapshot_count == 0

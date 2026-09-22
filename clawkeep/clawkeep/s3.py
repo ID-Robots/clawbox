@@ -12,7 +12,7 @@ unit tests, etc.) can run on a host that has not yet installed boto3.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -255,7 +255,12 @@ def _last_modified_ms(value: object) -> int:
 
 
 def stats(creds: Credentials) -> CloudStats:
-    """Sum sizes + count objects under the prefix."""
+    """Sum sizes + count objects under the prefix.
+
+    This — not any counter the portal keeps — is what the account actually
+    holds. One LIST answers it, which is why the runner can afford to ask on
+    every heartbeat instead of trusting a number that only ever goes stale.
+    """
     try:
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:  # pragma: no cover
@@ -269,15 +274,36 @@ def stats(creds: Credentials) -> CloudStats:
         for page in paginator.paginate(Bucket=creds.bucket, Prefix=creds.prefix):
             for obj in page.get("Contents", []) or []:
                 name = _strip_prefix(creds.prefix, str(obj.get("Key", "")))
-                # The sidecar manifest is bookkeeping, not a backup — exclude it
-                # from both byte usage and the snapshot count so the UI/quota
-                # never see it.
+                # Same two exclusions `list_snapshots` applies, in the same
+                # order, so the usage the panel derives from a listing and the
+                # usage a backup run reports can never disagree:
+                # the sidecar manifest is bookkeeping, not a backup, and a
+                # zero-byte "directory marker" is not a snapshot either.
+                if not name or name.endswith("/"):
+                    continue
                 if name == MANIFEST_OBJECT:
                     continue
                 total += int(obj.get("Size", 0))
                 count += 1
     except (BotoCoreError, ClientError) as e:
         raise S3Error(f"list_objects_v2 failed for s3://{creds.bucket}/{creds.prefix}: {e}") from e
+    return CloudStats(cloud_bytes=total, snapshot_count=count)
+
+
+def stats_from_snapshots(snapshots: Iterable[Snapshot]) -> CloudStats:
+    """The same CloudStats for a prefix that has *already* been listed.
+
+    `list_snapshots` and `stats` walk the same objects under the same
+    exclusions, so a caller holding a snapshot list can derive usage from it
+    instead of paying for a second LIST — and, more importantly, gets a number
+    that agrees with the one a backup run reports by construction rather than
+    by two copies of the same arithmetic staying in step.
+    """
+    total = 0
+    count = 0
+    for snap in snapshots:
+        total += int(snap.size_bytes)
+        count += 1
     return CloudStats(cloud_bytes=total, snapshot_count=count)
 
 

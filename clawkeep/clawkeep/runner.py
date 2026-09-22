@@ -124,6 +124,32 @@ def _retry_credentials(server: str, token: str, attempts: int = 3) -> api.Creden
     raise last
 
 
+def _recompute_usage(st: state.State, creds: api.Credentials) -> s3.CloudStats | None:
+    """Re-derive cloud usage from the objects in R2 and record it on `st`.
+
+    The portal's `cloudBytes` is an accumulator, not a measurement: it is
+    whatever the last heartbeat told it, so it is wrong from the moment
+    anything removes an object the daemon didn't remove itself (a support
+    cleanup, a lifecycle rule, a second box on the same account). A box that
+    believed that number sat at "full" over an empty prefix — and because the
+    portal answers 402 to `POST /credentials` while the counter is over quota,
+    a counter that was too high blocked the very run that would have corrected
+    it. So every heartbeat that *can* count the objects, counts them.
+
+    Best-effort by design: a failed LIST leaves `st` and the caller's payload
+    untouched, so a transient network error can't clobber the portal's
+    last-known usage with a zero. Callers persist `st` themselves.
+    """
+    try:
+        cloud = s3.stats(creds)
+    except s3.S3Error as e:
+        log.warning("cloud usage recompute failed (continuing): %s", e)
+        return None
+    st.last_cloud_bytes = cloud.cloud_bytes
+    st.last_snapshot_count = cloud.snapshot_count
+    return cloud
+
+
 def _stamp_heartbeat(
     st: state.State, ok: bool, status: str, *, now_override: int | None = None,
 ) -> None:
@@ -284,7 +310,19 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
             return EXIT_SERVER
         return EXIT_NETWORK if e.kind == "network" else EXIT_UNKNOWN
 
-    running_ok = _heartbeat_safe(cfg.server, token, status="running")
+    # Count what is in the prefix *before* this run adds to it, and send that
+    # with the run's first heartbeat. Doing it here rather than only at the end
+    # means every run corrects the portal — including the ones that go on to
+    # fail in openclaw, in openssl or in the upload, which is exactly the shape
+    # of run a nearly-full account produces.
+    opening = _recompute_usage(st, creds)
+    running_ok = _heartbeat_safe(
+        cfg.server,
+        token,
+        status="running",
+        cloud_bytes=opening.cloud_bytes if opening is not None else None,
+        snapshot_count=opening.snapshot_count if opening is not None else None,
+    )
     _stamp_heartbeat(st, running_ok, "running")
     _stamp_step(st, STEP_STARTING)
 
@@ -441,16 +479,12 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         except s3.S3Error as e:
             log.warning("retention prune failed (continuing): %s", e)
 
-        # Best-effort stats — leave the per-run fields *unsent* on failure
-        # so a transient ListBucket doesn't clobber the portal's last-known
-        # cloudBytes/snapshotCount.
+        # The closing recount: same call as the opening one, now including the
+        # snapshot this run just uploaded and minus whatever retention pruned.
+        # Best-effort — see _recompute_usage: a failed LIST leaves the per-run
+        # fields unsent rather than clobbering the portal with a zero.
         _stamp_step(st, STEP_CHECKING_STATS)
-        cloud: s3.CloudStats | None
-        try:
-            cloud = s3.stats(creds)
-        except s3.S3Error as e:
-            log.warning("s3 stats failed (continuing): %s", e)
-            cloud = None
+        cloud = _recompute_usage(st, creds)
 
         now = api.now_ms()
 
@@ -464,13 +498,11 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         )
 
         # Backup succeeded regardless of heartbeat outcome → always record
-        # last_backup_at_ms. cloudBytes/snapshotCount only update when stats
-        # are real, so a failed list-objects can't show "0 B" in the UI.
+        # last_backup_at_ms. cloudBytes/snapshotCount are already on `st` when
+        # the recount succeeded, and untouched when it didn't — so a failed
+        # list-objects can't show "0 B" in the UI.
         _stamp_heartbeat(st, heartbeat_ok, "ok", now_override=now)
         st.last_backup_at_ms = now
-        if cloud is not None:
-            st.last_cloud_bytes = cloud.cloud_bytes
-            st.last_snapshot_count = cloud.snapshot_count
         state.save(st)
 
         log.info(
@@ -514,7 +546,14 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
 
 def run_idle(cfg: Config, token: str) -> int:
     """Send an `idle` heartbeat if the last heartbeat is older than
-    cfg.heartbeat.idle_interval_hours. Used by clawkeep-idle.timer."""
+    cfg.heartbeat.idle_interval_hours. Used by clawkeep-idle.timer.
+
+    The idle tick is the only thing that runs on a box which isn't backing up,
+    so it is also where a usage number that has drifted gets put right: it
+    recounts the prefix and carries the answer, and the box's own panel — which
+    reads `last_cloud_bytes` out of state.json — stops showing the size of a
+    snapshot set the account no longer has.
+    """
     st = state.load()
     interval_ms = cfg.heartbeat.idle_interval_hours * 3600 * 1000
     now = api.now_ms()
@@ -522,10 +561,32 @@ def run_idle(cfg: Config, token: str) -> int:
         log.info("recent heartbeat (%d ms ago), skipping idle", now - st.last_heartbeat_at_ms)
         return EXIT_OK
 
+    # Both halves are best-effort: if the portal won't mint credentials (over
+    # quota, offline, revoked) we still owe it a "last seen", so an unanswerable
+    # recount degrades to the bare heartbeat this function has always sent
+    # rather than costing the device its heartbeat too.
+    cloud: s3.CloudStats | None = None
     try:
-        api.heartbeat(cfg.server, token, status="idle")
+        creds = api.mint_credentials(cfg.server, token)
+    except ApiError as e:
+        log.warning("idle usage recount skipped — no credentials (%s): %s", e.kind, e)
+    else:
+        cloud = _recompute_usage(st, creds)
+
+    try:
+        api.heartbeat(
+            cfg.server,
+            token,
+            status="idle",
+            cloud_bytes=cloud.cloud_bytes if cloud is not None else None,
+            snapshot_count=cloud.snapshot_count if cloud is not None else None,
+        )
     except ApiError as e:
         log.warning("idle heartbeat failed (%s): %s", e.kind, e)
+        # A recount that the portal never heard is still true for this box —
+        # persist it so the panel is right even while the portal isn't.
+        if cloud is not None:
+            state.save(st)
         return EXIT_NETWORK if e.kind == "network" else EXIT_UNKNOWN
 
     st.last_heartbeat_at_ms = now
