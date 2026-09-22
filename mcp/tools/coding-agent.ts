@@ -542,7 +542,7 @@ function describeRun(run: RunPayload, tail: number): string {
   const facts = [
     // Which account paid is said whenever it is not the box's own plan: the
     // owner asked for that run to go somewhere else and is entitled to see it
-    // in the report, and "model claude-opus-5" alone does not say whose bill.
+    // in the report, and "model claude-opus-5-5" alone does not say whose bill.
     run.provider && run.provider !== "clawbox-ai" ? `on the owner's ${run.provider} account` : null,
     run.model ? `model ${run.model}` : (run.requestedModel ? `model ${run.requestedModel}` : null),
     `${run.numTurns} turns`,

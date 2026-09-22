@@ -552,6 +552,9 @@ describe("coding_agent_run — provider and model", () => {
     expect(shape.provider.safeParse("anthropic").success).toBe(true);
     expect(shape.provider.safeParse("clawbox-ai").success).toBe(true);
     expect(shape.provider.safeParse("openai").success).toBe(false);
+    // The new default and the one it replaced: a "Finish PR" run inherits the
+    // model of the run it continues, so both have to survive the enum.
+    expect(shape.model.safeParse("claude-opus-5-5").success).toBe(true);
     expect(shape.model.safeParse("claude-opus-5").success).toBe(true);
     expect(shape.model.safeParse("gpt-5").success).toBe(false);
     // Both optional: omitting them means the owner's default.

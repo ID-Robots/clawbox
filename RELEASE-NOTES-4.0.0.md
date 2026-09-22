@@ -90,6 +90,10 @@ plans cover, in 4.0:
   values before it reaches the record.
 - **Isolation.** A run's parent process is spawned through `setpriv` with the
   ambient and inheritable capability sets emptied and no-new-privs set.
+- **A run on your own Anthropic account uses Claude Opus 5.5.** `claude-opus-5-5`
+  is the default there; `claude-opus-5` and `claude-sonnet-5` are still in the
+  picker. A run on the box's own ClawBox AI plan is unchanged — the plan chooses
+  the model, so one cannot be named for it.
 - The feature needs a paid ClawBox AI plan, Pro or Max. A box already enabled
   when a subscription lapses is never auto-disabled.
 - MCP tools: `coding_agent_run`, `coding_agent_status`, `coding_agent_resume`,

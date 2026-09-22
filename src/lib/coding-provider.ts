@@ -51,16 +51,21 @@ export const ANTHROPIC_API_KEY_CONFIG_KEY = "anthropic_api_key";
 
 /**
  * The models offered for an `anthropic` run. Deliberately a short list of the
- * two the device names elsewhere rather than whatever the account can reach:
+ * ones the device names elsewhere rather than whatever the account can reach:
  * an unknown model id is a failed run several minutes in, and the picker's
  * job is to make that impossible from here.
+ *
+ * Default first. `claude-opus-5` stays selectable behind the 5.5 default and
+ * is not going anywhere: a "Finish PR" run inherits the `requestedModel` of
+ * the run it continues, so a model dropped from this list would refuse the
+ * follow-up to every run started before the switch.
  */
-export const ANTHROPIC_MODELS = ["claude-opus-5", "claude-sonnet-5"] as const;
+export const ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"] as const;
 
 export type AnthropicModel = (typeof ANTHROPIC_MODELS)[number];
 
 /** The model an `anthropic` run gets when the caller named none. */
-export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5";
+export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5-5";
 
 /**
  * The catalogue key that names a provider in the owner's language.
