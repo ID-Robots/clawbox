@@ -3041,7 +3041,13 @@ step_network_setup() {
 validate_hostname() {
   local name="${1:-}"
   name="${name,,}"
-  if [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+  # 1..63 characters as an explicit length test rather than a bounded repeat
+  # `{0,61}`: `[[ =~ ]]` is glibc regex, which expands one into an NFA state per
+  # permitted repetition. Cheap at 61 (~0.5 MB) next to the 260 MB `{32,4096}`
+  # cost TASK-1066 took out of scripts/run-tunnel.sh, but it is the same
+  # construct, and src/tests/unit/shell-regex-hygiene.test.ts now keeps every
+  # script free of it. Same accepted and rejected labels as before.
+  if [ -z "$name" ] || [ "${#name}" -gt 63 ] || [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
     echo ""
     return 1
   fi
