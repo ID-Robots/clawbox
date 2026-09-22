@@ -256,41 +256,52 @@ describe("how many runs at once", () => {
    * stranger. A team's runs share the project; the orchestrator decides who
    * writes where.
    */
-  it("lets a team's reviewer start in the project beside a live run of the SAME team, and still refuses a run of no team there", async () => {
+  it("lets a team's reviewer start in the project beside a live run of the SAME team, and still refuses a second writer or a run of no team there", async () => {
     const flag = path.join(base, "go");
     installWrapper([`echo '${result("done")}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
     makePlainProject("plain");
-    // Room for all three, so only the folder rule is in the way.
+    // Room for all of them, so only the folder rule is in the way.
     await lib.setMaxParallelRuns(4);
     const team = "team-aaaa0001";
-    const first = await lib.startRun({ task: "review t1", directory: "plain", source: "owner", readOnly: true, team: { id: team, role: "reviewer", taskId: "t1" } });
-    const second = await lib.startRun({ task: "review t2", directory: "plain", source: "owner", readOnly: true, team: { id: team, role: "reviewer", taskId: "t2" } });
-    expect(second.status).toBe("running");
-    expect(second.directory).toBe(first.directory);
+    const inFolder = /Another coding run \(run-\w+\) is already working in that folder/;
+    // A worker of the team writing in place (a code project's shape).
+    const writer = await lib.startRun({ task: "work t1", directory: "plain", source: "owner", team: { id: team, role: "worker", taskId: "t1" } });
+    const reviewer = await lib.startRun({ task: "review t2", directory: "plain", source: "owner", readOnly: true, team: { id: team, role: "reviewer", taskId: "t2" } });
+    expect(reviewer.status).toBe("running");
+    expect(reviewer.directory).toBe(writer.directory);
+    // A second WRITER of the same team in the same checkout: the two would
+    // edit each other's half-written files, team or not.
+    await expect(lib.startRun({ task: "work t3", directory: "plain", source: "owner", team: { id: team, role: "worker", taskId: "t3" } }))
+      .rejects.toMatchObject({ kind: "busy", message: expect.stringMatching(inFolder) });
     await expect(lib.startRun({ task: "mine", directory: "plain", source: "owner" }))
-      .rejects.toMatchObject({ kind: "busy", message: expect.stringMatching(/Another coding run \(run-\w+\) is already working in that folder/) });
+      .rejects.toMatchObject({ kind: "busy", message: expect.stringMatching(inFolder) });
     fs.writeFileSync(flag, "go");
-    await finished(first.id);
-    await finished(second.id);
+    await finished(writer.id);
+    await finished(reviewer.id);
   });
 
-  it("names the live run that holds a folder: the team's own never, a stranger's or another team's always", () => {
+  it("names the live run that holds a folder: the team's own never beside a reader, a stranger's or another team's always", () => {
     const dir = "/home/clawbox/Projects/site";
-    const mine = { id: "run-aaaaaaaa", status: "running" as const, directory: dir, team: { id: "team-aaaa0001", role: "worker" as const, taskId: "t1" } };
-    const foreign = { id: "run-bbbbbbbb", status: "running" as const, directory: dir, team: { id: "team-bbbb0002", role: "worker" as const, taskId: "t1" } };
-    const loner = { id: "run-cccccccc", status: "running" as const, directory: dir, team: null };
+    const mine = { id: "run-aaaaaaaa", status: "running" as const, directory: dir, readOnly: false, team: { id: "team-aaaa0001", role: "worker" as const, taskId: "t1" } };
+    const myReviewer = { id: "run-dddddddd", status: "running" as const, directory: dir, readOnly: true, team: { id: "team-aaaa0001", role: "reviewer" as const, taskId: "t3" } };
+    const foreign = { id: "run-bbbbbbbb", status: "running" as const, directory: dir, readOnly: true, team: { id: "team-bbbb0002", role: "reviewer" as const, taskId: "t1" } };
+    const loner = { id: "run-cccccccc", status: "running" as const, directory: dir, readOnly: false, team: null };
     const reviewer = { id: "team-aaaa0001", role: "reviewer" as const, taskId: "t2" };
-    // Only the same team live: a reviewer of that team may start.
-    expect(lib.folderHolder([mine], dir, reviewer)).toBeNull();
-    // Same team AND another team live: the other team holds it.
-    expect(lib.folderHolder([mine, foreign], dir, reviewer)?.id).toBe("run-bbbbbbbb");
+    const worker = { id: "team-aaaa0001", role: "worker" as const, taskId: "t4" };
+    // Only the same team live: a (read-only) reviewer of that team may start.
+    expect(lib.folderHolder([mine, myReviewer], dir, reviewer, undefined, true)).toBeNull();
+    // Same team AND another team live: the other team holds it, read-only or not.
+    expect(lib.folderHolder([mine, foreign], dir, reviewer, undefined, true)?.id).toBe("run-bbbbbbbb");
     // A run of no team holds it against a team.
-    expect(lib.folderHolder([mine, loner], dir, reviewer)?.id).toBe("run-cccccccc");
+    expect(lib.folderHolder([mine, loner], dir, reviewer, undefined, true)?.id).toBe("run-cccccccc");
     // …and a run of no team is held off by any live run, a team's included.
-    expect(lib.folderHolder([mine], dir, null)?.id).toBe("run-aaaaaaaa");
+    expect(lib.folderHolder([myReviewer], dir, null)?.id).toBe("run-dddddddd");
+    // A writer of the team may start beside the team's readers, never beside its writer.
+    expect(lib.folderHolder([myReviewer], dir, worker)).toBeNull();
+    expect(lib.folderHolder([mine, myReviewer], dir, worker)?.id).toBe("run-aaaaaaaa");
     // Settled runs, other folders and the run itself (a resume) hold nothing.
-    expect(lib.folderHolder([{ ...foreign, status: "completed" as const }], dir, reviewer)).toBeNull();
-    expect(lib.folderHolder([{ ...foreign, directory: `${dir}/.clawbox/worktrees/t1-1` }], dir, reviewer)).toBeNull();
+    expect(lib.folderHolder([{ ...foreign, status: "completed" as const }], dir, reviewer, undefined, true)).toBeNull();
+    expect(lib.folderHolder([{ ...foreign, directory: `${dir}/.clawbox/worktrees/t1-1` }], dir, reviewer, undefined, true)).toBeNull();
     expect(lib.folderHolder([loner], dir, null, "run-cccccccc")).toBeNull();
   });
 });

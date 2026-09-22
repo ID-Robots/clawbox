@@ -731,6 +731,17 @@ describe("the words", () => {
     expect(team.workerTask(board, task, board.directory)).not.toContain("Your folder:");
   });
 
+  it("keeps the worker's folder when a long goal pushes the task text past its cut", async () => {
+    const { createBoard, postTask, MAX_GOAL_CHARS } = await import("@/lib/coding-team-board");
+    const { MAX_TASK_CHARS } = await import("@/lib/coding-agent");
+    // A goal at the limit a team accepts, and a long task under it.
+    const board = createBoard({ goal: "g".repeat(MAX_GOAL_CHARS), projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
+    const task = postTask(board, { kind: "planner" }, { task_description: "d".repeat(1_500), files_hint: ["styles.css"] });
+    const text = team.workerTask(board, task, "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1");
+    expect(text.length).toBe(MAX_TASK_CHARS);
+    expect(text).toContain("Your folder: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1");
+  });
+
   it("names files outside a task's hint, folders included, and nothing when there is no hint", () => {
     expect(team.outsideHint(["src/a.js", "src/lib/b.js", "README.md"], ["src"])).toEqual(["README.md"]);
     expect(team.outsideHint(["./index.html"], ["index.html"])).toEqual([]);

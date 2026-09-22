@@ -865,18 +865,17 @@ export function workerTask(board: TeamBoard, task: TeamTask, folder: string | nu
   // The task line comes FIRST: a run's commit subject and its row in the
   // app are the task text's first line, and "Team goal: …" four times over
   // told the owner nothing about which worker did what.
-  const parts = [
-    `Your task (${task.task_id} of ${board.tasks.length}): ${task.task_description}`,
-    `Team goal: ${board.goal}`,
-  ];
+  const parts = [`Your task (${task.task_id} of ${board.tasks.length}): ${task.task_description}`];
   // The hint is relative to the project, and a worker in a worktree took it
   // as relative to the project folder: it read `<project>/styles.css`, was
   // refused (the run is contained to its worktree), and the refusal was an
   // alert (bench, 2026-09-22). Its own folder is named, and every path is
-  // said to be relative to it.
+  // said to be relative to it — right after the task line, ahead of a goal
+  // that may be long enough to push it past the cut below.
   if (folder && folder !== board.directory) {
     parts.push(`Your folder: ${folder} — your own working copy of the project. Every path in this task, the files below included, is relative to it; read and write there, never in ${board.directory} itself.`);
   }
+  parts.push(`Team goal: ${board.goal}`);
   if (task.files_hint.length) parts.push(`Files this task is expected to touch: ${task.files_hint.join(", ")}`);
   if (done.length) parts.push(`Already done by teammates:\n${done.join("\n")}`);
   if (task.attempts > 0 && task.review?.verdict === "rejected") parts.push(`A previous attempt was rejected: ${task.review.notes}`);
