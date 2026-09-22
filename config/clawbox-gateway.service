@@ -79,6 +79,15 @@ RestartPreventExitStatus=78
 # 143 = 128+SIGTERM, the normal shutdown path. Without this the unit is marked
 # failed every time it is stopped.
 SuccessExitStatus=0 143
+# An OOM kill of ONE process in this cgroup — a claude CLI turn, a tool or MCP
+# subprocess the gateway spawned — must not take the whole gateway down. Under
+# systemd's default OOMPolicy=stop it does: every channel and every active turn
+# goes with it, and on an 8 GB Jetson the restart then re-runs the whole of
+# gateway-pre-start.sh (TASK-1073). `continue` is what OpenClaw's own systemd
+# template writes: the victim dies, the gateway reports that one turn as failed
+# and carries on. The gateway process itself being the victim still ends the
+# unit, and Restart=always brings it back as before.
+OOMPolicy=continue
 TimeoutStopSec=30
 # gateway-pre-start.sh runs as a blocking ExecStartPre. The default
 # ~90s start timeout could kill a legitimately slow first-boot pre-start
