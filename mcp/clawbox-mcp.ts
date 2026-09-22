@@ -33,8 +33,17 @@
  *   CLAWBOX_SMALL_MODEL_PROFILE
  *                             off — never auto-select "core" under `auto` (the
  *                             explicit pins above still work)
- *   CLAWBOX_MCP_CODING_TOOLS  1 forces the OpenClaw coding family onto Hermes
- *                             (debugging only — see mcp/tools/coding.ts)
+ *   CLAWBOX_MCP_CODING_TOOLS  1 registers the coding family — bash, job_status,
+ *                             job_stop, read_file, write_file, edit_file,
+ *                             notebook_edit, web_fetch, web_search — on EVERY
+ *                             edition. Unset (the shipped state) they are
+ *                             registered on none: each harness already has its
+ *                             own shell, file and web tools, and the duplicate
+ *                             family cost ~12.5 KB of tools/list for six of six
+ *                             prompts that chose the built-ins. list_directory,
+ *                             glob and grep are NOT behind it on OpenClaw — the
+ *                             guarded trio filters credential stores out of a
+ *                             listing, a glob and a grep. See mcp/tools/coding.ts
  *   CLAWBOX_RUN_DIR           inside a coding-agent run: its working folder
  *   CLAWBOX_RUN_ARTIFACTS_DIR inside a coding-agent run: its evidence folder
  *   CLAWBOX_RUN_MEDIA         "images", "audio" or both — which media tools the
@@ -89,6 +98,9 @@ const WHICH_MODEL_AM_I =
   "Where the ClawBox chat knows the model that served a reply, it prints it under that reply. `device_status` and `ai_list_models` report the device default, which a chat may override per session — never name yourself from those tools; read the label, or say you cannot tell.";
 
 function instructionsFor(edition: Ed, profile: Profile): string {
+  // The same env `registerCodingTools` reads, read the same way. See the
+  // paragraph it feeds in the `full` branch below.
+  const codingFamilyOn = process.env.CLAWBOX_MCP_CODING_TOOLS === "1";
   const product =
     edition === "hermes"
       ? "a private NVIDIA Jetson AI device on the user's desk. You are its Hermes agent; your extra abilities come from installed SKILLS, which you can browse and install yourself with skill_search and skill_install."
@@ -127,7 +139,28 @@ function instructionsFor(edition: Ed, profile: Profile): string {
     // minutes on install/timeout errors before giving up. Both were observed on
     // a Hermes device. Name it explicitly; steering only away from the desktop
     // app left this path wide open.
-    "Ignore any built-in browser tool your harness provides. On this device only the ClawBox `browser_*` tools work, and only they act on the Chromium window the user is actually looking at.",
+    //
+    // SCOPED TO THE BROWSER, and said so, because the rule stopped being safe
+    // to generalise: since TASK-1079 this server registers no shell, file or
+    // web tools unless an owner sets CLAWBOX_MCP_CODING_TOOLS=1, so an agent
+    // that read "ignore your harness's built-ins" broadly would have nothing
+    // left to run a command or write a file with.
+    "Ignore any built-in browser tool your harness provides — that rule, and only that rule. On this device only the ClawBox `browser_*` tools work, and only they act on the Chromium window the user is actually looking at.",
+    // The positive half, naming only what THIS box registers — which is why it
+    // reads the gate rather than assuming the shipped default. `buildServer`
+    // calls this and then the registrars, in one process and one moment, so
+    // the two read the same value and the instructions cannot describe a tool
+    // set the server did not register. Without that, an owner who switched the
+    // family on was told in EVERY system prompt that ClawBox "adds no second
+    // copy" of tools sitting in their own tools/list — the defect TASK-1079 is
+    // about, pointed the other way, and heavier here than in the field guide
+    // because this text is on every turn and carries no "your tools/list is the
+    // authority" caveat.
+    codingFamilyOn
+      ? "The ClawBox shell, file and web tools are switched on beside your harness's own here: `bash`, `read_file`, `write_file`, `edit_file`, `notebook_edit`, `web_fetch`, `web_search`, `list_directory`, `glob` and `grep`. Either set works. Prefer the ClawBox file and search tools under the home folder — they refuse to open, list or print the device's credential files."
+      : edition === "hermes"
+        ? "For shell commands, files and the web, use the tools your Hermes harness gave you. ClawBox deliberately adds none of its own here."
+        : "For shell commands, reading and writing files and the web, use your harness's own tools: ClawBox adds no second copy of them. `list_directory`, `glob` and `grep` are the exception and worth preferring under the home folder — they hide the device's credential files from a listing or a search, which an ordinary shell search does not.",
     // Offered only when the owner switched it on and the harness is ready
     // (mcp/lib/context.ts), hence "when it is available".
     "When `coding_agent_run` is available, use it for coding work that spans several files or needs a build or tests to prove it worked: it runs a separate Claude Code session in the background on this device. Follow it with `coding_agent_status` and relay its summary; do not narrate its progress turn by turn. Steer a run that is still working with `coding_run_message` instead of stopping it; `coding_run_list` and `coding_project_status` show every run and project at a glance, and `coding_agent_resume` carries on a paused run when the user asks.",
@@ -230,7 +263,7 @@ export async function buildServer(
  * the box answering "send only" seven minutes after Settings said "Read on
  * demand". `hasMailboxSurface` is asked of the registrar rather than of
  * `profile`/`edition` again — it owns both reasons, including the SDK one.
- * `buildServer` deliberately does not do this: mcp/check-tools.ts builds ten
+ * `buildServer` deliberately does not do this: mcp/check-tools.ts builds twelve
  * servers and connects none of them.
  *
  * STOPPED WITH THE TRANSPORT. `unref` is what stops the poll holding an
@@ -290,7 +323,7 @@ async function main(): Promise<void> {
   );
 }
 
-// mcp/check-tools.ts imports buildServer to build five postures per edition and diff the tool lists;
+// mcp/check-tools.ts imports buildServer to build six postures per edition and diff the tool lists;
 // it sets this first so importing this module does not claim stdio.
 if (process.env.CLAWBOX_MCP_NO_AUTOSTART !== "1") {
   main().catch((err) => {

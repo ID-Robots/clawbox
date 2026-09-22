@@ -1,16 +1,51 @@
 // The coding-agent family: shell, files, search, web.
 //
-// OPENCLAW ONLY (override with CLAWBOX_MCP_CODING_TOOLS=1 for debugging).
-// Three reasons, in order of weight:
+// TWO GROUPS, and REGISTRATION IS THE ONLY LEVER. Nothing below is deleted,
+// renamed, reshaped or weakened; every tool still exists and still answers
+// exactly as it did. What changed is which of them a box is OFFERED.
+//
+//   ALWAYS, on the OpenClaw edition: list_directory, glob, grep — the guarded
+//   read-only trio. They stay because of what they do that no harness's own
+//   search does: they filter DESCENDANTS (see below), so a credential store
+//   under a folder being listed, matched or searched never reaches the agent.
+//   They are also the cheap end of the schema.
+//
+//   GATED behind CLAWBOX_MCP_CODING_TOOLS=1, on EVERY edition: bash,
+//   job_status, job_stop, read_file, write_file, edit_file, notebook_edit,
+//   web_fetch, web_search.
+//
+// Why the gate — measured on a real box (v4.0.0, OpenClaw edition). The family
+// is ≈ 12.5 KB of a 43.9 KB tools/list, 28% of the payload and ≈ 3k input
+// tokens spent at every session start, and the model did not use it: over six
+// shell, file and web prompts it reached for the OpenClaw harness's own
+// exec / read / edit / web_fetch six times out of six, and for an MCP tool only
+// on the device question. The whole MCP server costs +10.4k input tokens per
+// session (34.8k against 24.4k); this family is the part of that nothing was
+// spending. Duplicating a harness's own shell and file tools buys a second,
+// differently-guarded way to do the same thing.
+//
+// CLAWBOX_MCP_CODING_TOOLS is the env this file already honoured for Hermes
+// debugging, with its meaning widened rather than replaced: 1 registers the
+// gated group on EVERY edition, so a Hermes box under the override sees exactly
+// what it saw before. An owner who wants the family back on OpenClaw sets it in
+// this server's `env` block through Settings → MCP or the Harness page
+// (mcp/README.md, "Environment"). It is set on no shipped device.
+//
+// Why Hermes never had any of it, and why a second shell is the wrong shape of
+// tool to hand an agent by default — three reasons, in order of weight:
 //   1. Blast radius. `bash` is a total bypass of the file guard — one
 //      `cat ~/.hermes/.env` reads every provider key and the ClawBox AI billing
 //      token. On Hermes the agent's threat model is untrusted web and email
 //      content, and Hermes already ships its own terminal and file tools.
 //      Handing it a second, less-guarded shell buys nothing and doubles the
-//      surface.
-//   2. Budget. This block is most of the tool-schema bytes, on a device being
-//      benchmarked with 4-8B models.
-//   3. No regression: nothing on a Hermes device uses these today.
+//      surface. On OpenClaw the harness's own `exec` is covered by the
+//      before_tool_call hook, and this was a second door reached by another
+//      tool id.
+//   2. Budget. This block is the largest single family in the tool schema —
+//      28% of the payload, measured above — on a device being benchmarked with
+//      4-8B models.
+//   3. No regression: nothing on a Hermes device uses these, and on OpenClaw
+//      the harness's own tools already did the work.
 //
 // Every file tool below honours src/lib/file-guard.ts, and honours it for
 // DESCENDANTS, not just the path it was handed: list_directory filters entries,
@@ -37,7 +72,7 @@ import {
 } from "../lib/guard";
 import { getJob, inspectCommand, runShell, startJob, stopJob } from "../lib/jobs";
 import { hostMatchesDomain, htmlToText, safeFetch, stripTagsToFixedPoint } from "../lib/web";
-import { json, text, type Registrar } from "../lib/register";
+import { json, text, type Ed, type Registrar } from "../lib/register";
 import { zBool, zEnumOf, zInt, zMaybeEmptyText, zOptText, zText } from "../lib/schema";
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -270,11 +305,19 @@ async function readCapped(res: Response, maxBytes: number): Promise<string> {
 }
 
 export function registerCodingTools(reg: Registrar): void {
-  // OpenClaw only — the three reasons are at the top of this file.
-  // CLAWBOX_MCP_CODING_TOOLS=1 widens it to Hermes for debugging, and is set on
-  // no shipped device.
-  const codingEditions: ("openclaw" | "hermes")[] =
-    process.env.CLAWBOX_MCP_CODING_TOOLS === "1" ? ["openclaw", "hermes"] : ["openclaw"];
+  // The one lever, read once. See the header: two groups, no deletions.
+  const forced = process.env.CLAWBOX_MCP_CODING_TOOLS === "1";
+
+  // The guarded read-only trio: OpenClaw always, Hermes only under the
+  // override — exactly the rule the whole family used to follow.
+  const guardedReadEditions: Ed[] = forced ? ["openclaw", "hermes"] : ["openclaw"];
+
+  // Shell, files, web: NO edition unless the override is set. An empty list is
+  // a real answer to `editions`, not an oversight — createRegistrar drops a
+  // tool whose `editions` does not include the running edition, and [] includes
+  // none of them, so these register nowhere while the tools themselves stay
+  // compiled, tested and one env var away.
+  const codingEditions: Ed[] = forced ? ["openclaw", "hermes"] : [];
 
   // ── bash ─────────────────────────────────────────────────────────────────
 
@@ -619,7 +662,7 @@ export function registerCodingTools(reg: Registrar): void {
     "list_directory",
     "List what is inside a folder on the ClawBox: folders first, then files. Use glob when you are looking for files by name across many folders. Folders holding device credentials are not listed.",
     { path: zOptText(4_000, "Folder to list. Defaults to the ClawBox project folder.") },
-    { editions: codingEditions, readOnly: true, maxChars: 8_000 },
+    { editions: guardedReadEditions, readOnly: true, maxChars: 8_000 },
     async ({ path }: { path?: string }) => {
       const abs = path ? resolveUserPath(path) : DEFAULT_CWD;
       assertPathAllowed(abs);
@@ -647,7 +690,7 @@ export function registerCodingTools(reg: Registrar): void {
       pattern: zText(200, "Name pattern, e.g. \"**/*.ts\"."),
       path: zOptText(4_000, "Folder to search under. Defaults to the ClawBox project folder."),
     },
-    { editions: codingEditions, readOnly: true, maxChars: 8_000 },
+    { editions: guardedReadEditions, readOnly: true, maxChars: 8_000 },
     async ({ pattern, path }: { pattern: string; path?: string }) => {
       const dir = path ? resolveUserPath(path) : DEFAULT_CWD;
       assertPathAllowed(dir);
@@ -690,7 +733,7 @@ export function registerCodingTools(reg: Registrar): void {
       max_results: zInt(1, 500, GREP_LIMIT, "Most output lines to return."),
       offset: zInt(0, 10_000, 0, "Skip this many results before returning any."),
     },
-    { editions: codingEditions, readOnly: true, maxChars: BIG_OUTPUT },
+    { editions: guardedReadEditions, readOnly: true, maxChars: BIG_OUTPUT },
     async ({
       pattern,
       path,

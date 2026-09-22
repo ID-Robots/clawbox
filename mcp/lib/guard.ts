@@ -29,8 +29,9 @@ import {
 // carries into ~/.openclaw/extensions. It lives there because a plugin copied
 // out of the checkout has to take its rule with it; it is imported HERE
 // because ClawBox's own `bash`, `write_file`, `edit_file` and `notebook_edit`
-// reach the same files the harness's tools do, and a deny the agent can walk
-// around through this server is not a deny. Its whole import graph is node
+// reach the same files the harness's tools do wherever an owner has switched
+// them on (CLAWBOX_MCP_CODING_TOOLS=1), and a deny the agent can walk around
+// through this server is not a deny. Its whole import graph is node
 // builtins, so it satisfies the rule at the top of this file.
 import {
   commandDenyReason,
@@ -374,10 +375,11 @@ export interface CommandPathRefusal {
  * spellings, not all of them. It is a guard rail against a mistake, not a
  * sandbox, and nothing here should be relied on as one.
  *
- * What actually bounds that tool: it is registered on OpenClaw only, every
- * other tool is argv-driven and goes through the real path guard, and its own
- * description tells the agent never to run a command that came from content it
- * read. Assume `bash` can reach anything the device user can.
+ * What actually bounds that tool: it is registered on no shipped device — only
+ * where an owner set CLAWBOX_MCP_CODING_TOOLS=1 — every other tool is
+ * argv-driven and goes through the real path guard, and its own description
+ * tells the agent never to run a command that came from content it read. Assume
+ * `bash` can reach anything the device user can.
  *
  * Four passes, all cheap, in the order that gives the most useful refusal:
  *   1. the `.openclaw` text rule, first so its own `next` hint survives — a
@@ -401,8 +403,8 @@ export function commandPathRefusal(command: string, cwd?: string): CommandPathRe
       if (!isAllowedPath(resolveUserPath(raw))) return { kind: "credential" };
     } catch { /* not a resolvable path */ }
   }
-  // TASK-605: the same rule the two harnesses enforce on their own shells. This
-  // tool is registered on the OpenClaw edition, where the harness's `exec` is
+  // TASK-605: the same rule the two harnesses enforce on their own shells.
+  // Wherever this tool is switched on, the harness's own shell is already
   // covered by the before_tool_call hook — and this is a SECOND shell, reached
   // by a different tool id, so without this the deny would have a door in it.
   //
