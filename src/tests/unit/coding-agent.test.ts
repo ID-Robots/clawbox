@@ -2418,6 +2418,45 @@ describe("a team run reloaded from disk", () => {
   });
 });
 
+describe("a team run's message tool", () => {
+  const team = { id: "team-k3x9q2ab", role: "worker" as const, taskId: "t2" };
+
+  it("names the run and its team to the run's own MCP server — all four, only for a team run", () => {
+    const env = JSON.parse(lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home, team })).mcpServers.clawbox.env;
+    expect(env).toMatchObject({ CLAWBOX_RUN_ID: "run-ab12cd34", CLAWBOX_TEAM_ID: "team-k3x9q2ab", CLAWBOX_TEAM_ROLE: "worker", CLAWBOX_TEAM_TASK: "t2" });
+    const planner = JSON.parse(lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home, team: { id: "team-k3x9q2ab", role: "planner", taskId: null } })).mcpServers.clawbox.env;
+    expect(planner.CLAWBOX_TEAM_TASK).toBe("none");
+    for (const solo of [lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home }), lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home, team: null })]) {
+      const soloEnv = JSON.parse(solo).mcpServers.clawbox.env;
+      for (const key of ["CLAWBOX_RUN_ID", "CLAWBOX_TEAM_ID", "CLAWBOX_TEAM_ROLE", "CLAWBOX_TEAM_TASK"]) expect(soloEnv[key]).toBeUndefined();
+    }
+  });
+
+  it("approves team_message for every team run, the read-only planner and reviewer included, and for no other run", () => {
+    const allowed = (argv: string[]) => argv.slice(argv.indexOf("--allowedTools") + 1, argv.indexOf("--disallowedTools"));
+    const readOnly = allowed(lib.buildRunArgs({ readOnly: true, run: { id: "run-ab12cd34", directory: home, team: { ...team, role: "reviewer" } } }));
+    expect(readOnly).toContain(lib.MCP_TEAM_TOOL);
+    // Still nothing else MCP for a read-only run: no browser, no media.
+    expect(readOnly.filter((a) => a.startsWith("mcp__"))).toEqual([lib.MCP_TEAM_TOOL]);
+    const worker = allowed(lib.buildRunArgs({ run: { id: "run-ab12cd34", directory: home, team } }));
+    expect(worker).toContain(lib.MCP_TEAM_TOOL);
+    for (const tool of lib.MCP_BROWSER_TOOLS) expect(worker).toContain(tool);
+    expect(allowed(lib.buildRunArgs({ run: { id: "run-ab12cd34", directory: home } }))).not.toContain(lib.MCP_TEAM_TOOL);
+    expect(allowed(lib.buildRunArgs({ run: { id: "run-ab12cd34", directory: home, team: null } }))).not.toContain(lib.MCP_TEAM_TOOL);
+    expect(lib.MCP_TEAM_TOOL).toBe("mcp__clawbox__team_message");
+  });
+
+  it("puts a message the run sent on its own feed, and ignores a run that is gone", async () => {
+    const base = { task: "t", directory: home, projectId: null, source: "agent", status: "running", startedAt: 1, completedAt: null, sessionId: null, model: null, summary: null, error: null, progress: [], filesTouched: [], commands: [], permissionDenials: [], numTurns: 0, tokensUsed: 0 };
+    fs.writeFileSync(runsFile(), JSON.stringify([{ ...base, id: "run-teamwork2", team: { id: "team-1", role: "worker", taskId: "t1" } }]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    lib.noteTeamMessageSent("run-teamwork2", "Team message to the lead: the task names src/ and there is none");
+    expect(lib.getRun("run-teamwork2")?.progress.at(-1)).toBe("Team message to the lead: the task names src/ and there is none");
+    expect(() => lib.noteTeamMessageSent("run-nosuchrn", "Team message to the lead: hi")).not.toThrow();
+  });
+});
+
 describe("a run's commit", () => {
   it("records why the work could not be committed, on the record, and clears it when it is", async () => {
     writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });

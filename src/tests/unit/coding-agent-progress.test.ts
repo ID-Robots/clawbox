@@ -281,3 +281,32 @@ describe("the runner's own sentences are keyed", () => {
     expect(describeProgressLine(RUNNER_STEP.merged).kind).toBe("text");
   });
 });
+
+/**
+ * A team message this run SENT (src/lib/coding-team.ts), on its own feed: one
+ * sentence per addressee, keyed so the run page words it, the run's own words
+ * carried through as a value — and still read after the feed's line cap has
+ * cut the end off.
+ */
+describe("a team message on the sender's feed", () => {
+  it.each([
+    [RUNNER_STEP.teamMessageToRun("run-ab12cd34", "what does total() return?"), "teamMessageToRun", { run: "run-ab12cd34", text: "what does total() return?" }],
+    [RUNNER_STEP.teamMessageToLead("t2's file is missing"), "teamMessageToLead", { text: "t2's file is missing" }],
+    [RUNNER_STEP.teamMessageToAssistant("Stripe or PayPal?"), "teamMessageToAssistant", { text: "Stripe or PayPal?" }],
+  ])("%s", (line, key, params) => {
+    const step = describeProgressLine(line);
+    expect(step.labelKey).toBe(key);
+    expect(step.params).toEqual(params);
+    expect(step.icon).toBe("forum");
+    expect(step.kind).toBe("text");
+  });
+
+  it("still reads a line the feed cut short", () => {
+    const cut = `${RUNNER_STEP.teamMessageToLead("x".repeat(400)).slice(0, 159)}…`;
+    expect(describeProgressLine(cut).labelKey).toBe("teamMessageToLead");
+  });
+
+  it("is not fooled by a run id that is not one", () => {
+    expect(describeProgressLine("Team message to everyone: hi").labelKey).toBeUndefined();
+  });
+});

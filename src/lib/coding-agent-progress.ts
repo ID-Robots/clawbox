@@ -108,7 +108,12 @@ export type ProgressLabelKey =
   | "anthropicAccount"
   | "accountSwitched"
   | "accountsWaiting"
-  | "resumedAfterLimit";
+  | "resumedAfterLimit"
+  // A coding team's run speaking (src/lib/coding-team-messages.ts), on the
+  // SENDER's feed; what a run receives is already there as a queued message.
+  | "teamMessageToRun"
+  | "teamMessageToLead"
+  | "teamMessageToAssistant";
 
 export interface ProgressDescription {
   kind: ProgressKind;
@@ -256,6 +261,16 @@ export const RUNNER_STEP = {
   pipelineResumed: "Delivery pipeline: picking up where it left off after a restart",
 
   started: (model: string | null | undefined) => (model ? `Started with ${model}` : "Started"),
+  /**
+   * A team message this run sent. Three sentences rather than one with the
+   * addressee in it, for the pipeline's reason: "the lead" travelling as a
+   * parameter is an English word no locale can translate. The text is the
+   * run's own words and goes last, where the reader can take the rest of the
+   * line for it.
+   */
+  teamMessageToRun: (runId: string, text: string) => `Team message to ${runId}: ${text}`,
+  teamMessageToLead: (text: string) => `Team message to the lead: ${text}`,
+  teamMessageToAssistant: (text: string) => `Team message to the assistant: ${text}`,
   reviewPass: (id: string) => `Automatic review pass of ${id}`,
   /** On the FOLLOW-UP run: whose pull request it was started to fix, and which
    *  round of that loop it is — the round is what makes a fix run readable on
@@ -448,6 +463,9 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   },
   { re: /^Every Anthropic account is at its usage limit; waiting for the reset at (\d{1,2}:\d{2})$/, labelKey: "accountsWaiting", icon: "hourglass_top", params: (m) => ({ time: m[1] }) },
   { re: /^The usage limit reset; carrying on where it left off$/, labelKey: "resumedAfterLimit", icon: "play_circle" },
+  { re: /^Team message to (run-[a-z0-9]{8}): (.+)$/, labelKey: "teamMessageToRun", icon: "forum", params: (m) => ({ run: m[1], text: m[2] }) },
+  { re: /^Team message to the lead: (.+)$/, labelKey: "teamMessageToLead", icon: "forum", params: (m) => ({ text: m[1] }) },
+  { re: /^Team message to the assistant: (.+)$/, labelKey: "teamMessageToAssistant", icon: "forum", params: (m) => ({ text: m[1] }) },
 ];
 
 export function describeProgressLine(raw: string): ProgressDescription {

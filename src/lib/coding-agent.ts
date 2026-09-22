@@ -5148,6 +5148,17 @@ export const MCP_MEDIA_TOOLS: Record<keyof RunMedia, string> = {
   audio: "mcp__clawbox__generate_audio",
 };
 
+/**
+ * The one tool a run of a coding TEAM gets beside the rest: `team_message`
+ * (coding-team-messages.ts) — a bounded, logged note to a sibling run, to the
+ * team's lead, or to the box's main agent. Allowed for EVERY team run, the
+ * read-only planner and reviewer included: it writes nothing in the project,
+ * and "the file the task names does not exist" is exactly what a planner
+ * should be able to say. The run's own MCP server registers it only when the
+ * environment below names the team, so no other run is ever offered it.
+ */
+export const MCP_TEAM_TOOL = "mcp__clawbox__team_message";
+
 /** Every MCP tool this run may call: the browser family, plus what it may draw and say. */
 export function runMcpTools(media: RunMedia | undefined): string[] {
   const tools: string[] = [...MCP_BROWSER_TOOLS];
@@ -5173,7 +5184,7 @@ export function runMediaEnv(media: RunMedia | undefined): string {
  * data/.mcp-token itself through its normal file fallback. Exported for the
  * contract test.
  */
-export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia }): string {
+export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null }): string {
   const media = runMediaEnv(run.media);
   return JSON.stringify({
     mcpServers: {
@@ -5192,6 +5203,19 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
           CLAWBOX_RUN_INPUTS_DIR: runInputsDir(run.id),
           CLAWBOX_RUN_DIR: run.directory,
           ...(media ? { CLAWBOX_RUN_MEDIA: media } : {}),
+          // Only for a run of a coding team, and all four or none: the server
+          // registers `team_message` from them (mcp/lib/run-context.ts), and
+          // the tool speaks as THIS run — the route then checks the claim
+          // against the team's board, so a variable is a name, not a pass.
+          // `none` for the planner, whose run has no task of its own.
+          ...(run.team
+            ? {
+                CLAWBOX_RUN_ID: run.id,
+                CLAWBOX_TEAM_ID: run.team.id,
+                CLAWBOX_TEAM_ROLE: run.team.role,
+                CLAWBOX_TEAM_TASK: run.team.taskId ?? "none",
+              }
+            : {}),
         },
       },
     },
@@ -5199,7 +5223,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT.
   const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
@@ -5292,7 +5316,9 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // circularity — `fileDenyRules` below is built FROM this list — and does
     // not need to be: every deny rule it returns still outranks each allow.
     const allowRules = normalizeAllowRules(opts.allowRules, allowRuleHomeContext());
-    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), TMP_READ_RULE, inputsReadRule(), ...allowRules);
+    // A team run's `team_message` is approved whatever else the run may do —
+    // read-only included (see MCP_TEAM_TOOL) — and only for a team run.
+    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), TMP_READ_RULE, inputsReadRule(), ...allowRules);
     // The file rules, and the one command list that is enforced: nothing a
     // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).
     //
@@ -9764,7 +9790,7 @@ function spawnRun(
   // for the life of the run, so a message the owner sends at minute three can
   // be written as the next user turn instead of waiting for a boundary.
   const streamInput = streamInputAvailable();
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media } }));
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -11114,6 +11140,23 @@ export function queueRunMessage(id: string, text: unknown): { run: CodingRun; de
   const state = live.get(id);
   const delivered = state ? flushRunMessages(run, state) > 0 : false;
   return { run: cloneRun(run), delivered };
+}
+
+/**
+ * A team message this run SENT, on its own feed (coding-team.ts calls it once
+ * the message is on its way): the receiver's side is already on the record as
+ * a queued message, and the sender's page must show what it said too, or a
+ * reader of one run sees an answer to a question nobody asked.
+ *
+ * Through pushProgress like every other step — scrubbed of the run's secrets
+ * and capped — and silent for a run that is gone: the message was sent either
+ * way, and the board holds the audit copy.
+ */
+export function noteTeamMessageSent(runId: string, line: string): void {
+  const run = loadRuns().find((r) => r.id === runId);
+  if (!run) return;
+  pushProgress(run, line);
+  persist();
 }
 
 /**

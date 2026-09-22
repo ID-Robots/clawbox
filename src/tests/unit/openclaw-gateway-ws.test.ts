@@ -16,6 +16,8 @@ let server: WebSocketServer | null = null;
 let probeServer: http.Server | null = null;
 let probed: string[] = [];
 let seen: { method: string; params: unknown; connect?: Record<string, unknown> }[] = [];
+/** What the fake's hello-ok carries beside the handshake fields — the snapshot a chat reads its session from. */
+let helloExtra: Record<string, unknown> = {};
 let lib: typeof import("@/lib/openclaw-gateway-ws");
 
 /**
@@ -50,7 +52,7 @@ async function fakeGateway(handler: (method: string, params: Record<string, unkn
         const ok = f.params?.auth?.token === "shared-token-0123456789abcdef0123456789"
           && f.params?.client?.id === "cli" && f.params?.client?.mode === "cli";
         ws.send(JSON.stringify(ok
-          ? { type: "res", id: f.id, ok: true, payload: { type: "hello-ok", protocol: 4, auth: { role: "operator", scopes: f.params.scopes } } }
+          ? { type: "res", id: f.id, ok: true, payload: { type: "hello-ok", protocol: 4, auth: { role: "operator", scopes: f.params.scopes }, ...helloExtra } }
           : { type: "res", id: f.id, ok: false, error: { code: "UNAUTHORIZED", message: "bad token" } }));
         return;
       }
@@ -65,6 +67,7 @@ async function fakeGateway(handler: (method: string, params: Record<string, unkn
 beforeEach(async () => {
   seen = [];
   probed = [];
+  helloExtra = {};
 });
 
 afterEach(async () => {
@@ -109,6 +112,35 @@ describe("gatewayWsCall", () => {
     const proxy = await import("@/lib/gateway-proxy");
     vi.mocked(proxy.getGatewayToken).mockResolvedValueOnce("wrong");
     await expect(lib.gatewayWsCall("sessions.list", {})).rejects.toMatchObject({ name: "GatewayWsUnavailableError", message: "bad token" });
+  });
+});
+
+describe("gatewayWsChatSendMain", () => {
+  it("posts into the session the hello names as main — the key the web chat binds to — on the same connection", async () => {
+    helloExtra = { snapshot: { sessionDefaults: { mainSessionKey: "agent:main:main" } } };
+    const port = await fakeGateway((method) => (method === "chat.send" ? { ok: true, payload: { runId: "r1", status: "started" } } : { ok: false, error: { code: "NOT_FOUND" } }));
+    await load(port);
+    const out = await lib.gatewayWsChatSendMain("[Coding team team-k3x9q2ab · worker run-ab12cd34] Stripe or PayPal?", { idempotencyKey: "idem-1" });
+    expect(out).toEqual({ sessionKey: "agent:main:main" });
+    expect(seen.map((s) => s.method)).toEqual(["connect", "chat.send"]);
+    expect(seen[1].params).toEqual({ sessionKey: "agent:main:main", message: "[Coding team team-k3x9q2ab · worker run-ab12cd34] Stripe or PayPal?", deliver: false, idempotencyKey: "idem-1" });
+  });
+
+  it("falls back to `main`, as the chat does, when the hello names no session", async () => {
+    const port = await fakeGateway(() => ({ ok: true, payload: {} }));
+    await load(port);
+    expect(await lib.gatewayWsChatSendMain("hi", { idempotencyKey: "idem-2" })).toEqual({ sessionKey: "main" });
+    expect(seen[1].params).toMatchObject({ sessionKey: "main" });
+    expect(lib.mainSessionKeyOf({ snapshot: { sessionDefaults: { mainSessionKey: "  " } } })).toBe("main");
+  });
+
+  it("is unavailable when nothing listens, and the gateway's own error when the send is refused", async () => {
+    await load(1);
+    await expect(lib.gatewayWsChatSendMain("hi", { idempotencyKey: "idem-3" })).rejects.toMatchObject({ name: "GatewayWsUnavailableError" });
+    await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
+    const port = await fakeGateway(() => ({ ok: false, error: { code: "INVALID_REQUEST", message: "session is busy" } }));
+    await load(port);
+    await expect(lib.gatewayWsChatSendMain("hi", { idempotencyKey: "idem-4" })).rejects.toMatchObject({ name: "GatewayRpcError", code: "INVALID_REQUEST" });
   });
 });
 

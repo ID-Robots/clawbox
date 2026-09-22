@@ -207,3 +207,52 @@ describe("with a team working here", () => {
     expect(screen.getByTestId("coding-team-form")).toBeInTheDocument();
   });
 });
+
+describe("what the team's runs said", () => {
+  const MESSAGES: TeamView["log"] = [
+    { ts: 1_700_000_002_000, actor: { kind: "worker", id: "run-00000003" }, type: "message", message: "worker run-00000003 → the lead: t2 needs …", payload: { from: "run-00000003", to: "lead", text: "t2 needs index.html's form ids first.\nWhich ones are final?" } },
+    { ts: 1_700_000_003_000, actor: { kind: "worker", id: "run-00000003" }, type: "message", message: "worker run-00000003 → run-00000002: hi", payload: { from: "run-00000003", to: "sibling", toRunId: "run-00000002", text: "Are the form ids final?" } },
+    { ts: 1_700_000_004_000, actor: { kind: "planner" }, type: "message", message: "planner run-00000001 → the assistant (not delivered: NO_SESSION): Stripe?", payload: { from: "run-00000001", to: "owner_agent", text: "Stripe or PayPal?", delivered: false, code: "NO_SESSION" } },
+  ];
+
+  it("shows the messages on the board itself, whole, with whom each went to and whether it arrived", async () => {
+    stub();
+    teams = [{ ...WORKING, log: [...WORKING.log, ...MESSAGES] }];
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    const list = await screen.findByTestId("coding-team-messages");
+    expect(list).toHaveTextContent(t("codingAgent.team.messagesTitle", { n: 3 }));
+    const rows = within(list).getAllByTestId("coding-team-message");
+    expect(rows.map((r) => r.getAttribute("data-to"))).toEqual(["lead", "sibling", "owner_agent"]);
+    expect(rows[0]).toHaveTextContent("worker run-00000003");
+    expect(rows[0]).toHaveTextContent(t("codingAgent.team.messageToLead"));
+    // The words in full, not the log line's first line.
+    expect(rows[0].textContent).toContain("t2 needs index.html's form ids first.\nWhich ones are final?");
+    expect(rows[1]).toHaveTextContent(t("codingAgent.team.messageToRun", { run: "run-00000002" }));
+    expect(rows[2]).toHaveTextContent(`planner run-00000001 ${t("codingAgent.team.messageToAssistant")}`);
+    expect(rows[2]).toHaveAttribute("data-delivered", "false");
+    expect(rows[2]).toHaveTextContent(t("codingAgent.team.messageUndelivered"));
+    expect(rows[0]).toHaveAttribute("data-delivered", "true");
+    expect(within(rows[0]).queryByText(t("codingAgent.team.messageUndelivered"), { exact: false })).toBeNull();
+  });
+
+  it("draws a message the same way in the log, and every other entry as before", async () => {
+    stub();
+    teams = [{ ...WORKING, log: [...WORKING.log, MESSAGES[0]] }];
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    fireEvent.click(await screen.findByTestId("coding-team-log-toggle"));
+    const log = screen.getByTestId("coding-team-log");
+    expect(log).toHaveTextContent("Team created");
+    expect(log).toHaveTextContent("t2 needs index.html's form ids first.");
+    expect(log).not.toHaveTextContent("worker run-00000003 → the lead: t2 needs …");
+  });
+
+  it("has no messages section while nobody has said anything, and ignores a message entry it cannot read", async () => {
+    stub();
+    teams = [{ ...WORKING, log: [...WORKING.log, { ts: 1, actor: { kind: "worker", id: "run-00000003" }, type: "message", message: "worker run-00000003 → the lead: hi" }] }];
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    await screen.findByTestId("coding-team-board");
+    expect(screen.queryByTestId("coding-team-messages")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-team-log-toggle"));
+    expect(screen.getByTestId("coding-team-log")).toHaveTextContent("worker run-00000003 → the lead: hi");
+  });
+});

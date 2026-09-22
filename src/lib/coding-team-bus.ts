@@ -23,6 +23,7 @@ import {
   type TeamTask,
   BoardAccessError,
   assignTask,
+  postMessage,
   postTask,
   raiseAlert,
   reviewTask,
@@ -30,6 +31,7 @@ import {
   submitResult,
   updateStatus,
 } from "@/lib/coding-team-board";
+import { MAX_TEAM_MESSAGE_CHARS, TEAM_MESSAGE_TARGETS, type TeamMessageRefusal, type TeamMessageTarget } from "@/lib/coding-team-messages";
 
 export type TeamMessage =
   | { type: "task"; task_description: string; depends_on?: string[]; files_hint?: string[] }
@@ -37,7 +39,13 @@ export type TeamMessage =
   | { type: "status_update"; task_id: string; status: "in_progress" | "complete" | "failed"; worker_id: string }
   | { type: "result"; task_id: string; result: string; worker_id: string }
   | { type: "review"; task_id: string; verdict: "accepted" | "rejected"; notes: string }
-  | { type: "alert"; reason: string; task_id?: string };
+  | { type: "alert"; reason: string; task_id?: string }
+  /**
+   * A run of the team speaking (coding-team-messages.ts). `undelivered` is
+   * set by the orchestrator for a message the box could not hand on — it is
+   * still the run's message, logged as one, never as an alert.
+   */
+  | { type: "message"; from_run_id: string; to: TeamMessageTarget; to_run_id?: string; text: string; undelivered?: TeamMessageRefusal };
 
 export interface Delivered {
   ts: number;
@@ -83,6 +91,13 @@ export function validateMessage(m: unknown): string | null {
     case "alert":
       if (typeof msg.reason !== "string" || !msg.reason.trim()) return "An alert needs a reason.";
       return null;
+    case "message":
+      if (typeof msg.from_run_id !== "string" || !RUN_ID.test(msg.from_run_id)) return "A team message needs from_run_id (a run id).";
+      if (typeof msg.to !== "string" || !(TEAM_MESSAGE_TARGETS as readonly string[]).includes(msg.to)) return `A team message goes to ${TEAM_MESSAGE_TARGETS.join(", ")}.`;
+      if (msg.to === "sibling" && (typeof msg.to_run_id !== "string" || !RUN_ID.test(msg.to_run_id))) return "A message to a sibling needs to_run_id (a run id).";
+      if (typeof msg.text !== "string" || !msg.text.trim()) return "A team message needs text.";
+      if (msg.text.length > MAX_TEAM_MESSAGE_CHARS) return `A team message is at most ${MAX_TEAM_MESSAGE_CHARS} characters.`;
+      return null;
     default:
       return `Unknown message type ${String(msg.type)}.`;
   }
@@ -111,6 +126,9 @@ export class TeamBus {
     if (actor.kind === "worker" && "worker_id" in message && message.worker_id !== actor.id) {
       return this.refuse(actor, message, `worker ${actor.id} sent a message as ${message.worker_id}`);
     }
+    if (actor.kind === "worker" && message.type === "message" && message.from_run_id !== actor.id) {
+      return this.refuse(actor, message, `worker ${actor.id} sent a team message as ${message.from_run_id}`);
+    }
     let task: TeamTask | null = null;
     try {
       switch (message.type) {
@@ -120,6 +138,7 @@ export class TeamBus {
         case "result": task = submitResult(this.board, actor, message.task_id, message.result); break;
         case "review": task = reviewTask(this.board, actor, message.task_id, message.verdict, message.notes); break;
         case "alert": raiseAlert(this.board, actor, message.reason, message.task_id); break;
+        case "message": postMessage(this.board, actor, message); break;
       }
     } catch (err) {
       // A role refusal and a rule refusal ("t1 cannot go from complete to
@@ -137,7 +156,14 @@ export class TeamBus {
     return delivered;
   }
 
-  private refuse(actor: Actor, message: TeamMessage, reason: string): never {
+  /**
+   * Refuse a message: log it as an alert, persist, throw. Public for the one
+   * caller that has to refuse on grounds the board cannot see — the team's
+   * message route (coding-team.ts), which knows whether a run is still live
+   * and whether a sibling can still be told anything — so that refusal reads
+   * on the board exactly like the ones the board makes itself.
+   */
+  refuse(actor: Actor, message: TeamMessage, reason: string): never {
     raiseAlert(this.board, { kind: "system" }, `Refused ${message.type} from ${actor.kind === "worker" ? `worker ${actor.id}` : actor.kind}: ${reason}`, "task_id" in message ? message.task_id : undefined);
     saveBoard(this.board);
     throw new BoardAccessError(actor, message.type, reason);
