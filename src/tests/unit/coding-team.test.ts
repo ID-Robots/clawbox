@@ -381,6 +381,8 @@ describe("many agents at once", () => {
     expect(plumbing.addWorkerWorktree).not.toHaveBeenCalled();
     const workers = starts.filter((s) => (s.team as { role: string }).role === "worker");
     expect(workers.every((w) => w.projectId === "site" && w.directory === "/home/clawbox/clawbox/data/code-projects/site")).toBe(true);
+    // In place, the project IS the worker's folder: nothing to point at.
+    expect(workers.some((w) => String(w.task).includes("Your folder:"))).toBe(false);
     expect(Object.values(liveWorkersAtStart).every((n) => n === 0)).toBe(true);
   });
 
@@ -454,6 +456,141 @@ describe("the review loop", () => {
   });
 });
 
+/**
+ * Bench, 2026-09-22: 5 of 6 teams lost a review because the reviewer could
+ * not start at a busy moment — "Accepted by rule: the reviewer could not
+ * start", one alert each — and one team was failed at MAX_ALERTS with two of
+ * those and one real alert, every deliverable verified on disk.
+ */
+describe("a reviewer that has to wait for room", () => {
+  const reviewerOf = (taskId: string) => (call: unknown[]) => {
+    const who = call[0] as { role: string; taskId: string | null };
+    return who.role === "reviewer" && who.taskId === taskId;
+  };
+
+  it("waits when the slot says wait, asks again, and the task is reviewed — no rule acceptance, no alert", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    let refused = 0;
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string; taskId: string | null }) => {
+      if (who.role === "reviewer" && who.taskId === "t1" && refused === 0) {
+        refused += 1;
+        return { ok: false, wait: true, reason: "Not enough free memory for another run beside the 2 going (900 MB free, 1200 MB needed)." };
+      }
+      return { ok: true };
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // Asked twice for t1's reviewer: refused, then room.
+    expect(runner.teamSpawnSlot.mock.calls.filter(reviewerOf("t1"))).toHaveLength(2);
+    expect(starts.filter((s) => (s.team as { role: string }).role === "reviewer").map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2"]);
+    expect(done.tasks.map((t) => t.reviewRunId)).toEqual(["run-00000003", "run-00000005"]);
+    expect(done.tasks.every((t) => t.review?.verdict === "accepted" && !/Accepted by rule/.test(t.review.notes))).toBe(true);
+    expect(done.alerts).toBe(0);
+    expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
+  });
+
+  it("counts a sibling worker whose worktree is still being added, and asks again once that launch has landed", async () => {
+    // t1 and t2 side by side; t2's worktree is held until t1's reviewer has
+    // asked for a slot, so that ask lands while t2's launch is only reserved.
+    outcomes = [
+      { summary: PARALLEL_PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "app wired", filesTouched: ["app.js"] },
+    ];
+    let releaseT2!: () => void;
+    const t2Held = new Promise<void>((resolve) => { releaseT2 = resolve; });
+    plumbing.addWorkerWorktree.mockImplementation(async (dir: string, teamId: string, taskId: string, attempt: number) => {
+      if (taskId === "t2") await t2Held;
+      return { ok: true, path: `${dir}/.clawbox/worktrees/${taskId}-${attempt}`, branch: `clawbox/${teamId}-${taskId}-${attempt}` };
+    });
+    const t1ReviewerAsks: number[] = [];
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string; taskId: string | null }, starting?: number) => {
+      if (who.role !== "reviewer" || who.taskId !== "t1") return { ok: true };
+      t1ReviewerAsks.push(starting ?? 0);
+      releaseT2();
+      // What the real guard answers on a box with room for one run only.
+      return (starting ?? 0) >= 1
+        ? { ok: false, wait: true, reason: `Not enough free memory for another run beside the ${starting} going (900 MB free, 1200 MB needed).` }
+        : { ok: true };
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // The first ask counted t2's reserved launch; the next, after t2's run
+    // was live (the real slot counts that one as a run), no reservation.
+    expect(t1ReviewerAsks).toEqual([1, 0]);
+    expect(runner.teamSpawnSlot).toHaveBeenCalledWith({ id: board.id, role: "worker", taskId: "t2" }, 1);
+    expect(done.tasks.map((t) => t.review?.verdict)).toEqual(["accepted", "accepted", "accepted"]);
+    expect(done.tasks.every((t) => t.reviewRunId !== null && !/Accepted by rule/.test(t.review?.notes ?? ""))).toBe(true);
+    expect(done.alerts).toBe(0);
+  });
+
+  it("waits too when the spawn itself refuses for room — the look and the spawn raced", async () => {
+    const { CodingAgentError } = await import("@/lib/coding-agent");
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    let thrown = 0;
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      if ((input.team as { role: string }).role === "reviewer" && thrown === 0) {
+        thrown += 1;
+        throw new CodingAgentError("busy", "The team already has 3 runs going.", true);
+      }
+      return fakeRun(input);
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(thrown).toBe(1);
+    expect(starts.filter((s) => (s.team as { role: string }).role === "reviewer")).toHaveLength(2);
+    expect(done.tasks.every((t) => t.reviewRunId !== null && !/Accepted by rule/.test(t.review?.notes ?? ""))).toBe(true);
+    expect(done.alerts).toBe(0);
+  });
+
+  it("takes a refusal that cannot clear as no reviewer — accepted by rule, alerted — but never lets those alerts fail the team", async () => {
+    // One real alert (the planner's re-ask) and three "no reviewer": four on
+    // the board, one counted, and the team's verified work stands.
+    outcomes = [
+      { summary: "Here is my plan, in prose." },
+      { summary: PARALLEL_PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "app wired", filesTouched: ["app.js"] },
+    ];
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string }) => who.role === "reviewer"
+      ? { ok: false, wait: false, reason: "A coding run is already in progress (run-zzzzzzzz). Wait for it or stop it first." }
+      : { ok: true });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.error).toBeNull();
+    expect(done.alerts).toBe(4);
+    const alerts = done.log.filter((e) => e.type === "alert").map((e) => e.message);
+    expect(alerts.filter((m) => /No reviewer for t\d: A coding run is already in progress \(run-zzzzzzzz\)/.test(m))).toHaveLength(3);
+    // Asked once each: a stranger's run is not waited on.
+    expect(runner.teamSpawnSlot.mock.calls.filter((c) => (c[0] as { role: string }).role === "reviewer")).toHaveLength(3);
+    expect(starts.filter((s) => (s.team as { role: string }).role === "reviewer")).toHaveLength(0);
+    expect(done.tasks.map((t) => t.review?.notes)).toEqual(Array(3).fill("Accepted by rule: the reviewer could not start."));
+  });
+
+  it("still takes the switch turned off as no reviewer, not a wait", async () => {
+    const { CodingAgentError } = await import("@/lib/coding-agent");
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      if ((input.team as { role: string }).role === "reviewer") throw new CodingAgentError("disabled", "The coding agent is switched off.");
+      return fakeRun(input);
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(runner.startRun.mock.calls.filter((c) => (c[0] as { team: { role: string } }).team.role === "reviewer")).toHaveLength(2);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+      expect.stringMatching(/No reviewer for t1: The coding agent is switched off/),
+      expect.stringMatching(/No reviewer for t2: The coding agent is switched off/),
+    ]);
+  });
+});
+
 describe("a team that works", () => {
   it("plans read-only, then runs one worker per task in order, relays each outcome in the worker's name, and finishes done", async () => {
     outcomes = [
@@ -479,6 +616,8 @@ describe("a team that works", () => {
     expect(starts[1]).toMatchObject({ team: { role: "worker", taskId: "t1" }, directory: `/home/clawbox/Projects/site/.clawbox/worktrees/t1-1`, projectId: null });
     expect(String(starts[1].task)).toContain("Your task (t1 of 2): Scaffold index.html");
     expect(String(starts[1].task)).toContain("Team goal: Build the invoice app");
+    // Its own folder named, so the hint's paths are read there and not in the project.
+    expect(String(starts[1].task)).toContain("Your folder: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1");
     expect(starts[2]).toMatchObject({ team: { role: "reviewer", taskId: "t1" }, readOnly: true, directory: "/home/clawbox/Projects/site" });
     expect(String(starts[2].task)).toContain("Review task t1: Scaffold index.html");
     expect(String(starts[2].task)).toContain("Built index.html; open it.");
@@ -621,6 +760,36 @@ describe("the gates", () => {
 });
 
 describe("the words", () => {
+  // Bench, 2026-09-22: a worker in a worktree read its hinted styles.css at
+  // `<project>/styles.css`, was refused, and the refusal was an alert.
+  it("names a worker's own folder when it has a worktree — before the files, every path relative to it — and nothing in place", async () => {
+    const { createBoard, postTask } = await import("@/lib/coding-team-board");
+    const board = createBoard({ goal: "Build the site", projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
+    const task = postTask(board, { kind: "planner" }, { task_description: "Write styles.css", files_hint: ["styles.css"] });
+    const folder = "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1";
+    const text = team.workerTask(board, task, folder);
+    // The task line stays first: it is the run's commit subject.
+    expect(text.split("\n")[0]).toBe("Your task (t1 of 1): Write styles.css");
+    expect(text).toContain(`Your folder: ${folder} — your own working copy of the project. Every path in this task, the files below included, is relative to it`);
+    expect(text).toContain("never in /home/clawbox/Projects/site itself");
+    expect(text.indexOf("Your folder:")).toBeLessThan(text.indexOf("Files this task is expected to touch: styles.css"));
+    // The hint itself stays relative — what outsideHint matches against.
+    expect(text).not.toContain(`${folder}/styles.css`);
+    expect(team.workerTask(board, task)).not.toContain("Your folder:");
+    expect(team.workerTask(board, task, board.directory)).not.toContain("Your folder:");
+  });
+
+  it("keeps the worker's folder when a long goal pushes the task text past its cut", async () => {
+    const { createBoard, postTask, MAX_GOAL_CHARS } = await import("@/lib/coding-team-board");
+    const { MAX_TASK_CHARS } = await import("@/lib/coding-agent");
+    // A goal at the limit a team accepts, and a long task under it.
+    const board = createBoard({ goal: "g".repeat(MAX_GOAL_CHARS), projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
+    const task = postTask(board, { kind: "planner" }, { task_description: "d".repeat(1_500), files_hint: ["styles.css"] });
+    const text = team.workerTask(board, task, "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1");
+    expect(text.length).toBe(MAX_TASK_CHARS);
+    expect(text).toContain("Your folder: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1");
+  });
+
   it("names files outside a task's hint, folders included, and nothing when there is no hint", () => {
     expect(team.outsideHint(["src/a.js", "src/lib/b.js", "README.md"], ["src"])).toEqual(["README.md"]);
     expect(team.outsideHint(["./index.html"], ["index.html"])).toEqual([]);

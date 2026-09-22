@@ -2058,9 +2058,14 @@ export interface RunTeam {
  */
 export type CodingAgentErrorKind = "disabled" | "not_ready" | "busy" | "invalid" | "not_found" | "limited";
 
-/** Thrown by startRun/stopRun; the routes map `kind` to a status code. */
+/**
+ * Thrown by startRun/stopRun; the routes map `kind` to a status code.
+ * `wait` marks a refusal that clears on its own — a team's run refused for
+ * room (its slot count, the memory guard) — so the team's orchestrator waits
+ * for it rather than giving up on the run.
+ */
 export class CodingAgentError extends Error {
-  constructor(readonly kind: CodingAgentErrorKind, message: string) {
+  constructor(readonly kind: CodingAgentErrorKind, message: string, readonly wait = false) {
     super(message);
     this.name = "CodingAgentError";
   }
@@ -10513,7 +10518,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       // branch first; the tree is the only thing that was removed.
       inheritedWorktree = await reopenWorktree(previous);
       directory = await realDirectory(previous.directory);
-      releaseDirectory = assertDirectoryFree(directory);
+      releaseDirectory = assertDirectoryFree(directory, undefined, input.team ?? null, input.readOnly === true);
       projectId = previous.projectId;
       // A session poisoned by an authentication or transport failure REPLAYS
       // that failure on every resume — Claude Code persists it in the session,
@@ -10537,7 +10542,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       inherited = { provider: previous.provider, model: previous.requestedModel };
     } else {
       ({ directory, projectId } = await resolveWorkingDirectory(input));
-      releaseDirectory = assertDirectoryFree(directory);
+      releaseDirectory = assertDirectoryFree(directory, undefined, input.team ?? null, input.readOnly === true);
     }
 
     // Read once, here: a run keeps the settings it started with even if the
@@ -11295,7 +11300,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     } catch {
       throw new CodingAgentError("not_found", `The folder this run worked in is gone (${run.directory}), so it cannot be resumed. Start a new run instead.`);
     }
-    releaseDirectory = assertDirectoryFree(run.directory, run.id);
+    releaseDirectory = assertDirectoryFree(run.directory, run.id, run.team ?? null, run.readOnly === true);
     // The one place a run's permission rules are RE-READ rather than kept.
     //
     // Everything else about a run is frozen on its record precisely so the tools
@@ -11427,7 +11432,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     const tools = await requireSpawnTools();
     // The folder must still be there — it was only checked when drafted.
     run.directory = await realDirectory(run.directory);
-    releaseDirectory = assertDirectoryFree(run.directory, run.id);
+    releaseDirectory = assertDirectoryFree(run.directory, run.id, run.team ?? null, run.readOnly === true);
     // The copy of the project is made at START and not when the draft was
     // written: a draft may sit for days, and a worktree made for one that is
     // never started would be a branch and a folder nobody asked for.
@@ -11567,7 +11572,7 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     // what covers the gap there, so `startingRuns` is deliberately not read by
     // it or the two would double-count one worker.
     const slot = await teamSpawnSlot(team);
-    if (!slot.ok) throw new CodingAgentError("busy", slot.reason);
+    if (!slot.ok) throw new CodingAgentError("busy", slot.reason, slot.wait);
     return holdSpawnSlot();
   }
   const limit = await getMaxParallelRuns();
@@ -11607,6 +11612,35 @@ async function anthropicPoolWait(): Promise<number | null | undefined> {
 }
 
 /**
+ * The live run that keeps a run from starting in `directory`, or null.
+ *
+ * A run of a TEAM is not kept out by its own team: the team's runs share the
+ * project on purpose — its reviewers read the project while its workers write
+ * in worktrees beneath it, and several tasks can be in review at once — and
+ * the orchestrator already decides which of them may write where. Counting
+ * them as strangers refused the reviewer of every task that finished while a
+ * sibling's reviewer was still reading, and each refusal was a review skipped
+ * (bench, 2026-09-22). A run of no team, or of another team, is refused as
+ * before — and so are two WRITERS of one team in one folder (the owner
+ * resuming a worker that gave up while its sibling writes in the same
+ * in-place checkout): the exemption needs one of the two to be read-only.
+ */
+export function folderHolder<R extends Pick<CodingRun, "id" | "status" | "directory" | "team" | "readOnly">>(
+  runs: readonly R[],
+  directory: string,
+  team: RunTeam | null = null,
+  exceptRunId?: string,
+  readOnly = false,
+): R | null {
+  return runs.find((r) =>
+    isLive(r.status)
+    && r.id !== exceptRunId
+    && r.directory === directory
+    && !(team && r.team?.id === team.id && (readOnly || r.readOnly === true)),
+  ) ?? null;
+}
+
+/**
  * Refuse a second run in the SAME working folder.
  *
  * The concurrency limit above is about the box's memory; this is the rule it
@@ -11614,9 +11648,10 @@ async function anthropicPoolWait(): Promise<number | null | undefined> {
  * this never fires for it — it fires for the folders that keep the old
  * in-place behaviour (a plain folder with no git history, a code project
  * inside ClawBox's own checkout), where two runs really would edit each
- * other's half-written files and each settle would commit the other's.
+ * other's half-written files and each settle would commit the other's. A
+ * team's own runs do not count against each other — see `folderHolder`.
  */
-function assertDirectoryFree(directory: string, exceptRunId?: string): () => void {
+function assertDirectoryFree(directory: string, exceptRunId?: string, team: RunTeam | null = null, readOnly = false): () => void {
   // A project the owner is REMOVING right now, before the run store is asked.
   //
   // This is the run half of a mutual exclusion, and the removal holds the other
@@ -11630,7 +11665,7 @@ function assertDirectoryFree(directory: string, exceptRunId?: string): () => voi
       "That project folder is being removed right now. Wait for it to finish, or work somewhere else.",
     );
   }
-  const busy = loadRuns().find((r) => isLive(r.status) && r.id !== exceptRunId && r.directory === directory);
+  const busy = folderHolder(loadRuns(), directory, team, exceptRunId, readOnly);
   if (busy) {
     throw new CodingAgentError(
       "busy",
