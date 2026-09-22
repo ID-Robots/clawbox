@@ -10,7 +10,10 @@ export const dynamic = "force-dynamic";
  * A coding TEAM — the multi-agent shape of the coding agent
  * (src/lib/coding-team.ts): a planner, workers, a reviewer, a blackboard.
  *
- * GET  ?id=<team-id>            → { team } — the board: tasks, audit log, alerts
+ * GET  ?id=<team-id>            → { team } — the board: tasks, audit log, alerts,
+ *                                 the planner's `shape`, and `metrics` (runs per
+ *                                 role, tasks planned/added/retired/accepted first
+ *                                 try/rejected, tokens, wall time) as of now
  * GET                           → { teams } — the recent boards, newest first
  * POST { goal, projectId | directory } → 202 { started: true, team }
  *

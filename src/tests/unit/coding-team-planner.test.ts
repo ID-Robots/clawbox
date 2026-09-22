@@ -5,9 +5,9 @@
  * not write — each task becomes a worker with a shell.
  */
 import { describe, expect, it } from "vitest";
-import { MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS } from "@/lib/coding-team-board";
-import { MAX_TASK_CHARS } from "@/lib/coding-agent";
-import { parsePlan, PLANNER_BRIEF, replanTask } from "@/lib/coding-team-planner";
+import { MAX_LEAD_ADDS, MAX_LEAD_RETIRES, MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS, type TaskStatus } from "@/lib/coding-team-board";
+import { MAX_TASK_CHARS, MAX_TEAM_WORKERS } from "@/lib/coding-agent";
+import { leadRoom, leadTask, MAX_LEAD_NOTE_CHARS, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask, type ReplanContext } from "@/lib/coding-team-planner";
 
 describe("parsePlan", () => {
   it("reads a bare array, and one fenced in prose", () => {
@@ -49,11 +49,13 @@ describe("parsePlan", () => {
     expect(parsePlan(`Here: ${JSON.stringify(tricky)}`)).toEqual(expect.objectContaining({ ok: true }));
   });
 
-  it("refuses a task without a description, a dependency on itself, a later or a non-canonical task, and bad hint shapes", () => {
+  it("refuses a task without a description, a dependency on itself, on a later or a non-canonical task, and bad hint shapes", () => {
     expect(parsePlan(JSON.stringify([{ files_hint: [] }]))).toEqual(refused(/t1 has no task_description/));
     expect(parsePlan(JSON.stringify([{ task_description: "a", depends_on: ["t1"] }]))).toEqual(refused(/t1 depends on t1/));
-    // A dependency on a LATER task is fine — the board starts a task when what it waits for is done, whatever the order.
-    expect(parsePlan(JSON.stringify([{ task_description: "a", depends_on: ["t2"] }, { task_description: "b" }]))).toMatchObject({ ok: true });
+    // A dependency on a LATER task is refused: the plan is posted in order, and the board
+    // takes a dependency only on a task already on it — posted, it failed the team.
+    expect(parsePlan(JSON.stringify([{ task_description: "a", depends_on: ["t2"] }, { task_description: "b" }]))).toEqual(refused(/Task t1 depends on t2, which is listed after it/));
+    expect(parsePlan(JSON.stringify([{ task_description: "a" }, { task_description: "b", depends_on: ["t1"] }]))).toMatchObject({ ok: true });
     // One outside the plan, and a cycle, are not.
     expect(parsePlan(JSON.stringify([{ task_description: "a", depends_on: ["t3"] }, { task_description: "b" }]))).toEqual(refused(/t1 depends on t3/));
     expect(parsePlan(JSON.stringify([{ task_description: "a", depends_on: ["t2"] }, { task_description: "b", depends_on: ["t3"] }, { task_description: "c", depends_on: ["t1"] }]))).toEqual(refused(/t1 and t2 and t3 depend on each other/));
@@ -63,12 +65,14 @@ describe("parsePlan", () => {
   });
 
   it("tells the planner the shape it must answer with, and that it may change nothing", () => {
-    expect(PLANNER_BRIEF).toContain("ONLY a JSON array");
+    expect(PLANNER_BRIEF).toContain("ONLY a JSON object");
+    expect(PLANNER_BRIEF).toContain('"tasks"');
     expect(PLANNER_BRIEF).toContain("task_description");
     expect(PLANNER_BRIEF).toContain("depends_on");
     expect(PLANNER_BRIEF).toContain("files_hint");
     expect(PLANNER_BRIEF).toMatch(/change NOTHING/);
     expect(PLANNER_BRIEF).toContain(String(MAX_TEAM_TASKS));
+    expect(PLANNER_BRIEF).toMatch(/depends_on names EARLIER tasks — listed before it/);
   });
 });
 
@@ -78,7 +82,7 @@ describe("replanTask", () => {
     expect(text).toContain("Goal: Build it");
     expect(text).toContain("no JSON array");
     expect(text).toContain("Sure! Here is my thinking…");
-    expect(text).toContain("ONLY the JSON array");
+    expect(text).toContain("ONLY the JSON plan");
     expect(replanTask("Build it", null, "empty")).toContain("You answered nothing.");
     const long = replanTask("g".repeat(MAX_TASK_CHARS * 2), "y".repeat(MAX_TASK_CHARS), "r");
     expect(long.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
@@ -166,5 +170,194 @@ describe("a plan whose faults must all be fixed at once", () => {
   it("accepts a description exactly at the limit", () => {
     const out = parsePlan(JSON.stringify([{ task_description: "y".repeat(MAX_TASK_DESCRIPTION_CHARS), files_hint: [] }]));
     expect(out.ok).toBe(true);
+  });
+});
+
+// ─── TASK-1099: the team's shape, and the lead ───────────────────────────────
+
+describe("parsePlan — the shape", () => {
+  const tasks = [
+    { task_description: "Fix the off-by-one in pager.ts", files_hint: ["src/pager.ts"] },
+  ];
+
+  it("accepts the bare array (no shape: the default team) and the wrapped object, fenced or not", () => {
+    expect(parsePlan(JSON.stringify(tasks))).toEqual({ ok: true, shape: null, tasks: [{ task_description: "Fix the off-by-one in pager.ts", depends_on: [], files_hint: ["src/pager.ts"] }] });
+    const wrapped = { shape: { parallelism: 1, review: "final", rationale: "A one-file fix." }, tasks };
+    for (const text of [JSON.stringify(wrapped), `The plan:\n\`\`\`json\n${JSON.stringify(wrapped, null, 2)}\n\`\`\`\nDone.`, `Plan [v1]: ${JSON.stringify(wrapped)} [end]`]) {
+      const out = parsePlan(text);
+      expect(out).toMatchObject({ ok: true, shape: { parallelism: 1, review: "final", rationale: "A one-file fix." } });
+      if (out.ok) expect(out.tasks).toHaveLength(1);
+    }
+    // Wrapped with no shape, or a null one, is the default team too; the rationale may be left out.
+    expect(parsePlan(JSON.stringify({ tasks }))).toMatchObject({ ok: true, shape: null });
+    expect(parsePlan(JSON.stringify({ shape: null, tasks }))).toMatchObject({ ok: true, shape: null });
+    expect(parsePlan(JSON.stringify({ shape: { parallelism: MAX_TEAM_WORKERS, review: "each" }, tasks }))).toMatchObject({ ok: true, shape: { parallelism: MAX_TEAM_WORKERS, review: "each", rationale: "" } });
+    expect(parsePlan(JSON.stringify({ shape: { parallelism: 2, review: "none", rationale: "Independent files." }, tasks }))).toMatchObject({ ok: true, shape: { review: "none" } });
+  });
+
+  it("refuses a bad shape, naming every fault, and never falls back to the default for one", () => {
+    const refusedWith = (shape: unknown) => parsePlan(JSON.stringify({ shape, tasks }));
+    expect(refusedWith({ parallelism: 0, review: "each" })).toMatchObject({ ok: false, reason: expect.stringMatching(/parallelism is 0; it must be a whole number from 1 to 3/) });
+    expect(refusedWith({ parallelism: MAX_TEAM_WORKERS + 1, review: "each" })).toMatchObject({ ok: false, reason: expect.stringMatching(/parallelism is 4/) });
+    expect(refusedWith({ parallelism: 1.5, review: "each" })).toMatchObject({ ok: false, reason: expect.stringMatching(/parallelism is 1.5/) });
+    expect(refusedWith({ parallelism: "2", review: "each" })).toMatchObject({ ok: false, reason: expect.stringMatching(/parallelism is "2"/) });
+    expect(refusedWith({ review: "each" })).toMatchObject({ ok: false, reason: expect.stringMatching(/parallelism is null/) });
+    expect(refusedWith({ parallelism: 2, review: "sometimes" })).toMatchObject({ ok: false, reason: expect.stringMatching(/review is "sometimes"; it must be "each", "final", "none"/) });
+    expect(refusedWith({ parallelism: 2, review: "each", rationale: "r".repeat(201) })).toMatchObject({ ok: false, reason: expect.stringMatching(/rationale has 201 characters; the maximum is 200/) });
+    expect(refusedWith({ parallelism: 2, review: "each", rationale: 7 })).toMatchObject({ ok: false, reason: expect.stringMatching(/rationale is not text/) });
+    expect(refusedWith("serial")).toMatchObject({ ok: false, reason: expect.stringMatching(/shape is not an object/) });
+    // A shape fault and a task fault are named together, like two task faults.
+    const both = parsePlan(JSON.stringify({ shape: { parallelism: 9, review: "each" }, tasks: [{ files_hint: [] }] }));
+    expect(both).toMatchObject({ ok: false, reason: expect.stringMatching(/parallelism is 9.*Task t1 has no task_description/) });
+  });
+
+  it("refuses an object that carries no tasks array", () => {
+    expect(parsePlan(JSON.stringify({ shape: { parallelism: 1, review: "each" } }))).toMatchObject({ ok: false, reason: expect.stringMatching(/no "tasks" array/) });
+    expect(parsePlan(JSON.stringify({ shape: { parallelism: 1, review: "each" }, tasks: "t1" }))).toMatchObject({ ok: false, reason: expect.stringMatching(/no "tasks" array/) });
+    expect(parsePlan(JSON.stringify({ shape: { parallelism: 1, review: "each" }, tasks: [] }))).toMatchObject({ ok: false, reason: expect.stringMatching(/no tasks/) });
+  });
+
+  it("tells the planner how to size the team: one-file fix, independent files, a migration", () => {
+    expect(PLANNER_BRIEF).toContain('"shape"');
+    expect(PLANNER_BRIEF).toMatch(/one-file fix is ONE task with parallelism 1 and review "final"/);
+    expect(PLANNER_BRIEF).toMatch(/independent files may run in parallel/);
+    expect(PLANNER_BRIEF).toMatch(/migration.*serially/);
+    expect(PLANNER_BRIEF).toContain(`1 to ${MAX_TEAM_WORKERS}`);
+  });
+});
+
+/** A board as the lead sees it: t1 done, the rest as given. */
+function ctxOf(statuses: TaskStatus[], added = 0, retired = 0): ReplanContext {
+  return { tasks: statuses.map((status, i) => ({ task_id: `t${i + 1}`, status })), added, retired };
+}
+
+describe("parseReplan — the lead's answer", () => {
+  const task = (description: string, extra: Record<string, unknown> = {}) => ({ task_description: description, files_hint: ["x.ts"], ...extra });
+
+  it("reads {} and a note alone as no change, fenced or bare", () => {
+    const ctx = ctxOf(["complete", "pending"]);
+    expect(parseReplan("{}", ctx)).toEqual({ ok: true, add: [], retire: [], note: "" });
+    expect(parseReplan('The plan stands.\n```json\n{"note": "t2 still fits"}\n```', ctx)).toEqual({ ok: true, add: [], retire: [], note: "t2 still fits" });
+    expect(parseReplan('{"add": [], "retire": [], "note": "x"}', ctx)).toMatchObject({ ok: true, add: [], retire: [] });
+  });
+
+  it("takes adds numbered after the board — depending on the board or on an earlier add — and retires of pending tasks", () => {
+    const ctx = ctxOf(["complete", "pending", "pending"]);
+    const out = parseReplan(JSON.stringify({
+      add: [task("Add a favicon", { depends_on: ["t1"] }), task("Link the favicon", { depends_on: ["t4", "t2"] })],
+      retire: ["t3", "t3"],
+      note: "t1 already wrote the README",
+    }), ctx);
+    expect(out).toEqual({
+      ok: true,
+      add: [
+        { task_description: "Add a favicon", depends_on: ["t1"], files_hint: ["x.ts"] },
+        { task_description: "Link the favicon", depends_on: ["t4", "t2"], files_hint: ["x.ts"] },
+      ],
+      retire: ["t3"],
+      note: "t1 already wrote the README",
+    });
+  });
+
+  it("refuses more adds than the team has left, and a board over MAX_TEAM_TASKS", () => {
+    const three = { add: [task("a"), task("b"), task("c")] };
+    expect(parseReplan(JSON.stringify(three), ctxOf(["complete"]))).toMatchObject({ ok: true });
+    expect(parseReplan(JSON.stringify({ add: [task("a"), task("b"), task("c"), task("d")] }), ctxOf(["complete"]))).toMatchObject({ ok: false, reason: expect.stringMatching(new RegExp(`adds 4 task\\(s\\); the lead adds at most ${MAX_LEAD_ADDS} over the team and has ${MAX_LEAD_ADDS} left`)) });
+    // Two already added over the team's life: one left.
+    expect(parseReplan(JSON.stringify({ add: [task("a"), task("b")] }), ctxOf(["complete", "pending", "pending"], 2))).toMatchObject({ ok: false, reason: expect.stringMatching(/has 1 left/) });
+    const seven = ctxOf(["complete", "pending", "pending", "pending", "pending", "pending", "pending"]);
+    expect(parseReplan(JSON.stringify({ add: [task("a"), task("b")] }), seven)).toMatchObject({ ok: false, reason: expect.stringMatching(/to the board's 7; a team holds at most 8/) });
+  });
+
+  it("refuses more retires than are left, and a retirement of anything but a pending task", () => {
+    expect(parseReplan('{"retire": ["t2", "t3", "t4"]}', ctxOf(["complete", "pending", "pending", "pending"]))).toMatchObject({ ok: false, reason: expect.stringMatching(new RegExp(`retires 3 task\\(s\\); a team retires at most ${MAX_LEAD_RETIRES}`)) });
+    expect(parseReplan('{"retire": ["t3"]}', ctxOf(["complete", "retired", "pending"], 0, 2))).toMatchObject({ ok: false, reason: expect.stringMatching(/has 0 left/) });
+    for (const status of ["complete", "in_progress", "failed", "rejected", "retired"] as const) {
+      expect(parseReplan('{"retire": ["t2"]}', ctxOf(["complete", status])), status).toMatchObject({ ok: false, reason: expect.stringMatching(new RegExp(`retires t2, which is ${status}; only a pending task may be retired`)) });
+    }
+    expect(parseReplan('{"retire": ["t9"]}', ctxOf(["complete", "pending"]))).toMatchObject({ ok: false, reason: expect.stringMatching(/t9, which is not on the board/) });
+    expect(parseReplan('{"retire": "t2"}', ctxOf(["complete", "pending"]))).toMatchObject({ ok: false, reason: expect.stringMatching(/retire is not a list/) });
+  });
+
+  it("refuses new tasks that wait on each other in a cycle, on themselves, on nothing, on a later add, or on a task that failed", () => {
+    const ctx = ctxOf(["complete", "pending", "failed"]);
+    expect(parseReplan(JSON.stringify({ add: [task("a", { depends_on: ["t5"] }), task("b", { depends_on: ["t4"] })] }), ctx)).toMatchObject({ ok: false, reason: "Tasks t4 and t5 depend on each other." });
+    expect(parseReplan(JSON.stringify({ add: [task("a", { depends_on: ["t4"] })] }), ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/t4 depends on t4, which is not another task/) });
+    expect(parseReplan(JSON.stringify({ add: [task("a", { depends_on: ["t7"] })] }), ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/t4 depends on t7, which is not another task/) });
+    expect(parseReplan(JSON.stringify({ add: [task("a", { depends_on: ["t04"] })] }), ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/t4 depends on t04/) });
+    // No cycle, but posted in order a task cannot wait on one listed after it.
+    expect(parseReplan(JSON.stringify({ add: [task("a", { depends_on: ["t5"] }), task("b")] }), ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/t4 depends on t5, which is listed after it/) });
+    expect(parseReplan(JSON.stringify({ add: [task("a", { depends_on: ["t3"] })] }), ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/t4 depends on t3, which is failed and will never complete/) });
+  });
+
+  it("refuses what is not an answer at all — never repairing it into one", () => {
+    const ctx = ctxOf(["complete", "pending"]);
+    expect(parseReplan(null, ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/answered nothing/) });
+    expect(parseReplan("The plan looks fine to me.", ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/no JSON object/) });
+    expect(parseReplan('[{"task_description": "x"}]', ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/no JSON object/) });
+    expect(parseReplan('{"tasks": [{"task_description": "x"}]}', ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/none of add, retire or note \(it has tasks\)/) });
+    expect(parseReplan('{"add": {"task_description": "x"}}', ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/add is not a list/) });
+    expect(parseReplan('{"note": 3}', ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/note is not text/) });
+    expect(parseReplan(JSON.stringify({ add: [{ files_hint: [] }] }), ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/t3 has no task_description/) });
+    // One bad add refuses the whole answer, the good retire with it.
+    expect(parseReplan(JSON.stringify({ retire: ["t2"], add: [{ task_description: "x".repeat(2001) }] }), ctx)).toMatchObject({ ok: false });
+    // A long note is only shortened: it decides nothing.
+    const long = parseReplan(JSON.stringify({ note: "n".repeat(MAX_LEAD_NOTE_CHARS + 50) }), ctx);
+    expect(long.ok && long.note.length).toBe(MAX_LEAD_NOTE_CHARS);
+  });
+});
+
+describe("the lead's view and words", () => {
+  it("counts a task a worker is being started on as in progress, so it cannot be retired", () => {
+    const board = { tasks: [
+      { task_id: "t1", status: "complete", origin: "plan" },
+      { task_id: "t2", status: "pending", origin: "plan" },
+      { task_id: "t3", status: "pending", origin: "lead" },
+      { task_id: "t4", status: "retired", origin: "plan" },
+    ] } as unknown as Parameters<typeof replanContext>[0];
+    const ctx = replanContext(board, new Set(["t2"]));
+    expect(ctx).toEqual({ tasks: [
+      { task_id: "t1", status: "complete" },
+      { task_id: "t2", status: "in_progress" },
+      { task_id: "t3", status: "pending" },
+      { task_id: "t4", status: "retired" },
+    ], added: 1, retired: 1 });
+    expect(parseReplan('{"retire": ["t2"]}', ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/t2, which is in_progress/) });
+    expect(leadRoom(ctx)).toEqual({ adds: MAX_LEAD_ADDS - 1, retires: MAX_LEAD_RETIRES - 1, retirable: ["t3"] });
+    // Nothing pending: no retire to spend, whatever is left of the budget.
+    expect(leadRoom(ctxOf(["complete", "in_progress"]))).toMatchObject({ retires: 0, retirable: [] });
+    expect(leadRoom(ctxOf(["complete", "pending"], MAX_LEAD_ADDS, MAX_LEAD_RETIRES))).toMatchObject({ adds: 0, retires: 0 });
+  });
+
+  it("briefs the lead: read-only, the object it answers, and its bounds", () => {
+    expect(REPLAN_BRIEF).toMatch(/You are the LEAD/);
+    // Messages the team's runs sent "to the lead" are on the board it reads.
+    expect(REPLAN_BRIEF).toMatch(/told the lead with team_message .* board you are given/);
+    expect(PLANNER_BRIEF).toMatch(/team_message .* still answer with the JSON plan/);
+    expect(REPLAN_BRIEF).toMatch(/change NOTHING/);
+    expect(REPLAN_BRIEF).toContain("ONLY a JSON object");
+    expect(REPLAN_BRIEF).toContain('"add"');
+    expect(REPLAN_BRIEF).toContain('"retire"');
+    expect(REPLAN_BRIEF).toContain(`at most ${MAX_LEAD_ADDS} tasks over the whole team`);
+    expect(REPLAN_BRIEF).toContain(`At most ${MAX_LEAD_RETIRES} over the whole team`);
+    // The planner's rules for writing a task are the lead's too.
+    expect(REPLAN_BRIEF).toContain(`at most ${MAX_TASK_DESCRIPTION_CHARS} characters`);
+  });
+
+  it("gives the lead the settled task, its result, what it may change and the board — inside the cap", async () => {
+    const { createBoard, postTask } = await import("@/lib/coding-team-board");
+    const board = createBoard({ goal: "g".repeat(3_900), projectId: null, directory: "/p", source: "owner" }, { kind: "owner" });
+    for (let i = 0; i < 6; i++) postTask(board, { kind: "planner" }, { task_description: `Task number ${i + 1} ${"d".repeat(1_500)}` });
+    Object.assign(board.tasks[0], { status: "complete", result: `Did it. ${"r".repeat(5_000)}`, review: { verdict: "accepted", notes: "", at: 1 } });
+    const text = leadTask(board, "t1", replanContext(board));
+    expect(text.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
+    expect(text).toMatch(/^Task t1 just settled \(complete, accepted\): Task number 1/);
+    expect(text).toContain("Its worker's result:\nDid it.");
+    // Six on the board: two more fit under MAX_TEAM_TASKS, whatever the lead's own budget.
+    expect(text).toContain(`add ${MAX_TEAM_TASKS - 6} more task(s) (numbered from t7)`);
+    expect(text).toContain("pending now: t2, t3, t4, t5, t6");
+    expect(text).toContain("t2 [pending] — Task number 2");
+    // The settled task is not in the digest twice.
+    expect(text).not.toContain("t1 [complete]");
   });
 });

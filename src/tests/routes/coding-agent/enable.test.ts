@@ -24,6 +24,7 @@ const setEffort = vi.hoisted(() => vi.fn());
 const setGenerateImages = vi.hoisted(() => vi.fn());
 const setGenerateAudio = vi.hoisted(() => vi.fn());
 const setRealBrowser = vi.hoisted(() => vi.fn());
+const setTeamDynamic = vi.hoisted(() => vi.fn());
 const clearHarnessFault = vi.hoisted(() => vi.fn());
 const setAutoMerge = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
@@ -34,6 +35,7 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   setGenerateImages,
   setGenerateAudio,
   setRealBrowser,
+  setTeamDynamic,
   clearHarnessFault,
   // setReviewRounds is deliberately left REAL: its range refusal is the thing
   // under test below, and a mock would pin the route's plumbing instead.
@@ -92,6 +94,7 @@ beforeEach(async () => {
   setGenerateImages.mockResolvedValue(false);
   setGenerateAudio.mockResolvedValue(false);
   setRealBrowser.mockResolvedValue(false);
+  setTeamDynamic.mockImplementation(async (on: boolean) => on);
   clearHarnessFault.mockResolvedValue(undefined);
   const route = await import("@/app/setup-api/coding-agent/enable/route");
   POST = route.POST;
@@ -171,6 +174,29 @@ describe("the body", () => {
 
     const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
     expect((await empty.json()).error as string).toContain("{ realBrowser: boolean }");
+  });
+
+  it("takes the team lead's switch both ways, and names it in the refusal too", async () => {
+    const on = await POST(request({ cookie: ownerCookie(), body: { teamDynamic: true } }));
+    expect(on.status).toBe(200);
+    expect(setTeamDynamic).toHaveBeenCalledWith(true);
+    const off = await POST(request({ cookie: ownerCookie(), body: { teamDynamic: false } }));
+    expect(off.status).toBe(200);
+    expect(setTeamDynamic).toHaveBeenLastCalledWith(false);
+    // Not a boolean: not this switch, and nothing else in the body either.
+    const bad = await POST(request({ cookie: ownerCookie(), body: { teamDynamic: "yes" } }));
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error as string).toContain("{ teamDynamic: boolean }");
+    expect(setTeamDynamic).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses the agent the team lead's switch — the owner's alone", async () => {
+    // The bearer is what the assistant (and so a coding run, through the MCP
+    // server) holds: it must not be able to let its own team rewrite plans.
+    const res = await POST(request({ bearer: "any-valid-looking-token-value", body: { teamDynamic: true } }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).kind).toBe("owner_only");
+    expect(setTeamDynamic).not.toHaveBeenCalled();
   });
 
   it("takes both halves of the commit author, clears them, and refuses what git could not author", async () => {

@@ -9,7 +9,8 @@ import { useT } from "@/lib/i18n";
  * side by side, and every worker's result passes a reviewer. Read-only — a
  * picture of who is who, sized by the board (how many workers, how many
  * reviewers, which of them are at work right now), so the nodes it draws are
- * the agents the card counts: planner + workers + reviewers.
+ * the agents the card counts: planner + workers + reviewers, and the lead
+ * under the planner once a team with the lead's switch on has used it.
  *
  * A deliberate sibling of CodingAgentDelegationArt and MemoryShardArt: the
  * same stroke weights, the same muted palette over the product's coral, the
@@ -34,6 +35,14 @@ export interface CodingTeamTreeProps {
   /** The planner is reading the folder right now. Ignored in the "run" shape. */
   plannerActive?: boolean;
   /**
+   * How many turns the team's LEAD took (the planner back after a worker
+   * settled, with the owner's switch on). None draws no lead: a team
+   * without the switch looks exactly as it always did. Ignored in the "run" shape.
+   */
+  leads?: number;
+  /** The lead is deciding right now. */
+  leadActive?: boolean;
+  /**
    * What the picture is OF.
    *
    * "team" — the board: the assistant hands a goal to the Coding Agent, which
@@ -57,11 +66,13 @@ function spread(n: number, top: number, bottom: number, mid: number): number[] {
   return Array.from({ length: n }, (_, i) => top + ((bottom - top) * i) / (n - 1));
 }
 
-export default function CodingTeamTree({ workers = 3, activeWorkers = 0, reviewers = 1, activeReviewers = 0, plannerActive = false, shape = "team", className = "" }: CodingTeamTreeProps) {
+export default function CodingTeamTree({ workers = 3, activeWorkers = 0, reviewers = 1, activeReviewers = 0, plannerActive = false, leads = 0, leadActive = false, shape = "team", className = "" }: CodingTeamTreeProps) {
   const { t } = useT();
   const board = shape === "team";
   const w = Math.min(MAX_TREE_WORKERS, Math.max(board ? 1 : 0, Math.round(workers)));
   const r = board ? Math.min(MAX_TREE_REVIEWERS, Math.max(0, Math.round(reviewers))) : 0;
+  const l = board ? Math.max(0, Math.round(leads)) : 0;
+  const liveL = l > 0 && leadActive;
   const liveW = Math.min(w, Math.max(0, Math.round(activeWorkers)));
   const liveR = Math.min(r, Math.max(0, Math.round(activeReviewers)));
   // The caption counts what there IS, the columns draw what fits: a board of
@@ -101,6 +112,7 @@ export default function CodingTeamTree({ workers = 3, activeWorkers = 0, reviewe
       data-active={liveW}
       data-active-reviewers={liveR}
       data-planner-active={plannerActive || undefined}
+      data-leads={l}
     >
       {/* Column captions, with the count the card states. */}
       {(board
@@ -145,6 +157,21 @@ export default function CodingTeamTree({ workers = 3, activeWorkers = 0, reviewe
           {node(X.planner, mid, plannerActive, (
             <path d={`M${X.planner - 5} ${mid - 4} h10 M${X.planner - 5} ${mid} h10 M${X.planner - 5} ${mid + 4} h6`} stroke={plannerActive ? "var(--coral-bright)" : "var(--text-muted)"} strokeOpacity="0.9" strokeWidth="1.5" strokeLinecap="round" />
           ))}
+        </g>
+      )}
+
+      {/* The lead: the planner, back after a worker settled, looking at the
+          plan again — under the planner, tied to it, with its count beneath.
+          Only on a team that had lead turns. */}
+      {l > 0 && (
+        <g data-testid="coding-team-tree-lead" data-live={liveL || undefined}>
+          <path d={`M${X.planner} ${mid + 14} V${148 - 14}`} fill="none" stroke="var(--text-muted)" strokeOpacity="0.45" strokeWidth="1.4" strokeDasharray="3 5" strokeLinecap="round" className="ct-art-flow" style={{ animationDelay: "0.6s" }} />
+          {node(X.planner, 148, liveL, (
+            <path d={`M${X.planner - 5} ${148 + 3} l5 -6 l5 6`} fill="none" stroke={liveL ? "var(--coral-bright)" : "var(--text-muted)"} strokeOpacity="0.9" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+          ))}
+          <text x={X.planner} y="176" textAnchor="middle" className="fill-[var(--text-muted)]" style={{ fontSize: 10, fontWeight: 500, letterSpacing: 0.4 }}>
+            {`${t("codingAgent.team.artLead")} · ${l}`}
+          </text>
         </g>
       )}
 
