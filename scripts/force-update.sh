@@ -166,6 +166,8 @@ MOVED=0          # the checkout may have left PREV_HEAD
 INSTALLED=0      # `bun install` ran against the new commit's lockfile
 PARKED=0         # the serving build is parked at $KEPT_DIR
 NO_FALLBACK=0    # too little space to park: the build runs over the serving one
+BUILT=0          # `bun run build` has started writing .next
+RESTORED=0       # the parked build was put back after a failed build
 BUILD_LOG_DIR=""
 BUILD_LOG=""
 
@@ -272,6 +274,7 @@ restore_serving_build() {
   # build the box serves.
   rm -f "$BUILD_DIR/.rebuild-pid" || true
   PARKED=0
+  RESTORED=1
   echo "[force-update] Put the previous build back."
 }
 
@@ -318,17 +321,25 @@ give_up() {
   if [ -n "$BUILD_LOG_DIR" ]; then rm -rf "$BUILD_LOG_DIR"; fi
   # Nothing is restarted onto a build that failed. The service was never
   # stopped, so it is still up on the build that was put back — unless it went
-  # down while that build was parked, and then it is brought back on it.
+  # down while that build was parked, and then it is brought back on it. Only
+  # when .next really holds that build: no build has run yet, or the parked one
+  # was put back. Otherwise .next is what the failed build left — nothing was
+  # parked (no room, or no .next to park) or the put-back itself failed — and a
+  # restart would serve exactly that.
   if systemctl is-active --quiet clawbox-setup; then
     echo "[force-update] clawbox-setup was not restarted: it is still serving the previous build." >&2
-  else
+  elif [ "$BUILT" -eq 0 ] || [ "$RESTORED" -eq 1 ]; then
     echo "[force-update] clawbox-setup is not running — starting it again on the previous build." >&2
     sudo systemctl restart clawbox-setup || true
+  else
+    echo "[force-update] clawbox-setup is not running, and was NOT started: .next holds the build that just failed, not the previous one." >&2
   fi
   if [ "$MOVED" -eq 1 ] || [ "$PARKED" -eq 1 ]; then
     echo "[force-update] FAILED (exit $code), and the rollback did not complete — see the lines above." >&2
-  elif [ "$NO_FALLBACK" -eq 1 ]; then
-    echo "[force-update] FAILED (exit $code). The checkout is back, but there was no room to keep the previous build: the dashboard has nothing to load on its next restart until a build succeeds." >&2
+  elif [ "$BUILT" -eq 1 ] && [ "$RESTORED" -eq 0 ]; then
+    local why_none="there was no previous build on disk to keep"
+    if [ "$NO_FALLBACK" -eq 1 ]; then why_none="there was no room to keep the previous build"; fi
+    echo "[force-update] FAILED (exit $code). The checkout is back, but $why_none: the dashboard has nothing good to load on its next restart until a build succeeds." >&2
   else
     echo "[force-update] FAILED (exit $code). Nothing was updated." >&2
   fi
@@ -389,6 +400,7 @@ fi
 BUILD_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-force-update-XXXXXX" 2>/dev/null || true)"
 if [ -n "$BUILD_LOG_DIR" ]; then BUILD_LOG="$BUILD_LOG_DIR/build.log"; fi
 BUILD_RC=0
+BUILT=1
 for BUILD_ATTEMPT in 1 2; do
   if [ -n "$BUILD_LOG" ]; then
     if run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN run build" 2>&1 | tee "$BUILD_LOG"; then

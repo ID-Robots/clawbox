@@ -40,6 +40,7 @@ const d = CAN_RUN ? describe : describe.skip;
 type BuildOutcome =
   | "succeeds"
   | "fails"
+  | "fails-with-entry"
   | "fails-long"
   | "says-error-exits-0"
   | "leaves-no-entry"
@@ -67,6 +68,10 @@ case "$STUB_BUILD" in
   fails)
     echo "Error [TurbopackInternalError]: [project]/src/lib/edition-source.ts [app-rsc] (ecmascript)" >&2
     echo "- Symlink [project]/data/coding-agent-artifacts/run-aaaaaaaa/venv/bin/python is invalid, it points out of the filesystem root" >&2
+    echo "> Build error occurred" >&2
+    exit 1 ;;
+  fails-with-entry)
+    produce
     echo "> Build error occurred" >&2
     exit 1 ;;
   fails-long)
@@ -298,6 +303,21 @@ d("scripts/force-update.sh never serves a build that failed", () => {
     expect(r.status).toBe(1);
     expectPreviousBuildServed();
     expect(logOf("systemctl.log")).toMatch(/^restart clawbox-setup$/m);
+  });
+
+  it("does not start the service onto what a failed build left when there was no previous build to keep", () => {
+    // Nothing to park — no .next on disk — so after the failure .next is the
+    // FAILED build's, entry and all. A service that is down must stay down
+    // rather than come up on it.
+    fs.rmSync(path.join(box, ".next"), { recursive: true });
+
+    const r = runForceUpdate("fails-with-entry", { STUB_ACTIVE: "3" });
+
+    expect(r.status).toBe(1);
+    expect(git(box, "rev-parse", "HEAD")).toBe(prevHead);
+    expect(logOf("systemctl.log")).not.toMatch(/restart/);
+    expect(r.stderr).toContain("was NOT started");
+    expect(r.stderr).toContain("there was no previous build on disk to keep");
   });
 
   it("puts back a build an interrupted update left parked before it parks anything", () => {

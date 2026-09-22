@@ -19,10 +19,17 @@ import nextConfig from "../../../next.config";
  *
  * The build tools must be told to leave it alone. tsconfig.json's exclusion is
  * pinned in tsconfig-excludes-data.test.ts; these are the other two.
+ *
+ * What the trace exclude does NOT do, measured on a CI build with files planted
+ * under data/ (2026-09-23): every ROUTE trace had 0 data/ entries, while
+ * middleware.js.nft.json and instrumentation.js.nft.json each listed all of
+ * them, stream files included — the limit next.config.ts already documents.
+ * This pins the half the key does reach; it is no proof that data/ is out of
+ * the standalone copy.
  */
 const REPO = process.cwd();
 
-describe("next.config keeps data/ out of the traced output", () => {
+describe("next.config keeps data/ out of every route's trace", () => {
   const excludes = nextConfig.outputFileTracingExcludes ?? {};
 
   it("excludes data/ for every route", () => {
