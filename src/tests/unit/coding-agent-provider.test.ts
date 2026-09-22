@@ -124,9 +124,11 @@ describe("the vocabulary", () => {
   });
 
   it("keeps claude-opus-5 selectable behind the new default", () => {
-    // A "Finish PR" run inherits the requestedModel of the run it continues,
-    // so dropping the previous default would refuse the follow-up to every
-    // run that was started before the switch.
+    // What the list fences is what a caller NAMES — the MCP tool's enum, the
+    // run route, a follow-up that re-states the model of the run it
+    // continues. A resume that names nothing carries the previous
+    // requestedModel past this list entirely, so the entry below is what
+    // keeps the old id askable, not what keeps an existing run alive.
     expect(ANTHROPIC_MODELS).toContain("claude-opus-5");
     expect(resolveRunProvider("anthropic", "claude-opus-5", "clawbox-ai")).toEqual({
       ok: true, provider: "anthropic", model: "claude-opus-5",
