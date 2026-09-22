@@ -48,6 +48,27 @@ Two properties of the Hermes entry are load-bearing:
 To check a device: `hermes mcp list` (or `openclaw mcp status`) should name
 `clawbox`; `hermes mcp test clawbox` connects and lists its tools.
 
+### The server hangs up when it is idle
+
+A harness spawns one of these processes per **session key** and holds it for its
+own lifetime, so nothing reaped them: measured on a v4.0.0 box, three turns on
+three keys left three `bun run mcp/clawbox-mcp.ts` processes alive — still all
+there after 90 s of silence — and a ten-prompt run left nine of them resident at
+63–70 MB each, cleared only by restarting the gateway. So the server ends
+itself. Ten minutes after the last request, with nothing in flight, it writes
+one line to stderr — `[clawbox-mcp] idle for 600s with no request in flight;
+exiting so the harness reconnects on the next call` — closes its transport and
+exits 0. Both harnesses treat that as an ordinary disconnect and reconnect on
+the next call (OpenClaw's gateway logs `[bundle-mcp] server "clawbox" closed;
+next request reconnects`); the reconnect costs 0.31–0.35 s to connect plus
+0.02 s to re-list the tools, paid once by whoever comes back after a long pause.
+The rule is edition-neutral — the same process, the same reconnect on Hermes —
+and it is not a timeout on your work: **a request still in flight defers the
+exit for as long as it runs**, so a `bash` command that sleeps for an hour is
+never cut off, and the clock only restarts once its result has gone back. Set
+`CLAWBOX_MCP_IDLE_EXIT_MS` to another number of milliseconds to move it, or to
+`0` to switch it off and keep every server for the life of the harness.
+
 ## The one thing to know: the tool set depends on the edition
 
 A ClawBox ships as an **OpenClaw** device or a **Hermes** device. They have
@@ -1182,6 +1203,7 @@ and it drags server-only Next.js code into this stdio process.
 | `CLAWBOX_MCP_PROFILE` | `full` (default), `core` or `browser` pins the tool set (`browser` = the browser family only — what a delegated coding-agent run gets); `auto` makes it FOLLOW THE MODEL — a device whose active provider is the on-device one and whose model is small (≤8B, or a ≤16k context) registers `core`, everything else `full`. `auto` is opt-in because this process sees only the persisted provider, not the chat header's per-turn override. See `mcp/lib/profile.ts` and `docs/hermes-reasoning-levels.md`. |
 | `CLAWBOX_SMALL_MODEL_PROFILE` | `off` disables the `auto` selection above (the explicit pins still work). |
 | `CLAWBOX_MCP_CODING_TOOLS` | `1` forces the coding family onto Hermes. Debugging only. |
+| `CLAWBOX_MCP_IDLE_EXIT_MS` | Milliseconds with **no request in flight** after which the server closes its transport and exits 0, so the harness reconnects on the next call. Default `600000` (10 min); `0` disables it. A value that is not a non-negative number falls back to the default rather than to `0` — see "The server hangs up when it is idle". |
 
 ## Work owned by others
 
