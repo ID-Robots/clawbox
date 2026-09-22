@@ -37,6 +37,9 @@ const RUN = {
   transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl",
 };
 
+/** The project's one Markdown file, for the Files tab's rendered preview. */
+const NOTES_MD = "## Notes\n\n- one\n";
+
 /** Every save the editor sent, as the route's PUT received it. */
 const saves: unknown[] = [];
 
@@ -76,11 +79,18 @@ test.beforeEach(async ({ page }) => {
     }
     const file = url.searchParams.get("file");
     if (file !== null) {
+      if (file.endsWith(".md")) {
+        return route.fulfill({ json: { file: { path: file, content: NOTES_MD, size: NOTES_MD.length, truncated: false, binary: false } } });
+      }
       return route.fulfill({ json: { file: { path: file, content: "<h1>Hi</h1>\n<p>there</p>\n", size: 24, truncated: false, binary: false } } });
     }
     const p = url.searchParams.get("path") ?? "";
     const entries = p === ""
-      ? [{ name: "src", type: "directory", size: null, modified: null }, { name: "index.html", type: "file", size: 24, modified: null }]
+      ? [
+        { name: "src", type: "directory", size: null, modified: null },
+        { name: "index.html", type: "file", size: 24, modified: null },
+        { name: "NOTES.md", type: "file", size: NOTES_MD.length, modified: null },
+      ]
       : [{ name: "app.js", type: "file", size: 3, modified: null }];
     return route.fulfill({ json: { listing: { path: p, truncated: false, entries } } });
   });
@@ -137,6 +147,20 @@ test("a project's page carries its files and changes, and a run's page its bread
   await win.getByTestId("coding-agent-file-save").click();
   await expect(win.getByTestId("coding-agent-file-saved")).toBeVisible();
   expect(saves).toEqual([{ projectId: null, directory: PROJECT.directory, file: "index.html", content: "<h1>Hi</h1>\n<p>edited</p>\n" }]);
+  // An HTML file is not Markdown: it has no view pair, only the wrap — and the
+  // wrap reaches the coloured text and the textarea over it alike.
+  await expect(win.getByTestId("coding-agent-file-preview-toggle")).toHaveCount(0);
+  await win.getByTestId("coding-agent-file-wrap").click();
+  await expect(editor).toHaveClass(/cb-code-wrap/);
+  await expect(win.getByTestId("coding-agent-file-editor-text")).toHaveClass(/cb-code-pre-wrap/);
+  await expect(win.getByTestId("coding-agent-file-editor-input")).toHaveClass(/cb-code-input-wrap/);
+
+  // A Markdown file opens as the document it is, and its source is one tap away.
+  await tree.getByTestId("coding-agent-tree-NOTES.md").click();
+  await expect(win.getByTestId("coding-agent-file-preview").locator("h2")).toHaveText("Notes");
+  await expect(win.getByTestId("coding-agent-file-editor")).toHaveCount(0);
+  await win.getByTestId("coding-agent-file-source-toggle").click();
+  await expect(win.getByTestId("coding-agent-file-editor-input")).toHaveValue(NOTES_MD);
 
   await win.getByTestId("coding-agent-workspace-changes").click();
   await expect(win.getByTestId("coding-agent-change-totals")).toContainText("Files changed: 1");
