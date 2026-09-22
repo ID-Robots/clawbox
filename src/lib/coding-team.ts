@@ -335,7 +335,7 @@ export async function sendTeamMessage(input: TeamMessageInput): Promise<TeamMess
   draft.text = text;
   if (target === "sibling") {
     if (toRunId === fromRunId) throw refused("SELF", "A run does not send a message to itself.");
-    if (!board.runs.some((r) => r.id === toRunId)) throw refused("NOT_IN_TEAM", `${toRunId} is not a run of team ${teamId}.`);
+    if (!board.runs.some((r) => r.id === toRunId)) throw refused("NOT_IN_TEAM", `${toRunId} is not a run of team ${teamId}. ${reachable(board, fromRunId)}`);
     const receiver = getRun(toRunId!);
     if (!receiver || isSettled(receiver.status)) throw refused("SETTLED", `${toRunId} has finished; there is nothing left to tell it.`);
   }
@@ -377,8 +377,9 @@ export async function sendTeamMessage(input: TeamMessageInput): Promise<TeamMess
   }
 
   // On the board — validated, capped, persisted, audit-logged — as the run's
-  // message, delivered or not. The team's alert count is not touched.
-  if (isSettledStatus(board.status)) throw new TeamMessageError("SETTLED", `Team ${teamId} finished while the message was on its way.`);
+  // message, delivered or not. The team's alert count is not touched. Logged
+  // even if the team settled while the assistant's chat was being reached:
+  // the message went, and the audit trail says so.
   try {
     bus.send(actor, { ...draft, ...(undelivered ? { undelivered: undelivered.code } : {}) });
   } catch (err) {
@@ -401,6 +402,22 @@ export async function sendTeamMessage(input: TeamMessageInput): Promise<TeamMess
     // The feed is the page's copy; the board already holds the record.
   }
   return { to: target, toRunId: target === "sibling" ? toRunId : null, delivered, ...(sessionKey ? { sessionKey } : {}), at: now, left: allowance.left - 1 };
+}
+
+/**
+ * The teammates a run could message right now, said in one sentence — the
+ * answer a run that named the wrong one needs, since a worker only knows the
+ * run ids its task text listed when it started.
+ */
+function reachable(board: TeamBoard, fromRunId: string): string {
+  const others = board.runs.filter((r) => r.id !== fromRunId && isHeldRun(r.id));
+  if (!others.length) return "No other run of the team is at work now; tell the lead instead.";
+  return `Its runs at work now: ${others.map((r) => `${r.id} (${r.role}${r.taskId ? `, ${r.taskId}` : ""})`).join(", ")}.`;
+}
+
+function isHeldRun(runId: string): boolean {
+  const run = getRun(runId);
+  return run !== null && !isSettled(run.status);
 }
 
 /**
@@ -801,6 +818,12 @@ export function workerTask(board: TeamBoard, task: TeamTask): string {
   ];
   if (task.files_hint.length) parts.push(`Files this task is expected to touch: ${task.files_hint.join(", ")}`);
   if (done.length) parts.push(`Already done by teammates:\n${done.join("\n")}`);
+  // Who else is at work, by the run id `team_message` needs: the one way a
+  // worker learns which run to tell when it is blocked on a sibling's part.
+  const working = board.tasks
+    .filter((t) => t.task_id !== task.task_id && t.status === "in_progress" && t.assigned_to)
+    .map((t) => `- ${t.assigned_to} on ${t.task_id}: ${firstLine(t.task_description, RESULT_QUOTE_CHARS)}`);
+  if (working.length) parts.push(`Teammates at work now (reach one with team_message, to="sibling"):\n${working.join("\n")}`);
   if (task.attempts > 0 && task.review?.verdict === "rejected") parts.push(`A previous attempt was rejected: ${task.review.notes}`);
   let text = parts.join("\n\n");
   if (text.length > MAX_TASK_CHARS) text = `${text.slice(0, MAX_TASK_CHARS - 1)}…`;

@@ -260,10 +260,13 @@ describe("who may speak", () => {
 });
 
 describe("whom it may reach, and what", () => {
-  it("refuses a message to itself and to a run outside the team", async () => {
-    const { id, a } = await startWorkers();
+  it("refuses a message to itself and to a run outside the team — naming the runs it could reach", async () => {
+    const { id, a, b } = await startWorkers();
     expect((await refusal(team.sendTeamMessage({ teamId: id, fromRunId: a, role: "worker", to: "sibling", toRunId: a, text: "note to self" }))).code).toBe("SELF");
-    expect((await refusal(team.sendTeamMessage({ teamId: id, fromRunId: a, role: "worker", to: "sibling", toRunId: "run-zzzzzzzz", text: "hi" }))).code).toBe("NOT_IN_TEAM");
+    const outside = await refusal(team.sendTeamMessage({ teamId: id, fromRunId: a, role: "worker", to: "sibling", toRunId: "run-zzzzzzzz", text: "hi" }));
+    expect(outside.code).toBe("NOT_IN_TEAM");
+    // The settled planner is not offered; the running sibling is, with its task.
+    expect(outside.message).toMatch(new RegExp(`Its runs at work now: ${b} \\(worker, t2\\)\\.$`));
     expect(runner.queueRunMessage).not.toHaveBeenCalled();
     expect(team.getTeam(id)!.alerts).toBe(2);
   });
@@ -314,5 +317,21 @@ describe("the caps", () => {
     expect(spent).toMatchObject({ code: "RATE_LIMITED", nextAllowedAt: null });
     // Twelve messages, two refusals: only the refusals are alerts.
     expect(team.getTeam(id)!.alerts).toBe(2);
+  });
+});
+
+describe("how a worker learns whom it can reach", () => {
+  it("lists the teammates at work, by run id, in a worker's task text", async () => {
+    const boardLib = await import("@/lib/coding-team-board");
+    const board = boardLib.createBoard({ goal: "Build the shop", projectId: null, directory: "/p", source: "agent" }, { kind: "system" });
+    for (const description of ["Build the cart API", "Build the checkout page", "Write the README"]) boardLib.postTask(board, { kind: "planner" }, { task_description: description });
+    boardLib.assignTask(board, { kind: "system" }, "t1", "run-aaaaaaaa");
+    boardLib.updateStatus(board, { kind: "worker", id: "run-aaaaaaaa" }, "t1", "in_progress");
+    const text = team.workerTask(board, board.tasks[1]);
+    expect(text).toContain('Teammates at work now (reach one with team_message, to="sibling"):\n- run-aaaaaaaa on t1: Build the cart API');
+    // Not itself, and not a task nobody is on.
+    expect(text).not.toContain("on t2:");
+    expect(text).not.toContain("on t3:");
+    expect(team.workerTask(board, board.tasks[0])).not.toContain("Teammates at work now");
   });
 });
