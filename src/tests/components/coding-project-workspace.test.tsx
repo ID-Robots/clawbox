@@ -36,6 +36,26 @@ const ROOT_LISTING = {
 };
 const SRC_LISTING = { path: "src", truncated: false, entries: [{ name: "app.js", type: "file", size: 30, modified: "2026-09-05T00:00:00.000Z" }] };
 
+/** A document with one of everything the preview has to draw. */
+const NOTES_MD = [
+  "## What changed",
+  "",
+  "- one",
+  "- two",
+  "",
+  "[the docs](https://example.com/docs)",
+  "",
+  "| file | lines |",
+  "| --- | --- |",
+  "| a.txt | 3 |",
+  "",
+  "```js",
+  "const x = 1",
+  "```",
+  "",
+].join("\n");
+const NOTES_TREE = { ...ROOT_LISTING, entries: [...ROOT_LISTING.entries, { name: "notes.md", type: "file", size: NOTES_MD.length, modified: null }] };
+
 const WORKING = {
   available: true, truncated: false, additions: 5, deletions: 1,
   files: [
@@ -90,6 +110,7 @@ function stubDevice(opts: { changes?: unknown; log?: unknown[]; tree?: unknown; 
       const file = q.get("file");
       if (file === "src/app.js") return json({ file: { path: file, content: "console.log(1)\nconsole.log(2)\n", size: 30, truncated: false, binary: false } });
       if (file === "README.md") return json({ file: { path: file, content: "# hi\n", size: 5, truncated: false, binary: false } });
+      if (file === "notes.md") return json({ file: { path: file, content: NOTES_MD, size: NOTES_MD.length, truncated: false, binary: false } });
       if (file === "big.log") return json({ file: { path: file, content: "first part", size: 900_000, truncated: true, binary: false } });
       if (file === "logo.png") return json({ file: { path: file, content: "", size: 8, truncated: false, binary: true } });
       if (file !== null) return json({ error: "No such file in the project", kind: "not_found" }, 404);
@@ -115,8 +136,22 @@ function stubDevice(opts: { changes?: unknown; log?: unknown[]; tree?: unknown; 
   }));
 }
 
-beforeEach(() => { calls = []; });
+beforeEach(() => {
+  calls = [];
+  // The toolbar remembers its wrap and its Markdown view on the device; a
+  // choice one test makes is not a choice the next one inherits.
+  window.localStorage.clear();
+});
 afterEach(() => { vi.unstubAllGlobals(); });
+
+/**
+ * A Markdown file opens RENDERED, so the editor behind it is one tap away —
+ * every test that reads or types a `.md` file's text starts here.
+ */
+async function openSource() {
+  fireEvent.click(await screen.findByTestId("coding-agent-file-source-toggle"));
+  return screen.findByTestId("coding-agent-file-editor-input");
+}
 
 describe("the Files tab", () => {
   it("lists the project's root from the tree route, folders first, and opens a folder on tap", async () => {
@@ -169,7 +204,7 @@ describe("the Files tab", () => {
     render(<CodingProjectWorkspace query="directory=%2Fhome%2Fclawbox%2FProjects%2Fsite" live={false} />);
     const tree = await screen.findByTestId("coding-agent-file-tree");
     fireEvent.click(within(tree).getByTestId("coding-agent-tree-README.md"));
-    const input = await screen.findByTestId("coding-agent-file-editor-input");
+    const input = await openSource();
     const view = screen.getByTestId("coding-agent-file-view");
     fireEvent.change(input, { target: { value: "# hi\n\nedited\n" } });
     expect(view).toHaveAttribute("data-dirty", "true");
@@ -188,7 +223,7 @@ describe("the Files tab", () => {
     render(<CodingProjectWorkspace query="projectId=site" live={false} />);
     const tree = await screen.findByTestId("coding-agent-file-tree");
     fireEvent.click(within(tree).getByTestId("coding-agent-tree-README.md"));
-    const input = await screen.findByTestId("coding-agent-file-editor-input");
+    const input = await openSource();
     fireEvent.change(input, { target: { value: "# changed" } });
     fireEvent.keyDown(input, { key: "s", ctrlKey: true });
     const view = screen.getByTestId("coding-agent-file-view");
@@ -203,7 +238,7 @@ describe("the Files tab", () => {
     render(<CodingProjectWorkspace query="projectId=site" live={false} />);
     const tree = await screen.findByTestId("coding-agent-file-tree");
     fireEvent.click(within(tree).getByTestId("coding-agent-tree-README.md"));
-    const input = await screen.findByTestId("coding-agent-file-editor-input");
+    const input = await openSource();
     fireEvent.change(input, { target: { value: "# changed" } });
     fireEvent.click(within(tree).getByTestId("coding-agent-tree-src"));
     fireEvent.click(await within(tree).findByTestId("coding-agent-tree-src/app.js"));
@@ -229,7 +264,7 @@ describe("the Files tab", () => {
     render(<CodingProjectWorkspace query="projectId=site" live={false} />);
     const tree = await screen.findByTestId("coding-agent-file-tree");
     fireEvent.click(within(tree).getByTestId("coding-agent-tree-README.md"));
-    const input = await screen.findByTestId("coding-agent-file-editor-input");
+    const input = await openSource();
     const view = screen.getByTestId("coding-agent-file-view");
     fireEvent.change(input, { target: { value: "# late" } });
     fireEvent.click(within(view).getByTestId("coding-agent-file-save"));
@@ -261,7 +296,7 @@ describe("the Files tab", () => {
     expect(within(view).queryByTestId("coding-agent-file-save")).toBeNull();
 
     fireEvent.click(within(tree).getByTestId("coding-agent-tree-README.md"));
-    await screen.findByTestId("coding-agent-file-editor-input");
+    await openSource();
     expect(within(view).getByTestId("coding-agent-file-live-note").textContent).toBe(t("codingAgent.fileLiveEdit"));
   });
 
@@ -301,6 +336,120 @@ describe("the Files tab", () => {
     render(<CodingProjectWorkspace query="directory=%2Fhome%2Fclawbox%2FProjects%2Fx" live={false} />);
     expect(await screen.findByText(t("codingAgent.emptyFolder"))).toBeInTheDocument();
     expect(calls[0]).toBe("/setup-api/coding-agent/tree?directory=%2Fhome%2Fclawbox%2FProjects%2Fx&path=");
+  });
+});
+
+describe("the Files tab's Markdown preview and its wrap", () => {
+  it("opens a Markdown file as the document it is, built from the text and never from markup", async () => {
+    stubDevice({ tree: NOTES_TREE });
+    render(<CodingProjectWorkspace query="projectId=site" live={false} />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-notes.md"));
+    const view = screen.getByTestId("coding-agent-file-view");
+    const preview = await within(view).findByTestId("coding-agent-file-preview");
+    // Preview is what a .md file opens on, and the editor is not behind it.
+    expect(within(view).getByTestId("coding-agent-file-preview-toggle")).toHaveAttribute("aria-pressed", "true");
+    expect(within(view).getByTestId("coding-agent-file-source-toggle")).toHaveAttribute("aria-pressed", "false");
+    expect(within(view).queryByTestId("coding-agent-file-editor")).toBeNull();
+    // A heading, a list, a table and a fence — drawn, not printed.
+    expect(preview.querySelector("h2")?.textContent).toBe("What changed");
+    // A list item is a row with its marker in an element of its own, so the
+    // source's "- one" is no longer anywhere in the text.
+    expect(preview.textContent).toContain("one");
+    expect(preview.textContent).toContain("two");
+    expect(preview.textContent).not.toContain("- one");
+    expect(preview.querySelectorAll("table tbody tr")).toHaveLength(1);
+    expect(preview.querySelector("pre")?.textContent).toContain("const x = 1");
+    expect(preview.textContent).not.toContain("## What changed");
+    // A link leaves for a tab of its own, and cannot reach back through it.
+    const link = preview.querySelector("a")!;
+    expect(link).toHaveAttribute("href", "https://example.com/docs");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    // Save belongs to both views; the wrap is the code view's alone.
+    expect(within(view).getByTestId("coding-agent-file-save")).toBeInTheDocument();
+    expect(within(view).queryByTestId("coding-agent-file-wrap")).toBeNull();
+  });
+
+  it("shows the source on the toggle, previews the UNSAVED draft, and remembers which view was read", async () => {
+    stubDevice({ tree: NOTES_TREE });
+    render(<CodingProjectWorkspace query="projectId=site" live={false} />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-notes.md"));
+    const view = screen.getByTestId("coding-agent-file-view");
+    const input = await openSource();
+    expect(input).toHaveValue(NOTES_MD);
+    expect(within(view).queryByTestId("coding-agent-file-preview")).toBeNull();
+    expect(window.localStorage.getItem("clawbox.codingAgent.files.mdView")).toBe("source");
+
+    fireEvent.change(input, { target: { value: "## edited\n" } });
+    fireEvent.click(within(view).getByTestId("coding-agent-file-preview-toggle"));
+    const preview = await within(view).findByTestId("coding-agent-file-preview");
+    // The draft as the owner has it, not the file as the device has it.
+    expect(preview.querySelector("h2")?.textContent).toBe("edited");
+    expect(within(view).getByTestId("coding-agent-file-dirty")).toBeInTheDocument();
+    expect(within(view).getByTestId("coding-agent-file-save")).toBeEnabled();
+    expect(window.localStorage.getItem("clawbox.codingAgent.files.mdView")).toBe("preview");
+  });
+
+  it("offers no view toggle for a file that is not Markdown", async () => {
+    stubDevice();
+    render(<CodingProjectWorkspace query="projectId=site" live={false} />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-src"));
+    fireEvent.click(await within(tree).findByTestId("coding-agent-tree-src/app.js"));
+    const view = screen.getByTestId("coding-agent-file-view");
+    await within(view).findByTestId("coding-agent-file-editor-input");
+    expect(within(view).queryByTestId("coding-agent-file-preview-toggle")).toBeNull();
+    expect(within(view).queryByTestId("coding-agent-file-source-toggle")).toBeNull();
+    expect(within(view).queryByTestId("coding-agent-file-preview")).toBeNull();
+    // The wrap is every file's.
+    expect(within(view).getByTestId("coding-agent-file-wrap")).toBeInTheDocument();
+  });
+
+  it("wraps the long lines on the word — the coloured text and the caret's textarea alike — and remembers it", async () => {
+    stubDevice();
+    render(<CodingProjectWorkspace query="projectId=site" live={false} />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-src"));
+    fireEvent.click(await within(tree).findByTestId("coding-agent-tree-src/app.js"));
+    const view = screen.getByTestId("coding-agent-file-view");
+    await within(view).findByTestId("coding-agent-file-editor-input");
+    const wrap = within(view).getByTestId("coding-agent-file-wrap");
+    expect(wrap).toHaveAttribute("aria-pressed", "false");
+    expect(within(view).getByTestId("coding-agent-file-editor")).not.toHaveClass("cb-code-wrap");
+    expect(within(view).getByTestId("coding-agent-file-editor-input")).toHaveAttribute("wrap", "off");
+
+    fireEvent.click(wrap);
+    expect(wrap).toHaveAttribute("aria-pressed", "true");
+    expect(within(view).getByTestId("coding-agent-file-editor")).toHaveClass("cb-code-wrap");
+    // Both layers wrap, or the caret stops standing on its glyph.
+    expect(within(view).getByTestId("coding-agent-file-editor-text")).toHaveClass("cb-code-pre-wrap");
+    expect(within(view).getByTestId("coding-agent-file-editor-input")).toHaveClass("cb-code-input-wrap");
+    expect(within(view).getByTestId("coding-agent-file-editor-input")).toHaveAttribute("wrap", "soft");
+    // The numbers step aside: a wrapped line covers rows they cannot name.
+    expect(within(view).getByTestId("coding-agent-file-editor").querySelector(".cb-code-gutter")).toBeNull();
+    expect(window.localStorage.getItem("clawbox.codingAgent.files.wrap")).toBe("true");
+
+    fireEvent.click(wrap);
+    expect(within(view).getByTestId("coding-agent-file-editor")).not.toHaveClass("cb-code-wrap");
+    expect(within(view).getByTestId("coding-agent-file-editor").querySelectorAll(".cb-code-gutter-line").length).toBeGreaterThan(0);
+    expect(window.localStorage.getItem("clawbox.codingAgent.files.wrap")).toBe("false");
+  });
+
+  it("reads both remembered choices off the device on mount", async () => {
+    window.localStorage.setItem("clawbox.codingAgent.files.wrap", "true");
+    window.localStorage.setItem("clawbox.codingAgent.files.mdView", "source");
+    stubDevice({ tree: NOTES_TREE });
+    render(<CodingProjectWorkspace query="projectId=site" live={false} />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-notes.md"));
+    const view = screen.getByTestId("coding-agent-file-view");
+    // Source, wrapped, without a tap.
+    expect(await within(view).findByTestId("coding-agent-file-editor-input")).toHaveValue(NOTES_MD);
+    expect(within(view).getByTestId("coding-agent-file-editor")).toHaveClass("cb-code-wrap");
+    expect(within(view).getByTestId("coding-agent-file-wrap")).toHaveAttribute("aria-pressed", "true");
+    expect(within(view).getByTestId("coding-agent-file-source-toggle")).toHaveAttribute("aria-pressed", "true");
   });
 });
 
