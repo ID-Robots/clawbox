@@ -442,6 +442,23 @@ describe("the Files tab's Markdown preview and its wrap", () => {
     expect(window.localStorage.getItem("clawbox.codingAgent.files.wrap")).toBe("false");
   });
 
+  it("follows the wrap when another window changes it", async () => {
+    stubDevice();
+    render(<CodingProjectWorkspace query="projectId=site" live={false} />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-src"));
+    fireEvent.click(await within(tree).findByTestId("coding-agent-tree-src/app.js"));
+    const view = screen.getByTestId("coding-agent-file-view");
+    await within(view).findByTestId("coding-agent-file-editor-input");
+    expect(within(view).getByTestId("coding-agent-file-editor")).not.toHaveClass("cb-code-wrap");
+
+    // A second window switches it: the store is the device's, not the pane's.
+    window.localStorage.setItem("clawbox.codingAgent.files.wrap", "true");
+    fireEvent(window, new StorageEvent("storage", { key: "clawbox.codingAgent.files.wrap", newValue: "true" }));
+    await waitFor(() => expect(within(view).getByTestId("coding-agent-file-editor")).toHaveClass("cb-code-wrap"));
+    expect(within(view).getByTestId("coding-agent-file-wrap")).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("reads both remembered choices off the device on mount", async () => {
     window.localStorage.setItem("clawbox.codingAgent.files.wrap", "true");
     window.localStorage.setItem("clawbox.codingAgent.files.mdView", "source");
