@@ -22,7 +22,7 @@
  * file in the list opens its unified diff, coloured line by line.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import type { ChangedFile, ChangeStatus, CommitSummary, FileDiff, GitChanges } from "@/lib/coding-git";
 import type { TreeEntry, TreeFile, TreeListing } from "@/lib/coding-project-tree";
@@ -185,31 +185,56 @@ export const FILES_MD_VIEW_KEY = "clawbox.codingAgent.files.mdView";
 type MdView = "preview" | "source";
 
 /**
- * The toolbar's two remembered choices. `localStorage` is not there while the
- * page renders on the server, and reading it throws outright in a browser whose
- * site data is blocked — both answer with the default rather than with an error.
+ * The toolbar's two remembered choices, as an external store the panes
+ * SUBSCRIBE to rather than copy into state on mount.
+ *
+ * Read through `useSyncExternalStore`, which is what React offers for a value
+ * that only the browser has: the server and the hydrating render answer with
+ * the default, the client's own answer arrives without a `setState` in an
+ * effect (and so without the extra render pass that costs), and because the
+ * store also listens for `storage`, a second window that switches the wrap is
+ * followed by the first instead of disagreeing with it.
+ *
+ * `localStorage` is absent on the server and THROWS outright in a browser whose
+ * site data is blocked; both reads and writes answer with the default rather
+ * than with an error. The store is the only truth here — no second copy in
+ * memory — so a browser that refuses the write keeps the old view rather than
+ * showing one thing and remembering another.
  */
-function readFilesPrefs(): { wrap: boolean; mdView: MdView } {
-  if (typeof window === "undefined") return { wrap: false, mdView: "preview" };
+const prefListeners = new Set<() => void>();
+
+function readPref(key: string): string | null {
+  if (typeof window === "undefined") return null;
   try {
-    const view = window.localStorage.getItem(FILES_MD_VIEW_KEY);
-    return {
-      wrap: window.localStorage.getItem(FILES_WRAP_KEY) === "true",
-      // Anything else in the slot — a key another version wrote, a hand edit —
-      // is not a view this tab has.
-      mdView: view === "source" ? "source" : "preview",
-    };
+    return window.localStorage.getItem(key);
   } catch {
-    return { wrap: false, mdView: "preview" };
+    return null;
   }
 }
 
-function rememberFilesPref(key: string, value: string): void {
-  if (typeof window === "undefined") return;
+function writePref(key: string, value: string): void {
   try {
     window.localStorage.setItem(key, value);
-  } catch { /* blocked store: the choice holds for this session only */ }
+  } catch { /* a store that refuses: the view stays as it was */ }
+  for (const notify of prefListeners) notify();
 }
+
+function subscribePrefs(notify: () => void): () => void {
+  prefListeners.add(notify);
+  window.addEventListener("storage", notify);
+  return () => {
+    prefListeners.delete(notify);
+    window.removeEventListener("storage", notify);
+  };
+}
+
+/** Both snapshots are primitives, so they stay stable until the value changes. */
+const wrapSnapshot = () => readPref(FILES_WRAP_KEY) === "true";
+// Anything else in the slot — a key another version wrote, a hand edit — is
+// not a view this tab has.
+const mdViewSnapshot = (): MdView => (readPref(FILES_MD_VIEW_KEY) === "source" ? "source" : "preview");
+const wrapOnServer = () => false;
+const mdViewOnServer = (): MdView => "preview";
 
 /**
  * The file toolbar's own segmented pair. The app's SEGMENT is a full-width rung
@@ -241,16 +266,10 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
   const [pendingOpen, setPendingOpen] = useState<string | null>(null);
   const [filesBusy, setFilesBusy] = useState(false);
   // Soft wrap in the code view, and whether a Markdown file opens rendered or
-  // as its source. Read from the store on MOUNT rather than as the initial
-  // state: the server has no store, and a first render that disagreed with the
-  // server's HTML is a hydration mismatch.
-  const [wrap, setWrap] = useState(false);
-  const [mdView, setMdView] = useState<MdView>("preview");
-  useEffect(() => {
-    const prefs = readFilesPrefs();
-    setWrap(prefs.wrap);
-    setMdView(prefs.mdView);
-  }, []);
+  // as its source: the device's, not this pane's, so they are subscribed to
+  // rather than held here.
+  const wrap = useSyncExternalStore(subscribePrefs, wrapSnapshot, wrapOnServer);
+  const mdView = useSyncExternalStore(subscribePrefs, mdViewSnapshot, mdViewOnServer);
   // Which opening of a file the editor shows: a save answers for the
   // opening it started under, and one that lands after another file took
   // the pane is dropped rather than written over it.
@@ -292,15 +311,8 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
   const isMarkdown = !!file && !file.binary && MARKDOWN_FILE.test(file.path);
   const preview = isMarkdown && mdView === "preview";
 
-  const toggleWrap = () => {
-    const next = !wrap;
-    setWrap(next);
-    rememberFilesPref(FILES_WRAP_KEY, String(next));
-  };
-  const chooseMdView = (next: MdView) => {
-    setMdView(next);
-    rememberFilesPref(FILES_MD_VIEW_KEY, next);
-  };
+  const toggleWrap = () => writePref(FILES_WRAP_KEY, String(!wrap));
+  const chooseMdView = (next: MdView) => writePref(FILES_MD_VIEW_KEY, next);
 
   const readFile = async (rel: string) => {
     setFileBusy(rel);
