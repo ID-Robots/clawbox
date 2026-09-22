@@ -1092,6 +1092,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // run the hook let go cannot leave a chip that restores nothing.
   const shownCodingRuns = codingRuns.filter(run => !dismissedCodingRuns.has(run.id))
   const hiddenCodingRunCount = codingRuns.length - shownCodingRuns.length
+  // Every chat control that opens an app window goes through here. On a phone
+  // the chat is full screen ABOVE the one window the phone draws, so the
+  // window would open out of sight and the press would look dead. Get out of
+  // its way; on a desktop the chat stays beside the window. One rule for all
+  // of them, not a patch per button: View on a run card was the one that
+  // missed it (TASK-1065).
+  const openFromChat = useCallback((open: () => void) => {
+    open()
+    if (mobile) onClose()
+  }, [mobile, onClose])
   const codingAgentCard = (run: CodingAgentActivity) => (
     <CodingAgentActivityPill
       key={run.id}
@@ -1148,7 +1158,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // placed to full screen on every press; a window already up keeps its
       // size and place now, and the chat is in the corner for a reason.
       openLabel={t("codingAgent.liveView")}
-      onOpen={() => dispatchOpenCodingRun(run.id)}
+      onOpen={() => openFromChat(() => dispatchOpenCodingRun(run.id))}
       // A run's screenshot opens in the SAME full-size preview the generated
       // and attached images use (the portal at the end of this component),
       // not a second lightbox of the card's own.
@@ -1401,17 +1411,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     void readCodingAgentStatus().then(status => {
       newAppGateRef.current = false
       if (status && (status.setupComplete === false || status.enabled === false)) {
-        dispatchOpenApp('coding')
-        // On a phone the chat is full screen ABOVE the one window the phone
-        // draws, so the Coding Agent would open out of sight and the press
-        // would look dead. Get out of its way; on a desktop the chat stays
-        // beside the plain window.
-        if (mobile) onClose()
+        // A plain window — and on a phone the chat gets out of its way.
+        openFromChat(() => dispatchOpenApp('coding'))
         return
       }
       setShowNewApp(true)
     })
-  }, [showNewApp, closeNewApp, readCodingAgentStatus, mobile, onClose])
+  }, [showNewApp, closeNewApp, readCodingAgentStatus, openFromChat])
 
   // The Coding Agent hands "Create app" over to here: the card composes one
   // message for the assistant, so it belongs in the conversation that will
@@ -5419,7 +5425,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (!target) return
 
     if (!target.available || !target.model) {
-      onOpenSettingsSection?.(target.settingsSection)
+      // Settings is an app window like any other: on a phone it would open
+      // under the full-screen chat. The note below is still there when the
+      // owner comes back to the conversation.
+      if (onOpenSettingsSection) openFromChat(() => onOpenSettingsSection(target.settingsSection))
       setMessages(prev => [...prev, {
         role: 'system',
         // A stale sign-in is not an absent one. The credential is on the box;
@@ -5434,7 +5443,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
 
     await switchChatModel({ model: target.model, label: target.label, provider: target.provider })
-  }, [chatModelState, onOpenSettingsSection, switchChatModel])
+  }, [chatModelState, onOpenSettingsSection, openFromChat, switchChatModel])
 
   // Seed (or RE-seed) the Hermes header: which providers this device can
   // actually talk to, what it is configured to use, and its effort level. The

@@ -26,8 +26,11 @@ const CHAT_POPUP = fs.readFileSync(path.join(process.cwd(), "src/components/Chat
 
 describe("the chat's View button on a coding run card", () => {
   it("hands the run over without asking for a maximize", () => {
-    // The one call site: the card's onOpen. A run id and nothing else.
-    expect(CHAT_POPUP).toMatch(/onOpen=\{\(\) => dispatchOpenCodingRun\(run\.id\)\}/);
+    // The one call site: the card's onOpen. A run id and nothing else — the
+    // phone's close of the full-screen chat around it (`openFromChat`) is
+    // pinned in src/tests/components/chat-run-card-view-phone.test.tsx.
+    // Whitespace-tolerant: a formatter re-wrapping the JSX is not a change.
+    expect(CHAT_POPUP).toMatch(/onOpen\s*=\s*\{\s*\(\s*\)\s*=>\s*openFromChat\(\s*\(\s*\)\s*=>\s*dispatchOpenCodingRun\(\s*run\.id\s*\)\s*\)\s*\}/);
     // And no other chat-side caller sneaks the option back in.
     const calls = CHAT_POPUP.match(/dispatchOpenCodingRun\([^)]*\)/g) ?? [];
     expect(calls.length).toBeGreaterThan(0);
