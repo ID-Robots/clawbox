@@ -78,6 +78,7 @@ def _client(creds: Credentials) -> Any:
     try:
         import boto3
         from botocore.config import Config as BotoConfig
+        from botocore.exceptions import BotoCoreError
     except ImportError as e:  # pragma: no cover — install-time configuration error
         raise S3Error(
             "boto3 is required for clawkeep cloud uploads but is not installed. "
@@ -96,14 +97,23 @@ def _client(creds: Credentials) -> Any:
         tcp_keepalive=True,
         s3={"addressing_style": "path"},
     )
-    return boto3.client(
-        "s3",
-        endpoint_url=creds.endpoint,
-        aws_access_key_id=creds.accessKeyId,
-        aws_secret_access_key=creds.secretAccessKey,
-        aws_session_token=creds.sessionToken,
-        config=cfg,
-    )
+    try:
+        return boto3.client(
+            "s3",
+            endpoint_url=creds.endpoint,
+            aws_access_key_id=creds.accessKeyId,
+            aws_secret_access_key=creds.secretAccessKey,
+            aws_session_token=creds.sessionToken,
+            config=cfg,
+        )
+    except (BotoCoreError, ValueError) as e:
+        # Building the client is a network-free call, but it validates what the
+        # portal handed us: botocore raises a bare `ValueError: Invalid
+        # endpoint` for an endpoint that isn't a URL. Every caller here handles
+        # S3Error and nothing handles ValueError, so an unusable endpoint took
+        # down the whole run — including `run_idle`, which would then send no
+        # heartbeat at all over a recount it was never obliged to complete.
+        raise S3Error(f"could not build an S3 client for {creds.endpoint!r}: {e}") from e
 
 
 def upload(

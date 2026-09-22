@@ -131,6 +131,27 @@ def test_stats_excludes_what_list_snapshots_excludes() -> None:
     assert counted == s3.stats_from_snapshots(listed)
 
 
+def test_client_failure_is_an_s3_error_not_a_bare_value_error() -> None:
+    """Every caller in this module handles `S3Error` and none handles
+    `ValueError`, so an endpoint botocore refuses to parse used to escape as
+    one — taking down a run that had already decided the S3 half was
+    best-effort. `run_idle` is the sharp case: it would send no heartbeat at
+    all over a recount it was free to skip."""
+    unusable = Credentials(
+        accessKeyId="AKIA",
+        secretAccessKey="secret",
+        sessionToken="session",
+        endpoint="not a url",
+        bucket="clawkeep",
+        prefix="users/u_x/repo/",
+        expiresAt=0,
+        quotaBytes=5_368_709_120,
+        cloudBytes=0,
+    )
+    with pytest.raises(s3.S3Error, match="could not build an S3 client"):
+        s3.stats(unusable)
+
+
 def test_stats_from_snapshots_totals_a_listing() -> None:
     snaps = [
         s3.Snapshot(name="a", size_bytes=10, last_modified_ms=2),
