@@ -69,7 +69,9 @@ never cut off, and the clock only restarts once its result has gone back. A
 **background job defers it too** — `bash` with `run_in_background` answers at
 once but leaves a detached shell whose handle and output live in this process,
 so the period simply starts again, as often as it takes, until `job_status`
-would call that job finished. Set
+would call that job finished. (`bash` exists only where
+`CLAWBOX_MCP_CODING_TOOLS=1` registered the coding family; on a device in its
+shipped state there is no job to defer for, and the period always runs out.) Set
 `CLAWBOX_MCP_IDLE_EXIT_MS` to another number of milliseconds to move it, or to
 `0` to switch it off and keep every server for the life of the harness.
 

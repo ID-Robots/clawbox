@@ -414,7 +414,11 @@ export interface IdleExit {
  * result has been delivered. NEITHER IS A BACKGROUND JOB: `bash` with
  * `run_in_background` answers at once and leaves a `detached` shell running,
  * whose handle and output buffer live in this process's memory
- * (mcp/lib/jobs.ts). Exiting would not stop that build, only hide it — every
+ * (mcp/lib/jobs.ts). That family is registered only under
+ * `CLAWBOX_MCP_CODING_TOOLS=1`, so on a device in its shipped state `busy()`
+ * has nothing to report and the deferral never fires — asked anyway, because
+ * the answer must be right on the devices that do turn it on.
+ * Exiting would not stop that build, only hide it — every
  * later `job_status` would answer "no background job with that id" — so `busy`
  * defers the exit by another whole period instead, again and again until the
  * job is done. It defers rather than cancels because the job may outlive any
