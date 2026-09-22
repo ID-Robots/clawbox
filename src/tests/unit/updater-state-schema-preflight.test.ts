@@ -328,6 +328,32 @@ describe("readStateSchemaVersion, against a real store", () => {
     expect(real.readStateSchemaVersion()).toBe(17);
   });
 
+  it("keeps the pragma when the content marker's own table has a shape it cannot read", () => {
+    // THE CASE THIS GUARD EXISTS FOR, and the one it used to fail open on.
+    //
+    // `config_machine_state` is the core's table, and the core reshapes its
+    // tables between schema versions. A store far enough ahead of us that the
+    // marker's columns have moved makes the content read THROW — and if that
+    // throw is allowed to take the whole reader down, the answer is "could not
+    // be read", the pre-flight stands down, and the update walks into exactly
+    // the mid-run failure it exists to replace. The refinement may fail; the
+    // pragma it refines must survive it.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    mkdirSync(path.join(home, "state"), { recursive: true });
+    const file = path.join(home, "state", "openclaw.sqlite");
+    for (const suffix of ["", "-wal", "-shm"]) rmSync(`${file}${suffix}`, { force: true });
+    const db = new sqlite!.DatabaseSync(file);
+    try {
+      db.exec("PRAGMA user_version = 18");
+      // Present, and nothing like the shape this reader knows.
+      db.exec("CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, payload BLOB) STRICT");
+    } finally {
+      db.close();
+    }
+
+    expect(real.readStateSchemaVersion(), "the pragma is still evidence").toBe(18);
+  });
+
   it("answers null when there is no store to ask", () => {
     expect(real.statePath()).toBeNull();
     expect(real.readStateSchemaVersion()).toBeNull();

@@ -137,20 +137,32 @@ function userVersion(db: DatabaseSyncType): number {
  * the marker (no `config_machine_state` table, no row, or a value that is not a
  * version). Null means "nothing to add", never "zero" — a malformed marker must
  * not drag the answer BELOW the pragma.
+ *
+ * NOTHING HERE MAY THROW, and that is the whole reason for the outer catch.
+ * This is a REFINEMENT of `PRAGMA user_version`, and `config_machine_state` is
+ * the core's own table — reshaped between schema versions like any other. A
+ * store far enough ahead of us that the marker's columns have moved makes the
+ * SELECT throw, and an escaping throw takes the already-read pragma down with
+ * it: the caller returns "could not be read", the updater's pre-flight stands
+ * down, and the box walks into the mid-run failure that pre-flight exists to
+ * replace. Losing the refinement costs a number we never had; losing the pragma
+ * costs the guard, on exactly the newest stores it is there to catch.
  */
 function contentVersion(db: DatabaseSyncType): number | null {
-  const table = db
-    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'config_machine_state'")
-    .get() as { ok?: unknown } | undefined;
-  if (table?.ok !== 1) return null;
-  const row = db
-    .prepare("SELECT value_json FROM config_machine_state WHERE state_key = ?")
-    .get(SCHEMA_CONTENT_VERSION_KEY) as { value_json?: unknown } | undefined;
-  if (typeof row?.value_json !== "string") return null;
   try {
+    const table = db
+      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'config_machine_state'")
+      .get() as { ok?: unknown } | undefined;
+    if (table?.ok !== 1) return null;
+    const row = db
+      .prepare("SELECT value_json FROM config_machine_state WHERE state_key = ?")
+      .get(SCHEMA_CONTENT_VERSION_KEY) as { value_json?: unknown } | undefined;
+    if (typeof row?.value_json !== "string") return null;
     const parsed: unknown = JSON.parse(row.value_json);
     return typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
   } catch {
+    // A marker this reader cannot make sense of is one it has nothing to add
+    // from — never a reason to forget what the pragma already said.
     return null;
   }
 }
