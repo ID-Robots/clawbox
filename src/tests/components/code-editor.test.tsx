@@ -127,6 +127,21 @@ describe("CodeEditor", () => {
     }
   });
 
+  it("soft-wraps both layers at once and drops the numbers while it does", () => {
+    const onChange = vi.fn();
+    render(<CodeEditor value={"a line long enough to wrap in any pane\nb"} onChange={onChange} language={null} wrap testId="ed" />);
+    const editor = screen.getByTestId("ed");
+    expect(editor).toHaveClass("cb-code-wrap");
+    expect(editor).toHaveAttribute("data-wrap", "true");
+    // The same wrap on the coloured text and on the textarea over it: one
+    // without the other and the caret stops standing on its glyph.
+    expect(screen.getByTestId("ed-text")).toHaveClass("cb-code-pre-wrap");
+    expect(screen.getByTestId("ed-input")).toHaveClass("cb-code-input-wrap");
+    expect(screen.getByTestId("ed-input")).toHaveAttribute("wrap", "soft");
+    // A wrapped line covers rows a column of numbers cannot name.
+    expect(editor.querySelector(".cb-code-gutter")).toBeNull();
+  });
+
   it("takes one indent back on Shift+Tab", () => {
     const onChange = vi.fn();
     render(<CodeEditor value={"    x"} onChange={onChange} language={null} testId="ed" />);

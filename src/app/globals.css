@@ -2207,6 +2207,30 @@ input[type="range"].appearance-none::-moz-range-track {
   line-height: inherit;
   tab-size: 2;
 }
+/* ── Soft wrap (the Files toolbar's "Wrap") ───────────────────────────────
+   Off, a long line scrolls sideways: the editor is `max-content` wide and the
+   text is `pre`. On, the editor stops growing past its pane and the SAME wrap
+   is set on the coloured text and on the textarea over it — one differing
+   `white-space` between the two and the caret walks off its glyph. These stay
+   flat, single-class selectors (no descendants) so the setup-ground parity
+   test's small engine keeps understanding this file; they come after the rules
+   they override, which is what decides the tie. */
+.cb-code-wrap {
+  min-width: 100%;
+}
+.cb-code-body-wrap {
+  /* `1 0 auto` keeps the body at its max-content width, which would scroll the
+     pane sideways however the text is wrapped. */
+  flex: 1 1 auto;
+}
+.cb-code-pre-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.cb-code-input-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
 /* The palette: GitHub's dark scheme, which reads on both grounds. */
 .tok-comment, .tok-prolog, .tok-doctype, .tok-cdata { color: #8b949e; font-style: italic; }
 .tok-punctuation { color: #9aa4b2; }
