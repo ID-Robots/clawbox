@@ -20,12 +20,18 @@ import { captureRegistrar, type CaptureHarness } from "../helpers/mcp-registrar"
 
 const VALUE = "t0k3n".repeat(8); // 40 chars, well past MIN_TOKEN_LEN
 const PREVIOUS = process.env.CLAWBOX_MCP_TOKEN;
+const PREVIOUS_GATE = process.env.CLAWBOX_MCP_CODING_TOOLS;
 
 let api: typeof import("../../../mcp/lib/api");
 let harness: CaptureHarness;
 
 beforeAll(async () => {
   process.env.CLAWBOX_MCP_TOKEN = VALUE;
+  // TASK-1079: `bash` registers on no edition unless this is set. The scrub
+  // under test is about what a shell child INHERITS, not about whether a
+  // shipped box offers the shell — and where an owner does switch it on, this
+  // is the test that says the bearer is not in the environment it gets.
+  process.env.CLAWBOX_MCP_CODING_TOOLS = "1";
   api = await import("../../../mcp/lib/api");
   const { registerCodingTools } = await import("../../../mcp/tools/coding");
   harness = captureRegistrar("openclaw");
@@ -35,6 +41,8 @@ beforeAll(async () => {
 afterAll(() => {
   if (PREVIOUS === undefined) delete process.env.CLAWBOX_MCP_TOKEN;
   else process.env.CLAWBOX_MCP_TOKEN = PREVIOUS;
+  if (PREVIOUS_GATE === undefined) delete process.env.CLAWBOX_MCP_CODING_TOOLS;
+  else process.env.CLAWBOX_MCP_CODING_TOOLS = PREVIOUS_GATE;
 });
 
 describe("the bearer is scrubbed from the environment before a bash child can see it", () => {

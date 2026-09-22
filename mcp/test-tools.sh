@@ -23,6 +23,14 @@ SKIP=0
 EDITION=$(bun mcp/clawbox-cli.ts edition 2>/dev/null || echo openclaw)
 [ "$EDITION" = "hermes" ] || EDITION=openclaw
 
+# TASK-1079: the shell, file and web tools register only where
+# CLAWBOX_MCP_CODING_TOOLS=1 is set (mcp/tools/coding.ts). The SECURITY block
+# below is about what those tools DO with a path — the cases that leak provider
+# keys and SSH identity if a guard regresses — not about whether a shipped box
+# offers them, so this script switches them on for the servers it spawns. It is
+# exported into child processes only and changes nothing on the device.
+export CLAWBOX_MCP_CODING_TOOLS=1
+
 call_tool() {
   local name="$1" params="$2" expect="${3:-ok}"   # ok | error | <ERROR_CODE>
   local result

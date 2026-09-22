@@ -38,6 +38,7 @@ vi.mock("../../../mcp/lib/api", () => ({
 }));
 
 import type { McpContext } from "../../../mcp/lib/context";
+import { saveEnv } from "../helpers/env";
 import { captureRegistrar } from "../helpers/mcp-registrar";
 import { BROWSER_GUIDE, WEBAPP_STORAGE_GUIDE, fieldGuideForEdition, registerOrientationTools } from "../../../mcp/tools/orientation";
 import { registerSystemTools } from "../../../mcp/tools/system";
@@ -91,6 +92,25 @@ const onlyOn = (a: Ed, b: Ed): string[] => {
   const other = toolNames(b);
   return [...toolNames(a)].filter((n) => !other.has(n)).sort();
 };
+
+/**
+ * The coding tools TASK-1079 put behind `CLAWBOX_MCP_CODING_TOOLS=1`.
+ *
+ * Computed from the real registrar in both postures rather than listed, for the
+ * same reason `onlyOn` is: a tool that changes side takes the assertion with
+ * it. The guide is filtered by EDITION only — there is no fence for an env var
+ * — so whatever this returns is text no box may be handed by default.
+ */
+function envGatedCodingTools(): string[] {
+  const withoutOverride = toolNames("openclaw");
+  const restore = saveEnv("CLAWBOX_MCP_CODING_TOOLS");
+  process.env.CLAWBOX_MCP_CODING_TOOLS = "1";
+  try {
+    return [...toolNames("openclaw")].filter((n) => !withoutOverride.has(n)).sort();
+  } finally {
+    restore();
+  }
+}
 
 /** `name(` or `name)` or bare — anywhere it is offered as a symbol to call. */
 const offers = (text: string, tool: string) =>
@@ -216,9 +236,13 @@ describe("the Hermes guide describes a Hermes box", () => {
   it("offers no tool the MCP server does not register on Hermes", () => {
     const openclawOnly = onlyOn("openclaw", "hermes");
     // Guards the guard: if this ever empties, the assertion below is vacuous.
-    expect(openclawOnly).toContain("bash");
-    expect(openclawOnly).toContain("write_file");
-    expect(openclawOnly).toContain("web_search");
+    // These three are the guarded read-only trio, which is what stayed
+    // OpenClaw-only after TASK-1079 moved the shell, file and web tools behind
+    // CLAWBOX_MCP_CODING_TOOLS (where they belong to no edition by default, so
+    // they are not "OpenClaw only" and cannot serve as this guard).
+    expect(openclawOnly).toContain("list_directory");
+    expect(openclawOnly).toContain("glob");
+    expect(openclawOnly).toContain("app_search");
 
     for (const install of ["hermes", "dual"] as const) {
       const leaked = openclawOnly.filter((tool) => offers(served("hermes", install), tool));
@@ -286,11 +310,25 @@ describe("the OpenClaw guide keeps everything it had", () => {
     expect(guide).toContain("App Store");
   });
 
-  it("still offers the whole coding family", () => {
+  it("still offers the guarded read-only trio", () => {
     const guide = served("openclaw");
-    for (const tool of ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "web_search", "web_fetch", "notebook_edit"]) {
-      expect(offers(guide, tool)).toBe(true);
+    for (const tool of ["list_directory", "glob", "grep"]) {
+      expect(offers(guide, tool), `the guide stopped offering ${tool}`).toBe(true);
     }
+  });
+
+  it("offers nothing that only CLAWBOX_MCP_CODING_TOOLS=1 registers", () => {
+    // TASK-1079, and the same defect as TASK-540 one edition over: an
+    // orientation document that hands the agent symbols the server does not
+    // register. The nine shell/file/web tools belong to no edition until an
+    // owner sets the override, so the guide must steer to the harness's own
+    // tools instead — it is read on every box, and there is no fence for an env.
+    const guide = served("openclaw");
+    const gated = envGatedCodingTools();
+    // Guards the guard: an empty list would make the filter below vacuous.
+    expect(gated).toContain("bash");
+    expect(gated).toContain("write_file");
+    expect(gated.filter((tool) => offers(guide, tool))).toEqual([]);
   });
 
   it("is not handed a tool that exists only on Hermes", () => {
