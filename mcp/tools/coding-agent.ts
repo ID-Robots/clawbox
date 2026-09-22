@@ -1547,19 +1547,42 @@ interface TeamTaskPayload {
   task_id: string;
   task_description: string;
   assigned_to: string | null;
-  status: "pending" | "in_progress" | "complete" | "failed" | "rejected";
+  status: "pending" | "in_progress" | "complete" | "failed" | "rejected" | "retired";
   result: string | null;
   depends_on: string[];
   review: { verdict: "accepted" | "rejected"; notes: string } | null;
   attempts: number;
+  /** Who put it on the board: the plan, or the lead while the team ran. */
+  origin?: "plan" | "lead";
+}
+
+/** The team's figures, as the server works them out from the board. */
+interface TeamMetricsPayload {
+  plannerRuns: number;
+  workerRuns: number;
+  reviewerRuns: number;
+  leadRuns: number;
+  tasksPlanned: number;
+  tasksAdded: number;
+  tasksRetired: number;
+  tasksAcceptedFirstTry: number;
+  tasksRejected: number;
+  tokensUsed: number;
+  wallMs: number;
 }
 
 interface TeamPayload {
   /** The team's branch in the project and what it forked from; null when the team works in place. */
   branch?: string | null;
   base?: string | null;
-  /** Who worked, counted by the server: planner, workers, reviewers. */
-  agents?: { planner: number; workers: number; reviewers: number; total: number };
+  /** Who worked, counted by the server: planner, workers, reviewers, lead turns. */
+  agents?: { planner: number; workers: number; reviewers: number; leads?: number; total: number };
+  /** The size and review the planner chose for the goal; null for the default team. */
+  shape?: { parallelism: number; review: "each" | "final" | "none"; rationale: string } | null;
+  /** Whether the team's lead may add or retire tasks while it runs (the owner's switch, when the team started). */
+  dynamic?: boolean;
+  finalReview?: { verdict: "accepted" | "rejected"; notes: string } | null;
+  metrics?: TeamMetricsPayload;
   id: string;
   goal: string;
   projectId: string | null;
@@ -1597,7 +1620,23 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
   if (team.plannerRunId) parts.push(`Planner run: ${team.plannerRunId}`);
   if (team.branch) parts.push(`Branch: ${team.branch} (from ${team.base ?? "the checkout's branch"}); the project page's Create PR compares it.`);
   if (team.agents && team.agents.total > 0) {
-    parts.push(`Agents: ${team.agents.total} — ${team.agents.planner} planner, ${team.agents.workers} worker(s), ${team.agents.reviewers} reviewer(s).`);
+    const leads = team.agents.leads ?? 0;
+    parts.push(`Agents: ${team.agents.total} — ${team.agents.planner} planner, ${team.agents.workers} worker(s), ${team.agents.reviewers} reviewer(s)${leads > 0 ? `, ${leads} lead turn(s)` : ""}.`);
+  }
+  if (team.shape) {
+    parts.push(`Shape: up to ${team.shape.parallelism} worker(s) side by side, review ${team.shape.review}${team.shape.rationale ? ` — ${redact(firstLine(team.shape.rationale, 200))}` : ""}.`);
+  }
+  if (team.dynamic) parts.push("Lead: on — the team's lead may add or retire tasks while it runs.");
+  if (team.metrics) {
+    const m = team.metrics;
+    parts.push(
+      `Metrics: runs planner ${m.plannerRuns}, worker ${m.workerRuns}, reviewer ${m.reviewerRuns}, lead ${m.leadRuns}; `
+      + `tasks planned ${m.tasksPlanned}, added ${m.tasksAdded}, retired ${m.tasksRetired}, accepted first try ${m.tasksAcceptedFirstTry}, rejected ${m.tasksRejected}; `
+      + `tokens ${m.tokensUsed}; wall ${Math.round(m.wallMs / 1000)} s.`,
+    );
+  }
+  if (team.finalReview) {
+    parts.push(`Final review: ${team.finalReview.verdict}${team.finalReview.notes ? ` — ${redact(firstLine(team.finalReview.notes, 200))}` : ""}`);
   }
   if (team.tasks.length === 0) {
     parts.push(team.status === "planning" ? "The planner is still reading the folder and writing the plan." : "No tasks were posted.");
@@ -1605,6 +1644,7 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
     parts.push("Tasks:");
     for (const t of team.tasks) {
       const bits = [`${t.task_id} [${t.status}${t.review ? `, ${t.review.verdict}` : ""}]`, redact(firstLine(t.task_description, 120))];
+      if (t.origin === "lead") bits.push("added by the lead");
       if (t.assigned_to) bits.push(`worker ${t.assigned_to}`);
       if (t.reviewRunId) bits.push(`reviewer ${t.reviewRunId}`);
       if (t.depends_on.length) bits.push(`after ${t.depends_on.join(", ")}`);
@@ -1685,7 +1725,8 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
           status: t.status,
           goal: redact(firstLine(t.goal, 80)),
           project_id: t.projectId,
-          tasks: t.tasks.length,
+          // A retired task will never be done: counted, a finished team read as unfinished.
+          tasks: t.tasks.filter((x) => x.status !== "retired").length,
           complete: t.tasks.filter((x) => x.status === "complete").length,
           alerts: t.alerts,
         })));
