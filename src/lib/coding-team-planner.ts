@@ -27,6 +27,7 @@ export const PLANNER_BRIEF = [
   "Tasks are numbered t1, t2, … in the order you list them; depends_on names earlier tasks a task must wait for. Each task_description must stand on its own: say what to build or change, in which files, and how the worker verifies it — it is the whole brief that worker gets. Prefer 2–5 tasks; one task is fine for a small goal.",
   `Each task_description must be at most ${MAX_TASK_DESCRIPTION_CHARS} characters. Keep shared context concise; describe disjoint file ownership for parallel work and add an integration task depending on the workers when needed.`,
   "files_hint lists the files or folders the task should touch; the team watches for a worker straying outside it.",
+  "If the goal cannot be planned as written — it names files or folders that are not there, or turns on a decision only the owner can take — say so in one short team_message to the lead or to the owner's assistant, never for progress or acknowledgements, and still answer with the array.",
 ].join(" ");
 
 /** How much of a planner's wrong answer is quoted back to it. */

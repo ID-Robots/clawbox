@@ -29,6 +29,40 @@ export interface TeamTaskView {
   reviewRunId?: string | null;
 }
 
+export interface TeamLogEntryView {
+  ts: number;
+  actor: { kind: string; id?: string };
+  type: string;
+  message: string;
+  /** A `message` entry's payload (coding-team-board.ts TeamMessagePayload); other entries' payloads are not read here. */
+  payload?: Record<string, unknown>;
+}
+
+/** A run of the team speaking, as the board recorded it — or null for any other entry, or a payload that is not one. */
+interface TeamMessageView {
+  role: string;
+  from: string;
+  to: "sibling" | "lead" | "owner_agent";
+  toRunId: string | null;
+  text: string;
+  delivered: boolean;
+}
+
+function teamMessageOf(entry: TeamLogEntryView): TeamMessageView | null {
+  if (entry.type !== "message" || !entry.payload) return null;
+  const p = entry.payload;
+  if (typeof p.from !== "string" || typeof p.text !== "string") return null;
+  if (p.to !== "sibling" && p.to !== "lead" && p.to !== "owner_agent") return null;
+  return {
+    role: entry.actor.kind,
+    from: p.from,
+    to: p.to,
+    toRunId: typeof p.toRunId === "string" ? p.toRunId : null,
+    text: p.text,
+    delivered: p.delivered !== false,
+  };
+}
+
 export interface TeamView {
   id: string;
   goal: string;
@@ -42,7 +76,7 @@ export interface TeamView {
   /** Who worked, counted by the server from the board's cast list. */
   agents?: { planner: number; workers: number; reviewers: number; total: number };
   tasks: TeamTaskView[];
-  log: { ts: number; actor: { kind: string; id?: string }; type: string; message: string }[];
+  log: TeamLogEntryView[];
   alerts: number;
   error: string | null;
   createdAt: number;
@@ -65,6 +99,8 @@ interface Props {
 
 const POLL_MS = 5000;
 const LOG_SHOWN = 30;
+/** The newest team messages shown on the board itself, outside the log. */
+const MESSAGES_SHOWN = 5;
 
 const STATUS_TONE: Record<TeamView["status"], string> = {
   planning: "text-sky-300 border-sky-400/40",
@@ -167,6 +203,26 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
   };
 
   const done = team ? team.tasks.filter((x) => x.status === "complete").length : 0;
+  const messages = team ? team.log.map((e) => ({ e, m: teamMessageOf(e) })).filter((x): x is { e: TeamLogEntryView; m: TeamMessageView } => x.m !== null) : [];
+
+  /** One team message: who, to whom, and the words — whole, since the board is where the lead reads them. */
+  const messageLine = (e: TeamLogEntryView, m: TeamMessageView) => (
+    <>
+      <span className="opacity-60">{new Date(e.ts).toLocaleTimeString()}</span>{" "}
+      <span className="material-symbols-rounded align-[-2px]" style={{ fontSize: 12 }} aria-hidden="true">forum</span>{" "}
+      <span className="text-[var(--text-secondary)]">{m.role} {m.from}</span>{" "}
+      <span>
+        {m.to === "sibling"
+          ? t("codingAgent.team.messageToRun", { run: m.toRunId ?? "" })
+          : m.to === "lead"
+            ? t("codingAgent.team.messageToLead")
+            : t("codingAgent.team.messageToAssistant")}
+      </span>
+      {!m.delivered && <span className="text-amber-400"> · {t("codingAgent.team.messageUndelivered")}</span>}
+      {": "}
+      <span className="whitespace-pre-wrap text-[var(--text-primary)]">{m.text}</span>
+    </>
+  );
 
   return (
     <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-team-card">
@@ -298,6 +354,22 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
               ))}
             </ul>
           )}
+          {/* What the team's runs said — to each other, to the lead, to the
+              assistant. On the board itself and not only in the log, because
+              a message to the lead is a worker asking and the board is the
+              only answer it gets. */}
+          {messages.length > 0 && (
+            <div className="mt-2" data-testid="coding-team-messages">
+              <p className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.team.messagesTitle", { n: messages.length })}</p>
+              <ul className="mt-1 space-y-0.5 text-[11px] text-sky-200/90">
+                {messages.slice(-MESSAGES_SHOWN).map(({ e, m }, i) => (
+                  <li key={`${e.ts}-${i}`} className="break-words" data-testid="coding-team-message" data-to={m.to} data-delivered={m.delivered ? "true" : "false"}>
+                    {messageLine(e, m)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setShowLog((v) => !v)}
@@ -310,13 +382,17 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
           </button>
           {showLog && (
             <ol className="mt-2 space-y-0.5 font-mono text-[11px] text-[var(--text-muted)] max-h-64 overflow-y-auto" data-testid="coding-team-log">
-              {team.log.slice(-LOG_SHOWN).map((e, i) => (
-                <li key={i} className={`break-words ${e.type === "alert" ? "text-amber-400" : ""}`}>
-                  <span className="opacity-60">{new Date(e.ts).toLocaleTimeString()}</span>{" "}
-                  <span className="text-[var(--text-secondary)]">{e.actor.kind === "worker" ? `worker ${e.actor.id ?? ""}` : e.actor.kind}</span>{" "}
-                  {e.message}
-                </li>
-              ))}
+              {team.log.slice(-LOG_SHOWN).map((e, i) => {
+                const m = teamMessageOf(e);
+                if (m) return <li key={i} className="break-words text-sky-200/90">{messageLine(e, m)}</li>;
+                return (
+                  <li key={i} className={`break-words ${e.type === "alert" ? "text-amber-400" : ""}`}>
+                    <span className="opacity-60">{new Date(e.ts).toLocaleTimeString()}</span>{" "}
+                    <span className="text-[var(--text-secondary)]">{e.actor.kind === "worker" ? `worker ${e.actor.id ?? ""}` : e.actor.kind}</span>{" "}
+                    {e.message}
+                  </li>
+                );
+              })}
             </ol>
           )}
         </div>

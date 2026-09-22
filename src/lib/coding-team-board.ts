@@ -27,6 +27,14 @@ import fs from "fs";
 import path from "path";
 import { randomBytes } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
+import {
+  MAX_TEAM_MESSAGE_CHARS,
+  MAX_TEAM_MESSAGES_PER_RUN,
+  TEAM_MESSAGE_TARGETS,
+  teamMessageAllowance,
+  type TeamMessageRefusal,
+  type TeamMessageTarget,
+} from "@/lib/coding-team-messages";
 
 export const TEAM_DIR = path.join(DATA_DIR, "coding-team");
 /** A planner may post this many tasks at most; a bigger plan is a bad plan on a box that runs one worker at a time. */
@@ -82,6 +90,13 @@ export interface TeamRunRef {
   id: string;
   role: "planner" | "worker" | "reviewer";
   taskId: string | null;
+  /**
+   * When this run sent each of its team messages (coding-team-messages.ts) —
+   * what its caps are counted from. On the cast list rather than read back out
+   * of the log, because the log drops its oldest entries and a cap that forgot
+   * a message would hand the run another one. Absent on a board from before.
+   */
+  sentAt?: number[];
 }
 
 /** Who worked on a team, counted from the board: the figure the card shows. */
@@ -95,10 +110,25 @@ export interface TeamAgents {
 export interface LogEntry {
   ts: number;
   actor: Actor;
-  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status";
+  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message";
   task_id?: string;
   message: string;
   payload?: Record<string, unknown>;
+}
+
+/**
+ * A `message` entry's payload: who sent it, to whom, and the words — whole,
+ * because the board is where the lead reads it. `delivered: false` (with the
+ * box's `code`) is a message the run sent that the box had no way to hand on:
+ * no chat session, an edition with no such path. Absent means delivered.
+ */
+export interface TeamMessagePayload {
+  from: string;
+  to: TeamMessageTarget;
+  toRunId?: string;
+  text: string;
+  delivered?: false;
+  code?: TeamMessageRefusal;
 }
 
 export interface TeamBoard {
@@ -226,6 +256,14 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     const actor = entry.actor as Record<string, unknown> | undefined;
     if (typeof entry.ts !== "number" || typeof entry.type !== "string" || typeof entry.message !== "string") return null;
     if (!actor || typeof actor.kind !== "string") return null;
+    if (entry.type === "message") {
+      // Re-read, never trusted: this payload is rendered on the card as the
+      // words a run said. One that is not a message loses its payload and
+      // keeps its line — the audit trail is not repaired, and not dropped.
+      const payload = messagePayload(entry.payload);
+      log.push({ ...(entry as unknown as LogEntry), ...(payload ? { payload: payload as unknown as Record<string, unknown> } : { payload: undefined }) });
+      continue;
+    }
     log.push(entry as unknown as LogEntry);
   }
   return {
@@ -242,7 +280,10 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
       ? (b.runs as unknown[]).flatMap((r) => {
           const ref = r as Record<string, unknown> | null;
           if (!ref || typeof ref.id !== "string" || (ref.role !== "planner" && ref.role !== "worker" && ref.role !== "reviewer")) return [];
-          return [{ id: ref.id, role: ref.role as TeamRunRef["role"], taskId: typeof ref.taskId === "string" ? ref.taskId : null }];
+          const sentAt = Array.isArray(ref.sentAt)
+            ? (ref.sentAt as unknown[]).filter((t): t is number => typeof t === "number" && Number.isFinite(t)).slice(-MAX_TEAM_MESSAGES_PER_RUN)
+            : [];
+          return [{ id: ref.id, role: ref.role as TeamRunRef["role"], taskId: typeof ref.taskId === "string" ? ref.taskId : null, ...(sentAt.length ? { sentAt } : {}) }];
         })
       : [],
     tasks,
@@ -251,6 +292,20 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     error: typeof b.error === "string" ? b.error : null,
     createdAt: typeof b.createdAt === "number" ? b.createdAt : 0,
     updatedAt: typeof b.updatedAt === "number" ? b.updatedAt : 0,
+  };
+}
+
+function messagePayload(raw: unknown): TeamMessagePayload | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  if (typeof p.from !== "string" || typeof p.text !== "string") return null;
+  if (typeof p.to !== "string" || !(TEAM_MESSAGE_TARGETS as readonly string[]).includes(p.to)) return null;
+  return {
+    from: p.from,
+    to: p.to as TeamMessageTarget,
+    ...(typeof p.toRunId === "string" ? { toRunId: p.toRunId } : {}),
+    text: p.text.slice(0, MAX_TEAM_MESSAGE_CHARS),
+    ...(p.delivered === false ? { delivered: false as const, ...(typeof p.code === "string" ? { code: p.code as TeamMessageRefusal } : {}) } : {}),
   };
 }
 
@@ -422,6 +477,64 @@ export function raiseAlert(board: TeamBoard, actor: Actor, reason: string, taskI
   board.alerts += 1;
   board.updatedAt = now;
   append(board, { ts: now, actor, type: "alert", task_id: taskId, message: `ALERT: ${firstLine(reason, 300)}` });
+}
+
+/**
+ * A run of the team says something — to a sibling run, to the lead (this
+ * board), or to the box's main agent. Only a run on the cast list, in the role
+ * it is listed with, may: a worker speaking as another run is refused the way
+ * the bus refuses a worker's status update carrying another id. The caps are
+ * checked here too, on the timestamps the cast list keeps, so no caller can
+ * log a message the run was not allowed to send.
+ *
+ * Never an alert, and never a change to the alert count: a message is how a
+ * run ASKS, and a team that stopped because its workers asked would punish
+ * exactly the behaviour this channel exists for.
+ */
+export function postMessage(
+  board: TeamBoard,
+  actor: Actor,
+  input: { from_run_id: string; to: TeamMessageTarget; to_run_id?: string; text: string; undelivered?: TeamMessageRefusal },
+  now = Date.now(),
+): TeamRunRef {
+  if (actor.kind !== "planner" && actor.kind !== "worker" && actor.kind !== "reviewer") {
+    throw new BoardAccessError(actor, "message", `Only a run of the team sends a team message; ${describeActor(actor)} may not.`);
+  }
+  const from = board.runs.find((r) => r.id === input.from_run_id);
+  if (!from || from.role !== actor.kind || (actor.kind === "worker" && actor.id !== input.from_run_id)) {
+    throw new BoardAccessError(actor, "message", `${describeActor(actor)} may not send a message as ${input.from_run_id}: that is not its run on this team.`);
+  }
+  if (!(TEAM_MESSAGE_TARGETS as readonly string[]).includes(input.to)) throw new Error(`A team message goes to ${TEAM_MESSAGE_TARGETS.join(", ")}.`);
+  let toRunId: string | undefined;
+  if (input.to === "sibling") {
+    toRunId = input.to_run_id;
+    if (!toRunId) throw new Error("A message to a sibling names its run.");
+    if (toRunId === from.id) throw new Error("A run does not send a message to itself.");
+    if (!board.runs.some((r) => r.id === toRunId)) throw new Error(`${toRunId} is not a run of this team.`);
+  }
+  const text = input.text.trim();
+  if (!text) throw new Error("A team message needs some text.");
+  if (text.length > MAX_TEAM_MESSAGE_CHARS) throw new Error(`A team message is at most ${MAX_TEAM_MESSAGE_CHARS} characters.`);
+  const allowance = teamMessageAllowance(from.sentAt ?? [], now);
+  if (!allowance.ok) throw new Error(`${from.id} has no team message left ${allowance.scope === "run" ? "in this run" : "in this window"}.`);
+  from.sentAt = [...(from.sentAt ?? []), now];
+  const whom = input.to === "sibling" ? toRunId : input.to === "lead" ? "the lead" : "the assistant";
+  const payload: TeamMessagePayload = {
+    from: from.id,
+    to: input.to,
+    ...(toRunId ? { toRunId } : {}),
+    text,
+    ...(input.undelivered ? { delivered: false as const, code: input.undelivered } : {}),
+  };
+  append(board, {
+    ts: now,
+    actor,
+    type: "message",
+    ...(from.taskId ? { task_id: from.taskId } : {}),
+    message: `${from.role} ${from.id} → ${whom}${input.undelivered ? ` (not delivered: ${input.undelivered})` : ""}: ${firstLine(text)}`,
+    payload: payload as unknown as Record<string, unknown>,
+  });
+  return from;
 }
 
 export function setTeamStatus(board: TeamBoard, actor: Actor, status: TeamStatus, note?: string): void {

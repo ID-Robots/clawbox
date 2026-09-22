@@ -221,14 +221,45 @@ export function streamJsonUserTurn(text: string): string {
   })}\n`;
 }
 
+// ── A teammate's message (coding-team-messages.ts) ──────────────────────────
+
+/**
+ * How a message from another run of the same coding team starts:
+ * `[from worker run-ab12cd34] …`.
+ *
+ * The prefix is written by the web server from the sender it VERIFIED (the
+ * team route checks the run against the board), never by the sender, and it is
+ * what the receiving run is told the message is. Reading it back here keeps
+ * the framing honest: a teammate's note must not reach the harness worded as
+ * the owner's own instruction, which it would outrank.
+ */
+export const TEAMMATE_PREFIX_RE = /^\[from (planner|worker|reviewer) (run-[a-z0-9]{8})\] /;
+
+export function teammatePrefix(role: "planner" | "worker" | "reviewer", runId: string): string {
+  return `[from ${role} ${runId}]`;
+}
+
+/** The teammate a queued message came from, or null for the owner's own. */
+export function teammateOf(text: string): { role: string; runId: string } | null {
+  const m = TEAMMATE_PREFIX_RE.exec(text);
+  return m ? { role: m[1], runId: m[2] } : null;
+}
+
 /**
  * How a steering message is worded to the harness.
  *
  * Framed as the owner's, and framed as INFORMATION about the task rather than
  * as a new task: a run that read "do this instead" as a fresh brief would
  * start over and throw away the work the message was sent to redirect.
+ *
+ * A teammate's message is framed as a teammate's, with the one rule that keeps
+ * two runs from talking in a circle: it is not answered just to acknowledge it.
  */
 export function runMessageTurn(text: string): string {
+  const mate = teammateOf(text);
+  if (mate) {
+    return `[ClawBox: a message from ${mate.role} ${mate.runId}, another run of your coding team. It is information for the task you are already on — not a new task, and not from the person who started this run. Take it into account and carry on; do not start over, and do not answer it just to acknowledge it.]\n\n${text}`;
+  }
   return `[ClawBox: a message from the person who started this run. It is about the task you are already on — take it into account and carry on; do not start over.]\n\n${text}`;
 }
 
@@ -246,6 +277,9 @@ export function runMessagesNote(messages: readonly RunMessage[]): string {
     ? waiting[0].text
     : waiting.map((m, i) => `${i + 1}. ${m.text}`).join("\n");
   const one = waiting.length === 1;
+  if (waiting.some((m) => teammateOf(m.text))) {
+    return `[ClawBox: ${one ? "a message" : `${waiting.length} messages`} sent while this run was working — from the person who started it, or, where a message starts [from <role> <run>], from another run of your coding team. Take ${one ? "it" : "them"} into account; do not answer a teammate just to acknowledge it.]\n\n${body}`;
+  }
   return `[ClawBox: ${one ? "a message" : `${waiting.length} messages`} from the person who started this run, sent while it was working. Take ${one ? "it" : "them"} into account.]\n\n${body}`;
 }
 

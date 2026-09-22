@@ -81,6 +81,60 @@ export async function gatewayWsCall(
   params: Record<string, unknown>,
   options: GatewayWsCallOptions = {},
 ): Promise<Record<string, unknown>> {
+  return callAfterHello(method, () => params, options);
+}
+
+/**
+ * The session the ClawBox web chat binds to: the hello snapshot's main session
+ * key, falling back to `main` — read exactly the way ChatApp reads it on
+ * connect, so a message posted here lands in the conversation the owner has
+ * open rather than in one the server picked.
+ */
+export function mainSessionKeyOf(hello: Record<string, unknown>): string {
+  const snapshot = hello.snapshot as Record<string, unknown> | undefined;
+  const defaults = snapshot?.sessionDefaults as Record<string, unknown> | undefined;
+  const key = defaults?.mainSessionKey;
+  return typeof key === "string" && key.trim() ? key : "main";
+}
+
+/**
+ * Post a user turn into the main chat session — the one the web chat is bound
+ * to — and answer the key it went to. The gateway acknowledges the turn and
+ * the agent answers it on the event stream, where the chat shows it; `deliver:
+ * false`, as the chat's own sends are, so the reply is not pushed out to a
+ * channel as well.
+ *
+ * One connection: the key comes from THIS handshake, so the turn cannot land in
+ * a session some earlier hello named. Rejects {@link GatewayWsUnavailableError}
+ * when there is no gateway to post to (no token, not listening, still booting)
+ * and {@link GatewayRpcError} when the gateway refused the turn.
+ */
+export async function gatewayWsChatSendMain(
+  message: string,
+  options: GatewayWsCallOptions & { idempotencyKey: string },
+): Promise<{ sessionKey: string }> {
+  let sessionKey = "";
+  await callAfterHello(
+    "chat.send",
+    (hello) => {
+      sessionKey = mainSessionKeyOf(hello);
+      return { sessionKey, message, deliver: false, idempotencyKey: options.idempotencyKey };
+    },
+    options,
+  );
+  return { sessionKey };
+}
+
+/**
+ * The exchange itself: connect, handshake, then ONE request whose params may
+ * depend on what the gateway said in its hello (`chat.send` needs the session
+ * key the hello names).
+ */
+async function callAfterHello(
+  method: string,
+  paramsFor: (hello: Record<string, unknown>) => Record<string, unknown>,
+  options: GatewayWsCallOptions,
+): Promise<Record<string, unknown>> {
   // Loaded here, not at the top: `gateway-proxy` pulls the config store and
   // the session module in behind it, and `openclaw-config` (which calls this)
   // is imported by half the codebase — suites that mock the store would
@@ -159,6 +213,16 @@ export async function gatewayWsCall(
         stage = "call";
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => finish(() => reject(new Error(`${method} timed out after ${timeoutMs}ms`))), timeoutMs);
+        const hello = frame.payload && typeof frame.payload === "object" && !Array.isArray(frame.payload)
+          ? (frame.payload as Record<string, unknown>)
+          : {};
+        let params: Record<string, unknown>;
+        try {
+          params = paramsFor(hello);
+        } catch (err) {
+          finish(() => reject(err instanceof Error ? err : new Error(String(err))));
+          return;
+        }
         send({ type: "req", id: requestId, method, params });
         return;
       }

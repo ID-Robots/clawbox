@@ -29,12 +29,15 @@
  * next read, with the reason, never left "working" forever.
  */
 
+import { randomUUID } from "crypto";
 import {
   CodingAgentError,
   getRun,
   isCodingAgentEnabled,
   MAX_TASK_CHARS,
   MAX_TEAM_WORKERS,
+  noteTeamMessageSent,
+  queueRunMessage,
   resolveWorkingDirectory,
   startRun,
   stopRun,
@@ -43,11 +46,27 @@ import {
   type CodingRun,
   type CodingRunSource,
 } from "@/lib/coding-agent";
+import { RUNNER_STEP } from "@/lib/coding-agent-progress";
+import { RunMessageError, teammatePrefix } from "@/lib/coding-run-messages";
+import {
+  normalizeTeamMessage,
+  ownerAgentMessage,
+  rateLimitedError,
+  RUN_ID_RE,
+  TEAM_MESSAGE_TARGETS,
+  TEAM_ROLES,
+  teamMessageAllowance,
+  TeamMessageError,
+  type TeamMessageRefusal,
+  type TeamMessageTarget,
+  type TeamRole,
+} from "@/lib/coding-team-messages";
 import { addWorkerWorktree, changedFiles, ensureTeamBranch, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
 import { parseVerdict, REVIEWER_BRIEF, reviewerTask } from "@/lib/coding-team-reviewer";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
   allComplete,
+  BoardAccessError,
   createBoard,
   isExhausted,
   listBoards,
@@ -65,7 +84,7 @@ import {
 
 /** The board as the routes and the app read it: with who worked, counted. */
 export type TeamView = TeamBoard & { agents: TeamAgents };
-import { TeamBus } from "@/lib/coding-team-bus";
+import { TeamBus, type TeamMessage } from "@/lib/coding-team-bus";
 import { parsePlan, PLANNER_BRIEF, replanTask } from "@/lib/coding-team-planner";
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
@@ -86,6 +105,7 @@ export const WORKER_BRIEF = [
   "Do your task and only your task: do not redo, undo or 'improve' the parts that belong to others, and stay inside the files your task names unless the task cannot be done otherwise — say so in your report if you had to.",
   "Scratch files — a page or script you write only to verify your work, notes to yourself — go in your evidence folder, never in the project: a file outside your task's files counts as straying, even a temporary one.",
   "Your final message is read by the team's reviewer and quoted to the next worker: state what you changed (file names), how it can be checked, and anything you could not finish.",
+  "If you are blocked — you need a teammate's output first, the files your task names do not exist or are wrong, or a decision only the owner can take — say so in one short team_message (to a sibling run, to the lead, or to the owner's assistant), never for progress reports, and never answer a message a teammate sent you just to acknowledge it.",
 ].join(" ");
 
 export interface StartTeamInput {
@@ -101,6 +121,12 @@ interface LiveTeam {
   stopRequested: boolean;
   /** Every run of the team still going — several workers at once. */
   currentRunIds: Set<string>;
+  /**
+   * Team messages on their way to the assistant's chat, per sending run: the
+   * one delivery that awaits, counted against the caps while it does so two
+   * sends in flight cannot both take the last slot.
+   */
+  pendingMessages: Map<string, number>;
   done: Promise<void>;
 }
 
@@ -143,7 +169,7 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   const board = createBoard({ goal, projectId, directory, source: input.source }, input.source === "owner" ? OWNER : SYSTEM);
   saveBoard(board);
   const bus = new TeamBus(board);
-  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), done: Promise.resolve() };
+  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), done: Promise.resolve() };
   live.set(board.id, team);
   team.done = runTeam(team, input.source)
     .catch((err) => {
@@ -198,6 +224,213 @@ export function listTeams(limit = 20): TeamView[] {
 /** The team a run belongs to, for the run page's chip. */
 export function teamOfRun(run: Pick<CodingRun, "team">): TeamView | null {
   return run.team ? getTeam(run.team.id) : null;
+}
+
+// ─── Team messages (coding-team-messages.ts) ─────────────────────────────────
+
+/** How long the assistant's chat gets to take a message; the MCP client waits longer. */
+export const OWNER_AGENT_TIMEOUT_MS = 10_000;
+
+export interface TeamMessageInput {
+  teamId: unknown;
+  fromRunId: unknown;
+  /** The role the sending run's environment claims; checked against the board. */
+  role: unknown;
+  to: unknown;
+  toRunId?: unknown;
+  text: unknown;
+}
+
+export interface TeamMessageSent {
+  to: TeamMessageTarget;
+  toRunId: string | null;
+  /**
+   * sibling: true when the receiving harness has it in this turn, false when
+   * it is queued for that run's next turn. lead and owner_agent: true.
+   */
+  delivered: boolean;
+  /** owner_agent: the chat session it was posted into. */
+  sessionKey?: string;
+  at: number;
+  /** Messages the sending run may still send. */
+  left: number;
+}
+
+/**
+ * A run of a live team says something to a sibling, to the lead or to the
+ * box's main agent — `POST /setup-api/coding-agent/team/message`, reached
+ * from the run's own MCP server (`team_message`).
+ *
+ * The sender is checked against the BOARD, not believed: it must be on the
+ * cast list in the role it claims, its record must say the same team and role,
+ * and it must be running. A run speaks only as itself — the rule the bus holds
+ * a worker's status update to — and the variables its MCP server was started
+ * with are its name, not a pass.
+ *
+ * Every refusal of the SENDER's (the text, the claim, the target, the caps) is
+ * logged on the board as an alert through the bus, like any message the bus
+ * would not take, and throws a TeamMessageError with its code. A message the
+ * BOX could not hand on (no chat session, the Hermes edition, a gateway that
+ * refused it) is logged as an undelivered message instead — never an alert —
+ * and throws its code too. A delivered message is a `message` entry on the
+ * board, a line on the sender's own feed, and, for a sibling, a queued message
+ * on the receiver's record prefixed with who sent it. Nothing is forwarded on
+ * from there: a run that receives a message is told not to answer it just to
+ * acknowledge it, and the lead never answers at all.
+ */
+export async function sendTeamMessage(input: TeamMessageInput): Promise<TeamMessageSent> {
+  const teamId = typeof input.teamId === "string" ? input.teamId.trim() : "";
+  const fromRunId = typeof input.fromRunId === "string" ? input.fromRunId.trim() : "";
+  const role = typeof input.role === "string" ? input.role.trim() : "";
+  const to = typeof input.to === "string" ? input.to.trim() : "";
+  const toRunId = typeof input.toRunId === "string" && input.toRunId.trim() ? input.toRunId.trim() : null;
+  if (!TEAM_ID_RE.test(teamId) || !RUN_ID_RE.test(fromRunId)) throw new TeamMessageError("INVALID", "A team message names its team (teamId) and the run sending it (fromRunId).");
+  if (!(TEAM_ROLES as readonly string[]).includes(role)) throw new TeamMessageError("INVALID", `role is one of ${TEAM_ROLES.join(", ")}.`);
+  if (!(TEAM_MESSAGE_TARGETS as readonly string[]).includes(to)) throw new TeamMessageError("INVALID", `to is one of ${TEAM_MESSAGE_TARGETS.join(", ")}.`);
+  const target = to as TeamMessageTarget;
+  const sender = role as TeamRole;
+  if (target === "sibling" && (!toRunId || !RUN_ID_RE.test(toRunId))) {
+    throw new TeamMessageError("INVALID", "A message to a sibling names its run: toRunId, e.g. run-ab12cd34.");
+  }
+
+  const team = live.get(teamId);
+  if (!team) {
+    if (!loadBoard(teamId)) throw new TeamMessageError("NOT_FOUND", "There is no coding team with that id.");
+    throw new TeamMessageError("SETTLED", `Team ${teamId} is no longer working; there is nobody left to tell.`);
+  }
+  const { board, bus } = team;
+  if (isSettledStatus(board.status)) throw new TeamMessageError("SETTLED", `Team ${teamId} is no longer working; there is nobody left to tell.`);
+
+  const actor: Actor = sender === "worker" ? worker(fromRunId) : sender === "planner" ? PLANNER : REVIEWER;
+  const draft: TeamMessage = {
+    type: "message",
+    from_run_id: fromRunId,
+    to: target,
+    ...(target === "sibling" && toRunId ? { to_run_id: toRunId } : {}),
+    text: typeof input.text === "string" ? input.text : "",
+  };
+  // The sender's refusals: on the board as an alert — the bus's own words for
+  // a message it would not take — then the code to the caller.
+  const refused = (code: TeamMessageRefusal, reason: string, nextAllowedAt: number | null = null): TeamMessageError => {
+    try {
+      bus.refuse(actor, draft, `${code}: ${reason}`);
+    } catch {
+      // refuse() always throws once the alert is logged; the caller gets the code.
+    }
+    return new TeamMessageError(code, reason, nextAllowedAt);
+  };
+
+  const ref = board.runs.find((r) => r.id === fromRunId);
+  const run = getRun(fromRunId);
+  if (!ref || ref.role !== sender || !run || run.team?.id !== teamId || run.team.role !== sender || !isLive(run.status)) {
+    throw refused("FORBIDDEN", `${fromRunId} is not a running ${sender} of team ${teamId}; a run speaks only as itself.`);
+  }
+  let text: string;
+  try {
+    text = normalizeTeamMessage(input.text);
+  } catch (err) {
+    if (err instanceof TeamMessageError) throw refused(err.code, err.message);
+    throw err;
+  }
+  draft.text = text;
+  if (target === "sibling") {
+    if (toRunId === fromRunId) throw refused("SELF", "A run does not send a message to itself.");
+    if (!board.runs.some((r) => r.id === toRunId)) throw refused("NOT_IN_TEAM", `${toRunId} is not a run of team ${teamId}.`);
+    const receiver = getRun(toRunId!);
+    if (!receiver || isSettled(receiver.status)) throw refused("SETTLED", `${toRunId} has finished; there is nothing left to tell it.`);
+  }
+  const now = Date.now();
+  const pending = team.pendingMessages.get(fromRunId) ?? 0;
+  const allowance = teamMessageAllowance([...(ref.sentAt ?? []), ...Array.from({ length: pending }, () => now)], now);
+  if (!allowance.ok) {
+    const limited = rateLimitedError(allowance);
+    throw refused("RATE_LIMITED", limited.message, limited.nextAllowedAt);
+  }
+
+  // The delivery.
+  let delivered = true;
+  let sessionKey: string | undefined;
+  let undelivered: { code: TeamMessageRefusal; reason: string } | null = null;
+  team.pendingMessages.set(fromRunId, pending + 1);
+  try {
+    if (target === "sibling") {
+      try {
+        // Prefixed with the VERIFIED sender: the receiver's harness is told who
+        // said it (runMessageTurn), and its page shows the same line.
+        delivered = queueRunMessage(toRunId!, `${teammatePrefix(sender, fromRunId)} ${text}`).delivered;
+      } catch (err) {
+        if (err instanceof RunMessageError && err.code === "settled") throw refused("SETTLED", `${toRunId} has finished; there is nothing left to tell it.`);
+        if (err instanceof RunMessageError && err.code === "queue_full") throw refused("QUEUE_FULL", `${toRunId} has not read the messages it already has; do not send it more until it has.`);
+        if (err instanceof CodingAgentError && err.kind === "not_found") throw refused("NOT_IN_TEAM", `${toRunId} is not a run of team ${teamId}.`);
+        throw err;
+      }
+    } else if (target === "owner_agent") {
+      const posted = await postToOwnerAgent(teamId, sender, fromRunId, text);
+      if (posted.ok) sessionKey = posted.sessionKey;
+      else undelivered = posted;
+    }
+    // The lead: the board entry below IS the delivery.
+  } finally {
+    const left = (team.pendingMessages.get(fromRunId) ?? 1) - 1;
+    if (left > 0) team.pendingMessages.set(fromRunId, left);
+    else team.pendingMessages.delete(fromRunId);
+  }
+
+  // On the board — validated, capped, persisted, audit-logged — as the run's
+  // message, delivered or not. The team's alert count is not touched.
+  if (isSettledStatus(board.status)) throw new TeamMessageError("SETTLED", `Team ${teamId} finished while the message was on its way.`);
+  try {
+    bus.send(actor, { ...draft, ...(undelivered ? { undelivered: undelivered.code } : {}) });
+  } catch (err) {
+    if (err instanceof BoardAccessError) throw new TeamMessageError("FORBIDDEN", err.message);
+    throw err;
+  }
+  if (undelivered) throw new TeamMessageError(undelivered.code, undelivered.reason);
+
+  // …and on the sender's own feed, so its page shows what it said.
+  try {
+    noteTeamMessageSent(
+      fromRunId,
+      target === "sibling"
+        ? RUNNER_STEP.teamMessageToRun(toRunId!, text)
+        : target === "lead"
+          ? RUNNER_STEP.teamMessageToLead(text)
+          : RUNNER_STEP.teamMessageToAssistant(text),
+    );
+  } catch {
+    // The feed is the page's copy; the board already holds the record.
+  }
+  return { to: target, toRunId: target === "sibling" ? toRunId : null, delivered, ...(sessionKey ? { sessionKey } : {}), at: now, left: allowance.left - 1 };
+}
+
+/**
+ * Post into the box's main agent's chat: the session the web chat is bound to,
+ * on the OpenClaw gateway. Loaded lazily — the harness and the gateway link
+ * are nothing the rest of the orchestrator needs.
+ */
+async function postToOwnerAgent(
+  teamId: string,
+  role: TeamRole,
+  runId: string,
+  text: string,
+): Promise<{ ok: true; sessionKey: string } | { ok: false; code: TeamMessageRefusal; reason: string }> {
+  const { getActiveHarness } = await import("@/lib/harness");
+  if ((await getActiveHarness()) !== "openclaw") {
+    return { ok: false, code: "UNSUPPORTED", reason: "This box's assistant runs on Hermes, which gives a coding run no way into its chat; tell the lead instead." };
+  }
+  const gateway = await import("@/lib/openclaw-gateway-ws");
+  try {
+    const { sessionKey } = await gateway.gatewayWsChatSendMain(ownerAgentMessage(teamId, role, runId, text), {
+      idempotencyKey: randomUUID(),
+      timeoutMs: OWNER_AGENT_TIMEOUT_MS,
+    });
+    return { ok: true, sessionKey };
+  } catch (err) {
+    if (err instanceof gateway.GatewayWsUnavailableError) {
+      return { ok: false, code: "NO_SESSION", reason: "There is no assistant chat session to post into right now: the OpenClaw gateway is not answering. The message was not delivered." };
+    }
+    return { ok: false, code: "NOT_DELIVERED", reason: `The assistant's chat did not take the message: ${firstLine(err instanceof Error ? err.message : String(err), 200)}` };
+  }
 }
 
 /** Tests only. */
