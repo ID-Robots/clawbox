@@ -816,4 +816,21 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
 
     expect(log).toContain("agents.defaults.model was not an object");
   });
+
+  it("survives an undecodable token file instead of failing pre-start", () => {
+    // `open()` decodes by the boot locale, and LANG is unset under systemd —
+    // so ascii. UnicodeDecodeError is not an OSError, so a truncated or
+    // half-written token file raised it straight out of the heredoc and
+    // ExecStartPre died under `set -euo pipefail`: no gateway at all, over a
+    // credential the repair could simply have declined to use.
+    writeFileSync(path.join(root, "data", ".local-ai-token"), Buffer.from([0xff, 0xfe, 0xff, 0xfe]));
+    const { cfg, changed, log } = migrate({
+      models: { providers: {} },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(false);
+    expect(llamacppProvider(cfg)).toEqual({});
+    expect(log).toContain("Skipped llamacpp provider repair");
+  });
 });

@@ -344,6 +344,23 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — local-AI apiKey reconcili
     expect(log).toContain("too short");
   });
 
+  it("treats an undecodable token file as unreadable rather than failing pre-start", () => {
+    // `open()` decodes by the boot locale, and LANG is unset under systemd —
+    // so ascii. UnicodeDecodeError is not an OSError: it would come straight
+    // out of the heredoc and ExecStartPre would die under `set -euo pipefail`,
+    // costing the box its whole gateway over a credential this block could
+    // simply have declined to use. It must never be repaired into a different
+    // string either, because this block would then write that string.
+    writeFileSync(path.join(root, "data", ".local-ai-token"), Buffer.from([0xff, 0xfe, 0xff, 0xfe]));
+    const { cfg, changed, log } = reconcile({
+      models: { providers: { llamacpp: llamacpp(STALE) } },
+    });
+
+    expect(changed).toBe(false);
+    expect(providerOf(cfg, "llamacpp").apiKey).toBe(STALE);
+    expect(log).toContain("WARN");
+  });
+
   it("says nothing at all when no entry points at the proxy", () => {
     // A box with an operator's own server and no token file is not a fault.
     writeToken(null);

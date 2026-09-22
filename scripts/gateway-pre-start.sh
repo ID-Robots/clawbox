@@ -1360,11 +1360,17 @@ elif _wants_llamacpp and _llamacpp_gaps:
     # llama-server needs no token from us, and refusing there would leave their
     # config invalid over a credential it never wanted.
     _llamacpp_takes_proxy = "baseUrl" in _llamacpp_gaps
+    # Strict utf-8, and a decode failure is an unreadable file — same reasoning
+    # as the reconciliation further down, which shares this file: without an
+    # explicit encoding a stray byte raises UnicodeDecodeError (not an OSError)
+    # out of the heredoc and ExecStartPre dies under `set -euo pipefail`, and a
+    # token quietly mangled by errors="replace" is one we would go on to write.
+    # Empty falls into the guard below, which refuses the repair and says why.
     _token_path = os.path.join(_clawbox_root, "data", ".local-ai-token")
     try:
-        with open(_token_path) as _tf:
+        with open(_token_path, encoding="utf-8") as _tf:
             _local_ai_token = _tf.read().strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         _local_ai_token = ""
 
     if _llamacpp_takes_proxy and len(_local_ai_token) < 16:
@@ -1721,11 +1727,21 @@ def _lai_row_on_another_host(_entry, _hosts):
 _lai_models = cfg.get("models")
 _lai_providers = _lai_models.get("providers") if isinstance(_lai_models, dict) else None
 if isinstance(_lai_providers, dict):
+    # STRICT utf-8, and a decode failure is an unreadable file rather than a
+    # repaired one. `open()` would otherwise decode by the boot locale — LANG is
+    # unset under systemd, so ascii — and one stray byte in a truncated or
+    # half-written token file would raise UnicodeDecodeError, which is NOT an
+    # OSError, straight out of this heredoc: ExecStartPre fails under
+    # `set -euo pipefail` and the box gets no gateway at all over a credential
+    # it could simply have declined to use. errors="replace" is deliberately NOT
+    # the answer here as it is for .env below: a token silently repaired into a
+    # different string is one this block would then WRITE into the config. An
+    # empty value falls into the short-token guard, which refuses and says why.
     _lai_token_file = os.path.join(_clawbox_root, "data", ".local-ai-token")
     try:
-        with open(_lai_token_file) as _lai_tf:
+        with open(_lai_token_file, encoding="utf-8") as _lai_tf:
             _lai_token = _lai_tf.read().strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         _lai_token = ""
     _lai_hosts = _lai_proxy_hosts()
 
