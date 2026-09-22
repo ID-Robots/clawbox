@@ -40,6 +40,18 @@ function stub() {
 }
 
 describe("CodingRunTeamMembers", () => {
+  it("names a lead turn as the team lead after its task, and draws it on the tree", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ team: { id: "team-1", runs: [...BOARD_RUNS, { id: "run-lead", role: "lead", taskId: "t1" }] } }), { status: 200, headers: { "content-type": "application/json" } })));
+    render(<CodingRunTeamMembers teamId="team-1" runId="run-w2" runs={[...RUNS, { id: "run-lead", status: "running" as const }]} live onOpenRun={vi.fn()} />);
+    const list = await screen.findByTestId("coding-agent-run-team-members");
+    const rows = within(list).getAllByTestId("coding-agent-team-member");
+    expect(rows.map((r) => r.getAttribute("data-role"))).toEqual(["planner", "worker", "reviewer", "lead"]);
+    expect(rows[3].textContent).toContain(t("codingAgent.team.roleLead", { task: "t1" }));
+    const tree = within(list).getByTestId("coding-team-tree");
+    expect(tree).toHaveAttribute("data-leads", "1");
+    expect(within(tree).getByTestId("coding-team-tree-lead")).toHaveAttribute("data-live", "true");
+  });
+
   it("draws the board as the tree and lists the TEAMMATES — never this run, which the card already names", async () => {
     const calls = stub();
     const onOpenRun = vi.fn();

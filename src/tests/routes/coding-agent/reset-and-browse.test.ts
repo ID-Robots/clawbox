@@ -254,6 +254,9 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // and a reset that left an explicit false behind would send the owner
       // through the wizard's browser step and then ignore what they chose.
       "coding_agent_real_browser",
+      // The team lead's switch is OFF when absent, so clearing it takes back
+      // the owner's leave for a running team's plan to change under it.
+      "coding_team_dynamic",
       // The owner's standing permission rules are consent too: each one is a
       // folder every later run may open, so "start over" takes them all back
       // rather than leaving a run started after the wizard with permissions

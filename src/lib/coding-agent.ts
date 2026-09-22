@@ -597,6 +597,18 @@ export const CODING_AGENT_GEN_AUDIO_CONFIG_KEY = "coding_agent_generate_audio";
 export const CODING_AGENT_REAL_BROWSER_CONFIG_KEY = "coding_agent_real_browser";
 
 /**
+ * May a coding TEAM's lead change the plan while the team runs — add a task
+ * a finished one revealed, retire a pending one the goal no longer needs?
+ *
+ * OFF when absent: every lead turn is one more paid, read-only run after
+ * each worker settles, and a plan that moves under a running team is a
+ * different thing from the one the owner saw posted. Read once when a team
+ * starts and kept on its board (src/lib/coding-team.ts), so flipping it
+ * never changes a team already at work.
+ */
+export const CODING_TEAM_DYNAMIC_CONFIG_KEY = "coding_team_dynamic";
+
+/**
 
 /**
  * The owner's standing answer to "may a run do this?" — the permission rules
@@ -644,6 +656,7 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
+  CODING_TEAM_DYNAMIC_CONFIG_KEY,
   CODING_AGENT_ALLOW_RULES_CONFIG_KEY,
   // The commit identity is a SETTING — the owner chose who the box signs their
   // work as — so "start over" puts it back to the project's own git config and
@@ -1904,6 +1917,8 @@ export interface CodingAgentStatus {
   generateAudio: boolean;
   /** Does a run verify its work in the browser on the owner's screen? */
   realBrowser: boolean;
+  /** May a coding team's lead add or retire tasks while the team runs? Off unless the owner said so. */
+  teamDynamic: boolean;
   /** The owner's standing permission rules, in the order they saved them. */
   allowRules: string[];
   /** How many they may keep, so the editor can say so without guessing. */
@@ -2030,7 +2045,8 @@ export interface StartRunInput {
 /** A run's place in a coding team. */
 export interface RunTeam {
   id: string;
-  role: "planner" | "worker" | "reviewer";
+  /** `lead`: the planner back for a moment after a worker settled, deciding whether the plan still fits (read-only, like the planner and the reviewer). */
+  role: "planner" | "worker" | "reviewer" | "lead";
   taskId: string | null;
 }
 
@@ -2453,6 +2469,19 @@ export async function setRealBrowser(on: unknown): Promise<boolean> {
     throw new CodingAgentError("invalid", "The browser switch must be true or false.");
   }
   await configSet(CODING_AGENT_REAL_BROWSER_CONFIG_KEY, on);
+  return on;
+}
+
+/** The team lead's switch. OFF unless it is exactly `true` — see its config key. */
+export async function getTeamDynamic(): Promise<boolean> {
+  return (await configGet(CODING_TEAM_DYNAMIC_CONFIG_KEY)) === true;
+}
+
+export async function setTeamDynamic(on: unknown): Promise<boolean> {
+  if (typeof on !== "boolean") {
+    throw new CodingAgentError("invalid", "The team lead switch must be true or false.");
+  }
+  await configSet(CODING_TEAM_DYNAMIC_CONFIG_KEY, on);
   return on;
 }
 
@@ -3353,6 +3382,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
+    teamDynamic: config[CODING_TEAM_DYNAMIC_CONFIG_KEY] === true,
     // The home, so a harness-project rule is still on the list the panels
     // read; the full context's directory walk is not worth it here.
     allowRules: normalizeAllowRules(config[CODING_AGENT_ALLOW_RULES_CONFIG_KEY], allowRuleHomeContext()),
@@ -3440,7 +3470,7 @@ function normalizeTeam(raw: unknown): RunTeam | null {
   // Every role the team has: a reviewer run reloaded without its team would
   // be resumed and settled as a project run — icon, review pass, pull
   // request — in a folder that is the team's.
-  if (t.role !== "planner" && t.role !== "worker" && t.role !== "reviewer") return null;
+  if (t.role !== "planner" && t.role !== "worker" && t.role !== "reviewer" && t.role !== "lead") return null;
   return { id: t.id, role: t.role, taskId: typeof t.taskId === "string" ? t.taskId : null };
 }
 

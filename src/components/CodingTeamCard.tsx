@@ -14,19 +14,36 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { BTN_BASE, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import CodingTeamTree from "./CodingTeamTree";
-import { timeAgo } from "./clawkeep-ui";
+import { formatDuration, timeAgo } from "./clawkeep-ui";
 
 export interface TeamTaskView {
   task_id: string;
   task_description: string;
   assigned_to: string | null;
-  status: "pending" | "in_progress" | "complete" | "failed" | "rejected";
+  status: "pending" | "in_progress" | "complete" | "failed" | "rejected" | "retired";
   result: string | null;
   depends_on: string[];
   review: { verdict: "accepted" | "rejected"; notes: string; at: number } | null;
   attempts: number;
   /** The reviewer run that ruled on the current attempt. */
   reviewRunId?: string | null;
+  /** Who put it on the board: the plan, or the lead while the team ran. Absent from an older server. */
+  origin?: "plan" | "lead";
+}
+
+/** The team's figures, as the server works them out from the board. */
+export interface TeamMetricsView {
+  plannerRuns: number;
+  workerRuns: number;
+  reviewerRuns: number;
+  leadRuns: number;
+  tasksPlanned: number;
+  tasksAdded: number;
+  tasksRetired: number;
+  tasksAcceptedFirstTry: number;
+  tasksRejected: number;
+  tokensUsed: number;
+  wallMs: number;
 }
 
 export interface TeamLogEntryView {
@@ -73,8 +90,15 @@ export interface TeamView {
   /** The team's branch in the project and what it forked from; null when the team works in place. */
   branch?: string | null;
   base?: string | null;
-  /** Who worked, counted by the server from the board's cast list. */
-  agents?: { planner: number; workers: number; reviewers: number; total: number };
+  /** Who worked, counted by the server from the board's cast list. `leads` is absent from an older server. */
+  agents?: { planner: number; workers: number; reviewers: number; leads?: number; total: number };
+  /** The size and review the planner chose for this goal; null when it chose none (the default team). */
+  shape?: { parallelism: number; review: "each" | "final" | "none"; rationale: string } | null;
+  /** The lead's switch as it stood when the team started. */
+  dynamic?: boolean;
+  /** The one review of the merged result, when the shape asked for it. */
+  finalReview?: { verdict: "accepted" | "rejected"; notes: string; at: number } | null;
+  metrics?: TeamMetricsView;
   tasks: TeamTaskView[];
   log: TeamLogEntryView[];
   alerts: number;
@@ -118,6 +142,7 @@ const TASK_KEY: Record<TeamTaskView["status"], string> = {
   complete: "complete",
   failed: "failed",
   rejected: "rejected",
+  retired: "retired",
 };
 
 const TASK_TONE: Record<TeamTaskView["status"], string> = {
@@ -126,10 +151,18 @@ const TASK_TONE: Record<TeamTaskView["status"], string> = {
   complete: "text-emerald-400 border-emerald-400/40",
   failed: "text-red-300 border-red-400/40",
   rejected: "text-red-300 border-red-400/40",
+  retired: "text-[var(--text-muted)] border-white/10",
 };
 
 function isActive(status: TeamView["status"]): boolean {
   return status === "planning" || status === "working" || status === "reviewing";
+}
+
+/** Compact token counts, the way the runs list writes them: 1.3M, 48k, 950. */
+function compactTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(Math.max(0, Math.round(n)));
 }
 
 export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan }: Props) {
@@ -203,6 +236,10 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
   };
 
   const done = team ? team.tasks.filter((x) => x.status === "complete").length : 0;
+  // A retired task will never be done — the lead decided the goal does not
+  // need it — so it is not in the count either: a finished team with one
+  // retired read "3 of 4 tasks done" beside its Done badge.
+  const counted = team ? team.tasks.filter((x) => x.status !== "retired").length : 0;
   const messages = team ? team.log.map((e) => ({ e, m: teamMessageOf(e) })).filter((x): x is { e: TeamLogEntryView; m: TeamMessageView } => x.m !== null) : [];
 
   /** One team message: who, to whom, and the words — whole, since the board is where the lead reads them. */
@@ -239,7 +276,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
         )}
         {team && team.tasks.length > 0 && (
           <span className="text-[11px] text-[var(--text-muted)]" data-testid="coding-team-progress">
-            {t("codingAgent.team.progress", { done, total: team.tasks.length })}
+            {t("codingAgent.team.progress", { done, total: counted })}
           </span>
         )}
         {team && team.alerts > 0 && (
@@ -263,21 +300,57 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
           workers={team?.agents && team.agents.workers > 0 ? team.agents.workers : 3}
           activeWorkers={team ? team.tasks.filter((x) => x.status === "in_progress").length : 0}
           reviewers={team?.agents ? team.agents.reviewers : 1}
-          activeReviewers={team && active ? team.tasks.filter((x) => x.status === "complete" && !x.review).length : 0}
+          activeReviewers={team && active ? team.tasks.filter((x) => x.status === "complete" && !x.review).length + (team.status === "reviewing" ? 1 : 0) : 0}
           plannerActive={team?.status === "planning"}
+          leads={team?.agents?.leads ?? 0}
           className="shrink-0"
         />
         <p className="text-[11px] text-[var(--text-muted)] leading-relaxed text-center max-w-[40rem]">{t("codingAgent.team.help")}</p>
       </div>
       {/* Who worked, and where: the owner asked to see how many agents a
-          run had. Planner, workers (an attempt is a new worker), reviewers. */}
+          run had. Planner, workers (an attempt is a new worker), reviewers,
+          and the lead's turns when it had any. */}
       {team && team.agents && team.agents.total > 0 && (
         <p className="mt-1.5 text-[11px] text-[var(--text-secondary)]" data-testid="coding-team-agents">
           <span className="material-symbols-rounded align-[-2px] mr-1" style={{ fontSize: 14 }} aria-hidden="true">smart_toy</span>
-          {t("codingAgent.team.agents", { total: team.agents.total, planner: team.agents.planner, workers: team.agents.workers, reviewers: team.agents.reviewers })}
+          {(team.agents.leads ?? 0) > 0
+            ? t("codingAgent.team.agentsWithLead", { total: team.agents.total, planner: team.agents.planner, workers: team.agents.workers, reviewers: team.agents.reviewers, leads: team.agents.leads ?? 0 })
+            : t("codingAgent.team.agents", { total: team.agents.total, planner: team.agents.planner, workers: team.agents.workers, reviewers: team.agents.reviewers })}
           {team.branch && (
             <span className="text-[var(--text-muted)]"> · {t("codingAgent.team.branch", { branch: team.branch, base: team.base ?? "" })}</span>
           )}
+        </p>
+      )}
+      {/* The shape the planner chose for this goal — how many side by side,
+          how the work is reviewed, and why — and whether the lead may change
+          the plan while the team runs. A team shaped by default says nothing. */}
+      {team && (team.shape || team.dynamic) && (
+        <p className="mt-1 text-[11px] text-[var(--text-secondary)] flex items-center gap-1.5 flex-wrap" data-testid="coding-team-shape">
+          <span className="material-symbols-rounded align-[-2px]" style={{ fontSize: 14 }} aria-hidden="true">account_tree</span>
+          {team.shape && (
+            <span>
+              {t("codingAgent.team.shape", { n: team.shape.parallelism })} · {t(`codingAgent.team.reviewMode.${team.shape.review}`)}
+              {team.shape.rationale && <span className="text-[var(--text-muted)]"> — {team.shape.rationale}</span>}
+            </span>
+          )}
+          {team.dynamic && (
+            <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40" data-testid="coding-team-dynamic">
+              {t("codingAgent.team.leadOn")}
+            </span>
+          )}
+        </p>
+      )}
+      {/* The team's figures: what it cost and how well its shape fitted the
+          goal — the same numbers the status tool and the bench read. */}
+      {team && team.metrics && (team.metrics.workerRuns > 0 || !active) && (
+        <p className="mt-1 text-[11px] text-[var(--text-muted)] flex items-center gap-x-2 gap-y-0.5 flex-wrap" data-testid="coding-team-metrics" title={t("codingAgent.team.metricsTitle")}>
+          <span className="material-symbols-rounded align-[-2px]" style={{ fontSize: 14 }} aria-hidden="true">monitoring</span>
+          <span data-testid="coding-team-metric-tokens">{t("codingAgent.team.metricTokens", { n: compactTokens(team.metrics.tokensUsed) })}</span>
+          <span>· {t("codingAgent.team.metricTime", { time: formatDuration(team.metrics.wallMs) })}</span>
+          <span data-testid="coding-team-metric-first-try">· {t("codingAgent.team.metricFirstTry", { n: team.metrics.tasksAcceptedFirstTry, total: team.metrics.tasksPlanned + team.metrics.tasksAdded - team.metrics.tasksRetired })}</span>
+          {team.metrics.tasksRejected > 0 && <span>· {t("codingAgent.team.metricRejected", { n: team.metrics.tasksRejected })}</span>}
+          {team.metrics.tasksAdded > 0 && <span>· {t("codingAgent.team.metricAdded", { n: team.metrics.tasksAdded })}</span>}
+          {team.metrics.tasksRetired > 0 && <span>· {t("codingAgent.team.metricRetired", { n: team.metrics.tasksRetired })}</span>}
         </p>
       )}
 
@@ -312,6 +385,15 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
           {team.error && (
             <p className="mt-2 text-[11px] text-red-300 break-words" data-testid="coding-team-reason">{team.error}</p>
           )}
+          {team.finalReview && (
+            <p className="mt-2 text-[11px] break-words" data-testid="coding-team-final-review" data-verdict={team.finalReview.verdict}>
+              <span className="text-[var(--text-secondary)]">{t("codingAgent.team.finalReview")}: </span>
+              <span className={`font-semibold uppercase tracking-wider text-[10px] ${team.finalReview.verdict === "accepted" ? "text-emerald-400" : "text-red-300"}`}>
+                {t(`codingAgent.team.review.${team.finalReview.verdict}`)}
+              </span>
+              {team.finalReview.notes && <span className={team.finalReview.verdict === "accepted" ? "text-[var(--text-muted)]" : "text-red-300"}> — {team.finalReview.notes}</span>}
+            </p>
+          )}
           {team.tasks.length === 0 && isActive(team.status) && (
             <p className="mt-2 text-[11px] text-[var(--text-muted)]">{t("codingAgent.team.planning")}</p>
           )}
@@ -321,9 +403,14 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
                 <li key={task.task_id} className={`${INSET_SURFACE} px-3 py-2`} data-testid={`coding-team-task-${task.task_id}`} data-status={task.status}>
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-mono text-[11px] text-[var(--text-muted)]">{task.task_id}</span>
-                    <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${TASK_TONE[task.status]}`}>
-                      {t(`codingAgent.team.task.${TASK_KEY[task.status]}`)}
+                    <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${TASK_TONE[task.status] ?? TASK_TONE.pending}`}>
+                      {t(`codingAgent.team.task.${TASK_KEY[task.status] ?? task.status}`)}
                     </span>
+                    {task.origin === "lead" && (
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-violet-300" data-testid={`coding-team-added-${task.task_id}`}>
+                        {t("codingAgent.team.addedByLead")}
+                      </span>
+                    )}
                     {task.review && (
                       <span className={`text-[10px] font-semibold uppercase tracking-wider ${task.review.verdict === "accepted" ? "text-emerald-400" : "text-red-300"}`}>
                         {t(`codingAgent.team.review.${task.review.verdict}`)}
@@ -343,7 +430,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
                       </button>
                     )}
                   </div>
-                  <p className="mt-1 text-xs text-[var(--text-primary)] break-words">{task.task_description}</p>
+                  <p className={`mt-1 text-xs break-words ${task.status === "retired" ? "text-[var(--text-muted)] line-through decoration-white/30" : "text-[var(--text-primary)]"}`}>{task.task_description}</p>
                   {task.result && (
                     <p className="mt-1 text-[11px] text-[var(--text-secondary)] whitespace-pre-wrap break-words max-h-24 overflow-y-auto">{task.result}</p>
                   )}

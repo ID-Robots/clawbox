@@ -256,3 +256,75 @@ describe("what the team's runs said", () => {
     expect(screen.getByTestId("coding-team-log")).toHaveTextContent("worker run-00000003 → the lead: hi");
   });
 });
+
+describe("the team's shape, its lead and its figures (TASK-1099)", () => {
+  const METRICS = { plannerRuns: 1, workerRuns: 2, reviewerRuns: 1, leadRuns: 2, tasksPlanned: 3, tasksAdded: 1, tasksRetired: 1, tasksAcceptedFirstTry: 2, tasksRejected: 1, tokensUsed: 184_300, wallMs: 754_000 };
+  const SHAPED: TeamView = {
+    ...WORKING,
+    status: "done",
+    alerts: 0,
+    agents: { planner: 1, workers: 2, reviewers: 1, leads: 2, total: 6 },
+    shape: { parallelism: 2, review: "final", rationale: "Two independent files, one look at the whole." },
+    dynamic: true,
+    finalReview: { verdict: "accepted", notes: "", at: 5 },
+    metrics: METRICS,
+    tasks: [
+      { ...WORKING.tasks[0] },
+      { ...WORKING.tasks[1], status: "complete", review: { verdict: "accepted", notes: "", at: 2 }, attempts: 2 },
+      { task_id: "t3", task_description: "Write the README", assigned_to: null, status: "retired", result: null, depends_on: ["t1"], review: null, attempts: 0, origin: "plan" },
+      { task_id: "t4", task_description: "Add a favicon", assigned_to: "run-00000009", status: "complete", result: "Added favicon.ico.", depends_on: ["t1"], review: { verdict: "accepted", notes: "", at: 3 }, attempts: 1, origin: "lead" },
+    ],
+  };
+
+  it("shows the shape with its reason, the lead's switch, the figures, a retired task, the lead's own task and the final review", async () => {
+    teams = [SHAPED];
+    stub();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} onPlan={vi.fn()} />);
+    await screen.findByTestId("coding-team-board");
+    // The retired task is not in the count: a finished team reads finished.
+    expect(screen.getByTestId("coding-team-progress")).toHaveTextContent(t("codingAgent.team.progress", { done: 3, total: 3 }));
+    const shape = screen.getByTestId("coding-team-shape");
+    expect(shape).toHaveTextContent(`${t("codingAgent.team.shape", { n: 2 })} · ${t("codingAgent.team.reviewMode.final")}`);
+    expect(shape).toHaveTextContent("Two independent files, one look at the whole.");
+    expect(within(shape).getByTestId("coding-team-dynamic")).toHaveTextContent(t("codingAgent.team.leadOn"));
+    const metrics = screen.getByTestId("coding-team-metrics");
+    expect(within(metrics).getByTestId("coding-team-metric-tokens")).toHaveTextContent(t("codingAgent.team.metricTokens", { n: "184k" }));
+    expect(metrics).toHaveTextContent(t("codingAgent.team.metricTime", { time: "12 min 34 s" }));
+    // Of the tasks that count: planned + added − retired.
+    expect(within(metrics).getByTestId("coding-team-metric-first-try")).toHaveTextContent(t("codingAgent.team.metricFirstTry", { n: 2, total: 3 }));
+    expect(metrics).toHaveTextContent(t("codingAgent.team.metricRejected", { n: 1 }));
+    expect(metrics).toHaveTextContent(t("codingAgent.team.metricAdded", { n: 1 }));
+    expect(metrics).toHaveTextContent(t("codingAgent.team.metricRetired", { n: 1 }));
+    expect(screen.getByTestId("coding-team-agents")).toHaveTextContent(t("codingAgent.team.agentsWithLead", { total: 6, planner: 1, workers: 2, reviewers: 1, leads: 2 }));
+    const retired = screen.getByTestId("coding-team-task-t3");
+    expect(retired).toHaveAttribute("data-status", "retired");
+    expect(retired).toHaveTextContent(t("codingAgent.team.task.retired"));
+    expect(screen.getByTestId("coding-team-added-t4")).toHaveTextContent(t("codingAgent.team.addedByLead"));
+    expect(screen.queryByTestId("coding-team-added-t1")).toBeNull();
+    const final = screen.getByTestId("coding-team-final-review");
+    expect(final).toHaveAttribute("data-verdict", "accepted");
+    expect(final).toHaveTextContent(`${t("codingAgent.team.finalReview")}: ${t("codingAgent.team.review.accepted")}`);
+    // The tree draws the lead's turns under the planner.
+    expect(screen.getByTestId("coding-team-tree")).toHaveAttribute("data-leads", "2");
+  });
+
+  it("says nothing of a shape for a default team, and waits for a worker before the figures while it plans", async () => {
+    teams = [{ ...WORKING, status: "planning", tasks: [], metrics: { ...METRICS, workerRuns: 0, leadRuns: 0 } }];
+    stub();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    await screen.findByTestId("coding-team-board");
+    expect(screen.queryByTestId("coding-team-shape")).toBeNull();
+    expect(screen.queryByTestId("coding-team-metrics")).toBeNull();
+    expect(screen.queryByTestId("coding-team-final-review")).toBeNull();
+    expect(screen.getByTestId("coding-team-tree")).toHaveAttribute("data-leads", "0");
+  });
+
+  it("shows a rejected final review with its notes", async () => {
+    teams = [{ ...SHAPED, status: "failed", error: "The final review rejected the merged work: app.js never loads.", finalReview: { verdict: "rejected", notes: "app.js never loads.", at: 5 } }];
+    stub();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    const final = await screen.findByTestId("coding-team-final-review");
+    expect(final).toHaveAttribute("data-verdict", "rejected");
+    expect(final).toHaveTextContent("app.js never loads.");
+  });
+});

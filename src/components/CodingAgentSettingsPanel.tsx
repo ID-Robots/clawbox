@@ -147,6 +147,10 @@ export interface AgentStatus {
   /** The owner's switch for the automatic review pass: one more run, in the
    *  same session, after every completed run that changed files. */
   reviewPass: boolean;
+  /** May a coding team's lead add or retire tasks while the team runs?
+   *  Optional: an older server does not answer with it. OFF by default, so
+   *  the fallback below is `?? false`. */
+  teamDynamic?: boolean;
   /** May a run draw pictures, and may the box draw the project's icon and
    *  favicon? Optional: an older server does not answer with it. ON by
    *  default, so the fallback below is `?? true`, not `?? false`. */
@@ -909,6 +913,32 @@ export default function CodingAgentSettingsPanel({
             label={t("codingAgent.reviewPassLabel")}
             testId="coding-agent-review-pass"
             onChange={(next) => void saveSetting({ reviewPass: next }, "review", t("codingAgent.reviewPassFailed"))}
+          />
+        </div>
+
+        {/* The coding team's lead: after each worker settles, one short
+            read-only run may add a task or retire a pending one. Off by
+            default — each turn is a paid run, and the plan the owner saw
+            posted then moves under a running team. Read when a team starts,
+            so it never changes a team already at work. */}
+        <div className="flex items-start justify-between gap-4 mt-4">
+          <div className="min-w-0 flex items-center gap-1.5">
+            <span className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.teamDynamicLabel")}
+            </span>
+            <HelpTip
+              text={t("codingAgent.teamDynamicHint")}
+              label={t("codingAgent.teamDynamicLabel")}
+              testId="coding-agent-team-dynamic-help"
+            />
+          </div>
+          <Switch
+            checked={status?.teamDynamic ?? false}
+            busy={busy === "teamDynamic"}
+            disabled={!status || saving}
+            label={t("codingAgent.teamDynamicLabel")}
+            testId="coding-agent-team-dynamic"
+            onChange={(next) => void saveSetting({ teamDynamic: next }, "teamDynamic", t("codingAgent.teamDynamicFailed"))}
           />
         </div>
 
