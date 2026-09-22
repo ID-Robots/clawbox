@@ -165,6 +165,7 @@ PREV_BRANCH=""   # the branch it was on; empty for a detached HEAD
 MOVED=0          # the checkout may have left PREV_HEAD
 INSTALLED=0      # `bun install` ran against the new commit's lockfile
 PARKED=0         # the serving build is parked at $KEPT_DIR
+NO_FALLBACK=0    # too little space to park: the build runs over the serving one
 BUILD_LOG_DIR=""
 BUILD_LOG=""
 
@@ -237,6 +238,7 @@ park_serving_build() {
   case "$avail" in ''|*[!0-9]*) avail="" ;; esac
   if [ -n "$need" ] && [ -n "$avail" ] && [ "$avail" -lt "$((need * 2))" ]; then
     echo "[force-update] Only ${avail}K free for a ${need}K build — building over the current one, so a failed build has nothing to fall back on" >&2
+    NO_FALLBACK=1
     return 0
   fi
   boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || boot_id=""
@@ -323,7 +325,13 @@ give_up() {
     echo "[force-update] clawbox-setup is not running — starting it again on the previous build." >&2
     sudo systemctl restart clawbox-setup || true
   fi
-  echo "[force-update] FAILED (exit $code). Nothing was updated." >&2
+  if [ "$MOVED" -eq 1 ] || [ "$PARKED" -eq 1 ]; then
+    echo "[force-update] FAILED (exit $code), and the rollback did not complete — see the lines above." >&2
+  elif [ "$NO_FALLBACK" -eq 1 ]; then
+    echo "[force-update] FAILED (exit $code). The checkout is back, but there was no room to keep the previous build: the dashboard has nothing to load on its next restart until a build succeeds." >&2
+  else
+    echo "[force-update] FAILED (exit $code). Nothing was updated." >&2
+  fi
   exit "$code"
 }
 trap 'give_up "Interrupted (SIGHUP)" 129' HUP
