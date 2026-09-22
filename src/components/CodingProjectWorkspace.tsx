@@ -460,11 +460,21 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
           <p className="px-3 py-3 text-[11px] text-[var(--text-muted)]">{t("codingAgent.pickFile")}</p>
         ) : (
           <>
-            <div className="sticky top-0 left-0 z-10 flex items-center gap-2 px-3 py-1.5 border-b border-white/[0.06] bg-[var(--win-ground)] text-[11px]">
+            {/* The strip WRAPS: the path is a shrinkable `truncate` and every
+                control beside it is `shrink-0`, so in a narrow pane — the file
+                side of the split is `minmax(0,1fr)` — the controls squeezed the
+                filename to nothing and the owner could not see which file was
+                open. Wrapping moves them to a second row instead, the way the
+                discard bar below already does. */}
+            <div className="sticky top-0 left-0 z-10 flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-1.5 border-b border-white/[0.06] bg-[var(--win-ground)] text-[11px]">
               <span className="font-mono text-[var(--text-primary)] truncate">{file.path}</span>
               <span className="text-[var(--text-muted)] shrink-0">{formatSize(file.size)}</span>
               {file.truncated && <span className="text-amber-300 shrink-0" title={t("codingAgent.fileReadOnlyLarge")}>{t("codingAgent.fileTruncated")}</span>}
-              <span className="ml-auto flex items-center gap-2 shrink-0">
+              {/* Wraps internally as well, and does NOT refuse to shrink: in
+                  German and Swedish the four controls are wider than a narrow
+                  pane, and as one rigid group they took the row sideways and
+                  clipped "Speichern"/"Spara" off its right edge. */}
+              <span className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1 min-w-0">
                 {/* Markdown only: read it as the document, or read its source.
                     Save sits to the right of both and works from either. */}
                 {isMarkdown && (
@@ -506,7 +516,10 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
                   </button>
                 )}
                 {editable && (
-                  <>
+                  // One unit: the dot says THIS button has something to save,
+                  // and a wrap that left it dangling on the row above read as a
+                  // stray separator.
+                  <span className="inline-flex items-center gap-2">
                     {dirty && <span className="text-[var(--text-muted)]" title={t("codingAgent.fileUnsaved")} data-testid="coding-agent-file-dirty">●</span>}
                     {!dirty && saved && <span className="text-emerald-300" data-testid="coding-agent-file-saved">{t("codingAgent.fileSaved")}</span>}
                     <button
@@ -519,7 +532,7 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
                       <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">save</span>
                       {saving ? t("codingAgent.fileSaving") : t("codingAgent.fileSave")}
                     </button>
-                  </>
+                  </span>
                 )}
               </span>
             </div>
@@ -540,7 +553,11 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
               // Through the chat's renderer, which builds elements from the text
               // and never injects HTML: a README a run wrote reaches the screen
               // as words, links and tables, not as markup.
-              <div className={`flex-1 min-h-0 overflow-auto px-3 py-2 ${MARKDOWN_PROSE}`} data-testid="coding-agent-file-preview">
+              // A region that scrolls needs a tab stop of its own, or a
+              // keyboard-only reader cannot reach the end of a long document
+              // (WCAG 2.1.1) — the rule chat-markdown's own scrolling tables
+              // follow. Focusable means it needs a name: the file it shows.
+              <div role="region" aria-label={file.path} tabIndex={0} className={`flex-1 min-h-0 overflow-auto px-3 py-2 ${MARKDOWN_PROSE}`} data-testid="coding-agent-file-preview">
                 {renderText(draft ?? file.content, t("chat.table"))}
               </div>
             ) : editable ? (
