@@ -646,14 +646,14 @@ describe("the provider split", () => {
     // Nothing exported at all: Claude Code then uses the credential it holds.
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
-    expect(env.ANTHROPIC_MODEL).toBe("claude-opus-5");
+    expect(env.ANTHROPIC_MODEL).toBe("claude-opus-5-5");
   });
 
   it("reads an oauthAccount in Claude Code's config as a login too", () => {
     // Which of the two files holds the answer depends on the CLI version.
     writeFileSync(anthropicConfig(), JSON.stringify({ oauthAccount: { emailAddress: "owner@example.com" } }), "utf-8");
     expect(runWrapper({ CLAUDE_DS_PROVIDER: "anthropic" }).status).toBe(0);
-    expect(capturedEnv().ANTHROPIC_MODEL).toBe("claude-opus-5");
+    expect(capturedEnv().ANTHROPIC_MODEL).toBe("claude-opus-5-5");
   });
 
   it("refuses an anthropic run with neither a key nor a login, and starts nothing", () => {

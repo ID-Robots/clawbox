@@ -51,16 +51,29 @@ export const ANTHROPIC_API_KEY_CONFIG_KEY = "anthropic_api_key";
 
 /**
  * The models offered for an `anthropic` run. Deliberately a short list of the
- * two the device names elsewhere rather than whatever the account can reach:
+ * ones the device names elsewhere rather than whatever the account can reach:
  * an unknown model id is a failed run several minutes in, and the picker's
  * job is to make that impossible from here.
+ *
+ * Default first. `claude-opus-5` stays on the list behind the 5.5 default
+ * rather than retiring with it, because this list is the fence for what a
+ * caller ASKS FOR: the MCP tool's `model` enum, the run route, and a
+ * follow-up run that re-states the model of the run it continues all go
+ * through it, and a model that had left would be refused there by name.
+ *
+ * It is NOT the fence for what a run CARRIES. A resume that names nothing
+ * keeps the previous run's `requestedModel` without consulting this list at
+ * all (`applyProviderChoice` in coding-agent.ts), and a stored id is read
+ * back against a shape regex rather than against these entries
+ * (`normalizeRequestedModel`). So dropping an id here does not stop one
+ * already on a run record — it only stops the next caller naming it.
  */
-export const ANTHROPIC_MODELS = ["claude-opus-5", "claude-sonnet-5"] as const;
+export const ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"] as const;
 
 export type AnthropicModel = (typeof ANTHROPIC_MODELS)[number];
 
 /** The model an `anthropic` run gets when the caller named none. */
-export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5";
+export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5-5";
 
 /**
  * The catalogue key that names a provider in the owner's language.
