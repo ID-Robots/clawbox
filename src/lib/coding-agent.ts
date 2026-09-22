@@ -71,7 +71,7 @@ import os from "os";
 import path from "path";
 import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet, setMany as configSetMany } from "@/lib/config-store";
-import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts, writeRunReport } from "@/lib/coding-agent-artifacts";
+import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, pruneArtifacts, removeArtifacts, writeRunReport, type PrunedArtifact } from "@/lib/coding-agent-artifacts";
 import {
   type InputRefusalCode,
   type RunInputFile,
@@ -5787,6 +5787,17 @@ export function killRunLeftovers(id: string): CodingRun {
   return cloneRun(run);
 }
 
+/**
+ * The paths a prune removed, as the value of one progress line: a tree with a
+ * trailing slash, a link as it is. The first four by name, then a count — the
+ * feed caps a line, and four is what fits after the sentence.
+ */
+function prunedPaths(pruned: PrunedArtifact[]): string {
+  const names = pruned.map((p) => (p.reason === "interpreter" ? `${p.path}/` : p.path)).sort();
+  const shown = names.slice(0, 4).join(", ");
+  return names.length > 4 ? `${shown} (+${names.length - 4})` : shown;
+}
+
 function pushProgress(run: CodingRun, line: string): void {
   // Scrubbed FIRST, before the collapse and the cap: this feed is persisted on
   // the run record and answered by a route the MCP bearer reaches, and a tool
@@ -9565,6 +9576,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   const settled = run.status;
   trackSettleWork((async () => {
     await recordRunWork(run);
+    // Before "finished", so the owner reads why something left the evidence
+    // folder next to the run that put it there — and before any waiter or
+    // update can find it: see pruneArtifacts.
+    const pruned = await pruneArtifacts(run.id);
+    if (pruned.length > 0) pushProgress(run, RUNNER_STEP.evidencePruned(prunedPaths(pruned)));
     pushProgress(run, settled === "paused" ? RUNNER_STEP.paused : RUNNER_STEP.finished(settled));
     persist(true);
     wakeWaiters(run.id);

@@ -964,6 +964,7 @@ export const es: Record<string, string> = {
   "codingAgent.autoMergeHint": "Cuando todas las comprobaciones pasan, no queda ningún comentario de revisión sin responder y nadie ha pedido cambios, ClawBox fusiona el pull request con squash y borra su rama. Cualquier rama destino puede fusionarse así — beta, master, una rama de funcionalidad — excepto main, hacia la que ClawBox nunca fusiona por muy verde que esté el pull request. Desactivado por defecto.",
   "codingAgent.autoMergeFailed": "No se pudo cambiar el ajuste de fusión.",
   "codingAgent.stepReattached": "El servidor web se reinició; esta ejecución siguió y se retomó",
+  "codingAgent.stepEvidencePruned": "Quitado de la carpeta de evidencias, donde no caben entornos ni enlaces hacia fuera de ella: {paths}",
   "codingAgent.stepReviewLoopTurn": "Ronda de revisión de {id}",
   "codingAgent.stepReviewLoopRound": "Ronda de revisión {round} de {id}",
   "codingAgent.stepPullRequestAdopted": "Pull request #{number} hacia {base} recogido, abierto por el propio run",

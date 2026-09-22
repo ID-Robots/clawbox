@@ -71,6 +71,7 @@ export type ProgressLabelKey =
   | "worktreeMerged"
   | "worktreeRemoved"
   | "worktreeKept"
+  | "evidencePruned"
   | "workingOnBranch"
   | "noPullRequest"
   | "committed"
@@ -287,6 +288,12 @@ export const RUNNER_STEP = {
   worktreeRemoved: "The run's copy of the project was removed; it left nothing on its branch",
   /** Why the copy is still on disk: unmerged work, a conflict, a pull request that owns the branch. */
   worktreeKept: (reason: string) => `The run's copy of the project was kept: ${reason}`,
+  /**
+   * What the settle took out of the run's evidence folder (pruneArtifacts in
+   * coding-agent-artifacts.ts): an environment a run built there, or a link
+   * leading out of it. `paths` are relative to the folder — names, not words.
+   */
+  evidencePruned: (paths: string) => `Removed from the evidence folder, where environments and links out of it do not belong: ${paths}`,
   noPullRequest: (reason: string) => `No pull request: ${reason}`,
   committed: (sha: string, newRepository: boolean) => `Committed as ${sha}${newRepository ? " (new repository)" : ""}`,
   committedByRun: (sha: string) => `Committed by the run itself as ${sha}`,
@@ -424,6 +431,7 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Merged into (.+) and the run's copy of the project removed$/, labelKey: "worktreeMerged", icon: "merge", params: (m) => ({ base: m[1] }) },
   { re: /^The run's copy of the project was removed; it left nothing on its branch$/, labelKey: "worktreeRemoved", icon: "delete_sweep" },
   { re: /^The run's copy of the project was kept: (.+)$/, labelKey: "worktreeKept", icon: "inventory_2", params: (m) => ({ reason: m[1] }) },
+  { re: /^Removed from the evidence folder, where environments and links out of it do not belong: (.+)$/, labelKey: "evidencePruned", icon: "delete_sweep", params: (m) => ({ paths: m[1] }) },
   { re: /^Working on (.+), for a pull request into (.+)$/, labelKey: "workingOnBranch", icon: "call_split", params: (m) => ({ branch: m[1], base: m[2] }) },
   { re: /^No pull request: (.+)$/, labelKey: "noPullRequest", icon: "block", params: (m) => ({ reason: m[1] }) },
   { re: /^Committed as (\S+) \(new repository\)$/, labelKey: "committedNewRepository", icon: "commit", params: (m) => ({ sha: m[1] }) },

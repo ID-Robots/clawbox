@@ -955,6 +955,7 @@ export const bg: Record<string, string> = {
   "codingAgent.autoMergeHint": "Когато всяка проверка е минала, няма коментар от преглед без отговор и никой не е поискал промени, ClawBox слива заявката със squash и изтрива клона й. Всеки целеви клон може да бъде слят така — beta, master, клон за функционалност — освен main, към който ClawBox никога не слива, колкото и зелена да е заявката. Изключено по подразбиране.",
   "codingAgent.autoMergeFailed": "Настройката за сливане не можа да бъде променена.",
   "codingAgent.stepReattached": "Уеб сървърът се рестартира; това изпълнение продължи и беше поето отново",
+  "codingAgent.stepEvidencePruned": "Премахнато от папката с доказателства, в която не се държат среди и връзки навън: {paths}",
   "codingAgent.stepReviewLoopTurn": "Кръг на преглед за {id}",
   "codingAgent.stepReviewLoopRound": "Раунд {round} от прегледа на {id}",
   "codingAgent.stepPullRequestAdopted": "Поета заявка #{number} към {base}, отворена от самото изпълнение",

@@ -969,6 +969,7 @@ export const nl: Record<string, string> = {
   "codingAgent.autoMergeHint": "Als elke controle geslaagd is, geen reviewopmerking onbeantwoord is en niemand om wijzigingen heeft gevraagd, voegt ClawBox de pull request samen met squash en verwijdert de branch. Elke doelbranch mag zo worden samengevoegd — beta, master, een featurebranch — behalve main, waarin ClawBox nooit samenvoegt hoe groen de pull request ook is. Standaard uit.",
   "codingAgent.autoMergeFailed": "Kon de samenvoeginstelling niet wijzigen.",
   "codingAgent.stepReattached": "De webserver is herstart; deze run liep door en is weer opgepakt",
+  "codingAgent.stepEvidencePruned": "Verwijderd uit de bewijsmap, waar omgevingen en links naar buiten niet thuishoren: {paths}",
   "codingAgent.stepReviewLoopTurn": "Reviewronde voor {id}",
   "codingAgent.stepReviewLoopRound": "Reviewronde {round} voor {id}",
   "codingAgent.stepPullRequestAdopted": "Pull request #{number} naar {base} overgenomen, geopend door de run zelf",

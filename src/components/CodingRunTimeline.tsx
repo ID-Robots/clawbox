@@ -64,6 +64,7 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   worktreeMerged: "codingAgent.stepWorktreeMerged",
   worktreeRemoved: "codingAgent.stepWorktreeRemoved",
   worktreeKept: "codingAgent.stepWorktreeKept",
+  evidencePruned: "codingAgent.stepEvidencePruned",
   workingOnBranch: "codingAgent.stepWorkingOnBranch",
   noPullRequest: "codingAgent.stepNoPullRequest",
   committed: "codingAgent.stepCommitted",

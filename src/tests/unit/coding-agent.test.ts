@@ -22,6 +22,7 @@ import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
 import { decodeHarnessStdin, readFirstTurn } from "@/tests/helpers/fake-harness";
+import { RUNNER_STEP } from "@/lib/coding-agent-progress";
 
 // Starts real processes through @/lib/coding-agent rather than importing
 // child_process itself, and CI has flaked on it both ways in one day — a
@@ -2298,6 +2299,50 @@ describe("the report", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+/**
+ * A settled run's evidence folder keeps files, not environments: a Python
+ * environment a run built there left a `venv/bin/python` pointing out of the
+ * box's data/, and the box's own `next build` refused it — every update failed
+ * until someone deleted it by hand.
+ */
+describe("the evidence folder at settle", () => {
+  beforeEach(() => readyDevice());
+
+  const evidenceOf = (id: string) => path.join(root, "data", "coding-agent-artifacts", id);
+
+  it("drops an environment and a dangling link the run left there, and says so in the run's progress", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      'mkdir -p "$CLAWBOX_RUN_ARTIFACTS_DIR/venv-attempt/venv/bin"',
+      'ln -s /nonexistent/python3.12 "$CLAWBOX_RUN_ARTIFACTS_DIR/venv-attempt/venv/bin/python"',
+      'ln -s /nonexistent/worktree/out.txt "$CLAWBOX_RUN_ARTIFACTS_DIR/latest.txt"',
+      'printf "1 passed\\n" > "$CLAWBOX_RUN_ARTIFACTS_DIR/tests.txt"',
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+
+    expect(done.status).toBe("completed");
+    const dir = evidenceOf(run.id);
+    expect(fs.readdirSync(dir).sort()).toEqual(["report.md", "tests.txt", "venv-attempt"]);
+    expect(fs.readdirSync(path.join(dir, "venv-attempt"))).toEqual([]);
+    const line = done.progress.find((l) => l.startsWith("Removed from the evidence folder"));
+    expect(line).toBe(RUNNER_STEP.evidencePruned("latest.txt, venv-attempt/venv/"));
+    // Said before the run is reported finished, beside the run that did it.
+    expect(done.progress.indexOf(line!)).toBeLessThan(done.progress.findIndex((l) => l.startsWith("Finished")));
+  });
+
+  it("says nothing when there was nothing to drop", async () => {
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+
+    expect(done.progress.some((l) => l.startsWith("Removed from the evidence folder"))).toBe(false);
   });
 });
 

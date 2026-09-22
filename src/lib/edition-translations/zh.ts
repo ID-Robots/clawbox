@@ -979,6 +979,7 @@ export const zh: Record<string, string> = {
   "codingAgent.autoMergeHint": "当所有检查都通过、没有评审评论未被回复、也没有人要求修改时，ClawBox 会以压缩方式合并该拉取请求并删除其分支。任何目标分支都可以这样合并 —— beta、master、功能分支 —— 唯独 main 除外：无论拉取请求多么绿，ClawBox 都绝不合并进 main。默认关闭。",
   "codingAgent.autoMergeFailed": "无法修改合并设置。",
   "codingAgent.stepReattached": "Web 服务器已重启；此运行仍在继续，并已重新接管",
+  "codingAgent.stepEvidencePruned": "已从证据文件夹中移除（运行环境和指向文件夹外的链接不应放在这里）：{paths}",
   "codingAgent.stepReviewLoopTurn": "{id} 的评审轮次",
   "codingAgent.stepReviewLoopRound": "{id} 的第 {round} 轮评审",
   "codingAgent.stepPullRequestAdopted": "已接管指向 {base} 的拉取请求 #{number}，由运行自己创建",
