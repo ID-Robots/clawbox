@@ -32,9 +32,11 @@ import {
   armIdleExit,
   armMailboxWatch,
   IDLE_EXIT_DEFAULT_MS,
+  IDLE_EXIT_MAX_MS,
   resolveIdleExitMs,
   type IdleExit,
 } from "../../../mcp/clawbox-mcp";
+import { hasRunningJobs } from "../../../mcp/lib/jobs";
 import { createRegistrar } from "../../../mcp/lib/register";
 import { registerEmailTools } from "../../../mcp/tools/email";
 
@@ -108,6 +110,10 @@ afterEach(async () => {
   for (const h of open.splice(0)) {
     await h.close().catch(() => {});
   }
+  // In the hook, not at the end of the body that stubs it: a case that failed
+  // part way through would otherwise leave the global clock fake for every case
+  // after it.
+  vi.useRealTimers();
   vi.restoreAllMocks();
   delete process.env.CLAWBOX_MCP_IDLE_EXIT_MS;
 });
@@ -161,7 +167,12 @@ async function connected(): Promise<
 /** Arm the idle rule on a connected server with the test's own clock. */
 function arm(
   h: Harness,
-  overrides: Partial<{ idleMs: number; exit: () => void; log: (line: string) => void }> = {},
+  overrides: Partial<{
+    idleMs: number;
+    busy: () => boolean;
+    exit: () => void;
+    log: (line: string) => void;
+  }> = {},
 ): { idle: IdleExit | null; clock: ReturnType<typeof fakeClock>; exits: () => number; lines: string[] } {
   const clock = fakeClock();
   const lines: string[] = [];
@@ -301,6 +312,38 @@ describe("the MCP server's idle self-exit", () => {
     expect(exits()).toBe(1);
   });
 
+  it("waits again, and again, while a background job is still running", async () => {
+    // `bash` with `run_in_background` answers at once and leaves a DETACHED
+    // shell running, with its handle and its output in this process's memory
+    // (mcp/lib/jobs.ts). Exiting would not stop that build, only hide it: every
+    // later `job_status` would answer "no background job with that id". So the
+    // period restarts for as long as the job runs — no request is outstanding,
+    // and nothing but this check will ever call back about it.
+    const h = await connected();
+    let jobRunning = true;
+    const { clock, exits } = arm(h, { busy: () => jobRunning });
+
+    // Three whole periods with the harness silent throughout.
+    clock.advance(IDLE_MS * 3);
+    expect(exits()).toBe(0);
+    // Deferred, not abandoned: something is still armed to ask again.
+    expect(clock.pending()).toBe(1);
+
+    jobRunning = false;
+    // The deferral is a whole period, so the answer is not acted on early…
+    clock.advance(IDLE_MS - 1);
+    expect(exits()).toBe(0);
+    // …and is acted on at the next boundary.
+    clock.advance(1);
+    expect(exits()).toBe(1);
+  });
+
+  it("asks about background jobs by default, so a caller cannot forget to", () => {
+    // The default is `hasRunningJobs`, not `() => false`: wiring it from
+    // main() instead would let the next caller orphan somebody's build.
+    expect(hasRunningJobs()).toBe(false);
+  });
+
   it("does nothing at all when the period is 0", async () => {
     const h = await connected();
     const onmessage = h.transport.onmessage;
@@ -366,6 +409,39 @@ describe("the MCP server's idle self-exit", () => {
     // And it is the env that production reads, with no argument.
     process.env.CLAWBOX_MCP_IDLE_EXIT_MS = "45000";
     expect(resolveIdleExitMs()).toBe(45_000);
+  });
+
+  it("clamps a period longer than a timer can hold, instead of firing in 1ms", () => {
+    // Measured on both runtimes: `setTimeout` past 2^31-1 ms answers
+    // `TimeoutOverflowWarning: ... Timeout duration was set to 1` and fires
+    // immediately. Thirty days — what an operator writes when they mean
+    // "effectively never", rather than the `0` that says it properly — would
+    // have torn down every session the instant it connected, which is the
+    // exact opposite of the instruction. Bigger must never mean sooner.
+    expect(IDLE_EXIT_MAX_MS).toBe(2_147_483_647);
+    expect(resolveIdleExitMs(String(IDLE_EXIT_MAX_MS))).toBe(IDLE_EXIT_MAX_MS);
+    expect(resolveIdleExitMs("2592000000")).toBe(IDLE_EXIT_MAX_MS);
+    expect(resolveIdleExitMs("1e21")).toBe(IDLE_EXIT_MAX_MS);
+    // `Infinity` is not a number of milliseconds at all, so it reads as a typo.
+    expect(resolveIdleExitMs("Infinity")).toBe(IDLE_EXIT_DEFAULT_MS);
+  });
+
+  it("never asks the runtime for a delay the runtime would shorten", async () => {
+    // The clamp where it matters: what actually reaches `setTimeout`.
+    const h = await connected();
+    const clock = fakeClock();
+    const asked: number[] = [];
+    armIdleExit(h.server, h.transport, {
+      idleMs: resolveIdleExitMs("2592000000"),
+      setTimer: (fire, ms) => {
+        asked.push(ms);
+        return clock.setTimer(fire, ms);
+      },
+      clearTimer: clock.clearTimer,
+      log: () => {},
+      exit: () => {},
+    });
+    expect(asked).toEqual([IDLE_EXIT_MAX_MS]);
   });
 
   it("ships a period an idle session is actually reaped within", () => {

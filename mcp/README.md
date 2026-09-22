@@ -65,7 +65,11 @@ next request reconnects`); the reconnect costs 0.31–0.35 s to connect plus
 The rule is edition-neutral — the same process, the same reconnect on Hermes —
 and it is not a timeout on your work: **a request still in flight defers the
 exit for as long as it runs**, so a `bash` command that sleeps for an hour is
-never cut off, and the clock only restarts once its result has gone back. Set
+never cut off, and the clock only restarts once its result has gone back. A
+**background job defers it too** — `bash` with `run_in_background` answers at
+once but leaves a detached shell whose handle and output live in this process,
+so the period simply starts again, as often as it takes, until `job_status`
+would call that job finished. Set
 `CLAWBOX_MCP_IDLE_EXIT_MS` to another number of milliseconds to move it, or to
 `0` to switch it off and keep every server for the life of the harness.
 
@@ -1203,7 +1207,7 @@ and it drags server-only Next.js code into this stdio process.
 | `CLAWBOX_MCP_PROFILE` | `full` (default), `core` or `browser` pins the tool set (`browser` = the browser family only — what a delegated coding-agent run gets); `auto` makes it FOLLOW THE MODEL — a device whose active provider is the on-device one and whose model is small (≤8B, or a ≤16k context) registers `core`, everything else `full`. `auto` is opt-in because this process sees only the persisted provider, not the chat header's per-turn override. See `mcp/lib/profile.ts` and `docs/hermes-reasoning-levels.md`. |
 | `CLAWBOX_SMALL_MODEL_PROFILE` | `off` disables the `auto` selection above (the explicit pins still work). |
 | `CLAWBOX_MCP_CODING_TOOLS` | `1` forces the coding family onto Hermes. Debugging only. |
-| `CLAWBOX_MCP_IDLE_EXIT_MS` | Milliseconds with **no request in flight** after which the server closes its transport and exits 0, so the harness reconnects on the next call. Default `600000` (10 min); `0` disables it. A value that is not a non-negative number falls back to the default rather than to `0` — see "The server hangs up when it is idle". |
+| `CLAWBOX_MCP_IDLE_EXIT_MS` | Milliseconds with **no request in flight** after which the server closes its transport and exits 0, so the harness reconnects on the next call. Default `600000` (10 min); `0` disables it. A value that is not a non-negative number falls back to the default rather than to `0`, and anything past `2147483647` (24.8 days, the longest delay a timer can hold — both runtimes turn a larger one into 1 ms) is clamped to it, so a bigger number never means a shorter wait. See "The server hangs up when it is idle". |
 
 ## Work owned by others
 

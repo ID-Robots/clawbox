@@ -58,6 +58,7 @@ import type { JSONRPCMessage, RequestId } from "@modelcontextprotocol/sdk/types.
 import { API_BASE, authHeader, primeApiToken } from "./lib/api";
 import { buildContext, type McpContext } from "./lib/context";
 import { installEdition, resolveAppHarness, resolveEdition, type Ed } from "./lib/edition";
+import { hasRunningJobs } from "./lib/jobs";
 import { resolveProfile } from "./lib/profile";
 import { createRegistrar, type Profile, type Registrar } from "./lib/register";
 import { registerAiTools } from "./tools/ai";
@@ -304,6 +305,19 @@ export function armMailboxWatch(
 export const IDLE_EXIT_DEFAULT_MS = 10 * 60 * 1000;
 
 /**
+ * The longest delay a timer can actually hold: 2^31-1 ms, about 24.8 days.
+ *
+ * MEASURED, because getting this wrong inverts the setting. Node and Bun both
+ * answer a larger delay with `TimeoutOverflowWarning: ... Timeout duration was
+ * set to 1` and then fire in ONE MILLISECOND — so `CLAWBOX_MCP_IDLE_EXIT_MS`
+ * set to thirty days, which is what an operator reaches for when they mean
+ * "effectively never", would have exited every session the instant it
+ * connected. Clamping keeps the promise the variable makes: a bigger number
+ * always means a longer wait, never a shorter one.
+ */
+export const IDLE_EXIT_MAX_MS = 2_147_483_647;
+
+/**
  * Read `CLAWBOX_MCP_IDLE_EXIT_MS`: milliseconds, `0` to disable, anything
  * unreadable falls back to the default.
  *
@@ -315,12 +329,17 @@ export function resolveIdleExitMs(raw = process.env.CLAWBOX_MCP_IDLE_EXIT_MS): n
   if (raw === undefined || raw.trim() === "") return IDLE_EXIT_DEFAULT_MS;
   const ms = Number(raw);
   if (!Number.isFinite(ms) || ms < 0) return IDLE_EXIT_DEFAULT_MS;
-  return Math.floor(ms);
+  return Math.min(Math.floor(ms), IDLE_EXIT_MAX_MS);
 }
 
 export interface IdleExitOptions {
   /** Overridden by tests only; production reads the env above. */
   idleMs?: number;
+  /**
+   * Work this process owns that has no request outstanding. Defaults to
+   * `hasRunningJobs` — see the note on deferral in `armIdleExit`.
+   */
+  busy?: () => boolean;
   /** The clock seam. Production uses `setTimeout`, `unref`ed. Tests pass a fake. */
   setTimer?: (fire: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -359,7 +378,16 @@ export interface IdleExit {
  * A REQUEST IN FLIGHT IS NOT IDLE. An id arrives, and the timer is taken down
  * until the answer carrying that id goes out — so a `bash` call that sleeps for
  * an hour is never cut off mid-run, and the clock only starts again once the
- * result has been delivered. A cancellation is the one way a request ends
+ * result has been delivered. NEITHER IS A BACKGROUND JOB: `bash` with
+ * `run_in_background` answers at once and leaves a `detached` shell running,
+ * whose handle and output buffer live in this process's memory
+ * (mcp/lib/jobs.ts). Exiting would not stop that build, only hide it — every
+ * later `job_status` would answer "no background job with that id" — so `busy`
+ * defers the exit by another whole period instead, again and again until the
+ * job is done. It defers rather than cancels because the job may outlive any
+ * number of periods and nothing must forget to re-check.
+ *
+ * A cancellation is the one way a request ends
  * without an answer (`Protocol._onrequest` aborts and deliberately sends
  * nothing), so `notifications/cancelled` releases its id by hand; without that,
  * one cancelled call would pin this process open for the life of the gateway,
@@ -389,6 +417,9 @@ export function armIdleExit(
     });
   const clearTimer =
     options.clearTimer ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  // Defaulted rather than wired from main(), so that a caller cannot forget it
+  // and orphan somebody's build.
+  const busy = options.busy ?? hasRunningJobs;
   const log = options.log ?? ((line: string) => console.error(line));
   const exit =
     options.exit
@@ -419,9 +450,16 @@ export function armIdleExit(
 
   function fire(): void {
     handle = null;
-    // Belt and braces: `rearm` already refuses to arm while a request is out,
-    // so this only catches a fake clock firing a handle it was asked to drop.
-    if (stopped || inFlight.size > 0) return;
+    if (stopped) return;
+    // Not idle after all. `inFlight` is belt and braces — `rearm` already
+    // refuses to arm while a request is out, and the answer will re-arm — but
+    // `busy()` is the case that only this check can catch: work with no request
+    // outstanding, which nothing else will call back about. Wait another whole
+    // period and ask again.
+    if (inFlight.size > 0 || busy()) {
+      rearm();
+      return;
+    }
     stopped = true;
     log(
       `[clawbox-mcp] idle for ${Math.round(idleMs / 1000)}s with no request in flight;`
