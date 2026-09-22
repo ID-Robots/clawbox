@@ -48,9 +48,27 @@ NAMED_EARLY_EXIT_SECS="${NAMED_EARLY_EXIT_SECS:-60}"
 # What cloudflared says when Cloudflare will not run this tunnel with this
 # token: a malformed token, a deleted tunnel, a rotated secret.
 NAMED_REFUSAL_RE='Tunnel token is not valid|Tunnel not found|[Ii]nvalid tunnel secret'
-# Same rules as src/lib/named-tunnel.ts.
-NAMED_HOST_RE='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.clawbox\.tech$'
-NAMED_TOKEN_RE='^[A-Za-z0-9+/_=-]{32,4096}$'
+# Same rules as src/lib/named-tunnel.ts, but never written as a bounded repeat
+# `{n,m}`: bash's `[[ =~ ]]` uses glibc regex, which compiles a bounded repeat by
+# expanding it into one NFA state per permitted repetition. Matching `{32,4096}`
+# once therefore allocated ~260 MB, and the arena was not handed back afterwards
+# — so the supervisor, which is alive for the whole tunnel lifetime, carried it
+# until the tunnel stopped. On an 8 GB ClawBox that was 260 MB of swap for a
+# length check. Measured on this script with a stub cloudflared and a valid
+# credential on file:
+#
+#   with {32,4096}   max RSS 273920 kB, live supervisor VmSize 268404 kB
+#   with +           max RSS   3968 kB, live supervisor VmSize   7800 kB
+#
+# An unbounded character class plus an explicit length check accepts and rejects
+# exactly the same strings (src/tests/unit/run-tunnel-named.test.ts pins the
+# boundaries) and costs nothing.
+NAMED_HOST_SUFFIX='.clawbox.tech'
+NAMED_HOST_LABEL_RE='^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+NAMED_HOST_LABEL_MAX=63
+NAMED_TOKEN_RE='^[A-Za-z0-9+/_=-]+$'
+NAMED_TOKEN_MIN=32
+NAMED_TOKEN_MAX=4096
 
 # Nothing inherited may pose as the credential; the named run sets its own.
 unset TUNNEL_TOKEN
@@ -86,6 +104,23 @@ record_url() {
   echo "[run-tunnel] captured URL: $url"
 }
 
+# One DNS label of 1..63 characters under .clawbox.tech, lower case.
+valid_named_host() {
+  local host="$1" label
+  label="${host%"$NAMED_HOST_SUFFIX"}"
+  # No suffix stripped means the name is not under .clawbox.tech at all.
+  [ "$label" != "$host" ] || return 1
+  [ -n "$label" ] && [ "${#label}" -le "$NAMED_HOST_LABEL_MAX" ] || return 1
+  [[ "$label" =~ $NAMED_HOST_LABEL_RE ]]
+}
+
+# 32..4096 characters of the base64url alphabet.
+valid_named_token() {
+  local token="$1"
+  [ "${#token}" -ge "$NAMED_TOKEN_MIN" ] && [ "${#token}" -le "$NAMED_TOKEN_MAX" ] || return 1
+  [[ "$token" =~ $NAMED_TOKEN_RE ]]
+}
+
 # Parse the credential line by line — never `source` it. Sets NAMED_HOSTNAME
 # and NAMED_TOKEN; fails when the file is absent, empty or malformed.
 NAMED_HOSTNAME=""
@@ -101,8 +136,8 @@ read_named_credential() {
       token=*) token="${line#token=}" ;;
     esac
   done < "$NAMED_CRED_FILE"
-  [[ "$host" =~ $NAMED_HOST_RE ]] || return 1
-  [[ "$token" =~ $NAMED_TOKEN_RE ]] || return 1
+  valid_named_host "$host" || return 1
+  valid_named_token "$token" || return 1
   NAMED_HOSTNAME="$host"
   NAMED_TOKEN="$token"
 }

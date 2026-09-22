@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -36,6 +36,43 @@ const FAKE_URL = "https://fake-observability-456.trycloudflare.com";
 let root: string;
 let fakeBin: string;
 
+// Fixtures get their own process group so one signal reaps the script, its
+// pipeline subshell and the fake cloudflared's `while true` loop together. Sent
+// only on the happy path, that signal is missed whenever a test fails or vitest
+// aborts first, and the group outlives the run — measured on the box as six
+// stray groups still alive hours later. Everything started here is recorded and
+// reaped in afterEach instead, pass or fail.
+const spawned: ChildProcess[] = [];
+
+function startFixture(scriptPath: string, cloudflaredBin: string): ChildProcess {
+  const child = spawn("bash", [scriptPath], {
+    env: { ...process.env, CLAWBOX_ROOT: root, CLOUDFLARED_BIN: cloudflaredBin },
+    detached: true, // its own process group, so we can signal the group
+    stdio: "ignore",
+  });
+  spawned.push(child);
+  return child;
+}
+
+function reapSpawned() {
+  let failure: unknown;
+  for (const child of spawned.splice(0)) {
+    if (child.pid == null) continue;
+    try {
+      // A negative pid signals the group. The group outliving its leader is
+      // exactly the leak being closed, so signal it even once the child exited.
+      process.kill(-child.pid, "SIGTERM");
+    } catch (err) {
+      // ESRCH: nothing left in the group — the outcome this is here to get.
+      if ((err as NodeJS.ErrnoException).code !== "ESRCH" && !failure) failure = err;
+    }
+  }
+  if (failure) throw failure;
+}
+
+// Belt and braces for what afterEach cannot cover: the worker torn down mid-test.
+process.once("exit", reapSpawned);
+
 beforeEach(() => {
   root = mkdtempSync(path.join(os.tmpdir(), "clawbox-run-tunnel-"));
   fakeBin = path.join(root, "fake-cloudflared");
@@ -48,6 +85,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Before the temp dir goes: the strays on the box were still running against a
+  // CLAWBOX_ROOT that had already been deleted under them.
+  reapSpawned();
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -55,11 +95,7 @@ const dataFile = (name: string) => path.join(root, "data", "cloudflared", name);
 
 /** Start the script, wait until it has published a URL, then SIGTERM its group. */
 async function runAndStop(scriptPath: string): Promise<number | null> {
-  const child = spawn("bash", [scriptPath], {
-    env: { ...process.env, CLAWBOX_ROOT: root, CLOUDFLARED_BIN: fakeBin },
-    detached: true, // its own process group, so we can signal the group
-    stdio: "ignore",
-  });
+  const child = startFixture(scriptPath, fakeBin);
 
   const exited = new Promise<number | null>((resolve) => {
     child.on("exit", (code, signal) => resolve(signal ? null : code));
@@ -103,10 +139,7 @@ describe("run-tunnel.sh — a user-requested stop is not a failure", () => {
 
   it("still reports a real failure honestly", async () => {
     // cloudflared missing -> exit 1, and that must stay 1.
-    const child = spawn("bash", [RUN_TUNNEL], {
-      env: { ...process.env, CLAWBOX_ROOT: root, CLOUDFLARED_BIN: path.join(root, "nope") },
-      stdio: "ignore",
-    });
+    const child = startFixture(RUN_TUNNEL, path.join(root, "nope"));
     const code = await new Promise<number | null>((resolve) =>
       child.on("exit", (c) => resolve(c)),
     );
