@@ -284,19 +284,40 @@ export function isOpenclawStatePath(abs: string): boolean {
 }
 
 /**
- * Is this path inside one of the agent workspaces the carve-out opens?
+ * Is this path inside one of the agent workspaces the carve-out opens — and
+ * still inside it where the path ENDS?
  *
- * True for a path the carve-out COVERS, whatever some other rule then says
- * about it — a `.env` in the workspace is a workspace file that is refused, not
- * a credential store the agent should stay quiet about. Judged on the first
- * `.openclaw` segment; `isProtectedFilePath` is what answers whether the path
- * is actually allowed.
+ * True for a path this rule allows, and also for one some OTHER rule then
+ * refuses: a `.env` in the workspace is a workspace file that was refused, not
+ * a credential store the agent should stay quiet about. False as soon as the
+ * path leaves the carve-out again — `workspace/.openclaw/credentials/x` and
+ * `workspace/../credentials/x` both BEGIN in a workspace and end somewhere the
+ * rule refuses, and a path this rule refuses is one the user must not be told
+ * the name of.
  */
 export function isOpenclawWorkspacePath(abs: string): boolean {
   if (!abs.includes(OPENCLAW_DIR)) return false;
-  const segs = toPatternPath(abs).split("/");
+  const p = toPatternPath(abs);
+  const segs = p.split("/");
   const at = segs.indexOf(OPENCLAW_DIR);
-  return at >= 0 && OPENCLAW_AGENT_SUBTREE_RE.test(segs[at + 1] ?? "");
+  if (at < 0 || !OPENCLAW_AGENT_SUBTREE_RE.test(segs[at + 1] ?? "")) return false;
+  return !isProtectedOpenclawPath(p);
+}
+
+/**
+ * The `~/.openclaw` verdict for a path-shaped string a caller assembled itself,
+ * rather than for a resolved absolute path.
+ *
+ * It exists for the `bash` pre-flight (mcp/lib/guard.ts), which sees a command
+ * line and rebuilds `/.openclaw<tail>` out of each mention in it. That surface
+ * gets THIS function rather than a rule of its own, because a shell string is
+ * where a spelling the file tools refuse would otherwise be run instead: with a
+ * `$HOME/...` spelling nothing resolves the token, so the text rule is the only
+ * one left, and a text rule that judged only the first segment let a second
+ * `.openclaw` — or a `..` — out of the carve-out again.
+ */
+export function isDeniedOpenclawPath(abs: string): boolean {
+  return isProtectedOpenclawPath(toPatternPath(abs));
 }
 
 /**

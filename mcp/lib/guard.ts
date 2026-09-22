@@ -20,10 +20,10 @@ import { statSync } from "fs";
 import { basename, resolve, isAbsolute, normalize, join } from "path";
 import {
   canonicalPath,
+  isDeniedOpenclawPath,
   isOpenclawStatePath,
   isOpenclawWorkspacePath,
   isProtectedResolvedPath,
-  OPENCLAW_AGENT_SUBTREE_RE,
 } from "../../src/lib/file-guard";
 // TASK-605's protected-path rule, from the module the OpenClaw hook plugin
 // carries into ~/.openclaw/extensions. It lives there because a plugin copied
@@ -186,18 +186,26 @@ const OPENCLAW_MENTION_RE = /(?:^|[^\w.-])\.openclaw(?![\w-])([^\s'"`;&|<>()]*)/
  * starts with a `$`, so nothing resolves it and only the text is left. Three
  * refusals, all on the spelling:
  *
- *   - a mention with no path after it (`ls ~/.openclaw`). `bash` output is NOT
- *     filtered the way `list_directory` is, so a listing there prints the
- *     credential names this guard exists to keep out of one;
- *   - a first segment that is not `workspace` or `workspace-<name>`;
- *   - a `..` anywhere after it, which is how a workspace path stops being one.
+ *   - a mention with no path after it (`ls ~/.openclaw`, `.openclaw.json`).
+ *     `bash` output is NOT filtered the way `list_directory` is, so a listing
+ *     there prints the credential names this guard exists to keep out of one;
+ *   - a path the file tools would refuse, judged by THEIR rule on the tail.
+ *
+ * The tail is handed to `isDeniedOpenclawPath` whole rather than picked apart
+ * here, and that is the fix for the hole a first-segment test left: `$HOME/
+ * .openclaw/workspace/.openclaw/credentials/x` and `…/workspace/../credentials/
+ * x` both start with an allowed segment and end in the credential store, and
+ * with a `$HOME` spelling the token pass above cannot resolve the token, so
+ * this rule is the only one left to see it. One rule for the shell and the file
+ * tools, so a spelling the tools refuse cannot be run by the shell instead.
  */
 export function openclawDeniedInCommand(command: string): boolean {
   for (const [, tail] of command.matchAll(OPENCLAW_MENTION_RE)) {
     if (!tail.startsWith("/")) return true;
-    const segs = tail.split("/").slice(1);
-    if (segs.includes("..")) return true;
-    if (!OPENCLAW_AGENT_SUBTREE_RE.test(segs[0])) return true;
+    // The literal is the one the regex above already matched; this rebuilds the
+    // path that mention names, with no home in front of it — the rule is about
+    // the segments after `.openclaw` and nothing before it.
+    if (isDeniedOpenclawPath(`/.openclaw${tail}`)) return true;
   }
   return false;
 }
