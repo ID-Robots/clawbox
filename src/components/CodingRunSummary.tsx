@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { renderText } from "@/lib/chat-markdown";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
+import { MARKDOWN_PROSE } from "./coding-agent-ui";
 
 /**
  * A run's summary, as the document it wrote: when the run filed a
@@ -43,7 +44,7 @@ export default function CodingRunSummary({ runId, report, summary, live }: {
         <div
           data-testid="coding-agent-summary"
           data-source={text !== null ? "report" : "summary"}
-          className="mt-2 text-xs text-[var(--text-secondary)] leading-relaxed min-w-0 break-words [&_img]:max-w-full [&_h1]:text-sm [&_h1]:font-semibold [&_h1]:text-[var(--text-primary)] [&_h1]:mt-2 [&_h2]:text-xs [&_h2]:font-semibold [&_h2]:text-[var(--text-primary)] [&_h2]:mt-2 [&_h3]:font-semibold [&_h3]:text-[var(--text-primary)] [&_h3]:mt-1.5 [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-black/30 [&_pre]:p-2 [&_code]:font-mono"
+          className={`mt-2 ${MARKDOWN_PROSE}`}
         >
           {renderText(body, t("chat.table"))}
         </div>
