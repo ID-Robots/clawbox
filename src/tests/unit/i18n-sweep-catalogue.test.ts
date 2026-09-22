@@ -100,14 +100,17 @@ const CHAT_KEYS = [
  * camel forms, one per code `clawkeep-memory.ts` can actually send.
  */
 const MEMORY_KEYS = [
+  "clawkeep.memory.error.indexRebuildRequired",
   "clawkeep.memory.error.indexIdentityMismatched",
   "clawkeep.memory.error.indexIdentityMissing",
+  "clawkeep.memory.error.providerMismatch",
   "clawkeep.memory.error.providerDegraded",
   "clawkeep.memory.error.statusUnavailable",
   "clawkeep.memory.runError.timedOut",
   "clawkeep.memory.runError.interrupted",
   "clawkeep.memory.runError.migrationBusy",
   "clawkeep.memory.runError.openclawMissing",
+  "clawkeep.memory.runError.providerMismatch",
   "clawkeep.memory.runError.indexFailed",
 ];
 

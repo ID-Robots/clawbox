@@ -65,8 +65,10 @@ export type MemoryRunStatus = "idle" | "running" | "succeeded" | "failed";
  * words for itself.
  */
 export type MemoryStatusErrorCode =
+  | "index_rebuild_required"
   | "index_identity_mismatched"
   | "index_identity_missing"
+  | "provider_mismatch"
   | "provider_degraded"
   | "status_unavailable";
 
@@ -75,6 +77,7 @@ export type MemoryRunErrorCode =
   | "interrupted"
   | "migration_busy"
   | "openclaw_missing"
+  | "provider_mismatch"
   | "index_failed";
 
 const RUN_ERROR_CODES = new Set<string>([
@@ -82,6 +85,7 @@ const RUN_ERROR_CODES = new Set<string>([
   "interrupted",
   "migration_busy",
   "openclaw_missing",
+  "provider_mismatch",
   "index_failed",
 ]);
 
@@ -149,6 +153,25 @@ export interface ClawKeepMemoryStatus {
   health: "healthy" | "degraded" | "unavailable" | "unknown";
   semanticAvailable: boolean;
   indexIdentity: "valid" | "missing" | "mismatched" | "unknown";
+  /**
+   * WHY the identity does not match, as the core's own short name for it —
+   * `chunking_version` for the 4.0 case, empty when it names none.
+   *
+   * A name, never the core's sentence: the reason string is CLI-generated
+   * English and this field is read by a panel that words itself in ten
+   * languages. It is also what separates "a different model built this index"
+   * from "the update changed how text is cut up", which are the same
+   * `mismatched` to everything else and two different sentences to the owner.
+   */
+  indexIdentityCode: string;
+  /**
+   * The provider the CONFIG asked for, when the core reports it, as against
+   * `provider`, which is the one it actually ended up using. They differ
+   * exactly when the core could not honour the configuration and fell back —
+   * the state a box lands in when `memory.search` survives an update
+   * half-written. Empty on a core that does not report it.
+   */
+  requestedProvider: string;
   /** Stable, non-secret digest of provider/model/sources. */
   fingerprint: string;
   /** The owner's switch for Memory Shard. Off on a box that has not been set
@@ -607,8 +630,52 @@ function collectMemoryStatusJson(): Promise<unknown> {
   });
 }
 
-function identityStatus(value: unknown): ClawKeepMemoryStatus["indexIdentity"] {
-  return value === "valid" || value === "missing" || value === "mismatched" ? value : "unknown";
+/**
+ * What the core says about the index it is holding.
+ *
+ * THE VERDICT IS NOT ONLY THE WORD. This read three spellings of `status` and
+ * answered "unknown" to everything else, which is how a box that had just been
+ * updated to 4.0 showed nothing to act on: the new core reports the chunking
+ * change as `{ status, reason: "index chunking implementation changed",
+ * owner: "openclaw", code: "chunking_version" }`, and a `status` this list does
+ * not carry made the whole block invisible — health "unknown", no banner, and
+ * "Index now" running the incremental pass that cannot succeed against it.
+ *
+ * So a status the list knows is taken as it comes, and any OTHER non-empty
+ * status that arrives WITH a reason or a code is read as `mismatched`: the core
+ * only fills those in when it has decided the index no longer belongs to the
+ * configuration, and "it named a reason" is a far more stable signal than the
+ * particular word it chose this release. An identity block with no status and
+ * no reason at all stays "unknown" — that is a core that does not report this,
+ * not a core reporting a problem.
+ */
+function readIndexIdentity(value: unknown): { status: ClawKeepMemoryStatus["indexIdentity"]; code: string } {
+  const identity = asRecord(value);
+  const status = cleanString(identity.status);
+  // `code` is a short machine name (`chunking_version`); `reason` is the CLI's
+  // English sentence, kept only as evidence that a verdict was reached and
+  // never surfaced — it is neither translated nor guaranteed free of paths.
+  const code = cleanString(identity.code);
+  const reason = cleanString(identity.reason);
+  if (status === "valid" || status === "missing" || status === "mismatched") {
+    return { status, code };
+  }
+  if (status && (code || reason)) return { status: "mismatched", code };
+  return { status: "unknown", code };
+}
+
+/**
+ * Is this index stale because the CORE changed under it, rather than because
+ * the owner pointed memory at a different model?
+ *
+ * Both are `mismatched`, and they are two different sentences: one is answered
+ * by a button, the other is the owner being told their index belongs to a model
+ * they moved off. `chunking_version` is the name the 4.0 core gives the first,
+ * and the prefix is there so a later release that versions the same thing under
+ * a longer name is still read as the update's doing and not as the owner's.
+ */
+function identityChangedByUpdate(code: string): boolean {
+  return code.startsWith("chunking");
 }
 
 /**
@@ -662,6 +729,59 @@ async function readEmbeddingRemoteBaseUrl(): Promise<string | null> {
   }
 }
 
+/**
+ * The one thing wrong with this index, worst first, in a sentence and in a name.
+ *
+ * ORDER IS THE WHOLE DESIGN. Every one of these can be true at once on a box
+ * that has just been updated, and the panel has room for one banner — so it
+ * names the fault that has to be fixed FIRST, because fixing the others while
+ * it stands is wasted work. A box embedding with a model its configuration
+ * never asked for rebuilds its index with that model: the customer on
+ * TASK-1024 ran Full reindex, it "succeeded", and search was no better. So the
+ * fallback outranks the stale index, which in turn outranks the general
+ * "provider is unwell" line it used to be flattened into.
+ *
+ * The English is the floor a locale pack has not reached yet; the code beside
+ * it is what a screen words for itself (see {@link MemoryStatusErrorCode}).
+ */
+function statusVerdict(facts: {
+  indexIdentity: ClawKeepMemoryStatus["indexIdentity"];
+  indexIdentityCode: string;
+  fellBack: boolean;
+  health: ClawKeepMemoryStatus["health"];
+}): { error: string; errorCode: MemoryStatusErrorCode | "" } {
+  if (facts.fellBack) {
+    return {
+      error: "Memory search is not using the embedding model you configured. Re-run Memory Shard setup.",
+      errorCode: "provider_mismatch",
+    };
+  }
+  if (facts.indexIdentity === "mismatched") {
+    // The 4.0 case, and the reason this function exists: an index the update
+    // itself invalidated was being reported as one built by the wrong model,
+    // which sent the owner to a model panel where everything was fine.
+    return identityChangedByUpdate(facts.indexIdentityCode)
+      ? {
+        error: "The index must be rebuilt after the update. Run a full reindex.",
+        errorCode: "index_rebuild_required",
+      }
+      : {
+        error: "The index does not match the configured embedding model. Run a full reindex.",
+        errorCode: "index_identity_mismatched",
+      };
+  }
+  if (facts.indexIdentity === "missing") {
+    return { error: "The index fingerprint is missing. Run a full reindex.", errorCode: "index_identity_missing" };
+  }
+  if (facts.health === "degraded") {
+    return {
+      error: "The embedding model is not ready. Check the model, then try indexing again.",
+      errorCode: "provider_degraded",
+    };
+  }
+  return { error: "", errorCode: "" };
+}
+
 export async function parseMemoryStatus(
   raw: unknown,
   run: MemoryRunState,
@@ -681,6 +801,7 @@ export async function parseMemoryStatus(
   const scan = asRecord(row.scan);
   const provider = cleanString(status.provider);
   const model = cleanString(status.model);
+  const requestedProvider = cleanString(status.requestedProvider);
   const files = finiteNonNegative(status.files);
   const chunks = finiteNonNegative(status.chunks);
   const totalFiles = finiteNonNegative(scan.totalFiles);
@@ -692,8 +813,17 @@ export async function parseMemoryStatus(
   // either — it is CLI-generated and carries paths.
   const failedItems = finiteNonNegative(batch.failures) + finiteNonNegative(recovery.failures);
   const semanticAvailable = vector.semanticAvailable === true || vector.available === true;
-  const indexIdentity = identityStatus(identity.status);
+  const { status: indexIdentity, code: indexIdentityCode } = readIndexIdentity(identity);
   const providerMode = cleanString(providerState.mode);
+  // THE CORE'S OWN REPORT THAT IT DID NOT DO WHAT THE CONFIG ASKED. Compared
+  // here rather than against openclaw.json because this is the one comparison
+  // that cannot be wrong about which key the core actually resolves from: both
+  // sides come out of the same probe. A box whose `memory.search` survived the
+  // 4.0 update half-written reports `requestedProvider` "openai-compatible"
+  // beside `provider` "ollama", and every surface used to show only the second
+  // of those — so the panel named a model the owner never chose, and a full
+  // reindex rebuilt the index with it.
+  const fellBack = Boolean(requestedProvider && provider && requestedProvider !== provider);
   const sources = Array.isArray(status.sources) ? status.sources.filter((v) => typeof v === "string") as string[] : [];
   const sourceCounts = Array.isArray(status.sourceCounts) ? status.sourceCounts : [];
   const sourceCount = sourceCounts.length || sources.length;
@@ -724,6 +854,11 @@ export async function parseMemoryStatus(
   let health: ClawKeepMemoryStatus["health"] = "unknown";
   if (!provider || provider === "none") health = "unavailable";
   else if (!semanticAvailable || providerMode === "degraded" || cleanString(custom.providerUnavailableReason)) health = "degraded";
+  // A fallback embedder ANSWERS, so nothing above catches it: the core is
+  // perfectly healthy embedding with the wrong model. Search still returns
+  // results, they are just not the ones the owner's configuration would give,
+  // which is the quietest way this can go wrong and so the one worth a chip.
+  else if (fellBack) health = "degraded";
   else if (providerMode === "active" && indexIdentity === "valid") health = "healthy";
   // An index built by a different model — or one with no fingerprint at all —
   // is a KNOWN state, not an unknown one: search is degraded until it is
@@ -740,6 +875,8 @@ export async function parseMemoryStatus(
     health,
     semanticAvailable,
     indexIdentity,
+    indexIdentityCode,
+    requestedProvider,
     fingerprint,
     // Filled in by getMemoryStatus, which is the only caller with an await to
     // spend on the config store; the parser itself stays synchronous. The gate
@@ -756,20 +893,7 @@ export async function parseMemoryStatus(
     failedItems,
     dirty: status.dirty === true,
     indexBytes,
-    error: indexIdentity === "mismatched"
-      ? "The index does not match the configured embedding model. Run a full reindex."
-      : indexIdentity === "missing"
-        ? "The index fingerprint is missing. Run a full reindex."
-        : health === "degraded"
-          ? "The embedding model is not ready. Check the model, then try indexing again."
-          : "",
-    errorCode: indexIdentity === "mismatched"
-      ? "index_identity_mismatched"
-      : indexIdentity === "missing"
-        ? "index_identity_missing"
-        : health === "degraded"
-          ? "provider_degraded"
-          : "",
+    ...statusVerdict({ indexIdentity, indexIdentityCode, fellBack, health }),
     run,
     schedule,
     nextRunAtMs: computeNextMemoryRunMs(schedule, now),
@@ -792,6 +916,8 @@ function unavailableStatus(
     health: "unavailable",
     semanticAvailable: false,
     indexIdentity: "unknown",
+    indexIdentityCode: "",
+    requestedProvider: "",
     fingerprint: "",
     sourceCount: 0,
     files: 0,
@@ -840,10 +966,38 @@ async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   ]);
   if (!probe.ok) return unavailableStatus(run, schedule);
   try {
-    return await parseMemoryStatus(probe.raw, run, schedule, new Date(), remoteBaseUrl);
+    const status = await parseMemoryStatus(probe.raw, run, schedule, new Date(), remoteBaseUrl);
+    noteProviderFallback(status);
+    return status;
   } catch {
     return unavailableStatus(run, schedule);
   }
+}
+
+/**
+ * The two sides of the configuration, in the device log, for whoever has to
+ * confirm they agree after an update.
+ *
+ * TASK-1024 was diagnosed by asking a customer to run the CLI by hand and read
+ * two numbers back, because nothing the box wrote down said which embedder the
+ * core had actually settled on — only which one it was using, which looks the
+ * same whether or not it was asked for. Neither side is a secret: both are
+ * provider ids and model names, never the endpoint and never the key.
+ *
+ * Said ONCE per verdict. The panel polls this reading every few seconds, and a
+ * line per poll is a log nobody can read.
+ */
+let loggedProviderFallback = "";
+function noteProviderFallback(status: ClawKeepMemoryStatus): void {
+  const verdict = providerFellBack(status) ? `${status.requestedProvider}>${status.provider}/${status.model}` : "";
+  if (verdict === loggedProviderFallback) return;
+  loggedProviderFallback = verdict;
+  if (!verdict) return;
+  console.warn(
+    `[clawkeep-memory] the core was configured for "${status.requestedProvider}" and is embedding with `
+    + `"${status.provider}" (${status.model || "no model named"}); memory search will not match openclaw.json `
+    + "until Memory Shard setup is run again",
+  );
 }
 
 /**
@@ -1002,6 +1156,20 @@ export function warmMemoryStatusCache(): Promise<void> {
 }
 
 /**
+ * Has the core disowned this index? Only ever answered from a reading the
+ * probe really produced — `unknown` is the value an unavailable status carries,
+ * and it must never be read as a verdict.
+ */
+function staleIndexIdentity(status: Pick<ClawKeepMemoryStatus, "indexIdentity">): boolean {
+  return status.indexIdentity === "mismatched" || status.indexIdentity === "missing";
+}
+
+/** The status verdict this module keys its own behaviour on, said once. */
+function providerFellBack(status: Pick<ClawKeepMemoryStatus, "errorCode">): boolean {
+  return status.errorCode === "provider_mismatch";
+}
+
+/**
  * What "Index now" should actually run.
  *
  * Observed on .177, not reasoned about: on a box whose vector index has never
@@ -1015,6 +1183,16 @@ export function warmMemoryStatusCache(): Promise<void> {
  * the full build. The run records the mode it really used, and the panel
  * prints it, so "Index now" never claims an incremental pass it did not do.
  *
+ * THE SAME RULE FOR AN INDEX THE CORE HAS DISOWNED (TASK-1024). An incremental
+ * pass adds and replaces rows inside an index whose identity the core has
+ * already rejected; it cannot make that index valid again, so it fails, and
+ * every route to it — the owner's "Index now", the nightly schedule — used to
+ * fail the same way until somebody found the Full reindex button. After the 4.0
+ * update, which changed how text is cut into chunks, that was every box that
+ * had ever indexed. There is nothing to preserve in an index that will be
+ * thrown away, so here too the honest pass IS the full one, and the run line
+ * says "full" because that is what ran.
+ *
  * Answered from the cached reading when there is one (stale included, and
  * one a run has changed since: the cost of a stale zero is one more pass
  * over an index that was just built, inside the ten seconds before the
@@ -1026,18 +1204,53 @@ export function warmMemoryStatusCache(): Promise<void> {
  * one.
  */
 export async function resolveIndexMode(requested: MemoryIndexMode): Promise<MemoryIndexMode> {
-  if (requested === "full") return "full";
+  return (await planIndexPass(requested)).mode;
+}
+
+/**
+ * The mode {@link resolveIndexMode} answers, plus the one other thing the same
+ * reading already knows: whether the core is embedding with a model the
+ * configuration never asked for.
+ *
+ * Carried forward rather than asked for again at the end, because by the time a
+ * pass has failed the cached reading has been dropped (`finish` unsettles it on
+ * purpose) and re-probing to word a failure would put a process boot between
+ * the owner and their error message.
+ *
+ * A `full` request STILL COSTS NOTHING. There is nothing to decide about a pass
+ * that is already full, and putting a probe in front of the Full reindex button
+ * would be a regression for every box that presses it — so that arm reads
+ * `cachedStatus` straight and takes "no reading yet" for an answer. NOT
+ * `peekMemoryStatus`, which starts a probe in the background when the cache is
+ * cold or aged: that is right for a panel that will be rendered again in five
+ * seconds and wrong here, where it would boot a second OpenClaw alongside the
+ * indexer this call is about to spawn.
+ *
+ * A box in this state has a reading: the panel carrying the button polls the
+ * status to draw the banner that names it, and `warmMemoryStatusCache` pays for
+ * the first one at boot. Without one the pass is worded the way it always was.
+ */
+async function planIndexPass(requested: MemoryIndexMode): Promise<{ mode: MemoryIndexMode; fellBack: boolean }> {
+  if (requested === "full") {
+    const seen = cachedStatus;
+    return { mode: "full", fellBack: seen !== null && seen.available && providerFellBack(seen) };
+  }
   try {
     const status = await lastMemoryStatus();
     // `available` is load-bearing: a failed CLI probe returns the unavailable
-    // status, which also reports zero chunks. Without this check a probe
-    // timeout would silently turn a scheduled incremental pass into a --force
-    // re-embed of an index that was perfectly fine.
-    return status.available && status.chunks === 0 ? "full" : requested;
+    // status, which also reports zero chunks AND an "unknown" identity. Without
+    // this check a probe timeout would silently turn a scheduled incremental
+    // pass into a --force re-embed of an index that was perfectly fine.
+    if (!status.available) return { mode: requested, fellBack: false };
+    return {
+      mode: status.chunks === 0 || staleIndexIdentity(status) ? "full" : requested,
+      fellBack: providerFellBack(status),
+    };
   } catch {
     // Same rule when the probe throws: run what was asked rather than
-    // upgrading on a box we know nothing about.
-    return requested;
+    // upgrading on a box we know nothing about — and claim to know nothing
+    // about its provider either, so the failure below is worded generically.
+    return { mode: requested, fellBack: false };
   }
 }
 
@@ -1074,6 +1287,21 @@ const TIMED_OUT_FAILURE = {
 const INDEX_FAILED_FAILURE = {
   error: "Indexing failed. Check that the embedding model is available, then try again.",
   errorCode: "index_failed" as const,
+};
+/**
+ * The one failure this module can name a cause for, and the reason TASK-1024
+ * needed more than a catch-all.
+ *
+ * "Check that the embedding model is available" is a fine last word when the
+ * box knows nothing, and a bad one when it knows this: the model in the panel
+ * is installed, answering and irrelevant, because the core never asked it. The
+ * customer checked it, found it healthy, and was left with a button that did
+ * not help. Said here instead of left to the banner because the run line is
+ * what a failed pass puts in front of the owner.
+ */
+const PROVIDER_MISMATCH_FAILURE = {
+  error: "Memory search is not using the embedding model you configured. Re-run Memory Shard setup.",
+  errorCode: "provider_mismatch" as const,
 };
 
 function fixedFailure(
@@ -1346,7 +1574,7 @@ export async function startMemoryIndex(
   const current = await readMemoryRunState();
   if (current.status === "running") return { accepted: false, declined: "running", run: current };
 
-  const mode = await resolveIndexMode(requested);
+  const { mode, fellBack } = await planIndexPass(requested);
   if (!await acquireRunLock()) {
     return { accepted: false, declined: "running", run: await readMemoryRunState() };
   }
@@ -1445,13 +1673,21 @@ export async function startMemoryIndex(
     // The timeout first, because it is the one verdict that does not depend on
     // which arm ran: whatever the pass said on its way out, the budget is what
     // ended it. After that each arm is worded by its own mapper.
-    const failure = ok
+    const mapped = ok
       ? null
       : timedOut
         ? TIMED_OUT_FAILURE
         : outcome.kind === "threw"
           ? localFailure(outcome.error)
           : fixedFailure(outcome.code, outcome.signal);
+    // The catch-all, and ONLY the catch-all, gives way to the cause the plan
+    // already found. Every other verdict above is a fact about how this pass
+    // ended — a timeout, a signal, a missing binary — and stays what it is:
+    // a box whose config the core ignored can still be killed by the OOM
+    // killer, and "re-run setup" would be the wrong thing to say about that.
+    const failure = mapped && fellBack && mapped.errorCode === "index_failed"
+      ? PROVIDER_MISMATCH_FAILURE
+      : mapped;
     if (failure) {
       const how = outcome.kind === "exit"
         ? `exit ${outcome.code ?? "none"}${outcome.signal ? `, ${outcome.signal}` : ""}`
