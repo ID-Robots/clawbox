@@ -106,6 +106,22 @@ export const FIELD =
   "rounded-lg border border-white/[0.08] bg-black/20 px-3 py-1.5 text-[var(--text-primary)]"
   + " outline-none transition-colors focus:border-[var(--coral-bright)]/50";
 
+/**
+ * A Markdown body drawn by the chat's renderer (`renderText`).
+ *
+ * The run summary's prose, now shared: the Files tab draws a `.md` file's
+ * preview through the same renderer, and a heading or a list that reads one
+ * way on a run's report and another two tabs over is two designs. Layout —
+ * the margin, the scroller — stays with the host; this is type only.
+ */
+export const MARKDOWN_PROSE =
+  "text-xs text-[var(--text-secondary)] leading-relaxed min-w-0 break-words [&_img]:max-w-full"
+  + " [&_h1]:text-sm [&_h1]:font-semibold [&_h1]:text-[var(--text-primary)] [&_h1]:mt-2"
+  + " [&_h2]:text-xs [&_h2]:font-semibold [&_h2]:text-[var(--text-primary)] [&_h2]:mt-2"
+  + " [&_h3]:font-semibold [&_h3]:text-[var(--text-primary)] [&_h3]:mt-1.5"
+  + " [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4"
+  + " [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-black/30 [&_pre]:p-2 [&_code]:font-mono";
+
 /** Small caps section label — the rhythm every list on these pages starts with. */
 export const SECTION_LABEL =
   "flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]";

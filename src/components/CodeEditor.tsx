@@ -63,12 +63,20 @@ export interface CodeEditorProps {
   /** Ctrl/Cmd+S while editing. */
   onSave?: () => void;
   autoFocus?: boolean;
+  /**
+   * Soft-wrap the long lines instead of scrolling sideways. The wrap is set on
+   * BOTH the coloured text and the textarea over it, so the caret keeps
+   * standing on its glyph; the numbered gutter steps aside while it is on,
+   * since one logical line then draws over several rows and a column of
+   * numbers beside it would point at the wrong ones.
+   */
+  wrap?: boolean;
   ariaLabel?: string;
   className?: string;
   testId?: string;
 }
 
-export default function CodeEditor({ value, onChange, language, onSave, autoFocus, ariaLabel, className = "", testId }: CodeEditorProps) {
+export default function CodeEditor({ value, onChange, language, onSave, autoFocus, wrap = false, ariaLabel, className = "", testId }: CodeEditorProps) {
   const [highlighter, setHighlighter] = useState<Highlighter | null>(loaded);
   useEffect(() => {
     if (highlighter || !language) return;
@@ -147,17 +155,20 @@ export default function CodeEditor({ value, onChange, language, onSave, autoFocu
 
   return (
     <div
-      className={`cb-code ${className}`}
+      className={`cb-code ${wrap ? "cb-code-wrap " : ""}${className}`}
       data-testid={testId}
       data-language={language ?? "plain"}
       data-editable={editable || undefined}
+      data-wrap={wrap || undefined}
       onClick={editable ? (e) => { if (e.target === e.currentTarget) inputRef.current?.focus(); } : undefined}
     >
-      <div className="cb-code-gutter" aria-hidden="true">
-        {lines.map((_, i) => <div key={i} className="cb-code-gutter-line">{i + 1}</div>)}
-      </div>
-      <div className="cb-code-body">
-        <pre className="cb-code-pre" aria-hidden={editable || undefined} data-testid={testId ? `${testId}-text` : undefined}>
+      {!wrap && (
+        <div className="cb-code-gutter" aria-hidden="true">
+          {lines.map((_, i) => <div key={i} className="cb-code-gutter-line">{i + 1}</div>)}
+        </div>
+      )}
+      <div className={`cb-code-body${wrap ? " cb-code-body-wrap" : ""}`}>
+        <pre className={`cb-code-pre${wrap ? " cb-code-pre-wrap" : ""}`} aria-hidden={editable || undefined} data-testid={testId ? `${testId}-text` : undefined}>
           {lines.map((line, i) => (
             <div key={i} className="cb-code-line">
               {line.map((piece, j) => <span key={j} className={piece.type ? `tok-${piece.type}` : undefined}>{piece.text}</span>)}
@@ -167,7 +178,7 @@ export default function CodeEditor({ value, onChange, language, onSave, autoFocu
         {editable && (
           <textarea
             ref={inputRef}
-            className="cb-code-input"
+            className={`cb-code-input${wrap ? " cb-code-input-wrap" : ""}`}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={onKeyDown}
@@ -175,7 +186,10 @@ export default function CodeEditor({ value, onChange, language, onSave, autoFocu
             autoCapitalize="off"
             autoCorrect="off"
             autoComplete="off"
-            wrap="off"
+            // The attribute, not only the class: `wrap=off` is what stops a
+            // browser from soft-wrapping the typed text, and its UA rule is
+            // the twin of the `white-space` the class sets on the text below.
+            wrap={wrap ? "soft" : "off"}
             autoFocus={autoFocus}
             aria-label={ariaLabel}
             data-testid={testId ? `${testId}-input` : undefined}

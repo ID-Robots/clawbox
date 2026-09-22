@@ -9,7 +9,10 @@
  * rooted at the PROJECT (a project can live anywhere the owner pointed the
  * agent at, so the Files app's home-rooted route is the wrong walk), with
  * the Files app's own icons so a folder looks the same in both. A file
- * opens read-only beside the tree: a run edits, the owner reads.
+ * opens beside the tree, editable unless it is binary or cut short. Markdown
+ * opens as the DOCUMENT it is — drawn through the chat's renderer, with a
+ * Preview/Source pair in the toolbar — and any file's long lines can be
+ * soft-wrapped instead of scrolled; both choices are remembered on the device.
  *
  * Changes reads `/setup-api/coding-agent/git?changes`: the working tree while
  * a run is in flight (polled, so the list grows as the run writes), and once
@@ -19,7 +22,7 @@
  * file in the list opens its unified diff, coloured line by line.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import type { ChangedFile, ChangeStatus, CommitSummary, FileDiff, GitChanges } from "@/lib/coding-git";
 import type { TreeEntry, TreeFile, TreeListing } from "@/lib/coding-project-tree";
@@ -27,7 +30,8 @@ import { fileIcon, formatSize, Icon } from "./file-icons";
 import CodeEditor from "./CodeEditor";
 import { languageForFile } from "@/lib/code-language";
 import { dispatchOpenApp } from "@/lib/ui-events";
-import { CARD_SURFACE, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
+import { renderText } from "@/lib/chat-markdown";
+import { CARD_SURFACE, MARKDOWN_PROSE, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import { timeAgo } from "./clawkeep-ui";
 
 export type WorkspaceTab = "files" | "changes" | "runs" | "team";
@@ -171,6 +175,80 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
 
 type Node = { path: string; entry: TreeEntry; depth: number };
 
+/** Markdown, as this tab knows it: the extensions that earn a rendered preview. */
+const MARKDOWN_FILE = /\.(?:md|markdown|mdx)$/i;
+
+/** How the owner reads a file here, remembered from one file to the next. */
+export const FILES_WRAP_KEY = "clawbox.codingAgent.files.wrap";
+export const FILES_MD_VIEW_KEY = "clawbox.codingAgent.files.mdView";
+
+type MdView = "preview" | "source";
+
+/**
+ * The toolbar's two remembered choices, as an external store the panes
+ * SUBSCRIBE to rather than copy into state on mount.
+ *
+ * Read through `useSyncExternalStore`, which is what React offers for a value
+ * that only the browser has: the server and the hydrating render answer with
+ * the default, the client's own answer arrives without a `setState` in an
+ * effect (and so without the extra render pass that costs), and because the
+ * store also listens for `storage`, a second window that switches the wrap is
+ * followed by the first instead of disagreeing with it.
+ *
+ * `localStorage` is absent on the server and THROWS outright in a browser whose
+ * site data is blocked; both reads and writes answer with the default rather
+ * than with an error. The store is the only truth here — no second copy in
+ * memory — so a browser that refuses the write keeps the old view rather than
+ * showing one thing and remembering another.
+ */
+const prefListeners = new Set<() => void>();
+
+function readPref(key: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writePref(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch { /* a store that refuses: the view stays as it was */ }
+  for (const notify of prefListeners) notify();
+}
+
+function subscribePrefs(notify: () => void): () => void {
+  prefListeners.add(notify);
+  window.addEventListener("storage", notify);
+  return () => {
+    prefListeners.delete(notify);
+    window.removeEventListener("storage", notify);
+  };
+}
+
+/** Both snapshots are primitives, so they stay stable until the value changes. */
+const wrapSnapshot = () => readPref(FILES_WRAP_KEY) === "true";
+// Anything else in the slot — a key another version wrote, a hand edit — is
+// not a view this tab has.
+const mdViewSnapshot = (): MdView => (readPref(FILES_MD_VIEW_KEY) === "source" ? "source" : "preview");
+const wrapOnServer = () => false;
+const mdViewOnServer = (): MdView => "preview";
+
+/**
+ * The file toolbar's own segmented pair. The app's SEGMENT is a full-width rung
+ * in a 12px row; this strip is 11px and half that tall, so it borrows the
+ * segment's LOOK — the black well, the flat white rung — at the height of the
+ * Save button beside it.
+ */
+const TOOLBAR_SEG =
+  "inline-flex items-center gap-1 rounded px-2 py-0.5 border-none cursor-pointer"
+  + " transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
+  + " focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--coral-ring)]";
+const TOOLBAR_SEG_ON = `${TOOLBAR_SEG} bg-white/[0.12] text-[var(--text-primary)]`;
+const TOOLBAR_SEG_OFF = `${TOOLBAR_SEG} bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]`;
+
 function FilesPane({ query, live, directory, paneClass, fill }: { query: string; live: boolean; directory?: string; paneClass: string; fill: boolean }) {
   const { t } = useT();
   const [listings, setListings] = useState<Record<string, TreeListing>>({});
@@ -187,6 +265,11 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
   // before it replaces them, never opened over them.
   const [pendingOpen, setPendingOpen] = useState<string | null>(null);
   const [filesBusy, setFilesBusy] = useState(false);
+  // Soft wrap in the code view, and whether a Markdown file opens rendered or
+  // as its source: the device's, not this pane's, so they are subscribed to
+  // rather than held here.
+  const wrap = useSyncExternalStore(subscribePrefs, wrapSnapshot, wrapOnServer);
+  const mdView = useSyncExternalStore(subscribePrefs, mdViewSnapshot, mdViewOnServer);
   // Which opening of a file the editor shows: a save answers for the
   // opening it started under, and one that lands after another file took
   // the pane is dropped rather than written over it.
@@ -222,6 +305,14 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
   // A binary file has nothing to edit; a cut one must not be saved back cut.
   const editable = !!file && !file.binary && !file.truncated;
   const dirty = editable && draft !== null && draft !== file!.content;
+  // A Markdown file can be read as the document it is; everything else is its
+  // text. The preview draws the DRAFT, so what a run — or the owner — has
+  // just written is what it renders.
+  const isMarkdown = !!file && !file.binary && MARKDOWN_FILE.test(file.path);
+  const preview = isMarkdown && mdView === "preview";
+
+  const toggleWrap = () => writePref(FILES_WRAP_KEY, String(!wrap));
+  const chooseMdView = (next: MdView) => writePref(FILES_MD_VIEW_KEY, next);
 
   const readFile = async (rel: string) => {
     setFileBusy(rel);
@@ -381,26 +472,81 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
           <p className="px-3 py-3 text-[11px] text-[var(--text-muted)]">{t("codingAgent.pickFile")}</p>
         ) : (
           <>
-            <div className="sticky top-0 left-0 z-10 flex items-center gap-2 px-3 py-1.5 border-b border-white/[0.06] bg-[var(--win-ground)] text-[11px]">
+            {/* The strip WRAPS: the path is a shrinkable `truncate` and every
+                control beside it is `shrink-0`, so in a narrow pane — the file
+                side of the split is `minmax(0,1fr)` — the controls squeezed the
+                filename to nothing and the owner could not see which file was
+                open. Wrapping moves them to a second row instead, the way the
+                discard bar below already does. */}
+            <div className="sticky top-0 left-0 z-10 flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-1.5 border-b border-white/[0.06] bg-[var(--win-ground)] text-[11px]">
               <span className="font-mono text-[var(--text-primary)] truncate">{file.path}</span>
               <span className="text-[var(--text-muted)] shrink-0">{formatSize(file.size)}</span>
               {file.truncated && <span className="text-amber-300 shrink-0" title={t("codingAgent.fileReadOnlyLarge")}>{t("codingAgent.fileTruncated")}</span>}
-              {editable && (
-                <span className="ml-auto flex items-center gap-2 shrink-0">
-                  {dirty && <span className="text-[var(--text-muted)]" title={t("codingAgent.fileUnsaved")} data-testid="coding-agent-file-dirty">●</span>}
-                  {!dirty && saved && <span className="text-emerald-300" data-testid="coding-agent-file-saved">{t("codingAgent.fileSaved")}</span>}
+              {/* Wraps internally as well, and does NOT refuse to shrink: in
+                  German and Swedish the four controls are wider than a narrow
+                  pane, and as one rigid group they took the row sideways and
+                  clipped "Speichern"/"Spara" off its right edge. */}
+              <span className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1 min-w-0">
+                {/* Markdown only: read it as the document, or read its source.
+                    Save sits to the right of both and works from either. */}
+                {isMarkdown && (
+                  <span className="inline-flex items-center gap-0.5 rounded-md bg-black/30 p-0.5" role="group" aria-label={t("codingAgent.fileViewLabel")}>
+                    <button
+                      type="button"
+                      onClick={() => chooseMdView("preview")}
+                      aria-pressed={preview}
+                      data-testid="coding-agent-file-preview-toggle"
+                      className={preview ? TOOLBAR_SEG_ON : TOOLBAR_SEG_OFF}
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">article</span>
+                      {t("codingAgent.filePreview")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => chooseMdView("source")}
+                      aria-pressed={!preview}
+                      data-testid="coding-agent-file-source-toggle"
+                      className={preview ? TOOLBAR_SEG_OFF : TOOLBAR_SEG_ON}
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">code</span>
+                      {t("codingAgent.fileSource")}
+                    </button>
+                  </span>
+                )}
+                {/* The wrap is the code view's; a rendered preview wraps anyway. */}
+                {!file.binary && !preview && (
                   <button
                     type="button"
-                    onClick={() => void save()}
-                    disabled={!dirty || saving}
-                    data-testid="coding-agent-file-save"
-                    className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 border border-white/[0.08] bg-white/[0.06] text-[var(--text-primary)] hover:bg-white/[0.12] disabled:opacity-40"
+                    onClick={toggleWrap}
+                    aria-pressed={wrap}
+                    title={t("codingAgent.fileWrapHint")}
+                    data-testid="coding-agent-file-wrap"
+                    className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 border ${wrap ? "border-white/[0.14] bg-white/[0.14] text-[var(--text-primary)]" : "border-white/[0.08] bg-white/[0.06] text-[var(--text-secondary)] hover:bg-white/[0.12]"}`}
                   >
-                    <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">save</span>
-                    {saving ? t("codingAgent.fileSaving") : t("codingAgent.fileSave")}
+                    <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">wrap_text</span>
+                    {t("codingAgent.fileWrap")}
                   </button>
-                </span>
-              )}
+                )}
+                {editable && (
+                  // One unit: the dot says THIS button has something to save,
+                  // and a wrap that left it dangling on the row above read as a
+                  // stray separator.
+                  <span className="inline-flex items-center gap-2">
+                    {dirty && <span className="text-[var(--text-muted)]" title={t("codingAgent.fileUnsaved")} data-testid="coding-agent-file-dirty">●</span>}
+                    {!dirty && saved && <span className="text-emerald-300" data-testid="coding-agent-file-saved">{t("codingAgent.fileSaved")}</span>}
+                    <button
+                      type="button"
+                      onClick={() => void save()}
+                      disabled={!dirty || saving}
+                      data-testid="coding-agent-file-save"
+                      className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 border border-white/[0.08] bg-white/[0.06] text-[var(--text-primary)] hover:bg-white/[0.12] disabled:opacity-40"
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">save</span>
+                      {saving ? t("codingAgent.fileSaving") : t("codingAgent.fileSave")}
+                    </button>
+                  </span>
+                )}
+              </span>
             </div>
             {editable && live && (
               <p className="sticky left-0 px-3 py-1 text-[11px] text-amber-300/90 border-b border-white/[0.06]" data-testid="coding-agent-file-live-note">{t("codingAgent.fileLiveEdit")}</p>
@@ -415,10 +561,21 @@ function FilesPane({ query, live, directory, paneClass, fill }: { query: string;
             )}
             {file.binary ? (
               <p className="px-3 py-3 text-[11px] text-[var(--text-muted)]">{t("codingAgent.binaryFile")}</p>
+            ) : preview ? (
+              // Through the chat's renderer, which builds elements from the text
+              // and never injects HTML: a README a run wrote reaches the screen
+              // as words, links and tables, not as markup.
+              // A region that scrolls needs a tab stop of its own, or a
+              // keyboard-only reader cannot reach the end of a long document
+              // (WCAG 2.1.1) — the rule chat-markdown's own scrolling tables
+              // follow. Focusable means it needs a name: the file it shows.
+              <div role="region" aria-label={file.path} tabIndex={0} className={`flex-1 min-h-0 overflow-auto px-3 py-2 ${MARKDOWN_PROSE}`} data-testid="coding-agent-file-preview">
+                {renderText(draft ?? file.content, t("chat.table"))}
+              </div>
             ) : editable ? (
-              <CodeEditor value={draft ?? file.content} onChange={setDraft} language={languageForFile(file.path)} onSave={() => void save()} ariaLabel={file.path} testId="coding-agent-file-editor" className="flex-1" />
+              <CodeEditor value={draft ?? file.content} onChange={setDraft} language={languageForFile(file.path)} onSave={() => void save()} wrap={wrap} ariaLabel={file.path} testId="coding-agent-file-editor" className="flex-1" />
             ) : (
-              <CodeEditor value={file.content} language={languageForFile(file.path)} testId="coding-agent-file-editor" className="flex-1" />
+              <CodeEditor value={file.content} language={languageForFile(file.path)} wrap={wrap} testId="coding-agent-file-editor" className="flex-1" />
             )}
           </>
         )}
