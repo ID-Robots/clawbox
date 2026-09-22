@@ -237,7 +237,10 @@ async function assertNotStale(abs: string): Promise<void> {
  * And a refusal inside the agent's OWN state directory sends it to the
  * harness's file tools instead of telling it to give up: those are not bound by
  * this guard, and everything in `~/.openclaw` except the workspaces is refused
- * here whatever the request was (TASK-1072).
+ * here whatever the request was (TASK-1072). That last one is also the only
+ * refusal `cwd` alone can earn, so it says so — an agent told "another
+ * spelling" that then re-ran the same command from inside the folder would be
+ * following the hint into the same wall.
  */
 function commandRefusal(refusal: CommandPathRefusal): ToolError {
   if (refusal.kind === "credential") {
@@ -250,8 +253,8 @@ function commandRefusal(refusal: CommandPathRefusal): ToolError {
   if (refusal.kind === "openclaw") {
     return new ToolError(
       "BLOCKED_PATH",
-      "That command names part of this device's own agent state that is not open to tools. The agent workspaces inside it are.",
-      "Do not try another spelling here. Your own file tools are not bound by this guard — use one of those for a workspace file, and tell the user only that a protected device file was involved.",
+      "That command reaches part of this device's own agent state that is not open to tools — by naming it, or by being run from inside it. The agent workspaces inside it are open.",
+      "Do not try another spelling here, and do not retry it with cwd inside that folder. Your own file tools are not bound by this guard — use one of those for a workspace file, and tell the user only that a protected device file was involved.",
     );
   }
   // The rule, not the credential sentence: `rm -rf ~/clawbox` holds no

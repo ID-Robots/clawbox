@@ -521,6 +521,24 @@ describe("mcp path guard — a link is judged by its target", () => {
     expect(() => assertWritePathAllowed(path.join(ws, "skills", "a", "SKILL.md"))).not.toThrow();
   });
 
+  it("refuses a `bash` cwd that LINKS into ~/.openclaw, and one that links into a workspace and walks out", () => {
+    // The cwd is the other half of every relative path in the command, and a
+    // link is a cwd with no `.openclaw` anywhere in its text. `isAllowedPath`
+    // lets `~/.openclaw` itself through on purpose — a listing filters its
+    // entries — so the typed spelling is not enough here either.
+    const oc = path.join(dir, ".openclaw");
+    const ws = path.join(oc, "workspace");
+    mkdirSync(path.join(oc, "credentials"), { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    const toState = link("state", oc);
+    const toWorkspace = link("notes", ws);
+    expect(commandPathRefusal("ls", toState)).toEqual({ kind: "openclaw" });
+    expect(commandPathRefusal("cat credentials/key", toState)).toEqual({ kind: "openclaw" });
+    expect(commandPathRefusal("cat ../credentials/key", toWorkspace)).toEqual({ kind: "openclaw" });
+    // …and the workspace itself is still a place a shell may stand and work.
+    expect(commandPathRefusal("cat MEMORY.md", toWorkspace)).toBeNull();
+  });
+
   it("still refuses a typed dotenv name that links somewhere harmless", () => {
     // Both spellings must pass: to the agent that wrote it, `.env` is a
     // dotenv file whatever it points at.
@@ -742,6 +760,62 @@ describe("mcp path guard — the agent's own ~/.openclaw workspace (TASK-1072)",
     const e = thrown as { next?: string };
     expect(e.next).not.toMatch(/workspace file/i);
     expect(e.next).toMatch(/never name this path/i);
+  });
+
+  // ── The working directory, which is half of every relative path ──────────
+  //
+  // `bash` takes a cwd and the pre-flight used to hand it only to TASK-605's
+  // rule. The carve-out deliberately lets `~/.openclaw` ITSELF be opened, so
+  // `assertPathAllowed(cwd)` passes for it — and then `cat credentials/x` names
+  // no refused path anywhere in the command string, because the `.openclaw`
+  // half of that path was spelled by the cwd.
+  it.each([
+    [OC, "ls"],
+    [OC, "cat credentials/anthropic.json"],
+    [OC, "cat openclaw.json"],
+    [OC, "grep -r . ."],
+    [`${OC}/credentials`, "cat anthropic.json"],
+    [`${OC}/agents/main/sessions`, "tail -n 200 x.jsonl"],
+  ])("refuses a shell sitting in %s (`%s`)", (cwd, command) => {
+    // `bash` output is NOT filtered entry by entry the way `list_directory` is,
+    // so the folder that is list-only to the file tools is refused outright to
+    // a shell standing in it, whatever it was asked to run.
+    expect(preflightRefuses(command, cwd)).toBe(true);
+  });
+
+  it.each([
+    "cat ../credentials/anthropic.json",
+    "cat ../.mcp-token",
+    "ls ..",
+    "cp MEMORY.md ../credentials/",
+    "cat ../../.openclaw/credentials/x",
+  ])("refuses `%s` run from inside the workspace", (command) => {
+    // The cwd is allowed and the command names no `.openclaw` of its own, so
+    // neither the text rule nor the token pass can see this: the token is
+    // relative, and what it walks out of came from the working directory.
+    expect(preflightRefuses(command, WS)).toBe(true);
+  });
+
+  it.each([
+    "ls",
+    "cat MEMORY.md",
+    "cat ./memory/project_pr_base.md",
+    "mkdir -p skills/hello && cat AGENTS.md",
+    "grep -rn beta memory/",
+    `cat ${WS}/MEMORY.md`,
+  ])("still runs `%s` from inside the workspace", (command) => {
+    // The point of the carve-out. A cwd rule that refused these would have put
+    // the agent back where TASK-1072 found it.
+    expect(preflightRefuses(command, WS)).toBe(false);
+  });
+
+  it("leaves a cwd outside ~/.openclaw judged by the rules that already judged it", () => {
+    expect(preflightRefuses("ls", HOME)).toBe(false);
+    expect(preflightRefuses("cat notes.txt", `${HOME}/projects`)).toBe(false);
+    // …and the text rule still answers for the command, cwd or no cwd.
+    expect(preflightRefuses("cat ~/.openclaw/credentials/x", HOME)).toBe(true);
+    // A lookalike directory is not the state directory.
+    expect(preflightRefuses("cat credentials/x", `${HOME}/openclaw`)).toBe(false);
   });
 
   it("does not fire on a path that merely starts the same way", () => {

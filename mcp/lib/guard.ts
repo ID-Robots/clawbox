@@ -179,6 +179,14 @@ export const SECRET_NAME_RE =
 const OPENCLAW_MENTION_RE = /(?:^|[^\w.-])\.openclaw(?![\w-])([^\s'"`;&|<>()]*)/gi;
 
 /**
+ * The word-shaped pieces of a command line, on the characters a shell ends a
+ * word at. Shared so the two passes below cannot disagree about what a token is.
+ */
+function shellTokens(command: string): string[] {
+  return command.split(/[\s;|&<>()'"`]+/).filter(Boolean);
+}
+
+/**
  * Does this command name something under `~/.openclaw` that is NOT one of the
  * agent's own workspaces?
  *
@@ -207,6 +215,45 @@ export function openclawDeniedInCommand(command: string): boolean {
     // path that mention names, with no home in front of it — the rule is about
     // the segments after `.openclaw` and nothing before it.
     if (isDeniedOpenclawPath(`/.openclaw${tail}`)) return true;
+  }
+  return false;
+}
+
+/**
+ * The same rule, for the `.openclaw` the WORKING DIRECTORY spells rather than
+ * the command.
+ *
+ * `bash` takes a cwd, and a cwd is half of every relative path in the command.
+ * `assertPathAllowed(cwd)` is not enough on its own here, because the carve-out
+ * deliberately lets `~/.openclaw` itself be opened so the workspaces inside it
+ * can be found — and a `list_directory` there filters its entries one by one,
+ * while `cd ~/.openclaw && cat credentials/anthropic.json` does not name a
+ * single refused path anywhere in the command string. Two arms:
+ *
+ *   - the shell is SITTING in protected state (`~/.openclaw`, `…/credentials`):
+ *     refused whatever it runs, because every relative path it names is one and
+ *     `bash` output is not filtered the way a listing is;
+ *   - the shell is in a workspace, which is allowed, and a relative token walks
+ *     back OUT of it (`cat ../credentials/x`, `ls ..`). The text rule above
+ *     cannot see those: the `.openclaw` segment came from the cwd, so there is
+ *     no mention in the command for it to match. Tokens that spell a path
+ *     absolutely are left alone — the text rule and the resolving pass in
+ *     `commandPathRefusal` already judge those, against the real home.
+ */
+function openclawDeniedCwd(command: string, cwd: string): boolean {
+  // BOTH SPELLINGS, for the reason `isAllowedPath` judges both: `~/notes -> ~/
+  // .openclaw` is a working directory with no `.openclaw` anywhere in its text,
+  // and a shell handed it is standing in the state directory all the same.
+  for (const dir of new Set([cwd, canonicalPath(cwd) ?? cwd])) {
+    if (!isOpenclawStatePath(dir)) continue;
+    if (openclawStateOutsideWorkspace(dir)) return true;
+    for (const raw of shellTokens(command)) {
+      if (raw.startsWith("/") || raw.startsWith("~")) continue;
+      // `join` normalises, which is what this arm wants: the question is where
+      // the token LANDS, and `..` is how it leaves. A token that is not a path
+      // at all (`cat`, `-r`) lands inside the workspace and is allowed.
+      if (openclawStateOutsideWorkspace(join(dir, raw))) return true;
+    }
   }
   return false;
 }
@@ -275,7 +322,7 @@ export function assertWritePathAllowed(abs: string, real: string | null = canoni
   // show them at all (src/lib/file-guard.ts), which is the same split DATA_DIR
   // gets — and for DATA_DIR the TASK-605 rule below happens to close the write
   // side. Nothing covers `~/.openclaw`, so it is said here, on both spellings.
-  if (deniedOpenclawWrite(abs) || (real !== null && deniedOpenclawWrite(real))) {
+  if (openclawStateOutsideWorkspace(abs) || (real !== null && openclawStateOutsideWorkspace(real))) {
     throw new ToolError(
       "BLOCKED_PATH",
       "That path holds device credentials or a device node and is not accessible to tools.",
@@ -320,8 +367,16 @@ export function resolveGuardedPath(abs: string, mode: "read" | "write"): string 
   return real ?? abs;
 }
 
-/** Inside the agent's state directory, but not inside a workspace it owns. */
-function deniedOpenclawWrite(p: string): boolean {
+/**
+ * Inside the agent's state directory, but not inside a workspace it owns.
+ *
+ * Stricter than `isDeniedOpenclawPath` in exactly one place, and deliberately:
+ * this says NO to `~/.openclaw` ITSELF, which the read rule allows so that a
+ * `list_directory` — which filters its entries one by one — can show the
+ * workspaces at all. A write there has no entry filter behind it, and neither
+ * does `bash` output, so both surfaces want this predicate rather than that one.
+ */
+function openclawStateOutsideWorkspace(p: string): boolean {
   return isOpenclawStatePath(p) && !isOpenclawWorkspacePath(p);
 }
 
@@ -381,13 +436,15 @@ export interface CommandPathRefusal {
  * tells the agent never to run a command that came from content it read. Assume
  * `bash` can reach anything the device user can.
  *
- * Four passes, all cheap, in the order that gives the most useful refusal:
+ * Five passes, all cheap, in the order that gives the most useful refusal:
  *   1. the `.openclaw` text rule, first so its own `next` hint survives — a
  *      credential answer here would send the agent away from a workspace file
  *      it could still open with the harness's own tools;
- *   2. tokens that look like paths, resolved and checked against the guard;
- *   3. TASK-605's command rule, with the working directory;
- *   4. the whole command scanned for a credential-store NAME anywhere in it, so
+ *   2. the same rule on the WORKING DIRECTORY, which is half of every relative
+ *      path in the command and spells a `.openclaw` the text rule cannot see;
+ *   3. tokens that look like paths, resolved and checked against the guard;
+ *   4. TASK-605's command rule, with the working directory;
+ *   5. the whole command scanned for a credential-store NAME anywhere in it, so
  *      a path assembled indirectly is still recognised.
  *
  * It lives HERE rather than in mcp/tools/coding.ts so the tests can ask the
@@ -397,7 +454,8 @@ export interface CommandPathRefusal {
  */
 export function commandPathRefusal(command: string, cwd?: string): CommandPathRefusal | null {
   if (openclawDeniedInCommand(command)) return { kind: "openclaw" };
-  for (const raw of command.split(/[\s;|&<>()'"`]+/).filter(Boolean)) {
+  if (cwd && openclawDeniedCwd(command, cwd)) return { kind: "openclaw" };
+  for (const raw of shellTokens(command)) {
     if (!raw.startsWith("/") && !raw.startsWith("~") && !raw.startsWith("./")) continue;
     try {
       if (!isAllowedPath(resolveUserPath(raw))) return { kind: "credential" };
