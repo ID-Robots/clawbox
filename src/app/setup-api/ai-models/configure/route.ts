@@ -241,6 +241,54 @@ const PROVIDERS: Record<string, ProviderConfig> = {
   },
 };
 
+/**
+ * The bare id a local provider's model row is written under, from whichever
+ * slot the caller filled. Every cloud provider sends its pick in `model` as
+ * `<provider>/<id>`, so an API caller saving llama.cpp the same way sent
+ * `llamacpp/gemma4-e2b-it-q4_0` — and the branches below, which add the prefix
+ * themselves, saved `primary` as `llamacpp/llamacpp/gemma4-e2b-it-q4_0` and the
+ * provider row's `id` as `llamacpp/gemma4-e2b-it-q4_0`.
+ *
+ * OpenClaw strips a self-provider prefix off a REF, and its row lookup forgives
+ * one on a ROW, so both still resolve on the first pass; but the runtime-plan
+ * materializer then compares the row it got back with the requested id
+ * verbatim, and every turn that carries the `llamacpp:default` profile died
+ * with "Unable to rematerialize llamacpp/gemma4-e2b-it-q4_0 for its resolved
+ * auth profile." (2026.9.3 and 2026.9.4 alike). Ollama had the same row shape;
+ * its probe mostly hid it by refusing `ollama/<tag>` as not installed.
+ *
+ * Only this provider's OWN prefix comes off, repeated until none is left: the
+ * core cannot address a model id that begins with it anyway. Anything else —
+ * an Ollama namespace such as `hf.co/org/model:tag` — is part of the id.
+ */
+function bareLocalModelId(provider: "llamacpp" | "ollama", raw: string): string {
+  const prefix = `${provider}/`;
+  let id = raw.trim();
+  while (id.toLowerCase().startsWith(prefix)) id = id.slice(prefix.length).trim();
+  return id;
+}
+
+/**
+ * A local ref read back from somewhere a pre-fix save wrote it, with the doubled
+ * prefix collapsed: `llamacpp/llamacpp/<id>` → `llamacpp/<id>`. The store's
+ * `local_ai_model` keeps the doubled ref until the owner saves again, and the
+ * boot migration only heals OpenClaw's config, so the fallback writer reading
+ * it verbatim put the unmaterializable ref straight back into
+ * `agents.defaults.model.fallbacks` on the next cloud save. The provider comes
+ * from the ref itself, as in the migration's `_local_collapse_ref`. Any other
+ * ref comes back unchanged; one that is nothing but prefixes names no model and
+ * comes back null.
+ */
+function collapseLocalModelRef(ref: string): string | null {
+  const [head, ...rest] = ref.trim().split("/");
+  const provider = head.trim().toLowerCase();
+  if ((provider !== "llamacpp" && provider !== "ollama") || rest.length === 0) return ref;
+  const id = rest.join("/");
+  const bare = bareLocalModelId(provider, id);
+  if (bare === id.trim()) return ref;
+  return bare ? `${provider}/${bare}` : null;
+}
+
 const PROFILE_KEY_RE = /^[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)*$/;
 const COMMAND_TIMEOUT_MS = 30_000;
 const BATCH_COMMAND_TIMEOUT_MS = 60_000;
@@ -1715,7 +1763,7 @@ async function getStoredLocalFallbackModel(): Promise<string | null> {
       return null;
     }
     const stored = config.local_ai_configured && typeof config.local_ai_model === "string"
-      ? config.local_ai_model
+      ? collapseLocalModelRef(config.local_ai_model)
       : null;
     if (stored) return stored;
   } catch {
@@ -1724,7 +1772,8 @@ async function getStoredLocalFallbackModel(): Promise<string | null> {
 
   try {
     const openclawConfig = await readOpenClawConfig();
-    return inferConfiguredLocalModel(openclawConfig)?.model ?? null;
+    const inferred = inferConfiguredLocalModel(openclawConfig)?.model;
+    return inferred ? collapseLocalModelRef(inferred) : null;
   } catch {
     return null;
   }
@@ -2494,7 +2543,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // an API caller who wrote { model: "qwen2.5:3b" } used to have the field
       // silently ignored and llama3.2:3b saved in its place — a "success" that
       // configured a model this box does not have.
-      const modelName = localModelSlot || normalizedModel || "llama3.2:3b";
+      const modelName = bareLocalModelId("ollama", localModelSlot)
+        || bareLocalModelId("ollama", normalizedModel)
+        || "llama3.2:3b";
 
       // Ask Ollama about the id BEFORE anything is written. Both refusals below
       // used to be discovered by the customer one dead chat turn at a time: an
@@ -2536,8 +2587,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       }
       config.defaultModel = `ollama/${modelName}`;
     } else if (isLlamaCpp) {
-      // Same two slots as the Ollama branch above, for the same reason.
-      const modelName = localModelSlot || normalizedModel || getDefaultLlamaCppModel();
+      // Same two slots as the Ollama branch above, for the same reason, and the
+      // same bare id: see `bareLocalModelId` for what a second prefix did.
+      const modelName = bareLocalModelId("llamacpp", localModelSlot)
+        || bareLocalModelId("llamacpp", normalizedModel)
+        || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
     } else if (isClawAI && resolvedClawboxTier) {
       // The badge fills in a DEFAULT, and a default never overwrites a choice
