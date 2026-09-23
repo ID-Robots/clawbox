@@ -83,6 +83,8 @@ export type ProgressLabelKey =
   | "pullRequestAdopted"
   | "merged"
   | "notMerged"
+  | "autoMergeOn"
+  | "autoMergeOff"
   | "onDesktop"
   | "notOnDesktop"
   | "providerSilent"
@@ -308,6 +310,10 @@ export const RUNNER_STEP = {
    *  the loop was ever going to watch it — see PrFoundBy. */
   pullRequestAdopted: (num: number, base: string | null) => `Picked up pull request #${num} into ${base}, opened by the run itself`,
   notMerged: (reason: string) => `Not merged: ${reason}`,
+  /** The box handed the merge to GitHub's auto-merge (reconcileAutoMerge). */
+  autoMergeOn: (num: number) => `Turned on GitHub's auto-merge for pull request #${num}: it merges the moment its required checks pass`,
+  /** ...and took it back; `reason` is the box's own words (decideAutoMerge). */
+  autoMergeOff: (reason: string) => `Turned off GitHub's auto-merge: ${reason}`,
   onDesktop: (name: string, id: string, port: number) => `On the desktop as "${name}", served at /apps/${id}/ from port ${port}`,
   notOnDesktop: (port: number, reason: string) => `Not on the desktop yet: clawbox.json names port ${port}, but ${reason}`,
   finished: (status: string) => `Finished: ${status}`,
@@ -443,6 +449,8 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Picked up pull request #(\d+) into (.+), opened by the run itself$/, labelKey: "pullRequestAdopted", icon: "merge", params: (m) => ({ number: Number(m[1]), base: m[2] }) },
   { re: /^Merged into the base branch$/, labelKey: "merged", icon: "merge" },
   { re: /^Not merged: (.+)$/, labelKey: "notMerged", icon: "error", params: (m) => ({ reason: m[1] }) },
+  { re: /^Turned on GitHub's auto-merge for pull request #(\d+): it merges the moment its required checks pass$/, labelKey: "autoMergeOn", icon: "merge", params: (m) => ({ number: Number(m[1]) }) },
+  { re: /^Turned off GitHub's auto-merge: (.+)$/, labelKey: "autoMergeOff", icon: "pause_circle", params: (m) => ({ reason: m[1] }) },
   { re: /^On the desktop as "(.*)", served at \/apps\/(\S+)\/ from port (\d+)$/, labelKey: "onDesktop", icon: "desktop_windows", params: (m) => ({ name: m[1], id: m[2], port: Number(m[3]) }) },
   { re: /^Not on the desktop yet: clawbox\.json names port (\d+), but (.+)$/, labelKey: "notOnDesktop", icon: "error", params: (m) => ({ port: Number(m[1]), reason: m[2] }) },
   { re: /^The provider did not answer; starting over in a fresh session$/, labelKey: "providerSilent", icon: "sync_problem" },

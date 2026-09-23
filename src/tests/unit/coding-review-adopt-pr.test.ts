@@ -46,6 +46,10 @@ const github = vi.hoisted(() => ({
   openPullRequest: vi.fn(),
   readPullRequest: vi.fn(),
   mergePullRequest: vi.fn(),
+  // Defaults, restored by mockReset: auto-merge is not this file's subject.
+  readAutoMergeFacts: vi.fn(async () => ({ error: "not read in this test" })),
+  enableAutoMerge: vi.fn(async () => ({ ok: true })),
+  disableAutoMerge: vi.fn(async () => ({ ok: true })),
 }));
 vi.mock("@/lib/coding-pr", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-pr")>()),

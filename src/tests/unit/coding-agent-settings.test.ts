@@ -167,6 +167,22 @@ describe("what a run is told about the shell", () => {
     expect(lib.HEADLESS_BRIEF).toMatch(/End anything you started by its PID: pkill, killall and fuser are refused/);
   });
 
+  it("hands a merge the task asked for to GitHub's auto-merge — never into main, over hold, or on a draft", async () => {
+    // Measured on ClawBox's own repository: green pull requests waited ten to
+    // sixteen hours for a merge. Every writing run hears this, whatever its
+    // review shape; a read-only run opens nothing and hears none of it.
+    const lib = await import("@/lib/coding-agent");
+    for (const brief of [lib.HEADLESS_BRIEF, lib.headlessBrief({ reviewedSeparately: true })]) {
+      expect(brief).toContain(lib.PR_AUTO_MERGE_BRIEF);
+    }
+    expect(lib.PR_AUTO_MERGE_BRIEF).toContain("`gh pr merge <number> --auto --merge`");
+    expect(lib.PR_AUTO_MERGE_BRIEF).toMatch(/wants it merged/);
+    expect(lib.PR_AUTO_MERGE_BRIEF).toMatch(/Never do that for a pull request into main or one labelled hold or do-not-merge/);
+    expect(lib.PR_AUTO_MERGE_BRIEF).toMatch(/not on a draft/);
+    expect(lib.PR_AUTO_MERGE_BRIEF).toContain("`gh pr merge <number> --disable-auto`");
+    expect(lib.READ_ONLY_BRIEF).not.toContain("--auto");
+  });
+
   it("tells a run whose diff gets a separate review not to send the reviewer helper too", async () => {
     // Bench cycle 1 (2026-09-05): with the automatic review pass on, m-02
     // spent 45% of its wall time idle behind a flash reviewer whose verdict

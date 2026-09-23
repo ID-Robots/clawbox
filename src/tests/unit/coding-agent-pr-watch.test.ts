@@ -30,10 +30,17 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const readPullRequest = vi.hoisted(() => vi.fn());
 const mergePullRequest = vi.hoisted(() => vi.fn());
+// Defaults, restored by mockReset: auto-merge unread unless a test says so.
+const readAutoMergeFacts = vi.hoisted(() => vi.fn(async (): Promise<unknown> => ({ error: "not read in this test" })));
+const enableAutoMerge = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
+const disableAutoMerge = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
 vi.mock("@/lib/coding-pr", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-pr")>()),
   readPullRequest,
   mergePullRequest,
+  readAutoMergeFacts,
+  enableAutoMerge,
+  disableAutoMerge,
 }));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
 
@@ -171,5 +178,75 @@ describe("a pull request GitHub will not answer about", () => {
     expect(run?.pr?.phase).toBe("merged");
     expect(run?.pr?.checks).toEqual({ total: 1, passed: 1, failed: 0, pending: 0 });
     expect(isPrPending(run?.pr)).toBe(false);
+  });
+});
+
+describe("GitHub's auto-merge under the checks-only watcher", () => {
+  const pending = { state: "OPEN", mergeable: "MERGEABLE", checks: { total: 2, passed: 1, failed: 0, pending: 1 }, noChecks: false };
+  const facts = (over: Record<string, unknown> = {}) => ({
+    state: "OPEN", draft: false, base: "beta", labels: [] as string[], mergeState: "BLOCKED", enabled: false, ...over,
+  });
+
+  it("hands the merge to GitHub while a required check runs, and looks again no more than once a minute", async () => {
+    readPullRequest.mockResolvedValue(pending);
+    readAutoMergeFacts.mockResolvedValue(facts());
+    // Past the grace a fresh pull request's checks get.
+    writeRecord(Date.now() - 5 * 60_000);
+
+    lib.resumePullRequestWatches();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+    expect(enableAutoMerge).toHaveBeenCalledWith(home, PR_NUMBER);
+    const run = lib.getRun(RUN_ID);
+    expect(run?.pr?.autoMergeAt).toEqual(expect.any(Number));
+    expect(run?.pr?.phase).toBe("waiting");
+    expect(run?.progress.join("\n")).toContain(`Turned on GitHub's auto-merge for pull request #${PR_NUMBER}`);
+
+    // The watcher polls every few seconds; auto-merge is looked at once a minute.
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    expect(readPullRequest).toHaveBeenCalledTimes(2);
+    expect(readAutoMergeFacts).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves it on when it gives up at its ceiling, and says the pull request still merges by itself", async () => {
+    readPullRequest.mockResolvedValue(pending);
+    readAutoMergeFacts.mockResolvedValue(facts({ enabled: true }));
+    writeRecord(Date.now() - MAX_WAIT_MS - 1_000);
+
+    lib.resumePullRequestWatches();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+    const run = lib.getRun(RUN_ID);
+    expect(run?.pr?.phase).toBe("blocked");
+    expect(run?.pr?.detail).toContain("Gave up waiting for GitHub Actions");
+    expect(run?.pr?.detail).toContain("GitHub's auto-merge is on for it, so it merges by itself");
+    expect(disableAutoMerge).not.toHaveBeenCalled();
+  });
+
+  it("never merges a pull request labelled hold, and turns auto-merge off over the label", async () => {
+    readPullRequest.mockResolvedValue({ ...pending, checks: { total: 2, passed: 2, failed: 0, pending: 0 }, labels: ["hold"] });
+    readAutoMergeFacts.mockResolvedValue(facts({ labels: ["hold"], enabled: true }));
+    writeRecord(Date.now() - 5 * 60_000);
+
+    lib.resumePullRequestWatches();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+    expect(mergePullRequest).not.toHaveBeenCalled();
+    expect(disableAutoMerge).toHaveBeenCalledWith(home, PR_NUMBER);
+    const run = lib.getRun(RUN_ID);
+    expect(run?.pr?.phase).toBe("blocked");
+    expect(run?.pr?.detail).toContain("hold label");
+  });
+
+  it("never turns it on for a pull request into main", async () => {
+    readPullRequest.mockResolvedValue(pending);
+    readAutoMergeFacts.mockResolvedValue(facts({ base: "main" }));
+    writeRecord(Date.now() - 5 * 60_000);
+
+    lib.resumePullRequestWatches();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+    expect(readAutoMergeFacts).toHaveBeenCalledTimes(1);
+    expect(enableAutoMerge).not.toHaveBeenCalled();
   });
 });
