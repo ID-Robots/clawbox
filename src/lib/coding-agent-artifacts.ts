@@ -322,7 +322,7 @@ function linkStaysInside(abs: string, realDir: string): boolean {
  * directory it has read for a link out of the folder in between, and the
  * removal would reach through it; checking each path first would only move
  * that race. finishRun skips the prune for a run that left something running
- * (`leftover`).
+ * (`leftover`), and waits for a process group it has just signalled to be gone.
  */
 export async function pruneArtifacts(runId: string): Promise<PrunedArtifact[]> {
   if (!ARTIFACT_RUN_ID_RE.test(runId)) return [];

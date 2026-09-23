@@ -5680,6 +5680,20 @@ function groupAlive(pgid: number | null): boolean {
 }
 
 /**
+ * Wait, at most `ms`, for a process group to be gone; answers whether it is.
+ * For a group the settle has just signalled: SIGKILL follows STOP_GRACE_MS
+ * after the SIGTERM (killRunGroup), so a little longer than that is enough.
+ */
+async function groupGone(pgid: number | null, ms: number): Promise<boolean> {
+  const until = Date.now() + ms;
+  while (groupAlive(pgid)) {
+    if (Date.now() >= until) return false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return true;
+}
+
+/**
  * Is that ONE process still there? `groupAlive`'s narrower sibling, and the two
  * answer different questions: the group is alive while anything the run forked
  * is, the process is alive only while the HARNESS is.
@@ -9455,6 +9469,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // …and the Anthropic account it was on, for the same branch and for the
   // account switch below.
   const carriedAccount = runAnthropicCredential.get(run.id);
+  // …and its process group, which the cleanup forgets once it has signalled
+  // it: the prune below waits for that group to be gone.
+  const settledGroup = run.pgid;
   // Timers, the run's browser tab, and the verdict on what it left running.
   // Before the retry branch below, which respawns into a fresh state and a
   // fresh process group: a retry that inherited the first attempt's timers
@@ -9618,7 +9635,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // folder next to the run that put it there — and before any waiter or
     // update can find it: see pruneArtifacts. Not while something the run
     // started is still running: it can still change the folder under the walk.
-    if (!leftRunning) {
+    // A run that left something running on purpose is not pruned at all; a
+    // group the cleanup signalled is waited for, up to its SIGKILL and a
+    // margin — something that shrugs off SIGTERM is still there until then.
+    if (!leftRunning && (await groupGone(settledGroup, STOP_GRACE_MS + 1_000))) {
       const pruned = await pruneArtifacts(run.id);
       if (pruned.length > 0) pushProgress(run, RUNNER_STEP.evidencePruned(prunedPaths(pruned)));
     }
