@@ -97,7 +97,7 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
  * way. Deliberately not called `then` — an object with a `then` field is a
  * thenable, and the fake runner returns these records from an async function.
  */
-let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; commitError: string | null; tokensUsed: number; resumesAs: Record<string, unknown> }>>;
+let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; resumesAs: Record<string, unknown> }>>;
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-team-"));
@@ -834,6 +834,107 @@ describe("a team that works", () => {
     expect(done.metrics.readOnlyRefusals).toBe(0);
   });
 
+  // Night validation, 2026-09-23: every miss had one shape — a worker in its
+  // worktree read or wrote `<project>/<file>`, was refused, and the rule
+  // failed the task with every deliverable on disk. The runner now answers
+  // such a refusal with a retry hint at the worktree path and marks it.
+  describe("a refusal the runner answered with a retry hint at the worktree", () => {
+    const P = "/home/clawbox/Projects/site";
+    const W1 = `${P}/.clawbox/worktrees/t1-1`;
+    const W2 = `${P}/.clawbox/worktrees/t2-1`;
+    const hinted = (text: string, worktreePath: string) => ({ text, rule: null, refusal: null, worktreePath });
+    const plain = (text: string) => ({ text, rule: null, refusal: null });
+
+    it("is a note — reads and writes alike, every one counted past the kept few — and the task goes to its reviewer clean", async () => {
+      const t1 = [
+        hinted(`Read: ${P}/index.html`, `${W1}/index.html`),
+        hinted(`Write: ${P}/index.html`, `${W1}/index.html`),
+        hinted(`Glob: ${P}`, W1),
+        hinted(`Edit: ${P}/index.html`, `${W1}/index.html`),
+        hinted(`Read: ${P}/app.js`, `${W1}/app.js`),
+      ];
+      const t2 = [plain("Write: /tmp/check.py"), hinted(`Write: ${P}/app.js`, `${W2}/app.js`)];
+      outcomes = [
+        { summary: PLAN },
+        // Seven refusals, five kept — and the runner counted all seven as hinted.
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 7, worktreeHints: 7, deniedActions: t1.map((d) => d.text), denials: t1 },
+        { summary: "app done", filesTouched: ["app.js"], permissionDenials: 2, worktreeHints: 1, deniedActions: t2.map((d) => d.text), denials: t2 },
+      ];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+      const done = await finished(board.id);
+      expect(done.status).toBe("done");
+      expect(done.alerts).toBe(0);
+      expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
+      expect(done.log.filter((e) => e.type === "note").map((e) => [e.actor.kind, e.task_id, e.message])).toEqual([
+        ["system", "t1", `Worker run-00000002 was refused 7 action(s) that changed nothing — 7 aimed at the project instead of its worktree, each answered with a retry hint at the worktree path: Read: ${P}/index.html → ${W1}/index.html; Write: ${P}/index.html → ${W1}/index.html; Glob: ${P} → ${W1}`],
+        ["system", "t2", `Worker run-00000004 was refused 2 action(s) that changed nothing — 1 aimed at the project instead of its worktree, each answered with a retry hint at the worktree path; the rest reads, or writes outside its folder: Write: /tmp/check.py; Write: ${P}/app.js → ${W2}/app.js`],
+      ]);
+      // Reviewed and accepted on the first attempt: nothing redone, nothing rejected by the rule.
+      expect(starts.map((s) => (s.team as { role: string }).role)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer"]);
+      expect(done.tasks.map((t) => [t.status, t.attempts, t.rejections, t.review?.verdict])).toEqual([["complete", 1, 0, "accepted"], ["complete", 1, 0, "accepted"]]);
+      expect(done.metrics).toMatchObject({ readOnlyRefusals: 9, tasksRejected: 0, tasksAcceptedFirstTry: 2 });
+    });
+
+    it("does not clear a refused write inside the worktree beside it: the alert and the rejection stay", async () => {
+      const t1 = [hinted(`Write: ${P}/index.html`, `${W1}/index.html`), plain(`Write: ${W1}/index.html`)];
+      outcomes = [
+        { summary: PLAN },
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 2, worktreeHints: 1, deniedActions: t1.map((d) => d.text), denials: t1 },
+        { summary: "index done", filesTouched: ["index.html"] },
+        { summary: "app done", filesTouched: ["app.js"] },
+      ];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+      const done = await finished(board.id);
+      expect(done.status).toBe("done");
+      expect(done.alerts).toBe(1);
+      // The refusal that decided it is named first.
+      expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+        `ALERT: Worker run-00000002 was refused 2 action(s): Write: ${W1}/index.html; Write: ${P}/index.html`,
+      ]);
+      expect(done.log.filter((e) => e.type === "note")).toEqual([]);
+      expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 2, rejections: 1 });
+      expect(starts.map((s) => (s.team as { role: string }).role)).toEqual(["planner", "worker", "worker", "reviewer", "worker", "reviewer"]);
+    });
+
+    it("keeps the alert when a refusal the run did not keep was not among the hinted ones", async () => {
+      const t1 = [1, 2, 3, 4, 5].map((i) => hinted(`Read: ${P}/f${i}.html`, `${W1}/f${i}.html`));
+      outcomes = [
+        { summary: PLAN },
+        // Seven refusals, five kept and hinted — the two not kept may have been writes.
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 7, worktreeHints: 5, deniedActions: t1.map((d) => d.text), denials: t1 },
+        { summary: "index done", filesTouched: ["index.html"] },
+        { summary: "app done", filesTouched: ["app.js"] },
+      ];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+      const done = await finished(board.id);
+      expect(done.alerts).toBe(1);
+      expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)[0]).toMatch(/Worker run-00000002 was refused 7 action\(s\)/);
+      expect(done.log.filter((e) => e.type === "note")).toEqual([]);
+      expect(done.tasks[0]).toMatchObject({ attempts: 2, rejections: 1 });
+    });
+
+    it("never softens a refused look into the harness's own state: an alert and a rejection, hinted refusals beside it or not", async () => {
+      const t1 = [plain(`Read: /home/clawbox/.claude-ds/projects/-home-clawbox-Projects-site/sess-1.jsonl`), hinted(`Read: ${P}/index.html`, `${W1}/index.html`)];
+      outcomes = [
+        { summary: PLAN },
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 2, worktreeHints: 1, deniedActions: t1.map((d) => d.text), denials: t1 },
+        // Its second attempt through the shell: read-only, and still the harness's state.
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: ["Bash: cat ~/.claude/projects/-home-clawbox-Projects-site/memory/MEMORY.md"] },
+      ];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+      const done = await finished(board.id);
+      expect(done.status).toBe("failed");
+      expect(done.alerts).toBe(2);
+      expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+        `ALERT: Worker run-00000002 was refused 2 action(s): Read: /home/clawbox/.claude-ds/projects/-home-clawbox-Projects-site/sess-1.jsonl; Read: ${P}/index.html`,
+        "ALERT: Worker run-00000003 was refused 1 action(s): Bash: cat ~/.claude/projects/-home-clawbox-Projects-site/memory/MEMORY.md",
+      ]);
+      expect(done.log.filter((e) => e.type === "note")).toEqual([]);
+      expect(done.tasks[0]).toMatchObject({ status: "rejected", attempts: 2, rejections: 2, review: { verdict: "rejected", notes: expect.stringMatching(/refused an action/) } });
+      expect(done.metrics.readOnlyRefusals).toBe(0);
+    });
+  });
+
   it("fails the team when a worker fails and its dependants can never run, naming both", async () => {
     outcomes = [{ summary: PLAN }, { status: "failed", error: "Stopped at the cost ceiling" }];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
@@ -909,23 +1010,70 @@ describe("the gates", () => {
 });
 
 describe("the words", () => {
-  // Bench, 2026-09-22: a worker in a worktree read its hinted styles.css at
-  // `<project>/styles.css`, was refused, and the refusal was an alert.
-  it("names a worker's own folder when it has a worktree — before the files, every path relative to it — and nothing in place", async () => {
+  // Bench, 2026-09-22/23: a worker in a worktree read its hinted styles.css at
+  // `<project>/styles.css`, was refused, and the refusal failed the task.
+  it("names a worker's worktree as its ONLY folder, before the files, and gives the files as absolute paths in it — nothing in place", async () => {
     const { createBoard, postTask } = await import("@/lib/coding-team-board");
     const board = createBoard({ goal: "Build the site", projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
-    const task = postTask(board, { kind: "planner" }, { task_description: "Write styles.css", files_hint: ["styles.css"] });
+    const task = postTask(board, { kind: "planner" }, { task_description: "Write styles.css", files_hint: ["styles.css", "./assets/", "/home/clawbox/Projects/site/index.html"] });
     const folder = "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1";
     const text = team.workerTask(board, task, folder);
     // The task line stays first: it is the run's commit subject.
     expect(text.split("\n")[0]).toBe("Your task (t1 of 1): Write styles.css");
-    expect(text).toContain(`Your folder: ${folder} — your own working copy of the project. Every path in this task, the files below included, is relative to it`);
-    expect(text).toContain("never in /home/clawbox/Projects/site itself");
-    expect(text.indexOf("Your folder:")).toBeLessThan(text.indexOf("Files this task is expected to touch: styles.css"));
-    // The hint itself stays relative — what outsideHint matches against.
-    expect(text).not.toContain(`${folder}/styles.css`);
-    expect(team.workerTask(board, task)).not.toContain("Your folder:");
-    expect(team.workerTask(board, task, board.directory)).not.toContain("Your folder:");
+    expect(text).toContain(`Your folder: ${folder} — your own working copy of the project, and the ONLY folder you work in.`);
+    expect(text).toContain(`Files this task is expected to touch: ${folder}/styles.css, ${folder}/assets/, ${folder}/index.html`);
+    expect(text.indexOf("Your folder:")).toBeLessThan(text.indexOf("Files this task is expected to touch:"));
+    // The project itself is never named to the worker: every mention of it is its worktree's.
+    expect(text.split(folder).join("")).not.toContain("/home/clawbox/Projects/site");
+    // The board keeps the hint as the planner wrote it — what outsideHint matches against.
+    expect(task.files_hint).toEqual(["styles.css", "./assets/", "/home/clawbox/Projects/site/index.html"]);
+    // In place, the project IS the worker's folder: no folder line, the hint as written.
+    for (const inPlace of [team.workerTask(board, task), team.workerTask(board, task, board.directory)]) {
+      expect(inPlace).not.toContain("Your folder:");
+      expect(inPlace).toContain("Files this task is expected to touch: styles.css, ./assets/, /home/clawbox/Projects/site/index.html");
+    }
+  });
+
+  it("says every project path a worker in a worktree reads in its own folder: the goal, its task, a rejection, the board and a sibling's worktree", async () => {
+    const { createBoard, postTask, assignTask, updateStatus, submitResult, reviewTask } = await import("@/lib/coding-team-board");
+    const project = "/home/clawbox/Projects/site";
+    const board = createBoard({ goal: `Build the site in ${project}. Keep ${project}/README.md as is; ${project}-old is another project.`, projectId: null, directory: project, source: "owner" }, { kind: "owner" });
+    const t1 = postTask(board, { kind: "planner" }, { task_description: `Scaffold ${project}/index.html` });
+    const t2 = postTask(board, { kind: "planner" }, { task_description: `Style ${project}/index.html with ${project}/styles.css`, files_hint: ["styles.css"] });
+    // t1 finished in ITS worktree and said so; the reviewer of t2's first attempt pointed at the project.
+    assignTask(board, { kind: "system" }, t1.task_id, "run-aaaaaaaa");
+    updateStatus(board, { kind: "worker", id: "run-aaaaaaaa" }, t1.task_id, "in_progress");
+    submitResult(board, { kind: "worker", id: "run-aaaaaaaa" }, t1.task_id, `Wrote ${project}/.clawbox/worktrees/t1-1/index.html.`);
+    updateStatus(board, { kind: "worker", id: "run-aaaaaaaa" }, t1.task_id, "complete");
+    assignTask(board, { kind: "system" }, t2.task_id, "run-bbbbbbbb");
+    updateStatus(board, { kind: "worker", id: "run-bbbbbbbb" }, t2.task_id, "in_progress");
+    updateStatus(board, { kind: "worker", id: "run-bbbbbbbb" }, t2.task_id, "complete");
+    reviewTask(board, { kind: "reviewer" }, t2.task_id, "rejected", `${project}/styles.css is empty.`);
+    const row = board.tasks.find((t) => t.task_id === t2.task_id)!;
+    const folder = `${project}/.clawbox/worktrees/t2-2`;
+    const text = team.workerTask(board, row, folder);
+    expect(text.split("\n")[0]).toBe(`Your task (t2 of 2): Style ${folder}/index.html with ${folder}/styles.css`);
+    expect(text).toContain(`Team goal: Build the site in ${folder}. Keep ${folder}/README.md as is; ${project}-old is another project.`);
+    expect(text).toContain(`A previous attempt was rejected: ${folder}/styles.css is empty.`);
+    // The sibling's worktree is gone once merged: its file is in this worker's own copy.
+    expect(text).toContain(`t1 [complete] — Scaffold ${folder}/index.html → Wrote ${folder}/index.html.`);
+    // Nothing of the project's path is left but the worker's own folder — and the OTHER project's name.
+    expect(text.split(folder).join("").split(`${project}-old`).join("")).not.toContain(project);
+  });
+
+  it("gives the reviewer the project's paths for what a worker wrote in its worktree, gone by the time it reads", async () => {
+    outcomes = [
+      { summary: PLAN },
+      { summary: "Built /home/clawbox/Projects/site/.clawbox/worktrees/t1-1/index.html; open it.", filesTouched: ["index.html"] },
+      { summary: "Wired app.js.", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const reviewer = starts.find((s) => (s.team as { role: string }).role === "reviewer")!;
+    expect(reviewer.directory).toBe("/home/clawbox/Projects/site");
+    expect(String(reviewer.task)).toContain("Built /home/clawbox/Projects/site/index.html; open it.");
+    expect(String(reviewer.task)).not.toContain(".clawbox/worktrees");
   });
 
   it("keeps the worker's folder when a long goal pushes the task text past its cut", async () => {

@@ -68,6 +68,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     permissionDenials: 0,
     deniedActions: [],
     denials: [],
+    worktreeHints: 0,
     allowRules: [],
     inputs: null,
     secretNames: [],
