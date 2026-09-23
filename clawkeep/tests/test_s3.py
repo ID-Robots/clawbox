@@ -72,12 +72,19 @@ def test_upload_translates_botocore_error(tmp_path: Path) -> None:
             s3.upload(CREDS, archive_path=archive, object_name="snap.tar.gz")
 
 
+def _key(name: str) -> str:
+    return f"users/u_x/repo/{name}"
+
+
 def test_stats_sums_sizes_across_pages() -> None:
     fake_paginator = MagicMock()
     fake_paginator.paginate.return_value = iter(
         [
-            {"Contents": [{"Size": 100}, {"Size": 200}]},
-            {"Contents": [{"Size": 50}]},
+            {"Contents": [
+                {"Key": _key("a.tar.gz.enc"), "Size": 100},
+                {"Key": _key("b.tar.gz.enc"), "Size": 200},
+            ]},
+            {"Contents": [{"Key": _key("c.tar.gz.enc"), "Size": 50}]},
             {},  # empty page (Cloudflare returns these between truncated batches)
         ]
     )
@@ -90,6 +97,68 @@ def test_stats_sums_sizes_across_pages() -> None:
     fake_paginator.paginate.assert_called_once_with(
         Bucket="clawkeep", Prefix="users/u_x/repo/",
     )
+
+
+def test_stats_excludes_what_list_snapshots_excludes() -> None:
+    """The two readings of "what's in the prefix" have to agree object for
+    object: whichever one the box quotes, it must be the same number. The
+    manifest was already excluded from both; the zero-byte directory markers
+    MinIO and some R2 lifecycles leave behind were counted as snapshots by
+    `stats` and skipped by `list_snapshots`."""
+    contents = [
+        {"Key": _key("a.tar.gz.enc"), "Size": 100},
+        {"Key": _key(s3.MANIFEST_OBJECT), "Size": 12},
+        {"Key": _key("nested/"), "Size": 0},   # directory marker
+        {"Key": "users/u_x/repo/", "Size": 0},  # the prefix itself
+    ]
+    fake_client = MagicMock()
+    fake_client.get_paginator.return_value.paginate.return_value = iter(
+        [{"Contents": contents}],
+    )
+    with patch("clawkeep.s3._client", return_value=fake_client):
+        counted = s3.stats(CREDS)
+
+    fake_client.get_paginator.return_value.paginate.return_value = iter(
+        [{"Contents": contents}],
+    )
+    with (
+        patch("clawkeep.s3._client", return_value=fake_client),
+        patch("clawkeep.s3.read_manifest", return_value={"version": 1, "snapshots": {}}),
+    ):
+        listed = s3.list_snapshots(CREDS)
+
+    assert counted == s3.CloudStats(cloud_bytes=100, snapshot_count=1)
+    assert counted == s3.stats_from_snapshots(listed)
+
+
+def test_client_failure_is_an_s3_error_not_a_bare_value_error() -> None:
+    """Every caller in this module handles `S3Error` and none handles
+    `ValueError`, so an endpoint botocore refuses to parse used to escape as
+    one — taking down a run that had already decided the S3 half was
+    best-effort. `run_idle` is the sharp case: it would send no heartbeat at
+    all over a recount it was free to skip."""
+    unusable = Credentials(
+        accessKeyId="AKIA",
+        secretAccessKey="secret",
+        sessionToken="session",
+        endpoint="not a url",
+        bucket="clawkeep",
+        prefix="users/u_x/repo/",
+        expiresAt=0,
+        quotaBytes=5_368_709_120,
+        cloudBytes=0,
+    )
+    with pytest.raises(s3.S3Error, match="could not build an S3 client"):
+        s3.stats(unusable)
+
+
+def test_stats_from_snapshots_totals_a_listing() -> None:
+    snaps = [
+        s3.Snapshot(name="a", size_bytes=10, last_modified_ms=2),
+        s3.Snapshot(name="b", size_bytes=32, last_modified_ms=1, locked=True),
+    ]
+    assert s3.stats_from_snapshots(snaps) == s3.CloudStats(cloud_bytes=42, snapshot_count=2)
+    assert s3.stats_from_snapshots([]) == s3.CloudStats(cloud_bytes=0, snapshot_count=0)
 
 
 def test_stats_translates_botocore_error() -> None:

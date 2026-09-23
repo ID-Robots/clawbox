@@ -11,7 +11,13 @@ Group=clawkeep
 Environment=CLAWKEEP_DATA_DIR=/var/lib/clawkeep
 Environment=CLAWKEEP_CONFIG_PATH=/etc/clawkeep/config.toml
 ExecStart=/usr/bin/clawkeepd --idle
-TimeoutStartSec=60s
+# The idle tick is no longer one POST: it mints credentials and counts the
+# objects in the R2 prefix so the heartbeat can carry real usage instead of a
+# counter (see runner.run_idle). Two network calls on a device that may be on
+# a slow link need more than a minute of headroom — and every part of it is
+# best-effort, so the only thing a tighter cap can buy is a killed unit that
+# would otherwise have finished.
+TimeoutStartSec=5min
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only

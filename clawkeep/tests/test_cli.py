@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -214,6 +215,60 @@ def test_snapshots_reports_the_quota_kind_the_portal_answered(
     assert out["kind"] == "quota_full"
     # Nothing was listed — the credential is withheld before the read.
     list_snapshots.assert_not_called()
+
+
+def test_snapshots_reports_the_listing_not_the_portal_counter(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """TASK-1025: `cloudBytes` in this envelope is what the objects add up to.
+
+    It used to be `creds.cloudBytes` — the portal's running counter — and the
+    TS bridge writes that field into state.json, which is where the panel's
+    "cloud usage" comes from. A counter that still carried freed snapshots
+    therefore reappeared on the box as "9.8 GB used" no matter what the
+    account actually held.
+    """
+    from clawkeep import s3
+
+    counter_says = 9_800_000_000
+    creds = replace(CREDS, cloudBytes=counter_says)
+    snapshots = [
+        s3.Snapshot(name="b.tar.gz.enc", size_bytes=200, last_modified_ms=2),
+        s3.Snapshot(name="a.tar.gz.enc", size_bytes=100, last_modified_ms=1),
+    ]
+    with (
+        patch("clawkeep.cli._load_cfg_and_token", return_value=(_stub_cfg(), "claw_token")),
+        patch("clawkeep.api.mint_credentials", return_value=creds),
+        patch("clawkeep.cli.s3.list_snapshots", return_value=snapshots),
+    ):
+        rc = cli._snapshots_main([])
+
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["cloudBytes"] == 300
+    assert out["cloudBytes"] != counter_says
+    # The quota is the portal's to declare — only usage is re-derived here.
+    assert out["quotaBytes"] == creds.quotaBytes
+    assert [s["name"] for s in out["snapshots"]] == ["b.tar.gz.enc", "a.tar.gz.enc"]
+
+
+def test_snapshots_reports_zero_usage_for_an_empty_prefix(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The case the customer was in: nothing left in the bucket, a counter
+    that still said otherwise."""
+    creds = replace(CREDS, cloudBytes=9_800_000_000)
+    with (
+        patch("clawkeep.cli._load_cfg_and_token", return_value=(_stub_cfg(), "claw_token")),
+        patch("clawkeep.api.mint_credentials", return_value=creds),
+        patch("clawkeep.cli.s3.list_snapshots", return_value=[]),
+    ):
+        rc = cli._snapshots_main([])
+
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["cloudBytes"] == 0
+    assert out["snapshots"] == []
 
 
 def _stub_cfg() -> object:
