@@ -80,6 +80,7 @@ import {
 } from "./drift-codes";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
+import { readStateSchemaVersion, statePath } from "./openclaw-state-store";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -112,7 +113,58 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // `{target: null, updateAvailable: false}` — "no OpenClaw update available" over a
 // box that has one, the false-success shape — and `reinstallManagedPluginPayload`
 // pinned the channel plugins to `@2026.8.1` on a 2026.9.3 core.
-const OPENCLAW_VERSION_FALLBACK = "2026.9.3";
+const OPENCLAW_VERSION_FALLBACK = "2026.9.4";
+
+/**
+ * The state-DB schema each pinned core supports, read from
+ * `OPENCLAW_STATE_SCHEMA_VERSION` in the published tarball's
+ * `dist/openclaw-state-db-contract-*.js` — not from release notes, which do
+ * not carry the number.
+ *
+ * It exists because OpenClaw NEVER downgrades a state schema. Once a core has
+ * opened `~/.openclaw/state/openclaw.sqlite` it migrates the file forward and
+ * every older core then refuses it outright ("uses newer schema version N;
+ * this build supports M"). A pin that moves BACKWARDS past such a box, or an
+ * update that installs a core older than the file on disk, leaves the device
+ * with an assistant that cannot start — so the pin bump has to carry the
+ * schema it implies, and the updater has to be able to compare the two before
+ * it installs anything.
+ *
+ * Exact-match only, and deliberately so: a pin this table has never seen
+ * answers `null` and the pre-flight below stands down rather than guessing a
+ * number for it. Guessing in either direction is worse than not asking —
+ * too low refuses a healthy box, too high lets the mid-run failure through
+ * that this whole check exists to replace.
+ */
+const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
+  "2026.8.1": 15,
+  "2026.9.3": 16,
+  "2026.9.4": 17,
+};
+
+/** The state schema `version` supports, or null when this pin is not in the table. */
+export function openclawStateSchemaFor(version: string | null | undefined): number | null {
+  if (!version) return null;
+  return OPENCLAW_STATE_SCHEMA_BY_VERSION[version.trim()] ?? null;
+}
+
+/**
+ * The OpenClaw this device is meant to converge on — NOT npm's latest.
+ *
+ * The pin file is canonical; `OPENCLAW_PIN_VERSION` overrides it for QA exactly
+ * as it does in install.sh and gateway-pre-start.sh; the compiled constant is
+ * the last resort for the one moment the file cannot be read.
+ */
+async function readPinnedOpenclawVersion(): Promise<string> {
+  const envPin = process.env.OPENCLAW_PIN_VERSION?.trim();
+  if (envPin) return envPin;
+  try {
+    const raw = await readFile(OPENCLAW_TARGET_FILE, "utf-8");
+    return raw.trim().split(/\s+/)[0] || OPENCLAW_VERSION_FALLBACK;
+  } catch {
+    return OPENCLAW_VERSION_FALLBACK;
+  }
+}
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
@@ -3739,16 +3791,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     // Read the ClawBox-pinned target — NOT npm's latest. The pin file is
     // the canonical source for which OpenClaw the fleet should converge on.
     // Env override (`OPENCLAW_PIN_VERSION`) mirrors install.sh for QA flows.
-    (async (): Promise<string | null> => {
-      const envPin = process.env.OPENCLAW_PIN_VERSION?.trim();
-      if (envPin) return envPin;
-      try {
-        const raw = await readFile(OPENCLAW_TARGET_FILE, "utf-8");
-        return raw.trim().split(/\s+/)[0] || OPENCLAW_VERSION_FALLBACK;
-      } catch {
-        return OPENCLAW_VERSION_FALLBACK;
-      }
-    })(),
+    readPinnedOpenclawVersion(),
     readClawboxVersion(),
     // Gated on the edition, not on a try/catch: the `openclaw` SKU has no
     // hermes binary, so this must never spawn there.
@@ -4608,6 +4651,61 @@ async function checkInternet(): Promise<boolean> {
   return false;
 }
 
+/**
+ * "This box's data is newer than the core this update would install" — asked
+ * BEFORE the first step runs, answered in one sentence or not at all.
+ *
+ * WHY IT IS A PRE-FLIGHT AND NOT A FAILURE MESSAGE. OpenClaw migrates
+ * `~/.openclaw/state/openclaw.sqlite` forward and NEVER back. A box whose store
+ * a newer core has opened is on a schema every older core refuses outright, and
+ * the refusal arrives from `npm install -g openclaw@<pin>`'s first CLI call —
+ * i.e. from INSIDE `openclaw_install`, after the step has retired the working
+ * core and written a new one over it. That is how a customer's V4.0 update
+ * stopped dead at "Updating OpenClaw" with "the device pins 2026.9.3, but
+ * ~/.openclaw/state/openclaw.sqlite uses schema 17 and this build supports only
+ * schema 16" (TASK-1088), leaving a box with no assistant and an update it
+ * could only retry into the same wall. The numbers are knowable before anything
+ * is touched, so they are read before anything is touched.
+ *
+ * IT REFUSES ONLY ON PROOF. Three separate unknowns each return null — a pin
+ * whose schema is not in the table, a device with no state store, a store that
+ * could not be read — because none of them is evidence of a newer schema, and
+ * an update refused over an unknown strands exactly the box an update repairs.
+ * Standing down costs what the box has today: the mid-run failure.
+ */
+async function newerStateSchemaRefusal(): Promise<string | null> {
+  try {
+    const target = await readPinnedOpenclawVersion();
+    const supported = openclawStateSchemaFor(target);
+    if (supported === null) {
+      console.warn(
+        `[Updater] no state schema recorded for the pinned OpenClaw ${target}; the state-DB pre-flight stood down`,
+      );
+      return null;
+    }
+    const dbPath = statePath();
+    if (!dbPath) return null;
+    const onDisk = readStateSchemaVersion();
+    if (onDisk === null || onDisk <= supported) return null;
+    return (
+      `This device's OpenClaw data is newer than the version this update installs. `
+      + `${dbPath} is on state schema ${onDisk}, and the pinned OpenClaw ${target} supports schema ${supported}. `
+      + `OpenClaw never downgrades a state schema, so installing it would leave the assistant unable to open its own data — `
+      + `the update was refused before it changed anything. `
+      + `Update ClawBox to a build whose pinned OpenClaw supports state schema ${onDisk} or newer, `
+      + `or restore the backup taken before the core that migrated this device.`
+    );
+  } catch (err) {
+    // A guard may not be the thing that fails an update. Whatever went wrong
+    // here, the box is no worse off than it was before this check existed.
+    console.warn(
+      "[Updater] could not read the OpenClaw state schema before the update:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+}
+
 /** Execute or resume update steps, recording failure and respecting host maintenance ownership. */
 async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOptions): Promise<void> {
   // The root-owned desktop adapter serializes its own core writers and
@@ -4699,6 +4797,30 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         "[Updater] Could not clear the previous run's markers - an interruption of THIS run may be reported as a completed update:",
         err instanceof Error ? err.message : err,
       );
+    }
+  }
+
+  // THE STATE-SCHEMA PRE-FLIGHT, and this is the one place it can stand.
+  //
+  // After the resume index has been resolved, so the question is asked about
+  // the steps this run will ACTUALLY execute: a continuation or a resume that
+  // is already past `openclaw_install` has its new core on the disk and must
+  // not be stopped by a check it has overtaken — that would strand a half-
+  // updated box. And before the loop, so it is ahead of every step that
+  // changes the device, which is the whole point (see newerStateSchemaRefusal).
+  //
+  // The lock above is already on disk by now, and is released here the way the
+  // internet refusal below releases it: it is a marker saying a run exists, not
+  // a change to the box, and the run it marks is over as of this line.
+  if (steps.slice(startFrom).some((s) => s.id === "openclaw_install")) {
+    const refusal = await newerStateSchemaRefusal();
+    if (refusal) {
+      console.error(`[Updater] refusing the update before step 1: ${refusal}`);
+      runtime.state.phase = "failed";
+      runtime.state.error = refusal;
+      runtime.state.currentStepIndex = -1;
+      await clearUpdateLock();
+      return;
     }
   }
 

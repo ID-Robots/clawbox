@@ -2172,7 +2172,31 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
     // migration in `scripts/gateway-pre-start.sh` REPLACES such an entry with a
     // fresh valid one; here we only decline to write into it, because this
     // function repairs a URL and is not the place that rebuilds a provider.)
-    if (!isPlainObject(provider) || provider.baseUrl === proxyUrl) return false;
+    if (!isPlainObject(provider)) return false;
+
+    // An entry ALREADY on the proxy still drifts, and returning early on it was
+    // the whole of TASK-1076 on this side: `data/.local-ai-token` is reminted at
+    // first boot of a rebuilt image (same second as `.mcp-token`) while the
+    // openclaw.json restored beside it keeps the token of the image it was built
+    // from. The proxy validates the bearer against that file and answers 401 to
+    // anything else, so every turn of the local model died before the model ran
+    // while this function reported "already ours, nothing to do". The URL and the
+    // key are therefore two reasons to write, not one — `scripts/gateway-pre-start.sh`
+    // carries the same reconciliation for the boot path.
+    // A key that RESOLVES ELSEWHERE is not drift, and is not ours to flatten
+    // into a literal: OpenClaw accepts a SecretRef object ({source, provider,
+    // id}) and a `${VAR}` interpolation as credentials, and this function can
+    // resolve neither, so it cannot tell a stale one from a current one. Only
+    // the KEY-refresh reason is suppressed — an entry being moved ONTO the
+    // proxy from somewhere else still takes our bearer, because the bearer
+    // travels with the URL and the old credential is wrong whatever its shape.
+    const token = getLocalAiToken();
+    const key = provider.apiKey;
+    const keyResolvesElsewhere = (typeof key === "object" && key !== null)
+      || (typeof key === "string" && /^\$\{.+\}$/.test(key));
+    const movesUrl = provider.baseUrl !== proxyUrl;
+    const refreshesKey = !keyResolvesElsewhere && key !== token;
+    if (!movesUrl && !refreshesKey) return false;
     if (routesToAnotherHost(provider, proxyUrl)) {
       // The URL is deliberately not logged: an owner-configured endpoint can
       // carry user-info or query credentials, and the journal keeps what it is
@@ -2181,7 +2205,7 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
       return false;
     }
     provider.baseUrl = proxyUrl;
-    provider.apiKey = getLocalAiToken();
+    provider.apiKey = token;
     return true;
   };
 

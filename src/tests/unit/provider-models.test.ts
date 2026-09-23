@@ -27,17 +27,29 @@ describe("provider-models", () => {
     // provider and that tag wins (catalog/route.ts) — but it is what
     // "Make default -> Anthropic" writes on a box whose Anthropic row has no
     // model of its own, and it was still the placeholder Sonnet id.
-    it("lands the Anthropic cold-start default on Claude Opus 5", () => {
+    it("lands the Anthropic cold-start default on Claude Opus 5.5", () => {
       const catalog = getProviderCatalog("anthropic");
-      expect(catalog?.defaultModelId).toBe("claude-opus-5");
+      expect(catalog?.defaultModelId).toBe("claude-opus-5-5");
       // A default the curated list does not carry is a default the picker
       // cannot render, so the two are asserted together.
-      expect(catalog?.models.map((m) => m.id)).toContain("claude-opus-5");
+      expect(catalog?.models.map((m) => m.id)).toContain("claude-opus-5-5");
       // Exactly one row may claim the "Default." hint, and it is that one: two
       // rows hinted Default is what a hand-edited list drifts into.
       expect(
         (catalog?.models ?? []).filter((m) => m.hint?.startsWith("Default")).map((m) => m.id),
-      ).toEqual(["claude-opus-5"]);
+      ).toEqual(["claude-opus-5-5"]);
+      // Dashes, never `claude-opus-5.5` — the dot spelling is not a
+      // provider-native id and resolves nowhere.
+      expect(catalog?.models.map((m) => m.id)).not.toContain("claude-opus-5.5");
+    });
+
+    // The other half of the 2026-09-22 move: only the DEFAULT moved. Opus 5 is
+    // still an ordinary row the picker offers and a stored explicit pick can
+    // still name, so a box holding `anthropic/claude-opus-5` keeps running it.
+    it("keeps Claude Opus 5 selectable, as a non-default row", () => {
+      const opus5 = getProviderCatalog("anthropic")?.models.find((m) => m.id === "claude-opus-5");
+      expect(opus5).toBeDefined();
+      expect(opus5?.hint?.startsWith("Default")).toBe(false);
     });
 
     it("does not return inherited Object prototype members", () => {

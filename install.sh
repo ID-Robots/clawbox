@@ -989,7 +989,7 @@ SWAPFILE_PRIORITY=1
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
-OPENCLAW_VERSION="2026.9.3"
+OPENCLAW_VERSION="2026.9.4"
 
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever

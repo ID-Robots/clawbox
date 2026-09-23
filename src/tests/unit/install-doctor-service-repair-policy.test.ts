@@ -40,6 +40,14 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const REPO = path.join(__dirname, "..", "..", "..");
 const INSTALL_SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");
 const PRE_START = readFileSync(path.join(REPO, "scripts", "gateway-pre-start.sh"), "utf-8");
+/**
+ * The shipped pin, read where install.sh reads it rather than retyped.
+ *
+ * The stub core below has to answer THIS to `--version` or the lifted step
+ * stops being about doctor and starts being about npm; taking it from the file
+ * means the next pin bump cannot leave the two disagreeing.
+ */
+const PINNED_CORE = readFileSync(path.join(REPO, "config", "openclaw-target.txt"), "utf-8").trim();
 
 const HAS_BASH = spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
 const HAS_PYTHON3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
@@ -77,12 +85,20 @@ function makeBox(): Box {
   // The stub logs the POLICY IT WAS HANDED beside the argv, because that pairing
   // is the whole claim: not that install.sh mentions the variable somewhere, but
   // that the doctor process itself runs with it.
+  //
+  // `--version` MUST answer the shipped pin, and moves with it. The step this
+  // suite lifts compares it against $TARGET and takes the "already at $TARGET;
+  // skipping npm install" arm on a match — so a stale number here makes the
+  // case reach `npm install -g openclaw@<pin>` against the real registry, which
+  // is a network round trip inside a 20 s budget and, on a runner below the
+  // core's engines.node floor, a preinstall refusal. Neither has anything to do
+  // with what this file is about. (Measured on a Node 22 dev box, TASK-1088.)
   const openclawBin = path.join(npmPrefix, "bin", "openclaw");
   writeFileSync(openclawBin, `#!/usr/bin/env bash
 ST=${JSON.stringify(state)}
 printf 'openclaw %s policy=%s\\n' "$*" "\${OPENCLAW_SERVICE_REPAIR_POLICY:-unset}" >> "$ST/calls"
 case "$1" in
-  --version) printf 'OpenClaw 2026.9.3 (stub)\\n' ;;
+  --version) printf 'OpenClaw ${PINNED_CORE} (stub)\\n' ;;
   plugins) printf '{"plugins":[]}\\n' ;;
   doctor) printf 'Doctor complete.\\n' ;;
 esac

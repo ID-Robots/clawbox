@@ -761,6 +761,239 @@ describe("how a run ends", () => {
   });
 });
 
+/**
+ * TASK-1024: a box that had Memory Shard indexed before 4.0.
+ *
+ * The 4.0 core changed how text is cut into chunks, so every index built
+ * before it is one the core disowns. It says so in the status payload — and
+ * ClawBox read three spellings of `indexIdentity.status` and answered
+ * "unknown" to the one the new core actually sends, so the panel showed a
+ * healthy-looking nothing, "Index now" ran the incremental pass that cannot
+ * succeed against a disowned index, and the failure fell through to "check
+ * that the embedding model is available" about a model that was answering.
+ *
+ * The payloads below are the captured one from a real box with only the
+ * fields under test changed, so a CLI that renames them breaks this.
+ */
+describe("an index the update left behind", () => {
+  function payloadWith(
+    identity: Record<string, unknown> | null,
+    extra: Record<string, unknown> = {},
+  ): unknown {
+    const payload = JSON.parse(JSON.stringify(REAL_STATUS)) as Array<{ status: Record<string, unknown> }>;
+    const custom = payload[0].status.custom as Record<string, unknown>;
+    if (identity) custom.indexIdentity = identity;
+    else delete custom.indexIdentity;
+    Object.assign(payload[0].status, extra);
+    return payload;
+  }
+
+  async function read(raw: unknown) {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    return await parseMemoryStatus(raw, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+  }
+
+  /** The shape the customer's box reported, with the core's own wording. */
+  const CHUNKING_VERDICT = {
+    status: "stale",
+    reason: "index chunking implementation changed",
+    owner: "openclaw",
+    code: "chunking_version",
+  };
+
+  it("reads the core's chunking verdict whatever it calls the status", async () => {
+    const status = await read(payloadWith(CHUNKING_VERDICT));
+    expect(status.indexIdentity).toBe("mismatched");
+    expect(status.indexIdentityCode).toBe("chunking_version");
+    expect(status.health).toBe("degraded");
+  });
+
+  it("sends the owner to the button instead of to the embedding model", async () => {
+    const status = await read(payloadWith(CHUNKING_VERDICT));
+    expect(status.errorCode).toBe("index_rebuild_required");
+    expect(status.error).toContain("rebuilt after the update");
+    expect(status.error).not.toContain("embedding model");
+  });
+
+  it("still blames the model when the model is what changed", async () => {
+    // Not every mismatch is the update's doing, and an owner who moved memory
+    // onto another embedder must not be told to wait for a rebuild that will
+    // not help them.
+    const status = await read(payloadWith({ status: "mismatched", code: "embedding_model" }));
+    expect(status.errorCode).toBe("index_identity_mismatched");
+    expect(status.error).toContain("configured embedding model");
+  });
+
+  it("does not invent a verdict out of a status it does not recognise", async () => {
+    // A word with no reason and no code behind it is a core reporting
+    // something this build has never heard of — not a core reporting a fault.
+    const status = await read(payloadWith({ status: "provisional" }));
+    expect(status.indexIdentity).toBe("unknown");
+    expect(status.errorCode).toBe("");
+  });
+
+  it("is silent about an identity block the core did not send at all", async () => {
+    const status = await read(payloadWith(null));
+    expect(status.indexIdentity).toBe("unknown");
+    expect(status.indexIdentityCode).toBe("");
+    expect(status.errorCode).toBe("");
+  });
+
+  it("names a provider the core fell back to, which used to be invisible", async () => {
+    // The half of TASK-1024 a full reindex could not fix: the configuration
+    // says one embedder and the core is using another, so the rebuilt index
+    // is rebuilt with the wrong model and search is no better afterwards.
+    const status = await read(payloadWith(null, { requestedProvider: "openai-compatible", provider: "ollama" }));
+    expect(status.requestedProvider).toBe("openai-compatible");
+    expect(status.errorCode).toBe("provider_mismatch");
+    expect(status.error).toContain("Re-run Memory Shard setup");
+    expect(status.health).toBe("degraded");
+  });
+
+  it("names the fallback FIRST, because rebuilding under it is wasted work", async () => {
+    const status = await read(
+      payloadWith(CHUNKING_VERDICT, { requestedProvider: "openai-compatible", provider: "ollama" }),
+    );
+    expect(status.indexIdentity).toBe("mismatched");
+    expect(status.errorCode).toBe("provider_mismatch");
+  });
+
+  it("does not call a provider the config never pinned a fallback", async () => {
+    // `auto` is a value this box's own boot script recognises and migrates
+    // (scripts/ensure-local-embeddings.sh, `""|auto|ollama`). It means "pick
+    // one", so the core resolving it IS the configuration being honoured —
+    // and calling that a fallback would put an amber banner, a degraded chip
+    // and "re-run setup" on the failure of every box that never pinned one.
+    // The identity is left VALID: the point is that an otherwise healthy box
+    // stays healthy, so the assertion has to be able to tell the difference.
+    const status = await read(payloadWith({ status: "valid" }, { requestedProvider: "auto", provider: "ollama" }));
+    expect(status.errorCode).toBe("");
+    expect(status.health).toBe("healthy");
+  });
+
+  it("does not read a difference of spelling as a difference of provider", async () => {
+    const status = await read(payloadWith({ status: "valid" }, { requestedProvider: "Ollama", provider: "ollama" }));
+    expect(status.errorCode).toBe("");
+    expect(status.health).toBe("healthy");
+  });
+
+  it("says nothing about a core that used the provider it was asked for", async () => {
+    // The captured payload: requestedProvider and provider both "ollama".
+    const status = await read(REAL_STATUS);
+    expect(status.requestedProvider).toBe("ollama");
+    expect(status.errorCode).toBe("");
+    expect(status.health).toBe("healthy");
+  });
+});
+
+describe("what a disowned index makes Index now run", () => {
+  afterEach(() => {
+    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
+  });
+
+  /** A CLI that answers the status probe and fails every index pass. */
+  async function withCli(mutate: (status: Record<string, unknown>) => void): Promise<string> {
+    const payload = JSON.parse(JSON.stringify(REAL_STATUS)) as Array<{ status: Record<string, unknown> }>;
+    mutate(payload[0].status);
+    const script = path.join(tmpDir, "fake-openclaw");
+    await fs.writeFile(script, [
+      "#!/bin/sh",
+      'if [ "$2" = "status" ]; then',
+      "cat <<'JSON'",
+      JSON.stringify(payload),
+      "JSON",
+      "exit 0",
+      "fi",
+      "echo 'index identity rejected' >&2",
+      "exit 1",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    vi.resetModules();
+    return script;
+  }
+
+  it("upgrades an incremental pass on an index the core has disowned", async () => {
+    // 512 chunks, so the empty-index rule is not what is being tested: an
+    // incremental pass over a disowned index cannot make it valid again, and
+    // running one is how the customer's box failed in five seconds.
+    await withCli((status) => {
+      status.chunks = 512;
+      status.files = 7;
+      (status.custom as Record<string, unknown>).indexIdentity = { status: "stale", code: "chunking_version" };
+    });
+    const { resolveIndexMode } = await import("@/lib/clawkeep-memory");
+    expect(await resolveIndexMode("incremental")).toBe("full");
+  });
+
+  it("leaves an index the core still owns on the incremental pass", async () => {
+    await withCli((status) => { status.chunks = 512; status.files = 7; });
+    const { resolveIndexMode } = await import("@/lib/clawkeep-memory");
+    expect(await resolveIndexMode("incremental")).toBe("incremental");
+  });
+
+  it("blames the fallback, not the model, when the pass fails under one", async () => {
+    await withCli((status) => {
+      status.requestedProvider = "openai-compatible";
+      status.provider = "ollama";
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { startMemoryIndex, getMemoryStatus } = await import("@/lib/clawkeep-memory");
+      // The reading the panel takes to draw the banner, and the one the Full
+      // reindex arm reads rather than paying for a probe of its own.
+      expect((await getMemoryStatus()).errorCode).toBe("provider_mismatch");
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      const run = await settledMemoryRun(tmpDir);
+      expect(run.status).toBe("failed");
+      expect(run.errorCode).toBe("provider_mismatch");
+      expect(run.error).toContain("not the one you configured");
+      expect(run.error).not.toContain("Check that the embedding model");
+      // NOT the banner's sentence: the two fire together, and the card showed
+      // the same instruction twice. This line says what happened to the pass.
+      expect(run.error).not.toContain("Re-run Memory Shard setup");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps the catch-all where the box knows nothing better", async () => {
+    await withCli(() => { /* the captured payload: nothing fell back */ });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { startMemoryIndex, getMemoryStatus } = await import("@/lib/clawkeep-memory");
+      expect((await getMemoryStatus()).errorCode).toBe("");
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      const run = await settledMemoryRun(tmpDir);
+      expect(run.errorCode).toBe("index_failed");
+      expect(run.error).toContain("Check that the embedding model");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not wait for a probe it has no reading for, to word a full pass", async () => {
+    // The Full reindex button must not grow a cold-probe wait: with no cached
+    // reading the pass runs at once and is worded the way it always was.
+    await withCli((status) => {
+      status.requestedProvider = "openai-compatible";
+      status.provider = "ollama";
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+      const started = performance.now();
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      expect(performance.now() - started).toBeLessThan(1_000);
+      expect((await settledMemoryRun(tmpDir)).errorCode).toBe("index_failed");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
 describe("how far an OpenClaw pass has got", () => {
   afterEach(() => {
     delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;

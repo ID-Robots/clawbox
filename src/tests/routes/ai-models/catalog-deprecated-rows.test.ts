@@ -11,7 +11,7 @@ import { NextRequest } from "next/server";
  * The card was filed against a hand-maintained Claude list that no longer
  * exists (`augmentWithStaticCatalog`, `STATIC_MODEL_CONTEXT_WINDOWS` and the
  * `claude-sonnet-4-6` default were all removed on 2 Sep, and beta's Anthropic
- * default is `claude-opus-5`). The defect it describes survives the rewrite in
+ * default is `claude-opus-5-5`). The defect it describes survives the rewrite in
  * a different place: the route's own guard against a retired model is
  *
  *     if (entry.tags?.includes("deprecated")) continue;
