@@ -268,6 +268,27 @@ function bareLocalModelId(provider: "llamacpp" | "ollama", raw: string): string 
   return id;
 }
 
+/**
+ * A local ref read back from somewhere a pre-fix save wrote it, with the doubled
+ * prefix collapsed: `llamacpp/llamacpp/<id>` → `llamacpp/<id>`. The store's
+ * `local_ai_model` keeps the doubled ref until the owner saves again, and the
+ * boot migration only heals OpenClaw's config, so the fallback writer reading
+ * it verbatim put the unmaterializable ref straight back into
+ * `agents.defaults.model.fallbacks` on the next cloud save. The provider comes
+ * from the ref itself, as in the migration's `_local_collapse_ref`. Any other
+ * ref comes back unchanged; one that is nothing but prefixes names no model and
+ * comes back null.
+ */
+function collapseLocalModelRef(ref: string): string | null {
+  const [head, ...rest] = ref.trim().split("/");
+  const provider = head.trim().toLowerCase();
+  if ((provider !== "llamacpp" && provider !== "ollama") || rest.length === 0) return ref;
+  const id = rest.join("/");
+  const bare = bareLocalModelId(provider, id);
+  if (bare === id.trim()) return ref;
+  return bare ? `${provider}/${bare}` : null;
+}
+
 const PROFILE_KEY_RE = /^[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)*$/;
 const COMMAND_TIMEOUT_MS = 30_000;
 const BATCH_COMMAND_TIMEOUT_MS = 60_000;
@@ -1742,7 +1763,7 @@ async function getStoredLocalFallbackModel(): Promise<string | null> {
       return null;
     }
     const stored = config.local_ai_configured && typeof config.local_ai_model === "string"
-      ? config.local_ai_model
+      ? collapseLocalModelRef(config.local_ai_model)
       : null;
     if (stored) return stored;
   } catch {
@@ -1751,7 +1772,8 @@ async function getStoredLocalFallbackModel(): Promise<string | null> {
 
   try {
     const openclawConfig = await readOpenClawConfig();
-    return inferConfiguredLocalModel(openclawConfig)?.model ?? null;
+    const inferred = inferConfiguredLocalModel(openclawConfig)?.model;
+    return inferred ? collapseLocalModelRef(inferred) : null;
   } catch {
     return null;
   }

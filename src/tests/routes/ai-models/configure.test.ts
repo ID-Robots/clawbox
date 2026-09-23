@@ -2009,6 +2009,41 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(res.status).toBe(200);
       expect(writtenRows("ollama").map((row) => row.id)).toEqual(["hf.co/bartowski/Qwen3-8B-GGUF:Q4_K_M"]);
     });
+
+    // A box that saved before the fix keeps the doubled ref in the store until
+    // the owner saves local AI again — the boot migration heals only OpenClaw's
+    // config — and the next cloud save used to write it back as the fallback.
+    it.each([
+      ["the store", () => mockGetAll.mockResolvedValue({
+        local_ai_configured: true,
+        local_ai_provider: "llamacpp",
+        local_ai_model: "llamacpp/llamacpp/gemma4-e2b-it-q4_0",
+      })],
+      ["the openclaw config inference", () => mockInferConfiguredLocalModel.mockReturnValue({
+        provider: "llamacpp",
+        model: "llamacpp/llamacpp/gemma4-e2b-it-q4_0",
+      })],
+    ])("collapses a doubled local fallback read from %s", async (_source, arrange) => {
+      arrange();
+
+      await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-openai-key" }));
+
+      const fallbacks = configSetCalls(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch))
+        .filter((call) => call.path === "agents.defaults.model.fallbacks")
+        .map((call) => call.value);
+      expect(fallbacks).toEqual([JSON.stringify(["llamacpp/gemma4-e2b-it-q4_0"])]);
+    });
+
+    it("skips a stored local model that is nothing but prefixes for the inferred one", async () => {
+      mockGetAll.mockResolvedValue({ local_ai_configured: true, local_ai_model: "llamacpp/llamacpp/" });
+      mockInferConfiguredLocalModel.mockReturnValue({ provider: "llamacpp", model: "llamacpp/gemma4-e2b-it-q4_0" });
+
+      await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-openai-key" }));
+
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands).toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
+      expect(commands.some((command) => command.includes("llamacpp/llamacpp"))).toBe(false);
+    });
   });
 
   it("configures openrouter provider definition in openclaw", async () => {
