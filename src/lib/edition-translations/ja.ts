@@ -990,6 +990,7 @@ export const ja: Record<string, string> = {
   "codingAgent.autoMergeHint": "すべてのチェックが成功し、未回答のレビューコメントがなく、誰も変更を要求していない場合、ClawBox はプルリクエストをスカッシュマージしてブランチを削除します。beta、master、機能ブランチなど、どのベースブランチでもこの方法でマージできますが、main だけは例外で、プルリクエストがどれほどグリーンでも ClawBox がマージすることはありません。既定ではオフです。",
   "codingAgent.autoMergeFailed": "マージの設定を変更できませんでした。",
   "codingAgent.stepReattached": "Web サーバーが再起動しましたが、この実行は続いており、再び追跡されました",
+  "codingAgent.stepEvidencePruned": "証跡フォルダーから削除しました（実行環境やフォルダー外へのリンクは置けません）: {paths}",
   "codingAgent.stepReviewLoopTurn": "{id} のレビューラウンド",
   "codingAgent.stepReviewLoopRound": "{id} のレビューラウンド {round}",
   "codingAgent.stepPullRequestAdopted": "{base} 向けのプルリクエスト #{number} を引き継ぎました（実行自身が作成）",

@@ -1000,6 +1000,7 @@ export const it: Record<string, string> = {
   "codingAgent.autoMergeHint": "Quando ogni controllo è superato, nessun commento di revisione resta senza risposta e nessuno ha chiesto modifiche, ClawBox unisce la pull request in squash e cancella il suo ramo. Qualsiasi ramo di destinazione può essere unito così — beta, master, un ramo di funzionalità — tranne main, verso cui ClawBox non unisce mai per quanto verde sia la pull request. Spento di default.",
   "codingAgent.autoMergeFailed": "Non è stato possibile cambiare l'impostazione di unione.",
   "codingAgent.stepReattached": "Il server web è stato riavviato; questa esecuzione è continuata ed è stata ripresa",
+  "codingAgent.stepEvidencePruned": "Rimosso dalla cartella di prove, dove ambienti e collegamenti verso l'esterno non devono stare: {paths}",
   "codingAgent.stepReviewLoopTurn": "Giro di revisione di {id}",
   "codingAgent.stepReviewLoopRound": "Giro di revisione {round} di {id}",
   "codingAgent.stepPullRequestAdopted": "Pull request #{number} verso {base} presa in carico, aperta dal run stesso",

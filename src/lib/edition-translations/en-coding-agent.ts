@@ -585,6 +585,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.autoMergeHint": "When every check has passed, no review comment is left unanswered and nobody has asked for changes, ClawBox squash-merges the pull request and deletes its branch. Any base branch may be merged this way — beta, master, a feature branch — except main, which ClawBox never merges into however green the pull request is. Off by default.",
   "codingAgent.autoMergeFailed": "Could not change the merge setting.",
   "codingAgent.stepReattached": "The web server restarted; this run kept going and was picked back up",
+  "codingAgent.stepEvidencePruned": "Removed from the evidence folder, where environments and links out of it do not belong: {paths}",
   "codingAgent.stepReviewLoopTurn": "Review round for {id}",
   "codingAgent.stepReviewLoopRound": "Review round {round} for {id}",
   "codingAgent.stepPullRequestAdopted": "Picked up pull request #{number} into {base}, opened by the run itself",

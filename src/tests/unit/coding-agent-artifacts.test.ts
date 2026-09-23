@@ -230,3 +230,111 @@ describe("run id containment", () => {
     expect(path.basename(dir)).toBe(RUN_ID);
   });
 });
+
+/**
+ * What a settled run's evidence folder may not keep (pruneArtifacts).
+ *
+ * A run made a Python environment inside its evidence folder; its
+ * `venv/bin/python` pointed out of the box's data/, dangled once the run's
+ * worktree was removed, and the box's own `next build` — which walks the
+ * checkout data/ sits in — refused it: "Symlink [project]/data/coding-agent-
+ * artifacts/run-…/venv/bin/python is invalid, it points out of the filesystem
+ * root". Every update failed until someone deleted it by hand.
+ */
+describe("pruning", () => {
+  const PY = path.join(os.tmpdir(), "no-such-python-dir", "python3.12");
+
+  it("drops a venv tree and a dangling link, and says so; files stay", async () => {
+    const dir = lib.ensureArtifactsDir(RUN_ID);
+    fs.writeFileSync(path.join(dir, "shot-001.png"), "png");
+    fs.mkdirSync(path.join(dir, "venv-attempt", "venv", "bin"), { recursive: true });
+    fs.symlinkSync(PY, path.join(dir, "venv-attempt", "venv", "bin", "python"));
+    fs.writeFileSync(path.join(dir, "venv-attempt", "venv", "pyvenv.cfg"), "home = /nowhere\n");
+    fs.symlinkSync(path.join(base, "gone-worktree", "out.txt"), path.join(dir, "latest.txt"));
+
+    const pruned = await lib.pruneArtifacts(RUN_ID);
+
+    expect(pruned).toEqual(expect.arrayContaining([
+      { path: path.join("venv-attempt", "venv"), reason: "interpreter" },
+      { path: "latest.txt", reason: "link" },
+    ]));
+    expect(pruned).toHaveLength(2);
+    expect(fs.existsSync(path.join(dir, "venv-attempt", "venv"))).toBe(false);
+    expect(() => fs.lstatSync(path.join(dir, "latest.txt"))).toThrow();
+    expect(fs.readFileSync(path.join(dir, "shot-001.png"), "utf-8")).toBe("png");
+    // The directory that held the tree is only a directory; it stays.
+    expect(fs.statSync(path.join(dir, "venv-attempt")).isDirectory()).toBe(true);
+  });
+
+  it("drops every interpreter tree it knows, at any depth", async () => {
+    const dir = lib.ensureArtifactsDir(RUN_ID);
+    for (const rel of [".venv", "node_modules/left-pad", "work/__pycache__", "deep/er/venv/lib"]) {
+      fs.mkdirSync(path.join(dir, rel), { recursive: true });
+      fs.writeFileSync(path.join(dir, rel, "f"), "x");
+    }
+
+    const pruned = await lib.pruneArtifacts(RUN_ID);
+
+    expect(pruned.map((p) => p.path).sort()).toEqual(
+      [".venv", path.join("deep", "er", "venv"), "node_modules", path.join("work", "__pycache__")].sort(),
+    );
+    expect(pruned.every((p) => p.reason === "interpreter")).toBe(true);
+    expect(fs.readdirSync(dir).sort()).toEqual(["deep", "work"]);
+  });
+
+  it("drops a link that leads out of the folder even when its target exists, and never touches the target", async () => {
+    const dir = lib.ensureArtifactsDir(RUN_ID);
+    const outside = path.join(base, "owner-file.txt");
+    fs.writeFileSync(outside, "the owner's");
+    fs.symlinkSync(outside, path.join(dir, "notes.txt"));
+    fs.mkdirSync(path.join(base, "owner-dir"));
+    fs.symlinkSync(path.join(base, "owner-dir"), path.join(dir, "linked-dir"));
+
+    const pruned = await lib.pruneArtifacts(RUN_ID);
+
+    expect(pruned.map((p) => p.path).sort()).toEqual(["linked-dir", "notes.txt"]);
+    expect(fs.readFileSync(outside, "utf-8")).toBe("the owner's");
+    expect(fs.statSync(path.join(base, "owner-dir")).isDirectory()).toBe(true);
+  });
+
+  it("keeps a link that stays inside the folder, and drops one left dangling by a tree it removed", async () => {
+    const dir = lib.ensureArtifactsDir(RUN_ID);
+    fs.writeFileSync(path.join(dir, "shot-003.png"), "png");
+    fs.symlinkSync("shot-003.png", path.join(dir, "latest.png"));
+    fs.mkdirSync(path.join(dir, ".venv", "bin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".venv", "bin", "python3"), "");
+    fs.symlinkSync(path.join(".venv", "bin", "python3"), path.join(dir, "python"));
+
+    const pruned = await lib.pruneArtifacts(RUN_ID);
+
+    expect(pruned).toEqual([
+      { path: ".venv", reason: "interpreter" },
+      { path: "python", reason: "link" },
+    ]);
+    expect(fs.readlinkSync(path.join(dir, "latest.png"))).toBe("shot-003.png");
+  });
+
+  it("removes only the link when the evidence folder itself is one", async () => {
+    const elsewhere = path.join(base, "project");
+    fs.mkdirSync(path.join(elsewhere, "venv", "bin"), { recursive: true });
+    fs.mkdirSync(lib.artifactsRoot(), { recursive: true });
+    fs.symlinkSync(elsewhere, lib.artifactsDir(RUN_ID));
+
+    expect(await lib.pruneArtifacts(RUN_ID)).toEqual([{ path: ".", reason: "link" }]);
+    expect(() => fs.lstatSync(lib.artifactsDir(RUN_ID))).toThrow();
+    // What the link pointed at is the owner's, and is left exactly as it was.
+    expect(fs.statSync(path.join(elsewhere, "venv", "bin")).isDirectory()).toBe(true);
+  });
+
+  it("answers [] for a clean folder, a missing one, a file in its place and a bad id", async () => {
+    const dir = lib.ensureArtifactsDir(RUN_ID);
+    fs.writeFileSync(path.join(dir, "report.md"), "# Done");
+    expect(await lib.pruneArtifacts(RUN_ID)).toEqual([]);
+    expect(await lib.pruneArtifacts("run-zzzzzzzz")).toEqual([]);
+    expect(await lib.pruneArtifacts("../etc")).toEqual([]);
+    fs.rmSync(dir, { recursive: true });
+    fs.writeFileSync(dir, "not a folder");
+    expect(await lib.pruneArtifacts(RUN_ID)).toEqual([]);
+    expect(fs.readFileSync(dir, "utf-8")).toBe("not a folder");
+  });
+});

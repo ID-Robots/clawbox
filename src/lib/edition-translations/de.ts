@@ -988,6 +988,7 @@ export const de: Record<string, string> = {
   "codingAgent.autoMergeHint": "Wenn alle Prüfungen bestanden sind, kein Review-Kommentar offen bleibt und niemand Änderungen angefordert hat, führt ClawBox den Pull Request per Squash zusammen und löscht seinen Branch. Jeder Ziel-Branch darf so zusammengeführt werden – beta, master, ein Feature-Branch – außer main, in den ClawBox niemals zusammenführt, wie grün der Pull Request auch ist. Standardmäßig aus.",
   "codingAgent.autoMergeFailed": "Die Zusammenführungs-Einstellung konnte nicht geändert werden.",
   "codingAgent.stepReattached": "Der Webserver wurde neu gestartet; dieser Lauf lief weiter und wurde wieder aufgenommen",
+  "codingAgent.stepEvidencePruned": "Aus dem Nachweis-Ordner entfernt — Umgebungen und Links nach draußen gehören nicht hinein: {paths}",
   "codingAgent.stepReviewLoopTurn": "Prüfrunde für {id}",
   "codingAgent.stepReviewLoopRound": "Review-Runde {round} für {id}",
   "codingAgent.stepPullRequestAdopted": "Pull Request #{number} nach {base} übernommen, vom Run selbst geöffnet",

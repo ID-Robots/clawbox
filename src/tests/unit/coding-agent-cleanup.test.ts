@@ -193,6 +193,55 @@ describe("what a run left running", () => {
     await vi.waitFor(() => expect(groupAlive(settled.pgid as number)).toBe(false), { timeout: 8_000 });
   });
 
+  it("keeps the settle's prune out of the evidence folder while it is still running", async () => {
+    // The prune reads the folder, then removes by path. Something of the run's
+    // still running could swap a directory it read for a link out of the
+    // folder in between, and the removal would reach through it.
+    readyDevice([
+      'mkdir -p "$CLAWBOX_RUN_ARTIFACTS_DIR/venv/bin"',
+      'ln -s /nonexistent/python3 "$CLAWBOX_RUN_ARTIFACTS_DIR/venv/bin/python"',
+      LEAVES_A_SERVER,
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Serve it", projectId: "site", source: "agent" });
+    const settled = await finished(run.id);
+    expect(settled.leftover).toBe(true);
+
+    const evidence = path.join(root, "data", "coding-agent-artifacts", run.id);
+    expect(fs.lstatSync(path.join(evidence, "venv", "bin", "python")).isSymbolicLink()).toBe(true);
+    expect(settled.progress.some((l) => l.startsWith("Removed from the evidence folder"))).toBe(false);
+
+    lib.killRunLeftovers(run.id);
+    await vi.waitFor(() => expect(groupAlive(settled.pgid as number)).toBe(false), { timeout: 8_000 });
+  });
+
+  it("keeps the settle's prune waiting until a stopped run's group is really gone", async () => {
+    // Stopping a run signals its group and escalates to SIGKILL only after a
+    // grace period. Something that shrugs off SIGTERM is still there in
+    // between, just as able to swap a directory the prune has read.
+    readyDevice([
+      'mkdir -p "$CLAWBOX_RUN_ARTIFACTS_DIR/venv/bin"',
+      'ln -s /nonexistent/python3 "$CLAWBOX_RUN_ARTIFACTS_DIR/venv/bin/python"',
+      '(trap "" TERM; exec sleep 20) &',
+      "sleep 30",
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Serve it", projectId: "site", source: "agent" });
+    await new Promise((r) => setTimeout(r, 400));
+    const pgid = lib.getRun(run.id)?.pgid;
+    expect(pgid).toBeTruthy();
+    lib.stopRun(run.id);
+    const settled = await finished(run.id);
+
+    expect(settled.status).toBe("stopped");
+    // By the time the run is reported finished — after the prune — nothing of
+    // its group is left, and the prune has still done its work.
+    expect(groupAlive(pgid as number)).toBe(false);
+    expect(fs.existsSync(path.join(root, "data", "coding-agent-artifacts", run.id, "venv"))).toBe(false);
+    expect(settled.progress.some((l) => l.startsWith("Removed from the evidence folder"))).toBe(true);
+  });
+
   it("is ended when the owner stops the run, because nothing it left is wanted", async () => {
     readyDevice(["sleep 60 &", "sleep 30", "exit 0"].join("\n"));
     makeProject("site");

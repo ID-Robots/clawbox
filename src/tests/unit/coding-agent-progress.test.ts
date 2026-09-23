@@ -249,6 +249,7 @@ describe("the runner's own sentences are keyed", () => {
     [RUNNER_STEP.helperSettled({ workflow: true, type: "workflow", refused: false }), "workflowFinished"],
     [RUNNER_STEP.helperSettled({ workflow: true, type: "workflow", refused: true }), "workflowRefused"],
     [RUNNER_STEP.dropped(41), "droppedSteps"],
+    [RUNNER_STEP.evidencePruned("venv-attempt/venv/, latest.txt"), "evidencePruned"],
   ])("%s", (line, key) => {
     expect(describeProgressLine(line).labelKey, line).toBe(key);
   });
@@ -263,6 +264,7 @@ describe("the runner's own sentences are keyed", () => {
     expect(describeProgressLine(RUNNER_STEP.workingOnBranch("clawbox/run-1", "main")).params)
       .toEqual({ branch: "clawbox/run-1", base: "main" });
     expect(describeProgressLine(RUNNER_STEP.dropped(41)).params).toEqual({ count: 41 });
+    expect(describeProgressLine(RUNNER_STEP.evidencePruned("venv/, python")).params).toEqual({ paths: "venv/, python" });
   });
 
   it("shows a helper's type and description beside the label, never inside it", () => {
@@ -288,6 +290,23 @@ describe("the runner's own sentences are keyed", () => {
  * carried through as a value — and still read after the feed's line cap has
  * cut the end off.
  */
+/**
+ * What the settle took out of a run's evidence folder. The sentence says why;
+ * the paths are names and ride along as a value. The runner caps a line at
+ * 160 characters, so the sentence has to leave room for them and still be
+ * recognised when the list is what got cut.
+ */
+describe("what the settle removed from the evidence folder", () => {
+  it("leaves room for the paths under the feed's line cap", () => {
+    expect(RUNNER_STEP.evidencePruned("").length).toBeLessThan(100);
+  });
+
+  it("still reads a line the feed cut short", () => {
+    const cut = `${RUNNER_STEP.evidencePruned(Array.from({ length: 20 }, (_, i) => `dir-${i}/venv/`).join(", ")).slice(0, 159)}…`;
+    expect(describeProgressLine(cut).labelKey).toBe("evidencePruned");
+  });
+});
+
 describe("a team message on the sender's feed", () => {
   it.each([
     [RUNNER_STEP.teamMessageToRun("run-ab12cd34", "what does total() return?"), "teamMessageToRun", { run: "run-ab12cd34", text: "what does total() return?" }],
