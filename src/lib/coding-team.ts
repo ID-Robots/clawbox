@@ -805,7 +805,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
       const folders = worktree ? [worktree.path, board.directory] : [board.directory];
       const outsideWrite = (a: string) => outsideFolderWriteDenial(a, folders);
       if (settled.deniedActions.length >= n && settled.deniedActions.every((a) => readOnlyDenial(a) || outsideWrite(a))) {
-        const what = settled.deniedActions.some(outsideWrite) ? "action(s) that changed nothing — reads, or writes" : "read-only action(s)";
+        const what = settled.deniedActions.every(readOnlyDenial) ? "read-only action(s)" : "action(s) that changed nothing — reads, or writes";
         bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} was refused ${n} ${what} outside its folder: ${named}`, read_only_refusals: n });
       } else {
         refusedWrite = true;

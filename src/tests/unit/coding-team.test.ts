@@ -812,6 +812,19 @@ describe("a team that works", () => {
     expect(done.metrics).toMatchObject({ readOnlyRefusals: 3, tasksRejected: 0, tasksAcceptedFirstTry: 2 });
   });
 
+  it("keeps the read-only words for a refused read of /tmp — it is not a write", async () => {
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: ["Bash: cat /tmp/notes.txt"] },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([
+      "Worker run-00000002 was refused 1 read-only action(s) outside its folder: Bash: cat /tmp/notes.txt",
+    ]);
+  });
+
   it("keeps the alert and the rejection for a refused write inside the worker's worktree", async () => {
     outcomes = [
       { summary: PLAN },
