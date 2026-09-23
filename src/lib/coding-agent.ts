@@ -7456,9 +7456,27 @@ const AUTO_MERGE_LOOK_MS = 60_000;
 /** Said after a watcher's last word when GitHub's auto-merge is still on. */
 const AUTO_MERGE_ON_NOTE = "GitHub's auto-merge is on for it, so it merges by itself the moment its required checks pass.";
 
-function withAutoMergeNote(detail: string | null, autoMergeOn: boolean | null): string | null {
-  if (autoMergeOn !== true) return detail;
-  return detail ? `${detail} ${AUTO_MERGE_ON_NOTE}` : AUTO_MERGE_ON_NOTE;
+/** Where reconcileAutoMerge left GitHub's auto-merge. */
+interface AutoMergeReconciled {
+  /** On once it was done, or null when that is not known. */
+  on: boolean | null;
+  /** GitHub's own words when auto-merge had to go OFF and would not, or null. */
+  offFailed: string | null;
+}
+
+/**
+ * A watcher's last word, with what GitHub's auto-merge will still do after it.
+ *
+ * A turn-off that failed is said first and plainly: the watcher is ending, so
+ * nothing here will try again, and over a hold label or a base of main that
+ * is a merge the owner asked for nobody to make.
+ */
+function withAutoMergeNote(detail: string | null, autoMerge: AutoMergeReconciled | null): string | null {
+  const note = autoMerge?.offFailed
+    ? `ClawBox could not turn GitHub's auto-merge off, so it may still merge by itself — turn it off on GitHub. ${autoMerge.offFailed}`
+    : autoMerge?.on === true ? AUTO_MERGE_ON_NOTE : null;
+  if (!note) return detail;
+  return detail ? `${detail} ${note}` : note;
 }
 
 /**
@@ -7475,20 +7493,22 @@ function withAutoMergeNote(detail: string | null, autoMergeOn: boolean | null): 
  *
  * Best-effort by construction: every `gh` failure is logged and the watcher
  * goes on exactly as it would have without this. Answers whether auto-merge is
- * on once it is done, or null when that is not known.
+ * on once it is done (null when that is not known), and GitHub's refusal when
+ * it had to go off and would not — see withAutoMergeNote.
  */
 async function reconcileAutoMerge(
   runId: string,
   input: { refusal: string | null; outstanding: string | null; early: boolean },
-): Promise<boolean | null> {
+): Promise<AutoMergeReconciled> {
+  const unknown: AutoMergeReconciled = { on: null, offFailed: null };
   const run = loadRuns().find((r) => r.id === runId);
   const number = run?.pr?.number;
-  if (!run?.pr || typeof number !== "number") return null;
+  if (!run?.pr || typeof number !== "number") return unknown;
 
   const facts = await readAutoMergeFacts(run.directory, number);
   if ("error" in facts) {
     console.error(`[coding-agent] ${runId} could not read auto-merge for PR #${number}: ${facts.error}`);
-    return null;
+    return unknown;
   }
   const failedAt = run.pr.autoMergeFailedAt ?? null;
   const stance = decideAutoMerge({
@@ -7499,21 +7519,21 @@ async function reconcileAutoMerge(
     mayTry: failedAt === null || Date.now() - failedAt >= AUTO_MERGE_RETRY_MS,
     armedAt: run.pr.autoMergeAt ?? null,
   });
-  if (stance.action === "none") return facts.enabled;
+  if (stance.action === "none") return { on: facts.enabled, offFailed: null };
 
   const turningOn = stance.action === "enable";
   const done = turningOn ? await enableAutoMerge(run.directory, number) : await disableAutoMerge(run.directory, number);
   // Re-read: the `gh` calls above are subprocesses, and the owner may have
   // cleared the run under them.
   const current = loadRuns().find((r) => r.id === runId);
-  if (!current?.pr || current.pr.number !== number) return null;
+  if (!current?.pr || current.pr.number !== number) return unknown;
   if (!done.ok) {
     console.error(`[coding-agent] ${runId} could not turn auto-merge ${turningOn ? "on" : "off"} for PR #${number}: ${done.detail}`);
     if (turningOn) {
       current.pr = { ...current.pr, autoMergeFailedAt: Date.now() };
       persist(true);
     }
-    return facts.enabled;
+    return { on: facts.enabled, offFailed: turningOn ? null : done.detail };
   }
   current.pr = turningOn
     ? { ...current.pr, autoMergeAt: Date.now(), autoMergeFailedAt: null }
@@ -7521,7 +7541,7 @@ async function reconcileAutoMerge(
   pushProgress(current, stance.action === "enable" ? RUNNER_STEP.autoMergeOn(number) : RUNNER_STEP.autoMergeOff(stance.reason));
   persist(true);
   console.error(`[coding-agent] ${runId} turned auto-merge ${turningOn ? "on" : "off"} for PR #${number}`);
-  return turningOn;
+  return { on: turningOn, offFailed: null };
 }
 
 /**
@@ -7629,11 +7649,11 @@ function watchPullRequest(runId: string): void {
     // while waiting, and always on the way out, so a watcher that gave up at
     // its ceiling leaves it on and one that refused leaves it off. Never
     // before the merge this watcher is about to make itself.
-    let autoMergeOn: boolean | null = null;
+    let autoMergeState: AutoMergeReconciled | null = null;
     if (verdict.action !== "merge" && snapshot.state === "OPEN"
       && (verdict.action === "block" || Date.now() - autoMergeLookedAt >= AUTO_MERGE_LOOK_MS)) {
       autoMergeLookedAt = Date.now();
-      autoMergeOn = await reconcileAutoMerge(runId, {
+      autoMergeState = await reconcileAutoMerge(runId, {
         refusal: run.pr.reviewOk ? null : "the automatic review pass did not finish cleanly",
         outstanding: snapshot.checks.failed > 0
           ? "a check failed"
@@ -7664,7 +7684,7 @@ function watchPullRequest(runId: string): void {
     if (verdict.action === "block") {
       // Re-read: reconcileAutoMerge may have waited on `gh`.
       const current = loadRuns().find((r) => r.id === runId);
-      if (current?.pr?.phase === "waiting") settlePr(current, "blocked", withAutoMergeNote(verdict.detail, autoMergeOn));
+      if (current?.pr?.phase === "waiting") settlePr(current, "blocked", withAutoMergeNote(verdict.detail, autoMergeState));
       prWatchers.delete(runId);
       return;
     }
@@ -7853,9 +7873,9 @@ function watchReviewLoop(runId: string): void {
     // and the box may merge, off while a round is due or the owner has said
     // no — see reconcileAutoMerge. Never before the merge this tick is about
     // to make itself, and not over a pull request that is no longer open.
-    let autoMergeOn: boolean | null = null;
+    let autoMergeState: AutoMergeReconciled | null = null;
     if (verdict.action !== "merge" && snapshot.state === "OPEN") {
-      autoMergeOn = await reconcileAutoMerge(runId, {
+      autoMergeState = await reconcileAutoMerge(runId, {
         refusal: !autoMerge
           ? "merging by itself is switched off"
           : run.pr?.reviewOk === false ? "the automatic review pass did not finish cleanly" : null,
@@ -7872,7 +7892,7 @@ function watchReviewLoop(runId: string): void {
     if (verdict.action === "done") {
       const current = loadRuns().find((r) => r.id === runId) ?? run;
       const said = verdict.detail ?? (verdict.state === "clean" ? REVIEW_CLEAN_DETAIL : null);
-      settleReview(current, verdict.state, verdict.state === "merged" ? said : withAutoMergeNote(said, autoMergeOn));
+      settleReview(current, verdict.state, verdict.state === "merged" ? said : withAutoMergeNote(said, autoMergeState));
       stop();
       return;
     }
