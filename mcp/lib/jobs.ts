@@ -193,6 +193,30 @@ export function getJob(id: string): BgJob | undefined {
   return jobs.get(id);
 }
 
+/**
+ * Is any background shell still running?
+ *
+ * Asked by `armIdleExit` in mcp/clawbox-mcp.ts, and the reason it has to be
+ * asked at all is the two facts above: the map is IN THIS PROCESS, and the
+ * shells are `detached`. Exiting while one is running therefore does not stop
+ * the job — it makes it invisible. The build keeps going, reparented, with its
+ * output going nowhere, while `job_status` on the id the agent is holding
+ * answers "no background job with that id" for the rest of the session. A
+ * process that owns a running shell is not idle, whatever the harness has
+ * stopped asking it.
+ *
+ * Only `running`. A finished job is kept for an hour so its output can still be
+ * read, but holding a process open for that is the pile-up this rule exists to
+ * end — an agent that has not come back for the result within the idle period
+ * has gone away.
+ */
+export function hasRunningJobs(): boolean {
+  for (const job of jobs.values()) {
+    if (job.status === "running") return true;
+  }
+  return false;
+}
+
 /** Run a shell command in the foreground with a hard output cap. */
 export function runShell(
   command: string,
