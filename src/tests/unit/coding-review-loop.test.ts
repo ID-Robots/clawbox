@@ -521,6 +521,26 @@ describe("the review loop's watcher", () => {
     expect(lib.getRun(RUN_ID)?.review?.detail).not.toContain("merges by itself");
   });
 
+  it("says so when it could not turn auto-merge off over a hold label, instead of promising a merge", async () => {
+    // The loop ends on this poll and never looks again, so a refusal here is
+    // the owner's to act on: the held pull request can still merge by itself.
+    review.readReviewSnapshot.mockResolvedValue(snap({ labels: ["hold"] }));
+    github.readAutoMergeFacts.mockResolvedValue(facts({ labels: ["hold"], enabled: true }));
+    github.disableAutoMerge.mockResolvedValue({ ok: false, detail: "HTTP 502: Bad Gateway" });
+    await boot({ coding_agent_auto_merge: true });
+    writeRecord(pastGrace());
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("needs_owner"); });
+
+    const detail = lib.getRun(RUN_ID)?.review?.detail ?? "";
+    expect(detail).toContain("hold label");
+    expect(detail).not.toContain("merges by itself the moment");
+    expect(detail).toContain("could not turn GitHub's auto-merge off");
+    expect(detail).toContain("HTTP 502");
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
   it("pauses the auto-merge a run turned on while a review comment is unanswered", async () => {
     review.readReviewSnapshot.mockResolvedValue(snap({
       checks: [{ name: "e2e-install", state: "pending", url: null }],
