@@ -26,6 +26,7 @@ import {
   REVIEW_MODES,
   assignTask,
   postMessage,
+  postNote,
   postTask,
   raiseAlert,
   recordFinalReview,
@@ -48,6 +49,8 @@ export type TeamMessage =
   | { type: "retire"; task_id: string; reason: string }
   | { type: "final_review"; verdict: "accepted" | "rejected"; notes: string }
   | { type: "alert"; reason: string; task_id?: string }
+  /** A guardrail line that is not an alert (postNote): the system's only. */
+  | { type: "note"; text: string; task_id?: string; read_only_refusals?: number }
   /**
    * A run of the team speaking (coding-team-messages.ts). `undelivered` is
    * set by the orchestrator for a message the box could not hand on — it is
@@ -114,6 +117,10 @@ export function validateMessage(m: unknown): string | null {
     case "alert":
       if (typeof msg.reason !== "string" || !msg.reason.trim()) return "An alert needs a reason.";
       return null;
+    case "note":
+      if (typeof msg.text !== "string" || !msg.text.trim()) return "A note needs its text.";
+      if (msg.read_only_refusals !== undefined && (typeof msg.read_only_refusals !== "number" || !Number.isInteger(msg.read_only_refusals) || msg.read_only_refusals < 0)) return "read_only_refusals is a whole number.";
+      return null;
     case "message":
       if (typeof msg.from_run_id !== "string" || !RUN_ID.test(msg.from_run_id)) return "A team message needs from_run_id (a run id).";
       if (typeof msg.to !== "string" || !(TEAM_MESSAGE_TARGETS as readonly string[]).includes(msg.to)) return `A team message goes to ${TEAM_MESSAGE_TARGETS.join(", ")}.`;
@@ -164,6 +171,7 @@ export class TeamBus {
         case "retire": task = retireTask(this.board, actor, message.task_id, message.reason); break;
         case "final_review": recordFinalReview(this.board, actor, message.verdict, message.notes); break;
         case "alert": raiseAlert(this.board, actor, message.reason, message.task_id); break;
+        case "note": postNote(this.board, actor, message.text, message.task_id, message.read_only_refusals); break;
         case "message": postMessage(this.board, actor, message); break;
       }
     } catch (err) {

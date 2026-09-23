@@ -688,6 +688,54 @@ describe("a team that works", () => {
     expect(String(starts[2].task)).toContain("A previous attempt was rejected");
   });
 
+  // Bench, 2026-09-22/23: a worker in its worktree globbed or read the project
+  // path, or ran a `ps`, was refused by design — and the alert rejected merged,
+  // correct work and failed teams on the alert ceiling.
+  it("notes a worker refused only read-only actions — no alert, and the task goes on to its reviewer as if clean", async () => {
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"], permissionDenials: 2, deniedActions: ["Glob: /home/clawbox/Projects/site", "Read: /home/clawbox/Projects/site/index.html"] },
+      { summary: "app done", filesTouched: ["app.js"], permissionDenials: 1, deniedActions: ["Bash: ps -eo pid,cmd | grep '[s]erver\\.py' || echo none"] },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.alerts).toBe(0);
+    expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
+    const notes = done.log.filter((e) => e.type === "note");
+    expect(notes.map((e) => [e.actor.kind, e.task_id, e.message])).toEqual([
+      ["system", "t1", "Worker run-00000002 was refused 2 read-only action(s) outside its folder: Glob: /home/clawbox/Projects/site; Read: /home/clawbox/Projects/site/index.html"],
+      ["system", "t2", "Worker run-00000004 was refused 1 read-only action(s) outside its folder: Bash: ps -eo pid,cmd | grep '[s]erver\\.py' || echo none"],
+    ]);
+    // Reviewed and accepted on the first attempt: nothing redone.
+    expect(starts.map((s) => (s.team as { role: string }).role)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer"]);
+    expect(done.tasks.map((t) => [t.status, t.attempts, t.review?.verdict])).toEqual([["complete", 1, "accepted"], ["complete", 1, "accepted"]]);
+    expect(done.metrics).toMatchObject({ readOnlyRefusals: 3, tasksRejected: 0, tasksAcceptedFirstTry: 2 });
+  });
+
+  it("keeps the alert and the rejection when one refusal was a write, or when the run did not keep every refusal", async () => {
+    outcomes = [
+      { summary: PLAN },
+      // t1: two reads and a write → an alert, rejected by the rule, offered once more.
+      { summary: "index done", filesTouched: ["index.html"], permissionDenials: 3, deniedActions: ["Read: /home/clawbox/Projects/site/index.html", "Glob: /home/clawbox/Projects/site", "Write: /home/clawbox/Projects/site/index.html"] },
+      // t1 again: seven refusals, five on the record, all reads — the two
+      // not kept may have been writes: an alert, and rejected for good.
+      { summary: "index done", filesTouched: ["index.html"], permissionDenials: 7, deniedActions: ["Read: a", "Read: b", "Read: c", "Read: d", "Read: e"] },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    expect(done.alerts).toBe(2);
+    const alerts = done.log.filter((e) => e.type === "alert").map((e) => e.message);
+    expect(alerts[0]).toMatch(/Worker run-00000002 was refused 3 action\(s\): Read: .*; Glob: .*; Write: \/home\/clawbox\/Projects\/site\/index\.html/);
+    expect(alerts[1]).toMatch(/Worker run-00000003 was refused 7 action\(s\)/);
+    expect(done.log.filter((e) => e.type === "note")).toEqual([]);
+    expect(done.tasks[0]).toMatchObject({ status: "rejected", attempts: 2, rejections: 2, review: { verdict: "rejected", notes: expect.stringMatching(/refused an action/) } });
+    // The rule ruled both times: no reviewer ran.
+    expect(starts.map((s) => (s.team as { role: string }).role)).toEqual(["planner", "worker", "worker"]);
+    expect(done.metrics.readOnlyRefusals).toBe(0);
+  });
+
   it("fails the team when a worker fails and its dependants can never run, naming both", async () => {
     outcomes = [{ summary: PLAN }, { status: "failed", error: "Stopped at the cost ceiling" }];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });

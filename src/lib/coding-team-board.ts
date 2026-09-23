@@ -117,6 +117,8 @@ export interface TeamMetrics {
   messagesToLead: number;
   messagesToSibling: number;
   messagesUndelivered: number;
+  /** Refused actions that only looked (`readOnlyDenial`): on the log as notes, never alerts, never a rejection. */
+  readOnlyRefusals: number;
 }
 
 const TEAM_STATUSES: readonly TeamStatus[] = ["planning", "working", "reviewing", "done", "failed", "stopped"];
@@ -187,7 +189,7 @@ export interface TeamAgents {
 export interface LogEntry {
   ts: number;
   actor: Actor;
-  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review";
+  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note";
   task_id?: string;
   message: string;
   payload?: Record<string, unknown>;
@@ -686,6 +688,18 @@ export function raiseAlert(board: TeamBoard, actor: Actor, reason: string, taskI
 }
 
 /**
+ * A guardrail line that is NOT an alert: on the record, never counted toward
+ * the team's alert ceiling. Only the system (the orchestrator) writes one —
+ * today, a worker whose every refusal only LOOKED (`readOnlyDenial`), with
+ * how many, which the figures count.
+ */
+export function postNote(board: TeamBoard, actor: Actor, text: string, taskId?: string, readOnlyRefusals?: number): void {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "note", `Only the system writes a note; ${describeActor(actor)} may not.`);
+  const now = Date.now();
+  append(board, { ts: now, actor, type: "note", task_id: taskId, message: firstLine(text, 300), ...(readOnlyRefusals ? { payload: { readOnlyRefusals } } : {}) });
+}
+
+/**
  * A run of the team says something — to a sibling run, to the lead (this
  * board), or to the box's main agent. Only a run on the cast list, in the role
  * it is listed with, may: a worker speaking as another run is refused the way
@@ -788,6 +802,51 @@ export function isSettledTeamStatus(status: TeamStatus): boolean {
   return status === "done" || status === "failed" || status === "stopped";
 }
 
+/** Tools that only look. */
+const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(["Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch"]);
+/** Shell commands that only look, as the first word of a command (`git` below, by its subcommand). */
+const READ_ONLY_COMMANDS: ReadonlySet<string> = new Set(["ls", "cat", "head", "tail", "grep", "rg", "find", "ps", "pgrep", "wc", "stat", "file", "which", "echo", "pwd", "test", "[", "cd"]);
+const READ_ONLY_GIT: ReadonlySet<string> = new Set(["status", "log", "diff", "show"]);
+/** `find` actions that run or write something. */
+const FIND_WRITES = /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/;
+/** The runner cuts a refused action's text at this length (describeDenial, coding-agent.ts): a command that long may hide the rest. */
+const DENIAL_TEXT_CUT = 160;
+
+/**
+ * True when a refused action, as the runner describes it (`Read: <path>`,
+ * `Bash: <command>` — `CodingRun.deniedActions`), only LOOKED: a read-only
+ * tool, or a shell command whose every part is a read-only command with no
+ * redirection into a file and no substitution. Anything else — a write, an
+ * edit, a command this cannot read to the end — is false: the team judges it
+ * the way it always did.
+ */
+export function readOnlyDenial(action: string): boolean {
+  const colon = action.indexOf(": ");
+  if (colon <= 0) return false;
+  const tool = action.slice(0, colon);
+  if (READ_ONLY_TOOLS.has(tool)) return true;
+  if (tool !== "Bash" || action.length >= DENIAL_TEXT_CUT) return false;
+  // Output thrown away, or folded into the other stream, writes nothing.
+  const command = action.slice(colon + 2).replace(/(?:(?:&>>?|\d?>>?)\s*\/dev\/null|\d?>&\d)(?=[\s;|&]|$)/g, " ");
+  // Any other redirection writes a file; a substitution runs a command not seen here.
+  if (/[>`]|\$\(|<\(/.test(command)) return false;
+  const parts = command.split(/\|\|?|&&?|;|\n/).map((p) => p.trim()).filter(Boolean);
+  return parts.length > 0 && parts.every((part) => {
+    const words = part.split(/\s+/);
+    const word = words[0];
+    let rest = words.slice(1);
+    if (word === "git") {
+      // `git -C <dir> log` is `git log` somewhere else.
+      while (rest[0] === "-C" && rest.length > 2) rest = rest.slice(2);
+      return READ_ONLY_GIT.has(rest[0]) && !rest.some((w) => w.startsWith("--output"));
+    }
+    if (!READ_ONLY_COMMANDS.has(word)) return false;
+    // `rg --pre <cmd>` runs <cmd> on every file it searches.
+    if (word === "rg") return !rest.some((w) => w.startsWith("--pre"));
+    return word !== "find" || !rest.some((w) => FIND_WRITES.test(w));
+  });
+}
+
 /**
  * The board, compact, for a worker (or the lead) to read in its task text:
  * one line per task — `t3 [status] — <description> → <result>` — then the
@@ -844,6 +903,7 @@ const EMPTY_METRICS: TeamMetrics = {
   tasksPlanned: 0, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 0, tasksRejected: 0,
   tokensUsed: 0, wallMs: 0,
   messagesSent: 0, messagesToLead: 0, messagesToSibling: 0, messagesUndelivered: 0,
+  readOnlyRefusals: 0,
 };
 
 /** The team's figures, from the board alone. `now` ends the clock of a team still at work. */
@@ -870,6 +930,10 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
     messagesToLead: payloads.filter((p) => p?.to === "lead").length,
     messagesToSibling: payloads.filter((p) => p?.to === "sibling").length,
     messagesUndelivered: payloads.filter((p) => p?.delivered === false).length,
+    readOnlyRefusals: board.log.reduce((sum, e) => {
+      const n = e.type === "note" ? e.payload?.readOnlyRefusals : undefined;
+      return sum + (typeof n === "number" && Number.isInteger(n) && n > 0 ? n : 0);
+    }, 0),
   };
 }
 
