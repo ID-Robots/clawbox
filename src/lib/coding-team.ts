@@ -20,7 +20,8 @@
  *
  * Guardrails (v0): the board refuses any message its sender's role may not
  * send and logs the refusal; a worker that hit a permission denial, or that
- * touched files outside its task's files_hint, raises an ALERT; after
+ * touched files outside its task's files_hint, raises an ALERT (refusals of
+ * read-only actions alone are a NOTE, and the task stays clean); after
  * MAX_ALERTS the team stops (a reviewer that could not start is alerted but
  * not counted; one that waits for room is neither). A failed task fails the
  * team unless other tasks can still run; a task the reviewer rejects is
@@ -89,6 +90,7 @@ import {
   listBoards,
   loadBoard,
   MAX_DIGEST_CHARS,
+  readOnlyDenial,
   readyTasks,
   saveBoard,
   setTeamStatus,
@@ -773,10 +775,24 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
     return true;
   }
 
-  // Guardrails: what the worker did, against what it was asked.
+  // Guardrails: what the worker did, against what it was asked. A worker
+  // whose every refusal only LOOKED — a Glob of the project path from inside
+  // its worktree, a `ps` — changed nothing: a note, not an alert, and the
+  // task stays clean (bench, 2026-09-22/23: such refusals rejected merged,
+  // correct work and failed teams on the alert ceiling). Only when every
+  // refusal is on the record: the run keeps the first few, and one it did not
+  // keep may have been a write.
+  let refusedWrite = false;
   if (settled) {
     if (settled.permissionDenials > 0) {
-      bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} was refused ${settled.permissionDenials} action(s): ${settled.deniedActions.slice(0, 3).join("; ")}` });
+      const n = settled.permissionDenials;
+      const named = settled.deniedActions.slice(0, 3).join("; ");
+      if (settled.deniedActions.length >= n && settled.deniedActions.every(readOnlyDenial)) {
+        bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} was refused ${n} read-only action(s) outside its folder: ${named}`, read_only_refusals: n });
+      } else {
+        refusedWrite = true;
+        bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} was refused ${n} action(s): ${named}` });
+      }
     }
     const strayed = outsideHint(files, task.files_hint);
     if (strayed.length) {
@@ -784,14 +800,14 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
     }
   }
 
-  // The review loop: the rule first (v0 — a refusal or a stray file is a
+  // The review loop: the rule first (v0 — a refused write or a stray file is a
   // rejection without a model), then the REVIEWER, a read-only run on the
   // merged work that answers a verdict. A review that was not done is not
   // an acceptance: a garbled answer falls back to the rule with an alert.
   // The planner's shape may ask for no reviewer here: `final` has one look
   // at the merged whole at the end, `none` trusts the rule alone.
   if (ok) {
-    const clean = settled && settled.permissionDenials === 0 && outsideHint(files, task.files_hint).length === 0;
+    const clean = settled && !refusedWrite && outsideHint(files, task.files_hint).length === 0;
     if (!clean) {
       bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: "The worker was refused an action or strayed outside its files; the task is offered once more." });
       return true;

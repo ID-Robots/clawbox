@@ -413,6 +413,10 @@ describe("teamMetrics", () => {
       said("run-work0002", { from: "run-work0002", to: "lead", text: "t3 duplicates t2: both build the cart." }),
       { ts: 3, actor: PLANNER, type: "message", message: "planner → the assistant (not delivered: NO_SESSION): Stripe?", payload: { from: "run-plan0001", to: "owner_agent", text: "Stripe or PayPal?", delivered: false, code: "NO_SESSION" } },
       said("run-work0003", undefined),
+      // Two workers refused only reads; a note read back with a payload that is not a count counts nothing.
+      { ts: 4, actor: SYSTEM, type: "note", message: "Worker run-work0001 was refused 2 read-only action(s) …", payload: { readOnlyRefusals: 2 } },
+      { ts: 5, actor: SYSTEM, type: "note", message: "Worker run-work0002 was refused 1 read-only action(s) …", payload: { readOnlyRefusals: 1 } },
+      { ts: 6, actor: SYSTEM, type: "note", message: "?", payload: { readOnlyRefusals: "lots" } },
     );
     b.status = "failed";
     b.finishedAt = 61_000;
@@ -432,6 +436,7 @@ describe("teamMetrics", () => {
       messagesToLead: 1,
       messagesToSibling: 2,
       messagesUndelivered: 1,
+      readOnlyRefusals: 3,
     });
     expect(lib.teamAgents(b)).toEqual({ planner: 1, workers: 3, reviewers: 2, leads: 1, total: 7 });
     // A team at work: the clock runs to now.
@@ -495,11 +500,89 @@ describe("teamMetrics", () => {
     expect(lib.loadBoard(b.id)?.lastLeadAt).toBe(0);
   });
 
+  it("counts the read-only refusals postNote wrote, never as alerts, and counts them again from the log read back", () => {
+    const b = board();
+    lib.postNote(b, SYSTEM, "Worker run-aaaaaaaa was refused 2 read-only action(s) outside its folder: Read: /p/a; Glob: /p", "t1", 2);
+    lib.postNote(b, SYSTEM, "A note that is about nothing refused.");
+    expect(b.alerts).toBe(0);
+    expect(b.log.filter((e) => e.type === "note").map((e) => e.task_id)).toEqual(["t1", undefined]);
+    expect(lib.teamMetrics(b).readOnlyRefusals).toBe(2);
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)!.metrics.readOnlyRefusals).toBe(2);
+    // The orchestrator's line alone: no run of the team writes one.
+    for (const actor of [PLANNER, REVIEWER, OWNER, worker("run-aaaaaaaa")]) {
+      expect(() => lib.postNote(b, actor, "all fine", "t1", 9)).toThrow(/Only the system writes a note/);
+    }
+    expect(lib.teamMetrics(b).readOnlyRefusals).toBe(2);
+    // Not quoted to a teammate: the digest carries alerts and messages.
+    expect(lib.boardDigest(b, null)).not.toContain("read-only");
+  });
+
   it("keeps when the lead's last turn was written, from a new board's 0", () => {
     const b = board();
     expect(b.lastLeadAt).toBe(0);
     b.lastLeadAt = 1_234_567;
     lib.saveBoard(b);
     expect(lib.loadBoard(b.id)?.lastLeadAt).toBe(1_234_567);
+  });
+});
+
+describe("readOnlyDenial", () => {
+  it("knows the refusals the bench saw only looked: a probe of the project path, a ps", () => {
+    for (const action of [
+      "Glob: /home/clawbox/Projects/team-bench/team-refactor-modules",
+      "Read: /home/clawbox/Projects/team-bench/units/index.html",
+      "Read: /home/clawbox/Projects/team-bench/units/units.py",
+      "Bash: ps -eo pid,cmd | grep '[s]erver\\.py' || echo …",
+    ]) expect(lib.readOnlyDenial(action), action).toBe(true);
+  });
+
+  it("takes every tool that only looks, and a shell command whose every part only looks", () => {
+    for (const action of [
+      "Grep: TODO", "LS: /home/clawbox/Projects/site", "WebFetch: https://example.com", "WebSearch: vitest config", "Read: (no details)",
+      "Bash: ls -la /home/clawbox/Projects/site",
+      "Bash: cat index.html | head -20",
+      "Bash: cd /home/clawbox/Projects/site && git status",
+      "Bash: git -C /home/clawbox/Projects/site log --oneline -3",
+      "Bash: git diff HEAD~1 -- app.js; git show HEAD:app.js",
+      "Bash: find . -name '*.py' 2>/dev/null | wc -l",
+      "Bash: test -f server.py && echo yes || echo no",
+      "Bash: [ -d dist ] && ls dist >/dev/null 2>&1",
+      "Bash: pgrep -f server.py &>/dev/null; rg -n TODO src; stat units.py; file units.py; which python3; pwd; tail -n 5 log.txt",
+    ]) expect(lib.readOnlyDenial(action), action).toBe(true);
+  });
+
+  it("calls anything that may write a write: the file tools, a redirection, a writing command, a command it cannot read to the end", () => {
+    for (const action of [
+      "Write: /home/clawbox/Projects/site/index.html",
+      "Edit: /home/clawbox/Projects/site/app.js",
+      "NotebookEdit: /home/clawbox/Projects/site/a.ipynb",
+      "Bash: rm -rf x",
+      "Bash: cat a > b",
+      "Bash: python3 build.py",
+      "Bash: echo hi >> notes.txt",
+      "Bash: ls >/dev/nullfile",
+      "Bash: cat a | tee b",
+      "Bash: ls && mkdir out",
+      "Bash: grep -l x src | xargs sed -i s/x/y/",
+      "Bash: git status; npm install",
+      "Bash: git checkout -- app.js",
+      "Bash: git diff --output=patch.txt",
+      "Bash: git -C .",
+      "Bash: find . -name '*.pyc' -delete",
+      "Bash: find . -exec rm {} ;",
+      "Bash: echo $(rm -rf x)",
+      "Bash: echo `touch x`",
+      "Bash: cat <(node gen.js)",
+      "Bash: sudo ls",
+      "Bash: FOO=1 ls",
+      "Bash: (no details)",
+      "Bash: ",
+      // At the runner's cut (160): the rest of the command is not on the record.
+      `Bash: ls ${"a".repeat(151)}`,
+      "tool: (no details)",
+      "Read /no/colon",
+      "",
+    ]) expect(lib.readOnlyDenial(action), action).toBe(false);
   });
 });
