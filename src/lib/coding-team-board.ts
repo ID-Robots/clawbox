@@ -827,7 +827,7 @@ export function readOnlyDenial(action: string): boolean {
   if (READ_ONLY_TOOLS.has(tool)) return true;
   if (tool !== "Bash" || action.length >= DENIAL_TEXT_CUT) return false;
   // Output thrown away, or folded into the other stream, writes nothing.
-  const command = action.slice(colon + 2).replace(/(?:&>>?|\d?>>?)\s*\/dev\/null(?=[\s;|&]|$)|\d?>&\d/g, " ");
+  const command = action.slice(colon + 2).replace(/(?:(?:&>>?|\d?>>?)\s*\/dev\/null|\d?>&\d)(?=[\s;|&]|$)/g, " ");
   // Any other redirection writes a file; a substitution runs a command not seen here.
   if (/[>`]|\$\(|<\(/.test(command)) return false;
   const parts = command.split(/\|\|?|&&?|;|\n/).map((p) => p.trim()).filter(Boolean);
@@ -841,6 +841,8 @@ export function readOnlyDenial(action: string): boolean {
       return READ_ONLY_GIT.has(rest[0]) && !rest.some((w) => w.startsWith("--output"));
     }
     if (!READ_ONLY_COMMANDS.has(word)) return false;
+    // `rg --pre <cmd>` runs <cmd> on every file it searches.
+    if (word === "rg") return !rest.some((w) => w.startsWith("--pre"));
     return word !== "find" || !rest.some((w) => FIND_WRITES.test(w));
   });
 }
