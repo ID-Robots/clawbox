@@ -589,3 +589,60 @@ describe("readOnlyDenial", () => {
     ]) expect(lib.readOnlyDenial(action), action).toBe(false);
   });
 });
+
+describe("outsideFolderWriteDenial", () => {
+  const WT = ["/p/.clawbox/worktrees/t2-1"];
+
+  it("takes a write the runner refused outside the worker's worktree, and keeps one inside it", () => {
+    expect(lib.outsideFolderWriteDenial("Write: /tmp/x.py", WT)).toBe(true);
+    expect(lib.outsideFolderWriteDenial("Write: /p/.clawbox/worktrees/t2-1/a.js", WT)).toBe(false);
+    expect(lib.outsideFolderWriteDenial("Bash: echo hi > /tmp/o", WT)).toBe(true);
+    // In place: the project is the worker's folder.
+    expect(lib.outsideFolderWriteDenial("Edit: /p/index.html", ["/p"])).toBe(false);
+  });
+
+  it("knows the scratch places the bench saw: /tmp, the harness's memory folder, /var", () => {
+    for (const action of [
+      "Write: /tmp/t2_check_contacts.py",
+      "Write: /home/clawbox/.claude-ds/projects/-p/memory/notes.md",
+      "Edit: /var/tmp/x.txt",
+      "MultiEdit: /tmp/a.js",
+      "NotebookEdit: /tmp/n.ipynb",
+      "Bash: cat > /tmp/check.py << 'EOF'",
+      "Bash: python3 -c \"open('/tmp/x','w').write('1')\"",
+      "Bash: echo hi>/tmp/o",
+      "Bash: mkdir -p /tmp/t2 && cp a.js /tmp/t2/",
+      // `..` walks out of the worktree.
+      "Write: /p/.clawbox/worktrees/t2-1/../../../tmp/x",
+      // A sibling's worktree is not this worker's.
+      "Write: /p/.clawbox/worktrees/t2-10/a.js",
+    ]) expect(lib.outsideFolderWriteDenial(action, WT), action).toBe(true);
+  });
+
+  it("is false for a write inside any of the folders, a tool that only looks, no absolute path, a path the runner's cut ran into, or no folder", () => {
+    for (const [action, folders] of [
+      ["Write: /p/.clawbox/worktrees/t2-1", WT],
+      ["Edit: /p/.clawbox/worktrees/t2-1/src/app.js", WT],
+      ["Bash: cd /p/.clawbox/worktrees/t2-1 && rm -rf dist", WT],
+      // A worktree worker's write at the project itself: its folders are both.
+      ["Write: /p/index.html", ["/p/.clawbox/worktrees/t2-1", "/p"]],
+      ["Read: /tmp/x.py", WT],
+      ["Glob: /tmp", WT],
+      ["mcp__clawbox__browser_open: /tmp/x", WT],
+      ["Bash: rm -rf dist", WT],
+      ["Bash: echo hi > ~/notes.txt", WT],
+      ["Bash: curl https://example.com/x -o out.html", WT],
+      ["Write: (no details)", WT],
+      ["Write /tmp/no-colon", WT],
+      ["", WT],
+      // At the runner's cut (160), mid-path: it may have gone on into the project.
+      [`Bash: ${"x".repeat(140)} > /home/clawbox/Projects/site/out.txt`.slice(0, 160), ["/home/clawbox/Projects/site"]],
+      ["Write: /tmp/x.py", []],
+      ["Write: /tmp/x.py", ["relative/dir"]],
+    ] as Array<[string, string[]]>) expect(lib.outsideFolderWriteDenial(action, folders), action).toBe(false);
+  });
+
+  it("still takes a long command whose path ends before the runner's cut", () => {
+    expect(lib.outsideFolderWriteDenial(`Bash: cat > /tmp/check.py << 'EOF' ${"x".repeat(140)}`.slice(0, 160), WT)).toBe(true);
+  });
+});

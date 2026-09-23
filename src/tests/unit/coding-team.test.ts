@@ -790,6 +790,50 @@ describe("a team that works", () => {
     expect(done.metrics.readOnlyRefusals).toBe(0);
   });
 
+  // Bench, 2026-09-23: a worker wrote its deliverable, then was refused a check
+  // script in /tmp — twice — and the rule rejected merged, correct work.
+  it("notes a worker refused only writes outside its folders — no alert, and the task stays clean", async () => {
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: ["Write: /tmp/t2_check_contacts.py"] },
+      { summary: "app done", filesTouched: ["app.js"], permissionDenials: 2, deniedActions: ["Bash: cat > /tmp/check.py << 'EOF'", "Read: /home/clawbox/Projects/site/index.html"] },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.alerts).toBe(0);
+    const notes = done.log.filter((e) => e.type === "note");
+    expect(notes.map((e) => [e.actor.kind, e.task_id, e.message])).toEqual([
+      ["system", "t1", "Worker run-00000002 was refused 1 action(s) that changed nothing — reads, or writes outside its folder: Write: /tmp/t2_check_contacts.py"],
+      ["system", "t2", "Worker run-00000004 was refused 2 action(s) that changed nothing — reads, or writes outside its folder: Bash: cat > /tmp/check.py << 'EOF'; Read: /home/clawbox/Projects/site/index.html"],
+    ]);
+    expect(starts.map((s) => (s.team as { role: string }).role)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer"]);
+    expect(done.tasks.map((t) => [t.status, t.attempts, t.review?.verdict])).toEqual([["complete", 1, "accepted"], ["complete", 1, "accepted"]]);
+    expect(done.metrics).toMatchObject({ readOnlyRefusals: 3, tasksRejected: 0, tasksAcceptedFirstTry: 2 });
+  });
+
+  it("keeps the alert and the rejection for a refused write inside the worker's worktree", async () => {
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: ["Write: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1/index.html"] },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.alerts).toBe(1);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+      "ALERT: Worker run-00000002 was refused 1 action(s): Write: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1/index.html",
+    ]);
+    expect(done.log.filter((e) => e.type === "note")).toEqual([]);
+    expect(done.log.find((e) => e.type === "review")?.message).toMatch(/Task t1 rejected: The worker was refused an action/);
+    // Offered once more, from a fresh worktree; the rule ruled the first time, so no reviewer ran for it.
+    expect(starts.map((s) => (s.team as { role: string }).role)).toEqual(["planner", "worker", "worker", "reviewer", "worker", "reviewer"]);
+    expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 2, rejections: 1 });
+    expect(done.metrics.readOnlyRefusals).toBe(0);
+  });
+
   it("fails the team when a worker fails and its dependants can never run, naming both", async () => {
     outcomes = [{ summary: PLAN }, { status: "failed", error: "Stopped at the cost ceiling" }];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
@@ -1415,5 +1459,9 @@ describe("the worker's brief: when to use team_message", () => {
     expect(brief.indexOf('to="lead"')).toBeLessThan(brief.indexOf('to="owner_agent"'));
     expect(brief).toContain("Never send a team_message for progress reports");
     expect(brief).toContain("never to acknowledge a message a teammate sent you");
+  });
+
+  it("puts scratch files in the evidence folder only — never in /tmp, never beside the project", () => {
+    expect(team.WORKER_BRIEF).toContain("Scratch files go in your evidence folder only — never in /tmp, never beside the project. A write anywhere else is refused, and a refused write counts against your task.");
   });
 });

@@ -90,6 +90,7 @@ import {
   listBoards,
   loadBoard,
   MAX_DIGEST_CHARS,
+  outsideFolderWriteDenial,
   readOnlyDenial,
   readyTasks,
   saveBoard,
@@ -127,7 +128,7 @@ const TEAMMATE_QUOTE_CHARS = 160;
 export const WORKER_BRIEF = [
   "You are ONE WORKER of a small coding team. The task you were given is one part of a larger goal; other workers do the other parts in their own sessions, before or after you.",
   "Do your task and only your task: do not redo, undo or 'improve' the parts that belong to others, and stay inside the files your task names unless the task cannot be done otherwise — say so in your report if you had to.",
-  "Scratch files — a page or script you write only to verify your work, notes to yourself — go in your evidence folder, never in the project: a file outside your task's files counts as straying, even a temporary one.",
+  "Scratch files go in your evidence folder only — never in /tmp, never beside the project. A write anywhere else is refused, and a refused write counts against your task.",
   "Your final message is read by the team's reviewer and quoted to the next worker: state what you changed (file names), how it can be checked, and anything you could not finish.",
   "Message a SIBLING with team_message (to=\"sibling\", its run id is in your task text under 'Teammates at work now') when your task needs a file, a name, a schema or an API shape that a teammate owns and that is not in your folder yet: ask for exactly that, in one message. If a teammate's message asks you for such a thing, answer it once with the exact answer (file name, field names, function signature) — that is the one reply that is not an acknowledgement.",
   "Message the LEAD (to=\"lead\") when a task on the board is wrong for the goal: it is already done, it duplicates yours, or it cannot be done as written.",
@@ -791,16 +792,21 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   // whose every refusal only LOOKED — a Glob of the project path from inside
   // its worktree, a `ps` — changed nothing: a note, not an alert, and the
   // task stays clean (bench, 2026-09-22/23: such refusals rejected merged,
-  // correct work and failed teams on the alert ceiling). Only when every
-  // refusal is on the record: the run keeps the first few, and one it did not
-  // keep may have been a write.
+  // correct work and failed teams on the alert ceiling). So did a refused
+  // WRITE outside its folders — a check script in /tmp (bench, 2026-09-23):
+  // the refusal is the proof. A refused write inside the worktree or the
+  // project is still an alert. Only when every refusal is on the record: the
+  // run keeps the first few, and one it did not keep may have been a write.
   let refusedWrite = false;
   if (settled) {
     if (settled.permissionDenials > 0) {
       const n = settled.permissionDenials;
       const named = settled.deniedActions.slice(0, 3).join("; ");
-      if (settled.deniedActions.length >= n && settled.deniedActions.every(readOnlyDenial)) {
-        bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} was refused ${n} read-only action(s) outside its folder: ${named}`, read_only_refusals: n });
+      const folders = worktree ? [worktree.path, board.directory] : [board.directory];
+      const outsideWrite = (a: string) => outsideFolderWriteDenial(a, folders);
+      if (settled.deniedActions.length >= n && settled.deniedActions.every((a) => readOnlyDenial(a) || outsideWrite(a))) {
+        const what = settled.deniedActions.some(outsideWrite) ? "action(s) that changed nothing — reads, or writes" : "read-only action(s)";
+        bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} was refused ${n} ${what} outside its folder: ${named}`, read_only_refusals: n });
       } else {
         refusedWrite = true;
         bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} was refused ${n} action(s): ${named}` });
