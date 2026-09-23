@@ -6754,9 +6754,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     if (Array.isArray(event.permission_denials)) {
       const parsed = denialsFrom(event.permission_denials);
       // The refusals a run in a worktree met on the project's own path, each
-      // marked with where it was pointed instead — and hinted now if its
-      // tool_result slipped by. Counted whole, not in the kept few: a team
-      // reads every one of them as a note, never as a rejection.
+      // marked with where it was pointed instead — and hinted if its
+      // tool_result slipped by: queued, for afterTurn below to deliver as the
+      // next turn. Counted whole, not in the kept few: a team reads every one
+      // of them as a note, never as a rejection.
       let hinted = 0;
       event.permission_denials.forEach((entry, i) => {
         const e = (entry && typeof entry === "object" ? entry : {}) as { tool_name?: unknown; tool_input?: unknown };
@@ -6764,7 +6765,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         if (!counterpart) return;
         hinted += 1;
         parsed[i].worktreePath = counterpart;
-        hintWorktree(run, state, e.tool_name as string, counterpart);
+        hintWorktree(run, state, e.tool_name as string, counterpart, false);
       });
       run.worktreeHints = (continuation ? run.worktreeHints : 0) + hinted;
       const described = parsed.map((d) => d.text);
@@ -10161,19 +10162,26 @@ const MAX_WORKTREE_HINTS = 3;
  * to retry. Once per path per spawn, a few paths at most, and only to a
  * harness that takes it NOW: queued for a later spawn it would sit in the
  * owner's queue and say where to retry after the work was over.
+ *
+ * `flush` false leaves it queued for the turn's end (a result event): there
+ * `afterTurn` delivers it, and a turn it delivered something to keeps the
+ * pipe open — written here, afterTurn would find the queue empty and close
+ * stdin behind it, and a message sent while the run acted on the hint could
+ * no longer reach it.
  */
-function hintWorktree(run: CodingRun, state: LiveRun, tool: string, counterpart: string): void {
+function hintWorktree(run: CodingRun, state: LiveRun, tool: string, counterpart: string, flush = true): void {
   if (!state.streamInput || !state.stdinOpen) return;
   if (state.worktreeHinted.has(counterpart) || state.worktreeHinted.size >= MAX_WORKTREE_HINTS) return;
   state.worktreeHinted.add(counterpart);
   try {
-    run.messages = appendRunMessage(run.messages, normalizeRunMessage(worktreeHintText(tool, run.directory, counterpart)), Date.now());
+    // Marked as the box's by the runner itself — never by what the text says.
+    run.messages = appendRunMessage(run.messages, normalizeRunMessage(worktreeHintText(tool, run.directory, counterpart)), Date.now(), "box");
   } catch {
     // The queue is full, or the path is not plain text: no hint, the refusal stands as it is.
     return;
   }
   persist(true);
-  flushRunMessages(run, state);
+  if (flush) flushRunMessages(run, state);
 }
 
 /**
@@ -10193,7 +10201,7 @@ function flushRunMessages(run: CodingRun, state: LiveRun): number {
   const sent: RunMessage[] = [];
   for (const message of waiting) {
     try {
-      stdin.write(streamJsonUserTurn(runMessageTurn(message.text)));
+      stdin.write(streamJsonUserTurn(runMessageTurn(message.text, message.from)));
     } catch {
       // The pipe went while we were writing. What is left stays queued, which
       // is the honest record: the harness did not get it.

@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { BOX_NOTE_PREFIX, isBoxNote } from "@/lib/coding-run-messages";
+import { BOX_NOTE_PREFIX } from "@/lib/coding-run-messages";
 import {
   hintInFolder,
   toFolderPaths,
@@ -158,7 +158,6 @@ describe("worktreeCounterpart and worktreeHintFor", () => {
 describe("worktreeHintText", () => {
   it("is the box's note: the worktree as the only folder, the path to retry, and never the project's own path", () => {
     const text = worktreeHintText("Read", W, `${W}/styles.css`);
-    expect(isBoxNote(text)).toBe(true);
     expect(text.startsWith(`${BOX_NOTE_PREFIX} Your Read was refused`)).toBe(true);
     expect(text).toContain(`Your folder is ${W}`);
     expect(text).toContain(`that path is ${W}/styles.css: retry with that path`);

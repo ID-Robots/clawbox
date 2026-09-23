@@ -151,9 +151,10 @@ describe("a run in a worktree refused on the project's own path", () => {
       ["Read: /etc/hostname", null],
     ]);
     // On the record and in the feed, as delivered — the road the owner's messages take.
-    expect(settled.messages.map((m) => [m.text.split(":")[0], typeof m.deliveredAt])).toEqual([
-      ["[from ClawBox] Your Read was refused", "number"],
-      ["[from ClawBox] Your Write was refused", "number"],
+    // Marked as the box's by the runner — the mark, not the text, frames it.
+    expect(settled.messages.map((m) => [m.text.split(":")[0], typeof m.deliveredAt, m.from])).toEqual([
+      ["[from ClawBox] Your Read was refused", "number", "box"],
+      ["[from ClawBox] Your Write was refused", "number", "box"],
     ]);
     expect(settled.progress.join("\n")).toContain("Message to the run: [from ClawBox] Your Read was refused");
 
@@ -176,6 +177,39 @@ describe("a run in a worktree refused on the project's own path", () => {
     // Both refusals are marked: the team counts every one.
     expect(settled.worktreeHints).toBe(2);
     expect(settled.denials.every((d) => d.worktreePath === `${worktree}/styles.css`)).toBe(true);
+  });
+});
+
+describe("a refusal the runner learns of only from the turn's result", () => {
+  it("is hinted as the next turn, handed over by the turn's end rather than written ahead of it", async () => {
+    const call = { id: "t_read", name: "Read", input: { file_path: `${project}/styles.css` } };
+    const result = (turns: number) => JSON.stringify({
+      type: "result", subtype: "success", is_error: false, num_turns: turns, result: "Done.", session_id: "sess-hint-1",
+      permission_denials: turns === 1 ? [{ tool_name: call.name, tool_use_id: call.id, tool_input: call.input }] : [],
+    });
+    fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(path.join(binDir, "claude-ds"), [
+      "#!/usr/bin/env bash",
+      `echo '${INIT}'`,
+      // The call, and no tool_result for it: only the result names the refusal.
+      `echo '${JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", ...call }] } })}'`,
+      `echo '${result(1)}'`,
+      // The task, then the hint — written only once the turn has ended.
+      `head -n 2 > "${turnsFile()}"`,
+      `echo '${result(2)}'`,
+      "exit 0",
+    ].join("\n"), { mode: 0o755 });
+    const run = await lib.startRun({ task: "style it", directory: worktree, source: "owner" });
+    const settled = await finished(run.id);
+    expect(settled.status).toBe("completed");
+    const turns = decodeHarnessTurns(fs.readFileSync(turnsFile(), "utf-8"));
+    expect(turns).toHaveLength(2);
+    expect(turns[1]).toMatch(/^\[ClawBox: a note from this box about an action of yours it refused\./);
+    expect(turns[1]).toContain(`that path is ${worktree}/styles.css: retry with that path`);
+    expect(settled.messages).toHaveLength(1);
+    expect(settled.messages[0]).toMatchObject({ from: "box", deliveredAt: expect.any(Number) });
+    expect(settled.worktreeHints).toBe(1);
+    expect(settled.denials[0].worktreePath).toBe(`${worktree}/styles.css`);
   });
 });
 
