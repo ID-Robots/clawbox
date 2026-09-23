@@ -129,6 +129,15 @@ export interface PrState {
    */
   foundBy: PrFoundBy | null;
   /**
+   * When the box marked this pull request ready for review, or null. The box
+   * opens its pull requests as drafts (see openPullRequest) and readies them
+   * once the checks pass, which is when CodeRabbit gives its one review. On the
+   * record for the reason `reviewOk` is: a watcher rebuilt after a restart
+   * must not ready a pull request somebody turned back into a draft. Optional
+   * because records written before the field lack it.
+   */
+  readyAt?: number | null;
+  /**
    * When the box turned GitHub's auto-merge ON for this pull request, or null
    * when it has not (or has turned it off again) — see decideAutoMerge.
    *
@@ -186,6 +195,9 @@ export interface PrSnapshot {
   /** True when the rollup field was absent — no checks are attached AT ALL,
    *  which is different from a check that is pending. */
   noChecks: boolean;
+  /** True while the pull request is a draft. Optional so a snapshot from
+   *  before the field reads as a ready one, as it always did. */
+  isDraft?: boolean;
   /** The pull request's label names. Optional so a snapshot from before the
    *  field reads as it always did: unlabelled. */
   labels?: string[];
@@ -202,6 +214,10 @@ export interface PrSnapshot {
  *    because GitHub attaches check runs a few seconds after the PR opens.
  *  - `reviewOk`: when the automatic review pass is on, its verdict gates the
  *    merge as well — the check suite and the reviewer are different questions.
+ *  - a draft is readied, never merged: once nothing is pending, `ready` has the
+ *    watcher run `gh pr ready`. That starts CodeRabbit's one review, whose
+ *    status then counts like any other check before the merge. A draft the
+ *    box already readied once was put back by somebody, and is left to them.
  *  - a hold label (isHoldLabel) is never merged over, whatever the checks say.
  *
  * Exported for its test, which is where the vacuous-green case is pinned.
@@ -210,8 +226,12 @@ export function decideMerge(input: {
   snapshot: PrSnapshot;
   waitedMs: number;
   reviewOk: boolean;
-}): { action: "merge" } | { action: "wait" } | { action: "block"; detail: string } {
+  /** How long ago the box marked this pull request ready (`PrState.readyAt`),
+   *  or null when it never did. */
+  sinceReadyMs?: number | null;
+}): { action: "merge" } | { action: "wait" } | { action: "ready" } | { action: "block"; detail: string } {
   const { snapshot, waitedMs, reviewOk } = input;
+  const sinceReadyMs = typeof input.sinceReadyMs === "number" ? input.sinceReadyMs : null;
 
   if (snapshot.state === "MERGED") return { action: "block", detail: "Already merged." };
   if (snapshot.state === "CLOSED") return { action: "block", detail: "The pull request was closed." };
@@ -232,6 +252,9 @@ export function decideMerge(input: {
   }
   if (snapshot.noChecks || snapshot.checks.total === 0) {
     if (waitedMs < NO_CHECKS_GRACE_MS) return { action: "wait" };
+    // Nothing will ever go green, so nothing is left to wait for before the
+    // review. The owner is handed a pull request that is ready, not a draft.
+    if (snapshot.isDraft && sinceReadyMs === null) return { action: "ready" };
     return {
       action: "block",
       detail: "No checks ran on this pull request, so there is nothing to go green. It is open and waiting for you — add a workflow under .github/workflows to have runs merge themselves.",
@@ -247,6 +270,16 @@ export function decideMerge(input: {
   if (snapshot.checks.pending > 0) return { action: "wait" };
   if (snapshot.mergeable === "CONFLICTING") {
     return { action: "block", detail: "The pull request conflicts with its base branch." };
+  }
+  // A pull request readied moments ago still carries its draft's statuses: the
+  // reviewer's "skipped: draft" reads as a pass until the review starts. The
+  // grace covers that gap, and GitHub's own lag in reporting the draft flag.
+  if (sinceReadyMs !== null && sinceReadyMs < NO_CHECKS_GRACE_MS) return { action: "wait" };
+  if (snapshot.isDraft) {
+    if (sinceReadyMs !== null) {
+      return { action: "block", detail: "The pull request was turned back into a draft after ClawBox marked it ready, so it is left for you." };
+    }
+    return { action: "ready" };
   }
   if (snapshot.mergeable !== "MERGEABLE") return { action: "wait" };
   return { action: "merge" };

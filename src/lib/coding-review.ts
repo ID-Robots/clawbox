@@ -25,10 +25,14 @@ import { runChild, type ChildResult, failureDetail } from "./child-run";
 import {
   labelNames,
   parseCheckRollup,
+  parseReviewFacts,
   parseReviewThreads,
+  type ChangesRequest,
+  type CodeRabbitFacts,
   type FailedCheckLog,
   type ReviewCheck,
   type ReviewSnapshot,
+  type ReviewThread,
 } from "./coding-review-state";
 
 // One import for server callers, the way ./coding-pr re-exports its own pure
@@ -81,16 +85,24 @@ const ok = (r: ChildResult) => r.code === 0;
 const out = (r: ChildResult) => r.stdout.trim();
 
 /**
- * The GraphQL query for a pull request's review threads.
+ * The GraphQL query for a pull request's review threads, and for the facts
+ * about CodeRabbit that the loop reads beside them (see isCodeRabbitCheck).
  *
  * `first: 100` on the threads and `first: 1` on each thread's comments: only
  * the opening comment of a thread is the finding, and asking for the whole
  * conversation on a busy pull request is how a GraphQL call starts costing
- * rate limit for text nothing reads.
+ * rate limit for text nothing reads. `replies` asks for the authors of the
+ * first twenty and nothing else, which is all "was it answered?" needs.
+ *
+ * `headRefOid` is read here and not through `gh pr view --json`, because the
+ * 2.4.0 gh on the box predates that field, and an unknown field fails the
+ * whole read. The reviews and comments show whether CodeRabbit is on the
+ * pull request at all, and whether its review is on an earlier commit.
  */
-const REVIEW_THREADS_QUERY = `query($owner:String!,$repo:String!,$number:Int!){
+const REVIEW_QUERY = `query($owner:String!,$repo:String!,$number:Int!){
   repository(owner:$owner,name:$repo){
     pullRequest(number:$number){
+      headRefOid
       reviewThreads(first:100){
         nodes{
           isResolved
@@ -98,11 +110,23 @@ const REVIEW_THREADS_QUERY = `query($owner:String!,$repo:String!,$number:Int!){
           path
           line
           comments(first:1){ nodes{ body url author{ login } } }
+          replies: comments(first:20){ nodes{ author{ login } } }
         }
       }
+      reviews(last:100){ nodes{ state author{ login } commit{ oid } } }
+      comments(first:50){ nodes{ author{ login } } }
     }
   }
 }`;
+
+/** What the review GraphQL adds to a snapshot. */
+export interface ReviewDetails {
+  threads: ReviewThread[];
+  headSha: string | null;
+  /** Null when the query could not be read, so nothing is known either way. */
+  codeRabbit: CodeRabbitFacts | null;
+  changesRequestedBy: ChangesRequest[] | null;
+}
 
 /** `owner/name` for the repository this folder is in, or null. */
 export async function readRepoSlug(dir: string): Promise<string | null> {
@@ -128,18 +152,22 @@ export async function readReviewSnapshot(dir: string, number: number): Promise<R
     "gh",
     // `labels` and `baseRefName` are in the 2.4.0 gh's field list; the hold
     // label and a retarget onto a protected base are read off every poll.
-    ["pr", "view", String(number), "--json", "state,mergeable,reviewDecision,statusCheckRollup,labels,baseRefName"],
+    ["pr", "view", String(number), "--json", "state,mergeable,reviewDecision,statusCheckRollup,isDraft,labels,baseRefName"],
     cwd,
   );
   if (!ok(viewed)) {
     return { error: failureDetail(viewed, `Reading pull request #${number}`, "Try again.") };
   }
-  let parsed: { state?: unknown; mergeable?: unknown; reviewDecision?: unknown; statusCheckRollup?: unknown; labels?: unknown; baseRefName?: unknown };
+  let parsed: {
+    state?: unknown; mergeable?: unknown; reviewDecision?: unknown; statusCheckRollup?: unknown; isDraft?: unknown;
+    labels?: unknown; baseRefName?: unknown;
+  };
   try {
     parsed = JSON.parse(out(viewed)) as typeof parsed;
   } catch {
     return { error: "Could not read GitHub's answer about the pull request." };
   }
+  const details = await readReviewDetails(cwd, number);
 
   return {
     state: String(parsed.state ?? "UNKNOWN").toUpperCase(),
@@ -154,34 +182,67 @@ export async function readReviewSnapshot(dir: string, number: number): Promise<R
       : null,
     checks: parseCheckRollup(parsed.statusCheckRollup),
     noChecks: parsed.statusCheckRollup == null,
-    threads: await readReviewThreads(cwd, number),
+    threads: details.threads,
+    isDraft: parsed.isDraft === true,
+    headSha: details.headSha,
+    codeRabbit: details.codeRabbit,
+    changesRequestedBy: details.changesRequestedBy,
     labels: labelNames(parsed.labels),
     base: typeof parsed.baseRefName === "string" && parsed.baseRefName ? parsed.baseRefName : null,
   };
 }
 
 /** The unresolved review threads, or an empty list when they cannot be read. */
-export async function readReviewThreads(dir: string, number: number) {
+export async function readReviewThreads(dir: string, number: number): Promise<ReviewThread[]> {
+  return (await readReviewDetails(dir, number)).threads;
+}
+
+/**
+ * The threads and the CodeRabbit facts, in one GraphQL call.
+ *
+ * Best-effort like the threads always were: an answer that cannot be read
+ * leaves no threads and `null` facts, and null means "unknown". The loop then
+ * does not wait for CodeRabbit (codeRabbitGate reads it as absent) and counts
+ * every change request, as it did before these facts existed.
+ */
+export async function readReviewDetails(dir: string, number: number): Promise<ReviewDetails> {
+  const none: ReviewDetails = { threads: [], headSha: null, codeRabbit: null, changesRequestedBy: null };
   const slug = await readRepoSlug(dir);
-  if (!slug) return [];
+  if (!slug) return none;
   const [owner, repo] = slug.split("/");
   const answered = await run(
     "gh",
     [
       "api", "graphql",
-      "-f", `query=${REVIEW_THREADS_QUERY}`,
+      "-f", `query=${REVIEW_QUERY}`,
       "-F", `owner=${owner}`,
       "-F", `repo=${repo}`,
       "-F", `number=${number}`,
     ],
     path.resolve(dir),
   );
-  if (!ok(answered)) return [];
+  if (!ok(answered)) return none;
   try {
-    return parseReviewThreads(JSON.parse(out(answered)));
+    const raw: unknown = JSON.parse(out(answered));
+    const pr = (raw as { data?: { repository?: { pullRequest?: { headRefOid?: unknown } | null } } })?.data?.repository?.pullRequest;
+    if (!pr) return none;
+    const headSha = typeof pr.headRefOid === "string" && /^[0-9a-f]{7,64}$/i.test(pr.headRefOid) ? pr.headRefOid : null;
+    const facts = parseReviewFacts(raw, headSha);
+    return { threads: parseReviewThreads(raw), headSha, codeRabbit: facts.codeRabbit, changesRequestedBy: facts.changesRequestedBy };
   } catch {
-    return [];
+    return none;
   }
+}
+
+/**
+ * Ask CodeRabbit for a review of the head it has not reviewed (see
+ * codeRabbitGate): one `@coderabbitai review` comment, which CodeRabbit reads
+ * as "review what changed since your last review".
+ */
+export async function requestCodeRabbitReview(dir: string, number: number): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const commented = await run("gh", ["pr", "comment", String(number), "--body", "@coderabbitai review"], path.resolve(dir));
+  if (ok(commented)) return { ok: true };
+  return { ok: false, detail: failureDetail(commented, `Asking CodeRabbit to review pull request #${number}`, "Comment `@coderabbitai review` on it yourself.") };
 }
 
 /**

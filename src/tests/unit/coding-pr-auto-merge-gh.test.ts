@@ -116,6 +116,6 @@ describe("what GitHub says about the merge", () => {
     })));
     const snapshot = await lib.readPullRequest("/tmp/p", 3);
     expect(snapshot).toMatchObject({ labels: ["hold"] });
-    expect(runChild.mock.calls[0][1]).toEqual(["pr", "view", "3", "--json", "state,mergeable,statusCheckRollup,labels"]);
+    expect(runChild.mock.calls[0][1]).toEqual(["pr", "view", "3", "--json", "state,mergeable,statusCheckRollup,isDraft,labels"]);
   });
 });

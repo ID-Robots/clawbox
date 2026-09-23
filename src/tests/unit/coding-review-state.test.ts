@@ -16,11 +16,14 @@ import { editionEn } from "@/lib/edition-translations";
 import {
   buildReviewFeedback,
   clampReviewRounds,
+  codeRabbitGate,
   decideReviewFixPath,
   decideReviewRound,
   DEFAULT_REVIEW_ROUNDS,
   describeProblems,
   foldReviewChecks,
+  isCodeRabbitCheck,
+  isCodeRabbitLogin,
   isProtectedMergeBase,
   isReviewLoopState,
   isReviewPending,
@@ -30,6 +33,7 @@ import {
   MAX_REVIEW_POLL_MS,
   DEFAULT_REVIEW_POLL_MS,
   parseCheckRollup,
+  parseReviewFacts,
   parseReviewLoop,
   parseReviewThreads,
   isQuotableRef,
@@ -586,10 +590,20 @@ describe("parseReviewLoop", () => {
     fixRunId: "run-abc",
     fixMode: "resumed",
     fixDetail: "Resumed run run-abc.",
+    readyAt: 1_700_000_100_000,
+    codeRabbitAskedFor: "3e9a760a869a7e3cd362d9381014f3afb3a7089a",
   };
 
   it("reads back a loop this code wrote", () => {
     expect(parseReviewLoop(JSON.parse(JSON.stringify(stored)))).toEqual(stored);
+  });
+
+  it("reads a loop from before the CodeRabbit fields as never readied and never asked", () => {
+    const old: Record<string, unknown> = { ...stored };
+    delete old.readyAt;
+    delete old.codeRabbitAskedFor;
+    expect(parseReviewLoop(JSON.parse(JSON.stringify(old)))).toMatchObject({ readyAt: null, codeRabbitAskedFor: null });
+    expect(parseReviewLoop({ ...stored, readyAt: "soon", codeRabbitAskedFor: 42 })).toMatchObject({ readyAt: null, codeRabbitAskedFor: null });
   });
 
   it("degrades to NO loop rather than to a state no surface here can word", () => {
@@ -619,5 +633,265 @@ describe("parseReviewLoop", () => {
     expect(isReviewPending({ ...stored, state: "clean" })).toBe(false);
     expect(isReviewPending({ ...stored, state: "needs_owner" })).toBe(false);
     expect(isReviewPending(null)).toBe(false);
+  });
+});
+
+describe("CodeRabbit reviews a pull request once", () => {
+  // The facts here are what GitHub showed on a real pull request (#995 on
+  // ID-Robots/clawbox) with incremental reviews off: a draft carries
+  // "Review skipped: draft pull request" (success), readying it starts
+  // "Review in progress" (pending) and then "Review completed" (success) with
+  // an APPROVED or CHANGES_REQUESTED review on that commit, and a later push
+  // carries "Review skipped: incremental reviews are disabled" (success).
+  const HEAD = "ea30e3b47b8ea9d4e7c12e59c7d5c91690d81ab8";
+  const EARLIER = "3e9a760a869a7e3cd362d9381014f3afb3a7089a";
+  const suite = check("test", "pass");
+  const rabbit = (state: ReviewCheck["state"]) => check("CodeRabbit", state);
+  /** CodeRabbit has been on the pull request and reviewed an earlier commit. */
+  const reviewed = { present: true, reviewedEarlier: true };
+  const base = { round: 1, maxRounds: 3, waitedMs: REVIEW_NO_CHECKS_GRACE_MS + 1, autoMerge: true, reviewOk: true, base: "beta" };
+
+  describe("who is CodeRabbit", () => {
+    it("knows its status and its login, and nobody else's", () => {
+      expect(isCodeRabbitCheck("CodeRabbit")).toBe(true);
+      expect(isCodeRabbitCheck("test")).toBe(false);
+      expect(isCodeRabbitLogin("coderabbitai")).toBe(true);
+      expect(isCodeRabbitLogin("coderabbitai[bot]")).toBe(true);
+      expect(isCodeRabbitLogin("rabbit-fan")).toBe(false);
+      expect(isCodeRabbitLogin(null)).toBe(false);
+    });
+  });
+
+  describe("parseReviewThreads", () => {
+    const answer = (nodes: unknown[]) => ({ data: { repository: { pullRequest: { reviewThreads: { nodes } } } } });
+    const thread = (opener: string, replies: string[]) => ({
+      isResolved: false,
+      isOutdated: false,
+      path: "src/a.ts",
+      line: 3,
+      comments: { nodes: [{ body: "This drops the error.", url: null, author: { login: opener } }] },
+      replies: { nodes: [opener, ...replies].map((login) => ({ author: { login } })) },
+    });
+
+    it("drops a CodeRabbit thread somebody answered: it resolves its threads only when it reviews again", () => {
+      expect(parseReviewThreads(answer([thread("coderabbitai", ["clawbox-bot"])]))).toEqual([]);
+      // Answered, then CodeRabbit replied to the answer: still answered.
+      expect(parseReviewThreads(answer([thread("coderabbitai", ["clawbox-bot", "coderabbitai"])]))).toEqual([]);
+    });
+
+    it("keeps a CodeRabbit thread nobody but CodeRabbit spoke on", () => {
+      expect(parseReviewThreads(answer([thread("coderabbitai", [])]))).toHaveLength(1);
+      expect(parseReviewThreads(answer([thread("coderabbitai", ["coderabbitai"])]))).toHaveLength(1);
+    });
+
+    it("keeps a person's thread even once it was answered: only its author can settle it", () => {
+      expect(parseReviewThreads(answer([thread("krasi", ["clawbox-bot"])]))).toHaveLength(1);
+    });
+  });
+
+  describe("parseReviewFacts", () => {
+    const answer = (reviews: unknown[], comments: unknown[] = []) => ({
+      data: { repository: { pullRequest: { reviews: { nodes: reviews }, comments: { nodes: comments } } } },
+    });
+    const review = (login: string, state: string, oid: string) => ({ state, author: { login }, commit: { oid } });
+
+    it("sees a review on an earlier commit as the one review being behind us", () => {
+      expect(parseReviewFacts(answer([review("coderabbitai", "APPROVED", EARLIER)]), HEAD).codeRabbit)
+        .toEqual({ present: true, reviewedEarlier: true });
+    });
+
+    it("does not call a review of the head 'earlier', nor anything when the head is unknown", () => {
+      expect(parseReviewFacts(answer([review("coderabbitai", "APPROVED", HEAD)]), HEAD).codeRabbit)
+        .toEqual({ present: true, reviewedEarlier: false });
+      expect(parseReviewFacts(answer([review("coderabbitai", "APPROVED", EARLIER)]), null).codeRabbit)
+        .toEqual({ present: true, reviewedEarlier: false });
+    });
+
+    it("finds CodeRabbit by its summary comment when it has not reviewed yet", () => {
+      expect(parseReviewFacts(answer([], [{ author: { login: "coderabbitai" } }]), HEAD).codeRabbit)
+        .toEqual({ present: true, reviewedEarlier: false });
+      expect(parseReviewFacts(answer([], [{ author: { login: "krasi" } }]), HEAD).codeRabbit)
+        .toEqual({ present: false, reviewedEarlier: false });
+    });
+
+    it("keeps only each reviewer's LATEST verdict when listing change requests", () => {
+      const facts = parseReviewFacts(answer([
+        review("krasi", "CHANGES_REQUESTED", EARLIER),
+        review("krasi", "APPROVED", HEAD),
+        review("coderabbitai", "CHANGES_REQUESTED", EARLIER),
+        review("coderabbitai", "COMMENTED", HEAD),
+      ]), HEAD);
+      expect(facts.changesRequestedBy).toEqual([{ author: "coderabbitai", commit: EARLIER }]);
+    });
+
+    it("answers nothing at all for an error body", () => {
+      expect(parseReviewFacts({ errors: [{ message: "Bad credentials" }] }, HEAD))
+        .toEqual({ codeRabbit: { present: false, reviewedEarlier: false }, changesRequestedBy: [] });
+    });
+  });
+
+  describe("codeRabbitGate", () => {
+    it("is absent when CodeRabbit is nowhere on the pull request, so nothing waits for it", () => {
+      expect(codeRabbitGate(snap({ codeRabbit: { present: false, reviewedEarlier: false } }), 0)).toBe("absent");
+      // Unknown facts (the GraphQL failed) read the same way, as before they existed.
+      expect(codeRabbitGate(snap({ codeRabbit: null }), 0)).toBe("absent");
+    });
+
+    it("is done on any success: reviewed, skipped or rate-limited", () => {
+      expect(codeRabbitGate(snap({ checks: [suite, rabbit("pass")], codeRabbit: reviewed }), 0)).toBe("done");
+    });
+
+    it("waits for the FIRST review for as long as it runs", () => {
+      expect(codeRabbitGate(snap({ checks: [suite, rabbit("pending")], codeRabbit: { present: true, reviewedEarlier: false } }), REVIEW_MAX_WAIT_MS - 1))
+        .toBe("waiting");
+    });
+
+    it("gives a later head only the grace, then calls it stale", () => {
+      expect(codeRabbitGate(snap({ codeRabbit: reviewed }), 5_000)).toBe("waiting");
+      expect(codeRabbitGate(snap({ codeRabbit: reviewed }), REVIEW_NO_CHECKS_GRACE_MS)).toBe("stale");
+      expect(codeRabbitGate(snap({ checks: [suite, rabbit("pending")], codeRabbit: reviewed }), REVIEW_NO_CHECKS_GRACE_MS)).toBe("stale");
+    });
+  });
+
+  describe("draft to ready", () => {
+    const draft = (over: Partial<ReviewSnapshot> = {}) => snap({
+      isDraft: true,
+      headSha: HEAD,
+      checks: [suite, rabbit("pass")],
+      codeRabbit: { present: true, reviewedEarlier: false },
+      ...over,
+    });
+
+    it("readies a draft once every check but CodeRabbit is green", () => {
+      expect(decideReviewRound({ ...base, round: 0, snapshot: draft() })).toEqual({ action: "ready" });
+      // With the merge switch off too: the review is what readying is for.
+      expect(decideReviewRound({ ...base, round: 0, autoMerge: false, snapshot: draft() })).toEqual({ action: "ready" });
+    });
+
+    it("keeps it a draft while the suite runs, and fixes a red suite before anybody reviews it", () => {
+      expect(decideReviewRound({ ...base, round: 0, snapshot: draft({ checks: [check("test", "pending"), rabbit("pass")] }) }))
+        .toEqual({ action: "wait" });
+      expect(decideReviewRound({ ...base, round: 0, snapshot: draft({ checks: [check("test", "fail"), rabbit("pass")] }) }).action)
+        .toBe("feedback");
+    });
+
+    it("readies a draft with no CI at all only after the grace", () => {
+      const bare = draft({ checks: [rabbit("pass")] });
+      expect(decideReviewRound({ ...base, round: 0, waitedMs: 5_000, snapshot: bare })).toEqual({ action: "wait" });
+      expect(decideReviewRound({ ...base, round: 0, snapshot: bare })).toEqual({ action: "ready" });
+    });
+
+    it("does not read the draft's 'skipped' status as the review, just after readying", () => {
+      // The first poll after `gh pr ready` can still see the draft's success.
+      expect(decideReviewRound({ ...base, round: 0, waitedMs: 1_000, sinceReadyMs: 1_000, snapshot: draft({ isDraft: false }) }))
+        .toEqual({ action: "wait" });
+    });
+
+    it("waits for the one review once it runs, then merges on its verdict", () => {
+      const ready = draft({ isDraft: false, checks: [suite, rabbit("pending")] });
+      expect(decideReviewRound({ ...base, round: 0, sinceReadyMs: REVIEW_NO_CHECKS_GRACE_MS + 1, snapshot: ready })).toEqual({ action: "wait" });
+      expect(decideReviewRound({ ...base, round: 0, autoMerge: false, sinceReadyMs: REVIEW_NO_CHECKS_GRACE_MS + 1, snapshot: ready }))
+        .toEqual({ action: "wait" });
+      expect(decideReviewRound({
+        ...base, round: 0, sinceReadyMs: REVIEW_NO_CHECKS_GRACE_MS + 1, snapshot: draft({ isDraft: false }),
+      })).toEqual({ action: "merge" });
+    });
+
+    it("gives up on a first review that never finishes, naming CodeRabbit", () => {
+      const verdict = decideReviewRound({
+        ...base, round: 0, waitedMs: REVIEW_MAX_WAIT_MS, snapshot: draft({ isDraft: false, checks: [suite, rabbit("pending")] }),
+      });
+      expect(verdict).toMatchObject({ action: "done", state: "needs_owner" });
+      expect(verdict.action === "done" && verdict.detail).toContain("CodeRabbit");
+    });
+
+    it("leaves a pull request somebody turned back into a draft to them", () => {
+      const verdict = decideReviewRound({ ...base, sinceReadyMs: REVIEW_NO_CHECKS_GRACE_MS + 1, snapshot: draft() });
+      expect(verdict).toMatchObject({ action: "done", state: "needs_owner" });
+      expect(verdict.action === "done" && verdict.detail).toContain("draft");
+    });
+  });
+
+  describe("after the fix pushes", () => {
+    /** A later head: CodeRabbit reviewed EARLIER and its threads were answered. */
+    const later = (over: Partial<ReviewSnapshot> = {}) => snap({
+      headSha: HEAD,
+      checks: [suite, rabbit("pass")],
+      codeRabbit: reviewed,
+      ...over,
+    });
+
+    it("does not wait for a re-review that is not coming", () => {
+      expect(decideReviewRound({ ...base, snapshot: later() })).toEqual({ action: "merge" });
+      // No status at all on the head: not blocking for the loop.
+      expect(decideReviewRound({ ...base, autoMerge: false, snapshot: later({ checks: [suite] }) }))
+        .toEqual({ action: "done", state: "clean", detail: null });
+      // A pending status left over on the head: not blocking either.
+      expect(decideReviewRound({ ...base, autoMerge: false, snapshot: later({ checks: [suite, rabbit("pending")] }) }))
+        .toEqual({ action: "done", state: "clean", detail: null });
+    });
+
+    it("lets CodeRabbit's change request on an EARLIER commit go once it is answered", () => {
+      const snapshot = later({ reviewDecision: "CHANGES_REQUESTED", changesRequestedBy: [{ author: "coderabbitai", commit: EARLIER }] });
+      expect(reviewProblems(snapshot).changesRequested).toBe(false);
+      expect(decideReviewRound({ ...base, snapshot })).toEqual({ action: "merge" });
+    });
+
+    it("still hands back a change request on the head, or one from anybody else", () => {
+      expect(reviewProblems(later({ reviewDecision: "CHANGES_REQUESTED", changesRequestedBy: [{ author: "coderabbitai", commit: HEAD }] })).changesRequested)
+        .toBe(true);
+      expect(reviewProblems(later({
+        reviewDecision: "CHANGES_REQUESTED",
+        changesRequestedBy: [{ author: "coderabbitai", commit: EARLIER }, { author: "krasi", commit: EARLIER }],
+      })).changesRequested).toBe(true);
+      // A list that could not be read proves nothing either way.
+      expect(reviewProblems(later({ reviewDecision: "CHANGES_REQUESTED", changesRequestedBy: null })).changesRequested).toBe(true);
+    });
+
+    it("still hands back a failing CodeRabbit status as a failing check", () => {
+      expect(decideReviewRound({ ...base, snapshot: later({ checks: [suite, rabbit("fail")] }) }).action).toBe("feedback");
+    });
+  });
+
+  describe("a later head with no CodeRabbit status", () => {
+    // CodeRabbit is a required check on beta: GitHub does not merge a head
+    // that carries no status from it, however green the rest is.
+    const missing = (over: Partial<ReviewSnapshot> = {}) => snap({ headSha: HEAD, checks: [suite], codeRabbit: reviewed, ...over });
+
+    it("waits out the grace before deciding the status is not coming", () => {
+      expect(decideReviewRound({ ...base, waitedMs: 5_000, snapshot: missing() })).toEqual({ action: "wait" });
+    });
+
+    it("asks CodeRabbit once for this head before the merge", () => {
+      expect(decideReviewRound({ ...base, snapshot: missing() })).toEqual({ action: "ask_coderabbit" });
+      expect(decideReviewRound({ ...base, codeRabbitAskedFor: HEAD, snapshot: missing() })).toEqual({ action: "wait" });
+      // A new head is a new ask.
+      expect(decideReviewRound({ ...base, codeRabbitAskedFor: EARLIER, snapshot: missing() })).toEqual({ action: "ask_coderabbit" });
+    });
+
+    it("does not ask while a status is pending, and never waits past the ceiling", () => {
+      expect(decideReviewRound({ ...base, snapshot: missing({ checks: [suite, rabbit("pending")] }) })).toEqual({ action: "wait" });
+      const verdict = decideReviewRound({ ...base, codeRabbitAskedFor: HEAD, waitedMs: REVIEW_MAX_WAIT_MS, snapshot: missing() });
+      expect(verdict).toMatchObject({ action: "done", state: "needs_owner" });
+      expect(verdict.action === "done" && verdict.detail).toContain("CodeRabbit");
+    });
+
+    it("merges straight away in a repository without CodeRabbit", () => {
+      expect(decideReviewRound({ ...base, waitedMs: 5_000, snapshot: missing({ codeRabbit: { present: false, reviewedEarlier: false } }) }))
+        .toEqual({ action: "merge" });
+    });
+  });
+
+  describe("buildReviewFeedback", () => {
+    const feedback = (author: string) => buildReviewFeedback({
+      prNumber: 7, url: null, branch: "clawbox/run-x", base: "beta", round: 1, maxRounds: 3,
+      failedChecks: [], threads: [{ path: "a.ts", line: 1, author, body: "fix", url: null }],
+      conflicting: false, changesRequested: false,
+    });
+
+    it("tells the round to answer CodeRabbit on its threads and not to ask it for another review", () => {
+      expect(feedback("coderabbitai")).toContain("Do not ask it for another review (`@coderabbitai review`)");
+      expect(feedback("krasi")).not.toContain("@coderabbitai");
+    });
   });
 });

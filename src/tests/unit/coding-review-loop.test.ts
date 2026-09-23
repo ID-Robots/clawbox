@@ -38,6 +38,7 @@ const review = vi.hoisted(() => ({
   readReviewSnapshot: vi.fn(),
   readFailedCheckLogs: vi.fn(),
   pushBranch: vi.fn(),
+  requestCodeRabbitReview: vi.fn(),
 }));
 vi.mock("@/lib/coding-review", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-review")>()),
@@ -48,6 +49,7 @@ const github = vi.hoisted(() => ({
   openPullRequest: vi.fn(),
   readPullRequest: vi.fn(),
   mergePullRequest: vi.fn(),
+  markPullRequestReady: vi.fn(),
   // Defaults, restored by mockReset: auto-merge unread, so every test that is
   // not about it sees the loop exactly as it was before it existed.
   readAutoMergeFacts: vi.fn(async (): Promise<unknown> => ({ error: "not read in this test" })),
@@ -163,7 +165,9 @@ describe("the review loop's watcher", () => {
     process.env.CLAWBOX_ROOT = root;
     review.pushBranch.mockResolvedValue({ ok: true });
     review.readFailedCheckLogs.mockResolvedValue([]);
+    review.requestCodeRabbitReview.mockResolvedValue({ ok: true });
     github.mergePullRequest.mockResolvedValue({ ok: true });
+    github.markPullRequestReady.mockResolvedValue({ ok: true });
   });
 
   afterEach(async () => {
@@ -336,6 +340,52 @@ describe("the review loop's watcher", () => {
     await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("clean"); });
     expect(review.readReviewSnapshot).toHaveBeenCalledWith(home, PR_NUMBER);
     // The round that died is not handed back: it was spent.
+    expect(lib.getRun(RUN_ID)?.review?.round).toBe(1);
+  });
+
+  it("readies its draft once the checks are green, and keeps watching for the review", async () => {
+    // Readying is what starts CodeRabbit's one review, so it is neither a merge
+    // nor an ending: the loop goes on polling, and the record says when.
+    review.readReviewSnapshot.mockResolvedValue(snap({
+      isDraft: true,
+      headSha: "ea30e3b47b8ea9d4e7c12e59c7d5c91690d81ab8",
+      checks: [{ name: "tests", state: "pass", url: null }, { name: "CodeRabbit", state: "pass", url: null }],
+      codeRabbit: { present: true, reviewedEarlier: false },
+    }));
+    await boot({ coding_agent_auto_merge: true });
+    writeRecord();
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.readyAt).toEqual(expect.any(Number)); });
+
+    expect(github.markPullRequestReady).toHaveBeenCalledWith(home, PR_NUMBER);
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+    const loop = lib.getRun(RUN_ID)?.review;
+    expect(loop?.state).toBe("polling");
+    // The round's clock restarts with the review it started.
+    expect(loop?.roundStartedAt).toBe(loop?.readyAt);
+    expect(loop?.round).toBe(0);
+    expect(isPrPending(lib.getRun(RUN_ID)?.pr)).toBe(true);
+  });
+
+  it("asks CodeRabbit once about a head it gave no status, instead of merging into a required check", async () => {
+    const head = "ea30e3b47b8ea9d4e7c12e59c7d5c91690d81ab8";
+    review.readReviewSnapshot.mockResolvedValue(snap({
+      headSha: head,
+      checks: [{ name: "tests", state: "pass", url: null }],
+      codeRabbit: { present: true, reviewedEarlier: true },
+    }));
+    await boot({ coding_agent_auto_merge: true });
+    // Past the grace: the status is not coming by itself.
+    writeRecord({ round: 1, roundStartedAt: Date.now() - 5 * 60_000 });
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.codeRabbitAskedFor).toBe(head); });
+
+    expect(review.requestCodeRabbitReview).toHaveBeenCalledTimes(1);
+    expect(review.requestCodeRabbitReview).toHaveBeenCalledWith(home, PR_NUMBER);
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+    expect(lib.getRun(RUN_ID)?.review?.state).toBe("polling");
     expect(lib.getRun(RUN_ID)?.review?.round).toBe(1);
   });
 

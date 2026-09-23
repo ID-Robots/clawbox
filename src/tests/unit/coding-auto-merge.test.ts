@@ -116,19 +116,43 @@ describe("the base a merge would land on", () => {
 });
 
 describe("what is outstanding", () => {
+  /** Well past the round's grace. */
+  const LATE = 10 * 60_000;
+  const HEAD = "b".repeat(40);
+  const EARLIER = "a".repeat(40);
+
   it("is each of the loop's findings, and CodeRabbit still reviewing", () => {
-    expect(autoMergeOutstanding(review())).toBeNull();
-    expect(autoMergeOutstanding(review({ checks: [{ name: "e2e", state: "fail", url: null }] }))).toBe("a check failed");
-    expect(autoMergeOutstanding(review({ mergeable: "CONFLICTING" }))).toBe("the branch conflicts with its base");
-    expect(autoMergeOutstanding(review({ reviewDecision: "CHANGES_REQUESTED" }))).toBe("a reviewer asked for changes");
-    expect(autoMergeOutstanding(review({ threads: [{ path: null, line: null, author: "r", body: "b", url: null }] })))
+    expect(autoMergeOutstanding(review(), LATE)).toBeNull();
+    expect(autoMergeOutstanding(review({ checks: [{ name: "e2e", state: "fail", url: null }] }), LATE)).toBe("a check failed");
+    expect(autoMergeOutstanding(review({ mergeable: "CONFLICTING" }), LATE)).toBe("the branch conflicts with its base");
+    expect(autoMergeOutstanding(review({ reviewDecision: "CHANGES_REQUESTED" }), LATE)).toBe("a reviewer asked for changes");
+    expect(autoMergeOutstanding(review({ threads: [{ path: null, line: null, author: "r", body: "b", url: null }] }), LATE))
       .toBe("a review comment is unanswered");
-    expect(autoMergeOutstanding(review({ checks: [{ name: "CodeRabbit", state: "pending", url: null }] })))
+    // Its first review, running: the status goes green in the same second its
+    // findings land, so nothing may be armed to merge on it.
+    expect(autoMergeOutstanding(review({ checks: [{ name: "CodeRabbit", state: "pending", url: null }] }), LATE))
       .toBe("CodeRabbit is still reviewing");
   });
 
+  it("is a head CodeRabbit has not finished a status on, since the box will ask it for one", () => {
+    expect(autoMergeOutstanding(review({
+      headSha: HEAD,
+      codeRabbit: { present: true, reviewedEarlier: true },
+    }), LATE)).toBe("CodeRabbit has not reviewed the latest commit");
+  });
+
+  it("is not a CodeRabbit change request an earlier commit already answered", () => {
+    expect(autoMergeOutstanding(review({
+      reviewDecision: "CHANGES_REQUESTED",
+      headSha: HEAD,
+      changesRequestedBy: [{ author: "coderabbitai", commit: EARLIER }],
+      checks: [{ name: "test", state: "pass", url: null }, { name: "CodeRabbit", state: "pass", url: null }],
+      codeRabbit: { present: true, reviewedEarlier: true },
+    }), LATE)).toBeNull();
+  });
+
   it("is not a suite that is merely still running — that is what auto-merge waits for", () => {
-    expect(autoMergeOutstanding(review({ checks: [{ name: "e2e-install", state: "pending", url: null }] }))).toBeNull();
+    expect(autoMergeOutstanding(review({ checks: [{ name: "e2e-install", state: "pending", url: null }] }), LATE)).toBeNull();
   });
 });
 

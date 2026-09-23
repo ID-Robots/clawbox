@@ -206,6 +206,48 @@ describe("decideMerge", () => {
   });
 });
 
+describe("decideMerge on a draft", () => {
+  // The box opens its pull requests as drafts, so the one CodeRabbit review
+  // lands once the checks pass. A draft is readied, never merged.
+  it("readies a draft once nothing is pending, rather than merging it", () => {
+    expect(decideMerge({ snapshot: snap({ isDraft: true }), waitedMs: 30_000, reviewOk: true })).toEqual({ action: "ready" });
+    expect(decideMerge({
+      snapshot: snap({ isDraft: true, checks: { total: 2, passed: 1, failed: 0, pending: 1 } }),
+      waitedMs: 30_000,
+      reviewOk: true,
+    })).toEqual({ action: "wait" });
+  });
+
+  it("keeps a red draft a draft, for the owner", () => {
+    expect(decideMerge({
+      snapshot: snap({ isDraft: true, checks: { total: 2, passed: 1, failed: 1, pending: 0 } }),
+      waitedMs: 30_000,
+      reviewOk: true,
+    }).action).toBe("block");
+  });
+
+  it("readies a draft that no check will ever run on before handing it back", () => {
+    const bare = snap({ isDraft: true, checks: emptyChecks(), noChecks: true });
+    expect(decideMerge({ snapshot: bare, waitedMs: NO_CHECKS_GRACE_MS + 1, reviewOk: true })).toEqual({ action: "ready" });
+    const verdict = decideMerge({ snapshot: { ...bare, isDraft: false }, waitedMs: NO_CHECKS_GRACE_MS + 1, reviewOk: true, sinceReadyMs: NO_CHECKS_GRACE_MS + 1 });
+    expect(verdict.action).toBe("block");
+    expect((verdict as { detail: string }).detail).toContain("No checks ran");
+  });
+
+  it("does not merge on the draft's statuses in the moments after readying it", () => {
+    // Its reviewer's "skipped: draft" is a success until the review starts.
+    expect(decideMerge({ snapshot: snap(), waitedMs: 1_000, reviewOk: true, sinceReadyMs: 1_000 })).toEqual({ action: "wait" });
+    expect(decideMerge({ snapshot: snap(), waitedMs: NO_CHECKS_GRACE_MS + 1, reviewOk: true, sinceReadyMs: NO_CHECKS_GRACE_MS + 1 }))
+      .toEqual({ action: "merge" });
+  });
+
+  it("leaves a pull request somebody turned back into a draft to them", () => {
+    const verdict = decideMerge({ snapshot: snap({ isDraft: true }), waitedMs: 30_000, reviewOk: true, sinceReadyMs: NO_CHECKS_GRACE_MS + 1 });
+    expect(verdict.action).toBe("block");
+    expect((verdict as { detail: string }).detail).toContain("draft");
+  });
+});
+
 describe("run branches", () => {
   it("names one branch per run so two runs cannot collide", () => {
     expect(runBranchName("run-abc123")).toBe("clawbox/run-abc123");
@@ -374,7 +416,10 @@ describe("the pull request across the owner's gestures", () => {
     await vi.waitFor(() => { expect(lib.getRun(started.id)?.pr?.phase).toBe("waiting"); }, { timeout: 5000 });
     expect(lib.getRun(started.id)?.commit).toBe("own1234");
     expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/Committed by the run itself as own1234/);
-    expect(github.openPullRequest).toHaveBeenCalledWith(expect.objectContaining({ branch: runBranchName(started.id) }));
+    // As a draft: the watcher readies it once the checks pass, which is when
+    // CodeRabbit gives the one review it gives a pull request.
+    expect(github.openPullRequest).toHaveBeenCalledWith(expect.objectContaining({ branch: runBranchName(started.id), draft: true }));
+    expect(lib.getRun(started.id)?.pr?.readyAt).toBeNull();
   });
 
   it("keeps the pull request 'opening' through a pause and opens it when the resumed run completes", async () => {

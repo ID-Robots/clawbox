@@ -180,6 +180,13 @@ export async function openPullRequest(input: {
   base: string;
   title: string;
   body: string;
+  /**
+   * Open it as a draft. The run's own pull requests are, so the watcher can
+   * ready them once the checks pass: that is when a reviewer that reviews
+   * once (CodeRabbit) gives its review. The owner's "Create PR" button opens
+   * a ready one, because nothing watches that pull request to ready it.
+   */
+  draft?: boolean;
 }): Promise<{ ok: true; number: number; url: string } | { ok: false; detail: string }> {
   const dir = path.resolve(input.directory);
 
@@ -196,11 +203,14 @@ export async function openPullRequest(input: {
     return { ok: false, detail: failureDetail(pushed, `Pushing ${input.branch}`, "Check the GitHub connection and try again.") };
   }
 
-  const created = await run(
-    "gh",
-    ["pr", "create", "--base", input.base, "--head", input.branch, "--title", input.title, "--body", input.body],
-    dir,
-  );
+  const args = ["pr", "create", "--base", input.base, "--head", input.branch, "--title", input.title, "--body", input.body];
+  let created = await run("gh", input.draft ? [...args, "--draft"] : args, dir);
+  // Drafts need a plan that has them: a private repository on a free account
+  // answers "Draft pull requests are not supported in this repository". Such a
+  // repository gets a ready pull request, as it always did, rather than none.
+  if (!ok(created) && input.draft && /draft/i.test(`${created.stderr}\n${created.stdout}`)) {
+    created = await run("gh", args, dir);
+  }
   if (!ok(created)) {
     return { ok: false, detail: failureDetail(created, "Opening the pull request", "Check the GitHub connection and try again.") };
   }
@@ -320,14 +330,14 @@ export async function openProjectPullRequest(directory: string): Promise<Project
 export async function readPullRequest(dir: string, number: number): Promise<PrSnapshot | { error: string }> {
   const viewed = await run(
     "gh",
-    ["pr", "view", String(number), "--json", "state,mergeable,statusCheckRollup,labels"],
+    ["pr", "view", String(number), "--json", "state,mergeable,statusCheckRollup,isDraft,labels"],
     path.resolve(dir),
   );
   if (!ok(viewed)) {
     return { error: failureDetail(viewed, `Reading pull request #${number}`, "Try again.") };
   }
   try {
-    const parsed = JSON.parse(out(viewed)) as { state?: string; mergeable?: string; statusCheckRollup?: unknown; labels?: unknown };
+    const parsed = JSON.parse(out(viewed)) as { state?: string; mergeable?: string; statusCheckRollup?: unknown; isDraft?: unknown; labels?: unknown };
     return {
       // `mergeable` is a STRING enum here (MERGEABLE / CONFLICTING / UNKNOWN),
       // not the boolean it is easy to assume.
@@ -335,11 +345,21 @@ export async function readPullRequest(dir: string, number: number): Promise<PrSn
       mergeable: (parsed.mergeable ?? "UNKNOWN").toUpperCase(),
       checks: foldChecks(parsed.statusCheckRollup),
       noChecks: parsed.statusCheckRollup == null,
+      isDraft: parsed.isDraft === true,
       labels: labelNames(parsed.labels),
     };
   } catch {
     return { error: "Could not read GitHub's answer about the pull request." };
   }
+}
+
+/** Mark a draft ready for review (`gh pr ready`). */
+export async function markPullRequestReady(dir: string, number: number): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const readied = await run("gh", ["pr", "ready", String(number)], path.resolve(dir));
+  if (!ok(readied)) {
+    return { ok: false, detail: failureDetail(readied, `Marking pull request #${number} ready for review`, "Mark it ready yourself on GitHub.") };
+  }
+  return { ok: true };
 }
 
 /**
