@@ -107,7 +107,7 @@ import {
 /** The board as the routes and the app read it: with who worked, counted, and the figures as of now. */
 export type TeamView = TeamBoard & { agents: TeamAgents };
 import { TeamBus, type TeamMessage } from "@/lib/coding-team-bus";
-import { leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask } from "@/lib/coding-team-planner";
+import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask } from "@/lib/coding-team-planner";
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
 export const MAX_ALERTS = 3;
@@ -522,9 +522,10 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // More than one correction, because one was not enough. On the box, a planner
   // told only to "shorten" a 2835-character description answered 3013 the second
   // time and the board died with no task ever posted — twice, on two devices.
-  // Each ask now carries every fault and how far over the limit it is; the
-  // budget is small because a planner that cannot answer an array in three
-  // tries is not going to on the fourth, and every try is a paid run.
+  // Each ask now carries every fault, and text over its length bound is cut
+  // rather than refused (a note on the log, not an alert); the budget is
+  // small because a planner that cannot answer an array in three tries is
+  // not going to on the fourth, and every try is a paid run.
   for (let attempt = 2; !plan.ok && attempt <= MAX_PLANNER_ATTEMPTS; attempt++) {
     // Once more, and for the plan alone: a planner that wrote its plan as
     // prose is asked to say it as the JSON the team reads. On the record as
@@ -562,6 +563,8 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // are read in. No shape is the default team — every slot, a reviewer per task.
   if (plan.shape) bus.send(PLANNER, { type: "shape", ...plan.shape });
   for (const task of plan.tasks) bus.send(PLANNER, { type: "task", ...task });
+  // Text over its bound was cut, not refused: one note says so — never an alert.
+  if (plan.clipped) bus.send(SYSTEM, { type: "note", text: clippedNote(plan.clipped) });
 
   // The team's own branch in a folder project: workers get worktrees off it
   // and their branches merge back into it. A code project sits inside the
@@ -1040,6 +1043,7 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
       // Refused by the board: already on it as an alert.
     }
   }
+  if (replan.clipped) bus.send(SYSTEM, { type: "note", text: clippedNote(replan.clipped) });
 }
 
 /** A pause that never keeps the process alive on its own: the loop's timer beside a race it may lose. */

@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import { createBoard, MAX_LEAD_ADDS, MAX_LEAD_RETIRES, MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS, postMessage, postTask, type TaskStatus, type TeamBoard } from "@/lib/coding-team-board";
 import { MAX_TASK_CHARS, MAX_TEAM_WORKERS } from "@/lib/coding-agent";
-import { leadRoom, leadShouldRun, leadTask, MAX_LEAD_INBOX_CHARS, MAX_LEAD_NOTE_CHARS, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask, type ReplanContext } from "@/lib/coding-team-planner";
+import { clippedNote, leadRoom, leadShouldRun, leadTask, MAX_LEAD_INBOX_CHARS, MAX_LEAD_NOTE_CHARS, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask, type ReplanContext } from "@/lib/coding-team-planner";
 
 describe("parsePlan", () => {
   it("reads a bare array, and one fenced in prose", () => {
@@ -96,34 +96,105 @@ it("never mistakes a truncated outer plan's nested depends_on array for the plan
   expect(parsePlan(plan.slice(0, -8))).toMatchObject({ ok: false, reason: expect.stringMatching(/no JSON array/) });
 });
 
-it("accepts a full plan above the display-summary limit and names precise schema violations", () => {
+it("accepts a full plan above the display-summary limit, a description over its bound cut to it", () => {
   const tasks = Array.from({ length: 5 }, () => ({ task_description: "x".repeat(1800), depends_on: [] }));
   expect(parsePlan(JSON.stringify(tasks))).toMatchObject({ ok: true });
   tasks[2].task_description = "x".repeat(2001);
-  expect(parsePlan(JSON.stringify(tasks))).toMatchObject({ ok: false, reason: expect.stringMatching(/t3.*2001.*2000/) });
+  expect(parsePlan(JSON.stringify(tasks))).toMatchObject({ ok: true, clipped: [{ task_id: "t3", field: "task_description", from: 2001, to: 2000 }] });
   expect(PLANNER_BRIEF).toContain("2000");
   expect(PLANNER_BRIEF).toContain("parallel");
 });
 
+/** `n` characters of whole sentences, the last one cut mid-word. */
+const prose = (n: number) => {
+  let text = "";
+  for (let i = 1; text.length < n; i++) text += `Step ${i}: wire part ${i} of the form in app.js, then check that it renders. `;
+  return `${text.slice(0, n - 1)}z`;
+};
+
+describe("a plan with text over its bound — cut at a sentence, never refused", () => {
+  it("cuts a 2313-character task_description at its last sentence inside the bound, and names it", () => {
+    // Seen on the box: a plan refused for this, and its re-ask refused for
+    // 2570, left a team with no task at all.
+    const long = prose(2313);
+    const out = parsePlan(JSON.stringify([
+      { task_description: "Scaffold index.html", files_hint: ["index.html"] },
+      { task_description: "Write styles.css", files_hint: ["styles.css"] },
+      { task_description: long, depends_on: ["t1", "t2"], files_hint: ["app.js"] },
+    ]));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const cut = out.tasks[2].task_description;
+    expect(cut.length).toBeLessThanOrEqual(MAX_TASK_DESCRIPTION_CHARS);
+    expect(cut.length).toBeGreaterThan(MAX_TASK_DESCRIPTION_CHARS - 100);
+    expect(cut.endsWith("renders.")).toBe(true);
+    expect(long.startsWith(cut)).toBe(true);
+    expect(out.tasks[2]).toMatchObject({ depends_on: ["t1", "t2"], files_hint: ["app.js"] });
+    expect(out.clipped).toEqual([{ task_id: "t3", field: "task_description", from: 2313, to: cut.length }]);
+    expect(clippedNote(out.clipped!)).toBe(`Task t3's description was cut from 2313 to ${cut.length} characters.`);
+  });
+
+  it("cuts at a line break when the text has no sentence end, and hard, marked, when it has neither", () => {
+    const lines = Array.from({ length: 80 }, (_, i) => `- step ${i + 1}: wire part ${i + 1} of the form`).join("\n");
+    const byLine = parsePlan(JSON.stringify([{ task_description: lines }]));
+    expect(byLine.ok).toBe(true);
+    if (!byLine.ok) return;
+    const cut = byLine.tasks[0].task_description;
+    expect(cut.length).toBeLessThanOrEqual(MAX_TASK_DESCRIPTION_CHARS);
+    expect(lines.startsWith(`${cut}\n`)).toBe(true);
+    const hard = parsePlan(JSON.stringify([{ task_description: "x".repeat(2313) }]));
+    expect(hard).toMatchObject({ ok: true, tasks: [{ task_description: `${"x".repeat(MAX_TASK_DESCRIPTION_CHARS - 1)}…` }], clipped: [{ task_id: "t1", from: 2313, to: MAX_TASK_DESCRIPTION_CHARS }] });
+    // A sentence end in the first half only would throw most of the task away: cut hard instead.
+    const early = `Short opener. ${"y".repeat(2300)}`;
+    const out = parsePlan(JSON.stringify([{ task_description: early }]));
+    expect(out.ok && out.tasks[0].task_description).toBe(`${early.slice(0, MAX_TASK_DESCRIPTION_CHARS - 1)}…`);
+  });
+
+  it("cuts a 205-character rationale the same way, and names it", () => {
+    const rationale = `${"Pages share nothing, so each gets its own worker. ".repeat(5).slice(0, 204)}z`;
+    expect(rationale).toHaveLength(205);
+    const out = parsePlan(JSON.stringify({ shape: { parallelism: 2, review: "each", rationale }, tasks: [{ task_description: "Build the page" }] }));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const cut = out.shape!.rationale;
+    expect(cut.length).toBeLessThanOrEqual(200);
+    expect(cut.endsWith("worker.")).toBe(true);
+    expect(rationale.startsWith(cut)).toBe(true);
+    expect(out.clipped).toEqual([{ task_id: null, field: "rationale", from: 205, to: cut.length }]);
+    expect(clippedNote(out.clipped!)).toBe(`The shape's rationale was cut from 205 to ${cut.length} characters.`);
+  });
+
+  it("cuts every over-long field of one answer, and one note line names them all", () => {
+    const out = parsePlan(JSON.stringify({
+      shape: { parallelism: 1, review: "final", rationale: "r".repeat(201) },
+      tasks: [{ task_description: prose(2541) }, { task_description: "fine" }, { task_description: prose(2013) }],
+    }));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.clipped?.map((c) => [c.task_id, c.from])).toEqual([[null, 201], ["t1", 2541], ["t3", 2013]]);
+    expect(out.tasks[1].task_description).toBe("fine");
+    const note = clippedNote(out.clipped!);
+    expect(note).not.toContain("\n");
+    expect(note).toMatch(/^The shape's rationale was cut from 201 to 200 characters\. Task t1's description was cut from 2541 to \d+ characters\. Task t3's description was cut from 2013 to \d+ characters\.$/);
+  });
+
+  it("names nothing clipped when nothing was, and still refuses a plan with a real fault beside a long task", () => {
+    expect(parsePlan(JSON.stringify([{ task_description: "y".repeat(MAX_TASK_DESCRIPTION_CHARS) }]))).not.toHaveProperty("clipped");
+    expect(parsePlan(JSON.stringify([{ task_description: prose(2313) }, { task_description: "b", depends_on: ["t9"] }]))).toMatchObject({ ok: false, reason: "Task t2 depends on t9, which is not another task in the plan." });
+  });
+
+  it("tells the planner and the lead the bound beside the JSON they answer, and to split a task that needs more", () => {
+    const planJson = PLANNER_BRIEF.slice(PLANNER_BRIEF.indexOf("Answer with ONLY"), PLANNER_BRIEF.indexOf("Tasks are numbered"));
+    expect(planJson).toContain(`Each task_description is at most ${MAX_TASK_DESCRIPTION_CHARS} characters and the rationale at most 200`);
+    expect(planJson).toContain("If a task needs more than that, split it into two tasks.");
+    const leadJson = REPLAN_BRIEF.slice(REPLAN_BRIEF.indexOf("add: new tasks"), REPLAN_BRIEF.indexOf("retire: tasks"));
+    expect(leadJson).toContain(`a task_description of at most ${MAX_TASK_DESCRIPTION_CHARS} characters`);
+    expect(leadJson).toContain("if a task needs more than that, split it into two tasks");
+  });
+});
+
 describe("a plan whose faults must all be fixed at once", () => {
   const over = (extra: number) => "x".repeat(MAX_TASK_DESCRIPTION_CHARS + extra);
-
-  it("names every over-long task_description in one reason, with how much each must lose", () => {
-    // Seen on two devices: the board died on t1's length alone, so the planner
-    // never learned t2 was over too and spent its one retry half-informed.
-    const out = parsePlan(JSON.stringify([
-      { task_description: over(541), files_hint: ["a.ts"] },
-      { task_description: "fine", files_hint: ["b.ts"] },
-      { task_description: over(13), files_hint: ["c.ts"] },
-    ]));
-    expect(out.ok).toBe(false);
-    if (out.ok) return;
-    expect(out.reason).toContain("Task t1");
-    expect(out.reason).toContain("Task t3");
-    expect(out.reason).toContain("must lose at least 541");
-    expect(out.reason).toContain("must lose at least 13");
-    expect(out.reason).not.toContain("Task t2");
-  });
 
   it("names faults of different kinds together, not just the first one it meets", () => {
     const out = parsePlan(JSON.stringify([
@@ -134,7 +205,8 @@ describe("a plan whose faults must all be fixed at once", () => {
     ]));
     expect(out.ok).toBe(false);
     if (out.ok) return;
-    expect(out.reason).toContain("must lose at least 1");
+    // Over its bound is no fault any more: it is cut.
+    expect(out.reason).not.toContain("Task t1");
     expect(out.reason).toContain("Task t2 has no task_description");
     expect(out.reason).toContain("Task t3 depends on t9");
     expect(out.reason).toContain("Task t4's files_hint is not a list");
@@ -149,7 +221,7 @@ describe("a plan whose faults must all be fixed at once", () => {
   });
 
   it("counts the rest instead of printing an unbounded wall of faults", () => {
-    const out = parsePlan(JSON.stringify(Array.from({ length: 8 }, () => ({ task_description: over(7), files_hint: [] }))));
+    const out = parsePlan(JSON.stringify(Array.from({ length: 8 }, () => ({ task_description: "", files_hint: [] }))));
     expect(out.ok).toBe(false);
     if (out.ok) return;
     expect(out.reason).toContain("Task t6");
@@ -157,12 +229,12 @@ describe("a plan whose faults must all be fixed at once", () => {
     expect(out.reason).toContain("and 2 further faults");
   });
 
-  it("still refuses the whole plan rather than dropping the tasks that were too long", () => {
+  it("still refuses the whole plan rather than dropping the tasks that were malformed", () => {
     // The parser repairs nothing: a plan with one bad task is not silently
     // delivered as a smaller plan, because each task becomes a worker.
     const out = parsePlan(JSON.stringify([
       { task_description: "fine", files_hint: [] },
-      { task_description: over(1), files_hint: [] },
+      { task_description: "bad", files_hint: "nope" },
     ]));
     expect(out.ok).toBe(false);
   });
@@ -203,7 +275,8 @@ describe("parsePlan — the shape", () => {
     expect(refusedWith({ parallelism: "2", review: "each" })).toMatchObject({ ok: false, reason: expect.stringMatching(/parallelism is "2"/) });
     expect(refusedWith({ review: "each" })).toMatchObject({ ok: false, reason: expect.stringMatching(/parallelism is null/) });
     expect(refusedWith({ parallelism: 2, review: "sometimes" })).toMatchObject({ ok: false, reason: expect.stringMatching(/review is "sometimes"; it must be "each", "final", "none"/) });
-    expect(refusedWith({ parallelism: 2, review: "each", rationale: "r".repeat(201) })).toMatchObject({ ok: false, reason: expect.stringMatching(/rationale has 201 characters; the maximum is 200/) });
+    // A rationale over its bound is cut, not refused — but only on a shape that is otherwise right.
+    expect(refusedWith({ parallelism: 0, review: "each", rationale: "r".repeat(201) })).toMatchObject({ ok: false, reason: expect.stringMatching(/parallelism is 0/) });
     expect(refusedWith({ parallelism: 2, review: "each", rationale: 7 })).toMatchObject({ ok: false, reason: expect.stringMatching(/rationale is not text/) });
     expect(refusedWith("serial")).toMatchObject({ ok: false, reason: expect.stringMatching(/shape is not an object/) });
     // A shape fault and a task fault are named together, like two task faults.
@@ -300,10 +373,23 @@ describe("parseReplan — the lead's answer", () => {
     expect(parseReplan('{"note": 3}', ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/note is not text/) });
     expect(parseReplan(JSON.stringify({ add: [{ files_hint: [] }] }), ctx)).toMatchObject({ ok: false, reason: expect.stringMatching(/t3 has no task_description/) });
     // One bad add refuses the whole answer, the good retire with it.
-    expect(parseReplan(JSON.stringify({ retire: ["t2"], add: [{ task_description: "x".repeat(2001) }] }), ctx)).toMatchObject({ ok: false });
+    expect(parseReplan(JSON.stringify({ retire: ["t2"], add: [{ task_description: "x", files_hint: "nope" }] }), ctx)).toMatchObject({ ok: false });
     // A long note is only shortened: it decides nothing.
     const long = parseReplan(JSON.stringify({ note: "n".repeat(MAX_LEAD_NOTE_CHARS + 50) }), ctx);
     expect(long.ok && long.note.length).toBe(MAX_LEAD_NOTE_CHARS);
+  });
+
+  it("cuts an added task's description over its bound at a sentence, keeping the rest of the answer", () => {
+    // Seen on the box: a lead's 2110-character add was refused, and the plan stayed as it was.
+    const long = prose(2110);
+    const out = parseReplan(JSON.stringify({ add: [task(long, { depends_on: ["t1"] })], retire: ["t2"], note: "t1 found a gap" }), ctxOf(["complete", "pending"]));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const cut = out.add[0].task_description;
+    expect(cut.length).toBeLessThanOrEqual(MAX_TASK_DESCRIPTION_CHARS);
+    expect(cut.endsWith("renders.")).toBe(true);
+    expect(out).toMatchObject({ retire: ["t2"], note: "t1 found a gap", add: [{ depends_on: ["t1"], files_hint: ["x.ts"] }] });
+    expect(out.clipped).toEqual([{ task_id: "t3", field: "task_description", from: 2110, to: cut.length }]);
   });
 });
 

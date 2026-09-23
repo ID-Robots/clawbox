@@ -10,7 +10,8 @@
  * dependency that is not in the plan, or asks for more tasks than a team
  * holds, or shapes the team in a way it cannot run, fails the team with the
  * reason — it is never "repaired" into something the planner did not say,
- * because every task here becomes a worker with a shell.
+ * because every task here becomes a worker with a shell. Only text over its
+ * length bound is cut, at a sentence end, and the cut is logged as a note.
  *
  * The same planner comes back as the team's LEAD while the team runs, when
  * the owner's `coding_team_dynamic` switch is on: after workers settle — one
@@ -57,7 +58,7 @@ const TASK_RULES = [
 export const PLANNER_BRIEF = [
   "You are the PLANNER of a small coding team working unattended in this folder. Your job is to split ONE goal into a few independent, concrete tasks that separate workers will carry out in parallel when independent, each in its own fresh session with no memory of yours.",
   "Read the folder first — map what exists, what the goal touches and what a worker would need to know — but change NOTHING: you may not edit, create, delete or run anything that writes.",
-  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}]}.`,
+  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}]}. Each task_description is at most ${MAX_TASK_DESCRIPTION_CHARS} characters and the rationale at most ${MAX_RATIONALE_CHARS}; longer text is cut. If a task needs more than that, split it into two tasks.`,
   "Tasks are numbered t1, t2, … in the order you list them; depends_on names EARLIER tasks — listed before it — that a task must wait for. Prefer 2–5 tasks; one task is fine for a small goal.",
   ...TASK_RULES,
   `Size the team to the goal in shape: parallelism is how many workers may run side by side; review is "each" (a reviewer checks every task), "final" (one reviewer checks the merged result at the end) or "none" (only the automatic check that a worker was refused nothing and stayed inside its files); rationale says why in at most ${MAX_RATIONALE_CHARS} characters.`,
@@ -85,11 +86,32 @@ export function replanTask(goal: string, previous: string | null | undefined, re
   return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
 }
 
+/**
+ * A field of a well-formed answer that was over its bound and was cut to it
+ * rather than refusing the answer: a task's description, or the shape's
+ * rationale (task_id null). `from` and `to` are its lengths before and after.
+ */
+export interface ClippedField {
+  task_id: string | null;
+  field: "task_description" | "rationale";
+  from: number;
+  to: number;
+}
+
 export interface PlanParse {
   ok: true;
   tasks: PlannedTask[];
   /** The team's shape as the planner gave it, or null — a bare array, or no shape: the default team. */
   shape: TeamShape | null;
+  /** Every field cut to its bound; absent when nothing was. */
+  clipped?: ClippedField[];
+}
+
+/** The clips of one answer as ONE line for the team's log — a note, never an alert. */
+export function clippedNote(clipped: readonly ClippedField[]): string {
+  return clipped
+    .map((c) => `${c.task_id ? `Task ${c.task_id}'s description` : "The shape's rationale"} was cut from ${c.from} to ${c.to} characters.`)
+    .join(" ");
 }
 
 export interface PlanFailure {
@@ -114,6 +136,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
     return { ok: false, reason: "The planner's answer is not valid JSON." };
   }
   const problems: string[] = [];
+  const clipped: ClippedField[] = [];
   let shape: TeamShape | null = null;
   let list: unknown = raw;
   if (!Array.isArray(raw)) {
@@ -122,7 +145,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
     if (!Array.isArray(list)) return { ok: false, reason: 'The planner\'s answer has no "tasks" array.' };
     // `"shape": null` says what leaving it out says: the default team.
     if (raw.shape !== undefined && raw.shape !== null) {
-      const read = parseShape(raw.shape);
+      const read = parseShape(raw.shape, clipped);
       if (read.ok) shape = read.shape;
       else problems.push(...read.problems);
     }
@@ -135,7 +158,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
   // alone: it would shorten t1, re-answer, and be told about t2 — spending a
   // whole planner run per fault against a budget of a few. A plan is still
   // never repaired here; the planner is simply shown the whole list to fix.
-  const tasks = readTasks(items, 0, problems, (d, n, i) => {
+  const tasks = readTasks(items, 0, problems, clipped, (d, n, i) => {
     // Canonical ids only — t1, not t01: the board numbers tasks t1…t999 and
     // knows no other spelling, so a plan that said `t01` would post and
     // then never find its dependency.
@@ -154,7 +177,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
   // planner is asked again.
   const forward = forwardDependencies(tasks, 0);
   if (forward.length) return { ok: false, reason: joinProblems(forward) };
-  return { ok: true, tasks, shape };
+  return { ok: true, tasks, shape, ...(clipped.length ? { clipped } : {}) };
 }
 
 /** Every dependency of a task (numbered from `t{offset + 1}`) on one listed after it, as the fault the planner or lead must fix. */
@@ -164,8 +187,8 @@ function forwardDependencies(tasks: PlannedTask[], offset: number): string[] {
     .map((d) => `Task t${offset + k + 1} depends on ${d}, which is listed after it; list a task after the tasks it waits for.`));
 }
 
-/** A planner's shape, every field checked; all its faults at once. */
-function parseShape(raw: unknown): { ok: true; shape: TeamShape } | { ok: false; problems: string[] } {
+/** A planner's shape, every field checked; all its faults at once. A rationale over its bound is cut, onto `clipped`. */
+function parseShape(raw: unknown, clipped: ClippedField[]): { ok: true; shape: TeamShape } | { ok: false; problems: string[] } {
   if (!isObject(raw)) return { ok: false, problems: ["The shape is not an object."] };
   const problems: string[] = [];
   const parallelism = raw.parallelism;
@@ -180,8 +203,9 @@ function parseShape(raw: unknown): { ok: true; shape: TeamShape } | { ok: false;
   if (raw.rationale !== undefined && raw.rationale !== null) {
     if (typeof raw.rationale !== "string") problems.push("The shape's rationale is not text.");
     else {
-      rationale = raw.rationale.trim();
-      if (rationale.length > MAX_RATIONALE_CHARS) problems.push(`The shape's rationale has ${rationale.length} characters; the maximum is ${MAX_RATIONALE_CHARS}.`);
+      const full = raw.rationale.trim();
+      rationale = clipAtBoundary(full, MAX_RATIONALE_CHARS);
+      if (rationale !== full) clipped.push({ task_id: null, field: "rationale", from: full.length, to: rationale.length });
     }
   }
   if (problems.length) return { ok: false, problems };
@@ -192,10 +216,11 @@ function parseShape(raw: unknown): { ok: true; shape: TeamShape } | { ok: false;
  * Tasks as a plan (or the lead) listed them, numbered from `t{offset + 1}`,
  * with every fault pushed onto `problems`; only a task whose every field
  * checked out is returned, and the caller refuses the whole answer anyway
- * once anything was wrong. `checkDependency` says what is wrong with one
+ * once anything was wrong. A description over its bound is not a fault: it
+ * is cut, onto `clipped`. `checkDependency` says what is wrong with one
  * dependency (`n` is its number, null when the id is not canonical).
  */
-function readTasks(items: unknown[], offset: number, problems: string[], checkDependency: (d: string, n: number | null, i: number) => string | null): PlannedTask[] {
+function readTasks(items: unknown[], offset: number, problems: string[], clipped: ClippedField[], checkDependency: (d: string, n: number | null, i: number) => string | null): PlannedTask[] {
   const tasks: PlannedTask[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i] as Record<string, unknown>;
@@ -204,11 +229,12 @@ function readTasks(items: unknown[], offset: number, problems: string[], checkDe
       problems.push(`Task ${id} is not an object.`);
       continue;
     }
-    const description = typeof item.task_description === "string" ? item.task_description.trim() : "";
+    const full = typeof item.task_description === "string" ? item.task_description.trim() : "";
+    // Cut, not refused: on the box a plan refused for ~300 characters too
+    // many — and its re-ask, longer still — left a team with no task at all.
+    const description = clipAtBoundary(full, MAX_TASK_DESCRIPTION_CHARS);
     if (!description) problems.push(`Task ${id} has no task_description.`);
-    // The overage is spelled out: "shorten this" left the planner guessing how
-    // much, and a planner asked only to shorten has answered longer than before.
-    else if (description.length > MAX_TASK_DESCRIPTION_CHARS) problems.push(`Task ${id}'s task_description has ${description.length} characters; the maximum is ${MAX_TASK_DESCRIPTION_CHARS}, so it must lose at least ${description.length - MAX_TASK_DESCRIPTION_CHARS} characters. Shorten this field without dropping its verification requirements.`);
+    else if (description !== full) clipped.push({ task_id: id, field: "task_description", from: full.length, to: description.length });
     // No early exit on a bad field either: a task whose depends_on AND
     // files_hint are both malformed must report both, for the same reason the
     // plan reports every task — one fault per planner run is the bug.
@@ -224,7 +250,7 @@ function readTasks(items: unknown[], offset: number, problems: string[], checkDe
     const hint = item.files_hint === undefined ? [] : item.files_hint;
     const validHint = Array.isArray(hint) && hint.every((f) => typeof f === "string");
     if (!validHint) problems.push(`Task ${id}'s files_hint is not a list of paths.`);
-    if (description && description.length <= MAX_TASK_DESCRIPTION_CHARS && validDepends && validHint) tasks.push({ task_description: description, depends_on, files_hint: (hint as string[]).map((f) => f.trim()).filter(Boolean).slice(0, 40) });
+    if (description && validDepends && validHint) tasks.push({ task_description: description, depends_on, files_hint: (hint as string[]).map((f) => f.trim()).filter(Boolean).slice(0, 40) });
   }
   return tasks;
 }
@@ -282,7 +308,7 @@ export const REPLAN_BRIEF = [
   "You are the LEAD of a small coding team working unattended in this folder: the planner that wrote the team's plan, back for a moment because one or more workers have just finished their tasks. You decide ONE thing: does the rest of the plan still fit the goal?",
   "Read what you need, but change NOTHING: you may not edit, create, delete or run anything that writes.",
   'Answer with ONLY a JSON object, no prose before or after: {"add": [task, ...], "retire": ["t4", ...], "note": string}. Every field is optional; {} means the plan stands, and that is the usual answer — change the plan only for a concrete reason.',
-  `add: new tasks, each {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}, for work the goal needs that no task on the board covers — say, something a finished task revealed. They are numbered after the board's last task in the order you list them, and may depend on any task on the board or on a new one listed before them. The lead adds at most ${MAX_LEAD_ADDS} tasks over the whole team, and a team holds at most ${MAX_TEAM_TASKS}.`,
+  `add: new tasks, each {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]} with a task_description of at most ${MAX_TASK_DESCRIPTION_CHARS} characters (longer text is cut; if a task needs more than that, split it into two tasks), for work the goal needs that no task on the board covers — say, something a finished task revealed. They are numbered after the board's last task in the order you list them, and may depend on any task on the board or on a new one listed before them. The lead adds at most ${MAX_LEAD_ADDS} tasks over the whole team, and a team holds at most ${MAX_TEAM_TASKS}.`,
   `retire: tasks still PENDING that the goal no longer needs — a finished task already did that work, or it turned out to be unnecessary. At most ${MAX_LEAD_RETIRES} over the whole team; a task a worker has started cannot be retired.`,
   `note: why, in one line of at most ${MAX_LEAD_NOTE_CHARS} characters, for the team's log.`,
   "What the team's runs told the lead with team_message — a worker blocked on a missing file, a question only a new task can answer — is listed in full under \"Messages to the lead since your last turn:\", and older messages are among the latest lines of the board you are given: weigh them, and act on them only through add or retire.",
@@ -456,11 +482,14 @@ export interface Replan {
   add: PlannedTask[];
   retire: string[];
   note: string;
+  /** Every added task's description cut to its bound; absent when none was. */
+  clipped?: ClippedField[];
 }
 
 /**
  * The lead's answer, read as strictly as a plan: `{ add, retire, note }`,
- * every field optional, `{}` meaning no change. Refused whole — never
+ * every field optional, `{}` meaning no change. An added task's description
+ * over its bound is cut, as a plan's is. Refused whole — never
  * trimmed to the part that fits — when it breaks a bound: more adds than the
  * team has left, a board over MAX_TEAM_TASKS, more retires than are left, a
  * retirement of a task that is not pending, a dependency on nothing or on a
@@ -512,7 +541,8 @@ export function parseReplan(text: string | null | undefined, ctx: ReplanContext)
   // may wait on anything on the board or on each other — but not on a task
   // that failed or was rejected for good: that wait would never end.
   const base = ctx.tasks.length;
-  const tasks = readTasks(adds, base, problems, (d, n, i) => {
+  const clipped: ClippedField[] = [];
+  const tasks = readTasks(adds, base, problems, clipped, (d, n, i) => {
     const id = `t${i + 1}`;
     if (n === null || n > base + adds.length || n === i + 1) return `Task ${id} depends on ${d}, which is not another task on the board or in this answer.`;
     if (n <= base) {
@@ -529,7 +559,7 @@ export function parseReplan(text: string | null | undefined, ctx: ReplanContext)
   // AFTER it would be refused half-way through the change.
   const forward = forwardDependencies(tasks, base);
   if (forward.length) return { ok: false, reason: joinProblems(forward) };
-  return { ok: true, add: tasks, retire, note };
+  return { ok: true, add: tasks, retire, note, ...(clipped.length ? { clipped } : {}) };
 }
 
 // ─── Reading JSON out of prose ───────────────────────────────────────────────
@@ -540,6 +570,28 @@ function isObject(v: unknown): v is Record<string, unknown> {
 
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/** A sentence's end (its stop, and any closing quote or bracket, before a space) or a line break. */
+const BOUNDARY = /[.!?]["')\]]*(?=\s)|\n/g;
+
+/**
+ * `text` within `max` characters, cut after the last sentence or before the
+ * last line break inside the bound — or, when that would keep less than half
+ * of it, cut hard and marked "…".
+ */
+function clipAtBoundary(text: string, max: number): string {
+  if (text.length <= max) return text;
+  // One character past the bound, so a stop right at it can see the space after it.
+  const head = text.slice(0, max + 1);
+  let cut = 0;
+  BOUNDARY.lastIndex = 0;
+  for (let m = BOUNDARY.exec(head); m; m = BOUNDARY.exec(head)) {
+    const end = m[0] === "\n" ? m.index : m.index + m[0].length;
+    if (end <= max) cut = end;
+  }
+  const kept = text.slice(0, cut).trimEnd();
+  return kept.length >= max / 2 ? kept : clip(text, max);
 }
 
 /**
