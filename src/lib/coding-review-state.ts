@@ -438,7 +438,7 @@ export interface ReviewSnapshot {
    *  AT ALL, which is not the same as a check that is pending. */
   noChecks: boolean;
   threads: ReviewThread[];
-  /** True while the pull request is a draft. Optional, like the three below,
+  /** True while the pull request is a draft. Optional, like the fields below,
    *  so a snapshot from before the fields reads as it always did. */
   isDraft?: boolean;
   /** The head commit, or null when GitHub did not say. */
@@ -448,6 +448,11 @@ export interface ReviewSnapshot {
   codeRabbit?: CodeRabbitFacts | null;
   /** The reviewers whose latest verdict requests changes, or null when unread. */
   changesRequestedBy?: ChangesRequest[] | null;
+  /** The pull request's label names; absent reads as unlabelled. */
+  labels?: string[];
+  /** The branch it targets NOW, which a retarget may have moved since the
+   *  loop recorded `ReviewLoop.base`. Null when GitHub did not say. */
+  base?: string | null;
 }
 
 /** What the loop should do with what it just saw. */
@@ -526,6 +531,73 @@ export function isProtectedMergeBase(base: string | null | undefined): boolean {
 }
 
 /**
+ * A label that says "do not merge this".
+ *
+ * The per-pull-request brake, and the one the box honours whatever else it has
+ * been allowed: a pull request carrying one is never merged by the box, and
+ * GitHub's auto-merge is never left on over it. `hold` is the documented label;
+ * the family around it (`hold-for-4.1`, `on hold`, `do-not-merge`,
+ * `do-not-merge/hold`, `DNM`) counts too, because a label somebody added to
+ * stop a merge is the one signal here that must not be missed on spelling.
+ */
+export function isHoldLabel(name: unknown): boolean {
+  if (typeof name !== "string") return false;
+  const label = name.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  return label === "hold"
+    || label === "on-hold"
+    || label === "dnm"
+    || /^hold[-/:]/.test(label)
+    || /^do-not-merge($|[-/:])/.test(label);
+}
+
+/**
+ * True when any of these labels holds the merge.
+ *
+ * A yes or no, never the label itself: a label's name is chosen by whoever can
+ * label the pull request, and the owner-facing `detail` is relayed where it
+ * would sit beside the assistant's own instructions (see describeProblems).
+ */
+export function carriesHoldLabel(labels: readonly unknown[] | null | undefined): boolean {
+  return Array.isArray(labels) && labels.some(isHoldLabel);
+}
+
+/** Label names out of gh's `labels` (`[{ name, ... }]`), or out of a list
+ *  of names already (the REST answer after its jq). */
+export function labelNames(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((label) => {
+    const name = typeof label === "string" ? label : (label as { name?: unknown } | null)?.name;
+    return typeof name === "string" && name.trim() ? [name.trim().slice(0, 100)] : [];
+  });
+}
+
+/**
+ * Something on the pull request the box will not let GitHub merge over, in
+ * words for the owner, or null when nothing is outstanding.
+ *
+ * The review loop's findings (a failing check, a conflict, an unanswered
+ * comment, a change request — each as reviewProblems counts it) and one thing
+ * it waits on: CodeRabbit still reviewing. Its commit status goes green in the
+ * same second its findings are posted — "Review completed" beside a change
+ * request — so auto-merge left on while it reviews would merge before the loop
+ * had read a word of it. That review is the one the box readies a draft for,
+ * so it is the LAST check to finish there, not the first. A head it has not
+ * finished a status on after the grace (codeRabbitGate's `stale`) is the same
+ * wait: the loop asks it for one, and its answer may carry findings too.
+ */
+export function autoMergeOutstanding(snapshot: ReviewSnapshot, waitedMs: number): string | null {
+  const problems = reviewProblems(snapshot);
+  if (problems.failedChecks.length) return "a check failed";
+  if (problems.conflicting) return "the branch conflicts with its base";
+  if (problems.changesRequested) return "a reviewer asked for changes";
+  if (problems.threads.length) return "a review comment is unanswered";
+  const codeRabbit = codeRabbitGate(snapshot, waitedMs);
+  if (codeRabbit === "waiting") return "CodeRabbit is still reviewing";
+  if (codeRabbit === "stale") return "CodeRabbit has not reviewed the latest commit";
+  return null;
+}
+
+/**
  * A branch name this device is willing to SPELL INTO a command it hands a run.
  *
  * Deliberately far narrower than what git accepts. `;`, `&`, `|`, `$`, a
@@ -578,6 +650,9 @@ export function isQuotableRef(ref: string | null | undefined): ref is string {
  *  - A head CodeRabbit never gave a status is asked about only at the merge.
  *    It blocks nothing else, but a required check with no status blocks
  *    GitHub's merge for good.
+ *  - A hold label stops the merge like a protected base does, and is read off
+ *    the snapshot every poll: it is the owner's per-pull-request "not this
+ *    one", and it can be added at any moment of the loop.
  */
 export function decideReviewRound(input: {
   snapshot: ReviewSnapshot;
@@ -603,7 +678,10 @@ export function decideReviewRound(input: {
   /** The head the box already asked CodeRabbit about (`ReviewLoop.codeRabbitAskedFor`). */
   codeRabbitAskedFor?: string | null;
 }): ReviewDecision {
-  const { snapshot, round, maxRounds, waitedMs, autoMerge, reviewOk, base } = input;
+  const { snapshot, round, maxRounds, waitedMs, autoMerge, reviewOk } = input;
+  // Where the pull request points now, over where it pointed when the loop
+  // picked it up: the merge guard is about the branch a merge would land on.
+  const base = snapshot.base ?? input.base;
   const sinceReadyMs = typeof input.sinceReadyMs === "number" ? input.sinceReadyMs : null;
 
   if (snapshot.state === "MERGED") {
@@ -692,6 +770,13 @@ export function decideReviewRound(input: {
       action: "done",
       state: "needs_owner",
       detail: `Everything is green, but this pull request targets ${base} and ClawBox never merges into that branch. Merge it yourself.`,
+    };
+  }
+  if (carriesHoldLabel(snapshot.labels)) {
+    return {
+      action: "done",
+      state: "needs_owner",
+      detail: "Everything is green, but the pull request carries a hold label, so ClawBox leaves the merge to you.",
     };
   }
   // Every check, CodeRabbit's included, as it always was: a repository whose
@@ -882,7 +967,11 @@ export function buildReviewFeedback(input: {
   }
   lines.push(
     "Work in this folder, on the branch you are already on. Fix the points below, commit,"
-    + " and push with `git push`. Do not open another pull request and do not merge this one.",
+    + " and push with `git push`. Do not open another pull request and do not merge this one."
+    // The device turns GitHub's auto-merge off while there is something to
+    // fix and back on once there is not (reconcileAutoMerge). A round that
+    // re-armed it itself would merge over the findings it was handed.
+    + " Leave its auto-merge alone too (no `gh pr merge --auto`): the device turns it back on once nothing is outstanding.",
   );
 
   if (input.conflicting) {

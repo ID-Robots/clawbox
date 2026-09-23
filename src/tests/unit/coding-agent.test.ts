@@ -2111,12 +2111,12 @@ describe("the pull request on disk", () => {
     writeRunWithPr({
       phase: "merged", number: 7, url: "https://github.com/o/r/pull/7", branch: "clawbox/run-prblob01", base: "main",
       checks: { total: 3, passed: 2, failed: 0, pending: 1 }, detail: null, startedAt: 1, endedAt: 2, reviewOk: true,
-      foundBy: "adopted", readyAt: 3,
+      foundBy: "adopted", readyAt: 3, autoMergeAt: 1_500, autoMergeFailedAt: 1_200,
     });
     expect(lib.listRuns()[0]?.pr).toEqual({
       phase: "merged", number: 7, url: "https://github.com/o/r/pull/7", branch: "clawbox/run-prblob01", base: "main",
       checks: { total: 3, passed: 2, failed: 0, pending: 1 }, detail: null, startedAt: 1, endedAt: 2, reviewOk: true,
-      foundBy: "adopted", readyAt: 3,
+      foundBy: "adopted", readyAt: 3, autoMergeAt: 1_500, autoMergeFailedAt: 1_200,
     });
   });
 
@@ -2127,6 +2127,17 @@ describe("the pull request on disk", () => {
     expect(lib.listRuns()[0]?.pr?.readyAt).toBeNull();
     writeRunWithPr({ phase: "waiting", startedAt: 1, number: 7, readyAt: "soon" });
     expect(lib.listRuns()[0]?.pr?.readyAt).toBeNull();
+  });
+
+  it("says the box never turned auto-merge on for a record that predates the field, or garbles it", () => {
+    // Null, never a guess: `autoMergeAt` is what lets the box take back only
+    // what it turned on itself, so a value it did not write must not count.
+    writeRunWithPr({ phase: "waiting", startedAt: 1, number: 7 });
+    expect(lib.listRuns()[0]?.pr?.autoMergeAt).toBeNull();
+    expect(lib.listRuns()[0]?.pr?.autoMergeFailedAt).toBeNull();
+    writeRunWithPr({ phase: "waiting", startedAt: 1, number: 7, autoMergeAt: "yesterday", autoMergeFailedAt: Number.NaN });
+    expect(lib.listRuns()[0]?.pr?.autoMergeAt).toBeNull();
+    expect(lib.listRuns()[0]?.pr?.autoMergeFailedAt).toBeNull();
   });
 
   it("says NOTHING about who opened a pull request a record predates the question", () => {

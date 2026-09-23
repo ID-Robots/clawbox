@@ -8,6 +8,10 @@
  * build fails outright. Same reason ./coding-agent-status.ts exists.
  */
 
+// The merge guards the review loop and this module share. One direction only:
+// ./coding-review-state imports nothing from here.
+import { carriesHoldLabel, isProtectedMergeBase } from "./coding-review-state";
+
 /** How often the checks are re-read. */
 export const POLL_INTERVAL_MS = 15_000;
 
@@ -133,6 +137,20 @@ export interface PrState {
    * because records written before the field lack it.
    */
   readyAt?: number | null;
+  /**
+   * When the box turned GitHub's auto-merge ON for this pull request, or null
+   * when it has not (or has turned it off again) — see decideAutoMerge.
+   *
+   * On the record because "who turned it on" decides what the box may take
+   * back: an owner who switches merging off has withdrawn the box's consent,
+   * not the run's, and a watcher rebuilt after a restart has to know which of
+   * the two it is looking at. Optional because records written before the
+   * field lack it.
+   */
+  autoMergeAt?: number | null;
+  /** When GitHub last refused to turn it on for the box, so the next attempt
+   *  waits AUTO_MERGE_RETRY_MS instead of repeating the refusal every poll. */
+  autoMergeFailedAt?: number | null;
 }
 
 export function emptyChecks(): PrChecks {
@@ -180,6 +198,9 @@ export interface PrSnapshot {
   /** True while the pull request is a draft. Optional so a snapshot from
    *  before the field reads as a ready one, as it always did. */
   isDraft?: boolean;
+  /** The pull request's label names. Optional so a snapshot from before the
+   *  field reads as it always did: unlabelled. */
+  labels?: string[];
 }
 
 /**
@@ -197,6 +218,7 @@ export interface PrSnapshot {
  *    watcher run `gh pr ready`. That starts CodeRabbit's one review, whose
  *    status then counts like any other check before the merge. A draft the
  *    box already readied once was put back by somebody, and is left to them.
+ *  - a hold label (isHoldLabel) is never merged over, whatever the checks say.
  *
  * Exported for its test, which is where the vacuous-green case is pinned.
  */
@@ -222,6 +244,11 @@ export function decideMerge(input: {
   // would have been thirty minutes of `gh` calls for an answer already known.
   if (!reviewOk) {
     return { action: "block", detail: "The automatic review pass did not finish cleanly, so this was not merged." };
+  }
+  // The owner's per-pull-request "not this one" — see isHoldLabel. A definite
+  // no like the review's, so it is answered before any waiting too.
+  if (carriesHoldLabel(snapshot.labels)) {
+    return { action: "block", detail: "The pull request carries a hold label, so ClawBox leaves the merge to you." };
   }
   if (snapshot.noChecks || snapshot.checks.total === 0) {
     if (waitedMs < NO_CHECKS_GRACE_MS) return { action: "wait" };
@@ -256,6 +283,99 @@ export function decideMerge(input: {
   }
   if (snapshot.mergeable !== "MERGEABLE") return { action: "wait" };
   return { action: "merge" };
+}
+
+/**
+ * How long after GitHub refused to turn auto-merge on the box asks again.
+ *
+ * A refusal is usually for good (the repository has auto-merge switched off)
+ * and sometimes for a minute (a network fault), and neither is worth a failing
+ * `gh` call on every poll. The box's own merge does not wait on it: a watcher
+ * that sees the pull request green merges it itself, as it always did.
+ */
+export const AUTO_MERGE_RETRY_MS = 15 * 60_000;
+
+/**
+ * What GitHub says about a pull request's merge, for the auto-merge decision.
+ *
+ * Read over REST (`gh api repos/{owner}/{repo}/pulls/<n>`, see readAutoMergeFacts)
+ * rather than `gh pr view --json`: the 2.4.0 gh on the box predates the
+ * `autoMergeRequest` field, and one unknown field fails the whole read.
+ */
+export interface AutoMergeFacts {
+  /** OPEN, CLOSED or MERGED. */
+  state: string;
+  draft: boolean;
+  /** The branch it targets now. */
+  base: string | null;
+  labels: string[];
+  /** REST's `mergeable_state`, upper-cased: BLOCKED, BEHIND, CLEAN, UNSTABLE,
+   *  DIRTY, DRAFT, HAS_HOOKS or UNKNOWN. */
+  mergeState: string;
+  /** GitHub's auto-merge is on for it, whoever turned it on. */
+  enabled: boolean;
+}
+
+export type AutoMergeStance =
+  | { action: "enable" }
+  | { action: "disable"; reason: string }
+  | { action: "none" };
+
+/**
+ * `mergeable_state`s where GitHub itself is holding the merge back for a
+ * requirement still to come — a required check or review. The ONLY states in
+ * which auto-merge is turned on, and not an optimisation: a newer gh answers
+ * `gh pr merge --auto` on a CLEAN or UNSTABLE pull request by merging it on the
+ * spot, and on a branch with no protection that is every pull request, pending
+ * checks and all. There the box's own watcher decides, as it always did.
+ */
+const GATED_MERGE_STATES = new Set(["BLOCKED", "BEHIND"]);
+
+/**
+ * Should GitHub's auto-merge be on for this pull request, as a pure function of
+ * what was observed?
+ *
+ * Auto-merge is how a green pull request merges the moment its last required
+ * check passes, instead of whenever a watcher next polls — or, once a watcher
+ * has given up at its ceiling, the next morning. It hands the merge to GitHub,
+ * so it is only ever on while the box would merge the pull request itself:
+ *  - a hold label or a protected base (isProtectedMergeBase) turns it OFF
+ *    whoever turned it on — those two are the owner's standing "never";
+ *  - `refusal` (the box has no consent: the owner's switch is off, or the
+ *    review pass failed) takes back only what the BOX turned on (`armedAt`).
+ *    A run whose own task had it turned on is the task's call, not the box's;
+ *  - a draft, or `outstanding` findings, turn it off whoever turned it on,
+ *    because the box with consent is the one steward of this merge, and it
+ *    comes back on once they clear;
+ *  - `early` (the checks of a fresh head are still arriving) or `mayTry` false
+ *    (a refusal a moment ago) only hold back turning it ON.
+ * Exported for its test.
+ */
+export function decideAutoMerge(input: {
+  facts: AutoMergeFacts;
+  /** Why the box may not merge this pull request, or null when it may. */
+  refusal: string | null;
+  /** Something the box will not merge over (autoMergeOutstanding), or null. */
+  outstanding: string | null;
+  early: boolean;
+  mayTry: boolean;
+  /** `PrState.autoMergeAt`. */
+  armedAt: number | null;
+}): AutoMergeStance {
+  const { facts, refusal, outstanding, early, mayTry, armedAt } = input;
+  const none = { action: "none" } as const;
+  const off = (reason: string): AutoMergeStance => (facts.enabled ? { action: "disable", reason } : none);
+
+  if (facts.state !== "OPEN") return none;
+  if (carriesHoldLabel(facts.labels)) return off("the pull request carries a hold label");
+  // Normalised the way isProtectedMergeBase matched it, so what is said is one
+  // of this code's own constants rather than GitHub's spelling of it.
+  if (isProtectedMergeBase(facts.base)) return off(`it targets ${facts.base?.trim().toLowerCase()}, which ClawBox never merges into`);
+  if (refusal !== null) return armedAt !== null ? off(refusal) : none;
+  if (facts.draft) return off("the pull request is a draft");
+  if (outstanding !== null) return off(`${outstanding}; it goes back on once that is cleared`);
+  if (facts.enabled || early || !mayTry) return none;
+  return GATED_MERGE_STATES.has(facts.mergeState) ? { action: "enable" } : none;
 }
 
 

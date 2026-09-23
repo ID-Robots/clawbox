@@ -238,6 +238,8 @@ describe("the runner's own sentences are keyed", () => {
     [RUNNER_STEP.faviconCommitted("4f21ab9"), "faviconCommitted"],
     [RUNNER_STEP.pullRequestOpened(12, "beta"), "pullRequestOpened"],
     [RUNNER_STEP.notMerged("checks failed"), "notMerged"],
+    [RUNNER_STEP.autoMergeOn(12), "autoMergeOn"],
+    [RUNNER_STEP.autoMergeOff("the pull request carries a hold label"), "autoMergeOff"],
     [RUNNER_STEP.onDesktop("Angry Pigs", "angry-pigs", 4310), "onDesktop"],
     [RUNNER_STEP.notOnDesktop(4310, "nothing is listening"), "notOnDesktop"],
     [RUNNER_STEP.finished("completed"), "finished"],

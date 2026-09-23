@@ -23,6 +23,7 @@
 import path from "path";
 import { runChild, type ChildResult, failureDetail } from "./child-run";
 import {
+  labelNames,
   parseCheckRollup,
   parseReviewFacts,
   parseReviewThreads,
@@ -149,13 +150,18 @@ export async function readReviewSnapshot(dir: string, number: number): Promise<R
   const cwd = path.resolve(dir);
   const viewed = await run(
     "gh",
-    ["pr", "view", String(number), "--json", "state,mergeable,reviewDecision,statusCheckRollup,isDraft"],
+    // `labels` and `baseRefName` are in the 2.4.0 gh's field list; the hold
+    // label and a retarget onto a protected base are read off every poll.
+    ["pr", "view", String(number), "--json", "state,mergeable,reviewDecision,statusCheckRollup,isDraft,labels,baseRefName"],
     cwd,
   );
   if (!ok(viewed)) {
     return { error: failureDetail(viewed, `Reading pull request #${number}`, "Try again.") };
   }
-  let parsed: { state?: unknown; mergeable?: unknown; reviewDecision?: unknown; statusCheckRollup?: unknown; isDraft?: unknown };
+  let parsed: {
+    state?: unknown; mergeable?: unknown; reviewDecision?: unknown; statusCheckRollup?: unknown; isDraft?: unknown;
+    labels?: unknown; baseRefName?: unknown;
+  };
   try {
     parsed = JSON.parse(out(viewed)) as typeof parsed;
   } catch {
@@ -181,6 +187,8 @@ export async function readReviewSnapshot(dir: string, number: number): Promise<R
     headSha: details.headSha,
     codeRabbit: details.codeRabbit,
     changesRequestedBy: details.changesRequestedBy,
+    labels: labelNames(parsed.labels),
+    base: typeof parsed.baseRefName === "string" && parsed.baseRefName ? parsed.baseRefName : null,
   };
 }
 

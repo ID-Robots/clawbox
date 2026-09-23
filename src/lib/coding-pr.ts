@@ -30,9 +30,11 @@ import {
   emptyChecks,
   foldChecks,
   runBranchName,
+  type AutoMergeFacts,
   type PrChecks,
   type PrSnapshot,
 } from "./coding-pr-state";
+import { labelNames } from "./coding-review-state";
 
 // One import for server callers: the pure half is re-exported here, and the
 // browser imports ./coding-pr-state directly (this module spawns processes).
@@ -328,14 +330,14 @@ export async function openProjectPullRequest(directory: string): Promise<Project
 export async function readPullRequest(dir: string, number: number): Promise<PrSnapshot | { error: string }> {
   const viewed = await run(
     "gh",
-    ["pr", "view", String(number), "--json", "state,mergeable,statusCheckRollup,isDraft"],
+    ["pr", "view", String(number), "--json", "state,mergeable,statusCheckRollup,isDraft,labels"],
     path.resolve(dir),
   );
   if (!ok(viewed)) {
     return { error: failureDetail(viewed, `Reading pull request #${number}`, "Try again.") };
   }
   try {
-    const parsed = JSON.parse(out(viewed)) as { state?: string; mergeable?: string; statusCheckRollup?: unknown; isDraft?: unknown };
+    const parsed = JSON.parse(out(viewed)) as { state?: string; mergeable?: string; statusCheckRollup?: unknown; isDraft?: unknown; labels?: unknown };
     return {
       // `mergeable` is a STRING enum here (MERGEABLE / CONFLICTING / UNKNOWN),
       // not the boolean it is easy to assume.
@@ -344,6 +346,7 @@ export async function readPullRequest(dir: string, number: number): Promise<PrSn
       checks: foldChecks(parsed.statusCheckRollup),
       noChecks: parsed.statusCheckRollup == null,
       isDraft: parsed.isDraft === true,
+      labels: labelNames(parsed.labels),
     };
   } catch {
     return { error: "Could not read GitHub's answer about the pull request." };
@@ -359,11 +362,95 @@ export async function markPullRequestReady(dir: string, number: number): Promise
   return { ok: true };
 }
 
-/** Squash-merge and delete the branch. */
+/**
+ * The merge method, and the one fallback.
+ *
+ * A MERGE COMMIT, not a squash: `beta` on ClawBox's own repository keeps every
+ * pull request's commits under a merge commit, and a branch history is the
+ * one thing a merge cannot give back. A repository that allows only squash
+ * (or refuses merge commits) answers with a refusal naming the method, and is
+ * then squash-merged as it always was rather than left unmerged.
+ */
+function mergeMethodRefused(r: ChildResult): boolean {
+  return /(merge commit|merge method)[^\n]*not allowed|not allowed[^\n]*merge commit/i.test(`${r.stderr}\n${r.stdout}`);
+}
+
+/** Merge (a merge commit — see mergeMethodRefused) and delete the branch. */
 export async function mergePullRequest(dir: string, number: number): Promise<{ ok: true } | { ok: false; detail: string }> {
-  const merged = await run("gh", ["pr", "merge", String(number), "--squash", "--delete-branch"], path.resolve(dir));
+  const cwd = path.resolve(dir);
+  let merged = await run("gh", ["pr", "merge", String(number), "--merge", "--delete-branch"], cwd);
+  if (!ok(merged) && mergeMethodRefused(merged)) {
+    merged = await run("gh", ["pr", "merge", String(number), "--squash", "--delete-branch"], cwd);
+  }
   if (!ok(merged)) {
     return { ok: false, detail: failureDetail(merged, `Merging pull request #${number}`, "Merge it yourself on GitHub.") };
+  }
+  return { ok: true };
+}
+
+/**
+ * The jq that trims REST's pull request (tens of kilobytes: the body, every
+ * user object) to the six facts decideAutoMerge reads.
+ */
+const AUTO_MERGE_FACTS_JQ =
+  "{state, merged, draft, base: .base.ref, labels: [.labels[]?.name], mergeable_state, auto_merge: (.auto_merge != null)}";
+
+/**
+ * What GitHub says about this pull request's merge — see AutoMergeFacts.
+ *
+ * REST through `gh api`, whose fields do not depend on the gh version: the
+ * 2.4.0 gh on the box has no `autoMergeRequest` for `gh pr view --json`, and
+ * `mergeable_state` is the one field that says whether GitHub itself is
+ * holding the merge for a requirement. `{owner}/{repo}` is filled in by gh
+ * from the folder's remote, as `gh pr view` does.
+ */
+export async function readAutoMergeFacts(dir: string, number: number): Promise<AutoMergeFacts | { error: string }> {
+  const viewed = await run("gh", ["api", `repos/{owner}/{repo}/pulls/${number}`, "--jq", AUTO_MERGE_FACTS_JQ], path.resolve(dir));
+  if (!ok(viewed)) return { error: failureDetail(viewed, `Reading pull request #${number}`, "Try again.") };
+  try {
+    const parsed = JSON.parse(out(viewed)) as {
+      state?: unknown; merged?: unknown; draft?: unknown; base?: unknown; labels?: unknown; mergeable_state?: unknown; auto_merge?: unknown;
+    };
+    const state = parsed.merged === true ? "MERGED" : typeof parsed.state === "string" ? parsed.state.toUpperCase() : "UNKNOWN";
+    return {
+      state,
+      draft: parsed.draft === true,
+      base: typeof parsed.base === "string" && parsed.base ? parsed.base : null,
+      labels: labelNames(parsed.labels),
+      mergeState: typeof parsed.mergeable_state === "string" && parsed.mergeable_state ? parsed.mergeable_state.toUpperCase() : "UNKNOWN",
+      enabled: parsed.auto_merge === true,
+    };
+  } catch {
+    return { error: "Could not read GitHub's answer about the pull request." };
+  }
+}
+
+/**
+ * Turn GitHub's auto-merge on: `gh pr merge <n> --auto --merge`, so GitHub
+ * merges the pull request the moment its required checks pass, and deletes the
+ * branch where the repository is set to. Only ever called for a pull request
+ * GitHub is holding for a requirement (see GATED_MERGE_STATES in
+ * ./coding-pr-state) — a newer gh merges a CLEAN one on the spot instead.
+ * No `--delete-branch`: with `--auto` gh skips it, and the repository's own
+ * "delete head branches" setting is what removes the branch.
+ */
+export async function enableAutoMerge(dir: string, number: number): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const cwd = path.resolve(dir);
+  let armed = await run("gh", ["pr", "merge", String(number), "--auto", "--merge"], cwd);
+  if (!ok(armed) && mergeMethodRefused(armed)) {
+    armed = await run("gh", ["pr", "merge", String(number), "--auto", "--squash"], cwd);
+  }
+  if (!ok(armed)) {
+    return { ok: false, detail: failureDetail(armed, `Turning on auto-merge for pull request #${number}`, "Turn it on yourself on GitHub.") };
+  }
+  return { ok: true };
+}
+
+/** Turn GitHub's auto-merge off: `gh pr merge <n> --disable-auto`. */
+export async function disableAutoMerge(dir: string, number: number): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const disarmed = await run("gh", ["pr", "merge", String(number), "--disable-auto"], path.resolve(dir));
+  if (!ok(disarmed)) {
+    return { ok: false, detail: failureDetail(disarmed, `Turning off auto-merge for pull request #${number}`, "Turn it off yourself on GitHub.") };
   }
   return { ok: true };
 }

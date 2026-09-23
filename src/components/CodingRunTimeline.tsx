@@ -76,6 +76,8 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   pullRequestAdopted: "codingAgent.stepPullRequestAdopted",
   merged: "codingAgent.stepMerged",
   notMerged: "codingAgent.stepNotMerged",
+  autoMergeOn: "codingAgent.stepAutoMergeOn",
+  autoMergeOff: "codingAgent.stepAutoMergeOff",
   onDesktop: "codingAgent.stepOnDesktop",
   notOnDesktop: "codingAgent.stepNotOnDesktop",
   providerSilent: "codingAgent.stepProviderSilent",

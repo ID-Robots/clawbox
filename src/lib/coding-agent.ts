@@ -189,19 +189,25 @@ import {
   withEvidenceSection,
 } from "@/lib/coding-review-visual";
 import {
+  AUTO_MERGE_RETRY_MS,
+  decideAutoMerge,
   decideMerge,
+  disableAutoMerge,
   emptyChecks,
+  enableAutoMerge,
   isPrFoundBy,
   isPrPending,
   isPrPhase,
   markPullRequestReady,
   mergePullRequest,
+  NO_CHECKS_GRACE_MS,
   openPullRequest,
   updatePullRequestBody,
   // Aliased: this module's own MAX_WAIT_MS is the 120-second status-request
   // limit, a different ceiling for a different wait.
   MAX_WAIT_MS as PR_MAX_WAIT_MS,
   POLL_INTERVAL_MS,
+  readAutoMergeFacts,
   readPullRequest,
   runBranchName,
   startRunBranch,
@@ -221,6 +227,7 @@ import {
 } from "@/lib/coding-run-worktree";
 import { worktreeHintFor, worktreeHintText } from "@/lib/coding-worktree-paths";
 import {
+  autoMergeOutstanding,
   buildReviewFeedback,
   clampReviewRounds,
   decideReviewFixPath,
@@ -237,6 +244,7 @@ import {
   readReviewSnapshot,
   requestCodeRabbitReview,
   REVIEW_MAX_WAIT_MS,
+  REVIEW_NO_CHECKS_GRACE_MS,
   reviewPollIntervalMs,
   reviewProblems,
   type ReviewLoop,
@@ -493,10 +501,15 @@ export const CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY = "coding_agent_review_rounds
  * May the box MERGE a pull request its own review loop has cleared?
  *
  * OFF by default, and the one switch here that is a consent rather than a
- * preference: everything else the loop does is reversible, and a squash-merge
- * into a shared branch is not. A pull request the loop cleared without this
- * switch ends at `review.state === "clean"` — green, no unresolved comments,
- * open, and the owner presses the button.
+ * preference: everything else the loop does is reversible, and a merge into a
+ * shared branch is not. A pull request the loop cleared without this switch
+ * ends at `review.state === "clean"` — green, no unresolved comments, open,
+ * and the owner presses the button.
+ *
+ * The same consent covers GitHub's auto-merge: with it on, the loop turns
+ * auto-merge on while nothing is outstanding, so the pull request merges the
+ * moment its required checks pass rather than on the loop's next poll — or
+ * never, once the loop has given up at its ceiling (reconcileAutoMerge).
  *
  * Note the older `coding_agent_auto_pr` watcher merges on green by itself.
  * That is deliberate and unchanged: it is what a box that switched the review
@@ -3519,6 +3532,8 @@ function normalizePr(raw: unknown): PrState | null {
     // credit it has no evidence for.
     foundBy: isPrFoundBy(v.foundBy) ? v.foundBy : null,
     readyAt: typeof v.readyAt === "number" && Number.isFinite(v.readyAt) ? v.readyAt : null,
+    autoMergeAt: typeof v.autoMergeAt === "number" && Number.isFinite(v.autoMergeAt) ? v.autoMergeAt : null,
+    autoMergeFailedAt: typeof v.autoMergeFailedAt === "number" && Number.isFinite(v.autoMergeFailedAt) ? v.autoMergeFailedAt : null,
   };
 }
 
@@ -4857,6 +4872,24 @@ export function headlessBrief(opts: { reviewedSeparately: boolean }): string {
   return HEADLESS_BRIEF_TEMPLATE.replace(REVIEWER_CLAUSE_SLOT, opts.reviewedSeparately ? REVIEWER_CLAUSE_SEPARATE : REVIEWER_CLAUSE_HELPER);
 }
 
+/**
+ * What every run that can write is told about a pull request its task wants
+ * merged — one sentence of the headless brief, exported for its test.
+ *
+ * Measured on ClawBox's own repository (2026-09-22): eight pull requests went
+ * green in the afternoon and evening and were merged together at 05:18 the
+ * next morning, ten to sixteen hours later. A run that waits on CI to merge
+ * spends its turns polling and ends before a slow install check does, and a
+ * watcher that merges gives up at its ceiling. Handing the merge to GitHub the
+ * moment the pull request is open is what closes that gap, with the required
+ * checks still the gate. Conditional on the TASK asking for the merge, because
+ * the task is the consent: a run told only to open a pull request is not told
+ * to merge it. The device's own watchers do the same for the pull requests
+ * they watch (reconcileAutoMerge), under the owner's merge switch.
+ */
+export const PR_AUTO_MERGE_BRIEF =
+  "If your task has you open a pull request and wants it merged, hand the merge to GitHub as soon as it is open instead of waiting on CI yourself: `gh pr merge <number> --auto --merge` merges it the moment its required checks pass, and the repository's own setting deletes the branch. Never do that for a pull request into main or one labelled hold or do-not-merge, and not on a draft (turn it on after `gh pr ready`). If a review leaves findings you are going to fix, turn it off first (`gh pr merge <number> --disable-auto`) and on again once the fix is pushed. If GitHub refuses it (auto-merge off for that repository, or nothing required on the branch), merge the way your task says.";
+
 const HEADLESS_BRIEF_TEMPLATE = [
   "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
   "Nobody can answer questions, so make sensible assumptions and keep going. Stay inside this folder; do not install system packages or change device settings.",
@@ -4921,6 +4954,7 @@ const HEADLESS_BRIEF_TEMPLATE = [
   // for; s-02's run (2026-09-05) spent five minutes searching the disk for a
   // file that was not where the task said it would be.
   "Deliver what the task names and nothing beside it: when it lists the files to produce, produce exactly those — no extra assets, pictures, notes or scripts, however nice; anything you make only to check your work goes to the evidence folder. When a file or folder the task relies on is not where the task says, look once where it points, then treat that step as undoable and report it — never search the disk for it.",
+  PR_AUTO_MERGE_BRIEF,
   "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, anything you could not finish, and every assumption you made where the task left a choice open — name the convention or default you picked and why.",
 ].join(" ");
 
@@ -4935,9 +4969,13 @@ export const HEADLESS_BRIEF = headlessBrief({ reviewedSeparately: false });
  * the box's own are: CodeRabbit reviews a pull request once, when it becomes
  * ready, and the watcher readies it only after the checks pass. Left out for
  * every other run, because a draft that nothing watches is never readied.
+ *
+ * It comes AFTER the headless brief's PR_AUTO_MERGE_BRIEF and overrides it by
+ * name: this run's pull request is the device's to arm (reconcileAutoMerge),
+ * after CodeRabbit's one review has been read, never the run's at open time.
  */
 export const PR_DRAFT_BRIEF =
-  "If your task asks you to open a pull request, open it as a draft (`gh pr create --draft`; without --draft only when GitHub refuses drafts in that repository): this device watches it, marks it ready for review once its checks pass, which is when CodeRabbit gives its one review, and merges it or hands it back as the owner's settings say. Do not mark it ready, ask for a review or merge it yourself.";
+  "If your task asks you to open a pull request, open it as a draft (`gh pr create --draft`; without --draft only when GitHub refuses drafts in that repository): this device watches it, marks it ready for review once its checks pass, which is when CodeRabbit gives its one review, and merges it or hands it back as the owner's settings say. Do not mark it ready, ask for a review or merge it yourself — and do not turn on its auto-merge either: the device does that once nothing on it is outstanding.";
 
 /**
  * Added to the brief under ultracode only: what the Workflow tool is for on
@@ -7399,6 +7437,94 @@ function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail
 }
 
 /**
+ * A watcher's own merge, and the one race it now has: GitHub's auto-merge
+ * lands the same pull request in the seconds between the poll that saw it
+ * green and this call, and `gh pr merge` then fails on a pull request that is
+ * merged. That is a merge, and it is recorded as one.
+ */
+async function mergeOrFindMerged(dir: string, number: number): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const merged = await mergePullRequest(dir, number);
+  if (merged.ok) return merged;
+  const facts = await readAutoMergeFacts(dir, number);
+  return !("error" in facts) && facts.state === "MERGED" ? { ok: true } : merged;
+}
+
+/** How often the checks-only watcher, which polls every few seconds, looks at
+ *  auto-merge. The review loop looks on every one of its polls. */
+const AUTO_MERGE_LOOK_MS = 60_000;
+
+/** Said after a watcher's last word when GitHub's auto-merge is still on. */
+const AUTO_MERGE_ON_NOTE = "GitHub's auto-merge is on for it, so it merges by itself the moment its required checks pass.";
+
+function withAutoMergeNote(detail: string | null, autoMergeOn: boolean | null): string | null {
+  if (autoMergeOn !== true) return detail;
+  return detail ? `${detail} ${AUTO_MERGE_ON_NOTE}` : AUTO_MERGE_ON_NOTE;
+}
+
+/**
+ * Bring GitHub's auto-merge for a watched pull request in line with what the
+ * box would do itself — see decideAutoMerge.
+ *
+ * WHY. A watcher merges on its next poll, and only for as long as it polls:
+ * the checks-only watcher gives up after half an hour and the review loop
+ * after an hour a round, which a slow install check and a rate-limited
+ * reviewer outlast between them. A pull request that went green after that sat
+ * open until somebody came by, measured at ten to sixteen hours overnight.
+ * Auto-merge hands the last step to GitHub, which merges the moment the
+ * required checks pass whether or not anything here is still looking.
+ *
+ * Best-effort by construction: every `gh` failure is logged and the watcher
+ * goes on exactly as it would have without this. Answers whether auto-merge is
+ * on once it is done, or null when that is not known.
+ */
+async function reconcileAutoMerge(
+  runId: string,
+  input: { refusal: string | null; outstanding: string | null; early: boolean },
+): Promise<boolean | null> {
+  const run = loadRuns().find((r) => r.id === runId);
+  const number = run?.pr?.number;
+  if (!run?.pr || typeof number !== "number") return null;
+
+  const facts = await readAutoMergeFacts(run.directory, number);
+  if ("error" in facts) {
+    console.error(`[coding-agent] ${runId} could not read auto-merge for PR #${number}: ${facts.error}`);
+    return null;
+  }
+  const failedAt = run.pr.autoMergeFailedAt ?? null;
+  const stance = decideAutoMerge({
+    facts,
+    refusal: input.refusal,
+    outstanding: input.outstanding,
+    early: input.early,
+    mayTry: failedAt === null || Date.now() - failedAt >= AUTO_MERGE_RETRY_MS,
+    armedAt: run.pr.autoMergeAt ?? null,
+  });
+  if (stance.action === "none") return facts.enabled;
+
+  const turningOn = stance.action === "enable";
+  const done = turningOn ? await enableAutoMerge(run.directory, number) : await disableAutoMerge(run.directory, number);
+  // Re-read: the `gh` calls above are subprocesses, and the owner may have
+  // cleared the run under them.
+  const current = loadRuns().find((r) => r.id === runId);
+  if (!current?.pr || current.pr.number !== number) return null;
+  if (!done.ok) {
+    console.error(`[coding-agent] ${runId} could not turn auto-merge ${turningOn ? "on" : "off"} for PR #${number}: ${done.detail}`);
+    if (turningOn) {
+      current.pr = { ...current.pr, autoMergeFailedAt: Date.now() };
+      persist(true);
+    }
+    return facts.enabled;
+  }
+  current.pr = turningOn
+    ? { ...current.pr, autoMergeAt: Date.now(), autoMergeFailedAt: null }
+    : { ...current.pr, autoMergeAt: null };
+  pushProgress(current, stance.action === "enable" ? RUNNER_STEP.autoMergeOn(number) : RUNNER_STEP.autoMergeOff(stance.reason));
+  persist(true);
+  console.error(`[coding-agent] ${runId} turned auto-merge ${turningOn ? "on" : "off"} for PR #${number}`);
+  return turningOn;
+}
+
+/**
  * One poll of a pull-request, review or deployment watcher, tracked like the
  * settle path it continues.
  *
@@ -7449,6 +7575,9 @@ const prWatchers = store.prWatchers;
 function watchPullRequest(runId: string): void {
   if (prWatchers.has(runId)) return;
   prWatchers.add(runId);
+  // In the watcher's closure rather than on the record: a watcher rebuilt
+  // after a restart looking again at once is what should happen anyway.
+  let autoMergeLookedAt = 0;
 
   const tick = async (): Promise<void> => {
     const run = loadRuns().find((r) => r.id === runId);
@@ -7494,6 +7623,26 @@ function watchPullRequest(runId: string): void {
       reviewOk: run.pr.reviewOk,
       sinceReadyMs: readyAt === null ? null : Date.now() - readyAt,
     });
+
+    // GitHub's auto-merge follows the verdict: on while this watcher would
+    // merge, off where it would not — see reconcileAutoMerge. Every minute
+    // while waiting, and always on the way out, so a watcher that gave up at
+    // its ceiling leaves it on and one that refused leaves it off. Never
+    // before the merge this watcher is about to make itself.
+    let autoMergeOn: boolean | null = null;
+    if (verdict.action !== "merge" && snapshot.state === "OPEN"
+      && (verdict.action === "block" || Date.now() - autoMergeLookedAt >= AUTO_MERGE_LOOK_MS)) {
+      autoMergeLookedAt = Date.now();
+      autoMergeOn = await reconcileAutoMerge(runId, {
+        refusal: run.pr.reviewOk ? null : "the automatic review pass did not finish cleanly",
+        outstanding: snapshot.checks.failed > 0
+          ? "a check failed"
+          : snapshot.mergeable === "CONFLICTING" ? "the branch conflicts with its base" : null,
+        // Opened or readied moments ago: its checks are still arriving.
+        early: Date.now() - (readyAt ?? run.pr.startedAt) < NO_CHECKS_GRACE_MS,
+      });
+    }
+
     if (verdict.action === "wait") { schedule(); return; }
     if (verdict.action === "ready") {
       const readied = await markPullRequestReady(run.directory, prNumber);
@@ -7513,11 +7662,13 @@ function watchPullRequest(runId: string): void {
       return;
     }
     if (verdict.action === "block") {
-      settlePr(run, "blocked", verdict.detail);
+      // Re-read: reconcileAutoMerge may have waited on `gh`.
+      const current = loadRuns().find((r) => r.id === runId);
+      if (current?.pr?.phase === "waiting") settlePr(current, "blocked", withAutoMergeNote(verdict.detail, autoMergeOn));
       prWatchers.delete(runId);
       return;
     }
-    const merged = await mergePullRequest(run.directory, prNumber);
+    const merged = await mergeOrFindMerged(run.directory, prNumber);
     settlePr(run, merged.ok ? "merged" : "blocked", merged.ok ? null : merged.detail);
     prWatchers.delete(runId);
   };
@@ -7675,15 +7826,16 @@ function watchReviewLoop(runId: string): void {
     };
     persist(true);
 
+    // Read every tick rather than frozen with the rounds: the rounds shape
+    // what the run was promised, but the merge is a consent, and an owner who
+    // switches it off while a loop runs has said no to THIS merge.
+    const autoMerge = await getAutoMerge();
     const verdict = decideReviewRound({
       snapshot,
       round: review.round,
       maxRounds: review.maxRounds,
       waitedMs,
-      // Read every tick rather than frozen with the rounds: the rounds shape
-      // what the run was promised, but the merge is a consent, and an owner
-      // who switches it off while a loop runs has said no to THIS merge.
-      autoMerge: await getAutoMerge(),
+      autoMerge,
       // The automatic review pass's verdict, recorded when the pull request was
       // opened. The checks-only watcher has always gated its merge on it
       // (decideMerge), and the loop has to as well: a green suite over a review
@@ -7697,8 +7849,33 @@ function watchReviewLoop(runId: string): void {
       codeRabbitAskedFor: review.codeRabbitAskedFor ?? null,
     });
 
+    // GitHub's auto-merge follows the round: on while nothing is outstanding
+    // and the box may merge, off while a round is due or the owner has said
+    // no — see reconcileAutoMerge. Never before the merge this tick is about
+    // to make itself, and not over a pull request that is no longer open.
+    let autoMergeOn: boolean | null = null;
+    if (verdict.action !== "merge" && snapshot.state === "OPEN") {
+      autoMergeOn = await reconcileAutoMerge(runId, {
+        refusal: !autoMerge
+          ? "merging by itself is switched off"
+          : run.pr?.reviewOk === false ? "the automatic review pass did not finish cleanly" : null,
+        outstanding: autoMergeOutstanding(snapshot, waitedMs),
+        // A head pushed moments ago has checks still arriving — its CodeRabbit
+        // status among them — so nothing is turned on before the grace is out.
+        early: waitedMs < REVIEW_NO_CHECKS_GRACE_MS,
+      });
+      // Re-read: the owner may have stopped the loop while `gh` was answering.
+      if (loadRuns().find((r) => r.id === runId)?.review?.state !== "polling") { stop(); return; }
+    }
+
     if (verdict.action === "wait") { schedule(); return; }
-    if (verdict.action === "done") { settleReview(run, verdict.state, verdict.detail); stop(); return; }
+    if (verdict.action === "done") {
+      const current = loadRuns().find((r) => r.id === runId) ?? run;
+      const said = verdict.detail ?? (verdict.state === "clean" ? REVIEW_CLEAN_DETAIL : null);
+      settleReview(current, verdict.state, verdict.state === "merged" ? said : withAutoMergeNote(said, autoMergeOn));
+      stop();
+      return;
+    }
     if (verdict.action === "ready" || verdict.action === "ask_coderabbit") {
       // Neither is a round: nothing goes to the harness. Each starts something
       // on GitHub (the review, or its status on this head), so the round's
@@ -7727,7 +7904,7 @@ function watchReviewLoop(runId: string): void {
       return;
     }
     if (verdict.action === "merge") {
-      const merged = await mergePullRequest(run.directory, review.prNumber);
+      const merged = await mergeOrFindMerged(run.directory, review.prNumber);
       settleReview(run, merged.ok ? "merged" : "needs_owner", merged.ok ? null : merged.detail);
       stop();
       return;

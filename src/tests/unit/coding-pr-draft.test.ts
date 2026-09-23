@@ -107,7 +107,8 @@ describe("what the watchers read", () => {
   it("reads the draft flag for the checks-only watcher", async () => {
     runChild.mockResolvedValueOnce(result(0, JSON.stringify({ state: "OPEN", mergeable: "MERGEABLE", statusCheckRollup: null, isDraft: true })));
     expect(await pr.readPullRequest("/tmp/p", 12)).toMatchObject({ isDraft: true, noChecks: true });
-    expect(runChild.mock.calls[0][1]).toContain("state,mergeable,statusCheckRollup,isDraft");
+    // `labels` beside it, for the hold label (see isHoldLabel).
+    expect(runChild.mock.calls[0][1]).toContain("state,mergeable,statusCheckRollup,isDraft,labels");
   });
 
   it("reads the draft flag, the head and CodeRabbit's footprint for the review loop", async () => {
@@ -147,7 +148,8 @@ describe("what the watchers read", () => {
       // The one thread was CodeRabbit's, and it was answered.
       threads: [],
     });
-    expect(runChild.mock.calls[0][1]).toContain("state,mergeable,reviewDecision,statusCheckRollup,isDraft");
+    // `labels` and `baseRefName` beside it, for the hold label and a retarget.
+    expect(runChild.mock.calls[0][1]).toContain("state,mergeable,reviewDecision,statusCheckRollup,isDraft,labels,baseRefName");
     // Answered with everything GitHub-side in order: nothing is left to feed back.
     if ("error" in snapshot) throw new Error(snapshot.error);
     expect(review.reviewProblems(snapshot)).toEqual({ failedChecks: [], threads: [], conflicting: false, changesRequested: false });
