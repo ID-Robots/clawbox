@@ -222,6 +222,10 @@ describe("boardDigest", () => {
     expect(lib.boardDigest(b, "t1")).toContain("t3 [pending] — Write the README → (not started)");
     expect(lib.boardDigest(b, "t1")).not.toContain("t1 [");
     expect(lib.boardDigest(b, null)).toContain("t1 [complete]");
+    // The lead's batch: every task it was given in full is left out.
+    const batch = lib.boardDigest(b, ["t1", "t2"]);
+    expect(batch).not.toMatch(/t[12] \[/);
+    expect(batch).toContain("t3 [pending]");
   });
 
   it("cuts each description at 160 and each result at 200, and quotes only the last 5 alerts or messages", () => {
@@ -466,14 +470,14 @@ describe("teamMetrics", () => {
     lib.saveBoard(b);
     const file = path.join(root, "data", "coding-team", `${b.id}.json`);
     const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-    for (const k of ["shape", "dynamic", "finalReview", "metrics", "finishedAt"]) delete raw[k];
+    for (const k of ["shape", "dynamic", "finalReview", "metrics", "finishedAt", "lastLeadAt"]) delete raw[k];
     delete raw.tasks[0].origin;
     delete raw.tasks[0].rejections;
     raw.tasks[0].attempts = 2;
     raw.runs = [{ id: "run-aaaaaaaa", role: "worker", taskId: "t1" }, { id: "run-bbbbbbbb", role: "lead", taskId: "t1", tokens: 42 }, { id: "run-cccccccc", role: "boss", taskId: null }];
     fs.writeFileSync(file, JSON.stringify(raw));
     const read = lib.loadBoard(b.id)!;
-    expect(read).toMatchObject({ shape: null, dynamic: false, finalReview: null, finishedAt: null });
+    expect(read).toMatchObject({ shape: null, dynamic: false, finalReview: null, finishedAt: null, lastLeadAt: 0 });
     // A second attempt only follows a rejection: counted as one.
     expect(read.tasks[0]).toMatchObject({ origin: "plan", rejections: 1 });
     expect(read.runs).toEqual([{ id: "run-aaaaaaaa", role: "worker", taskId: "t1" }, { id: "run-bbbbbbbb", role: "lead", taskId: "t1", tokens: 42 }]);
@@ -485,5 +489,17 @@ describe("teamMetrics", () => {
     raw.shape = { parallelism: 2, review: "final", rationale: "Two files." };
     fs.writeFileSync(file, JSON.stringify(raw));
     expect(lib.loadBoard(b.id)?.shape).toEqual({ parallelism: 2, review: "final", rationale: "Two files." });
+    // The lead's last turn: kept when it is a time, 0 when it is anything else.
+    raw.lastLeadAt = "soon";
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(lib.loadBoard(b.id)?.lastLeadAt).toBe(0);
+  });
+
+  it("keeps when the lead's last turn was written, from a new board's 0", () => {
+    const b = board();
+    expect(b.lastLeadAt).toBe(0);
+    b.lastLeadAt = 1_234_567;
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)?.lastLeadAt).toBe(1_234_567);
   });
 });

@@ -13,14 +13,18 @@
  * because every task here becomes a worker with a shell.
  *
  * The same planner comes back as the team's LEAD while the team runs, when
- * the owner's `coding_team_dynamic` switch is on: after a worker settles, one
- * short read-only run may add a task or retire one still pending. Its answer
- * is read here too, as strictly, and against the board as it stands.
+ * the owner's `coding_team_dynamic` switch is on: after workers settle — one
+ * turn for every task that settled since its last, and only when there is
+ * something to decide (`leadShouldRun`) — one short read-only run may add a
+ * task or retire one still pending. Its answer is read here too, as
+ * strictly, and against the board as it stands.
  */
 
 import { MAX_TASK_CHARS, MAX_TEAM_WORKERS } from "@/lib/coding-agent";
 import {
+  allComplete,
   boardDigest,
+  isExhausted,
   MAX_DIGEST_CHARS,
   MAX_LEAD_ADDS,
   MAX_LEAD_RETIRES,
@@ -28,6 +32,7 @@ import {
   MAX_TASK_DESCRIPTION_CHARS,
   MAX_TEAM_TASKS,
   REVIEW_MODES,
+  type LogEntry,
   type ReviewMode,
   type TaskStatus,
   type TeamBoard,
@@ -44,6 +49,7 @@ export interface PlannedTask {
 const TASK_RULES = [
   "Each task_description must stand on its own: say what to build or change, in which files, and how the worker verifies it — it is the whole brief that worker gets.",
   `Each task_description must be at most ${MAX_TASK_DESCRIPTION_CHARS} characters. Keep shared context concise; describe disjoint file ownership for parallel work and add an integration task depending on the workers when needed.`,
+  "A task that verifies, integrates or reviews the other tasks' output must list EVERY task it checks in depends_on — never fewer: its worker starts from the work merged so far, and a task it does not wait for may not be there yet.",
   "files_hint lists the files or folders the task should touch; the team watches for a worker straying outside it.",
   "When two tasks share a contract — an API shape, a schema, a module path — say in BOTH task_descriptions which task owns it, and that the other task's worker must ask that task's worker for it with team_message (to=\"sibling\") rather than invent it.",
 ];
@@ -273,13 +279,13 @@ function dependencyCycle(dependsOn: string[][], offset: number): string[] | null
 export const MAX_LEAD_NOTE_CHARS = 300;
 
 export const REPLAN_BRIEF = [
-  "You are the LEAD of a small coding team working unattended in this folder: the planner that wrote the team's plan, back for a moment because one worker has just finished its task. You decide ONE thing: does the rest of the plan still fit the goal?",
+  "You are the LEAD of a small coding team working unattended in this folder: the planner that wrote the team's plan, back for a moment because one or more workers have just finished their tasks. You decide ONE thing: does the rest of the plan still fit the goal?",
   "Read what you need, but change NOTHING: you may not edit, create, delete or run anything that writes.",
   'Answer with ONLY a JSON object, no prose before or after: {"add": [task, ...], "retire": ["t4", ...], "note": string}. Every field is optional; {} means the plan stands, and that is the usual answer — change the plan only for a concrete reason.',
   `add: new tasks, each {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}, for work the goal needs that no task on the board covers — say, something a finished task revealed. They are numbered after the board's last task in the order you list them, and may depend on any task on the board or on a new one listed before them. The lead adds at most ${MAX_LEAD_ADDS} tasks over the whole team, and a team holds at most ${MAX_TEAM_TASKS}.`,
   `retire: tasks still PENDING that the goal no longer needs — a finished task already did that work, or it turned out to be unnecessary. At most ${MAX_LEAD_RETIRES} over the whole team; a task a worker has started cannot be retired.`,
   `note: why, in one line of at most ${MAX_LEAD_NOTE_CHARS} characters, for the team's log.`,
-  "What the team's runs told the lead with team_message — a worker blocked on a missing file, a question only a new task can answer — is among the latest lines of the board you are given: weigh it, and act on it only through add or retire.",
+  "What the team's runs told the lead with team_message — a worker blocked on a missing file, a question only a new task can answer — is listed in full under \"Messages to the lead since your last turn:\", and older messages are among the latest lines of the board you are given: weigh them, and act on them only through add or retire.",
   ...TASK_RULES,
 ].join(" ");
 
@@ -314,30 +320,134 @@ export function leadRoom(ctx: ReplanContext): { adds: number; retires: number; r
   };
 }
 
-/** How much of the settled task's own result the lead is shown, and of the goal. */
-const LEAD_RESULT_CHARS = 1_000;
-const LEAD_GOAL_CHARS = 800;
+/**
+ * A line of a worker's result that says it could not do its part: a
+ * blocker in its own words, or the refusal the orchestrator appends when
+ * the work could not be committed or merged. Read at the start of a line,
+ * after any list or emphasis marks, as a whole word.
+ */
+const BLOCKER_LINE = /^(?:(?:BLOCKED|MISSING|[Cc]annot|[Cc]ould not|NOT COMMITTED|MERGE CONFLICT|MERGE FAILED)(?![\w-])|[Bb]locked:)/;
+/** What a report section with nothing in it says: "Could not finish: nothing." */
+const NOTHING = /^(?:none|nothing|n\/a)\b/i;
+
+const bare = (line: string) => line.replace(/^[\s>*_#-]+/, "");
+
+function blockerLine(result: string | null): string | null {
+  if (!result) return null;
+  const lines = result.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = bare(lines[i]);
+    if (!BLOCKER_LINE.test(line)) continue;
+    // A worker's final message is asked for "anything you could not finish",
+    // and one with nothing to say still writes the words: what the line says
+    // after its colon — or, for a heading, on the next line — decides.
+    const colon = line.indexOf(":");
+    const after = colon < 0 ? "" : line.slice(colon + 1).replace(/^[\s*_]+/, "").trim();
+    const heading = /^\s*#/.test(lines[i]) || (colon >= 0 && !after);
+    const said = after || (heading ? bare(lines.slice(i + 1).find((l) => l.trim()) ?? "") : "");
+    if (!NOTHING.test(said)) return line;
+  }
+  return null;
+}
+
+/** A `team_message` a run sent to the lead after `sinceTs`. */
+function isMessageToLead(e: LogEntry, sinceTs: number): boolean {
+  return e.type === "message" && e.payload?.to === "lead" && typeof e.payload.text === "string" && e.ts > sinceTs;
+}
 
 /**
- * The lead's task text: which task just settled and how, its result, what it
- * may still change, the goal, and the board's digest in whatever room is left
- * — all inside the run route's cap.
+ * Whether the lead is worth a run for `batch` — the tasks whose workers
+ * settled since its last turn. An accepted, clean task with nothing said to
+ * the lead leaves the plan as it was, and the lead's usual answer to it is
+ * `{}`: ~10–45k tokens and a stall of every new worker, for nothing. It runs
+ * when a task of the batch was rejected or failed; when a worker's result
+ * names a blocker; when a run sent the lead a message after `sinceTs` (its
+ * last turn, or 0: since the team started); or when nothing left can start
+ * and the goal is not complete — a dependency chain broke, and only a new
+ * task can mend it.
  */
-export function leadTask(board: TeamBoard, settledTaskId: string, ctx: ReplanContext): string {
-  const task = board.tasks.find((t) => t.task_id === settledTaskId);
+export function leadShouldRun(board: TeamBoard, batch: readonly string[], sinceTs: number): { run: boolean; why: string } {
+  const settled = board.tasks.filter((t) => batch.includes(t.task_id));
+  const bad = settled.find((t) => t.status === "failed" || t.status === "rejected" || t.review?.verdict === "rejected");
+  if (bad) return { run: true, why: `${bad.task_id} ${bad.status === "failed" ? "failed" : "was rejected"}` };
+  for (const t of settled) {
+    const line = blockerLine(t.result);
+    if (line) return { run: true, why: `${t.task_id}'s result says: ${clip(line, 160)}` };
+  }
+  const message = board.log.find((e) => isMessageToLead(e, sinceTs));
+  if (message) return { run: true, why: `${String(message.payload?.from)} sent the lead a message` };
+  if (isExhausted(board) && !allComplete(board)) return { run: true, why: "nothing left can start, and the goal is not complete" };
+  return { run: false, why: "every task settled clean and accepted; no blocker, no message to the lead" };
+}
+
+/** How much of a settled task's own result the lead is shown — alone; several share the room, never under the floor — and of the goal. */
+const LEAD_RESULT_CHARS = 1_000;
+const LEAD_MIN_RESULT_CHARS = 200;
+const LEAD_GOAL_CHARS = 800;
+/** The lead's inbox: each message whole up to here, the section as a whole up to MAX_LEAD_INBOX_CHARS, the newest kept. */
+const LEAD_INBOX_MESSAGE_CHARS = 600;
+export const MAX_LEAD_INBOX_CHARS = 2_000;
+const INBOX_LABEL = "Messages to the lead since your last turn:";
+const RESULT_LABEL = "Its worker's result:\n";
+
+/**
+ * Every message a run sent the lead since its last turn (`board.lastLeadAt`),
+ * oldest first, as `- <role> <run> (task tN): <text>` — the text whole up to
+ * LEAD_INBOX_MESSAGE_CHARS, where the digest keeps a line of the last few
+ * log entries. Over `maxChars` the OLDEST go, and a line says how many.
+ */
+function leadInbox(board: TeamBoard, maxChars: number): string {
+  if (maxChars <= INBOX_LABEL.length + 1) return "";
+  // `?? 0`: a board built before the inbox has no lastLeadAt, and every message is new to its lead.
+  const since = board.lastLeadAt ?? 0;
+  const lines = board.log
+    .filter((e) => isMessageToLead(e, since))
+    .map((e) => `- ${e.actor.kind} ${String(e.payload?.from)}${e.task_id ? ` (task ${e.task_id})` : ""}: ${clip(String(e.payload?.text).replace(/\s+/g, " ").trim(), LEAD_INBOX_MESSAGE_CHARS)}`);
+  if (!lines.length) return clip(`${INBOX_LABEL} (none)`, maxChars);
+  for (let dropped = 0; dropped < lines.length; dropped++) {
+    const note = dropped ? [`(${dropped} older ${dropped === 1 ? "message" : "messages"} left out)`] : [];
+    const text = [INBOX_LABEL, ...note, ...lines.slice(dropped)].join("\n");
+    if (text.length <= maxChars) return text;
+  }
+  // Not even the newest fits whole: the newest, cut.
+  return clip([INBOX_LABEL, lines[lines.length - 1]].join("\n"), maxChars);
+}
+
+/**
+ * The lead's task text: every task of the batch that settled since its last
+ * turn and how, each one's result, what it may still change, the goal, the
+ * messages sent to the lead since its last turn, and the board's digest in
+ * whatever room is left — all inside the run route's cap. One settled task's
+ * result is shown as it always was; several share the room the rest leaves.
+ */
+export function leadTask(board: TeamBoard, settledTaskIds: readonly string[], ctx: ReplanContext): string {
   const room = leadRoom(ctx);
-  const verdict = task?.review ? `, ${task.review.verdict}${task.review.verdict === "rejected" && task.review.notes ? `: ${clip(task.review.notes, 300)}` : ""}` : "";
-  const head = [
-    task
-      ? `Task ${task.task_id} just settled (${task.status}${verdict}): ${clip(task.task_description, 400)}`
-      : `Task ${settledTaskId} just settled.`,
-    `Its worker's result:\n${task?.result ? clip(task.result.trim(), LEAD_RESULT_CHARS) : "(none)"}`,
+  const settled = settledTaskIds.map((id) => {
+    const task = board.tasks.find((t) => t.task_id === id);
+    const verdict = task?.review ? `, ${task.review.verdict}${task.review.verdict === "rejected" && task.review.notes ? `: ${clip(task.review.notes, 300)}` : ""}` : "";
+    return {
+      line: task ? `Task ${task.task_id} just settled (${task.status}${verdict}): ${clip(task.task_description, 400)}` : `Task ${id} just settled.`,
+      result: task?.result?.trim() || "",
+    };
+  });
+  const tail = [
     `What you may change: add ${room.adds} more task(s)${room.adds ? ` (numbered from t${ctx.tasks.length + 1})` : ""}; retire ${room.retires} more${room.retires ? ` — pending now: ${room.retirable.join(", ")}` : ""}. Answer with ONLY the JSON object your brief describes; {} if the plan stands.`,
     `Team goal: ${clip(board.goal, LEAD_GOAL_CHARS)}`,
+  ];
+  const inbox = leadInbox(board, MAX_LEAD_INBOX_CHARS);
+  const fixed = [...settled.map((s) => `${s.line}\n\n${RESULT_LABEL}`), ...tail, inbox].join("\n\n").length;
+  const each = Math.max(LEAD_MIN_RESULT_CHARS, Math.min(LEAD_RESULT_CHARS, Math.floor((MAX_TASK_CHARS - fixed) / Math.max(1, settled.length))));
+  const head = [
+    ...settled.flatMap((s) => [s.line, `${RESULT_LABEL}${s.result ? clip(s.result, each) : "(none)"}`]),
+    ...tail,
   ].join("\n\n");
+  // The inbox after the head, cut to the room the head leaves — oldest
+  // messages first — so the final cut never takes the newest.
+  const box = leadInbox(board, Math.min(MAX_LEAD_INBOX_CHARS, MAX_TASK_CHARS - head.length - 2));
+  const withInbox = box ? `${head}\n\n${box}` : head;
   const label = "\n\nThe board (every other task, then the latest alerts and messages):\n";
-  const digest = boardDigest(board, settledTaskId, Math.min(MAX_DIGEST_CHARS, MAX_TASK_CHARS - head.length - label.length));
-  const text = digest ? `${head}${label}${digest}` : head;
+  const digest = boardDigest(board, settledTaskIds, Math.min(MAX_DIGEST_CHARS, MAX_TASK_CHARS - withInbox.length - label.length));
+  const text = digest ? `${withInbox}${label}${digest}` : withInbox;
   return clip(text, MAX_TASK_CHARS);
 }
 

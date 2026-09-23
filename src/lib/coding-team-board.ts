@@ -236,6 +236,12 @@ export interface TeamBoard {
   shape: TeamShape | null;
   /** The `coding_team_dynamic` switch as it stood when the team started: may a lead add or retire tasks while it runs? */
   dynamic: boolean;
+  /**
+   * When the lead's last turn was written (ms): its inbox, and the message
+   * that calls it back, are what was said to the lead after this. 0 before
+   * its first turn — and on a board from before the lead had an inbox.
+   */
+  lastLeadAt: number;
   /** The one review over the merged result (review mode `final`), once it ruled. */
   finalReview: FinalReview | null;
   /** The figures, kept current on every save (`teamMetrics`). */
@@ -385,6 +391,7 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     // A board from before the planner could shape a team has none: it ran the default.
     shape: normalizeShape(b.shape),
     dynamic: b.dynamic === true,
+    lastLeadAt: typeof b.lastLeadAt === "number" && Number.isFinite(b.lastLeadAt) && b.lastLeadAt > 0 ? b.lastLeadAt : 0,
     finalReview: finalReview && typeof finalReview === "object" && (finalReview.verdict === "accepted" || finalReview.verdict === "rejected") && typeof finalReview.notes === "string"
       ? { verdict: finalReview.verdict, notes: finalReview.notes, at: typeof finalReview.at === "number" ? finalReview.at : 0 }
       : null,
@@ -483,6 +490,7 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
     error: null,
     shape: null,
     dynamic: input.dynamic === true,
+    lastLeadAt: 0,
     finalReview: null,
     metrics: EMPTY_METRICS,
     createdAt: now,
@@ -785,16 +793,18 @@ export function isSettledTeamStatus(status: TeamStatus): boolean {
  * one line per task — `t3 [status] — <description> → <result>` — then the
  * latest alerts and messages (what the team's runs said with team_message —
  * to the lead among them —, reviews, retirements). The task named by
- * `forTaskId` is left out: its reader has it in full already.
+ * `forTaskId` is left out: its reader has it in full already — the lead
+ * names every task of the batch it was called for.
  *
  * Bounded at `maxChars` (MAX_DIGEST_CHARS at most). Over the bound, the
  * OLDEST lines go first — a task line is as old as its last change, a log
  * line as old as its entry — and a line at the top says how many went.
  */
-export function boardDigest(board: TeamBoard, forTaskId: string | null, maxChars: number = MAX_DIGEST_CHARS): string {
+export function boardDigest(board: TeamBoard, forTaskId: string | readonly string[] | null, maxChars: number = MAX_DIGEST_CHARS): string {
   const max = Math.max(0, Math.min(MAX_DIGEST_CHARS, Math.floor(maxChars)));
+  const known = typeof forTaskId === "string" ? [forTaskId] : (forTaskId ?? []);
   const tasks = board.tasks
-    .filter((t) => t.task_id !== forTaskId)
+    .filter((t) => !known.includes(t.task_id))
     .map((t) => ({
       at: t.updated_at,
       text: `${t.task_id} [${t.status}] — ${clip(oneLine(t.task_description), 160)} → ${t.result ? clip(oneLine(t.result), 200) : t.status === "in_progress" ? "(in progress)" : "(not started)"}`,
