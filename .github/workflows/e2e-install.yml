@@ -264,6 +264,15 @@ jobs:
           cache-from: type=gha,scope=e2e-install-${{ runner.arch }}
           cache-to: type=gha,mode=min,scope=e2e-install-${{ runner.arch }}
 
+      # The install inside the container (~4 min) needs nothing from the host
+      # but the image, so it starts here and runs while the host installs
+      # Playwright below — 40 s to 1 min 45 s of apt, measured, that every
+      # shard otherwise waited through first. global-setup's `compose up -d`
+      # then finds the container running with the same config, leaves it be,
+      # and waits for the install as before.
+      - name: Boot the container
+        run: docker compose -f e2e-install/docker-compose.test.yml up -d
+
       # Only install the host-side bits we need to *drive* the tests: the
       # Playwright runner + its system libs for the chat UI spec. The
       # container inside Docker has its own separate Playwright install.

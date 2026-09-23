@@ -8,12 +8,16 @@ on:
 permissions:
   contents: read
 
-# A run a newer push has superseded tells nobody anything the newer one will
-# not, and it holds a runner the newer one may be queued behind. Pull requests
-# only: every push to a branch is a commit that landed, and keeps its verdict.
+# A run a newer push to the same PR has superseded tells nobody anything the
+# newer one will not, and it holds a runner the newer one may be queued behind. Grouped by PR number,
+# and every other run — a push to a branch, a schedule — in a group of its
+# own (its run id): GitHub keeps one RUNNING and one PENDING run per group and
+# cancels the pending one when a third arrives, whatever `cancel-in-progress`
+# says, so a group keyed on the branch would queue each landed commit behind
+# the last and drop the middle one of three quick pushes unverified.
 concurrency:
-  group: e2e-tests-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: e2e-tests-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   e2e:
