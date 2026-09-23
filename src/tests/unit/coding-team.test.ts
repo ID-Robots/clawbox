@@ -1045,6 +1045,56 @@ describe("the lead (coding_team_dynamic)", () => {
     expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([expect.stringMatching(alert)]);
     expect(done.tasks.map((t) => [t.task_id, t.status, t.origin])).toEqual([["t1", "complete", "plan"], ["t2", "complete", "plan"]]);
     expect(done.metrics.leadRuns).toBe(1);
+    // A turn that decided nothing read nothing: the inbox is still unread.
+    expect(done.lastLeadAt).toBe(0);
+  });
+
+  it.each([
+    ["did not finish", { status: "failed", error: "boom" }],
+    ["gave no usable answer", { summary: "The plan looks fine to me!" }],
+  ])("keeps the inbox unread when the lead %s — the next turn reads the message again; a usable {} marks it read", async (_what, first) => {
+    runner.getTeamDynamic.mockResolvedValue(true);
+    outcomes = [
+      { summary: JSON.stringify([
+        { task_description: "Scaffold index.html", files_hint: ["index.html"] },
+        { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"] },
+        { task_description: "Write the README", depends_on: ["t2"], files_hint: ["README.md"] },
+        { task_description: "Add a licence", depends_on: ["t3"], files_hint: ["LICENSE"] },
+      ]) },
+      { summary: "Built index.html.", filesTouched: ["index.html"] },
+      { summary: "Wired app.js.", filesTouched: ["app.js"] },
+      { summary: "Wrote the README.", filesTouched: ["README.md"] },
+      { summary: "Added the licence.", filesTouched: ["LICENSE"] },
+    ];
+    leadAnswers = [first, { summary: "{}" }];
+    // t1's worker tells the lead while it works; every task then settles clean.
+    const wait = runner.waitForRun.getMockImplementation()!;
+    let told = false;
+    runner.waitForRun.mockImplementation(async (id: string, ms?: number) => {
+      const run = runs.get(id);
+      const who = run?.team as { id: string; role: string; taskId: string | null } | null;
+      if (!told && run?.status === "running" && who?.role === "worker" && who.taskId === "t1") {
+        told = true;
+        await team.sendTeamMessage({ teamId: who.id, fromRunId: id, role: "worker", to: "lead", text: "The licence is the owner's call." });
+      }
+      return wait(id, ms);
+    });
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks.map((t) => [t.task_id, t.status])).toEqual([["t1", "complete"], ["t2", "complete"], ["t3", "complete"], ["t4", "complete"]]);
+    // The message calls the lead after t1; that turn decides nothing, so the
+    // same message calls it again after t2, clean as t2 is. That turn's {}
+    // reads it, and t3 — clean, nothing new said — calls no one.
+    expect(starts.map(role)).toEqual(["planner", "worker", "reviewer", "lead", "worker", "reviewer", "lead", "worker", "reviewer", "worker", "reviewer"]);
+    const leads = starts.filter((s) => role(s) === "lead");
+    expect(leads.map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2"]);
+    for (const lead of leads) {
+      expect(String(lead.task)).toContain("Messages to the lead since your last turn:\n- worker run-00000002 (task t1): The licence is the owner's call.");
+    }
+    expect(done.metrics.leadRuns).toBe(2);
+    expect(done.alerts).toBe(1);
+    expect(done.lastLeadAt).toBeGreaterThan(0);
   });
 
   it("counts a worker still being started when the lead asks for a seat — it would take that worker's place otherwise", async () => {

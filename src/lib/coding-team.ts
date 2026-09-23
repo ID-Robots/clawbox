@@ -997,7 +997,9 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
     if (team.stopRequested) return;
   }
   // The inbox is written from what was said up to now; what is said after
-  // waits for the next turn.
+  // waits for the next turn. It counts as read only once the lead gave an
+  // answer the team can act on (below): a lead that failed, ran out of
+  // budget or answered nothing usable leaves it unread for the next turn.
   const writtenAt = Date.now();
   let run: CodingRun;
   try {
@@ -1014,7 +1016,6 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
     bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${after}: ${err instanceof Error ? err.message : String(err)}` });
     return;
   }
-  board.lastLeadAt = writtenAt;
   board.runs.push({ id: run.id, role: "lead", taskId });
   saveBoard(board);
   const settled = await settle(team, run.id);
@@ -1029,6 +1030,9 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
     bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `The lead after ${after} gave no usable answer: ${replan.reason} The plan is unchanged.` });
     return;
   }
+  // Saved on its own: an answer of `{}` sends nothing on the bus to save it.
+  board.lastLeadAt = writtenAt;
+  saveBoard(board);
   for (const id of replan.retire) {
     try {
       bus.send(PLANNER, { type: "retire", task_id: id, reason: replan.note });

@@ -417,7 +417,8 @@ const INBOX_LABEL = "Messages to the lead since your last turn:";
 const RESULT_LABEL = "Its worker's result:\n";
 
 /**
- * Every message a run sent the lead since its last turn (`board.lastLeadAt`),
+ * Every message a run sent the lead since its last turn that gave a usable
+ * answer (`board.lastLeadAt`),
  * oldest first, as `- <role> <run> (task tN): <text>` — the text whole up to
  * LEAD_INBOX_MESSAGE_CHARS, where the digest keeps a line of the last few
  * log entries. Over `maxChars` the OLDEST go, and a line says how many.

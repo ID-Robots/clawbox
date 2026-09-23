@@ -240,8 +240,10 @@ export interface TeamBoard {
   dynamic: boolean;
   /**
    * When the lead's last turn was written (ms): its inbox, and the message
-   * that calls it back, are what was said to the lead after this. 0 before
-   * its first turn — and on a board from before the lead had an inbox.
+   * that calls it back, are what was said to the lead after this. Set only
+   * once that turn gave a usable answer — a lead that failed or answered
+   * nothing usable leaves its inbox unread. 0 before its first such turn —
+   * and on a board from before the lead had an inbox.
    */
   lastLeadAt: number;
   /** The one review over the merged result (review mode `final`), once it ruled. */
