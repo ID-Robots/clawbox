@@ -297,7 +297,11 @@ jobs:
           set -o pipefail
           args=()
           if [ -n "$GREP_FILTER" ]; then
-            args=(--grep "$GREP_FILTER")
+            # Every shard gets the same grep, and it can leave one of them with
+            # nothing to run (`chat` is only in core). An empty shard is not a
+            # failure — without a grep it still is, since then every shard has
+            # specs by definition.
+            args=(--grep "$GREP_FILTER" --pass-with-no-tests)
           fi
           bunx playwright test --config e2e-install/playwright.config.ts "${args[@]}"
 

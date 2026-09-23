@@ -60,6 +60,16 @@ test.describe("power restart", () => {
     try {
       await waitForContainerStopped();
     } catch {
+      // The force-stop stands in for a reboot that WAS dispatched and did not
+      // propagate. With no answer from the route there is no evidence it was:
+      // the connection may have failed before the request reached it, and a
+      // force-stop would then pass this test with no reboot in it — the
+      // defect above, by another door.
+      if (!dispatched) {
+        throw new Error(
+          "the power request got no answer and the container never exited — no evidence the reboot was dispatched",
+        );
+      }
       console.warn(
         "[power] systemctl reboot did not exit the container within the window; " +
         "force-stopping (CI Docker-in-systemd flake).",
