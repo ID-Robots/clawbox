@@ -134,9 +134,14 @@ export interface ProviderCatalog {
 // one thing they still contribute to a live row is a `hint`, which no
 // enumeration returns.
 export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5", hint: "Default. Most capable." },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest, near-frontier." },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Speed + intelligence." },
-  { id: "claude-opus-5", label: "Claude Opus 5", hint: "Default. Most capable." },
+  // Still selectable, and still what a box that explicitly picked it keeps
+  // running: the 2026-09-22 move changed which id a box with NO pick lands on,
+  // not which ids exist. Never spelled `claude-opus-5.5` — the provider-native
+  // id uses dashes, and the dot spelling resolves nowhere.
+  { id: "claude-opus-5", label: "Claude Opus 5", hint: "Previous generation." },
 ] as const;
 
 /**
@@ -159,10 +164,22 @@ export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
  * picker while these two still write this id — deliberate, per the ruling that
  * put Opus 5 here, and the point to revisit if it happens.
  *
+ * Yanko moved it from `claude-opus-5` to `claude-opus-5-5` on 2026-09-22. The
+ * ruling above is unchanged in kind — the newest Opus is still what a box with
+ * nothing named lands on — only in which id that is. What the move does NOT do
+ * is touch a box that already named one. This constant is the answer to "no
+ * model was named": the active primary and the box's own configured rows are
+ * both consulted ahead of it (chat/model's `defaultModelForProvider` is the
+ * last branch of three), and `ai_model_explicit_picks` is carried forward
+ * untouched across a provider switch. So a box holding
+ * `anthropic/claude-opus-5` keeps running Opus 5, and no migration rewrites a
+ * stored pick. Opus 5 stays in ANTHROPIC_MODELS above as an ordinary
+ * selectable row for the same reason.
+ *
  * Hermes never reads it: there the recommendation comes from the harness's own
  * `/api/model/recommended-default` (src/lib/hermes-model-options.ts).
  */
-export const ANTHROPIC_DEFAULT_MODEL_ID = "claude-opus-5";
+export const ANTHROPIC_DEFAULT_MODEL_ID = "claude-opus-5-5";
 
 // OpenAI API key models — cold-start display only, like every list here.
 // There is no longer a generation allowlist at the catalog route for openai:
