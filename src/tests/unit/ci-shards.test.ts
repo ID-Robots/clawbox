@@ -66,7 +66,9 @@ function runBlock(text: string, stepName: string): string {
 function bash(script: string, env: Record<string, string>, cwd = REPO): { status: number; out: string } {
   try {
     const out = execFileSync("bash", ["-c", script], {
-      cwd, env: { PATH: process.env.PATH ?? "", ...env }, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
+      // Only what the script is given, so nothing from the runner's own
+      // environment (a GITHUB_OUTPUT, a CHANGED_FILES) can answer for it.
+      cwd, env: { NODE_ENV: "test", PATH: process.env.PATH ?? "", ...env }, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"],
     });
     return { status: 0, out };
   } catch (err) {
