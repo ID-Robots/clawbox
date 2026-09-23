@@ -809,6 +809,7 @@ export const zh: Record<string, string> = {
   "codingAgent.team.agents": "{total} 个代理在此工作 — 规划者 {planner} · 工作者 {workers} · 审核者 {reviewers}",
   "codingAgent.team.branch": "在分支 {branch} 上，源自 {base}",
   "codingAgent.team.messagesTitle": "消息（{n}）",
+  "codingAgent.team.inboxTitle": "负责人收件箱（{n}）",
   "codingAgent.team.messageToLead": "发给负责人",
   "codingAgent.team.messageToAssistant": "发给助手",
   "codingAgent.team.messageToRun": "发给 {run}",

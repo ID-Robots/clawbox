@@ -1569,6 +1569,11 @@ interface TeamMetricsPayload {
   tasksRejected: number;
   tokensUsed: number;
   wallMs: number;
+  /** Absent from an older server. */
+  messagesSent?: number;
+  messagesToLead?: number;
+  messagesToSibling?: number;
+  messagesUndelivered?: number;
 }
 
 interface TeamPayload {
@@ -1632,7 +1637,10 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
     parts.push(
       `Metrics: runs planner ${m.plannerRuns}, worker ${m.workerRuns}, reviewer ${m.reviewerRuns}, lead ${m.leadRuns}; `
       + `tasks planned ${m.tasksPlanned}, added ${m.tasksAdded}, retired ${m.tasksRetired}, accepted first try ${m.tasksAcceptedFirstTry}, rejected ${m.tasksRejected}; `
-      + `tokens ${m.tokensUsed}; wall ${Math.round(m.wallMs / 1000)} s.`,
+      + `tokens ${m.tokensUsed}; wall ${Math.round(m.wallMs / 1000)} s.`
+      + (typeof m.messagesSent === "number"
+        ? ` Messages: ${m.messagesSent} sent — ${m.messagesToLead ?? 0} to the lead, ${m.messagesToSibling ?? 0} to a sibling, ${m.messagesUndelivered ?? 0} not delivered.`
+        : ""),
     );
   }
   if (team.finalReview) {
@@ -1849,7 +1857,7 @@ export function registerTeamRunTools(reg: Registrar): void {
 
   reg.tool(
     "team_message",
-    `Send ONE short message from this run to the rest of your coding team while you work. to="sibling" reaches another run of the team that is still working (to_run_id, e.g. run-ab12cd34) in its current turn; to="lead" puts it on the team's board, which the orchestrator and the owner read — nobody answers there; to="owner_agent" posts it into the chat of this box's assistant, who may steer you with a reply. Use it only when you are blocked: you need a teammate's output first, the files your task names do not exist or are wrong, or a decision only the owner can take. Never for progress reports, and never to acknowledge a message you received — a received message needs no reply. Plain text, at most ${MAX_TEAM_MESSAGE_CHARS} characters; ${MAX_TEAM_MESSAGES_PER_WINDOW} per ${TEAM_MESSAGE_WINDOW_MS / 60_000} minutes and ${MAX_TEAM_MESSAGES_PER_RUN} per run.`,
+    `Send ONE short message from this run to the rest of your coding team while you work. to="sibling" reaches another run of the team that is still working (to_run_id, e.g. run-ab12cd34) in its current turn; to="lead" puts it on the team's board, which the orchestrator and the owner read — nobody answers there; to="owner_agent" posts it into the chat of this box's assistant, who may steer you with a reply. Message a sibling when your task needs a file, name, schema or API shape a teammate owns that is not in your folder yet: ask for exactly that; if a sibling asks you for one, reply once with the exact answer. Message the lead when a task on the board is wrong for the goal: already done, a duplicate of yours, or impossible as written. Message the owner's assistant only for a decision only the owner can take. Never for progress reports, and never to acknowledge a message you received. Plain text, at most ${MAX_TEAM_MESSAGE_CHARS} characters; ${MAX_TEAM_MESSAGES_PER_WINDOW} per ${TEAM_MESSAGE_WINDOW_MS / 60_000} minutes and ${MAX_TEAM_MESSAGES_PER_RUN} per run.`,
     {
       to: zEnumOf(TEAM_MESSAGE_TARGETS, "Who gets it: \"sibling\" (another run of your team), \"lead\" (the team's board) or \"owner_agent\" (the box's assistant)."),
       text: zText(MAX_TEAM_MESSAGE_CHARS, "What to say, in plain text: the one thing that blocks you and what you need."),

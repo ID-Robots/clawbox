@@ -399,6 +399,17 @@ describe("teamMetrics", () => {
       task("t4", { status: "complete", attempts: 1, origin: "lead", review: { verdict: "accepted", notes: "", at: 1 } }),
       task("t5", { status: "rejected", attempts: 2, rejections: 2, review: { verdict: "rejected", notes: "no", at: 1 } }),
     ];
+    // What the runs said: two to a sibling (the ask and its one answer), one
+    // to the lead, one to the assistant the box could not hand on, and one
+    // whose payload could not be read back — sent, but to nobody in particular.
+    const said = (from: string, payload: Record<string, unknown> | undefined) => ({ ts: 2, actor: worker(from), type: "message" as const, message: `worker ${from} → …`, payload });
+    b.log.push(
+      said("run-work0002", { from: "run-work0002", to: "sibling", toRunId: "run-work0001", text: "Which fields does the invoice schema have?" }),
+      said("run-work0001", { from: "run-work0001", to: "sibling", toRunId: "run-work0002", text: "id, total, dueAt — in src/schema.ts." }),
+      said("run-work0002", { from: "run-work0002", to: "lead", text: "t3 duplicates t2: both build the cart." }),
+      { ts: 3, actor: PLANNER, type: "message", message: "planner → the assistant (not delivered: NO_SESSION): Stripe?", payload: { from: "run-plan0001", to: "owner_agent", text: "Stripe or PayPal?", delivered: false, code: "NO_SESSION" } },
+      said("run-work0003", undefined),
+    );
     b.status = "failed";
     b.finishedAt = 61_000;
     expect(lib.teamMetrics(b)).toEqual({
@@ -413,6 +424,10 @@ describe("teamMetrics", () => {
       tasksRejected: 2,
       tokensUsed: 12_000,
       wallMs: 60_000,
+      messagesSent: 5,
+      messagesToLead: 1,
+      messagesToSibling: 2,
+      messagesUndelivered: 1,
     });
     expect(lib.teamAgents(b)).toEqual({ planner: 1, workers: 3, reviewers: 2, leads: 1, total: 7 });
     // A team at work: the clock runs to now.
@@ -429,8 +444,20 @@ describe("teamMetrics", () => {
     expect(b.finishedAt).toBe(b.updatedAt);
     lib.saveBoard(b);
     const raw = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-team", `${b.id}.json`), "utf8"));
-    expect(raw.metrics).toMatchObject({ tasksPlanned: 1, tasksAdded: 0, tokensUsed: 0 });
+    expect(raw.metrics).toMatchObject({ tasksPlanned: 1, tasksAdded: 0, tokensUsed: 0, messagesSent: 0, messagesToLead: 0, messagesToSibling: 0, messagesUndelivered: 0 });
     expect(lib.loadBoard(b.id)).toMatchObject({ finishedAt: b.finishedAt, metrics: { tasksPlanned: 1 } });
+  });
+
+  it("counts the team messages postMessage wrote, and counts them again from the log read back", () => {
+    const b = board();
+    b.runs.push({ id: "run-aaaaaaaa", role: "worker", taskId: "t1" }, { id: "run-bbbbbbbb", role: "worker", taskId: "t2" });
+    lib.postMessage(b, worker("run-aaaaaaaa"), { from_run_id: "run-aaaaaaaa", to: "sibling", to_run_id: "run-bbbbbbbb", text: "What does cart.ts export?" }, 1_000);
+    lib.postMessage(b, worker("run-bbbbbbbb"), { from_run_id: "run-bbbbbbbb", to: "sibling", to_run_id: "run-aaaaaaaa", text: "addItem(sku, qty)", undelivered: "NOT_DELIVERED" }, 2_000);
+    lib.postMessage(b, worker("run-bbbbbbbb"), { from_run_id: "run-bbbbbbbb", to: "lead", text: "t3 is already done by t2." }, 3_000);
+    const counted = { messagesSent: 3, messagesToLead: 1, messagesToSibling: 2, messagesUndelivered: 1 };
+    expect(lib.teamMetrics(b)).toMatchObject(counted);
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)!.metrics).toMatchObject(counted);
   });
 
   it("reads a board from before the shape, the lead and the figures as the default team", () => {

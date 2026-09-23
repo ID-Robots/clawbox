@@ -50,6 +50,8 @@ export interface TeamLogEntryView {
   ts: number;
   actor: { kind: string; id?: string };
   type: string;
+  /** The task the entry is about — for a message, the sender's task. */
+  task_id?: string;
   message: string;
   /** A `message` entry's payload (coding-team-board.ts TeamMessagePayload); other entries' payloads are not read here. */
   payload?: Record<string, unknown>;
@@ -241,6 +243,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
   // retired read "3 of 4 tasks done" beside its Done badge.
   const counted = team ? team.tasks.filter((x) => x.status !== "retired").length : 0;
   const messages = team ? team.log.map((e) => ({ e, m: teamMessageOf(e) })).filter((x): x is { e: TeamLogEntryView; m: TeamMessageView } => x.m !== null) : [];
+  const inbox = messages.filter(({ m }) => m.to === "lead");
 
   /** One team message: who, to whom, and the words — whole, since the board is where the lead reads them. */
   const messageLine = (e: TeamLogEntryView, m: TeamMessageView) => (
@@ -440,6 +443,23 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
                 </li>
               ))}
             </ul>
+          )}
+          {/* What was put to the lead, on its own: a task a worker says is
+              wrong for the goal, a blocker — the lines the owner acts on. */}
+          {inbox.length > 0 && (
+            <div className="mt-2" data-testid="coding-team-inbox">
+              <p className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.team.inboxTitle", { n: inbox.length })}</p>
+              <ul className="mt-1 space-y-0.5 text-[11px] text-amber-200/90">
+                {inbox.slice(-MESSAGES_SHOWN).map(({ e, m }, i) => (
+                  <li key={`${e.ts}-${i}`} className="break-words" data-testid="coding-team-inbox-message">
+                    <span className="text-[var(--text-secondary)]">{m.role} {m.from}</span>
+                    {e.task_id && <span> · {e.task_id}</span>}
+                    {" · "}
+                    <span className="whitespace-pre-wrap text-[var(--text-primary)]">{m.text}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           {/* What the team's runs said — to each other, to the lead, to the
               assistant. On the board itself and not only in the log, because

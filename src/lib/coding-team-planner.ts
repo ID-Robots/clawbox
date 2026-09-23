@@ -45,6 +45,7 @@ const TASK_RULES = [
   "Each task_description must stand on its own: say what to build or change, in which files, and how the worker verifies it — it is the whole brief that worker gets.",
   `Each task_description must be at most ${MAX_TASK_DESCRIPTION_CHARS} characters. Keep shared context concise; describe disjoint file ownership for parallel work and add an integration task depending on the workers when needed.`,
   "files_hint lists the files or folders the task should touch; the team watches for a worker straying outside it.",
+  "When two tasks share a contract — an API shape, a schema, a module path — say in BOTH task_descriptions which task owns it, and that the other task's worker must ask that task's worker for it with team_message (to=\"sibling\") rather than invent it.",
 ];
 
 export const PLANNER_BRIEF = [

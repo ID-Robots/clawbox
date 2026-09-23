@@ -1109,3 +1109,23 @@ describe("the team's figures", () => {
     expect(onDisk.metrics).toEqual(done.metrics);
   });
 });
+
+describe("the worker's brief: when to use team_message", () => {
+  it("names the sibling, lead and owner triggers in that order, and still forbids progress reports and acknowledgements", () => {
+    const brief = team.WORKER_BRIEF;
+    // A sibling, for a contract a teammate owns — by the run id the task text lists.
+    expect(brief).toContain('to="sibling"');
+    expect(brief).toContain("under 'Teammates at work now'");
+    expect(brief).toContain("needs a file, a name, a schema or an API shape that a teammate owns");
+    expect(brief).toContain("answer it once with the exact answer");
+    // The lead, for a task on the board that is wrong for the goal.
+    expect(brief).toContain('to="lead"');
+    expect(brief).toContain("already done, it duplicates yours, or it cannot be done as written");
+    // The owner's assistant, only for the owner's decision.
+    expect(brief).toMatch(/owner's assistant \(to="owner_agent"\) only for a decision only the owner can take/);
+    expect(brief.indexOf('to="sibling"')).toBeLessThan(brief.indexOf('to="lead"'));
+    expect(brief.indexOf('to="lead"')).toBeLessThan(brief.indexOf('to="owner_agent"'));
+    expect(brief).toContain("Never send a team_message for progress reports");
+    expect(brief).toContain("never to acknowledge a message a teammate sent you");
+  });
+});

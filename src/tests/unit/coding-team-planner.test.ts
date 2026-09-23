@@ -344,6 +344,13 @@ describe("the lead's view and words", () => {
     expect(REPLAN_BRIEF).toContain(`at most ${MAX_TASK_DESCRIPTION_CHARS} characters`);
   });
 
+  it("has two tasks that share a contract say, in both, which owns it and that the other asks for it", () => {
+    for (const brief of [PLANNER_BRIEF, REPLAN_BRIEF]) {
+      expect(brief).toContain("When two tasks share a contract — an API shape, a schema, a module path — say in BOTH task_descriptions which task owns it");
+      expect(brief).toMatch(/ask that task's worker for it with team_message \(to="sibling"\) rather than invent it/);
+    }
+  });
+
   it("gives the lead the settled task, its result, what it may change and the board — inside the cap", async () => {
     const { createBoard, postTask } = await import("@/lib/coding-team-board");
     const board = createBoard({ goal: "g".repeat(3_900), projectId: null, directory: "/p", source: "owner" }, { kind: "owner" });

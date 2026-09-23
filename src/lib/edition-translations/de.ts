@@ -798,6 +798,7 @@ export const de: Record<string, string> = {
   "codingAgent.team.agents": "{total} Agenten haben hier gearbeitet — Planer {planner} · Worker {workers} · Reviewer {reviewers}",
   "codingAgent.team.branch": "auf Branch {branch}, von {base}",
   "codingAgent.team.messagesTitle": "Nachrichten ({n})",
+  "codingAgent.team.inboxTitle": "Posteingang der Leitung ({n})",
   "codingAgent.team.messageToLead": "an die Leitung",
   "codingAgent.team.messageToAssistant": "an den Assistenten",
   "codingAgent.team.messageToRun": "an {run}",
