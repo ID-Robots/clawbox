@@ -419,13 +419,26 @@ describe("leadShouldRun — a lead run only when there is something to decide", 
       "Built the form.\nblocked: waiting on t1's form ids",
       "Built the form.\n\nNOT COMMITTED: fatal: cannot lock ref",
       "Built the form.\n\nMERGE CONFLICT: CONFLICT (content): Merge conflict in index.html",
+      "Built the form.\n**BLOCKED**: t3 needs the owner's API key.",
+      "Built the form.\n\n## Could not finish\n- Wiring the totals: app.js is not there yet.",
     ]) {
       const board = boardOf([{ status: "complete", verdict: "accepted", result }, { status: "pending" }]);
       expect(leadShouldRun(board, ["t1"], 0), result).toMatchObject({ run: true, why: expect.stringMatching(/^t1's result says: /) });
     }
-    // The words inside a line are not a blocker.
-    const fine = boardOf([{ status: "complete", verdict: "accepted", result: "All done — nothing BLOCKED, nothing MISSING; I cannot see a gap." }, { status: "pending" }]);
-    expect(leadShouldRun(fine, ["t1"], 0)).toMatchObject({ run: false });
+    // The words inside a line, or inside a longer word, are not a blocker — and
+    // neither is the report's "could not finish" section with nothing in it.
+    for (const result of [
+      "All done — nothing BLOCKED, nothing MISSING; I cannot see a gap.",
+      "cannot-fail tests pass.",
+      "MISSINGNO is the sprite's name.",
+      "Changed index.html.\nCould not finish: nothing.",
+      "Changed index.html.\n**Could not finish:** None.",
+      "Changed index.html.\n\n## Could not finish\n\nNone — all of it is done.",
+      "Changed index.html.\nCould not finish:\n- n/a",
+    ]) {
+      const fine = boardOf([{ status: "complete", verdict: "accepted", result }, { status: "pending" }]);
+      expect(leadShouldRun(fine, ["t1"], 0), result).toMatchObject({ run: false });
+    }
   });
 
   it("runs when nothing left can start and the goal is not complete — a dependency chain broke", () => {

@@ -323,15 +323,28 @@ export function leadRoom(ctx: ReplanContext): { adds: number; retires: number; r
  * A line of a worker's result that says it could not do its part: a
  * blocker in its own words, or the refusal the orchestrator appends when
  * the work could not be committed or merged. Read at the start of a line,
- * after any list or emphasis marks.
+ * after any list or emphasis marks, as a whole word.
  */
-const BLOCKER_LINE = /^(?:BLOCKED|[Bb]locked:|MISSING|[Cc]annot\b|[Cc]ould not\b|NOT COMMITTED|MERGE CONFLICT|MERGE FAILED)/;
+const BLOCKER_LINE = /^(?:(?:BLOCKED|MISSING|[Cc]annot|[Cc]ould not|NOT COMMITTED|MERGE CONFLICT|MERGE FAILED)(?![\w-])|[Bb]locked:)/;
+/** What a report section with nothing in it says: "Could not finish: nothing." */
+const NOTHING = /^(?:none|nothing|n\/a)\b/i;
+
+const bare = (line: string) => line.replace(/^[\s>*_#-]+/, "");
 
 function blockerLine(result: string | null): string | null {
   if (!result) return null;
-  for (const raw of result.split("\n")) {
-    const line = raw.replace(/^[\s>*_#-]+/, "");
-    if (BLOCKER_LINE.test(line)) return line;
+  const lines = result.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = bare(lines[i]);
+    if (!BLOCKER_LINE.test(line)) continue;
+    // A worker's final message is asked for "anything you could not finish",
+    // and one with nothing to say still writes the words: what the line says
+    // after its colon — or, for a heading, on the next line — decides.
+    const colon = line.indexOf(":");
+    const after = colon < 0 ? "" : line.slice(colon + 1).replace(/^[\s*_]+/, "").trim();
+    const heading = /^\s*#/.test(lines[i]) || (colon >= 0 && !after);
+    const said = after || (heading ? bare(lines.slice(i + 1).find((l) => l.trim()) ?? "") : "");
+    if (!NOTHING.test(said)) return line;
   }
   return null;
 }
