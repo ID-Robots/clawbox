@@ -72,3 +72,5 @@ Found a vulnerability? **Do not open a public issue.** Email **yanko@idrobots.co
 ## Code of Conduct
 
 Be respectful. We're building something cool together. 🤝
+
+<!-- CI wall-time probe for TASK-1127; this PR is never merged. -->
