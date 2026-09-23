@@ -46,9 +46,12 @@ OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
 export OPENCLAW_STATE_DIR
 # Doctor repairs STATE here, never the service: the gateway this script is the
 # ExecStartPre of is ClawBox's own system unit, and systemd is mid-start of it.
-# 2026.9.3's `doctor --fix` refuses maintenance outright unless it can account
-# for the gateway's service itself, which on this box it cannot — see
-# OPENCLAW_SERVICE_REPAIR_POLICY in install.sh for the whole of why. Exported
+# The pinned core's `doctor --fix` refuses maintenance outright unless it can
+# account for the gateway's service itself, which on this box it cannot — see
+# OPENCLAW_SERVICE_REPAIR_POLICY in install.sh for the whole of why. 2026.9.3
+# brought the gate; the published 2026.9.4 tarball still reads the same
+# variable (`dist/doctor-service-repair-policy-*.mjs`), so the escape still
+# exists and is still the one this box needs. Exported
 # rather than placed on the one call below because every `openclaw` this script
 # runs is on the same footing.
 export OPENCLAW_SERVICE_REPAIR_POLICY="external"
@@ -546,9 +549,11 @@ clawbox_core_residual_issues() {
   # BOTH module extensions, because which one a chunk gets is the bundler's
   # decision and it has already changed once. Counted over the whole `dist/`
   # tree: 2026.8.1 is 7,219 `*.js` and 1 `*.mjs`; 2026.9.3 is 1,731 `*.js` and
-  # 5,383 `*.mjs`, with this declaration in no `.js` file at all. Still an
-  # allow-list rather than every file, so a `.d.ts` declaration or a `.map`
-  # carrying the same text as DATA is never a candidate to import.
+  # 5,383 `*.mjs`; the 2026.9.4 pin is 1,784 `*.js` and 5,477 `*.mjs` — and on
+  # both 9.x cores this declaration is in no `*.js` file at all (counted on the
+  # published tarballs, TASK-1088). Still an allow-list rather than every file,
+  # so a `.d.ts` declaration or a `.map` carrying the same text as DATA is never
+  # a candidate to import.
   #
   # A LIST, not a first hit, because the declaration is in TWO files on both
   # cores: the library chunk that exports it, and `dist/worker/worker.mjs` — a
@@ -7799,6 +7804,9 @@ dist, installed = sys.argv[1], sys.argv[2]
 # and `node_modules/@openclaw/ai/dist/host-*.mjs` (double-quoted, the copy the
 # Anthropic extension actually imports). Both are rewritten, or the request
 # still says 2.1.75 while the worker file says otherwise (seen on a box).
+# Unchanged by the 2026.9.4 pin: that tarball still carries the constant in
+# `dist/worker/worker.mjs`, still backtick-quoted and still 2.1.75, so this
+# rewrite has the same two targets and the same reason to run (TASK-1088).
 pattern = re.compile(r"ANTHROPIC_CLAUDE_CODE_VERSION(\s*=\s*)([`\"'])(\d+\.\d+\.\d+)\2")
 
 def tuple_of(v):

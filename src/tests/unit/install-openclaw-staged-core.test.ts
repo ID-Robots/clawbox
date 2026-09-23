@@ -89,16 +89,16 @@ describe("promote_staged_openclaw_core", () => {
   it("flushes the stage BEFORE the swap, renames it into place, and drops the old tree after", () => {
     const p = makePrefix({});
     try {
-      const stage = stageCore(p.prefix, "2026.9.3");
+      const stage = stageCore(p.prefix, "2026.9.4");
       const r = bash(p, `promote_staged_openclaw_core ${JSON.stringify(stage)}`);
       expect(r.status, r.stderr).toBe(0);
       const live = path.join(p.prefix, "lib", "node_modules", "openclaw");
-      expect(JSON.parse(readFileSync(path.join(live, "package.json"), "utf-8")).version).toBe("2026.9.3");
+      expect(JSON.parse(readFileSync(path.join(live, "package.json"), "utf-8")).version).toBe("2026.9.4");
       // The launcher is npm's relative link, and it resolves from the live bin.
       const launcher = path.join(p.prefix, "bin", "openclaw");
       expect(lstatSync(launcher).isSymbolicLink()).toBe(true);
       expect(readlinkSync(launcher)).toBe("../lib/node_modules/openclaw/openclaw.mjs");
-      expect(spawnSync("bash", [launcher], { encoding: "utf-8" }).stdout).toContain("OpenClaw 2026.9.3 (new)");
+      expect(spawnSync("bash", [launcher], { encoding: "utf-8" }).stdout).toContain("OpenClaw 2026.9.4 (new)");
       // Nothing of the old core or the stage is left behind.
       expect(existsSync(path.join(p.prefix, "lib", "node_modules", ".openclaw-previous"))).toBe(false);
       expect(existsSync(stage)).toBe(false);
@@ -118,12 +118,12 @@ describe("promote_staged_openclaw_core", () => {
       mkdirSync(elsewhere, { recursive: true });
       writeFileSync(path.join(elsewhere, "package.json"), JSON.stringify({ name: "openclaw", version: "2026.7.1" }));
       symlinkSync(elsewhere, path.join(p.prefix, "lib", "node_modules", "openclaw"));
-      const stage = stageCore(p.prefix, "2026.9.3");
+      const stage = stageCore(p.prefix, "2026.9.4");
       const r = bash(p, `promote_staged_openclaw_core ${JSON.stringify(stage)}`);
       expect(r.status, r.stderr).toBe(0);
       const live = path.join(p.prefix, "lib", "node_modules", "openclaw");
       expect(lstatSync(live).isSymbolicLink()).toBe(false);
-      expect(JSON.parse(readFileSync(path.join(live, "package.json"), "utf-8")).version).toBe("2026.9.3");
+      expect(JSON.parse(readFileSync(path.join(live, "package.json"), "utf-8")).version).toBe("2026.9.4");
       // The link's target is somebody else's folder: untouched.
       expect(existsSync(path.join(elsewhere, "package.json"))).toBe(true);
     } finally {
@@ -137,7 +137,7 @@ describe("promote_staged_openclaw_core", () => {
     // nor a staged launcher, the tree is in place and nothing starts it.
     const p = makePrefix({});
     try {
-      const stage = stageCore(p.prefix, "2026.9.3");
+      const stage = stageCore(p.prefix, "2026.9.4");
       rmSync(path.join(stage, "bin", "openclaw"));
       rmSync(path.join(p.prefix, "bin", "openclaw"));
       const r = bash(p, `promote_staged_openclaw_core ${JSON.stringify(stage)}`);
@@ -151,11 +151,11 @@ describe("promote_staged_openclaw_core", () => {
   it("accepts a live launcher link that still resolves into the promoted tree", () => {
     const p = makePrefix({});
     try {
-      const stage = stageCore(p.prefix, "2026.9.3");
+      const stage = stageCore(p.prefix, "2026.9.4");
       rmSync(path.join(stage, "bin", "openclaw"));
       const r = bash(p, `promote_staged_openclaw_core ${JSON.stringify(stage)}`);
       expect(r.status, r.stderr).toBe(0);
-      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.9.3");
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.9.4");
     } finally {
       rmSync(p.dir, { recursive: true, force: true });
     }
@@ -164,10 +164,10 @@ describe("promote_staged_openclaw_core", () => {
   it("works on a box with no core yet", () => {
     const p = makePrefix({ oldCore: false });
     try {
-      const stage = stageCore(p.prefix, "2026.9.3");
+      const stage = stageCore(p.prefix, "2026.9.4");
       const r = bash(p, `promote_staged_openclaw_core ${JSON.stringify(stage)}`);
       expect(r.status, r.stderr).toBe(0);
-      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.9.3");
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.9.4");
     } finally {
       rmSync(p.dir, { recursive: true, force: true });
     }
@@ -176,7 +176,7 @@ describe("promote_staged_openclaw_core", () => {
   it("puts the old core back when the staged tree cannot be moved in", () => {
     const p = makePrefix({});
     try {
-      const stage = stageCore(p.prefix, "2026.9.3");
+      const stage = stageCore(p.prefix, "2026.9.4");
       // A stage whose package tree has vanished under it: the second rename fails.
       const r = bash(p, `rm -rf ${JSON.stringify(path.join(stage, "lib", "node_modules", "openclaw"))}; promote_staged_openclaw_core ${JSON.stringify(stage)}`);
       expect(r.status).not.toBe(0);
@@ -192,7 +192,7 @@ describe("promote_staged_openclaw_core", () => {
   it("refuses to go on when the stage cannot be flushed, leaving the live core untouched", () => {
     const p = makePrefix({});
     try {
-      const stage = stageCore(p.prefix, "2026.9.3");
+      const stage = stageCore(p.prefix, "2026.9.4");
       const r = bash(p, `flush_core_to_disk() { return 1; }; promote_staged_openclaw_core ${JSON.stringify(stage)}`);
       expect(r.status).not.toBe(0);
       const live = path.join(p.prefix, "lib", "node_modules", "openclaw");
@@ -291,7 +291,7 @@ exit 0
     // A pin file the step reads its target from.
     const src = path.join(p.dir, "src");
     mkdirSync(path.join(src, "config"), { recursive: true });
-    writeFileSync(path.join(src, "config", "openclaw-target.txt"), `${opts.pin ?? "2026.9.3"}\n`);
+    writeFileSync(path.join(src, "config", "openclaw-target.txt"), `${opts.pin ?? "2026.9.4"}\n`);
     const program = [
       "set -uo pipefail",
       `NPM_PREFIX=${JSON.stringify(p.prefix)}`,
@@ -337,8 +337,8 @@ exit 0
       const npmCall = p.calls().find((c) => c.startsWith("npm "));
       // The prefix npm was handed IS the stage, and only the stage.
       expect(npmCall?.split(" --prefix ")[1]).toBe(path.join(p.prefix, ".openclaw-stage"));
-      expect(r.stdout).toContain("OpenClaw installed: OpenClaw 2026.9.3 (new)");
-      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.9.3");
+      expect(r.stdout).toContain("OpenClaw installed: OpenClaw 2026.9.4 (new)");
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.9.4");
       expect(existsSync(path.join(p.prefix, ".openclaw-stage"))).toBe(false);
       expect(p.calls().filter((c) => c.startsWith("flush ")).length).toBe(2);
     } finally {
@@ -390,7 +390,7 @@ exit 0
     try {
       const r = runStep(p, { npm: "wrong-version" });
       expect(r.status).not.toBe(0);
-      expect(r.stderr).toMatch(/not 2026\.9\.3 — leaving the core on the box as it is/);
+      expect(r.stderr).toMatch(/not 2026\.9\.4 — leaving the core on the box as it is/);
       expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
     } finally {
       rmSync(p.dir, { recursive: true, force: true });
