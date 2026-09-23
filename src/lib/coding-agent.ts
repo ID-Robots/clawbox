@@ -218,6 +218,7 @@ import {
   sweepRunWorktrees,
   type MergeHomeBlocker,
 } from "@/lib/coding-run-worktree";
+import { worktreeHintFor, worktreeHintText } from "@/lib/coding-worktree-paths";
 import {
   buildReviewFeedback,
   clampReviewRounds,
@@ -1388,6 +1389,15 @@ export interface CodingRun {
    */
   denials: CodingDenial[];
   /**
+   * How many of the refusals (`permissionDenials`, all of them, not the kept
+   * few) were a run in a worktree aiming a file tool at `<project>/<rel>`
+   * while `<worktree>/<rel>` was there — answered with a retry hint at the
+   * worktree path in the run's transcript (coding-worktree-paths.ts), and
+   * marked on its `denials` entry with `worktreePath`. A coding team reads
+   * them as soft: a note, not an alert, and never a rejection on their own.
+   */
+  worktreeHints: number;
+  /**
    * The owner's permission rules as they stood when this run STARTED.
    *
    * Frozen on the record for the same reason `effort`, `maxTurns` and `media`
@@ -1786,6 +1796,14 @@ export interface CodingDenial {
   text: string;
   rule: string | null;
   refusal: AllowRuleRefusal | null;
+  /**
+   * Where the run meant to go, when it works in a worktree and the refused
+   * action aimed at the same path in the project itself (`worktreeHintFor`):
+   * the path in its own folder — the one the retry hint named, where the
+   * harness could take one. Absent for every other refusal, and on a record
+   * from before the hint.
+   */
+  worktreePath?: string;
 }
 
 /** How many finished helpers a run record keeps — the newest; the counts by type keep the total. */
@@ -3543,8 +3561,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
           // the page words it from a fixed table, and an unknown code would
           // render as nothing beside a refusal that then explains itself twice.
           refusal: isAllowRuleRefusal(d.refusal) ? d.refusal : null,
+          ...(typeof d.worktreePath === "string" && path.isAbsolute(d.worktreePath) ? { worktreePath: d.worktreePath } : {}),
         }))
       : [],
+    worktreeHints: typeof raw.worktreeHints === "number" && Number.isFinite(raw.worktreeHints) && raw.worktreeHints > 0 ? Math.floor(raw.worktreeHints) : 0,
     // Re-validated rather than trusted: this list is what a resume hands to the
     // CLI, and the floor it had to clear when the run started may have risen.
     allowRules: normalizeAllowRules(raw.allowRules, allowRuleHomeContext()),
@@ -3981,6 +4001,14 @@ interface LiveRun {
    */
   pendingFiles: Map<string, string>;
   /**
+   * File tools a run in a worktree aimed at the project's own path, by
+   * tool_use id: the tool, and the same path in the worktree
+   * (`worktreeHintFor`). A refusal of one is answered with a retry hint.
+   */
+  worktreeTargets: Map<string, { tool: string; counterpart: string }>;
+  /** Worktree paths this spawn has already hinted: each is said once. */
+  worktreeHinted: Set<string>;
+  /**
    * Whether the run ever ASKED to write, confirmed or not.
    *
    * filesTouched holds only confirmed writes, which is right for reporting and
@@ -4277,6 +4305,8 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     outputBilledInSegment: 0,
     helperBilled: new Map<string, number>(),
     pendingFiles: new Map<string, string>(),
+    worktreeTargets: new Map<string, { tool: string; counterpart: string }>(),
+    worktreeHinted: new Set<string>(),
     sawWriteAttempt: false,
     sawThinking: false,
     thinkingSeen: 0,
@@ -6570,6 +6600,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         pushProgress(run, block.text);
       } else if (block.type === "tool_use" && typeof block.name === "string") {
         const input = (block.input && typeof block.input === "object" ? block.input : {}) as Record<string, unknown>;
+        // A run in a worktree pointing a file tool at the project's own path:
+        // kept until its result says whether it was refused (below).
+        const counterpart = typeof block.id === "string" && block.id ? worktreeHintFor(run.directory, block.name, input) : null;
+        if (counterpart) state.worktreeTargets.set(block.id as string, { tool: block.name, counterpart });
         switch (block.name) {
           case "Bash":
             run.commandsRun += 1;
@@ -6664,6 +6698,13 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         // A refusal comes back as an error result; only a clean one counts.
         if (block.is_error !== true) noteFile(run, pending);
       }
+      // Refused on the project's path from inside a worktree: the retry
+      // hint goes to the run now, while it can still act on it.
+      const aimed = state.worktreeTargets.get(block.tool_use_id);
+      if (aimed) {
+        state.worktreeTargets.delete(block.tool_use_id);
+        if (block.is_error === true) hintWorktree(run, state, aimed.tool, aimed.counterpart);
+      }
     }
     return;
   }
@@ -6712,6 +6753,20 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     }
     if (Array.isArray(event.permission_denials)) {
       const parsed = denialsFrom(event.permission_denials);
+      // The refusals a run in a worktree met on the project's own path, each
+      // marked with where it was pointed instead — and hinted now if its
+      // tool_result slipped by. Counted whole, not in the kept few: a team
+      // reads every one of them as a note, never as a rejection.
+      let hinted = 0;
+      event.permission_denials.forEach((entry, i) => {
+        const e = (entry && typeof entry === "object" ? entry : {}) as { tool_name?: unknown; tool_input?: unknown };
+        const counterpart = worktreeHintFor(run.directory, e.tool_name, e.tool_input);
+        if (!counterpart) return;
+        hinted += 1;
+        parsed[i].worktreePath = counterpart;
+        hintWorktree(run, state, e.tool_name as string, counterpart);
+      });
+      run.worktreeHints = (continuation ? run.worktreeHints : 0) + hinted;
       const described = parsed.map((d) => d.text);
       run.permissionDenials = (continuation ? run.permissionDenials : 0) + event.permission_denials.length;
       run.deniedActions = (continuation ? [...run.deniedActions, ...described] : described).slice(0, MAX_DENIALS_KEPT);
@@ -9958,6 +10013,8 @@ function spawnRun(
     outputBilledInSegment: 0,
     helperBilled: new Map<string, number>(),
     pendingFiles: new Map<string, string>(),
+    worktreeTargets: new Map<string, { tool: string; counterpart: string }>(),
+    worktreeHinted: new Set<string>(),
     sawWriteAttempt: false,
     sawThinking: false,
     thinkingSeen: 0,
@@ -10089,6 +10146,34 @@ function noteMessagesDelivered(run: CodingRun, messages: readonly RunMessage[]):
     marked += 1;
   }
   if (marked > 0) persist();
+}
+
+/** Different paths one spawn is pointed at before the box stops saying it: a run that keeps missing its folder is told a few times, not thirty. */
+const MAX_WORKTREE_HINTS = 3;
+
+/**
+ * Answer a refusal on the project's own path, met by a run working in a
+ * worktree, with where that path is in its folder (coding-worktree-paths.ts):
+ * the box's own note, put on the record and written to the streaming harness
+ * at once — the road the owner's messages take, so it is on the record, in
+ * the feed, and in the run's transcript as its next user turn (framed as the
+ * box's by runMessageTurn). The refusal itself stands; this only says where
+ * to retry. Once per path per spawn, a few paths at most, and only to a
+ * harness that takes it NOW: queued for a later spawn it would sit in the
+ * owner's queue and say where to retry after the work was over.
+ */
+function hintWorktree(run: CodingRun, state: LiveRun, tool: string, counterpart: string): void {
+  if (!state.streamInput || !state.stdinOpen) return;
+  if (state.worktreeHinted.has(counterpart) || state.worktreeHinted.size >= MAX_WORKTREE_HINTS) return;
+  state.worktreeHinted.add(counterpart);
+  try {
+    run.messages = appendRunMessage(run.messages, normalizeRunMessage(worktreeHintText(tool, run.directory, counterpart)), Date.now());
+  } catch {
+    // The queue is full, or the path is not plain text: no hint, the refusal stands as it is.
+    return;
+  }
+  persist(true);
+  flushRunMessages(run, state);
 }
 
 /**
@@ -10994,6 +11079,7 @@ function newRunRecord(fields: {
     permissionDenials: 0,
     deniedActions: [],
     denials: [],
+    worktreeHints: 0,
     allowRules: [...fields.settings.allowRules],
     // The folder is known the moment the id is; what lands in it is staged by
     // `stageInputs` a few lines into startRun, once the caller's paths have

@@ -245,6 +245,21 @@ export function teammateOf(text: string): { role: string; runId: string } | null
   return m ? { role: m[1], runId: m[2] } : null;
 }
 
+// ── The box's own note (coding-worktree-paths.ts) ───────────────────────────
+
+/**
+ * How a note the RUNNER writes starts: `[from ClawBox] …` — today only the
+ * retry hint a run in a worktree gets when an action of its was refused on
+ * the project's path (`worktreeHintText`). Written by the runner itself, never
+ * by a teammate: a teammate's message starts with its own verified prefix.
+ */
+export const BOX_NOTE_PREFIX = "[from ClawBox]";
+
+/** True for a queued message the runner wrote (`BOX_NOTE_PREFIX`). */
+export function isBoxNote(text: string): boolean {
+  return text.startsWith(`${BOX_NOTE_PREFIX} `);
+}
+
 /**
  * How a steering message is worded to the harness.
  *
@@ -254,11 +269,16 @@ export function teammateOf(text: string): { role: string; runId: string } | null
  *
  * A teammate's message is framed as a teammate's, with the one rule that keeps
  * two runs from talking in a circle: it is not answered just to acknowledge it.
+ * The box's own note is framed as the box's: a retry hint for the task in
+ * hand, not the owner's word.
  */
 export function runMessageTurn(text: string): string {
   const mate = teammateOf(text);
   if (mate) {
     return `[ClawBox: a message from ${mate.role} ${mate.runId}, another run of your coding team. It is information for the task you are already on — not a new task, and not from the person who started this run. Take it into account and carry on; do not start over, and do not answer it just to acknowledge it.]\n\n${text}`;
+  }
+  if (isBoxNote(text)) {
+    return `[ClawBox: a note from this box about an action of yours it refused. It is information for the task you are already on — not a new task, and not from the person who started this run. Retry the way it says and carry on; do not start over.]\n\n${text}`;
   }
   return `[ClawBox: a message from the person who started this run. It is about the task you are already on — take it into account and carry on; do not start over.]\n\n${text}`;
 }
@@ -277,8 +297,12 @@ export function runMessagesNote(messages: readonly RunMessage[]): string {
     ? waiting[0].text
     : waiting.map((m, i) => `${i + 1}. ${m.text}`).join("\n");
   const one = waiting.length === 1;
+  const fromBox = waiting.some((m) => isBoxNote(m.text));
   if (waiting.some((m) => teammateOf(m.text))) {
-    return `[ClawBox: ${one ? "a message" : `${waiting.length} messages`} sent while this run was working — from the person who started it, or, where a message starts [from <role> <run>], from another run of your coding team. Take ${one ? "it" : "them"} into account; do not answer a teammate just to acknowledge it.]\n\n${body}`;
+    return `[ClawBox: ${one ? "a message" : `${waiting.length} messages`} sent while this run was working — from the person who started it, or, where a message starts [from <role> <run>], from another run of your coding team${fromBox ? `, or, where it starts ${BOX_NOTE_PREFIX}, from this box about an action of yours it refused` : ""}. Take ${one ? "it" : "them"} into account; do not answer a teammate just to acknowledge it.]\n\n${body}`;
+  }
+  if (fromBox) {
+    return `[ClawBox: ${one ? "a message" : `${waiting.length} messages`} sent while this run was working — from the person who started it, or, where a message starts ${BOX_NOTE_PREFIX}, from this box about an action of yours it refused. Take ${one ? "it" : "them"} into account.]\n\n${body}`;
   }
   return `[ClawBox: ${one ? "a message" : `${waiting.length} messages`} from the person who started this run, sent while it was working. Take ${one ? "it" : "them"} into account.]\n\n${body}`;
 }

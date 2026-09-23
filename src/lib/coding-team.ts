@@ -21,7 +21,9 @@
  * Guardrails (v0): the board refuses any message its sender's role may not
  * send and logs the refusal; a worker that hit a permission denial, or that
  * touched files outside its task's files_hint, raises an ALERT (refusals of
- * read-only actions alone are a NOTE, and the task stays clean); after
+ * read-only actions alone are a NOTE, and the task stays clean — as are the
+ * ones on the project's own path that the runner answered with a retry hint
+ * at the worker's worktree; a look into the harness's state never is); after
  * MAX_ALERTS the team stops (a reviewer that could not start is alerted but
  * not counted; one that waits for room is neither). A failed task fails the
  * team unless other tasks can still run; a task the reviewer rejects is
@@ -78,6 +80,7 @@ import {
   type TeamRole,
 } from "@/lib/coding-team-messages";
 import { addWorkerWorktree, changedFiles, ensureTeamBranch, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
+import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
 import { FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, reviewerTask } from "@/lib/coding-team-reviewer";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
@@ -85,6 +88,7 @@ import {
   BoardAccessError,
   boardDigest,
   createBoard,
+  harnessStateDenial,
   isExhausted,
   isSettledTeamStatus,
   listBoards,
@@ -794,21 +798,39 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   // task stays clean (bench, 2026-09-22/23: such refusals rejected merged,
   // correct work and failed teams on the alert ceiling). So did a refused
   // WRITE outside its folders — a check script in /tmp (bench, 2026-09-23):
-  // the refusal is the proof. A refused write inside the worktree or the
-  // project is still an alert. Only when every refusal is on the record: the
-  // run keeps the first few, and one it did not keep may have been a write.
+  // the refusal is the proof. So did one the runner answered with a retry
+  // hint — a read OR a write aimed at `<project>/<rel>` from the worktree,
+  // where `<worktree>/<rel>` is (bench, 2026-09-23: a team failed on those
+  // with every deliverable on disk): the write stays refused, the worker was
+  // told where to retry, and the review judges what it made. A refused write
+  // inside the worktree or the project is still an alert, and so is a refused
+  // look into the harness's own state. Only when every refusal is judged: the
+  // run keeps the first few, and one it did not keep may have been a write —
+  // unless the runner counted it among the hinted ones.
   let refusedWrite = false;
   if (settled) {
     if (settled.permissionDenials > 0) {
       const n = settled.permissionDenials;
-      const named = settled.deniedActions.slice(0, 3).join("; ");
       const folders = worktree ? [worktree.path, board.directory] : [board.directory];
       const outsideWrite = (a: string) => outsideFolderWriteDenial(a, folders);
-      if (settled.deniedActions.length >= n && settled.deniedActions.every((a) => readOnlyDenial(a) || outsideWrite(a))) {
-        const what = settled.deniedActions.some(outsideWrite) ? "action(s) that changed nothing — reads, or writes" : "read-only action(s)";
-        bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} was refused ${n} ${what} outside its folder: ${named}`, read_only_refusals: n });
+      // Each refusal on the record, with where the runner pointed the worker
+      // instead; a record from before the structured list has its strings.
+      const kept: Array<{ text: string; worktreePath?: string }> = settled.denials?.length ? settled.denials : settled.deniedActions.map((text) => ({ text }));
+      const hinted = kept.filter((d) => d.worktreePath);
+      const others = kept.filter((d) => !d.worktreePath).map((d) => d.text);
+      const hintedCount = Math.max(settled.worktreeHints ?? 0, hinted.length);
+      const judged = kept.length + (hintedCount - hinted.length) >= n;
+      const harness = kept.some((d) => readOnlyDenial(d.text) && harnessStateDenial(d.text));
+      if (judged && !harness && others.every((a) => readOnlyDenial(a) || outsideWrite(a))) {
+        const rest = others.length === 0 ? "" : others.some(outsideWrite) ? "reads, or writes" : "read-only";
+        const what = hintedCount > 0
+          ? `action(s) that changed nothing — ${hintedCount} aimed at the project instead of its worktree, each answered with a retry hint at the worktree path${rest ? `; the rest ${rest} outside its folder` : ""}`
+          : rest === "read-only" ? "read-only action(s) outside its folder" : "action(s) that changed nothing — reads, or writes outside its folder";
+        const named = [...others, ...hinted.map((d) => `${d.text} → ${d.worktreePath}`)].slice(0, 3).join("; ");
+        bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} was refused ${n} ${what}: ${named}`, read_only_refusals: n });
       } else {
         refusedWrite = true;
+        const named = [...others, ...hinted.map((d) => d.text)].slice(0, 3).join("; ");
         bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} was refused ${n} action(s): ${named}` });
       }
     }
@@ -873,9 +895,12 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
     // The reservations are read on every ask: a launch lands while we wait.
     const room = await teamSpawnSlot(role, starting.size);
     if (!room.ok) return room;
+    // The reviewer works in the project, on the merged work: a path the worker
+    // wrote in its worktree — gone by now — is said in the project instead.
+    const here = (text: string) => toFolderPaths(text, board.directory, board.directory);
     try {
       return await startRun({
-        task: reviewerTask({ taskId: task.task_id, description: task.task_description, files: work.files, report: work.report, goal: board.goal }),
+        task: reviewerTask({ taskId: task.task_id, description: here(task.task_description), files: work.files, report: here(work.report), goal: board.goal }),
         projectId: board.projectId,
         directory: board.directory,
         source,
@@ -944,7 +969,8 @@ async function finalReview(team: LiveTeam, source: CodingRunSource): Promise<{ v
   let run: CodingRun;
   try {
     run = await startRun({
-      task: finalReviewerTask({ ...where, digest: boardDigest(board, null, Math.min(MAX_DIGEST_CHARS, finalReviewRoom(where))) }),
+      // Workers' worktree paths in their results said in the project, where this reviewer reads: never longer.
+      task: finalReviewerTask({ ...where, digest: toFolderPaths(boardDigest(board, null, Math.min(MAX_DIGEST_CHARS, finalReviewRoom(where))), board.directory, board.directory) }),
       projectId: board.projectId,
       directory: board.directory,
       source,
@@ -1133,37 +1159,56 @@ const DIGEST_LABEL = "\n\nThe team's board — every other task, then the latest
  * previous attempt was rejected — and the whole board, compact
  * (`boardDigest`), in whatever room that leaves inside the run route's cap.
  * `folder` is the worker's own worktree, when it has one.
+ *
+ * A worker in a worktree is told that folder as its ONLY one, and the
+ * project folder is never named to it: every path in the text — the goal's,
+ * a task description's, a previous rejection's, the board's, a sibling's
+ * worktree — is said inside its own folder (`toFolderPaths`), and the files
+ * its task names are given as absolute paths there (`hintInFolder`). Told
+ * the project's path, or a hint it took as relative to the project, a
+ * worker read and wrote `<project>/<file>`, was refused (the run is
+ * contained to its worktree), and the refusal failed the task (bench,
+ * 2026-09-22/23).
  */
 export function workerTask(board: TeamBoard, task: TeamTask, folder: string | null = null): string {
+  const own = folder && folder !== board.directory ? folder : null;
+  const here = (text: string): string => (own ? toFolderPaths(text, board.directory, own) : text);
   // The task line comes FIRST: a run's commit subject and its row in the
   // app are the task text's first line, and "Team goal: …" four times over
   // told the owner nothing about which worker did what.
-  const parts = [`Your task (${task.task_id} of ${board.tasks.length}): ${task.task_description}`];
-  // The hint is relative to the project, and a worker in a worktree took it
-  // as relative to the project folder: it read `<project>/styles.css`, was
-  // refused (the run is contained to its worktree), and the refusal was an
-  // alert (bench, 2026-09-22). Its own folder is named, and every path is
-  // said to be relative to it — right after the task line, ahead of a goal
-  // that may be long enough to push it past the cut below.
-  if (folder && folder !== board.directory) {
-    parts.push(`Your folder: ${folder} — your own working copy of the project. Every path in this task, the files below included, is relative to it; read and write there, never in ${board.directory} itself.`);
+  const parts = [`Your task (${task.task_id} of ${board.tasks.length}): ${here(task.task_description)}`];
+  // Right after the task line, ahead of a goal that may be long enough to
+  // push it past the cut below.
+  if (own) {
+    parts.push(`Your folder: ${own} — your own working copy of the project, and the ONLY folder you work in. Read and write there and nowhere else; the files below are given with their full path in it.`);
   }
-  parts.push(`Team goal: ${board.goal}`);
-  if (task.files_hint.length) parts.push(`Files this task is expected to touch: ${task.files_hint.join(", ")}`);
+  parts.push(`Team goal: ${here(board.goal)}`);
+  if (task.files_hint.length) {
+    const files = own ? task.files_hint.map((f) => hintInFolder(f, board.directory, own)) : task.files_hint;
+    parts.push(`Files this task is expected to touch: ${files.join(", ")}`);
+  }
   const head = parts.join("\n\n");
-  const rejected = task.attempts > 0 && task.review?.verdict === "rejected" ? `\n\nA previous attempt was rejected: ${task.review.notes}` : "";
+  const rejected = task.attempts > 0 && task.review?.verdict === "rejected" ? `\n\nA previous attempt was rejected: ${here(task.review.notes)}` : "";
   // Who else is at work, by the run id `team_message` needs: the one way a
   // worker learns which run to tell when it is blocked on a sibling's part.
   // LAST, because the text is cut at MAX_TASK_CHARS from the end: a list a
   // NOT_IN_TEAM refusal can also give must never push out a retry's reason.
   const working = board.tasks
     .filter((t) => t.task_id !== task.task_id && t.status === "in_progress" && t.assigned_to)
-    .map((t) => `- ${t.assigned_to} on ${t.task_id}: ${firstLine(t.task_description, TEAMMATE_QUOTE_CHARS)}`);
+    .map((t) => `- ${t.assigned_to} on ${t.task_id}: ${firstLine(here(t.task_description), TEAMMATE_QUOTE_CHARS)}`);
   const teammates = working.length ? `\n\nTeammates at work now (reach one with team_message, to="sibling"):\n${working.join("\n")}` : "";
   // The board's digest takes the room the rest leaves, so it never pushes a
-  // retry's reason or the teammates' run ids out of the text.
+  // retry's reason or the teammates' run ids out of the text. Said in the
+  // worker's folder it can grow (a worktree path is longer than the
+  // project's): built once more for the room the growth leaves, and cut
+  // only if that is still over.
   const room = MAX_TASK_CHARS - head.length - DIGEST_LABEL.length - rejected.length - teammates.length;
-  const digest = room > 0 ? boardDigest(board, task.task_id, Math.min(MAX_DIGEST_CHARS, room)) : "";
+  let digest = room > 0 ? here(boardDigest(board, task.task_id, Math.min(MAX_DIGEST_CHARS, room))) : "";
+  if (digest.length > room && room > 0) {
+    const smaller = room - (digest.length - room);
+    digest = smaller > 0 ? here(boardDigest(board, task.task_id, Math.min(MAX_DIGEST_CHARS, smaller))) : "";
+    if (digest.length > room) digest = `${digest.slice(0, room - 1)}…`;
+  }
   let text = `${head}${digest ? `${DIGEST_LABEL}${digest}` : ""}${rejected}${teammates}`;
   if (text.length > MAX_TASK_CHARS) text = `${text.slice(0, MAX_TASK_CHARS - 1)}…`;
   return text;

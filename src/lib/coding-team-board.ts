@@ -24,6 +24,7 @@
  */
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { randomBytes } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
@@ -118,9 +119,11 @@ export interface TeamMetrics {
   messagesToSibling: number;
   messagesUndelivered: number;
   /**
-   * Refused actions that changed nothing — they only looked (`readOnlyDenial`)
-   * or wrote outside the worker's folders (`outsideFolderWriteDenial`): on the
-   * log as notes, never alerts, never a rejection.
+   * Refused actions that changed nothing — they only looked (`readOnlyDenial`),
+   * wrote outside the worker's folders (`outsideFolderWriteDenial`), or aimed
+   * at the project's own path and were answered with a retry hint at the
+   * worker's worktree (`CodingDenial.worktreePath`): on the log as notes,
+   * never alerts, never a rejection.
    */
   readOnlyRefusals: number;
 }
@@ -883,6 +886,41 @@ export function outsideFolderWriteDenial(action: string, folders: readonly strin
     const rel = path.posix.relative(root, target);
     return rel === ".." || rel.startsWith("../");
   });
+}
+
+/**
+ * The harness's own state in a home folder — `~/.claude` and `~/.claude-ds`:
+ * its settings and OAuth token, and under `projects/` every session's
+ * transcripts and notes — named at the start of the text, after a space, a
+ * quote, `=`, `(`, `<` or `>`, as `~`, `$HOME`, `/root` or `/home/<user>`.
+ */
+const HARNESS_STATE = /(?:^|[\s"'=(<>])(?:~|\$HOME|\$\{HOME\}|\/root|\/home\/[^/\s"'`;|&()<>]+)\/\.claude(?:-ds)?(?=$|[/\s"'`;|&()<>])/;
+
+/**
+ * True when a refused action, as the runner describes it, named the
+ * harness's own state (`~/.claude-ds/projects/…` and the rest of
+ * `HARNESS_STATE`) — or the same folders under this server's own home. A
+ * refused READ of it is never a note (`readOnlyDenial` alone would make it
+ * one): no worker's task is in there, and a look into other sessions'
+ * transcripts stays an alert. A write there that was refused changed nothing
+ * and is judged by `outsideFolderWriteDenial`, as before.
+ */
+export function harnessStateDenial(action: string): boolean {
+  const colon = action.indexOf(": ");
+  if (colon <= 0) return false;
+  const text = action.slice(colon + 2);
+  if (HARNESS_STATE.test(text)) return true;
+  const home = path.posix.resolve(os.homedir());
+  if (home === "/") return false;
+  for (const dir of [".claude", ".claude-ds"]) {
+    const root = `${home}/${dir}`;
+    for (let at = text.indexOf(root); at >= 0; at = text.indexOf(root, at + 1)) {
+      const before = at === 0 ? "" : text[at - 1];
+      const after = text[at + root.length] ?? "";
+      if ((before === "" || /[\s"'=(<>]/.test(before)) && (after === "" || /[/\s"'`;|&()<>]/.test(after))) return true;
+    }
+  }
+  return false;
 }
 
 /**

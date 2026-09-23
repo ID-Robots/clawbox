@@ -646,3 +646,35 @@ describe("outsideFolderWriteDenial", () => {
     expect(lib.outsideFolderWriteDenial(`Bash: cat > /tmp/check.py << 'EOF' ${"x".repeat(140)}`.slice(0, 160), WT)).toBe(true);
   });
 });
+
+describe("harnessStateDenial", () => {
+  it("knows the harness's own state in a home folder, however the action names it", () => {
+    for (const action of [
+      "Read: /home/clawbox/.claude-ds/projects/-home-clawbox-Projects-site/sess-1.jsonl",
+      "Read: /home/clawbox/.claude/projects/-p/memory/MEMORY.md",
+      "Glob: /home/clawbox/.claude-ds",
+      "Grep: /root/.claude/settings.json",
+      "Bash: cat ~/.claude-ds/projects/-p/sess.jsonl",
+      "Bash: ls $HOME/.claude/projects",
+      "Bash: ls ${HOME}/.claude-ds/",
+      "Bash: grep -r token \"/home/clawbox/.claude-ds/.credentials.json\"",
+      // Its own write there too — the team judges a write by where it went, not by this.
+      "Write: /home/clawbox/.claude-ds/projects/-p/memory/notes.md",
+      `Read: ${os.homedir()}/.claude-ds/projects/x.jsonl`,
+    ]) expect(lib.harnessStateDenial(action), action).toBe(true);
+  });
+
+  it("is false for a project's own .claude folder, a lookalike name, and anything else", () => {
+    for (const action of [
+      "Read: /home/clawbox/Projects/site/.claude/commands/build.md",
+      "Read: /home/clawbox/Projects/site/.clawbox/worktrees/t1-1/index.html",
+      "Read: /home/clawbox/.claude-notes/todo.md",
+      "Read: /home/clawbox/.claudex/x",
+      "Glob: /home/clawbox/Projects",
+      "Bash: ps -eo pid,cmd",
+      "Read: (no details)",
+      "no colon /home/clawbox/.claude-ds",
+      "",
+    ]) expect(lib.harnessStateDenial(action), action).toBe(false);
+  });
+});

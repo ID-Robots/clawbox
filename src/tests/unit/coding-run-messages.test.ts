@@ -9,6 +9,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   appendRunMessage,
+  BOX_NOTE_PREFIX,
+  isBoxNote,
   isRunMessageRefusal,
   MAX_QUEUED_RUN_MESSAGES,
   MAX_RUN_MESSAGE_CHARS,
@@ -189,6 +191,29 @@ describe("what the harness is handed", () => {
 
   it("says a delivered message in the run's own feed", () => {
     expect(runMessageProgressLine("use tabs")).toBe("Message to the run: use tabs");
+  });
+
+  // The runner's retry hint for a run in a worktree refused on the project's path.
+  it("frames the box's own note as the box's — a retry hint, not the owner's word and not a new task", () => {
+    const note = `${BOX_NOTE_PREFIX} Your Read was refused: its path is outside your folder.`;
+    expect(isBoxNote(note)).toBe(true);
+    expect(isBoxNote("use tabs")).toBe(false);
+    expect(isBoxNote("[from worker run-ab12cd34] the schema is in api.ts")).toBe(false);
+    expect(isBoxNote(BOX_NOTE_PREFIX)).toBe(false);
+    const turn = runMessageTurn(note);
+    expect(turn).toContain(note);
+    expect(turn).toMatch(/^\[ClawBox: a note from this box about an action of yours it refused\./);
+    expect(turn).toContain("not from the person who started this run");
+    expect(turn).toMatch(/do not start over/i);
+    // Folded into a continuation, it is said to be the box's too.
+    const folded = runMessagesNote([msg("use tabs"), msg(note)]);
+    expect(folded).toContain(`where a message starts ${BOX_NOTE_PREFIX}, from this box`);
+    expect(folded).toContain(`2. ${note}`);
+    const withMate = runMessagesNote([msg("[from worker run-ab12cd34] the schema is in api.ts"), msg(note)]);
+    expect(withMate).toContain("[from <role> <run>], from another run of your coding team");
+    expect(withMate).toContain(`where it starts ${BOX_NOTE_PREFIX}, from this box`);
+    // The owner's own queue reads as it always did.
+    expect(runMessagesNote([msg("use tabs")])).not.toContain(BOX_NOTE_PREFIX);
   });
 });
 
