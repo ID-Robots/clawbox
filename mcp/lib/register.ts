@@ -102,7 +102,28 @@ const MAX_IMAGE_BASE64 = 1024 * 1024;
 export const BANNED_DESCRIPTION_RE =
   /ignore (?:previous|prior) instructions|disregard|system prompt|<system>|do not tell|do not reveal|curl https:\/\/|exec\(|eval\(|import subprocess/i;
 
-export const MAX_DESCRIPTION_CHARS = 1000;
+/**
+ * The ceiling on a tool description (TASK-1080).
+ *
+ * Every description is paid for in the `tools/list` payload at the start of
+ * every session, whether the tool is called or not — on a box that may be
+ * running a 4-8B model. So a description says WHEN to call the tool, in about
+ * one sentence, plus the guard sentence a tool that reads untrusted content
+ * carries. What the model needs only once it has decided to call — how to read
+ * the answer, the edge cases, where the owner changes a setting — lives in the
+ * field guide's tool notes (mcp/lib/tool-notes.ts), which `clawbox_context`
+ * serves once per session and only for the tools this server registered.
+ *
+ * It was 1000 until the twelve largest descriptions were moved there; the
+ * checker (mcp/check-tools.ts) fails on anything longer, over every posture.
+ */
+export const MAX_DESCRIPTION_CHARS = 400;
+
+/**
+ * The same ceiling for one parameter's description. Checked by
+ * `paramDescriptionViolations` below, over the EMITTED schema.
+ */
+export const MAX_PARAM_DESCRIPTION_CHARS = 120;
 
 export interface Registrar {
   tool(name: string, description: string, shape: Shape, opts: ToolOpts, handler: ToolHandler): void;
@@ -169,6 +190,32 @@ export function contractViolations(info: RegisteredToolInfo): string[] {
   }
   if (info.opts.readOnly && info.opts.destructive) {
     out.push(`${info.name}: cannot be both readOnly and destructive`);
+  }
+  return out;
+}
+
+/**
+ * Parameter descriptions over MAX_PARAM_DESCRIPTION_CHARS.
+ *
+ * Read off the EMITTED JSON Schema rather than the zod objects: that is the
+ * text a harness shows the model, and a description set on an inner schema
+ * (`zEnumOf(…).optional()`) is only found there. Not part of
+ * `contractViolations`, which runs at every registration on the device — this
+ * costs one `toJSONSchema` per tool, so mcp/check-tools.ts runs it over every
+ * posture instead.
+ */
+export function paramDescriptionViolations(info: RegisteredToolInfo): string[] {
+  const emitted = z.toJSONSchema(z.object(info.shape), { io: "input" }) as {
+    properties?: Record<string, { description?: unknown }>;
+  };
+  const out: string[] = [];
+  for (const [param, prop] of Object.entries(emitted.properties ?? {})) {
+    const described = typeof prop.description === "string" ? prop.description : "";
+    if (described.length > MAX_PARAM_DESCRIPTION_CHARS) {
+      out.push(
+        `${info.name}: parameter "${param}" description is ${described.length} chars (max ${MAX_PARAM_DESCRIPTION_CHARS})`,
+      );
+    }
   }
   return out;
 }

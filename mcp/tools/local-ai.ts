@@ -105,7 +105,7 @@ function engineRow(m: LocalModelRow): Record<string, unknown> {
 export function registerLocalAiTools(reg: Registrar): void {
   reg.tool(
     "local_ai_status",
-    "Report the AI engines that run ON this ClawBox rather than in the cloud: Kokoro (speaks replies), Whisper (transcribes speech), the embedding model behind Memory Shard, and the llama.cpp language model — for each, whether it is installed, running, idle or started on demand, and what it uses. Also which voice and which transcription engine the box uses now (on the box or the ClawBox cloud). Use it when the user asks what runs locally, why voice or transcription goes to the cloud, or what they could install. It changes nothing: installing or removing an engine is the owner's, in Settings → Local AI.",
+    "Report the AI engines that run ON this ClawBox rather than in the cloud, when the user asks what runs locally, why voice or transcription goes to the cloud, or what they could install.",
     {
       engine: zEnumOf(ENGINES, "One engine, or \"all\".").default("all"),
     },

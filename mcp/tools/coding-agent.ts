@@ -946,7 +946,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_run",
-    "Hand a coding task to the coding agent on this ClawBox: a separate Claude Code session that works in the background inside one folder, edits files, runs builds and tests, and reports back. Use it for work that spans several files or needs a build to prove it worked; for a one-line change use your own file tools. Give a project_id from code_project_list, or a folder inside the owner's project folder as `directory` (a name from coding_agent_status); nowhere else. Prefer a folder the owner already has to scaffolding a new one. The task must be self-contained: the run cannot ask questions. Returns a run id AT ONCE; the work continues in the background. Tell the user it is running, then STOP — do not wait, poll, or call coding_agent_status straight after. Blocking makes you deaf to the user until you return, and the device already shows live progress and tells them when it finishes. Stay available for other questions; check only when they ask. Do not start a second run for the same task.",
+    "Hand a coding task that spans several files or needs a build to the coding agent: a separate Claude Code session that works in the background in one folder (project_id or directory). The task must stand alone. It returns a run id at once: tell the user it is running, then STOP — no waiting, no coding_agent_status until they ask. Do not start a second run for the same task.",
     {
       task: zText(MAX_TASK_CHARS, "What to build or change, with enough detail to work unattended. Name the files or features involved."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
@@ -954,31 +954,26 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       resume_run_id: zOptText(40, "A finished run's id, e.g. \"run-k3x9q2ab\", to continue that session with this task."),
       provider: zEnumOf(
         CODING_PROVIDERS,
-        `Which account pays for this run. Omit to use the owner's default. "clawbox-ai" is the box's own plan; "anthropic" is the owner's own Anthropic access, and only works when they have connected it (coding_agent_status says so).`,
+        `Who pays: "clawbox-ai" (the box's plan) or "anthropic" (the owner's own, once connected). Omit for the owner's default.`,
       ).optional(),
       model: zEnumOf(
         ANTHROPIC_MODELS,
-        `Which model, for provider "anthropic" only. Omit for the default. ClawBox AI chooses its own model from the box's plan, so naming one with that provider is refused.`,
+        `For provider "anthropic" only; omit for its default. Naming a model with "clawbox-ai" is refused.`,
       ).optional(),
       delivery_pipeline: zBool(
         false,
         // This ClawBox has no deployment integration, so the device SKIPS the
         // four deploy-and-check stages (it does not fail the run). Described as
         // what it really gives: the review and improvement laps.
-        "Run the review and improvement laps after the build instead of just the build. NOTE: this ClawBox cannot deploy, so the deploy and check stages of the delivery flow are skipped — this gives you the review and improvement laps and nothing else. Leave it off for anything that is not a web project.",
+        "Add review and improvement laps after the build; the deploy stages are skipped here. Leave it off for non-web work.",
       ),
       input_files: zOptText(
         1024,
-        "Comma-separated ABSOLUTE paths of files this run is to be GIVEN to work from — pictures or audio you generated for this task, a file the user sent you. "
-        + "Name them here whenever the task refers to an asset that already exists: the device copies each one into a folder the run can read, and tells the run their names. "
-        + "The run CANNOT read your own media folder, so a path you only mention in the task text is a file the run will never open. "
-        + "A path the device will not copy is reported back and costs only that file.",
+        "Comma-separated ABSOLUTE paths of files to GIVE the run (assets, a user's file); a path only in the task is never read.",
       ),
       deliverable_files: zOptText(
         512,
-        `Comma-separated relative paths (at most ${MAX_DELIVERABLE_PATHS}) of the files this run MUST leave behind, e.g. "src/app.js,index.html". `
-        + "The device checks they exist and are not empty before it calls the run finished, and resumes the run with a nudge when they are not. "
-        + "Name them whenever the task has a concrete output; leave this out when it does not.",
+        `Comma-separated relative paths (at most ${MAX_DELIVERABLE_PATHS}) the run MUST leave behind, not empty, e.g. "src/app.js,index.html".`,
       ),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
@@ -1104,7 +1099,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_status",
-    "Check a coding run started by coding_agent_run: whether it is still working, what it has done so far, and — once finished — its summary of what changed and how to verify it. Answers immediately by default, which is what you normally want. wait_seconds blocks until the run finishes or the time is up — use it ONLY when the user has asked you to wait for the result and is content to wait with you, because while it blocks you cannot answer anything else. Never use it just after starting a run. Without run_id it lists the recent runs and their ids. Run ids stay valid across sessions; the runs are kept on the device.",
+    "Check a coding run: whether it is working, what it has done and, once finished, its summary and how to verify it. It answers at once; set wait_seconds ONLY when the user asked you to wait with them — while it blocks you cannot answer anything else. Without run_id it lists the recent runs.",
     {
       run_id: zOptText(40, "The run id, e.g. \"run-k3x9q2ab\". Leave it out to list recent runs."),
       wait_seconds: zInt(0, MAX_WAIT_SECONDS, 0, "How long to wait for the run to finish before answering. 0 answers at once."),
@@ -1150,12 +1145,12 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_stop",
-    "Stop a coding run that is still working — including a detached one that outlived a restart of the web server. Only call this when the USER asks for it — never because a run looks quiet or slow. A long first turn with no output and 0 turns is normal at high effort; turns are only counted when the run finishes. What it changed so far stays on disk, and its status stays readable with coding_agent_status. A PAUSED run is closed for good (it can no longer be resumed). Stopping a run that already finished does nothing, unless it left something running (coding_run_list says left_running) and you pass end_leftovers — which also takes down any app the box serves from that server.",
+    "Stop a coding run that is still working, detached ones included — only when the USER asks, never because a run looks quiet or slow. Its changes and status are kept; a PAUSED run is closed for good. For a finished run that left something running (left_running in coding_run_list), pass end_leftovers.",
     {
       run_id: zText(40, "The run id, e.g. \"run-k3x9q2ab\"."),
       end_leftovers: zBool(
         false,
-        "Only for a run that already finished but left a process running (a server it started). true ends it. Only when the user asked for that server to be stopped.",
+        "For a finished run that left a process running: true ends it. Only when the user asked for that server to be stopped.",
       ),
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
@@ -1210,12 +1205,12 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_run_message",
-    "Tell a coding run that is still working something — a correction, a constraint you or the user forgot, an answer to something it guessed at. The run cannot ask questions, so this is the only way to steer one without stopping it and starting over. Use it when the user changes their mind mid-run, or when you realise the brief was wrong; do NOT use it to ask the run how it is going (coding_agent_status answers that) and do not send a running commentary — each message costs the run a turn. Plain text, one point per message. It is queued at once and reaches the run either in its current session or at its next step, and the answer says which.",
+    "Tell a coding run that is still working a correction, a forgotten constraint or an answer to a guess — the only way to steer it without starting over. Not to ask how it is going (coding_agent_status does) and no running commentary: each message costs the run a turn. Plain text, one point per message.",
     {
       run_id: zText(40, "The run id, e.g. \"run-k3x9q2ab\"."),
       text: zText(
         MAX_RUN_MESSAGE_CHARS,
-        "What to tell the run, in plain text. Write it as guidance about the task it is already on, not as a new task — it carries on from where it is rather than starting over.",
+        "What to tell the run, in plain text: guidance about the task it is already on, not a new task.",
       ),
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
@@ -1242,7 +1237,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_secret_list",
-    "List the NAMES of the secrets the owner has stored on this ClawBox for coding runs — a deploy token, a test API key, an SSH target. Use it before starting a run that needs a credential, so you can tell the user which name is there and which is missing instead of watching the run fail for the want of one. There is no way to read a value, here or anywhere: the owner types it in Settings and only a run's own environment ever sees it. A name with inject:false is stored but deliberately NOT handed to runs, and one with readable:false cannot be handed over at all — in both cases tell the user to look at the secret in the Coding Agent's settings rather than starting a run that will fail.",
+    "List the NAMES of the secrets the owner stored for coding runs (a deploy token, an API key, an SSH target) before starting a run that needs one, to tell the user which is there and which is missing. A name with given_to_runs false or unreadable true will not reach a run: send the user to the Coding Agent's settings instead of starting one.",
     {},
     // LIST_MAX_CHARS, not the 2,000 this started with: the store keeps up to
     // MAX_SECRETS entries and each row serialises to roughly 130 characters
@@ -1278,7 +1273,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_run_list",
-    "List the coding runs on this ClawBox with the state of each: its status, who started it, its project, its own branch and whether that work is merged home, how many attempts it has had at its deliverable and whether it delivered, why a paused one is paused, whether it is detached (it keeps working through a restart of the web server), messages it has not read yet, and whether it left something running. Use it to answer \"what are my coding runs doing?\" or to find the run a follow-up is about; call coding_agent_status with one run_id for its full summary. Filter by status or project.",
+    "List the coding runs on this ClawBox with each one's status, project, branch, attempts, deliverable and anything left running — to answer \"what are my coding runs doing?\" or find the run a follow-up is about. Filter by status or project; coding_agent_status gives one run's full summary.",
     {
       status: zEnumOf(RUN_FILTERS, "Only runs in this status. \"all\" lists every status.").default("all"),
       project: zOptText(128, "Only runs in this project — a project id or a folder name, as coding_project_status names it."),
@@ -1323,12 +1318,12 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_resume",
-    "Carry on a coding run that is PAUSED, or that GAVE UP short of its deliverable, in the same session and folder — the Resume button on its page. Only when the user asks for it to continue, and only for a run you started (the owner's runs are theirs to resume). With `message`, the run is first told what it missed or what changed, and reads it as it goes back in. Not for a finished or failed run: coding_agent_run with resume_run_id is the way on from those. Answers at once; the run works in the background — tell the user and stop.",
+    "Carry on a coding run that is PAUSED, or GAVE UP short of its deliverable, in the same session — only when the user asks, and only for a run you started. For a finished or failed run use coding_agent_run with resume_run_id instead. It answers at once: tell the user and stop.",
     {
       run_id: zText(40, "The run id, e.g. \"run-k3x9q2ab\"."),
       message: zOptText(
         MAX_RUN_MESSAGE_CHARS,
-        "Optional. Plain text the run is given as it resumes: what it missed, or what the user wants done differently. Guidance about the task it is on, not a new task.",
+        "Plain text the run reads as it resumes: what it missed, or what the user wants done differently. Not a new task.",
       ),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 2_000 },
@@ -1455,7 +1450,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_project_status",
-    "The state of the owner's coding projects in one table: for each, whether it is a folder or a code project and how to name it to coding_agent_run, its last commit, whether it is on the desktop or is a server app, its latest run, and how many runs are working, waiting, have a branch not merged home, or left something running. Name one project for its runs too, and its delivery-pipeline default and deployment state. Use it before starting a run, to pick the right project and to see whether one is already busy.",
+    "The owner's coding projects in one table — folder or code project and how to name it to coding_agent_run, last commit, desktop or server app, latest run and busy runs. Use it before starting a run, to pick the project and see whether one is busy; name one project for its runs, pipeline default and deploy state.",
     {
       project: zOptText(128, "A project id or folder name from this table, for that one project in detail. Leave it out for every project."),
     },
@@ -1683,9 +1678,9 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
 
   reg.tool(
     "coding_team_run",
-    "Hand a LARGER goal to a coding team on this ClawBox: a planner splits it into a few tasks, workers do them in separate Claude Code sessions — side by side in a folder project, each in its own git worktree and merged back as it finishes; one at a time in a code project — and a reviewer checks each result — all on a shared board with an audit log. Use it for a goal that spans several parts or files; for one focused change use coding_agent_run instead. The team works in the background inside ONE folder and takes a while; call coding_team_status to follow it.",
+    "Hand a LARGER goal that spans several parts or files to a coding team: a planner splits it into tasks, workers do them in separate Claude Code sessions and a reviewer checks each. For one focused change use coding_agent_run instead. The team works in the background inside ONE folder and takes a while; follow it with coding_team_status.",
     {
-      goal: zText(MAX_GOAL_CHARS, "What to build or change, as a whole. The planner reads the folder and writes the tasks; give the outcome and any constraints, not a task list."),
+      goal: zText(MAX_GOAL_CHARS, "What to build or change, as a whole: the outcome and any constraints, not a task list. The planner writes the tasks."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
       directory: zOptText(512, "A folder inside the owner's project folder to work in (its name, or its absolute path), when it is not a code project."),
     },
@@ -1857,7 +1852,12 @@ export function registerTeamRunTools(reg: Registrar): void {
 
   reg.tool(
     "team_message",
-    `Send ONE short message from this run to the rest of your coding team while you work. to="sibling" reaches another run of the team that is still working (to_run_id, e.g. run-ab12cd34) in its current turn; to="lead" puts it on the team's board, which the orchestrator and the owner read — nobody answers there; to="owner_agent" posts it into the chat of this box's assistant, who may steer you with a reply. Message a sibling when your task needs a file, name, schema or API shape a teammate owns that is not in your folder yet: ask for exactly that; if a sibling asks you for one, reply once with the exact answer. Message the lead when a task on the board is wrong for the goal: already done, a duplicate of yours, or impossible as written. Message the owner's assistant only for a decision only the owner can take. Never for progress reports, and never to acknowledge a message you received. Plain text, at most ${MAX_TEAM_MESSAGE_CHARS} characters; ${MAX_TEAM_MESSAGES_PER_WINDOW} per ${TEAM_MESSAGE_WINDOW_MS / 60_000} minutes and ${MAX_TEAM_MESSAGES_PER_RUN} per run.`,
+    // WHEN to message each of them is in the role's own brief (WORKER_BRIEF
+    // and its planner and reviewer siblings in src/lib/coding-team*.ts), which
+    // every run holding this tool is started with: a run's server has no
+    // `clawbox_context`, and the 400-character ceiling (TASK-1080) leaves room
+    // here for who each target reaches, the never-rule and the limits.
+    `Send ONE short message to your coding team: to="sibling" (with to_run_id) reaches a teammate still working, to="lead" posts on the team's board, to="owner_agent" reaches the box's assistant. Never for progress reports, and never to acknowledge a message you received. Plain text, at most ${MAX_TEAM_MESSAGE_CHARS} characters; ${MAX_TEAM_MESSAGES_PER_WINDOW} per ${TEAM_MESSAGE_WINDOW_MS / 60_000} minutes and ${MAX_TEAM_MESSAGES_PER_RUN} per run.`,
     {
       to: zEnumOf(TEAM_MESSAGE_TARGETS, "Who gets it: \"sibling\" (another run of your team), \"lead\" (the team's board) or \"owner_agent\" (the box's assistant)."),
       text: zText(MAX_TEAM_MESSAGE_CHARS, "What to say, in plain text: the one thing that blocks you and what you need."),

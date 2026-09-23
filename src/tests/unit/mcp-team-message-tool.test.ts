@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveEnv } from "../helpers/env";
 import { captureRegistrar, type CaptureHarness } from "../helpers/mcp-registrar";
 import { ApiError } from "../../../mcp/lib/errors";
+import { MAX_DESCRIPTION_CHARS } from "../../../mcp/lib/register";
 import { teamRunContext } from "../../../mcp/lib/run-context";
 import { registerTeamRunTools, TEAM_MESSAGE_CALL_TIMEOUT_MS } from "../../../mcp/tools/coding-agent";
 
@@ -105,16 +106,20 @@ describe("when the tool exists", () => {
     expect(teamTools().names()).toEqual([]);
   });
 
-  it("says in its description when to message a sibling, the lead and the owner's assistant — and never for progress or to acknowledge", () => {
+  it("says in its description who each target reaches, and never for progress or to acknowledge", () => {
+    // WHEN to message a sibling, the lead or the owner's assistant moved out
+    // of this description under the 400-character ceiling (TASK-1080): it is
+    // the role's own brief now, which every run holding this tool is started
+    // with, and src/tests/unit/coding-team.test.ts pins it on WORKER_BRIEF
+    // ("the worker's brief: when to use team_message").
     const { description } = teamTools().get("team_message");
-    expect(description).toMatch(/Message a sibling when your task needs a file, name, schema or API shape a teammate owns/);
-    expect(description).toMatch(/if a sibling asks you for one, reply once with the exact answer/);
-    expect(description).toMatch(/Message the lead when a task on the board is wrong for the goal: already done, a duplicate of yours, or impossible as written/);
-    expect(description).toMatch(/Message the owner's assistant only for a decision only the owner can take/);
+    expect(description).toMatch(/to="sibling" \(with to_run_id\) reaches a teammate still working/);
+    expect(description).toMatch(/to="lead" posts on the team's board/);
+    expect(description).toMatch(/to="owner_agent" reaches the box's assistant/);
     expect(description).toMatch(/Never for progress reports/);
     expect(description).toMatch(/never to acknowledge a message you received/i);
     expect(description).toMatch(/1500 characters; 4 per 5 minutes and 12 per run/);
-    expect(description.length).toBeLessThanOrEqual(1000);
+    expect(description.length).toBeLessThanOrEqual(MAX_DESCRIPTION_CHARS);
   });
 });
 

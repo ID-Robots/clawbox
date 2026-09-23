@@ -40,8 +40,17 @@ vi.mock("../../../mcp/lib/api", () => ({
 import type { McpContext } from "../../../mcp/lib/context";
 import { saveEnv } from "../helpers/env";
 import { captureRegistrar } from "../helpers/mcp-registrar";
-import { BROWSER_GUIDE, WEBAPP_STORAGE_GUIDE, fieldGuideForEdition, registerOrientationTools } from "../../../mcp/tools/orientation";
+import {
+  BROWSER_GUIDE,
+  FIELD_GUIDE_MAX_CHARS,
+  WEBAPP_STORAGE_GUIDE,
+  fieldGuideForEdition,
+  registerOrientationTools,
+} from "../../../mcp/tools/orientation";
 import { registerSystemTools } from "../../../mcp/tools/system";
+import { registerHermesPluginTools } from "../../../mcp/tools/hermes-plugins";
+import { registerLocalAiTools } from "../../../mcp/tools/local-ai";
+import { registerMemoryTools } from "../../../mcp/tools/memory";
 import { registerDesktopTools } from "../../../mcp/tools/desktop";
 import { registerSkillTools } from "../../../mcp/tools/skills";
 import { registerAiTools } from "../../../mcp/tools/ai";
@@ -86,6 +95,36 @@ function toolNames(edition: Ed): Set<string> {
   registerCodingAgentTools(h.reg, c);
   registerCodingTeamTools(h.reg, c);
   return new Set(h.names());
+}
+
+/**
+ * The server with the most to say: every family registered, the coding family
+ * switched on too, so `clawbox_context` serves the longest tool notes any box
+ * can be handed.
+ */
+function widestServer(edition: Ed, install: Install) {
+  const h = captureRegistrar(edition);
+  const c = ctx(edition, install);
+  const restore = saveEnv("CLAWBOX_MCP_CODING_TOOLS");
+  process.env.CLAWBOX_MCP_CODING_TOOLS = "1";
+  try {
+    registerOrientationTools(h.reg, c);
+    registerSkillTools(h.reg);
+    registerHermesPluginTools(h.reg);
+    registerMemoryTools(h.reg);
+    registerAiTools(h.reg, c);
+    registerLocalAiTools(h.reg);
+    registerSystemTools(h.reg, c);
+    registerDesktopTools(h.reg, c);
+    registerBrowserTools(h.reg);
+    registerEmailTools(h.reg, c);
+    registerCodingTools(h.reg);
+    registerCodingAgentTools(h.reg, c);
+    registerCodingTeamTools(h.reg, c);
+  } finally {
+    restore();
+  }
+  return h;
 }
 
 const onlyOn = (a: Ed, b: Ed): string[] => {
@@ -162,16 +201,23 @@ describe("the field guide is fenced, and the fences are well formed", () => {
     }
   });
 
-  it("stays inside the tool's own output cap on every box", () => {
-    // The real budget: clawbox_context declares maxChars 24_000 and joins this
-    // text with WEBAPP_STORAGE_GUIDE and BROWSER_GUIDE, each after a
-    // "\n\n---\n\n" separator. capText truncates the TAIL, so an overrun eats
-    // the browser guide first — the part that says whose screen is driven.
-    const separator = "\n\n---\n\n".length;
+  it("stays inside the tool's own output cap on every box", async () => {
+    // The real budget: what the handler returns BEFORE the cap — this text, the
+    // tool notes (TASK-1080) for every tool the widest server registers, then
+    // WEBAPP_STORAGE_GUIDE and BROWSER_GUIDE, each after a "\n\n---\n\n"
+    // separator. capText truncates the TAIL, so an overrun eats the browser
+    // guide first — the part that says whose screen is driven.
     for (const [edition, install] of BOXES) {
-      expect(
-        served(edition, install).length + separator + WEBAPP_STORAGE_GUIDE.length + separator + BROWSER_GUIDE.length,
-      ).toBeLessThan(24_000);
+      const tool = widestServer(edition, install).get("clawbox_context");
+      expect(tool.opts.maxChars).toBe(FIELD_GUIDE_MAX_CHARS);
+      const result = await tool.handler({});
+      const whole = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+      // Guards the guard: every part is in the measured text, the notes too.
+      expect(whole.startsWith(served(edition, install))).toBe(true);
+      expect(whole).toContain("## Tool notes");
+      expect(whole).toContain(WEBAPP_STORAGE_GUIDE);
+      expect(whole.endsWith(BROWSER_GUIDE)).toBe(true);
+      expect(whole.length, `${edition} (install ${install})`).toBeLessThan(FIELD_GUIDE_MAX_CHARS);
     }
   });
 });

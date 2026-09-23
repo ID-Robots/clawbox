@@ -136,7 +136,7 @@ export function registerMediaTools(reg: Registrar): void {
   if (media.images) {
     reg.tool(
       "generate_image",
-      "Draw a picture with this device's own image model and save it as a PNG in your project — hero art, a sprite, a background, a texture, a logo. Describe what you want in the prompt; you cannot see the result, so describe it fully. Each picture is paid for out of the owner's daily allowance, so spend them on the few that carry the project. Do not use it for the project's icon or favicon: those are drawn for you.",
+      "Draw a picture with this device's own image model and save it as a PNG in your project — describe it fully, since you cannot see it. Each costs the owner's daily allowance, so spend them on the few that carry the project; never draw the project's icon or favicon, which are drawn for you.",
       {
         prompt: zText(2_000, "What the picture should show, in plain words. Say the subject, the style and the background."),
         path: zText(512, "Where to save it, relative to your working folder, e.g. assets/hero.png. Must end in .png."),
@@ -165,7 +165,7 @@ export function registerMediaTools(reg: Registrar): void {
       "Speak a line of text in this device's own voice and save it as a WAV in your project — narration, a greeting, a spoken cue. Keep clips short and few: the device has one voice and the chat shares it, so a refusal that names memory or says it is busy means try once more later and then carry on without sound.",
       {
         text: zText(4_000, "What to say. Plain sentences; formatting marks are stripped before it is spoken."),
-        path: zText(512, "Where to save it, relative to your working folder, e.g. audio/intro.wav. Must end in .wav, .mp3 or .ogg, and the box only writes it when the voice really answered in that format."),
+        path: zText(512, "Where to save it in your working folder, e.g. audio/intro.wav (.wav, .mp3 or .ogg: the format the voice answered in)."),
       },
       { editions: ["openclaw", "hermes"], family: "browser", readOnly: false, maxChars: 2_000 },
       async ({ text: line, path: given }: { text: string; path: string }) => {
