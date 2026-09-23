@@ -161,6 +161,15 @@ interface LiveTeam {
    * (bench, 2026-09-22).
    */
   uncountedAlerts: number;
+  /**
+   * When the lead's last two turns that got a run were written (ms), older
+   * first. A turn that decided nothing leaves its inbox unread
+   * (`board.lastLeadAt`), and what was in it calls the lead back ONCE: a
+   * message from before the older one was put to two leads already. Called
+   * after every batch instead, a lead that never answers would cost an alert
+   * each time, until MAX_ALERTS stopped a team whose work was fine.
+   */
+  leadTurnsAt: [number, number];
   done: Promise<void>;
 }
 
@@ -206,7 +215,7 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   const board = createBoard({ goal, projectId, directory, source: input.source, dynamic }, input.source === "owner" ? OWNER : SYSTEM);
   saveBoard(board);
   const bus = new TeamBus(board);
-  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, done: Promise.resolve() };
+  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, leadTurnsAt: [0, 0], done: Promise.resolve() };
   live.set(board.id, team);
   team.done = runTeam(team, input.source)
     .catch((err) => {
@@ -980,7 +989,8 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
   if (board.tasks.every((t) => t.status === "complete" || t.status === "retired")) return;
   const room = leadRoom(replanContext(board, dispatched()));
   if (room.adds === 0 && room.retires === 0) return;
-  if (!leadShouldRun(board, taskIds, board.lastLeadAt).run) return;
+  // An unread message calls the lead back once, not after every batch (leadTurnsAt).
+  if (!leadShouldRun(board, taskIds, Math.max(board.lastLeadAt, team.leadTurnsAt[0])).run) return;
   // The run is filed under the batch's latest task; the alerts name them all.
   const taskId = taskIds[taskIds.length - 1];
   const after = taskIds.join(", ");
@@ -999,7 +1009,8 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
   // The inbox is written from what was said up to now; what is said after
   // waits for the next turn. It counts as read only once the lead gave an
   // answer the team can act on (below): a lead that failed, ran out of
-  // budget or answered nothing usable leaves it unread for the next turn.
+  // budget or answered nothing usable leaves it unread — shown to every
+  // later turn, and calling the next one back on its own once.
   const writtenAt = Date.now();
   let run: CodingRun;
   try {
@@ -1016,6 +1027,7 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
     bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${after}: ${err instanceof Error ? err.message : String(err)}` });
     return;
   }
+  team.leadTurnsAt = [team.leadTurnsAt[1], writtenAt];
   board.runs.push({ id: run.id, role: "lead", taskId });
   saveBoard(board);
   const settled = await settle(team, run.id);

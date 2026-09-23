@@ -1097,6 +1097,46 @@ describe("the lead (coding_team_dynamic)", () => {
     expect(done.lastLeadAt).toBeGreaterThan(0);
   });
 
+  it("calls the lead back ONCE on a message it could not decide — a lead that never answers must not spend the team's alerts", async () => {
+    runner.getTeamDynamic.mockResolvedValue(true);
+    outcomes = [
+      { summary: JSON.stringify([
+        { task_description: "Scaffold index.html", files_hint: ["index.html"] },
+        { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"] },
+        { task_description: "Write the README", depends_on: ["t2"], files_hint: ["README.md"] },
+        { task_description: "Add a licence", depends_on: ["t3"], files_hint: ["LICENSE"] },
+      ]) },
+      { summary: "Built index.html.", filesTouched: ["index.html"] },
+      { summary: "Wired app.js.", filesTouched: ["app.js"] },
+      { summary: "Wrote the README.", filesTouched: ["README.md"] },
+      { summary: "Added the licence.", filesTouched: ["LICENSE"] },
+    ];
+    // Prose, every time it is asked.
+    leadAnswers = Array.from({ length: 4 }, () => ({ summary: "The plan looks fine to me!" }));
+    const wait = runner.waitForRun.getMockImplementation()!;
+    let told = false;
+    runner.waitForRun.mockImplementation(async (id: string, ms?: number) => {
+      const run = runs.get(id);
+      const who = run?.team as { id: string; role: string; taskId: string | null } | null;
+      if (!told && run?.status === "running" && who?.role === "worker" && who.taskId === "t1") {
+        told = true;
+        await team.sendTeamMessage({ teamId: who.id, fromRunId: id, role: "worker", to: "lead", text: "The licence is the owner's call." });
+      }
+      return wait(id, ms);
+    });
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    // Once after t1, once more after t2 — then t3 and t4, clean with nothing
+    // new said, call no one, and the team is not stopped at MAX_ALERTS.
+    expect(done.status).toBe("done");
+    expect(done.tasks.map((t) => t.status)).toEqual(["complete", "complete", "complete", "complete"]);
+    expect(starts.filter((s) => role(s) === "lead").map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2"]);
+    expect(done.metrics.leadRuns).toBe(2);
+    expect(done.alerts).toBe(2);
+    // Never read: a lead that does run later, for a reason of its own, is still shown it.
+    expect(done.lastLeadAt).toBe(0);
+  });
+
   it("counts a worker still being started when the lead asks for a seat — it would take that worker's place otherwise", async () => {
     runner.getTeamDynamic.mockResolvedValue(true);
     outcomes = [{ summary: PARALLEL_PLAN }, { summary: BLOCKED_INDEX, filesTouched: ["index.html"] }, { summary: "styles", filesTouched: ["styles.css"] }, { summary: "app", filesTouched: ["app.js"] }];
