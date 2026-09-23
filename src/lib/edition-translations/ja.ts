@@ -800,6 +800,7 @@ export const ja: Record<string, string> = {
   "codingAgent.team.agents": "{total} 体のエージェントが作業しました — プランナー {planner} · ワーカー {workers} · レビュアー {reviewers}",
   "codingAgent.team.branch": "ブランチ {branch}（{base} から）",
   "codingAgent.team.messagesTitle": "メッセージ（{n}）",
+  "codingAgent.team.inboxTitle": "リーダー宛ての受信箱（{n}）",
   "codingAgent.team.messageToLead": "リーダー宛て",
   "codingAgent.team.messageToAssistant": "アシスタント宛て",
   "codingAgent.team.messageToRun": "{run} 宛て",

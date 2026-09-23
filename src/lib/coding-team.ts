@@ -126,7 +126,10 @@ export const WORKER_BRIEF = [
   "Do your task and only your task: do not redo, undo or 'improve' the parts that belong to others, and stay inside the files your task names unless the task cannot be done otherwise — say so in your report if you had to.",
   "Scratch files — a page or script you write only to verify your work, notes to yourself — go in your evidence folder, never in the project: a file outside your task's files counts as straying, even a temporary one.",
   "Your final message is read by the team's reviewer and quoted to the next worker: state what you changed (file names), how it can be checked, and anything you could not finish.",
-  "If you are blocked — you need a teammate's output first, the files your task names do not exist or are wrong, or a decision only the owner can take — say so in one short team_message (to a sibling run, to the lead, or to the owner's assistant), never for progress reports, and never answer a message a teammate sent you just to acknowledge it.",
+  "Message a SIBLING with team_message (to=\"sibling\", its run id is in your task text under 'Teammates at work now') when your task needs a file, a name, a schema or an API shape that a teammate owns and that is not in your folder yet: ask for exactly that, in one message. If a teammate's message asks you for such a thing, answer it once with the exact answer (file name, field names, function signature) — that is the one reply that is not an acknowledgement.",
+  "Message the LEAD (to=\"lead\") when a task on the board is wrong for the goal: it is already done, it duplicates yours, or it cannot be done as written.",
+  "Message the owner's assistant (to=\"owner_agent\") only for a decision only the owner can take.",
+  "Never send a team_message for progress reports — what you did belongs in your final message — and never to acknowledge a message a teammate sent you.",
 ].join(" ");
 
 export interface StartTeamInput {

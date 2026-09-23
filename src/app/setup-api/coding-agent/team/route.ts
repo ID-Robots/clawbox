@@ -13,7 +13,8 @@ export const dynamic = "force-dynamic";
  * GET  ?id=<team-id>            → { team } — the board: tasks, audit log, alerts,
  *                                 the planner's `shape`, and `metrics` (runs per
  *                                 role, tasks planned/added/retired/accepted first
- *                                 try/rejected, tokens, wall time) as of now
+ *                                 try/rejected, tokens, wall time, team messages
+ *                                 sent/to the lead/to a sibling/undelivered) as of now
  * GET                           → { teams } — the recent boards, newest first
  * POST { goal, projectId | directory } → 202 { started: true, team }
  *

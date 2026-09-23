@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { MAX_TASK_CHARS } from "@/lib/coding-agent";
-import { MAX_NOTES_CHARS, MAX_REVIEW_FILES, parseVerdict, reviewerTask, REVIEWER_BRIEF } from "@/lib/coding-team-reviewer";
+import { FINAL_REVIEWER_BRIEF, MAX_NOTES_CHARS, MAX_REVIEW_FILES, parseVerdict, reviewerTask, REVIEWER_BRIEF } from "@/lib/coding-team-reviewer";
 
 describe("parseVerdict", () => {
   it("reads a bare object, a fenced one, and one buried in prose", () => {
@@ -38,6 +38,17 @@ describe("the reviewer's brief and task", () => {
   it("tells the reviewer to change nothing and to answer only the JSON object", () => {
     expect(REVIEWER_BRIEF).toContain("Change NOTHING");
     expect(REVIEWER_BRIEF).toContain("ONLY a JSON object");
+  });
+
+  it("sends no message when the verdict is clear — the verdict is what the lead reads", () => {
+    for (const brief of [REVIEWER_BRIEF, FINAL_REVIEWER_BRIEF]) {
+      expect(brief).toContain("Send NO team_message when your verdict is clear");
+      expect(brief).toMatch(/Only when it turns on .*sibling's output|Only when it turns on .*task's output/);
+      expect(brief).toContain("a decision only the owner can take");
+      expect(brief).toContain("never for progress or acknowledgements");
+      expect(brief).toContain("team_message to the owner's assistant");
+      expect(brief).not.toMatch(/team_message to the lead/);
+    }
   });
 
   it("lists the task, the goal, the files and the worker's report", () => {

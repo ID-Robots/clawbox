@@ -246,12 +246,47 @@ describe("what the team's runs said", () => {
     expect(log).not.toHaveTextContent("worker run-00000003 → the lead: t2 needs …");
   });
 
+  it("puts what was said to the lead in its own inbox, above the messages: who, which task, the words whole", async () => {
+    stub();
+    teams = [{ ...WORKING, log: [...WORKING.log, { ...MESSAGES[0], task_id: "t2" }, MESSAGES[1], MESSAGES[2]] }];
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    const inbox = await screen.findByTestId("coding-team-inbox");
+    expect(inbox).toHaveTextContent(t("codingAgent.team.inboxTitle", { n: 1 }));
+    const rows = within(inbox).getAllByTestId("coding-team-inbox-message");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toBe("worker run-00000003 · t2 · t2 needs index.html's form ids first.\nWhich ones are final?");
+    // Above the newest messages, which still list every one of them.
+    const list = screen.getByTestId("coding-team-messages");
+    expect(inbox.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(list).getAllByTestId("coding-team-message")).toHaveLength(3);
+  });
+
+  it("shows the newest five messages to the lead, and counts them all", async () => {
+    stub();
+    const asks = Array.from({ length: 7 }, (_, i) => ({ ...MESSAGES[0], ts: 1_700_000_010_000 + i, payload: { from: "run-00000003", to: "lead", text: `ask ${i + 1}` } }));
+    teams = [{ ...WORKING, log: [...WORKING.log, ...asks] }];
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    const inbox = await screen.findByTestId("coding-team-inbox");
+    expect(inbox).toHaveTextContent(t("codingAgent.team.inboxTitle", { n: 7 }));
+    const rows = within(inbox).getAllByTestId("coding-team-inbox-message");
+    expect(rows.map((r) => r.textContent)).toEqual([3, 4, 5, 6, 7].map((n) => `worker run-00000003 · ask ${n}`));
+  });
+
+  it("has no inbox while nothing was said to the lead", async () => {
+    stub();
+    teams = [{ ...WORKING, log: [...WORKING.log, MESSAGES[1], MESSAGES[2]] }];
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    expect(await screen.findByTestId("coding-team-messages")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-team-inbox")).toBeNull();
+  });
+
   it("has no messages section while nobody has said anything, and ignores a message entry it cannot read", async () => {
     stub();
     teams = [{ ...WORKING, log: [...WORKING.log, { ts: 1, actor: { kind: "worker", id: "run-00000003" }, type: "message", message: "worker run-00000003 → the lead: hi" }] }];
     render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
     await screen.findByTestId("coding-team-board");
     expect(screen.queryByTestId("coding-team-messages")).toBeNull();
+    expect(screen.queryByTestId("coding-team-inbox")).toBeNull();
     fireEvent.click(screen.getByTestId("coding-team-log-toggle"));
     expect(screen.getByTestId("coding-team-log")).toHaveTextContent("worker run-00000003 → the lead: hi");
   });

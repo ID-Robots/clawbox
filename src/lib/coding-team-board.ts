@@ -112,6 +112,11 @@ export interface TeamMetrics {
   tokensUsed: number;
   /** From the team's creation to its end — or to now, while it works. */
   wallMs: number;
+  /** Team messages on the log (team_message), and of those: to the lead, to a sibling, and the ones the box could not hand on. */
+  messagesSent: number;
+  messagesToLead: number;
+  messagesToSibling: number;
+  messagesUndelivered: number;
 }
 
 const TEAM_STATUSES: readonly TeamStatus[] = ["planning", "working", "reviewing", "done", "failed", "stopped"];
@@ -828,12 +833,17 @@ const EMPTY_METRICS: TeamMetrics = {
   plannerRuns: 0, workerRuns: 0, reviewerRuns: 0, leadRuns: 0,
   tasksPlanned: 0, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 0, tasksRejected: 0,
   tokensUsed: 0, wallMs: 0,
+  messagesSent: 0, messagesToLead: 0, messagesToSibling: 0, messagesUndelivered: 0,
 };
 
 /** The team's figures, from the board alone. `now` ends the clock of a team still at work. */
 export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMetrics {
   const agents = teamAgents(board);
   const ended = board.finishedAt ?? (isSettledTeamStatus(board.status) ? board.updatedAt : now);
+  // Counted from the log, as it stands: an entry whose payload could not be
+  // read back is still a message sent, just not one to anybody in particular.
+  const messages = board.log.filter((e) => e.type === "message");
+  const payloads = messages.map((e) => e.payload as Partial<TeamMessagePayload> | undefined);
   return {
     plannerRuns: agents.planner,
     workerRuns: agents.workers,
@@ -846,6 +856,10 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
     tasksRejected: board.tasks.filter((t) => t.rejections > 0).length,
     tokensUsed: board.runs.reduce((sum, r) => sum + (typeof r.tokens === "number" && Number.isFinite(r.tokens) ? r.tokens : 0), 0),
     wallMs: board.createdAt > 0 ? Math.max(0, ended - board.createdAt) : 0,
+    messagesSent: messages.length,
+    messagesToLead: payloads.filter((p) => p?.to === "lead").length,
+    messagesToSibling: payloads.filter((p) => p?.to === "sibling").length,
+    messagesUndelivered: payloads.filter((p) => p?.delivered === false).length,
   };
 }
 

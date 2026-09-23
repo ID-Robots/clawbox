@@ -785,6 +785,7 @@ export const bg: Record<string, string> = {
   "codingAgent.team.agents": "{total} агента работиха тук — планиращ {planner} · работници {workers} · рецензенти {reviewers}",
   "codingAgent.team.branch": "в клон {branch}, от {base}",
   "codingAgent.team.messagesTitle": "Съобщения ({n})",
+  "codingAgent.team.inboxTitle": "Входящи за водещия ({n})",
   "codingAgent.team.messageToLead": "към водещия",
   "codingAgent.team.messageToAssistant": "към асистента",
   "codingAgent.team.messageToRun": "към {run}",
