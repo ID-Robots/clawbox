@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
 
+# A run a newer push has superseded tells nobody anything the newer one will
+# not, and it holds a runner the newer one may be queued behind. Pull requests
+# only: every push to a branch is a commit that landed, and keeps its verdict.
+concurrency:
+  group: e2e-tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   e2e:
     runs-on: ubuntu-latest

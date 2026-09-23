@@ -17,11 +17,14 @@ describe("CI credential environments", () => {
     const step = read("e2e-install.yml").split("      - name: Write .env.test\n")[1].split("        env:")[0];
     expect(step).toContain("if: ${{ github.event_name != 'pull_request' }}");
   });
-  it("both installer checkouts leave no git token on disk", () => {
+  it("every installer checkout leaves no git token on disk", () => {
+    // Every one, not the first of each name: the plan job checks out the same
+    // two ways ahead of the shards, and the shards' own checkouts come second.
     const text = read("e2e-install.yml");
+    const checkouts = text.split(/^ *- (?=name:|uses:|run:)/m).filter(step => /uses: actions\/checkout@/.test(step));
     for (const name of ["Checkout PR head", "Checkout repository"]) {
-      const step = text.split(`      - name: ${name}\n`)[1].split("      - ")[0];
-      expect(step).toContain("persist-credentials: false");
+      expect(checkouts.filter(step => step.startsWith(`name: ${name}\n`)).length).toBeGreaterThanOrEqual(2);
     }
+    for (const step of checkouts) expect(step).toContain("persist-credentials: false");
   });
 });

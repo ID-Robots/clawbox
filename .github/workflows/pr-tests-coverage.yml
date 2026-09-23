@@ -8,33 +8,29 @@ on:
 permissions:
   contents: read
 
+# A run a newer push has superseded tells nobody anything the newer one will
+# not, and it holds six runners while it does. Pull requests only: every push
+# to main is a commit that landed, and each one keeps its own verdict.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# THREE jobs do the work and one of them, `test`, is the verdict. `test` is
+# the REQUIRED status check on beta and main, so it is the job every other one
+# here reports into:
+#
+#   checks  — the blocking checks that are not the suite, plus advisory lint.
+#   shard   — the vitest suite, split four ways across runners (TASK-1127).
+#   test    — merges the four shards' reports, applies the coverage
+#             thresholds ONCE over the merged coverage, and fails unless
+#             `checks` and every shard passed.
+#
+# The suite alone took 11-13 min of a ~15 min job on one runner and was half
+# of every PR's wait; split four ways it is ~4 min a shard plus ~1 min of merge.
 jobs:
-  test:
+  checks:
     runs-on: ubuntu-latest
-    # The four workflows that run real work cap their jobs (codeql 30,
-    # e2e-tests 30, build-identity 20, e2e-install 90); this one — the only job
-    # in the repo that runs the whole vitest suite — ran to GitHub's six-hour
-    # default. (The `comment` jobs here and in the e2e workflows, and
-    # docs-deploy / issue-triage / pr-review, are still uncapped; each is a
-    # short API call, and none of them was the one burning a runner.) It matters now: raising the per-test ceiling for the files that
-    # start real processes makes a genuine hang that much more expensive to
-    # surface, and this is the backstop that keeps "a hung test must not cost a
-    # day" true without weakening the 5 s default everywhere else. TASK-702.
-    timeout-minutes: 30
-    outputs:
-      # Whether the SUITE itself reported, as distinct from whether the JOB
-      # passed. Those are two different claims and the comment below makes both,
-      # so it needs both: a blocking step ahead of vitest failing means the suite
-      # never ran, and a step AFTER it failing means the job went red over a
-      # green suite. Read as success / failure / anything else, where anything
-      # else (skipped, cancelled, or an outcome the runner could not evaluate)
-      # is "did not run" rather than a verdict invented here.
-      suite: ${{ steps.suite.outcome }}
-      found: ${{ steps.coverage.outputs.found }}
-      statements: ${{ steps.coverage.outputs.statements }}
-      branches: ${{ steps.coverage.outputs.branches }}
-      functions: ${{ steps.coverage.outputs.functions }}
-      lines: ${{ steps.coverage.outputs.lines }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -103,17 +99,6 @@ jobs:
       - name: MCP tool contract
         run: bun run check:mcp-tools
 
-      # CI's variant of `bun run test:coverage`: the same suite, the same
-      # thresholds, only the reporters differ. The full set (text, html, clover,
-      # json-summary) is for a person looking at a checkout; here nothing reads
-      # the ~550-file html tree, the clover XML or the text table — the only
-      # consumer is "Parse coverage" below, which reads coverage-summary.json.
-      # Writing the other ~590 files and printing the table bought nothing but a
-      # few seconds and 600 lines of job log nobody scrolls through.
-      - name: Test
-        id: suite
-        run: bun run test:coverage:ci
-
       # ADVISORY, deliberately, and this is the decision the card asked for:
       # eslint reports 18 errors and 123 warnings on beta today, so a blocking
       # step would fail every PR on day one and be switched off again — the same
@@ -132,15 +117,12 @@ jobs:
       # crashed one would otherwise write the same "no summary line" sentence,
       # and the day the ratchet succeeds every PR would read like a broken step.
       #
-      # AFTER the suite, for the step LOG rather than for the verdict: the
-      # `comment` job `needs: test` and so waits for this step either way
-      # (measured at 1m56s for `bun run lint`), which is why moving it does not
-      # deliver the PR comment any sooner. What it buys is that the suite's own
-      # output and annotations land first, instead of a reader scrolling past
-      # 141 advisory lint problems to reach the failure they came for.
-      # `!cancelled()`, not `always()`: `always()` runs during a cancellation too,
-      # so a hung suite hitting `timeout-minutes: 30` would burn another ~2 min
-      # on advisory lint nobody will read. Same idiom as e2e-tests.yml.
+      # In THIS job, beside the suite rather than after it: lint took 1-1.5 min
+      # at the end of the one job that ran the suite, and the verdict waited for
+      # it. Here it finishes long before the four shards do, so nobody waits on
+      # it at all. `!cancelled()`, not `always()`: it still runs when a blocking
+      # check above went red — the counts are most useful on exactly that run —
+      # but not while the run is being cancelled.
       - name: Lint (advisory)
         if: ${{ !cancelled() }}
         continue-on-error: true
@@ -160,6 +142,121 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+  shard:
+    name: vitest (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    # The ceiling TASK-702 put on the job that runs the suite, kept on the jobs
+    # that run it now. Raising the per-test ceiling for the files that start
+    # real processes makes a genuine hang that much more expensive to surface,
+    # and this is the backstop that keeps "a hung test must not cost a day"
+    # true without weakening the 5 s default everywhere else. (A quarter of the
+    # suite needs far less than 30 minutes; a hang needs exactly this much.)
+    timeout-minutes: 30
+    strategy:
+      # Every shard runs to the end: a failure in one says nothing about the
+      # other three, and the merged report is the one place all of it is read.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.10"
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      # `bun run test:coverage:ci` plus two things, and only these (see
+      # package.json; src/tests/unit/ci-workflows.test.ts pins it): the blob
+      # reporter, which writes this shard's results AND its coverage to
+      # .vitest-reports/blob-<n>-<of>.json for the merge; and the coverage
+      # thresholds set to zero. vitest checks thresholds on every coverage
+      # report it writes, and a quarter of the suite covers a quarter of the
+      # code, so a shard would fail every threshold. They are applied once,
+      # to the merged coverage, in `test` below.
+      #
+      # vitest splits by file (a hash of each path, so the same file always
+      # lands in the same shard), not by duration; measured on 1239 files, the
+      # heaviest (the ~90 s sudoers scan) is well under a shard's share.
+      - name: Test
+        run: bun run test:coverage:shard --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+
+      # `!cancelled()`: a shard whose tests FAILED still reported, and the
+      # merge is where those failures are told. Only a shard that never wrote
+      # its blob has nothing to upload — and `test` refuses to merge without it.
+      - name: Upload the shard's report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-blob-${{ matrix.shard }}
+          path: .vitest-reports/
+          include-hidden-files: true
+          retention-days: 1
+
+  test:
+    # The REQUIRED check, so it must never be skipped: a skipped job reports
+    # success to branch protection. A job whose `if:` has no status function
+    # gets the implicit `success()`, which skips it whenever a job it needs
+    # failed — exactly the run it has to go red on. `!cancelled()` runs it
+    # over any outcome except a cancellation (a newer push, or a person), and
+    # the last step below turns every other outcome into its own verdict.
+    needs: [checks, shard]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      # Whether the SUITE itself reported, as distinct from whether the JOB
+      # passed. Those are two different claims and the comment below makes both,
+      # so it needs both: a shard that never reported means the suite never ran
+      # whole, and a check failing BESIDE it means the job went red over a
+      # green suite. Read as success / failure / anything else, where anything
+      # else (skipped, cancelled, or an outcome the runner could not evaluate)
+      # is "did not run" rather than a verdict invented here.
+      suite: ${{ steps.suite.outcome }}
+      found: ${{ steps.coverage.outputs.found }}
+      statements: ${{ steps.coverage.outputs.statements }}
+      branches: ${{ steps.coverage.outputs.branches }}
+      functions: ${{ steps.coverage.outputs.functions }}
+      lines: ${{ steps.coverage.outputs.lines }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.10"
+
+      # The merge re-reads the config (thresholds, coverage include/exclude)
+      # and the sources the coverage maps point at, so it needs the same
+      # checkout and the same vitest the shards ran.
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Download the shards' reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: vitest-blob-*
+          path: .vitest-reports
+          merge-multiple: true
+
+      # `--merge-reports` merges whatever it finds; a shard that never
+      # uploaded is simply absent, and the merge would print a green suite and
+      # a coverage figure over three quarters of it. See the script.
+      - name: Every shard reported
+        run: bash scripts/check-vitest-shards.sh .vitest-reports
+
+      # The suite's verdict. The same config and the same thresholds as
+      # `bun run test:coverage` at a checkout — the merge replays every shard's
+      # results (and their annotations) and applies the thresholds to the
+      # merged coverage — with only the reporter set narrowed: nothing in CI
+      # reads the ~550-file html tree, the clover XML or the text table; the
+      # only consumer is "Parse coverage" below, which reads
+      # coverage-summary.json.
+      - name: Test
+        id: suite
+        run: bun run test:coverage:merge
 
       # Always parse coverage so the PR comment can show numbers even on failure.
       - name: Parse coverage
@@ -181,6 +278,26 @@ jobs:
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # The jobs this one reports for. The merged suite can pass while a
+      # blocking check in `checks` failed, and a shard can fail without the
+      # merge ever running; either way this required check is the one that
+      # has to say so.
+      - name: The checks and every shard passed
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          SHARD_RESULT: ${{ needs.shard.result }}
+        run: |
+          rc=0
+          if [ "$CHECKS_RESULT" != "success" ]; then
+            echo "::error::the checks job finished '$CHECKS_RESULT' — see its log"
+            rc=1
+          fi
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "::error::the vitest shards finished '$SHARD_RESULT' — see the vitest (n/4) jobs"
+            rc=1
+          fi
+          exit "$rc"
 
   comment:
     # Skip for fork PRs: GITHUB_TOKEN is always read-only on fork PRs regardless
@@ -223,10 +340,10 @@ jobs:
             // TWO claims, two sources, kept apart. "Tests passed/failed" is
             // about the SUITE and may only come from the suite's own step
             // outcome; the JOB's result is a different fact and gets its own
-            // line. Mixing them reports a suite that never started as "failed"
-            // (a blocking step ahead of it went red) and a suite that passed as
-            // "failed" (a step after it, such as Parse coverage, went red) —
-            // false failures in both directions, over the one sentence a
+            // line. Mixing them reports a suite that never ran whole as
+            // "failed" (a shard never reported) and a suite that passed as
+            // "failed" (a check beside it, such as the MCP typecheck, went red)
+            // — false failures in both directions, over the one sentence a
             // reviewer actually reads.
             const suite = process.env.SUITE_OUTCOME;
             const passed = suite === 'success';
@@ -236,28 +353,27 @@ jobs:
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             let section = `## ${icon} Tests\n- Result: **${verdict}**\n- [View run](${runUrl})`;
             if (!passed && !failed) {
-              // Deliberately not a list of step names: the steps ahead of the
-              // suite include checkout, setup-bun and `bun install`, and naming
-              // three of the six sends a reader with a lockfile mismatch to the
-              // MCP typecheck log to find it never ran.
-              section += `\n- The suite did not report: a step before it failed, or the job was cancelled. See the run.`;
+              // Deliberately not a list of step or job names: a shard can fail
+              // to report at checkout, setup-bun or `bun install` as easily as
+              // in vitest, and naming one sends a reader with a lockfile
+              // mismatch to a log that never ran.
+              section += `\n- The suite did not report: a shard never finished, a step before the merge failed, or the run was cancelled. See the run.`;
             } else if (process.env.TEST_RESULT === 'cancelled') {
               // The same false failure the E2E verdicts carried, one line
               // further in: `always()` reaches this job during a cancellation
               // too, and a suite that reported before the run was stopped would
-              // otherwise be told as "a later step in it failed".
+              // otherwise be told as "a check beside it failed".
               //
               // It names the verdict rather than assuming "passed": the suite
               // going red is the most likely reason anyone cancels this
-              // workflow — Lint (advisory) and Parse coverage still run for
-              // about two minutes after it — so failure × cancelled is the
-              // square this sentence is most often read in.
+              // workflow, so failure × cancelled is the square this sentence
+              // is most often read in.
               section += `\n- The suite ${verdict}, then the run was cancelled. See the run.`;
             } else if (passed && process.env.TEST_RESULT !== 'success') {
               // Only when the SUITE passed. Over a failed suite the job's own
               // failure is not news, and "even though the suite did" would be
               // a second, contradictory claim beside "Result: failed".
-              section += `\n- The job did not pass even though the suite did — a later step in it failed. See the run.`;
+              section += `\n- The job did not pass even though the suite did — a check beside it failed. See the run.`;
             }
             if (process.env.COVERAGE_FOUND === 'true') {
               section += `\n- Coverage: statements **${process.env.COVERAGE_STATEMENTS}%**, branches **${process.env.COVERAGE_BRANCHES}%**, functions **${process.env.COVERAGE_FUNCTIONS}%**, lines **${process.env.COVERAGE_LINES}%**`;

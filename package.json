@@ -21,6 +21,8 @@
     "test:watch": "vitest --config vitest.config.ts",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "test:coverage:ci": "vitest run --config vitest.config.ts --coverage --coverage.reporter=json-summary",
+    "test:coverage:shard": "vitest run --config vitest.config.ts --coverage --coverage.reporter=json-summary --reporter=default --reporter=blob --coverage.thresholds.statements=0 --coverage.thresholds.branches=0 --coverage.thresholds.functions=0 --coverage.thresholds.lines=0",
+    "test:coverage:merge": "vitest run --config vitest.config.ts --coverage --coverage.reporter=json-summary --merge-reports",
     "test:e2e": "playwright test",
     "test:e2e:coverage": "rm -f coverage/e2e-summary.json coverage/e2e-bundles.json && playwright test && node scripts/e2e-coverage-report.mjs",
     "test:e2e:ui": "playwright test --ui",

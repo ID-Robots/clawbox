@@ -598,18 +598,18 @@ describe("test-timeout hygiene", () => {
     expect(workflow).not.toMatch(CLI_FLAG);
   });
 
-  it("caps the test job at thirty minutes, so a genuine hang cannot burn a runner", () => {
+  it("caps the jobs that run the suite at thirty minutes, so a genuine hang cannot burn a runner", () => {
     // The cheap half of the same ruling. Raising eighty-odd files' budget
-    // six-fold makes a real hang six times more expensive to surface, and this
-    // job — the only one in the repo that runs the whole suite — had no ceiling
-    // at all, so GitHub's six-hour default applied.
-    // The `test` job specifically, and the value specifically: `/timeout-minutes:
+    // six-fold makes a real hang six times more expensive to surface, and the
+    // job that ran the whole suite had no ceiling at all, so GitHub's six-hour
+    // default applied. Since TASK-1127 the suite runs in the `shard` matrix
+    // job, one quarter a runner, so that is the job the cap belongs on.
+    // The job specifically, and the value specifically: `/timeout-minutes:
     // \d+/` anywhere in the file passes when the cap sits on another job, or
     // when it is 360. The job is bounded by the NEXT two-space key after its
     // own, so a key under `on:` cannot be mistaken for one — and the job is
-    // found BY NAME, because pinning it to the first position would fail this
-    // assertion, over a message about a timeout, the day someone adds a `lint:`
-    // job above it.
+    // found by the command it RUNS, not by its name or position, so moving the
+    // suite to another job moves this assertion with it.
     const workflow = fs.readFileSync(
       path.join(REPO, ".github", "workflows", "pr-tests-coverage.yml"),
       "utf-8",
@@ -617,13 +617,14 @@ describe("test-timeout hygiene", () => {
     const jobsAt = workflow.indexOf("\njobs:\n");
     expect(jobsAt).toBeGreaterThan(-1);
     const headers = [...workflow.slice(jobsAt).matchAll(/^ {2}([\w-]+):$/gm)];
-    const at = headers.findIndex((h) => h[1] === "test");
-    expect(at, "no `test` job in pr-tests-coverage.yml").toBeGreaterThan(-1);
-    const start = jobsAt + headers[at].index!;
-    const end = headers[at + 1] ? jobsAt + headers[at + 1].index! : workflow.length;
-    const testJob = workflow.slice(start, end);
-    const cap = /^\s*timeout-minutes:\s*(\d+)\s*$/m.exec(testJob);
-    expect(cap, "the test job has no timeout-minutes").not.toBeNull();
+    const jobs = headers.map((h, i) => workflow.slice(
+      jobsAt + h.index!,
+      headers[i + 1] ? jobsAt + headers[i + 1].index! : workflow.length,
+    ));
+    const suiteJobs = jobs.filter((job) => /^\s+run: bun run test:coverage:shard\b/m.test(job));
+    expect(suiteJobs, "no job in pr-tests-coverage.yml runs the suite").toHaveLength(1);
+    const cap = /^\s*timeout-minutes:\s*(\d+)\s*$/m.exec(suiteJobs[0]);
+    expect(cap, "the job that runs the suite has no timeout-minutes").not.toBeNull();
     expect(Number(cap![1])).toBe(30);
   });
 });
