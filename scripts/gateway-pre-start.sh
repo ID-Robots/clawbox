@@ -1229,6 +1229,134 @@ if isinstance(primary_model, str) and primary_model.lower() in (
     model_defaults["primary"] = "llamacpp/gemma4-e2b-it-q4_0"
     changed = True
 
+# Migration: a local model id saved with its provider prefix TWICE (TASK-1076).
+# ai-models/configure prepended `llamacpp/` (or `ollama/`) to a `model` field
+# that already carried it — the `<provider>/<id>` form every cloud provider
+# sends there — and one save left
+#
+#   agents.defaults.model.primary           llamacpp/llamacpp/gemma4-e2b-it-q4_0
+#   models.providers.llamacpp.models[].id   llamacpp/gemma4-e2b-it-q4_0
+#
+# OpenClaw strips a self-provider prefix off the ref and its row lookup forgives
+# one on the row, so the model resolves once; the runtime-plan materializer then
+# compares the row it got back with the requested id VERBATIM, and every turn
+# that carries the `llamacpp:default` profile ends "Unable to rematerialize
+# llamacpp/gemma4-e2b-it-q4_0 for its resolved auth profile." (2026.9.3 and
+# 2026.9.4 alike; the ollama plugin declares no catalog-id normaliser either).
+# The route no longer writes it (`bareLocalModelId`); this heals a box that
+# saved it before, so the owner does not have to find the setting and save again.
+#
+# Only each provider's OWN prefix comes off. The core strips it from every ref
+# before looking anything up, so no model id that begins with it was reachable
+# and no working configuration changes; every other id (an Ollama namespace
+# such as `hf.co/org/model:tag`) is left exactly as written. A ref that is
+# nothing BUT prefixes collapses to a bare `llamacpp/`, which the migration below
+# already refuses to register (an empty row id fails the whole config), and a row
+# whose id would come out empty is not touched. Runs first so that migration
+# sees the corrected refs.
+_LOCAL_SELF_PREFIXED = ("llamacpp", "ollama")
+
+
+def _local_bare_model_id(provider, model_id):
+    prefix = provider + "/"
+    bare = model_id.strip()
+    while bare.lower().startswith(prefix):
+        bare = bare[len(prefix):].strip()
+    return bare
+
+
+def _local_collapse_ref(ref):
+    """`llamacpp/llamacpp/x` -> `llamacpp/x`; None when there is nothing to do."""
+    if not isinstance(ref, str) or "/" not in ref:
+        return None
+    provider, _, rest = ref.strip().partition("/")
+    provider = provider.strip().lower()
+    if provider not in _LOCAL_SELF_PREFIXED:
+        return None
+    bare = _local_bare_model_id(provider, rest)
+    if bare == rest.strip():
+        return None
+    return provider + "/" + bare
+
+
+_local_collapsed = []
+_ref = model_defaults.get("primary")
+_collapsed = _local_collapse_ref(_ref)
+if _collapsed:
+    model_defaults["primary"] = _collapsed
+    _local_collapsed.append("agents.defaults.model.primary")
+_refs = model_defaults.get("fallbacks")
+if isinstance(_refs, list):
+    _fixed = []
+    for _ref in _refs:
+        _collapsed = _local_collapse_ref(_ref)
+        if _collapsed:
+            _local_collapsed.append("agents.defaults.model.fallbacks")
+        _fixed.append(_collapsed or _ref)
+    if "agents.defaults.model.fallbacks" in _local_collapsed:
+        # Collapsing can make two entries equal; keep the first of each.
+        _deduped = []
+        for _ref in _fixed:
+            if not (isinstance(_ref, str) and _ref in _deduped):
+                _deduped.append(_ref)
+        model_defaults["fallbacks"] = _deduped
+_allow = agents_defaults.get("models")
+if isinstance(_allow, dict):
+    for _key in list(_allow.keys()):
+        _collapsed = _local_collapse_ref(_key)
+        if not _collapsed:
+            continue
+        _entry = _allow.pop(_key)
+        _kept = _allow.get(_collapsed)
+        if isinstance(_kept, dict) and isinstance(_entry, dict):
+            # The correctly-keyed entry wins; the doubled one only adds.
+            _allow[_collapsed] = {**_entry, **_kept}
+        elif _collapsed not in _allow:
+            _allow[_collapsed] = _entry
+        _local_collapsed.append("agents.defaults.models")
+_models_block = cfg.get("models")
+_providers_block = _models_block.get("providers") if isinstance(_models_block, dict) else None
+for _provider in _LOCAL_SELF_PREFIXED:
+    _entry = _providers_block.get(_provider) if isinstance(_providers_block, dict) else None
+    _rows = _entry.get("models") if isinstance(_entry, dict) else None
+    if not isinstance(_rows, list):
+        continue
+    _bare_ids = {
+        _row["id"].strip()
+        for _row in _rows
+        if isinstance(_row, dict) and isinstance(_row.get("id"), str)
+    }
+    _fixed = []
+    _touched = False
+    for _row in _rows:
+        _row_id = _row.get("id") if isinstance(_row, dict) else None
+        _bare = _local_bare_model_id(_provider, _row_id) if isinstance(_row_id, str) else ""
+        if not _bare or _bare == _row_id.strip():
+            _fixed.append(_row)
+            continue
+        _touched = True
+        if _bare in _bare_ids:
+            # A row already answers to the bare id, and it is the one the core
+            # matches first: this one could only shadow it.
+            continue
+        _row = dict(_row)
+        _row["id"] = _bare
+        _name = _row.get("name")
+        if not isinstance(_name, str) or _local_bare_model_id(_provider, _name) == _bare:
+            _row["name"] = _bare
+        _bare_ids.add(_bare)
+        _fixed.append(_row)
+    if _touched:
+        _entry["models"] = _fixed
+        _local_collapsed.append("models.providers." + _provider + ".models")
+if _local_collapsed:
+    changed = True
+    print(
+        "  Collapsed a doubled local-model provider prefix in "
+        + ", ".join(sorted(set(_local_collapsed)))
+        + " (OpenClaw cannot re-materialize a self-prefixed row id)"
+    )
+
 # Migration: a primary (or fallback) that names `llamacpp/<model>` while
 # `models.providers.llamacpp` is absent. OpenClaw ships an `ollama` plugin but
 # NO llamacpp one, so `llamacpp/*` resolves ONLY through an explicit provider

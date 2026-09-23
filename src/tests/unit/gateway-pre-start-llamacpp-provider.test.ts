@@ -834,3 +834,233 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
     expect(log).toContain("Skipped llamacpp provider repair");
   });
 });
+
+// TASK-1076. ai-models/configure prepended `llamacpp/` to a `model` field that
+// already carried it, and saved `primary: llamacpp/llamacpp/<id>` beside a row
+// `id: llamacpp/<id>`. OpenClaw (2026.9.3 and 2026.9.4) strips one self-provider
+// prefix off the ref, finds the row through its legacy-prefix leniency, and then
+// the runtime-plan materializer compares that row's id with the requested one
+// verbatim — "Unable to rematerialize llamacpp/<id> for its resolved auth
+// profile." on every turn. The route is fixed; this is the heal for a box that
+// saved the doubled shape before it was.
+describe.skipIf(!hasPython3)("gateway-pre-start.sh — a doubled local-model provider prefix", () => {
+  /** The id OpenClaw re-resolves for a ref: one self-provider prefix stripped. */
+  function coreRequestedModelId(ref: string): string {
+    const provider = ref.slice(0, ref.indexOf("/")).toLowerCase();
+    const rest = ref.slice(ref.indexOf("/") + 1);
+    return rest.toLowerCase().startsWith(`${provider}/`) ? rest.slice(provider.length + 1) : rest;
+  }
+
+  function provider(cfg: Config, id: "llamacpp" | "ollama"): ProviderDef {
+    const models = (cfg.models ?? {}) as { providers?: Record<string, ProviderDef> };
+    return models.providers?.[id] ?? {};
+  }
+
+  function defaultsOf(cfg: Config): { model?: { primary?: string; fallbacks?: unknown[] }; models?: Record<string, unknown> } {
+    return ((cfg.agents ?? {}) as { defaults?: Record<string, never> }).defaults ?? {};
+  }
+
+  const PROXY = "http://127.0.0.1/setup-api/local-ai/llamacpp/v1";
+
+  /** Exactly what the unfixed route wrote for { provider: "llamacpp", model: "llamacpp/gemma4-e2b-it-q4_0" }. */
+  function doubledSave(): Config {
+    return {
+      models: {
+        mode: "replace",
+        providers: {
+          llamacpp: {
+            baseUrl: PROXY,
+            api: "openai-completions",
+            apiKey: TOKEN,
+            models: [{
+              id: "llamacpp/gemma4-e2b-it-q4_0",
+              name: "llamacpp/gemma4-e2b-it-q4_0",
+              reasoning: false,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 131072,
+              maxTokens: 131072,
+            }],
+          },
+        },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "llamacpp/llamacpp/gemma4-e2b-it-q4_0",
+            fallbacks: ["llamacpp/llamacpp/gemma4-e2b-it-q4_0"],
+          },
+        },
+      },
+    };
+  }
+
+  it("heals the saved shape into one OpenClaw can re-materialize", () => {
+    writeToken(TOKEN);
+    const { cfg, changed, log } = migrate(doubledSave());
+
+    expect(changed).toBe(true);
+    const defaults = defaultsOf(cfg);
+    expect(defaults.model?.primary).toBe("llamacpp/gemma4-e2b-it-q4_0");
+    expect(defaults.model?.fallbacks).toEqual(["llamacpp/gemma4-e2b-it-q4_0"]);
+    const rows = provider(cfg, "llamacpp").models ?? [];
+    expect(rows).toEqual([expect.objectContaining({
+      id: "gemma4-e2b-it-q4_0",
+      name: "gemma4-e2b-it-q4_0",
+      contextWindow: 131072,
+      maxTokens: 131072,
+    })]);
+    // The contract the core enforces: the id it asks for IS a row id, verbatim.
+    expect(rows.map((row) => row.id)).toContain(coreRequestedModelId(defaults.model!.primary!));
+    // Everything else on the entry is the operator's and stays as written.
+    expect(provider(cfg, "llamacpp")).toMatchObject({ baseUrl: PROXY, api: "openai-completions", apiKey: TOKEN });
+    expect(log).toContain("Collapsed a doubled local-model provider prefix");
+    expect(log).not.toContain(TOKEN);
+  });
+
+  it("is idempotent: a healed config is left alone on the next boot", () => {
+    writeToken(TOKEN);
+    const first = migrate(doubledSave());
+    const second = migrate(first.cfg);
+
+    expect(second.changed).toBe(false);
+    expect(second.cfg).toEqual(first.cfg);
+    expect(second.log).not.toContain("Collapsed");
+  });
+
+  it("drops a self-prefixed row that shadows a bare one rather than renaming it onto it", () => {
+    writeToken(TOKEN);
+    const cfg = doubledSave();
+    const llamacpp = (cfg.models as { providers: Record<string, ProviderDef> }).providers.llamacpp;
+    llamacpp.models = [
+      { id: "gemma4-e2b-it-q4_0", name: "Gemma 4 E2B", contextWindow: 65536 },
+      ...(llamacpp.models ?? []),
+    ];
+    const { cfg: healed } = migrate(cfg);
+
+    expect(provider(healed, "llamacpp").models).toEqual([
+      { id: "gemma4-e2b-it-q4_0", name: "Gemma 4 E2B", contextWindow: 65536 },
+    ]);
+  });
+
+  it("keeps an operator's display name on a renamed row", () => {
+    writeToken(TOKEN);
+    const cfg = doubledSave();
+    const llamacpp = (cfg.models as { providers: Record<string, ProviderDef> }).providers.llamacpp;
+    llamacpp.models = [{ ...(llamacpp.models ?? [])[0], name: "Gemma 4 on this box" }];
+    const { cfg: healed } = migrate(cfg);
+
+    expect(provider(healed, "llamacpp").models?.[0]).toMatchObject({ id: "gemma4-e2b-it-q4_0", name: "Gemma 4 on this box" });
+  });
+
+  it("collapses a doubled key in the agents.defaults.models allow-list without losing its settings", () => {
+    writeToken(TOKEN);
+    const cfg = doubledSave();
+    (cfg.agents as { defaults: Record<string, unknown> }).defaults.models = {
+      "llamacpp/llamacpp/gemma4-e2b-it-q4_0": { alias: "local", params: { temperature: 0.2 } },
+      "openai/gpt-5.5": {},
+    };
+    const { cfg: healed } = migrate(cfg);
+
+    expect(defaultsOf(healed).models).toEqual({
+      "llamacpp/gemma4-e2b-it-q4_0": { alias: "local", params: { temperature: 0.2 } },
+      "openai/gpt-5.5": {},
+    });
+  });
+
+  it("lets a correctly-keyed allow-list entry win over its doubled twin", () => {
+    writeToken(TOKEN);
+    const cfg = doubledSave();
+    (cfg.agents as { defaults: Record<string, unknown> }).defaults.models = {
+      "llamacpp/gemma4-e2b-it-q4_0": { alias: "kept" },
+      "llamacpp/llamacpp/gemma4-e2b-it-q4_0": { alias: "doubled", params: { temperature: 0.2 } },
+    };
+    const { cfg: healed } = migrate(cfg);
+
+    expect(defaultsOf(healed).models).toEqual({
+      "llamacpp/gemma4-e2b-it-q4_0": { alias: "kept", params: { temperature: 0.2 } },
+    });
+  });
+
+  it("heals the same shape on the ollama entry, and nothing that is not its own prefix", () => {
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: {
+        providers: {
+          ollama: {
+            baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama",
+            api: "ollama",
+            apiKey: TOKEN,
+            models: [
+              { id: "ollama/qwen3:8b", name: "ollama/qwen3:8b" },
+              { id: "hf.co/bartowski/Qwen3-8B-GGUF:Q4_K_M", name: "hf.co/bartowski/Qwen3-8B-GGUF:Q4_K_M" },
+            ],
+          },
+        },
+      },
+      agents: {
+        defaults: {
+          model: {
+            primary: "ollama/ollama/qwen3:8b",
+            fallbacks: ["ollama/hf.co/bartowski/Qwen3-8B-GGUF:Q4_K_M", "openai/gpt-5.5"],
+          },
+        },
+      },
+    });
+
+    expect(changed).toBe(true);
+    expect(defaultsOf(cfg).model).toEqual({
+      primary: "ollama/qwen3:8b",
+      fallbacks: ["ollama/hf.co/bartowski/Qwen3-8B-GGUF:Q4_K_M", "openai/gpt-5.5"],
+    });
+    expect(provider(cfg, "ollama").models).toEqual([
+      { id: "qwen3:8b", name: "qwen3:8b" },
+      { id: "hf.co/bartowski/Qwen3-8B-GGUF:Q4_K_M", name: "hf.co/bartowski/Qwen3-8B-GGUF:Q4_K_M" },
+    ]);
+  });
+
+  it("changes nothing on a config that was saved correctly", () => {
+    writeToken(TOKEN);
+    const saved: Config = {
+      models: {
+        providers: {
+          llamacpp: { baseUrl: PROXY, api: "openai-completions", apiKey: TOKEN, models: [{ id: "gemma4-e2b-it-q4_0", name: "gemma4-e2b-it-q4_0" }] },
+          ollama: { baseUrl: "http://127.0.0.1/setup-api/local-ai/ollama", api: "ollama", apiKey: TOKEN, models: [{ id: "llama3.2:3b", name: "llama3.2:3b" }] },
+        },
+      },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0", fallbacks: ["ollama/llama3.2:3b"] } } },
+    };
+    const { cfg, changed, log } = migrate(saved);
+
+    expect(changed).toBe(false);
+    expect(cfg).toEqual(saved);
+    expect(log).not.toContain("Collapsed");
+  });
+
+  it("hands a ref that is nothing but prefixes to the provider repair, which refuses an empty id", () => {
+    // Left doubled, the repair below would have registered a row `llamacpp/`.
+    writeToken(TOKEN);
+    const { cfg, log } = migrate({
+      models: { providers: {} },
+      agents: { defaults: { model: { primary: "llamacpp/llamacpp/" } } },
+    });
+
+    expect(primaryOf(cfg)).toBe("llamacpp/");
+    expect(log).toContain("Collapsed");
+    expect(log).toContain("Skipped llamacpp provider repair");
+    expect(llamacppProvider(cfg)).toEqual({});
+  });
+
+  it("registers the corrected id when the doubled primary has no provider entry at all", () => {
+    // The two migrations compose: the collapse runs first, so the provider
+    // repair below registers `gemma4-e2b-it-q4_0`, not `llamacpp/gemma4-…`.
+    writeToken(TOKEN);
+    const { cfg } = migrate({
+      models: { providers: {} },
+      agents: { defaults: { model: { primary: "llamacpp/llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(primaryOf(cfg)).toBe("llamacpp/gemma4-e2b-it-q4_0");
+    expect(llamacppProvider(cfg).models?.map((row) => row.id)).toEqual(["gemma4-e2b-it-q4_0"]);
+  });
+});

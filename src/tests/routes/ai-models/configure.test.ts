@@ -1894,6 +1894,123 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(providerDef.baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/ollama");
   });
 
+  describe("a provider-qualified local model id (TASK-1076)", () => {
+    // What OpenClaw's runtime-plan materializer (2026.9.3 and 2026.9.4) will
+    // accept. It reads the primary as `<provider>` plus the rest with ONE
+    // self-provider prefix stripped, re-resolves that id once an auth profile
+    // is forwarded, and compares the row it gets back with it VERBATIM. Its row
+    // lookup forgives a `llamacpp/` on the row id; the comparison does not, so
+    // a self-prefixed row fails every turn with "Unable to rematerialize
+    // llamacpp/<id> for its resolved auth profile."
+    function coreRequestedModel(primary: string): { provider: string; modelId: string } {
+      const slash = primary.indexOf("/");
+      const provider = primary.slice(0, slash).trim().toLowerCase();
+      const rest = primary.slice(slash + 1).trim();
+      const modelId = rest.toLowerCase().startsWith(`${provider}/`) ? rest.slice(provider.length + 1) : rest;
+      return { provider, modelId };
+    }
+
+    function writtenPrimary(): string | undefined {
+      return configSetCalls(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch))
+        .filter((call) => call.path === "agents.defaults.model.primary")
+        .at(-1)?.value;
+    }
+
+    function writtenRows(provider: "llamacpp" | "ollama"): { id: string; name: string }[] {
+      const call = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), `models.providers.${provider}`);
+      return call ? JSON.parse(call.value).models : [];
+    }
+
+    function expectMaterializable(primary: string | undefined, provider: "llamacpp" | "ollama"): void {
+      expect(primary).toBeDefined();
+      const requested = coreRequestedModel(primary!);
+      expect(requested.provider).toBe(provider);
+      const rows = writtenRows(provider);
+      expect(rows.map((row) => row.id)).toContain(requested.modelId);
+      expect(rows.filter((row) => row.id.toLowerCase().startsWith(`${provider}/`))).toEqual([]);
+    }
+
+    it.each([
+      ["model", { model: "llamacpp/gemma4-e2b-it-q4_0" }],
+      ["apiKey", { apiKey: "llamacpp/gemma4-e2b-it-q4_0" }],
+      ["model, prefixed twice", { model: "llamacpp/llamacpp/gemma4-e2b-it-q4_0" }],
+      ["model, mixed case", { model: "LlamaCpp/gemma4-e2b-it-q4_0" }],
+    ])("saves llamacpp/<id> sent in %s under the bare id", async (_slot, fields) => {
+      const res = await configurePost(jsonRequest({ provider: "llamacpp", ...fields }));
+
+      expect(res.status).toBe(200);
+      const primary = writtenPrimary();
+      expect(primary).toBe("llamacpp/gemma4-e2b-it-q4_0");
+      expect(writtenRows("llamacpp")).toEqual([
+        expect.objectContaining({ id: "gemma4-e2b-it-q4_0", name: "gemma4-e2b-it-q4_0" }),
+      ]);
+      expectMaterializable(primary, "llamacpp");
+    });
+
+    it("records the local model once-prefixed for the local-AI scope too", async () => {
+      const res = await configurePost(jsonRequest({
+        provider: "llamacpp",
+        scope: "local",
+        model: "llamacpp/gemma4-e2b-it-q4_0",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ local_ai_model: "llamacpp/gemma4-e2b-it-q4_0" }),
+      );
+      expectMaterializable(writtenPrimary(), "llamacpp");
+    });
+
+    it("still takes the apiKey slot over the model field", async () => {
+      const res = await configurePost(jsonRequest({
+        provider: "llamacpp",
+        apiKey: "gemma-q4",
+        model: "llamacpp/gemma4-e2b-it-q4_0",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(writtenPrimary()).toBe("llamacpp/gemma-q4");
+      expect(writtenRows("llamacpp").map((row) => row.id)).toEqual(["gemma-q4"]);
+    });
+
+    it("falls back to the default model when the slot holds nothing but the prefix", async () => {
+      const res = await configurePost(jsonRequest({ provider: "llamacpp", model: "llamacpp/" }));
+
+      expect(res.status).toBe(200);
+      expect(writtenPrimary()).toBe("llamacpp/gemma4-e2b-it-q4_0");
+      expect(writtenRows("llamacpp").map((row) => row.id)).toEqual(["gemma4-e2b-it-q4_0"]);
+    });
+
+    it("asks Ollama about, and saves, the bare tag of an ollama/<tag> pick", async () => {
+      // Before the fix the probe asked Ollama for `ollama/qwen3:8b` — a
+      // namespace it does not have — and refused a model that was installed.
+      const fetchMock = vi.fn<(url: unknown, init?: RequestInit) => Promise<Response>>(async () => new Response(
+        JSON.stringify({ capabilities: ["completion"], model_info: { "qwen3.context_length": 40960 } }),
+        { status: 200 },
+      ));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await configurePost(jsonRequest({ provider: "ollama", model: "ollama/qwen3:8b" }));
+
+      expect(res.status).toBe(200);
+      const probed = fetchMock.mock.calls.map(([, init]) => String(init?.body ?? ""));
+      expect(probed).toContain(JSON.stringify({ model: "qwen3:8b" }));
+      expect(probed.some((body) => body.includes("ollama/qwen3"))).toBe(false);
+      expect(writtenRows("ollama").map((row) => row.id)).toEqual(["qwen3:8b"]);
+      expectMaterializable(writtenPrimary(), "ollama");
+    });
+
+    it("keeps an Ollama namespace that is not the provider's own prefix", async () => {
+      const res = await configurePost(jsonRequest({
+        provider: "ollama",
+        apiKey: "hf.co/bartowski/Qwen3-8B-GGUF:Q4_K_M",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(writtenRows("ollama").map((row) => row.id)).toEqual(["hf.co/bartowski/Qwen3-8B-GGUF:Q4_K_M"]);
+    });
+  });
+
   it("configures openrouter provider definition in openclaw", async () => {
     // OpenClaw has no built-in OpenRouter adapter, so without an explicit
     // models.providers.openrouter entry the runtime short-circuits every
