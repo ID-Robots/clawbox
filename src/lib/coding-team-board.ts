@@ -112,6 +112,17 @@ export interface TeamMetrics {
   tokensUsed: number;
   /** From the team's creation to its end — or to now, while it works. */
   wallMs: number;
+  /** Team messages on the log (team_message), and of those: to the lead, to a sibling, and the ones the box could not hand on. */
+  messagesSent: number;
+  messagesToLead: number;
+  messagesToSibling: number;
+  messagesUndelivered: number;
+  /**
+   * Refused actions that changed nothing — they only looked (`readOnlyDenial`)
+   * or wrote outside the worker's folders (`outsideFolderWriteDenial`): on the
+   * log as notes, never alerts, never a rejection.
+   */
+  readOnlyRefusals: number;
 }
 
 const TEAM_STATUSES: readonly TeamStatus[] = ["planning", "working", "reviewing", "done", "failed", "stopped"];
@@ -182,7 +193,7 @@ export interface TeamAgents {
 export interface LogEntry {
   ts: number;
   actor: Actor;
-  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review";
+  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note";
   task_id?: string;
   message: string;
   payload?: Record<string, unknown>;
@@ -231,6 +242,14 @@ export interface TeamBoard {
   shape: TeamShape | null;
   /** The `coding_team_dynamic` switch as it stood when the team started: may a lead add or retire tasks while it runs? */
   dynamic: boolean;
+  /**
+   * When the lead's last turn was written (ms): its inbox, and the message
+   * that calls it back, are what was said to the lead after this. Set only
+   * once that turn gave a usable answer — a lead that failed or answered
+   * nothing usable leaves its inbox unread. 0 before its first such turn —
+   * and on a board from before the lead had an inbox.
+   */
+  lastLeadAt: number;
   /** The one review over the merged result (review mode `final`), once it ruled. */
   finalReview: FinalReview | null;
   /** The figures, kept current on every save (`teamMetrics`). */
@@ -380,6 +399,7 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     // A board from before the planner could shape a team has none: it ran the default.
     shape: normalizeShape(b.shape),
     dynamic: b.dynamic === true,
+    lastLeadAt: typeof b.lastLeadAt === "number" && Number.isFinite(b.lastLeadAt) && b.lastLeadAt > 0 ? b.lastLeadAt : 0,
     finalReview: finalReview && typeof finalReview === "object" && (finalReview.verdict === "accepted" || finalReview.verdict === "rejected") && typeof finalReview.notes === "string"
       ? { verdict: finalReview.verdict, notes: finalReview.notes, at: typeof finalReview.at === "number" ? finalReview.at : 0 }
       : null,
@@ -478,6 +498,7 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
     error: null,
     shape: null,
     dynamic: input.dynamic === true,
+    lastLeadAt: 0,
     finalReview: null,
     metrics: EMPTY_METRICS,
     createdAt: now,
@@ -673,6 +694,20 @@ export function raiseAlert(board: TeamBoard, actor: Actor, reason: string, taskI
 }
 
 /**
+ * A guardrail line that is NOT an alert: on the record, never counted toward
+ * the team's alert ceiling. Only the system (the orchestrator) writes one —
+ * today, a worker whose every refusal only LOOKED (`readOnlyDenial`) or wrote
+ * outside its folders (`outsideFolderWriteDenial`), with how many, which the
+ * figures count; and a plan's text cut to fit its bound
+ * (`clippedNote`), every cut on one line.
+ */
+export function postNote(board: TeamBoard, actor: Actor, text: string, taskId?: string, readOnlyRefusals?: number): void {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "note", `Only the system writes a note; ${describeActor(actor)} may not.`);
+  const now = Date.now();
+  append(board, { ts: now, actor, type: "note", task_id: taskId, message: firstLine(text, 600), ...(readOnlyRefusals ? { payload: { readOnlyRefusals } } : {}) });
+}
+
+/**
  * A run of the team says something — to a sibling run, to the lead (this
  * board), or to the box's main agent. Only a run on the cast list, in the role
  * it is listed with, may: a worker speaking as another run is refused the way
@@ -775,21 +810,98 @@ export function isSettledTeamStatus(status: TeamStatus): boolean {
   return status === "done" || status === "failed" || status === "stopped";
 }
 
+/** Tools that only look. */
+const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(["Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch"]);
+/** Shell commands that only look, as the first word of a command (`git` below, by its subcommand). */
+const READ_ONLY_COMMANDS: ReadonlySet<string> = new Set(["ls", "cat", "head", "tail", "grep", "rg", "find", "ps", "pgrep", "wc", "stat", "file", "which", "echo", "pwd", "test", "[", "cd"]);
+const READ_ONLY_GIT: ReadonlySet<string> = new Set(["status", "log", "diff", "show"]);
+/** `find` actions that run or write something. */
+const FIND_WRITES = /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/;
+/** The runner cuts a refused action's text at this length (describeDenial, coding-agent.ts): a command that long may hide the rest. */
+const DENIAL_TEXT_CUT = 160;
+
+/**
+ * True when a refused action, as the runner describes it (`Read: <path>`,
+ * `Bash: <command>` — `CodingRun.deniedActions`), only LOOKED: a read-only
+ * tool, or a shell command whose every part is a read-only command with no
+ * redirection into a file and no substitution. Anything else — a write, an
+ * edit, a command this cannot read to the end — is false: the team judges it
+ * the way it always did.
+ */
+export function readOnlyDenial(action: string): boolean {
+  const colon = action.indexOf(": ");
+  if (colon <= 0) return false;
+  const tool = action.slice(0, colon);
+  if (READ_ONLY_TOOLS.has(tool)) return true;
+  if (tool !== "Bash" || action.length >= DENIAL_TEXT_CUT) return false;
+  // Output thrown away, or folded into the other stream, writes nothing.
+  const command = action.slice(colon + 2).replace(/(?:(?:&>>?|\d?>>?)\s*\/dev\/null|\d?>&\d)(?=[\s;|&]|$)/g, " ");
+  // Any other redirection writes a file; a substitution runs a command not seen here.
+  if (/[>`]|\$\(|<\(/.test(command)) return false;
+  const parts = command.split(/\|\|?|&&?|;|\n/).map((p) => p.trim()).filter(Boolean);
+  return parts.length > 0 && parts.every((part) => {
+    const words = part.split(/\s+/);
+    const word = words[0];
+    let rest = words.slice(1);
+    if (word === "git") {
+      // `git -C <dir> log` is `git log` somewhere else.
+      while (rest[0] === "-C" && rest.length > 2) rest = rest.slice(2);
+      return READ_ONLY_GIT.has(rest[0]) && !rest.some((w) => w.startsWith("--output"));
+    }
+    if (!READ_ONLY_COMMANDS.has(word)) return false;
+    // `rg --pre <cmd>` runs <cmd> on every file it searches.
+    if (word === "rg") return !rest.some((w) => w.startsWith("--pre"));
+    return word !== "find" || !rest.some((w) => FIND_WRITES.test(w));
+  });
+}
+
+/** Tools that may write, as the runner names a refused one. */
+const WRITE_TOOLS: ReadonlySet<string> = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]);
+/** An absolute path in a refused action's text: at its start, or after a space, a quote, `=`, `(`, `>` or `<`. */
+const ABSOLUTE_PATH = /(?:^|[\s"'=(<>])(\/[^\s"'`;|&()<>]*)/;
+
+/**
+ * True when a refused WRITE — a file tool, or a shell command — was aimed
+ * outside every one of the worker's `folders` (its worktree, the project),
+ * judged by the first absolute path in the action's text: a check script in
+ * /tmp, a note in the harness's own memory folder. The refusal is the proof
+ * it changed nothing, and nothing of the task's was there. No absolute path,
+ * one inside a folder, or one the runner's cut may have ended early is false:
+ * the team judges it the way it always did.
+ */
+export function outsideFolderWriteDenial(action: string, folders: readonly string[]): boolean {
+  const colon = action.indexOf(": ");
+  if (colon <= 0 || !WRITE_TOOLS.has(action.slice(0, colon))) return false;
+  const roots = folders.filter((f) => path.posix.isAbsolute(f)).map((f) => path.posix.resolve(f));
+  const text = action.slice(colon + 2);
+  const found = ABSOLUTE_PATH.exec(text);
+  if (!roots.length || !found) return false;
+  // Cut by the runner mid-path: the rest may have gone on inside a folder.
+  if (action.length >= DENIAL_TEXT_CUT && found.index + found[0].length >= text.length) return false;
+  const target = path.posix.resolve(found[1]);
+  return roots.every((root) => {
+    const rel = path.posix.relative(root, target);
+    return rel === ".." || rel.startsWith("../");
+  });
+}
+
 /**
  * The board, compact, for a worker (or the lead) to read in its task text:
  * one line per task — `t3 [status] — <description> → <result>` — then the
  * latest alerts and messages (what the team's runs said with team_message —
  * to the lead among them —, reviews, retirements). The task named by
- * `forTaskId` is left out: its reader has it in full already.
+ * `forTaskId` is left out: its reader has it in full already — the lead
+ * names every task of the batch it was called for.
  *
  * Bounded at `maxChars` (MAX_DIGEST_CHARS at most). Over the bound, the
  * OLDEST lines go first — a task line is as old as its last change, a log
  * line as old as its entry — and a line at the top says how many went.
  */
-export function boardDigest(board: TeamBoard, forTaskId: string | null, maxChars: number = MAX_DIGEST_CHARS): string {
+export function boardDigest(board: TeamBoard, forTaskId: string | readonly string[] | null, maxChars: number = MAX_DIGEST_CHARS): string {
   const max = Math.max(0, Math.min(MAX_DIGEST_CHARS, Math.floor(maxChars)));
+  const known = typeof forTaskId === "string" ? [forTaskId] : (forTaskId ?? []);
   const tasks = board.tasks
-    .filter((t) => t.task_id !== forTaskId)
+    .filter((t) => !known.includes(t.task_id))
     .map((t) => ({
       at: t.updated_at,
       text: `${t.task_id} [${t.status}] — ${clip(oneLine(t.task_description), 160)} → ${t.result ? clip(oneLine(t.result), 200) : t.status === "in_progress" ? "(in progress)" : "(not started)"}`,
@@ -828,12 +940,18 @@ const EMPTY_METRICS: TeamMetrics = {
   plannerRuns: 0, workerRuns: 0, reviewerRuns: 0, leadRuns: 0,
   tasksPlanned: 0, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 0, tasksRejected: 0,
   tokensUsed: 0, wallMs: 0,
+  messagesSent: 0, messagesToLead: 0, messagesToSibling: 0, messagesUndelivered: 0,
+  readOnlyRefusals: 0,
 };
 
 /** The team's figures, from the board alone. `now` ends the clock of a team still at work. */
 export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMetrics {
   const agents = teamAgents(board);
   const ended = board.finishedAt ?? (isSettledTeamStatus(board.status) ? board.updatedAt : now);
+  // Counted from the log, as it stands: an entry whose payload could not be
+  // read back is still a message sent, just not one to anybody in particular.
+  const messages = board.log.filter((e) => e.type === "message");
+  const payloads = messages.map((e) => e.payload as Partial<TeamMessagePayload> | undefined);
   return {
     plannerRuns: agents.planner,
     workerRuns: agents.workers,
@@ -846,6 +964,14 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
     tasksRejected: board.tasks.filter((t) => t.rejections > 0).length,
     tokensUsed: board.runs.reduce((sum, r) => sum + (typeof r.tokens === "number" && Number.isFinite(r.tokens) ? r.tokens : 0), 0),
     wallMs: board.createdAt > 0 ? Math.max(0, ended - board.createdAt) : 0,
+    messagesSent: messages.length,
+    messagesToLead: payloads.filter((p) => p?.to === "lead").length,
+    messagesToSibling: payloads.filter((p) => p?.to === "sibling").length,
+    messagesUndelivered: payloads.filter((p) => p?.delivered === false).length,
+    readOnlyRefusals: board.log.reduce((sum, e) => {
+      const n = e.type === "note" ? e.payload?.readOnlyRefusals : undefined;
+      return sum + (typeof n === "number" && Number.isInteger(n) && n > 0 ? n : 0);
+    }, 0),
   };
 }
 

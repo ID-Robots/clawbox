@@ -795,6 +795,7 @@ export const sv: Record<string, string> = {
   "codingAgent.team.agents": "{total} agenter arbetade här — planerare {planner} · arbetare {workers} · granskare {reviewers}",
   "codingAgent.team.branch": "på grenen {branch}, från {base}",
   "codingAgent.team.messagesTitle": "Meddelanden ({n})",
+  "codingAgent.team.inboxTitle": "Inkorg för ledaren ({n})",
   "codingAgent.team.messageToLead": "till ledaren",
   "codingAgent.team.messageToAssistant": "till assistenten",
   "codingAgent.team.messageToRun": "till {run}",

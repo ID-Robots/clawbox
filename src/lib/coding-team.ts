@@ -20,7 +20,8 @@
  *
  * Guardrails (v0): the board refuses any message its sender's role may not
  * send and logs the refusal; a worker that hit a permission denial, or that
- * touched files outside its task's files_hint, raises an ALERT; after
+ * touched files outside its task's files_hint, raises an ALERT (refusals of
+ * read-only actions alone are a NOTE, and the task stays clean); after
  * MAX_ALERTS the team stops (a reviewer that could not start is alerted but
  * not counted; one that waits for room is neither). A failed task fails the
  * team unless other tasks can still run; a task the reviewer rejects is
@@ -31,10 +32,11 @@
  * work is reviewed — a reviewer per task, one over the merged result, or the
  * rule alone. Every worker reads a bounded digest of the whole board. With
  * the owner's `coding_team_dynamic` switch on, the planner comes back as the
- * LEAD after each worker settles and may add or retire a few tasks; with it
- * off, no lead run is ever started. The team's figures (runs per role,
- * tasks planned/added/retired/accepted/rejected, tokens, wall time) are on
- * the board.
+ * LEAD once per batch of settled workers — only when there is something to
+ * decide — and may add or retire a few tasks; with it off, no lead run is
+ * ever started. The team's figures (runs per role, tasks
+ * planned/added/retired/accepted/rejected, tokens, wall time) are on the
+ * board.
  *
  * A team lives in this process; its board is on disk after every message.
  * A team the web server was restarted under is settled as failed on the
@@ -88,6 +90,8 @@ import {
   listBoards,
   loadBoard,
   MAX_DIGEST_CHARS,
+  outsideFolderWriteDenial,
+  readOnlyDenial,
   readyTasks,
   saveBoard,
   setTeamStatus,
@@ -104,7 +108,7 @@ import {
 /** The board as the routes and the app read it: with who worked, counted, and the figures as of now. */
 export type TeamView = TeamBoard & { agents: TeamAgents };
 import { TeamBus, type TeamMessage } from "@/lib/coding-team-bus";
-import { leadRoom, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask } from "@/lib/coding-team-planner";
+import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask } from "@/lib/coding-team-planner";
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
 export const MAX_ALERTS = 3;
@@ -124,9 +128,12 @@ const TEAMMATE_QUOTE_CHARS = 160;
 export const WORKER_BRIEF = [
   "You are ONE WORKER of a small coding team. The task you were given is one part of a larger goal; other workers do the other parts in their own sessions, before or after you.",
   "Do your task and only your task: do not redo, undo or 'improve' the parts that belong to others, and stay inside the files your task names unless the task cannot be done otherwise — say so in your report if you had to.",
-  "Scratch files — a page or script you write only to verify your work, notes to yourself — go in your evidence folder, never in the project: a file outside your task's files counts as straying, even a temporary one.",
+  "Scratch files go in your evidence folder only — never in /tmp, never beside the project. A write anywhere else is refused, and a refused write counts against your task.",
   "Your final message is read by the team's reviewer and quoted to the next worker: state what you changed (file names), how it can be checked, and anything you could not finish.",
-  "If you are blocked — you need a teammate's output first, the files your task names do not exist or are wrong, or a decision only the owner can take — say so in one short team_message (to a sibling run, to the lead, or to the owner's assistant), never for progress reports, and never answer a message a teammate sent you just to acknowledge it.",
+  "Message a SIBLING with team_message (to=\"sibling\", its run id is in your task text under 'Teammates at work now') when your task needs a file, a name, a schema or an API shape that a teammate owns and that is not in your folder yet: ask for exactly that, in one message. If a teammate's message asks you for such a thing, answer it once with the exact answer (file name, field names, function signature) — that is the one reply that is not an acknowledgement.",
+  "Message the LEAD (to=\"lead\") when a task on the board is wrong for the goal: it is already done, it duplicates yours, or it cannot be done as written.",
+  "Message the owner's assistant (to=\"owner_agent\") only for a decision only the owner can take.",
+  "Never send a team_message for progress reports — what you did belongs in your final message — and never to acknowledge a message a teammate sent you.",
 ].join(" ");
 
 export interface StartTeamInput {
@@ -155,6 +162,15 @@ interface LiveTeam {
    * (bench, 2026-09-22).
    */
   uncountedAlerts: number;
+  /**
+   * When the lead's last two turns that got a run were written (ms), older
+   * first. A turn that decided nothing leaves its inbox unread
+   * (`board.lastLeadAt`), and what was in it calls the lead back ONCE: a
+   * message from before the older one was put to two leads already. Called
+   * after every batch instead, a lead that never answers would cost an alert
+   * each time, until MAX_ALERTS stopped a team whose work was fine.
+   */
+  leadTurnsAt: [number, number];
   done: Promise<void>;
 }
 
@@ -200,7 +216,7 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   const board = createBoard({ goal, projectId, directory, source: input.source, dynamic }, input.source === "owner" ? OWNER : SYSTEM);
   saveBoard(board);
   const bus = new TeamBus(board);
-  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, done: Promise.resolve() };
+  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, leadTurnsAt: [0, 0], done: Promise.resolve() };
   live.set(board.id, team);
   team.done = runTeam(team, input.source)
     .catch((err) => {
@@ -516,9 +532,10 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // More than one correction, because one was not enough. On the box, a planner
   // told only to "shorten" a 2835-character description answered 3013 the second
   // time and the board died with no task ever posted — twice, on two devices.
-  // Each ask now carries every fault and how far over the limit it is; the
-  // budget is small because a planner that cannot answer an array in three
-  // tries is not going to on the fourth, and every try is a paid run.
+  // Each ask now carries every fault, and text over its length bound is cut
+  // rather than refused (a note on the log, not an alert); the budget is
+  // small because a planner that cannot answer an array in three tries is
+  // not going to on the fourth, and every try is a paid run.
   for (let attempt = 2; !plan.ok && attempt <= MAX_PLANNER_ATTEMPTS; attempt++) {
     // Once more, and for the plan alone: a planner that wrote its plan as
     // prose is asked to say it as the JSON the team reads. On the record as
@@ -556,6 +573,8 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // are read in. No shape is the default team — every slot, a reviewer per task.
   if (plan.shape) bus.send(PLANNER, { type: "shape", ...plan.shape });
   for (const task of plan.tasks) bus.send(PLANNER, { type: "task", ...task });
+  // Text over its bound was cut, not refused: one note says so — never an alert.
+  if (plan.clipped) bus.send(SYSTEM, { type: "note", text: clippedNote(plan.clipped) });
 
   // The team's own branch in a folder project: workers get worktrees off it
   // and their branches merge back into it. A code project sits inside the
@@ -598,10 +617,11 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     }
     // The lead, before anything new starts: a pending task it retires must
     // not be handed to a worker while it is still deciding. The workers
-    // already going go on meanwhile.
-    const settledTask = leadAfter.shift();
-    if (settledTask) {
-      await leadTurn(team, settledTask, source, () => new Set(inFlight.keys()), () => starting.size);
+    // already going go on meanwhile — and every one that settles while it
+    // thinks waits for ONE next turn, not a turn each.
+    const settledTasks = leadAfter.splice(0);
+    if (settledTasks.length) {
+      await leadTurn(team, settledTasks, source, () => new Set(inFlight.keys()), () => starting.size);
       continue;
     }
     const ready = readyTasks(board).filter((t) => !inFlight.has(t.task_id));
@@ -768,10 +788,29 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
     return true;
   }
 
-  // Guardrails: what the worker did, against what it was asked.
+  // Guardrails: what the worker did, against what it was asked. A worker
+  // whose every refusal only LOOKED — a Glob of the project path from inside
+  // its worktree, a `ps` — changed nothing: a note, not an alert, and the
+  // task stays clean (bench, 2026-09-22/23: such refusals rejected merged,
+  // correct work and failed teams on the alert ceiling). So did a refused
+  // WRITE outside its folders — a check script in /tmp (bench, 2026-09-23):
+  // the refusal is the proof. A refused write inside the worktree or the
+  // project is still an alert. Only when every refusal is on the record: the
+  // run keeps the first few, and one it did not keep may have been a write.
+  let refusedWrite = false;
   if (settled) {
     if (settled.permissionDenials > 0) {
-      bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} was refused ${settled.permissionDenials} action(s): ${settled.deniedActions.slice(0, 3).join("; ")}` });
+      const n = settled.permissionDenials;
+      const named = settled.deniedActions.slice(0, 3).join("; ");
+      const folders = worktree ? [worktree.path, board.directory] : [board.directory];
+      const outsideWrite = (a: string) => outsideFolderWriteDenial(a, folders);
+      if (settled.deniedActions.length >= n && settled.deniedActions.every((a) => readOnlyDenial(a) || outsideWrite(a))) {
+        const what = settled.deniedActions.some(outsideWrite) ? "action(s) that changed nothing — reads, or writes" : "read-only action(s)";
+        bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} was refused ${n} ${what} outside its folder: ${named}`, read_only_refusals: n });
+      } else {
+        refusedWrite = true;
+        bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} was refused ${n} action(s): ${named}` });
+      }
     }
     const strayed = outsideHint(files, task.files_hint);
     if (strayed.length) {
@@ -779,14 +818,14 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
     }
   }
 
-  // The review loop: the rule first (v0 — a refusal or a stray file is a
+  // The review loop: the rule first (v0 — a refused write or a stray file is a
   // rejection without a model), then the REVIEWER, a read-only run on the
   // merged work that answers a verdict. A review that was not done is not
   // an acceptance: a garbled answer falls back to the rule with an alert.
   // The planner's shape may ask for no reviewer here: `final` has one look
   // at the merged whole at the end, `none` trusts the rule alone.
   if (ok) {
-    const clean = settled && settled.permissionDenials === 0 && outsideHint(files, task.files_hint).length === 0;
+    const clean = settled && !refusedWrite && outsideHint(files, task.files_hint).length === 0;
     if (!clean) {
       bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: "The worker was refused an action or strayed outside its files; the task is offered once more." });
       return true;
@@ -930,44 +969,59 @@ async function finalReview(team: LiveTeam, source: CodingRunSource): Promise<{ v
 }
 
 /**
- * The LEAD's turn after `taskId`'s worker settled (only on a team started
+ * The LEAD's turn after the workers of `taskIds` settled — every task that
+ * settled since its last turn, in the order they did (only on a team started
  * with the `coding_team_dynamic` switch on): one short read-only run — the
  * planner's brief for writing tasks, the REPLAN_BRIEF for what it may do —
- * that reads the goal, the board's digest and that task's result, and
- * answers `{ add, retire, note }`. Every accepted change goes through the
- * bus in the planner's name; an answer that is not one, or that breaks a
- * bound, is an alert and the plan stands as it was — never repaired.
+ * that reads the goal, the board's digest, those tasks' results and the
+ * messages sent to the lead since its last turn, and answers `{ add, retire,
+ * note }`. Every accepted change goes through the bus in the planner's name;
+ * an answer that is not one, or that breaks a bound, is an alert and the
+ * plan stands as it was — never repaired.
  *
  * No run is spent when there is nothing to decide: every task left is
- * complete, the team is stopping, or the lead has no add and no retire left.
+ * complete, the team is stopping, the lead has no add and no retire left, or
+ * the batch was accepted clean with no blocker and no message to the lead
+ * (`leadShouldRun`) — skipped without a word on the board.
  * `dispatched` names the tasks a worker is going on or being started on —
  * the latter still read pending on the board and must not be retired from
  * under it. `reserved` counts the workers whose run is not persisted yet (a
  * worktree being added): the spawn slot must see them, or the lead could
  * take the seat a worker is seconds from filling.
  */
-async function leadTurn(team: LiveTeam, taskId: string, source: CodingRunSource, dispatched: () => ReadonlySet<string>, reserved: () => number): Promise<void> {
+async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSource, dispatched: () => ReadonlySet<string>, reserved: () => number): Promise<void> {
   const { board, bus } = team;
   if (team.stopRequested || isSettledStatus(board.status)) return;
   if (board.tasks.every((t) => t.status === "complete" || t.status === "retired")) return;
   const room = leadRoom(replanContext(board, dispatched()));
   if (room.adds === 0 && room.retires === 0) return;
+  // An unread message calls the lead back once, not after every batch (leadTurnsAt).
+  if (!leadShouldRun(board, taskIds, Math.max(board.lastLeadAt, team.leadTurnsAt[0])).run) return;
+  // The run is filed under the batch's latest task; the alerts name them all.
+  const taskId = taskIds[taskIds.length - 1];
+  const after = taskIds.join(", ");
   // A seat beside the workers still going: the memory guard is waited out
   // the way a worker's is; a stranger's run holding the box is an alert.
   for (;;) {
     const slot = await teamSpawnSlot({ id: board.id, role: "lead", taskId }, reserved());
     if (slot.ok) break;
     if (!slot.wait) {
-      bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${taskId}: ${slot.reason}` });
+      bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${after}: ${slot.reason}` });
       return;
     }
     await sleep(SLOT_WAIT_MS);
     if (team.stopRequested) return;
   }
+  // The inbox is written from what was said up to now; what is said after
+  // waits for the next turn. It counts as read only once the lead gave an
+  // answer the team can act on (below): a lead that failed, ran out of
+  // budget or answered nothing usable leaves it unread — shown to every
+  // later turn, and calling the next one back on its own once.
+  const writtenAt = Date.now();
   let run: CodingRun;
   try {
     run = await startRun({
-      task: leadTask(board, taskId, replanContext(board, dispatched())),
+      task: leadTask(board, taskIds, replanContext(board, dispatched())),
       projectId: board.projectId,
       directory: board.directory,
       source,
@@ -976,23 +1030,27 @@ async function leadTurn(team: LiveTeam, taskId: string, source: CodingRunSource,
       extraBrief: REPLAN_BRIEF,
     });
   } catch (err) {
-    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${taskId}: ${err instanceof Error ? err.message : String(err)}` });
+    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${after}: ${err instanceof Error ? err.message : String(err)}` });
     return;
   }
+  team.leadTurnsAt = [team.leadTurnsAt[1], writtenAt];
   board.runs.push({ id: run.id, role: "lead", taskId });
   saveBoard(board);
   const settled = await settle(team, run.id);
   if (team.stopRequested) return;
   if (settled?.status !== "completed") {
-    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `The lead after ${taskId} (${run.id}) ended ${settled?.status ?? "without a record"}; the plan is unchanged.` });
+    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `The lead after ${after} (${run.id}) ended ${settled?.status ?? "without a record"}; the plan is unchanged.` });
     return;
   }
   // Read against the board as it is NOW: workers went on while the lead thought.
   const replan = parseReplan(settled.resultText ?? settled.summary, replanContext(board, dispatched()));
   if (!replan.ok) {
-    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `The lead after ${taskId} gave no usable answer: ${replan.reason} The plan is unchanged.` });
+    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `The lead after ${after} gave no usable answer: ${replan.reason} The plan is unchanged.` });
     return;
   }
+  // Saved on its own: an answer of `{}` sends nothing on the bus to save it.
+  board.lastLeadAt = writtenAt;
+  saveBoard(board);
   for (const id of replan.retire) {
     try {
       bus.send(PLANNER, { type: "retire", task_id: id, reason: replan.note });
@@ -1007,6 +1065,7 @@ async function leadTurn(team: LiveTeam, taskId: string, source: CodingRunSource,
       // Refused by the board: already on it as an alert.
     }
   }
+  if (replan.clipped) bus.send(SYSTEM, { type: "note", text: clippedNote(replan.clipped) });
 }
 
 /** A pause that never keeps the process alive on its own: the loop's timer beside a race it may lose. */

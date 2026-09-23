@@ -160,3 +160,35 @@ describe("the lead's messages and the shape (TASK-1099)", () => {
     expect(alerts[0]).toMatch(/Refused retire from worker run-aaaaaaaa/);
   });
 });
+
+describe("a note (a guardrail line that is not an alert)", () => {
+  it("is validated, applied for the system without touching the alert count, and refused — as an alert — from anyone else", () => {
+    const { validateMessage } = busLib;
+    expect(validateMessage({ type: "note", text: " " })).toMatch(/text/);
+    expect(validateMessage({ type: "note", text: "x", read_only_refusals: 1.5 })).toMatch(/whole number/);
+    expect(validateMessage({ type: "note", text: "x", read_only_refusals: -1 })).toMatch(/whole number/);
+    expect(validateMessage({ type: "note", text: "x", task_id: "t1", read_only_refusals: 2 })).toBeNull();
+    const board = boardLib.createBoard({ goal: "g", projectId: null, directory: "/p", source: "owner" }, { kind: "owner" });
+    const bus = new busLib.TeamBus(board);
+    bus.send({ kind: "system" }, { type: "note", text: "Worker run-aaaaaaaa was refused 2 read-only action(s)", task_id: "t1", read_only_refusals: 2 });
+    expect(board.alerts).toBe(0);
+    expect(boardLib.loadBoard(board.id)).toMatchObject({ alerts: 0, metrics: { readOnlyRefusals: 2 } });
+    expect(() => bus.send(W, { type: "note", text: "nothing to see", read_only_refusals: 5 })).toThrow(/Only the system writes a note/);
+    expect(board.alerts).toBe(1);
+    expect(board.metrics.readOnlyRefusals).toBe(2);
+  });
+
+  it("carries a plan's clip line too: no task, never an alert, never counted as a refusal — and nobody else's", () => {
+    expect(busLib.validateMessage({ type: "note", text: "Task t3's description was cut from 2313 to 1987 characters." })).toBeNull();
+    const board = boardLib.createBoard({ goal: "g", projectId: null, directory: "/p", source: "owner" }, { kind: "owner" });
+    const bus = new busLib.TeamBus(board);
+    bus.send({ kind: "system" }, { type: "note", text: "Task t3's description was cut from 2313 to 1987 characters." });
+    expect(board.alerts).toBe(0);
+    expect(boardLib.loadBoard(board.id)).toMatchObject({ alerts: 0, metrics: { readOnlyRefusals: 0 } });
+    expect(boardLib.loadBoard(board.id)?.log.at(-1)).toMatchObject({ type: "note", actor: { kind: "system" }, message: "Task t3's description was cut from 2313 to 1987 characters." });
+    for (const actor of [W, { kind: "planner" } as const]) {
+      expect(() => bus.send(actor, { type: "note", text: "hi" })).toThrow(/Only the system writes a note/);
+    }
+    expect(board.log.filter((e) => e.type === "note")).toHaveLength(1);
+  });
+});

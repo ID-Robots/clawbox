@@ -222,6 +222,10 @@ describe("boardDigest", () => {
     expect(lib.boardDigest(b, "t1")).toContain("t3 [pending] — Write the README → (not started)");
     expect(lib.boardDigest(b, "t1")).not.toContain("t1 [");
     expect(lib.boardDigest(b, null)).toContain("t1 [complete]");
+    // The lead's batch: every task it was given in full is left out.
+    const batch = lib.boardDigest(b, ["t1", "t2"]);
+    expect(batch).not.toMatch(/t[12] \[/);
+    expect(batch).toContain("t3 [pending]");
   });
 
   it("cuts each description at 160 and each result at 200, and quotes only the last 5 alerts or messages", () => {
@@ -399,6 +403,21 @@ describe("teamMetrics", () => {
       task("t4", { status: "complete", attempts: 1, origin: "lead", review: { verdict: "accepted", notes: "", at: 1 } }),
       task("t5", { status: "rejected", attempts: 2, rejections: 2, review: { verdict: "rejected", notes: "no", at: 1 } }),
     ];
+    // What the runs said: two to a sibling (the ask and its one answer), one
+    // to the lead, one to the assistant the box could not hand on, and one
+    // whose payload could not be read back — sent, but to nobody in particular.
+    const said = (from: string, payload: Record<string, unknown> | undefined) => ({ ts: 2, actor: worker(from), type: "message" as const, message: `worker ${from} → …`, payload });
+    b.log.push(
+      said("run-work0002", { from: "run-work0002", to: "sibling", toRunId: "run-work0001", text: "Which fields does the invoice schema have?" }),
+      said("run-work0001", { from: "run-work0001", to: "sibling", toRunId: "run-work0002", text: "id, total, dueAt — in src/schema.ts." }),
+      said("run-work0002", { from: "run-work0002", to: "lead", text: "t3 duplicates t2: both build the cart." }),
+      { ts: 3, actor: PLANNER, type: "message", message: "planner → the assistant (not delivered: NO_SESSION): Stripe?", payload: { from: "run-plan0001", to: "owner_agent", text: "Stripe or PayPal?", delivered: false, code: "NO_SESSION" } },
+      said("run-work0003", undefined),
+      // Two workers refused only reads; a note read back with a payload that is not a count counts nothing.
+      { ts: 4, actor: SYSTEM, type: "note", message: "Worker run-work0001 was refused 2 read-only action(s) …", payload: { readOnlyRefusals: 2 } },
+      { ts: 5, actor: SYSTEM, type: "note", message: "Worker run-work0002 was refused 1 read-only action(s) …", payload: { readOnlyRefusals: 1 } },
+      { ts: 6, actor: SYSTEM, type: "note", message: "?", payload: { readOnlyRefusals: "lots" } },
+    );
     b.status = "failed";
     b.finishedAt = 61_000;
     expect(lib.teamMetrics(b)).toEqual({
@@ -413,6 +432,11 @@ describe("teamMetrics", () => {
       tasksRejected: 2,
       tokensUsed: 12_000,
       wallMs: 60_000,
+      messagesSent: 5,
+      messagesToLead: 1,
+      messagesToSibling: 2,
+      messagesUndelivered: 1,
+      readOnlyRefusals: 3,
     });
     expect(lib.teamAgents(b)).toEqual({ planner: 1, workers: 3, reviewers: 2, leads: 1, total: 7 });
     // A team at work: the clock runs to now.
@@ -429,8 +453,20 @@ describe("teamMetrics", () => {
     expect(b.finishedAt).toBe(b.updatedAt);
     lib.saveBoard(b);
     const raw = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-team", `${b.id}.json`), "utf8"));
-    expect(raw.metrics).toMatchObject({ tasksPlanned: 1, tasksAdded: 0, tokensUsed: 0 });
+    expect(raw.metrics).toMatchObject({ tasksPlanned: 1, tasksAdded: 0, tokensUsed: 0, messagesSent: 0, messagesToLead: 0, messagesToSibling: 0, messagesUndelivered: 0 });
     expect(lib.loadBoard(b.id)).toMatchObject({ finishedAt: b.finishedAt, metrics: { tasksPlanned: 1 } });
+  });
+
+  it("counts the team messages postMessage wrote, and counts them again from the log read back", () => {
+    const b = board();
+    b.runs.push({ id: "run-aaaaaaaa", role: "worker", taskId: "t1" }, { id: "run-bbbbbbbb", role: "worker", taskId: "t2" });
+    lib.postMessage(b, worker("run-aaaaaaaa"), { from_run_id: "run-aaaaaaaa", to: "sibling", to_run_id: "run-bbbbbbbb", text: "What does cart.ts export?" }, 1_000);
+    lib.postMessage(b, worker("run-bbbbbbbb"), { from_run_id: "run-bbbbbbbb", to: "sibling", to_run_id: "run-aaaaaaaa", text: "addItem(sku, qty)", undelivered: "NOT_DELIVERED" }, 2_000);
+    lib.postMessage(b, worker("run-bbbbbbbb"), { from_run_id: "run-bbbbbbbb", to: "lead", text: "t3 is already done by t2." }, 3_000);
+    const counted = { messagesSent: 3, messagesToLead: 1, messagesToSibling: 2, messagesUndelivered: 1 };
+    expect(lib.teamMetrics(b)).toMatchObject(counted);
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)!.metrics).toMatchObject(counted);
   });
 
   it("reads a board from before the shape, the lead and the figures as the default team", () => {
@@ -439,14 +475,14 @@ describe("teamMetrics", () => {
     lib.saveBoard(b);
     const file = path.join(root, "data", "coding-team", `${b.id}.json`);
     const raw = JSON.parse(fs.readFileSync(file, "utf8"));
-    for (const k of ["shape", "dynamic", "finalReview", "metrics", "finishedAt"]) delete raw[k];
+    for (const k of ["shape", "dynamic", "finalReview", "metrics", "finishedAt", "lastLeadAt"]) delete raw[k];
     delete raw.tasks[0].origin;
     delete raw.tasks[0].rejections;
     raw.tasks[0].attempts = 2;
     raw.runs = [{ id: "run-aaaaaaaa", role: "worker", taskId: "t1" }, { id: "run-bbbbbbbb", role: "lead", taskId: "t1", tokens: 42 }, { id: "run-cccccccc", role: "boss", taskId: null }];
     fs.writeFileSync(file, JSON.stringify(raw));
     const read = lib.loadBoard(b.id)!;
-    expect(read).toMatchObject({ shape: null, dynamic: false, finalReview: null, finishedAt: null });
+    expect(read).toMatchObject({ shape: null, dynamic: false, finalReview: null, finishedAt: null, lastLeadAt: 0 });
     // A second attempt only follows a rejection: counted as one.
     expect(read.tasks[0]).toMatchObject({ origin: "plan", rejections: 1 });
     expect(read.runs).toEqual([{ id: "run-aaaaaaaa", role: "worker", taskId: "t1" }, { id: "run-bbbbbbbb", role: "lead", taskId: "t1", tokens: 42 }]);
@@ -458,5 +494,155 @@ describe("teamMetrics", () => {
     raw.shape = { parallelism: 2, review: "final", rationale: "Two files." };
     fs.writeFileSync(file, JSON.stringify(raw));
     expect(lib.loadBoard(b.id)?.shape).toEqual({ parallelism: 2, review: "final", rationale: "Two files." });
+    // The lead's last turn: kept when it is a time, 0 when it is anything else.
+    raw.lastLeadAt = "soon";
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(lib.loadBoard(b.id)?.lastLeadAt).toBe(0);
+  });
+
+  it("counts the read-only refusals postNote wrote, never as alerts, and counts them again from the log read back", () => {
+    const b = board();
+    lib.postNote(b, SYSTEM, "Worker run-aaaaaaaa was refused 2 read-only action(s) outside its folder: Read: /p/a; Glob: /p", "t1", 2);
+    lib.postNote(b, SYSTEM, "A note that is about nothing refused.");
+    expect(b.alerts).toBe(0);
+    expect(b.log.filter((e) => e.type === "note").map((e) => e.task_id)).toEqual(["t1", undefined]);
+    expect(lib.teamMetrics(b).readOnlyRefusals).toBe(2);
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)!.metrics.readOnlyRefusals).toBe(2);
+    // The orchestrator's line alone: no run of the team writes one.
+    for (const actor of [PLANNER, REVIEWER, OWNER, worker("run-aaaaaaaa")]) {
+      expect(() => lib.postNote(b, actor, "all fine", "t1", 9)).toThrow(/Only the system writes a note/);
+    }
+    expect(lib.teamMetrics(b).readOnlyRefusals).toBe(2);
+    // Not quoted to a teammate: the digest carries alerts and messages.
+    expect(lib.boardDigest(b, null)).not.toContain("read-only");
+  });
+
+  it("keeps when the lead's last turn was written, from a new board's 0", () => {
+    const b = board();
+    expect(b.lastLeadAt).toBe(0);
+    b.lastLeadAt = 1_234_567;
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)?.lastLeadAt).toBe(1_234_567);
+  });
+});
+
+describe("readOnlyDenial", () => {
+  it("knows the refusals the bench saw only looked: a probe of the project path, a ps", () => {
+    for (const action of [
+      "Glob: /home/clawbox/Projects/team-bench/team-refactor-modules",
+      "Read: /home/clawbox/Projects/team-bench/units/index.html",
+      "Read: /home/clawbox/Projects/team-bench/units/units.py",
+      "Bash: ps -eo pid,cmd | grep '[s]erver\\.py' || echo …",
+    ]) expect(lib.readOnlyDenial(action), action).toBe(true);
+  });
+
+  it("takes every tool that only looks, and a shell command whose every part only looks", () => {
+    for (const action of [
+      "Grep: TODO", "LS: /home/clawbox/Projects/site", "WebFetch: https://example.com", "WebSearch: vitest config", "Read: (no details)",
+      "Bash: ls -la /home/clawbox/Projects/site",
+      "Bash: cat index.html | head -20",
+      "Bash: cd /home/clawbox/Projects/site && git status",
+      "Bash: git -C /home/clawbox/Projects/site log --oneline -3",
+      "Bash: git diff HEAD~1 -- app.js; git show HEAD:app.js",
+      "Bash: find . -name '*.py' 2>/dev/null | wc -l",
+      "Bash: test -f server.py && echo yes || echo no",
+      "Bash: [ -d dist ] && ls dist >/dev/null 2>&1",
+      "Bash: pgrep -f server.py &>/dev/null; rg -n TODO src; stat units.py; file units.py; which python3; pwd; tail -n 5 log.txt",
+    ]) expect(lib.readOnlyDenial(action), action).toBe(true);
+  });
+
+  it("calls anything that may write a write: the file tools, a redirection, a writing command, a command it cannot read to the end", () => {
+    for (const action of [
+      "Write: /home/clawbox/Projects/site/index.html",
+      "Edit: /home/clawbox/Projects/site/app.js",
+      "NotebookEdit: /home/clawbox/Projects/site/a.ipynb",
+      "Bash: rm -rf x",
+      "Bash: cat a > b",
+      "Bash: python3 build.py",
+      "Bash: echo hi >> notes.txt",
+      "Bash: ls >/dev/nullfile",
+      "Bash: ls >&2file",
+      "Bash: rg --pre rm TODO .",
+      "Bash: rg --pre=./wipe.sh TODO",
+      "Bash: cat a | tee b",
+      "Bash: ls && mkdir out",
+      "Bash: grep -l x src | xargs sed -i s/x/y/",
+      "Bash: git status; npm install",
+      "Bash: git checkout -- app.js",
+      "Bash: git diff --output=patch.txt",
+      "Bash: git -C .",
+      "Bash: find . -name '*.pyc' -delete",
+      "Bash: find . -exec rm {} ;",
+      "Bash: echo $(rm -rf x)",
+      "Bash: echo `touch x`",
+      "Bash: cat <(node gen.js)",
+      "Bash: sudo ls",
+      "Bash: FOO=1 ls",
+      "Bash: (no details)",
+      "Bash: ",
+      // At the runner's cut (160): the rest of the command is not on the record.
+      `Bash: ls ${"a".repeat(151)}`,
+      "tool: (no details)",
+      "Read /no/colon",
+      "",
+    ]) expect(lib.readOnlyDenial(action), action).toBe(false);
+  });
+});
+
+describe("outsideFolderWriteDenial", () => {
+  const WT = ["/p/.clawbox/worktrees/t2-1"];
+
+  it("takes a write the runner refused outside the worker's worktree, and keeps one inside it", () => {
+    expect(lib.outsideFolderWriteDenial("Write: /tmp/x.py", WT)).toBe(true);
+    expect(lib.outsideFolderWriteDenial("Write: /p/.clawbox/worktrees/t2-1/a.js", WT)).toBe(false);
+    expect(lib.outsideFolderWriteDenial("Bash: echo hi > /tmp/o", WT)).toBe(true);
+    // In place: the project is the worker's folder.
+    expect(lib.outsideFolderWriteDenial("Edit: /p/index.html", ["/p"])).toBe(false);
+  });
+
+  it("knows the scratch places the bench saw: /tmp, the harness's memory folder, /var", () => {
+    for (const action of [
+      "Write: /tmp/t2_check_contacts.py",
+      "Write: /home/clawbox/.claude-ds/projects/-p/memory/notes.md",
+      "Edit: /var/tmp/x.txt",
+      "MultiEdit: /tmp/a.js",
+      "NotebookEdit: /tmp/n.ipynb",
+      "Bash: cat > /tmp/check.py << 'EOF'",
+      "Bash: python3 -c \"open('/tmp/x','w').write('1')\"",
+      "Bash: echo hi>/tmp/o",
+      "Bash: mkdir -p /tmp/t2 && cp a.js /tmp/t2/",
+      // `..` walks out of the worktree.
+      "Write: /p/.clawbox/worktrees/t2-1/../../../tmp/x",
+      // A sibling's worktree is not this worker's.
+      "Write: /p/.clawbox/worktrees/t2-10/a.js",
+    ]) expect(lib.outsideFolderWriteDenial(action, WT), action).toBe(true);
+  });
+
+  it("is false for a write inside any of the folders, a tool that only looks, no absolute path, a path the runner's cut ran into, or no folder", () => {
+    for (const [action, folders] of [
+      ["Write: /p/.clawbox/worktrees/t2-1", WT],
+      ["Edit: /p/.clawbox/worktrees/t2-1/src/app.js", WT],
+      ["Bash: cd /p/.clawbox/worktrees/t2-1 && rm -rf dist", WT],
+      // A worktree worker's write at the project itself: its folders are both.
+      ["Write: /p/index.html", ["/p/.clawbox/worktrees/t2-1", "/p"]],
+      ["Read: /tmp/x.py", WT],
+      ["Glob: /tmp", WT],
+      ["mcp__clawbox__browser_open: /tmp/x", WT],
+      ["Bash: rm -rf dist", WT],
+      ["Bash: echo hi > ~/notes.txt", WT],
+      ["Bash: curl https://example.com/x -o out.html", WT],
+      ["Write: (no details)", WT],
+      ["Write /tmp/no-colon", WT],
+      ["", WT],
+      // At the runner's cut (160), mid-path: it may have gone on into the project.
+      [`Bash: ${"x".repeat(140)} > /home/clawbox/Projects/site/out.txt`.slice(0, 160), ["/home/clawbox/Projects/site"]],
+      ["Write: /tmp/x.py", []],
+      ["Write: /tmp/x.py", ["relative/dir"]],
+    ] as Array<[string, string[]]>) expect(lib.outsideFolderWriteDenial(action, folders), action).toBe(false);
+  });
+
+  it("still takes a long command whose path ends before the runner's cut", () => {
+    expect(lib.outsideFolderWriteDenial(`Bash: cat > /tmp/check.py << 'EOF' ${"x".repeat(140)}`.slice(0, 160), WT)).toBe(true);
   });
 });

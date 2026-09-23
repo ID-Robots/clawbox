@@ -105,9 +105,13 @@ describe("when the tool exists", () => {
     expect(teamTools().names()).toEqual([]);
   });
 
-  it("says in its description when to use it, and that a received message needs no reply", () => {
+  it("says in its description when to message a sibling, the lead and the owner's assistant — and never for progress or to acknowledge", () => {
     const { description } = teamTools().get("team_message");
-    expect(description).toMatch(/blocked/);
+    expect(description).toMatch(/Message a sibling when your task needs a file, name, schema or API shape a teammate owns/);
+    expect(description).toMatch(/if a sibling asks you for one, reply once with the exact answer/);
+    expect(description).toMatch(/Message the lead when a task on the board is wrong for the goal: already done, a duplicate of yours, or impossible as written/);
+    expect(description).toMatch(/Message the owner's assistant only for a decision only the owner can take/);
+    expect(description).toMatch(/Never for progress reports/);
     expect(description).toMatch(/never to acknowledge a message you received/i);
     expect(description).toMatch(/1500 characters; 4 per 5 minutes and 12 per run/);
     expect(description.length).toBeLessThanOrEqual(1000);

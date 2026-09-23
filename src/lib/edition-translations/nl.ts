@@ -799,6 +799,7 @@ export const nl: Record<string, string> = {
   "codingAgent.team.agents": "{total} agents werkten hier — planner {planner} · werkers {workers} · teamreviewers {reviewers}",
   "codingAgent.team.branch": "op branch {branch}, vanaf {base}",
   "codingAgent.team.messagesTitle": "Berichten ({n})",
+  "codingAgent.team.inboxTitle": "Inbox van de leiding ({n})",
   "codingAgent.team.messageToLead": "aan de leiding",
   "codingAgent.team.messageToAssistant": "aan de assistent",
   "codingAgent.team.messageToRun": "aan {run}",
