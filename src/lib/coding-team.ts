@@ -31,10 +31,11 @@
  * work is reviewed — a reviewer per task, one over the merged result, or the
  * rule alone. Every worker reads a bounded digest of the whole board. With
  * the owner's `coding_team_dynamic` switch on, the planner comes back as the
- * LEAD after each worker settles and may add or retire a few tasks; with it
- * off, no lead run is ever started. The team's figures (runs per role,
- * tasks planned/added/retired/accepted/rejected, tokens, wall time) are on
- * the board.
+ * LEAD once per batch of settled workers — only when there is something to
+ * decide — and may add or retire a few tasks; with it off, no lead run is
+ * ever started. The team's figures (runs per role, tasks
+ * planned/added/retired/accepted/rejected, tokens, wall time) are on the
+ * board.
  *
  * A team lives in this process; its board is on disk after every message.
  * A team the web server was restarted under is settled as failed on the
@@ -104,7 +105,7 @@ import {
 /** The board as the routes and the app read it: with who worked, counted, and the figures as of now. */
 export type TeamView = TeamBoard & { agents: TeamAgents };
 import { TeamBus, type TeamMessage } from "@/lib/coding-team-bus";
-import { leadRoom, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask } from "@/lib/coding-team-planner";
+import { leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask } from "@/lib/coding-team-planner";
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
 export const MAX_ALERTS = 3;
@@ -598,10 +599,11 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     }
     // The lead, before anything new starts: a pending task it retires must
     // not be handed to a worker while it is still deciding. The workers
-    // already going go on meanwhile.
-    const settledTask = leadAfter.shift();
-    if (settledTask) {
-      await leadTurn(team, settledTask, source, () => new Set(inFlight.keys()), () => starting.size);
+    // already going go on meanwhile — and every one that settles while it
+    // thinks waits for ONE next turn, not a turn each.
+    const settledTasks = leadAfter.splice(0);
+    if (settledTasks.length) {
+      await leadTurn(team, settledTasks, source, () => new Set(inFlight.keys()), () => starting.size);
       continue;
     }
     const ready = readyTasks(board).filter((t) => !inFlight.has(t.task_id));
@@ -930,44 +932,55 @@ async function finalReview(team: LiveTeam, source: CodingRunSource): Promise<{ v
 }
 
 /**
- * The LEAD's turn after `taskId`'s worker settled (only on a team started
+ * The LEAD's turn after the workers of `taskIds` settled — every task that
+ * settled since its last turn, in the order they did (only on a team started
  * with the `coding_team_dynamic` switch on): one short read-only run — the
  * planner's brief for writing tasks, the REPLAN_BRIEF for what it may do —
- * that reads the goal, the board's digest and that task's result, and
- * answers `{ add, retire, note }`. Every accepted change goes through the
- * bus in the planner's name; an answer that is not one, or that breaks a
- * bound, is an alert and the plan stands as it was — never repaired.
+ * that reads the goal, the board's digest, those tasks' results and the
+ * messages sent to the lead since its last turn, and answers `{ add, retire,
+ * note }`. Every accepted change goes through the bus in the planner's name;
+ * an answer that is not one, or that breaks a bound, is an alert and the
+ * plan stands as it was — never repaired.
  *
  * No run is spent when there is nothing to decide: every task left is
- * complete, the team is stopping, or the lead has no add and no retire left.
+ * complete, the team is stopping, the lead has no add and no retire left, or
+ * the batch was accepted clean with no blocker and no message to the lead
+ * (`leadShouldRun`) — skipped without a word on the board.
  * `dispatched` names the tasks a worker is going on or being started on —
  * the latter still read pending on the board and must not be retired from
  * under it. `reserved` counts the workers whose run is not persisted yet (a
  * worktree being added): the spawn slot must see them, or the lead could
  * take the seat a worker is seconds from filling.
  */
-async function leadTurn(team: LiveTeam, taskId: string, source: CodingRunSource, dispatched: () => ReadonlySet<string>, reserved: () => number): Promise<void> {
+async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSource, dispatched: () => ReadonlySet<string>, reserved: () => number): Promise<void> {
   const { board, bus } = team;
   if (team.stopRequested || isSettledStatus(board.status)) return;
   if (board.tasks.every((t) => t.status === "complete" || t.status === "retired")) return;
   const room = leadRoom(replanContext(board, dispatched()));
   if (room.adds === 0 && room.retires === 0) return;
+  if (!leadShouldRun(board, taskIds, board.lastLeadAt).run) return;
+  // The run is filed under the batch's latest task; the alerts name them all.
+  const taskId = taskIds[taskIds.length - 1];
+  const after = taskIds.join(", ");
   // A seat beside the workers still going: the memory guard is waited out
   // the way a worker's is; a stranger's run holding the box is an alert.
   for (;;) {
     const slot = await teamSpawnSlot({ id: board.id, role: "lead", taskId }, reserved());
     if (slot.ok) break;
     if (!slot.wait) {
-      bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${taskId}: ${slot.reason}` });
+      bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${after}: ${slot.reason}` });
       return;
     }
     await sleep(SLOT_WAIT_MS);
     if (team.stopRequested) return;
   }
+  // The inbox is written from what was said up to now; what is said after
+  // waits for the next turn.
+  const writtenAt = Date.now();
   let run: CodingRun;
   try {
     run = await startRun({
-      task: leadTask(board, taskId, replanContext(board, dispatched())),
+      task: leadTask(board, taskIds, replanContext(board, dispatched())),
       projectId: board.projectId,
       directory: board.directory,
       source,
@@ -976,21 +989,22 @@ async function leadTurn(team: LiveTeam, taskId: string, source: CodingRunSource,
       extraBrief: REPLAN_BRIEF,
     });
   } catch (err) {
-    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${taskId}: ${err instanceof Error ? err.message : String(err)}` });
+    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${after}: ${err instanceof Error ? err.message : String(err)}` });
     return;
   }
+  board.lastLeadAt = writtenAt;
   board.runs.push({ id: run.id, role: "lead", taskId });
   saveBoard(board);
   const settled = await settle(team, run.id);
   if (team.stopRequested) return;
   if (settled?.status !== "completed") {
-    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `The lead after ${taskId} (${run.id}) ended ${settled?.status ?? "without a record"}; the plan is unchanged.` });
+    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `The lead after ${after} (${run.id}) ended ${settled?.status ?? "without a record"}; the plan is unchanged.` });
     return;
   }
   // Read against the board as it is NOW: workers went on while the lead thought.
   const replan = parseReplan(settled.resultText ?? settled.summary, replanContext(board, dispatched()));
   if (!replan.ok) {
-    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `The lead after ${taskId} gave no usable answer: ${replan.reason} The plan is unchanged.` });
+    bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `The lead after ${after} gave no usable answer: ${replan.reason} The plan is unchanged.` });
     return;
   }
   for (const id of replan.retire) {
