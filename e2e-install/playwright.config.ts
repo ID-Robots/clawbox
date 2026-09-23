@@ -6,8 +6,13 @@
  *
  * Usage:
  *   bunx playwright test --config e2e-install/playwright.config.ts
+ *   CLAWBOX_E2E_SHARD=core bunx playwright test --config e2e-install/playwright.config.ts
+ *
+ * CI runs the suite as shards, one box each (see ./shards.ts); unset, every
+ * spec runs on one box in file order.
  */
 import { defineConfig } from "@playwright/test";
+import { shardFilter } from "./shards";
 
 const CLAWBOX_PORT = process.env.CLAWBOX_PORT ?? "8080";
 
@@ -40,6 +45,6 @@ export default defineConfig({
     ignoreHTTPSErrors: true,
   },
   projects: [
-    { name: "install", testMatch: /.*\.spec\.ts/ },
+    { name: "install", ...shardFilter(process.env.CLAWBOX_E2E_SHARD) },
   ],
 });

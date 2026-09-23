@@ -20,7 +20,7 @@ import {
   waitForContainerStopped,
   waitForHttpReady,
 } from "./helpers/container";
-import { getStatus, systemPower } from "./helpers/setup-api";
+import { getStatus, HttpError, loginSessionCookie, systemPower } from "./helpers/setup-api";
 
 test.describe.configure({ mode: "serial" });
 
@@ -32,12 +32,24 @@ test.describe("power restart", () => {
     const before = await getStatus();
     expect(before.setup_complete).toBe(true);
 
-    // Fire and forget — the server responds before the reboot executes
-    // (1.5s delay in the route handler).
-    await systemPower("restart").catch(() => {
-      // The fetch may also fail if systemd tears down during the response
-      // write. Either outcome is fine.
-    });
+    // As the OWNER. Since #793 the route powers nothing for anyone else: it
+    // queues an approval and answers 202 `pendingApproval`. This call carried
+    // no session, so from then on no reboot was ever dispatched — the wait
+    // below ran its full four minutes on every run, the force-stop brought the
+    // container down, and the test passed without a reboot in it. Measured:
+    // 5-6 s for this test before #793, 4.1 min on every run after it.
+    const owner = await loginSessionCookie();
+    let dispatched: Awaited<ReturnType<typeof systemPower>> | undefined;
+    try {
+      dispatched = await systemPower("restart", owner);
+    } catch (err) {
+      // A dropped connection is the reboot winning the race with the response
+      // write, which is fine. A status is the route refusing, which is not.
+      if (err instanceof HttpError) throw err;
+    }
+    if (dispatched) {
+      expect(dispatched, "the power route did not dispatch the reboot").toMatchObject({ ok: true, action: "restart" });
+    }
 
     // Wait for the in-container `systemctl reboot` to exit the container.
     // Best-effort: in CI, Docker-in-systemd reboot signaling intermittently
@@ -48,6 +60,16 @@ test.describe("power restart", () => {
     try {
       await waitForContainerStopped();
     } catch {
+      // The force-stop stands in for a reboot that WAS dispatched and did not
+      // propagate. With no answer from the route there is no evidence it was:
+      // the connection may have failed before the request reached it, and a
+      // force-stop would then pass this test with no reboot in it — the
+      // defect above, by another door.
+      if (!dispatched) {
+        throw new Error(
+          "the power request got no answer and the container never exited — no evidence the reboot was dispatched",
+        );
+      }
       console.warn(
         "[power] systemctl reboot did not exit the container within the window; " +
         "force-stopping (CI Docker-in-systemd flake).",

@@ -42,8 +42,11 @@ describe("Tests workflow coverage reporters", () => {
     }
   });
 
-  it("the workflow runs the CI script and parses the file json-summary writes", () => {
-    expect(workflow).toMatch(/^\s+run: bun run test:coverage:ci$/m);
+  it("the workflow runs the CI script, sharded and merged, and parses the file json-summary writes", () => {
+    // The shard and merge scripts are the CI script plus the flags sharding
+    // needs and nothing else — pinned in ci-shards.test.ts.
+    expect(workflow).toMatch(/^\s+run: bun run test:coverage:shard --shard=/m);
+    expect(workflow).toMatch(/^\s+run: bun run test:coverage:merge$/m);
     // vitest's json-summary reporter writes coverage/coverage-summary.json;
     // the parse step's guard and its readFileSync must both name that file.
     expect(workflow).toMatch(/if \[ -f coverage\/coverage-summary\.json \]/);
@@ -166,7 +169,13 @@ describe("the checks CI runs, and their blocking status", () => {
     // comment renders "Tests — Result: passed" over a red suite of 11 000+
     // tests. Measured on the first revision of this guard: adding that key to
     // the Test step left every case in the file green.
-    runsBlocking("bun run test:coverage:ci");
+    //
+    // Three steps since the suite was sharded (TASK-1127), and each is the
+    // same hole: a shard that cannot fail, a completeness check that cannot
+    // fail, or a merge that cannot fail each report a green suite that is not.
+    runsBlocking("bun run test:coverage:shard --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    runsBlocking("bash scripts/check-vitest-shards.sh .vitest-reports");
+    runsBlocking("bun run test:coverage:merge");
   });
 
   it("checks the sudoers allow-list, blocking", () => {
@@ -205,21 +214,32 @@ describe("the checks CI runs, and their blocking status", () => {
     expect(lint).toMatch(/crashed/);
   });
 
-  it("keeps every check in the same job as the tests", () => {
-    // Not a second workflow and not a second job: these run on the same
-    // checkout and the same `bun install`, so a PR gets one red X with
-    // everything in it rather than four jobs to open.
-    //
-    // The `test` job is bounded by the next two-space key AFTER `jobs:`, so a
-    // key under `on:` cannot be mistaken for a job.
-    const jobsAt = tests.indexOf("\njobs:\n");
+  /** Every job of the Tests workflow by key, each bounded by the next two-space key after `jobs:`. */
+  function jobsOf(yml: string): Map<string, string> {
+    const jobsAt = yml.indexOf("\njobs:\n");
     expect(jobsAt).toBeGreaterThan(-1);
-    const headers = [...tests.slice(jobsAt).matchAll(/^ {2}([\w-]+):$/gm)];
-    expect(headers[0]?.[1]).toBe("test");
-    const end = headers[1] ? jobsAt + headers[1].index! : tests.length;
-    const testJob = tests.slice(jobsAt, end);
+    const headers = [...yml.slice(jobsAt).matchAll(/^ {2}([\w-]+):$/gm)];
+    return new Map(headers.map((h, i) => [h[1], yml.slice(
+      jobsAt + h.index!,
+      headers[i + 1] ? jobsAt + headers[i + 1].index! : yml.length,
+    )]));
+  }
 
-    // Over the job's STEPS, not over its text. `testJob` carries the workflow's
+  it("runs every check in a job the `test` verdict waits for", () => {
+    // `test` is the REQUIRED check, so it is the one red X a PR must get when
+    // any of these fails. Since TASK-1127 the work is split — `checks` beside
+    // four `shard`s, merged in `test` — so the rule is no longer "one job" but
+    // "a job `test` needs": a check moved to a job `test` does not wait for
+    // could fail with the required check green.
+    //
+    // Each job is bounded by the next two-space key AFTER `jobs:`, so a key
+    // under `on:` cannot be mistaken for a job.
+    const jobs = jobsOf(tests);
+    const verdict = jobs.get("test");
+    expect(verdict, "no `test` job").toBeDefined();
+    const needs = /^ {4}needs: \[([^\]]*)\]$/m.exec(verdict!)?.[1].split(",").map((s) => s.trim()) ?? [];
+
+    // Over each job's STEPS, not over its text. A job's slice carries the workflow's
     // COMMENTS, and the lint step's own doc block quotes `bun run lint` in
     // prose — so a plain `includes` stayed GREEN with the whole `Lint
     // (advisory)` step DELETED. Measured: that mutation failed two cases and
@@ -243,7 +263,7 @@ describe("the checks CI runs, and their blocking status", () => {
     // that itself began `- name:` would forge a step boundary. Cross-checked
     // against a parse of the same file — the split yields exactly one piece per
     // real step, and every anchor lands on a real `run:` key.
-    const runsOfEachStep = testJob
+    const runsOfEachStep = (jobText: string) => jobText
       .split("\n").filter((line) => !/^\s*#/.test(line)).join("\n")
       .split(/^ *- (?=name:|uses:|run:)/m).slice(1)
       .map((step) => {
@@ -254,9 +274,16 @@ describe("the checks CI runs, and their blocking status", () => {
         return next ? fromRun.slice(0, key[0].length + next.index) : fromRun;
       });
 
-    for (const command of ["bun run typecheck:mcp", "bun run check:mcp-tools", "bun run scripts/i18n-scan.ts", "bun run lint"]) {
-      expect(runsOfEachStep.some((body) => body.includes(command)),
-        `${command} is not run by any step of the test job`).toBe(true);
+    for (const command of [
+      "./scripts/check-doc-images.sh", "bun run check:sudoers", "python3 -m unittest discover -s scripts/x64-migration",
+      "bun run scripts/i18n-scan.ts", "bun run typecheck:mcp", "bun run check:mcp-tools", "bun run lint",
+      "bun run test:coverage:shard", "bash scripts/check-vitest-shards.sh", "bun run test:coverage:merge",
+    ]) {
+      const runners = [...jobs].filter(([, text]) => runsOfEachStep(text).some((body) => body.includes(command))).map(([key]) => key);
+      expect(runners.length, `${command} is not run by any step of any job`).toBeGreaterThan(0);
+      for (const key of runners) {
+        expect(key === "test" || needs.includes(key), `${command} runs in \`${key}\`, which the test verdict does not wait for`).toBe(true);
+      }
     }
   });
 
@@ -272,31 +299,50 @@ describe("the checks CI runs, and their blocking status", () => {
     //   jobs.test.if: ${{ false }}          → the job is skipped outright: three
     //     checks and the entire suite.
     //   on.pull_request.paths: [...]        → most PRs never trigger it at all.
-    const jobsAt = tests.indexOf("\njobs:\n");
-    const header = tests.slice(jobsAt, tests.indexOf("    steps:", jobsAt));
-    expect(header).toContain("  test:");
+    //
+    // Since the split (TASK-1127) `test` carries exactly one `if:` and must:
+    // `${{ !cancelled() }}`, without which the implicit `success()` SKIPS it
+    // whenever a shard or `checks` failed — and a skipped required check reads
+    // as passed. Anything else there is a way to switch it off. The jobs it
+    // waits for carry neither key: a `checks` or `shard` that cannot fail, or
+    // never runs, is the same hole one job over.
+    const jobs = jobsOf(tests);
+    const jobHeader = (key: string) => {
+      const text = jobs.get(key);
+      expect(text, `no \`${key}\` job`).toBeDefined();
+      return text!.slice(0, text!.indexOf("    steps:"));
+    };
+    const header = jobHeader("test");
     expect(header, "the test job is marked continue-on-error").not.toMatch(/continue-on-error/);
-    expect(header, "the test job is conditional").not.toMatch(/^ {4}if:/m);
+    expect([...header.matchAll(/^ {4}if:(.*)$/gm)].map((m) => m[1].trim()), "the test job's if: is not exactly !cancelled()")
+      .toEqual(["${{ !cancelled() }}"]);
+    for (const key of ["checks", "shard"]) {
+      expect(jobHeader(key), `the ${key} job is marked continue-on-error`).not.toMatch(/continue-on-error/);
+      expect(jobHeader(key), `the ${key} job is conditional`).not.toMatch(/^ {4}if:/m);
+    }
 
     // The trigger, unnarrowed: `pull_request:` with no key under it. A
     // `paths:`/`paths-ignore:`/`types:` filter would exempt whole classes of PR
     // from every check above, and nothing else here would notice.
-    expect(tests.slice(0, jobsAt)).toMatch(/\non:\n {2}pull_request:\n(?! {4})/);
+    expect(tests.slice(0, tests.indexOf("\njobs:\n"))).toMatch(/\non:\n {2}pull_request:\n(?! {4})/);
   });
 
   it("says Tests passed or failed only about the suite, never about the job", () => {
     // `needs.test.result` is the JOB's verdict and the sentence claims something
-    // about the SUITE. They come apart in both directions: a blocking step ahead
-    // of vitest failing leaves the suite unrun, and a step after it failing
-    // (Parse coverage, which runs `if: always()` and parses JSON) turns the job
-    // red over a green suite. Reading the job verdict as the suite's is a false
+    // about the SUITE. They come apart in both directions: a shard that never
+    // reported leaves the suite unmerged, and a check beside it failing (the
+    // MCP typecheck in `checks`, or Parse coverage, which runs `if: always()`
+    // and parses JSON) turns the job red over a green suite. Reading the job
+    // verdict as the suite's is a false
     // failure either way, so the verdict is driven off the suite step's own
     // outcome and the job result gets a line of its own.
     //
     // It takes all four — the id, the job output, the env, and a branch that
     // reads only `success`/`failure` as a verdict — or the comment silently
     // falls back to the job.
-    expect(step("bun run test:coverage:ci")).toMatch(/^\s+id: suite$/m);
+    // The suite's verdict is the MERGE: it replays every shard's results and
+    // applies the thresholds, which is what the unsharded Test step did.
+    expect(step("bun run test:coverage:merge")).toMatch(/^\s+id: suite$/m);
     expect(tests).toMatch(/^\s+suite: \$\{\{ steps\.suite\.outcome \}\}$/m);
     expect(tests).toMatch(/SUITE_OUTCOME: \$\{\{ needs\.test\.outputs\.suite \}\}/);
     expect(tests).toMatch(/const passed = suite === 'success';/);
@@ -333,16 +379,19 @@ describe("the checks CI runs, and their blocking status", () => {
     }
   });
 
-  it("runs the advisory step after the suite it must not delay", () => {
-    // Lint is the only non-blocking step here; running it first put a check
-    // nobody is waiting for in front of the verdict everybody is. `if: always()`
-    // is what keeps it running when the suite went red — the counts are most
-    // useful on exactly that run.
-    expect(tests.indexOf("bun run test:coverage:ci")).toBeLessThan(tests.indexOf("bun run lint >"));
-    // Either status function keeps it running on a red suite. `!cancelled()` is
-    // the better one — `always()` also runs it while the job is being cancelled,
-    // which on a hung suite spends another two minutes after the timeout that
-    // exists to stop exactly that — and it is the idiom e2e-tests.yml uses.
+  it("keeps the advisory step off the path of the verdict it must not delay", () => {
+    // Lint is the only non-blocking step here; in front of the suite it put a
+    // check nobody is waiting for ahead of the verdict everybody is, and after
+    // it, in the one job that ran the suite, the verdict still waited its
+    // 1-1.5 min. Since TASK-1127 it runs in `checks`, beside the shards, which
+    // finishes long before they do — so neither a shard nor the merge waits.
+    const jobs = jobsOf(tests);
+    const withLint = [...jobs].filter(([, text]) => text.includes("bun run lint >")).map(([key]) => key);
+    expect(withLint).toEqual(["checks"]);
+    // Either status function keeps it running over a red check ahead of it.
+    // `!cancelled()` is the better one — `always()` also runs it while the job
+    // is being cancelled, which spends another two minutes nobody will read —
+    // and it is the idiom e2e-tests.yml uses.
     expect(step("bun run lint >")).toMatch(/if:\s*(\$\{\{\s*)?(always\(\)|!cancelled\(\))/);
   });
 });
@@ -538,16 +587,30 @@ describe("what the PR-comment jobs render", () => {
     // the JOB's. The second sentence is reached whenever `needs.test.result` is
     // not `success`, and `always()` reaches this job during a cancellation too
     // — so a suite that passed before the run was stopped was told to the
-    // reader as "a later step in it failed", the sibling of the E2E false
-    // failure above.
+    // reader as "a later step in it failed" (since the split: "a check beside
+    // it failed"), the sibling of the E2E false failure above.
     const body = await render("pr-tests-coverage.yml", { SUITE_OUTCOME: "success", TEST_RESULT: "cancelled" });
     const s = sectionOf(body, "Tests");
     expect(s.verdict).toBe("passed");
-    expect(s.text, "a cancelled run is blamed on a later step").not.toContain("a later step in it failed");
+    expect(s.text, "a cancelled run is blamed on another check").not.toContain("a check beside it failed");
     expect(s.text.toLowerCase()).toContain("cancel");
     // …and the real case it exists for still reads that way.
     const stepFailed = sectionOf(await render("pr-tests-coverage.yml", { SUITE_OUTCOME: "success", TEST_RESULT: "failure" }), "Tests");
-    expect(stepFailed.text).toContain("a later step in it failed");
+    expect(stepFailed.text).toContain("a check beside it failed");
+  });
+
+  it("says which e2e-install shards ran, so core alone is not read as the upgrade passing", async () => {
+    const core = sectionOf(await render("e2e-install.yml", { E2E_INSTALL_RESULT: "success", E2E_INSTALL_SHARDS: '["core"]' }), "E2E Install");
+    expect(core.text).toContain("Shards: `core`");
+    expect(core.text).toMatch(/upgrade shard runs when a PR touches/);
+    const both = sectionOf(await render("e2e-install.yml", { E2E_INSTALL_RESULT: "success", E2E_INSTALL_SHARDS: '["core","upgrade"]' }), "E2E Install");
+    expect(both.text).toContain("Shards: `core`, `upgrade`");
+    expect(both.text).not.toMatch(/upgrade shard runs when/);
+    // Unknown — the plan never finished — says nothing rather than guessing.
+    for (const shards of ["", "not json"]) {
+      const s = sectionOf(await render("e2e-install.yml", { E2E_INSTALL_RESULT: "failure", E2E_INSTALL_SHARDS: shards }), "E2E Install");
+      expect(s.text).not.toContain("Shards:");
+    }
   });
 
   it.each(JOBS)("%s does not call a skipped run a failure either", async (file, key, heading) => {
@@ -640,18 +703,20 @@ describe("secrets never reach a pull_request run", () => {
 describe("credentialed e2e-install runs are bound to a protected Environment", () => {
   const yml = read(".github/workflows/e2e-install.yml");
   const text = yml.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
-  // The e2e-install job alone: from its key to the next job key at the same
-  // indent. `environment:` has to be the JOB's, not a step's `with:` or a
-  // job further down.
+  // The e2e-install job alone — the shard matrix, which checks out and runs
+  // the PR head — from its key to the next job key at the same indent.
+  // `environment:` has to be the JOB's, not a step's `with:` or a job further
+  // down (the `verdict` after it runs no PR code and names none).
   const jobStart = text.indexOf("\n  e2e-install:\n");
-  const jobEnd = text.indexOf("\n  comment:\n", jobStart);
+  const nextJob = /^ {2}[\w-]+:$/m.exec(text.slice(jobStart + "\n  e2e-install:\n".length));
+  const jobEnd = nextJob ? jobStart + "\n  e2e-install:\n".length + nextJob.index - 1 : -1;
   const job = text.slice(jobStart, jobEnd);
   const [preamble] = job.split(/^ *- (?=name:|uses:|run:)/m);
   const ENVIRONMENT = /^ {4}environment: \$\{\{\s*github\.event_name == 'pull_request' && '([^']+)' \|\| '([^']+)'\s*\}\}$/m;
 
   it("declares a job-level environment chosen by the event", () => {
     expect(jobStart, "the e2e-install job is gone").toBeGreaterThan(-1);
-    expect(jobEnd, "the comment job is gone").toBeGreaterThan(jobStart);
+    expect(jobEnd, "nothing follows the e2e-install job — the verdict and the comment are gone").toBeGreaterThan(jobStart);
     expect(preamble, "the e2e-install job declares no job-level `environment:`").toMatch(ENVIRONMENT);
     // Only one — a second declaration would be a YAML duplicate key, and
     // which one GitHub honours is not something to find out on a PR.
@@ -683,10 +748,16 @@ describe("credentialed e2e-install runs are bound to a protected Environment", (
 
   it("leaves the comment job reading the e2e-install verdict", () => {
     // The PR comment reports the job by name; a rename of the job to carry
-    // the environment would silently detach it.
-    const comment = text.slice(jobEnd);
-    expect(comment).toMatch(/^\s+needs: e2e-install$/m);
-    expect(comment).toContain("needs.e2e-install.result");
+    // the environment would silently detach it. Since the shards (TASK-1127)
+    // the verdict is its own job — the one named `e2e-install`, which branch
+    // protection requires — and the comment reads that, not the matrix.
+    const commentAt = text.indexOf("\n  comment:\n");
+    expect(commentAt, "the comment job is gone").toBeGreaterThan(jobStart);
+    const comment = text.slice(commentAt);
+    expect(comment).toMatch(/^\s+needs: verdict$/m);
+    expect(comment).toContain("needs.verdict.result");
+    const verdict = text.slice(text.indexOf("\n  verdict:\n"), commentAt);
+    expect(verdict).toMatch(/^ {4}name: e2e-install$/m);
   });
 });
 
