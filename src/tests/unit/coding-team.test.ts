@@ -255,6 +255,60 @@ describe("a planner that wrote prose", () => {
   });
 });
 
+/** `n` characters of whole sentences, the last one cut mid-word. */
+function prose(n: number): string {
+  let text = "";
+  for (let i = 1; text.length < n; i++) text += `Step ${i}: wire part ${i} of app.js, then check that it renders. `;
+  return `${text.slice(0, n - 1)}z`;
+}
+
+describe("a plan with text over its bound", () => {
+  it("is cut, not refused: the team goes on from the first answer, with one note on the log and no alert", async () => {
+    outcomes = [
+      { summary: JSON.stringify({
+        shape: { parallelism: 1, review: "final", rationale: `${"One page, then its script. ".repeat(8).slice(0, 204)}z` },
+        tasks: [
+          { task_description: "Scaffold index.html", files_hint: ["index.html"] },
+          { task_description: prose(2313), depends_on: ["t1"], files_hint: ["app.js"] },
+        ],
+      }) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(starts.filter((s) => (s.team as { role: string }).role === "planner")).toHaveLength(1);
+    expect(done.alerts).toBe(0);
+    expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
+    const cut = done.tasks[1].task_description;
+    expect(cut.length).toBeLessThanOrEqual(2000);
+    expect(cut.endsWith("renders.")).toBe(true);
+    expect(done.shape!.rationale.length).toBeLessThanOrEqual(200);
+    const notes = done.log.filter((e) => e.type === "note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({ actor: { kind: "system" }, message: `The shape's rationale was cut from 205 to ${done.shape!.rationale.length} characters. Task t2's description was cut from 2313 to ${cut.length} characters.` });
+  });
+
+  it("from the lead is cut too: the task is added, with a note and no alert", async () => {
+    runner.getTeamDynamic.mockResolvedValue(true);
+    outcomes = [
+      { summary: PLAN },
+      { summary: "Built index.html.\nMISSING: favicon.ico — no task makes one.", filesTouched: ["index.html"] },
+      { summary: "app", filesTouched: ["app.js"] },
+      { summary: "favicon", filesTouched: ["favicon.ico"] },
+    ];
+    leadAnswers = [{ summary: JSON.stringify({ add: [{ task_description: prose(2110), depends_on: ["t1"], files_hint: ["favicon.ico"] }], note: "t1 found no favicon" }) }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.tasks[2]).toMatchObject({ task_id: "t3", origin: "lead", status: "complete" });
+    const cut = done.tasks[2].task_description;
+    expect(cut.length).toBeLessThanOrEqual(2000);
+    expect(done.alerts).toBe(0);
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([`Task t3's description was cut from 2110 to ${cut.length} characters.`]);
+  });
+});
+
 describe("a worker whose commit failed", () => {
   it("is rejected with the reason and offered once more, and its branch is never merged", async () => {
     outcomes = [

@@ -177,4 +177,18 @@ describe("a note (a guardrail line that is not an alert)", () => {
     expect(board.alerts).toBe(1);
     expect(board.metrics.readOnlyRefusals).toBe(2);
   });
+
+  it("carries a plan's clip line too: no task, never an alert, never counted as a refusal — and nobody else's", () => {
+    expect(busLib.validateMessage({ type: "note", text: "Task t3's description was cut from 2313 to 1987 characters." })).toBeNull();
+    const board = boardLib.createBoard({ goal: "g", projectId: null, directory: "/p", source: "owner" }, { kind: "owner" });
+    const bus = new busLib.TeamBus(board);
+    bus.send({ kind: "system" }, { type: "note", text: "Task t3's description was cut from 2313 to 1987 characters." });
+    expect(board.alerts).toBe(0);
+    expect(boardLib.loadBoard(board.id)).toMatchObject({ alerts: 0, metrics: { readOnlyRefusals: 0 } });
+    expect(boardLib.loadBoard(board.id)?.log.at(-1)).toMatchObject({ type: "note", actor: { kind: "system" }, message: "Task t3's description was cut from 2313 to 1987 characters." });
+    for (const actor of [W, { kind: "planner" } as const]) {
+      expect(() => bus.send(actor, { type: "note", text: "hi" })).toThrow(/Only the system writes a note/);
+    }
+    expect(board.log.filter((e) => e.type === "note")).toHaveLength(1);
+  });
 });

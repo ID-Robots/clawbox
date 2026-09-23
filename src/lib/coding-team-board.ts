@@ -691,12 +691,13 @@ export function raiseAlert(board: TeamBoard, actor: Actor, reason: string, taskI
  * A guardrail line that is NOT an alert: on the record, never counted toward
  * the team's alert ceiling. Only the system (the orchestrator) writes one —
  * today, a worker whose every refusal only LOOKED (`readOnlyDenial`), with
- * how many, which the figures count.
+ * how many, which the figures count; and a plan's text cut to fit its bound
+ * (`clippedNote`), every cut on one line.
  */
 export function postNote(board: TeamBoard, actor: Actor, text: string, taskId?: string, readOnlyRefusals?: number): void {
   if (actor.kind !== "system") throw new BoardAccessError(actor, "note", `Only the system writes a note; ${describeActor(actor)} may not.`);
   const now = Date.now();
-  append(board, { ts: now, actor, type: "note", task_id: taskId, message: firstLine(text, 300), ...(readOnlyRefusals ? { payload: { readOnlyRefusals } } : {}) });
+  append(board, { ts: now, actor, type: "note", task_id: taskId, message: firstLine(text, 600), ...(readOnlyRefusals ? { payload: { readOnlyRefusals } } : {}) });
 }
 
 /**
