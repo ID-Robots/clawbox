@@ -2111,13 +2111,22 @@ describe("the pull request on disk", () => {
     writeRunWithPr({
       phase: "merged", number: 7, url: "https://github.com/o/r/pull/7", branch: "clawbox/run-prblob01", base: "main",
       checks: { total: 3, passed: 2, failed: 0, pending: 1 }, detail: null, startedAt: 1, endedAt: 2, reviewOk: true,
-      foundBy: "adopted",
+      foundBy: "adopted", readyAt: 3,
     });
     expect(lib.listRuns()[0]?.pr).toEqual({
       phase: "merged", number: 7, url: "https://github.com/o/r/pull/7", branch: "clawbox/run-prblob01", base: "main",
       checks: { total: 3, passed: 2, failed: 0, pending: 1 }, detail: null, startedAt: 1, endedAt: 2, reviewOk: true,
-      foundBy: "adopted",
+      foundBy: "adopted", readyAt: 3,
     });
+  });
+
+  it("reads a record from before readyAt as a pull request the box never readied", () => {
+    // The watcher leaves a draft that the box already readied to its owner, so
+    // anything but a number the box wrote must read as "never readied".
+    writeRunWithPr({ phase: "waiting", startedAt: 1, number: 7 });
+    expect(lib.listRuns()[0]?.pr?.readyAt).toBeNull();
+    writeRunWithPr({ phase: "waiting", startedAt: 1, number: 7, readyAt: "soon" });
+    expect(lib.listRuns()[0]?.pr?.readyAt).toBeNull();
   });
 
   it("says NOTHING about who opened a pull request a record predates the question", () => {

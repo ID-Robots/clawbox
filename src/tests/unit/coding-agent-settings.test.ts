@@ -191,6 +191,19 @@ describe("what a run is told about the shell", () => {
     expect(brief(lib.buildRunArgs({ reviewedSeparately: true, effort: "ultracode" }))).toBe(`${reviewed} ${lib.ULTRACODE_BRIEF}`);
   });
 
+  it("tells a run whose pull request the box will watch to open it as a draft, and nobody else", async () => {
+    // CodeRabbit reviews a pull request once, when it becomes ready, and the
+    // watcher readies it once the checks pass. A draft nothing watches would
+    // never be readied, so only the auto-PR run hears this.
+    const lib = await import("@/lib/coding-agent");
+    const brief = (args: string[]) => args[args.indexOf("--append-system-prompt") + 1];
+    expect(lib.PR_DRAFT_BRIEF).toContain("gh pr create --draft");
+    expect(lib.PR_DRAFT_BRIEF).toMatch(/Do not mark it ready, ask for a review or merge it yourself/);
+    expect(brief(lib.buildRunArgs({ draftPullRequests: true }))).toBe(`${lib.HEADLESS_BRIEF} ${lib.PR_DRAFT_BRIEF}`);
+    expect(brief(lib.buildRunArgs({}))).not.toContain(lib.PR_DRAFT_BRIEF);
+    expect(brief(lib.buildRunArgs({ draftPullRequests: true, readOnly: true }))).not.toContain(lib.PR_DRAFT_BRIEF);
+  });
+
   it("closes the contradictions the refusal task exposed, and asks the report for its assumptions", async () => {
     // Bench s-02 (2026-09-05): the brief banned data/ while --add-dir granted
     // the evidence folder under it; the run listed two sibling projects and
