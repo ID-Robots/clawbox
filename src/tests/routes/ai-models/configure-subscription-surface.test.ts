@@ -383,8 +383,8 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     // The precondition, asserted rather than assumed: the shipped default is
     // absent from this cached surface, and that absence is the whole window
     // the union covers. A later refresh of SURFACE_IDS from a real box would
-    // add claude-opus-5 and silently retire this regression otherwise.
-    expect(SURFACE_IDS).not.toContain("claude-opus-5");
+    // add claude-opus-5-5 and silently retire this regression otherwise.
+    expect(SURFACE_IDS).not.toContain("claude-opus-5-5");
     mockSurfaceRead.mockResolvedValue(surfaceCache(SURFACE_IDS) as never);
 
     const res = await configurePost(subscribe());
@@ -396,7 +396,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
         vi.mocked(runOpenclawConfigSetBatch),
         "agents.defaults.model.primary",
       )?.value,
-    ).toBe("anthropic/claude-opus-5");
+    ).toBe("anthropic/claude-opus-5-5");
   });
 
   it("still judges the settled default, not only a typed id", async () => {
@@ -409,13 +409,13 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     // Once-only: `vi.clearAllMocks()` clears calls, not implementations, so a
     // sticky override would follow this test into the next one.
     vi.mocked(getProviderCatalog).mockReturnValueOnce(null);
-    expect(SURFACE_IDS).not.toContain("claude-opus-5");
+    expect(SURFACE_IDS).not.toContain("claude-opus-5-5");
     mockSurfaceRead.mockResolvedValue(surfaceCache(SURFACE_IDS) as never);
 
     const res = await configurePost(subscribe());
 
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toContain("claude-opus-5");
+    expect((await res.json()).error).toContain("claude-opus-5-5");
     expectNoSideEffects();
   });
 

@@ -279,7 +279,7 @@ if [ "$PROVIDER" = "anthropic" ]; then
   unset ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
   unset CLAUDE_CONFIG_DIR
 
-  MODEL="${CLAUDE_DS_MODEL:-claude-opus-5}"
+  MODEL="${CLAUDE_DS_MODEL:-claude-opus-5-5}"
   export ANTHROPIC_MODEL="$MODEL"
   # The account's credential: an API key, a Claude account's OAuth token, or
   # nothing at all — and nothing is the right answer for the `claude` sign-in:

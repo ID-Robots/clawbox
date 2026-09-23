@@ -265,6 +265,133 @@ export function artifactFilePath(runId: string, name: string): string | null {
   }
 }
 
+/**
+ * Directory names an evidence folder never keeps: a Python environment, an
+ * npm install, bytecode caches. Matched at any depth, and removed whole.
+ */
+export const INTERPRETER_TREES: ReadonlySet<string> = new Set(["venv", ".venv", "node_modules", "__pycache__"]);
+
+/**
+ * How many entries a prune looks at before it stops. An evidence folder is
+ * screenshots and a report; one past this is misbehaving, and the prune is a
+ * settle step that must not stall on it. Interpreter trees are removed without
+ * being walked, so a large node_modules costs one entry here.
+ */
+const MAX_PRUNE_ENTRIES = 10_000;
+
+/** One thing a prune removed: its path inside the evidence folder, and why. */
+export interface PrunedArtifact {
+  path: string;
+  reason: "interpreter" | "link";
+}
+
+/** Does this symlink resolve to something that exists INSIDE the folder? */
+function linkStaysInside(abs: string, realDir: string): boolean {
+  try {
+    const real = fs.realpathSync(abs);
+    return real === realDir || real.startsWith(realDir + path.sep);
+  } catch {
+    // Dangling, a loop, or unreadable: nothing the folder can vouch for.
+    return false;
+  }
+}
+
+/**
+ * Take out of a settled run's evidence folder what an evidence folder must not
+ * host: interpreter trees (INTERPRETER_TREES) and symlinks that do not resolve
+ * to something inside the folder — a dangling one included.
+ *
+ * A run that made a Python environment in its evidence folder left a
+ * `venv/bin/python` symlink pointing out of the box's data/ — at a Python, or
+ * into the run's worktree, where it dangled once the worktree was removed. The
+ * box builds its own dashboard from the checkout data/ sits in, and Next's
+ * build refuses a symlink that leads out of the project ("Symlink … is invalid,
+ * it points out of the filesystem root"): one run's leftover failed every
+ * update until someone deleted it by hand. None of it is evidence — the
+ * listing never showed a directory or a link, and the serving route refuses
+ * both — so it goes.
+ *
+ * Nothing is followed: directories are read with their own entry types, a link
+ * is removed as a link (never its target), and an evidence folder that is
+ * itself a symlink loses only that link. Answers what was removed, for the
+ * run's progress feed. Never throws: this runs on the settle path of a run that
+ * has already finished.
+ *
+ * Only for a run with nothing of its own still running. The walk and the
+ * removals are separate steps by path, so a process of the run's could swap a
+ * directory it has read for a link out of the folder in between, and the
+ * removal would reach through it; checking each path first would only move
+ * that race. finishRun skips the prune for a run that left something running
+ * (`leftover`), and waits for a process group it has just signalled to be gone.
+ */
+export async function pruneArtifacts(runId: string): Promise<PrunedArtifact[]> {
+  if (!ARTIFACT_RUN_ID_RE.test(runId)) return [];
+  const pruned: PrunedArtifact[] = [];
+  try {
+    const dir = artifactsDir(runId);
+    let top: fs.Stats;
+    try {
+      top = fs.lstatSync(dir);
+    } catch {
+      return [];
+    }
+    if (top.isSymbolicLink()) {
+      await fs.promises.unlink(dir);
+      return [{ path: ".", reason: "link" }];
+    }
+    if (!top.isDirectory()) return [];
+    const realDir = fs.realpathSync(dir);
+
+    const trees: string[] = [];
+    const links: string[] = [];
+    const pending = [""];
+    let seen = 0;
+    while (pending.length > 0 && seen < MAX_PRUNE_ENTRIES) {
+      const rel = pending.pop()!;
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(path.join(dir, rel), { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (++seen > MAX_PRUNE_ENTRIES) break;
+        const child = rel ? path.join(rel, entry.name) : entry.name;
+        if (entry.isSymbolicLink()) links.push(child);
+        else if (entry.isDirectory()) (INTERPRETER_TREES.has(entry.name) ? trees : pending).push(child);
+      }
+    }
+    if (seen > MAX_PRUNE_ENTRIES) {
+      console.warn(`[coding-agent] ${runId}: evidence folder has more than ${MAX_PRUNE_ENTRIES} entries; pruned only what was looked at`);
+    }
+
+    for (const rel of trees) {
+      try {
+        await fs.promises.rm(path.join(dir, rel), { recursive: true, force: true });
+        pruned.push({ path: rel, reason: "interpreter" });
+      } catch (err) {
+        console.warn(`[coding-agent] ${runId}: could not remove ${rel} from the evidence folder:`, err instanceof Error ? err.message : err);
+      }
+    }
+    // After the trees: a link into a tree that just went now dangles, and goes
+    // with it.
+    for (const rel of links) {
+      const abs = path.join(dir, rel);
+      if (linkStaysInside(abs, realDir)) continue;
+      try {
+        await fs.promises.unlink(abs);
+        pruned.push({ path: rel, reason: "link" });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+        console.warn(`[coding-agent] ${runId}: could not remove the link ${rel} from the evidence folder:`, err instanceof Error ? err.message : err);
+      }
+    }
+  } catch (err) {
+    console.warn(`[coding-agent] could not prune the evidence folder of ${runId}:`, err instanceof Error ? err.message : err);
+  }
+  return pruned;
+}
+
 /** Delete a dropped run's folder. Never throws — cleanup must not break its caller. */
 export function removeArtifacts(runId: string): void {
   if (!ARTIFACT_RUN_ID_RE.test(runId)) return;

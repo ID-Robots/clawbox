@@ -108,6 +108,83 @@ function withStateDb<T>(readOnly: boolean, what: string, fn: (db: DatabaseSyncTy
   return dbPath ? withOpenStore(dbPath, readOnly, what, fn) : null;
 }
 
+/**
+ * Where OpenClaw records the schema its state database has been migrated to,
+ * beside `PRAGMA user_version`.
+ *
+ * Both are read because the core reads both. `readStateSchemaContentVersion`
+ * in the published core (`dist/openclaw-state-db-schema-version-*.mjs`,
+ * checked on 2026.9.4) takes the GREATER of the pragma and this row, and the
+ * admission check that refuses a too-new file — `assertSupportedStateSchemaVersion`
+ * — compares that greater number against the build's own
+ * `OPENCLAW_STATE_SCHEMA_VERSION`. A reader that asked only for the pragma
+ * would miss a core that had committed its content ahead of the published
+ * version floor, and would then tell the updater a box is safe to move to a
+ * core that will refuse it — the exact false clearance the pre-flight exists to
+ * remove.
+ */
+const SCHEMA_CONTENT_VERSION_KEY = "state.schema.contentVersion";
+
+/** `PRAGMA user_version`, floored at 0: a store that has never been migrated reads 0. */
+function userVersion(db: DatabaseSyncType): number {
+  const row = db.prepare("PRAGMA user_version").get() as { user_version?: unknown } | undefined;
+  const value = Number(row?.user_version ?? 0);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+/**
+ * The content version the core last committed, or null when this store predates
+ * the marker (no `config_machine_state` table, no row, or a value that is not a
+ * version). Null means "nothing to add", never "zero" — a malformed marker must
+ * not drag the answer BELOW the pragma.
+ *
+ * NOTHING HERE MAY THROW, and that is the whole reason for the outer catch.
+ * This is a REFINEMENT of `PRAGMA user_version`, and `config_machine_state` is
+ * the core's own table — reshaped between schema versions like any other. A
+ * store far enough ahead of us that the marker's columns have moved makes the
+ * SELECT throw, and an escaping throw takes the already-read pragma down with
+ * it: the caller returns "could not be read", the updater's pre-flight stands
+ * down, and the box walks into the mid-run failure that pre-flight exists to
+ * replace. Losing the refinement costs a number we never had; losing the pragma
+ * costs the guard, on exactly the newest stores it is there to catch.
+ */
+function contentVersion(db: DatabaseSyncType): number | null {
+  try {
+    const table = db
+      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'config_machine_state'")
+      .get() as { ok?: unknown } | undefined;
+    if (table?.ok !== 1) return null;
+    const row = db
+      .prepare("SELECT value_json FROM config_machine_state WHERE state_key = ?")
+      .get(SCHEMA_CONTENT_VERSION_KEY) as { value_json?: unknown } | undefined;
+    if (typeof row?.value_json !== "string") return null;
+    const parsed: unknown = JSON.parse(row.value_json);
+    return typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+  } catch {
+    // A marker this reader cannot make sense of is one it has nothing to add
+    // from — never a reason to forget what the pragma already said.
+    return null;
+  }
+}
+
+/**
+ * The state schema this device's OpenClaw store is on, as the core itself would
+ * read it. Null when there is no store to ask (a v1 box, a Hermes-only box, a
+ * fresh install) or when one exists and could not be read.
+ *
+ * Null is deliberately indistinguishable from "no store": every caller of this
+ * is a guard that may only act on a number it actually has. An unreadable store
+ * is not evidence of a newer schema, and refusing an update over one would
+ * strand exactly the box an update is there to repair.
+ */
+export function readStateSchemaVersion(): number | null {
+  return withStateDb(true, "state schema version read", (db) => {
+    const published = userVersion(db);
+    const content = contentVersion(db);
+    return content === null ? published : Math.max(published, content);
+  });
+}
+
 /** OpenClaw stores account ids lowercased, and the default account as "default". */
 function accountKey(account: string): string {
   return account.trim().toLowerCase() || "default";

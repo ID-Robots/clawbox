@@ -224,6 +224,7 @@ describe("catalog — a fallback is never served as a live enumeration", () => {
     // The curated cold-start ids must not be in a file the picker and the
     // server-side surface guard both read back as a device answer.
     expect(ids).not.toContain("claude-opus-5");
+    expect(ids).not.toContain("claude-opus-5-5");
     expect(readCache("anthropic").source).toBe("live");
   });
 

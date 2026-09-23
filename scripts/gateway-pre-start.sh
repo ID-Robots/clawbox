@@ -46,9 +46,12 @@ OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
 export OPENCLAW_STATE_DIR
 # Doctor repairs STATE here, never the service: the gateway this script is the
 # ExecStartPre of is ClawBox's own system unit, and systemd is mid-start of it.
-# 2026.9.3's `doctor --fix` refuses maintenance outright unless it can account
-# for the gateway's service itself, which on this box it cannot — see
-# OPENCLAW_SERVICE_REPAIR_POLICY in install.sh for the whole of why. Exported
+# The pinned core's `doctor --fix` refuses maintenance outright unless it can
+# account for the gateway's service itself, which on this box it cannot — see
+# OPENCLAW_SERVICE_REPAIR_POLICY in install.sh for the whole of why. 2026.9.3
+# brought the gate; the published 2026.9.4 tarball still reads the same
+# variable (`dist/doctor-service-repair-policy-*.mjs`), so the escape still
+# exists and is still the one this box needs. Exported
 # rather than placed on the one call below because every `openclaw` this script
 # runs is on the same footing.
 export OPENCLAW_SERVICE_REPAIR_POLICY="external"
@@ -546,9 +549,11 @@ clawbox_core_residual_issues() {
   # BOTH module extensions, because which one a chunk gets is the bundler's
   # decision and it has already changed once. Counted over the whole `dist/`
   # tree: 2026.8.1 is 7,219 `*.js` and 1 `*.mjs`; 2026.9.3 is 1,731 `*.js` and
-  # 5,383 `*.mjs`, with this declaration in no `.js` file at all. Still an
-  # allow-list rather than every file, so a `.d.ts` declaration or a `.map`
-  # carrying the same text as DATA is never a candidate to import.
+  # 5,383 `*.mjs`; the 2026.9.4 pin is 1,784 `*.js` and 5,477 `*.mjs` — and on
+  # both 9.x cores this declaration is in no `*.js` file at all (counted on the
+  # published tarballs, TASK-1088). Still an allow-list rather than every file,
+  # so a `.d.ts` declaration or a `.map` carrying the same text as DATA is never
+  # a candidate to import.
   #
   # A LIST, not a first hit, because the declaration is in TWO files on both
   # cores: the library chunk that exports it, and `dist/worker/worker.mjs` — a
@@ -906,7 +911,13 @@ if [ -f "$HOSTNAME_ENV" ]; then
   _h=$(sed -n 's/^[[:space:]]*HOSTNAME[[:space:]]*=[[:space:]]*//p' "$HOSTNAME_ENV" | head -n1 || true)
   _h="${_h%\"}"; _h="${_h#\"}"
   _h="${_h%\'}"; _h="${_h#\'}"
-  if [[ "$_h" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+  # The 1..63-character bound is an explicit length test, never a bounded repeat
+  # `{0,61}`: `[[ =~ ]]` is glibc regex, which expands one into an NFA state per
+  # permitted repetition. Cheap at 61 (~0.5 MB) next to the 260 MB `{32,4096}`
+  # cost TASK-1066 took out of scripts/run-tunnel.sh, but it is the same
+  # construct, and src/tests/unit/shell-regex-hygiene.test.ts now keeps every
+  # script free of it. Same accepted and rejected names as before.
+  if [ -n "$_h" ] && [ "${#_h}" -le 63 ] && [[ "$_h" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
     CONFIGURED_HOSTNAME="$_h"
   else
     # Not silent: this name feeds gateway.controlUi.allowedOrigins below, so a
@@ -1360,11 +1371,17 @@ elif _wants_llamacpp and _llamacpp_gaps:
     # llama-server needs no token from us, and refusing there would leave their
     # config invalid over a credential it never wanted.
     _llamacpp_takes_proxy = "baseUrl" in _llamacpp_gaps
+    # Strict utf-8, and a decode failure is an unreadable file — same reasoning
+    # as the reconciliation further down, which shares this file: without an
+    # explicit encoding a stray byte raises UnicodeDecodeError (not an OSError)
+    # out of the heredoc and ExecStartPre dies under `set -euo pipefail`, and a
+    # token quietly mangled by errors="replace" is one we would go on to write.
+    # Empty falls into the guard below, which refuses the repair and says why.
     _token_path = os.path.join(_clawbox_root, "data", ".local-ai-token")
     try:
-        with open(_token_path) as _tf:
+        with open(_token_path, encoding="utf-8") as _tf:
             _local_ai_token = _tf.read().strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         _local_ai_token = ""
 
     if _llamacpp_takes_proxy and len(_local_ai_token) < 16:
@@ -1586,6 +1603,224 @@ elif _wants_llamacpp and _llamacpp_gaps:
                     "  Repaired models.providers.llamacpp for "
                     + ", ".join(_llamacpp_model_ids)
                 )
+
+# Reconciliation: models.providers.{llamacpp,ollama}.apiKey vs data/.local-ai-token.
+#
+# The repair above fires only on a SCHEMA GAP — no `baseUrl`, or a `models` list
+# OpenClaw would reject. An entry that is complete and merely STALE has no gap,
+# so until now nothing re-pointed its bearer, and a rebuilt board came up mute:
+# `data/.local-ai-token` is minted at first boot (same second as `.mcp-token`
+# and `.session-secret`) while the openclaw.json restored beside it still
+# carries the token of the image it was built from. The proxy validates
+# `Authorization` against that file (verifyLocalAiBearer, src/lib/local-ai-token.ts)
+# and answers 401 to everything else, so EVERY agent turn on the local model
+# dies before the model is ever reached and the web chat shows an
+# authentication error. Re-saving the provider through
+# POST /setup-api/ai-models/configure repaired it by hand, because that route
+# writes getLocalAiToken(); nothing did it on boot.
+#
+# This is for the two local providers exactly what the `mcp.servers.clawbox`
+# block near MCP_TOKEN_FILE is for the MCP bearer: a rotated secret cannot be
+# allowed to leave the config pointing at the previous one. Unlike the repair
+# above it runs on EVERY boot and does not care whether the entry is otherwise
+# complete — staleness is the whole failure mode.
+#
+# Bounded tightly on purpose, and only ever narrower than the repair above:
+#
+#   * ONLY an entry already pointing at THIS box's local-AI proxy. That is the
+#     one endpoint for which this file is the credential; an operator's own
+#     llama-server or ollama on loopback keeps the key they gave it. A baseUrl
+#     is never written here — a wrong endpoint is the repair's business.
+#   * NEVER over a missing or too-short token file. Writing "" would turn a key
+#     that might still be working into one that certainly is not.
+#   * NEVER onto an entry carrying a model row on another host: `apiKey` is
+#     PROVIDER-WIDE (OpenClaw resolves a row as `model.baseUrl ?? provider.baseUrl`
+#     and has no per-model credential slot), so such a row would be mailed this
+#     box's token on every turn. Same rule, same reason, as the repair above.
+#
+# Self-contained rather than sharing the repair's helpers: each of these regions
+# is extracted and executed on its own by its regression suite, which is also
+# why the OpenRouter repair further down repeats what it repeats.
+import urllib.parse as _lai_url
+
+_LAI_PROVIDERS = ("llamacpp", "ollama")
+
+
+def _lai_host(_raw):
+    try:
+        return (_lai_url.urlsplit(_raw).hostname or "").lower() or None
+    except ValueError:
+        return None
+
+
+def _lai_proxy_hosts():
+    """Loopback, plus the authority of an explicitly configured proxy root.
+
+    CLAWBOX_LOCAL_AI_PROXY_BASE_URL lives in $CLAWBOX_ROOT/.env, and NEITHER
+    gateway unit loads that file (see the longer note in the repair above), so
+    reading the process environment alone would miss it — and a box with a
+    custom proxy root would go on drifting with nothing said. One key is read,
+    never the whole file into the gateway's environment. The bare except is the
+    same precaution the repair takes: .env is clawbox-writable, and one
+    undecodable byte in it must not fail ExecStartPre under `set -euo pipefail`.
+    """
+    _hosts = {"127.0.0.1", "localhost", "::1"}
+    _root = (os.environ.get("CLAWBOX_LOCAL_AI_PROXY_BASE_URL") or "").strip()
+    if not _root:
+        try:
+            with open(os.path.join(_clawbox_root, ".env"), encoding="utf-8", errors="replace") as _lai_ef:
+                for _lai_line in _lai_ef:
+                    _lai_line = _lai_line.strip()
+                    if _lai_line.startswith("export "):
+                        _lai_line = _lai_line[len("export "):].strip()
+                    _lai_key, _, _lai_value = _lai_line.partition("=")
+                    if _lai_key.strip() != "CLAWBOX_LOCAL_AI_PROXY_BASE_URL":
+                        continue
+                    _lai_value = _lai_value.strip()
+                    if (
+                        len(_lai_value) >= 2
+                        and _lai_value[0] == _lai_value[-1]
+                        and _lai_value[0] in ("'", '"')
+                    ):
+                        _lai_value = _lai_value[1:-1]
+                    _root = _lai_value.strip()
+        except Exception:
+            _root = ""
+    if _root:
+        _root_host = _lai_host(_root)
+        if _root_host:
+            _hosts.add(_root_host)
+    return _hosts
+
+
+def _lai_is_our_proxy(_base_url, _provider_id, _hosts):
+    """OUR proxy for THIS provider — not merely something on loopback.
+
+    getLocalAiProxyBaseUrl() writes `<root>/setup-api/local-ai/<provider>` for
+    ollama and the same with a `/v1` suffix for llamacpp, so the path is what
+    separates our proxy from the operator's own `http://127.0.0.1:8080/v1`. The
+    segment boundary stops `/setup-api/local-ai/ollama-of-theirs` from passing
+    as `ollama`.
+    """
+    if _lai_host(_base_url) not in _hosts:
+        return False
+    try:
+        _path = _lai_url.urlsplit(_base_url).path or ""
+    except ValueError:
+        return False
+    _prefix = "/setup-api/local-ai/" + _provider_id
+    return _path == _prefix or _path.startswith(_prefix + "/")
+
+
+def _lai_row_on_another_host(_entry, _hosts):
+    # A row without an id is skipped: ModelDefinitionSchema requires a non-empty
+    # one, so it can never route a turn and can never receive the bearer. A URL
+    # that will not parse counts as foreign — guessing permissively is the wrong
+    # way to be wrong about a credential.
+    _rows = _entry.get("models")
+    for _lai_row in _rows if isinstance(_rows, list) else []:
+        if not isinstance(_lai_row, dict):
+            continue
+        _lai_rid = _lai_row.get("id")
+        if not (isinstance(_lai_rid, str) and _lai_rid.strip()):
+            continue
+        _lai_rb = _lai_row.get("baseUrl")
+        if not (isinstance(_lai_rb, str) and _lai_rb.strip()):
+            continue
+        if _lai_host(_lai_rb.strip()) not in _hosts:
+            return True
+    return False
+
+
+# Containers are READ, never created: a box with no `models.providers` has no
+# local provider to reconcile, and adding an empty one would be an edit to a
+# config this block was not asked to change.
+_lai_models = cfg.get("models")
+_lai_providers = _lai_models.get("providers") if isinstance(_lai_models, dict) else None
+if isinstance(_lai_providers, dict):
+    # STRICT utf-8, and a decode failure is an unreadable file rather than a
+    # repaired one. `open()` would otherwise decode by the boot locale — LANG is
+    # unset under systemd, so ascii — and one stray byte in a truncated or
+    # half-written token file would raise UnicodeDecodeError, which is NOT an
+    # OSError, straight out of this heredoc: ExecStartPre fails under
+    # `set -euo pipefail` and the box gets no gateway at all over a credential
+    # it could simply have declined to use. errors="replace" is deliberately NOT
+    # the answer here as it is for .env below: a token silently repaired into a
+    # different string is one this block would then WRITE into the config. An
+    # empty value falls into the short-token guard, which refuses and says why.
+    _lai_token_file = os.path.join(_clawbox_root, "data", ".local-ai-token")
+    try:
+        with open(_lai_token_file, encoding="utf-8") as _lai_tf:
+            _lai_token = _lai_tf.read().strip()
+    except (OSError, UnicodeDecodeError):
+        _lai_token = ""
+    _lai_hosts = _lai_proxy_hosts()
+
+    for _lai_provider in _LAI_PROVIDERS:
+        _lai_entry = _lai_providers.get(_lai_provider)
+        if not isinstance(_lai_entry, dict):
+            continue
+        _lai_base = _lai_entry.get("baseUrl")
+        if not (isinstance(_lai_base, str) and _lai_base.strip()):
+            continue
+        if not _lai_is_our_proxy(_lai_base.strip(), _lai_provider, _lai_hosts):
+            continue
+        if _lai_entry.get("apiKey") == _lai_token:
+            continue
+        # A key that RESOLVES ELSEWHERE is not drift, and is not ours to flatten
+        # into a literal. OpenClaw accepts a SecretRef object
+        # ({source, provider, id}) and a `${VAR}` interpolation as credentials —
+        # is_strong_gateway_token() at the top of this file already decides the
+        # same question the same way for the gateway token — and this block can
+        # resolve neither, so it cannot tell a stale one from a current one.
+        #
+        # Overwriting would be worse than an invisible edit to the operator's
+        # file. getLocalAiToken() (src/lib/local-ai-token.ts) prefers
+        # process.env.LOCAL_AI_TOKEN over the token FILE and returns before ever
+        # writing it, so on a box that sets it `${LOCAL_AI_TOKEN}` is the
+        # CORRECT key while data/.local-ai-token may hold a stale one — and
+        # replacing the first with the second would cause the exact 401 this
+        # block exists to remove. Checked BEFORE the token-file guard below so a
+        # correctly-referenced key never draws a warning, and silent: a
+        # resolvable reference is a working configuration, not a fault.
+        _lai_key_now = _lai_entry.get("apiKey")
+        if not (_lai_key_now is None or isinstance(_lai_key_now, str)):
+            continue
+        if (
+            isinstance(_lai_key_now, str)
+            and _lai_key_now.startswith("${")
+            and _lai_key_now.endswith("}")
+            and len(_lai_key_now) > 3
+        ):
+            continue
+        # The token itself is never printed, here or in the warning below: the
+        # journal keeps what it is given, and this is the credential the whole
+        # local-AI path turns on.
+        if len(_lai_token) < 16:
+            print(
+                "  WARN: models.providers." + _lai_provider + " points at this"
+                " box's local-AI proxy but " + _lai_token_file + " is missing or"
+                " too short to be a token this box wrote, so the configured key"
+                " is left as it is — the proxy will answer 401 to every turn of"
+                " the local model until that file is restored."
+            )
+            continue
+        if _lai_row_on_another_host(_lai_entry, _lai_hosts):
+            print(
+                "  Skipped the models.providers." + _lai_provider + ".apiKey"
+                " reconciliation: a model row under it names its own baseUrl on"
+                " another host, and this entry's key is the bearer for every row"
+                " of the entry. Remove that row's baseUrl, or give it one on this"
+                " box, to have the key refreshed on boot."
+            )
+            continue
+        _lai_entry["apiKey"] = _lai_token
+        changed = True
+        print(
+            "  Reconciled models.providers." + _lai_provider + ".apiKey with"
+            " data/.local-ai-token: the entry points at this box's local-AI"
+            " proxy, which accepts only the current bearer."
+        )
 
 # Model migration: legacy ChatGPT-subscription devices can have their active
 # model — or a fallback — stored as `openai/<gpt>` from before the setup UI
@@ -7793,6 +8028,9 @@ dist, installed = sys.argv[1], sys.argv[2]
 # and `node_modules/@openclaw/ai/dist/host-*.mjs` (double-quoted, the copy the
 # Anthropic extension actually imports). Both are rewritten, or the request
 # still says 2.1.75 while the worker file says otherwise (seen on a box).
+# Unchanged by the 2026.9.4 pin: that tarball still carries the constant in
+# `dist/worker/worker.mjs`, still backtick-quoted and still 2.1.75, so this
+# rewrite has the same two targets and the same reason to run (TASK-1088).
 pattern = re.compile(r"ANTHROPIC_CLAUDE_CODE_VERSION(\s*=\s*)([`\"'])(\d+\.\d+\.\d+)\2")
 
 def tuple_of(v):

@@ -61,6 +61,16 @@ import {
   type RunAttempt,
 } from "../../src/lib/coding-deliverable";
 import { isPipelineStage, stageNoun, type PipelineState } from "../../src/lib/coding-pipeline";
+// Pure too: a team message's caps and targets, so the tool's schema and the
+// route's refusal are one set of numbers.
+import {
+  MAX_TEAM_MESSAGE_CHARS,
+  MAX_TEAM_MESSAGES_PER_RUN,
+  MAX_TEAM_MESSAGES_PER_WINDOW,
+  TEAM_MESSAGE_TARGETS,
+  TEAM_MESSAGE_WINDOW_MS,
+} from "../../src/lib/coding-team-messages";
+import { teamRunContext } from "../lib/run-context";
 
 const MAX_TASK_CHARS = 4_000;
 /**
@@ -542,7 +552,7 @@ function describeRun(run: RunPayload, tail: number): string {
   const facts = [
     // Which account paid is said whenever it is not the box's own plan: the
     // owner asked for that run to go somewhere else and is entitled to see it
-    // in the report, and "model claude-opus-5" alone does not say whose bill.
+    // in the report, and "model claude-opus-5-5" alone does not say whose bill.
     run.provider && run.provider !== "clawbox-ai" ? `on the owner's ${run.provider} account` : null,
     run.model ? `model ${run.model}` : (run.requestedModel ? `model ${run.requestedModel}` : null),
     `${run.numTurns} turns`,
@@ -1537,19 +1547,42 @@ interface TeamTaskPayload {
   task_id: string;
   task_description: string;
   assigned_to: string | null;
-  status: "pending" | "in_progress" | "complete" | "failed" | "rejected";
+  status: "pending" | "in_progress" | "complete" | "failed" | "rejected" | "retired";
   result: string | null;
   depends_on: string[];
   review: { verdict: "accepted" | "rejected"; notes: string } | null;
   attempts: number;
+  /** Who put it on the board: the plan, or the lead while the team ran. */
+  origin?: "plan" | "lead";
+}
+
+/** The team's figures, as the server works them out from the board. */
+interface TeamMetricsPayload {
+  plannerRuns: number;
+  workerRuns: number;
+  reviewerRuns: number;
+  leadRuns: number;
+  tasksPlanned: number;
+  tasksAdded: number;
+  tasksRetired: number;
+  tasksAcceptedFirstTry: number;
+  tasksRejected: number;
+  tokensUsed: number;
+  wallMs: number;
 }
 
 interface TeamPayload {
   /** The team's branch in the project and what it forked from; null when the team works in place. */
   branch?: string | null;
   base?: string | null;
-  /** Who worked, counted by the server: planner, workers, reviewers. */
-  agents?: { planner: number; workers: number; reviewers: number; total: number };
+  /** Who worked, counted by the server: planner, workers, reviewers, lead turns. */
+  agents?: { planner: number; workers: number; reviewers: number; leads?: number; total: number };
+  /** The size and review the planner chose for the goal; null for the default team. */
+  shape?: { parallelism: number; review: "each" | "final" | "none"; rationale: string } | null;
+  /** Whether the team's lead may add or retire tasks while it runs (the owner's switch, when the team started). */
+  dynamic?: boolean;
+  finalReview?: { verdict: "accepted" | "rejected"; notes: string } | null;
+  metrics?: TeamMetricsPayload;
   id: string;
   goal: string;
   projectId: string | null;
@@ -1587,7 +1620,23 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
   if (team.plannerRunId) parts.push(`Planner run: ${team.plannerRunId}`);
   if (team.branch) parts.push(`Branch: ${team.branch} (from ${team.base ?? "the checkout's branch"}); the project page's Create PR compares it.`);
   if (team.agents && team.agents.total > 0) {
-    parts.push(`Agents: ${team.agents.total} — ${team.agents.planner} planner, ${team.agents.workers} worker(s), ${team.agents.reviewers} reviewer(s).`);
+    const leads = team.agents.leads ?? 0;
+    parts.push(`Agents: ${team.agents.total} — ${team.agents.planner} planner, ${team.agents.workers} worker(s), ${team.agents.reviewers} reviewer(s)${leads > 0 ? `, ${leads} lead turn(s)` : ""}.`);
+  }
+  if (team.shape) {
+    parts.push(`Shape: up to ${team.shape.parallelism} worker(s) side by side, review ${team.shape.review}${team.shape.rationale ? ` — ${redact(firstLine(team.shape.rationale, 200))}` : ""}.`);
+  }
+  if (team.dynamic) parts.push("Lead: on — the team's lead may add or retire tasks while it runs.");
+  if (team.metrics) {
+    const m = team.metrics;
+    parts.push(
+      `Metrics: runs planner ${m.plannerRuns}, worker ${m.workerRuns}, reviewer ${m.reviewerRuns}, lead ${m.leadRuns}; `
+      + `tasks planned ${m.tasksPlanned}, added ${m.tasksAdded}, retired ${m.tasksRetired}, accepted first try ${m.tasksAcceptedFirstTry}, rejected ${m.tasksRejected}; `
+      + `tokens ${m.tokensUsed}; wall ${Math.round(m.wallMs / 1000)} s.`,
+    );
+  }
+  if (team.finalReview) {
+    parts.push(`Final review: ${team.finalReview.verdict}${team.finalReview.notes ? ` — ${redact(firstLine(team.finalReview.notes, 200))}` : ""}`);
   }
   if (team.tasks.length === 0) {
     parts.push(team.status === "planning" ? "The planner is still reading the folder and writing the plan." : "No tasks were posted.");
@@ -1595,6 +1644,7 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
     parts.push("Tasks:");
     for (const t of team.tasks) {
       const bits = [`${t.task_id} [${t.status}${t.review ? `, ${t.review.verdict}` : ""}]`, redact(firstLine(t.task_description, 120))];
+      if (t.origin === "lead") bits.push("added by the lead");
       if (t.assigned_to) bits.push(`worker ${t.assigned_to}`);
       if (t.reviewRunId) bits.push(`reviewer ${t.reviewRunId}`);
       if (t.depends_on.length) bits.push(`after ${t.depends_on.join(", ")}`);
@@ -1675,7 +1725,8 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
           status: t.status,
           goal: redact(firstLine(t.goal, 80)),
           project_id: t.projectId,
-          tasks: t.tasks.length,
+          // A retired task will never be done: counted, a finished team read as unfinished.
+          tasks: t.tasks.filter((x) => x.status !== "retired").length,
           complete: t.tasks.filter((x) => x.status === "complete").length,
           alerts: t.alerts,
         })));
@@ -1711,6 +1762,136 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
       }
       const team = data.team;
       return text(team ? `Team ${team.id} is ${team.status}. ${describeTeam(team, false)}` : `Asked the ClawBox to stop team ${team_id}.`);
+    },
+  );
+}
+
+// ── Inside a team's run: the one tool that talks to the rest of the team ────
+
+/** Above the web server's own budget for the assistant's chat (OWNER_AGENT_TIMEOUT_MS, 10 s) plus the connect. */
+export const TEAM_MESSAGE_CALL_TIMEOUT_MS = 20_000;
+
+interface TeamMessageReply {
+  sent?: boolean;
+  to?: string;
+  toRunId?: string | null;
+  delivered?: boolean;
+  left?: number;
+}
+
+/**
+ * The route's refusal, worded for the model's next step. The route's `code` is
+ * the brief's own vocabulary and leads the message, so a model and a person
+ * reading the transcript see the same word the board logged; the envelope's
+ * code is the nearest of this server's fixed set.
+ */
+function teamMessageRefusal(err: ApiError): ToolError {
+  let body: { code?: unknown; error?: unknown; nextAllowedAt?: unknown } = {};
+  try {
+    body = JSON.parse(err.body) as typeof body;
+  } catch {
+    /* not the route's own JSON: classified below */
+  }
+  const code = typeof body.code === "string" ? body.code : "";
+  const said = typeof body.error === "string" && body.error.trim() ? body.error.trim() : "The ClawBox refused the message.";
+  const message = `${code || "REFUSED"}: ${said}`;
+  const nothingSent = "Nothing was sent.";
+  switch (code) {
+    case "RATE_LIMITED": {
+      const at = typeof body.nextAllowedAt === "number" ? new Date(body.nextAllowedAt).toISOString() : null;
+      return new ToolError("CONFLICT", message, at
+        ? `${nothingSent} Do not try again before ${at}; carry on with your task meanwhile, and put it in your final report if it still matters then.`
+        : `${nothingSent} This run has no team messages left: put what you wanted to say in your final report.`);
+    }
+    case "SETTLED":
+      return new ToolError("CONFLICT", message, `${nothingSent} That run, or the team, has finished — do not message it again. Tell the lead instead if it still matters.`);
+    case "NOT_IN_TEAM":
+      return new ToolError("NOT_FOUND", message, `${nothingSent} Only runs of your own team can be messaged; check the run id, or send it to the lead with to="lead".`);
+    case "SELF":
+      return new ToolError("BAD_ARGUMENT", message, `${nothingSent} Name another run of the team in to_run_id, or send it to the lead.`);
+    case "QUEUE_FULL":
+      return new ToolError("CONFLICT", message, `${nothingSent} Do not send that run anything more until it has read what it has.`);
+    case "FORBIDDEN":
+      return new ToolError("CONFLICT", message, `${nothingSent} Do not retry: the team does not recognise this run as the sender. Carry on with your task and mention it in your final report.`);
+    case "NOT_FOUND":
+      return new ToolError("NOT_FOUND", message, `${nothingSent} The team is gone; do not call this tool again in this run.`);
+    case "NO_SESSION":
+      return new ToolError("ENDPOINT_DOWN", message, "The assistant did not get it. Do not retry; send it to the lead with to=\"lead\" instead, or put it in your final report.");
+    case "UNSUPPORTED":
+      return new ToolError("NOT_SUPPORTED_HERE", message, "The assistant cannot be reached this way on this ClawBox. Do not retry; send it to the lead with to=\"lead\" instead.");
+    case "NOT_DELIVERED":
+      return new ToolError("ENDPOINT_DOWN", message, "The assistant did not get it. Try once more at most, then tell the lead instead.");
+    case "TOO_LONG":
+      return new ToolError("TOO_LARGE", message, `${nothingSent} Say it in at most ${MAX_TEAM_MESSAGE_CHARS} characters and send it once.`);
+    case "EMPTY":
+    case "NOT_PLAIN_TEXT":
+    case "INVALID":
+      return new ToolError("BAD_ARGUMENT", message, `${nothingSent} Send plain text, and for to="sibling" a to_run_id like run-ab12cd34.`);
+    default:
+      return classifyError(err, "team_message");
+  }
+}
+
+/**
+ * `team_message` — registered ONLY in a run of a coding team: the four team
+ * variables the runner sets for such a run (mcp/lib/run-context.ts) say so. Any
+ * other process, the assistant's own server included, never lists it; a tool
+ * that exists everywhere and answers "not a team run" is a refusal a model
+ * would spend steps arguing with.
+ *
+ * The run speaks as ITSELF: the team, the run and the role go to the route from
+ * the environment, never from the model's arguments, and the route checks them
+ * against the team's board before anything is said.
+ */
+export function registerTeamRunTools(reg: Registrar): void {
+  const team = teamRunContext();
+  if (!team) return;
+
+  reg.tool(
+    "team_message",
+    `Send ONE short message from this run to the rest of your coding team while you work. to="sibling" reaches another run of the team that is still working (to_run_id, e.g. run-ab12cd34) in its current turn; to="lead" puts it on the team's board, which the orchestrator and the owner read — nobody answers there; to="owner_agent" posts it into the chat of this box's assistant, who may steer you with a reply. Use it only when you are blocked: you need a teammate's output first, the files your task names do not exist or are wrong, or a decision only the owner can take. Never for progress reports, and never to acknowledge a message you received — a received message needs no reply. Plain text, at most ${MAX_TEAM_MESSAGE_CHARS} characters; ${MAX_TEAM_MESSAGES_PER_WINDOW} per ${TEAM_MESSAGE_WINDOW_MS / 60_000} minutes and ${MAX_TEAM_MESSAGES_PER_RUN} per run.`,
+    {
+      to: zEnumOf(TEAM_MESSAGE_TARGETS, "Who gets it: \"sibling\" (another run of your team), \"lead\" (the team's board) or \"owner_agent\" (the box's assistant)."),
+      text: zText(MAX_TEAM_MESSAGE_CHARS, "What to say, in plain text: the one thing that blocks you and what you need."),
+      to_run_id: zOptText(12, "For to=\"sibling\" only: the run id of the teammate, e.g. \"run-ab12cd34\"."),
+    },
+    { editions: ["openclaw", "hermes"], family: "browser", readOnly: false, maxChars: 2_000 },
+    async ({ to, text: said, to_run_id }: { to: (typeof TEAM_MESSAGE_TARGETS)[number]; text: string; to_run_id?: string }) => {
+      if (to === "sibling" && !to_run_id) {
+        throw new ToolError("BAD_ARGUMENT", "INVALID: a message to a sibling needs to_run_id.", "Nothing was sent. Call again with to_run_id set to the teammate's run id, e.g. run-ab12cd34, or send it to the lead.");
+      }
+      let res: TeamMessageReply;
+      try {
+        res = await apiPost<TeamMessageReply>(
+          "/setup-api/coding-agent/team/message",
+          {
+            teamId: team.teamId,
+            fromRunId: team.runId,
+            role: team.role,
+            to,
+            ...(to === "sibling" ? { toRunId: to_run_id } : {}),
+            text: said,
+          },
+          { timeoutMs: TEAM_MESSAGE_CALL_TIMEOUT_MS },
+        );
+      } catch (err) {
+        if (err instanceof ApiError) throw teamMessageRefusal(err);
+        throw err;
+      }
+      if (!res.sent) {
+        throw new ToolError("ENDPOINT_DOWN", "The ClawBox did not take the message.", "Do not retry more than once; carry on with your task and mention it in your final report.");
+      }
+      const left = typeof res.left === "number" ? ` (${res.left} team message${res.left === 1 ? "" : "s"} left in this run.)` : "";
+      const carryOn = "Carry on with your task; do not wait for a reply, and do not send the same thing again.";
+      if (to === "sibling") {
+        return text(res.delivered
+          ? `Sent to ${to_run_id}; it has the message in its current turn. ${carryOn}${left}`
+          : `Queued for ${to_run_id}; it reads it when its current turn ends. ${carryOn}${left}`);
+      }
+      if (to === "lead") {
+        return text(`Posted on the team's board for the lead. Nobody answers there — ${carryOn.charAt(0).toLowerCase()}${carryOn.slice(1)} If it stops you finishing, say so in your final report.${left}`);
+      }
+      return text(`Posted into the assistant's chat. It may answer by steering you with a message. ${carryOn}${left}`);
     },
   );
 }

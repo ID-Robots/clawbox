@@ -181,6 +181,14 @@ describe("gateway restart breaker", () => {
     expect(GATEWAY_UNIT).toMatch(/^SuccessExitStatus=0 143$/m);
   });
 
+  it("survives an OOM kill of one of its children, as OpenClaw's own template does", () => {
+    // systemd's default OOMPolicy=stop tears the whole unit down when the
+    // kernel kills ANY process in its cgroup — one claude CLI turn or tool
+    // subprocess took every channel and active turn with it (TASK-1073).
+    expect(GATEWAY_UNIT).toMatch(/^OOMPolicy=continue$/m);
+    expect(GATEWAY_UNIT).not.toMatch(/^OOMPolicy=(?!continue$)/m);
+  });
+
   it("leaves headroom for deliberate restarts without losing the window", () => {
     expect(intervalSec).toBe(3_600);
     // Restart=always means operator-driven restarts (model changes, updates)

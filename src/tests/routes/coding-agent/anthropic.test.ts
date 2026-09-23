@@ -151,8 +151,8 @@ describe("what the route will say about the credential", () => {
 
   it("answers the models a run may name, so the picker never guesses", async () => {
     const body = await (await GET(req("GET"))).json();
-    expect(body.models).toEqual(["claude-opus-5", "claude-sonnet-5"]);
-    expect(body.defaultModel).toBe("claude-opus-5");
+    expect(body.models).toEqual(["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"]);
+    expect(body.defaultModel).toBe("claude-opus-5-5");
   });
 });
 

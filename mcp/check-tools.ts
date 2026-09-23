@@ -279,8 +279,10 @@ const INVERSE_GATED_TOOLS: Record<Ed, readonly string[]> = {
  * ones most in need of the check, too: their descriptions are the longest in
  * the tree and they only ever run on a customer's device, where the registrar's
  * contract complaint goes to a stdio server's stderr that nobody reads.
+ * `team_message` is gated the same way, on the team half of that environment
+ * (a coding team's run), which RUN_ENV below carries as a worker's.
  */
-const RUN_ONLY_TOOLS = ["browser_view_local", "generate_audio", "generate_image"];
+const RUN_ONLY_TOOLS = ["browser_view_local", "generate_audio", "generate_image", "team_message"];
 
 /**
  * Which probes SPAWN a binary and which ask the device's own HTTP API.
@@ -296,6 +298,12 @@ const RUN_ENV = {
   CLAWBOX_RUN_DIR: "/home/clawbox/projects/example",
   CLAWBOX_RUN_ARTIFACTS_DIR: "/home/clawbox/clawbox/data/coding-agent-artifacts/example",
   CLAWBOX_RUN_MEDIA: "images,audio",
+  // A worker of a coding team, so the team's own tool is built and checked
+  // too (mcp/lib/run-context.ts `teamRunContext`).
+  CLAWBOX_RUN_ID: "run-ab12cd34",
+  CLAWBOX_TEAM_ID: "team-ab12cd34",
+  CLAWBOX_TEAM_ROLE: "worker",
+  CLAWBOX_TEAM_TASK: "t1",
 };
 
 /** Names present in `a` and absent from `b`, sorted. */

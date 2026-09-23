@@ -3,11 +3,13 @@ import fs, { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSy
 import { tmpdir } from "os";
 import path from "path";
 import {
+  HOME,
   isAllowedPath,
   filterAllowedPaths,
   assertPathAllowed,
   assertWritePathAllowed,
   commandDeniedByPathGuard,
+  commandPathRefusal,
   resolveGuardedPath,
   SECRET_NAME_RE,
 } from "../../../mcp/lib/guard";
@@ -496,6 +498,47 @@ describe("mcp path guard — a link is judged by its target", () => {
     }
   });
 
+  it("refuses a link planted INSIDE the ~/.openclaw workspace that leaves it", () => {
+    // The carve-out makes that folder writable, so the agent can plant a link
+    // in it — which is the first thing to ask of any new hole in a credential
+    // store. The canonical half of the rule is what answers: the typed path is
+    // a workspace path and the target is not.
+    const oc = path.join(dir, ".openclaw");
+    const ws = path.join(oc, "workspace");
+    mkdirSync(path.join(oc, "credentials"), { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(path.join(oc, "credentials", "key"), "SECRET\n");
+    const dirLink = link(path.join(".openclaw", "workspace", "dirlink"), path.join(oc, "credentials"));
+    const leafLink = link(path.join(".openclaw", "workspace", "leaflink"), path.join(oc, "credentials", "key"));
+    const dangling = link(path.join(".openclaw", "workspace", "danglink"), path.join(oc, "credentials", "new"));
+    expect(isAllowedPath(leafLink)).toBe(false);
+    expect(isAllowedPath(path.join(dirLink, "key"))).toBe(false);
+    // …including a path below the link that does not exist yet.
+    expect(isAllowedPath(path.join(dirLink, "deep", "x"))).toBe(false);
+    expect(() => assertWritePathAllowed(dangling)).toThrow();
+    expect(() => assertWritePathAllowed(path.join(dirLink, "new"))).toThrow();
+    // …while the workspace itself stays writable, which is the point of it.
+    expect(() => assertWritePathAllowed(path.join(ws, "skills", "a", "SKILL.md"))).not.toThrow();
+  });
+
+  it("refuses a `bash` cwd that LINKS into ~/.openclaw, and one that links into a workspace and walks out", () => {
+    // The cwd is the other half of every relative path in the command, and a
+    // link is a cwd with no `.openclaw` anywhere in its text. `isAllowedPath`
+    // lets `~/.openclaw` itself through on purpose — a listing filters its
+    // entries — so the typed spelling is not enough here either.
+    const oc = path.join(dir, ".openclaw");
+    const ws = path.join(oc, "workspace");
+    mkdirSync(path.join(oc, "credentials"), { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    const toState = link("state", oc);
+    const toWorkspace = link("notes", ws);
+    expect(commandPathRefusal("ls", toState)).toEqual({ kind: "openclaw" });
+    expect(commandPathRefusal("cat credentials/key", toState)).toEqual({ kind: "openclaw" });
+    expect(commandPathRefusal("cat ../credentials/key", toWorkspace)).toEqual({ kind: "openclaw" });
+    // …and the workspace itself is still a place a shell may stand and work.
+    expect(commandPathRefusal("cat MEMORY.md", toWorkspace)).toBeNull();
+  });
+
   it("still refuses a typed dotenv name that links somewhere harmless", () => {
     // Both spellings must pass: to the agent that wrote it, `.env` is a
     // dotenv file whatever it points at.
@@ -518,5 +561,307 @@ describe("mcp path guard — a link is judged by its target", () => {
     const env = path.join(dir, ".env");
     writeFileSync(env, "SECRET=1\n");
     expect(() => resolveGuardedPath(link("notes.txt", env), "read")).toThrow();
+  });
+});
+
+// ── TASK-1072: the agent's own workspace inside ~/.openclaw ──────────────────
+//
+// `.openclaw` is in PROTECTED_HOME_DIRS beside `.ssh`, and that list is matched
+// for a WHOLE SEGMENT ANYWHERE in the path — so every one of the tools above
+// refused every path under it, the agent's own AGENTS.md, MEMORY.md, memory/
+// and skills/ included. That folder holds two very different things side by
+// side: the provider keys, the MCP bearer and every session transcript, and the
+// agent's own working notes. A single verdict for the whole tree has to be
+// wrong about one of them, and it was wrong about the half the agent is
+// supposed to edit.
+//
+// So the rule is a carve-out, the same shape DATA_DIR_PUBLIC_SUBTREES has in
+// src/lib/file-guard.ts: everything under `~/.openclaw` is protected EXCEPT the
+// workspaces, and a secret basename inside a workspace is still a secret.
+//
+// Paths are built off the guard's own HOME rather than written literally like
+// the credential cases above. The read side would not care — the rule is a
+// regex over segments — but the WRITE side folds the home before it matches
+// TASK-605's `/clawbox` root, so a literal `/home/clawbox/...` on a machine
+// whose home is elsewhere is refused for a reason that has nothing to do with
+// this rule.
+const OC = `${HOME}/.openclaw`;
+const WS = `${OC}/workspace`;
+
+/**
+ * The `bash` pre-flight itself — the one `mcp/tools/coding.ts` calls, not a
+ * copy of its passes. It moved into the guard for exactly this: a rule composed
+ * inside the tool and re-composed inside its test is two rules, and the weaker
+ * one is the one nobody notices is weaker.
+ */
+function preflightRefuses(command: string, cwd?: string): boolean {
+  return commandPathRefusal(command, cwd) !== null;
+}
+
+/** One row of the ruling: a path, and what each of the three surfaces says. */
+interface OpenclawCase {
+  path: string;
+  /** read_file, glob, grep, list_directory — `isAllowedPath`. */
+  read: boolean;
+  /** write_file, edit_file — `assertWritePathAllowed`. */
+  write: boolean;
+  /** `cat <path>` through the `bash` pre-flight. */
+  bash: boolean;
+  why: string;
+}
+
+const OPENCLAW_CASES: OpenclawCase[] = [
+  // ── Allowed: the agent's own workspace ──────────────────────────────────
+  {
+    path: `${WS}/MEMORY.md`,
+    read: true, write: true, bash: true,
+    why: "the agent's own memory file — 'add a line to your MEMORY.md' is the request that could not be served",
+  },
+  {
+    path: `${WS}/AGENTS.md`,
+    read: true, write: true, bash: true,
+    why: "the workspace's instruction file, beside it",
+  },
+  {
+    path: `${WS}/skills/hello/SKILL.md`,
+    read: true, write: true, bash: true,
+    why: "'create a skill called hello under your workspace skills' — a file that does not exist yet, so the write side judges where it would land",
+  },
+  {
+    path: `${WS}/memory/project_pr_base.md`,
+    read: true, write: true, bash: true,
+    why: "one memory file, the shape the memory directory is full of",
+  },
+  {
+    path: `${OC}/workspace-main/MEMORY.md`,
+    read: true, write: true, bash: true,
+    why: "a second agent's workspace is the same kind of folder and follows the same rule",
+  },
+  {
+    path: OC,
+    read: true, write: false, bash: false,
+    why: "the directory ITSELF stays listable so the carve-out can be found — entries are filtered one by one, exactly as DATA_DIR is. `bash` keeps refusing it: an `ls` there prints the credential names this guard filters out of a listing",
+  },
+
+  // ── Denied: everything else under ~/.openclaw ───────────────────────────
+  {
+    path: `${OC}/openclaw.json`,
+    read: false, write: false, bash: false,
+    why: "the config carries the provider keys and the MCP bearer; redacting it is not this task",
+  },
+  {
+    path: `${OC}/credentials/anthropic.json`,
+    read: false, write: false, bash: false,
+    why: "the credential store, the reason the whole folder was denied in the first place",
+  },
+  {
+    path: `${OC}/agents/main/sessions/2026-09-01.jsonl`,
+    read: false, write: false, bash: false,
+    why: "a session transcript is every word the owner has said to the box",
+  },
+  {
+    path: `${OC}/extensions/clawbox-path-guard/index.mjs`,
+    read: false, write: false, bash: false,
+    why: "the hook plugin enforcing TASK-605 — an agent that can rewrite its own guard has none",
+  },
+  {
+    path: `${OC}/.mcp-token`,
+    read: false, write: false, bash: false,
+    why: "the MCP bearer",
+  },
+  {
+    path: `${OC}/auth-profile.json`,
+    read: false, write: false, bash: false,
+    why: "an auth profile, named in the ruling's deny half",
+  },
+  {
+    path: `${OC}/logs/gateway.log`,
+    read: false, write: false, bash: false,
+    why: "the gateway log quotes request bodies",
+  },
+  {
+    path: `${OC}/media/generated-1.png`,
+    read: false, write: false, bash: false,
+    why: "the assistant's media store: a run is handed copies under data/coding-agent-inputs and never reads this folder",
+  },
+
+  // ── Denied: the edges of the carve-out itself ───────────────────────────
+  {
+    path: `${WS}/.env`,
+    read: false, write: false, bash: false,
+    why: "a dotenv basename inside the workspace is still a dotenv file",
+  },
+  {
+    path: `${WS}/.mcp-token`,
+    read: false, write: false, bash: false,
+    why: "…and a credential-shaped basename is still a credential store, wherever it sits",
+  },
+  {
+    path: `${WS}/../credentials/anthropic.json`,
+    read: false, write: false, bash: false,
+    why: "a `..` out of the carve-out is not in the carve-out — judged on the spelling, before anything resolves",
+  },
+  {
+    path: `${OC}/workspaces/x`,
+    read: false, write: false, bash: false,
+    why: "`workspace` has to be the WHOLE segment, or a folder named to look like it opens the same door",
+  },
+  {
+    path: `${OC}/workspace.bak/MEMORY.md`,
+    read: false, write: false, bash: false,
+    why: "…and only a `-suffix` is a sibling workspace; a copy under another name is not",
+  },
+];
+
+describe("mcp path guard — the agent's own ~/.openclaw workspace (TASK-1072)", () => {
+  it.each(OPENCLAW_CASES)("read $path", ({ path: p, read, why }) => {
+    expect(isAllowedPath(p), why).toBe(read);
+  });
+
+  it.each(OPENCLAW_CASES)("write $path", ({ path: p, write, why }) => {
+    if (write) expect(() => assertWritePathAllowed(p), why).not.toThrow();
+    else expect(() => assertWritePathAllowed(p), why).toThrow();
+  });
+
+  it.each(OPENCLAW_CASES)("bash `cat $path`", ({ path: p, bash, why }) => {
+    expect(preflightRefuses(`cat ${p}`), why).toBe(!bash);
+  });
+
+  it("still refuses a command that names an allowed path AND a denied one", () => {
+    expect(preflightRefuses(`cat ${WS}/MEMORY.md ${OC}/.mcp-token`)).toBe(true);
+    expect(preflightRefuses(`cat ${WS}/MEMORY.md && cat ~/.ssh/id_rsa`)).toBe(true);
+  });
+
+  it.each([
+    "cat $HOME/.openclaw/workspace/../credentials/x",
+    "cat $HOME/.openclaw/workspace/.openclaw/credentials/x",
+    "cat $HOME/.openclaw/workspace/a,$HOME/.openclaw/credentials/x",
+  ])("refuses `%s`, which starts in the workspace and ends outside it", (command) => {
+    // `$HOME` is expanded by nothing here, so the token pass skips the token
+    // and the TEXT rule is the only one left. Judging its first segment alone
+    // passed all three: each begins `workspace`, and each names the credential
+    // store by the time it ends. The tail goes through the file tools' own
+    // rule instead, so the shell cannot run a path they would refuse.
+    expect(preflightRefuses(command)).toBe(true);
+  });
+
+  it("does not let a nested .openclaw be described to the user as a workspace file", () => {
+    // The deny itself was never in doubt; the HINT was. `isOpenclawWorkspacePath`
+    // read the first `.openclaw` only, so a credential path that merely began
+    // in a workspace was handed the "tell the user which workspace file" wording.
+    const nested = `${WS}/.openclaw/credentials/key`;
+    expect(isAllowedPath(nested)).toBe(false);
+    let thrown: unknown;
+    try {
+      assertPathAllowed(nested);
+    } catch (err) {
+      thrown = err;
+    }
+    const e = thrown as { next?: string };
+    expect(e.next).not.toMatch(/workspace file/i);
+    expect(e.next).toMatch(/never name this path/i);
+  });
+
+  // ── The working directory, which is half of every relative path ──────────
+  //
+  // `bash` takes a cwd and the pre-flight used to hand it only to TASK-605's
+  // rule. The carve-out deliberately lets `~/.openclaw` ITSELF be opened, so
+  // `assertPathAllowed(cwd)` passes for it — and then `cat credentials/x` names
+  // no refused path anywhere in the command string, because the `.openclaw`
+  // half of that path was spelled by the cwd.
+  it.each([
+    [OC, "ls"],
+    [OC, "cat credentials/anthropic.json"],
+    [OC, "cat openclaw.json"],
+    [OC, "grep -r . ."],
+    [`${OC}/credentials`, "cat anthropic.json"],
+    [`${OC}/agents/main/sessions`, "tail -n 200 x.jsonl"],
+  ])("refuses a shell sitting in %s (`%s`)", (cwd, command) => {
+    // `bash` output is NOT filtered entry by entry the way `list_directory` is,
+    // so the folder that is list-only to the file tools is refused outright to
+    // a shell standing in it, whatever it was asked to run.
+    expect(preflightRefuses(command, cwd)).toBe(true);
+  });
+
+  it.each([
+    "cat ../credentials/anthropic.json",
+    "cat ../.mcp-token",
+    "ls ..",
+    "cp MEMORY.md ../credentials/",
+    "cat ../../.openclaw/credentials/x",
+  ])("refuses `%s` run from inside the workspace", (command) => {
+    // The cwd is allowed and the command names no `.openclaw` of its own, so
+    // neither the text rule nor the token pass can see this: the token is
+    // relative, and what it walks out of came from the working directory.
+    expect(preflightRefuses(command, WS)).toBe(true);
+  });
+
+  it.each([
+    "ls",
+    "cat MEMORY.md",
+    "cat ./memory/project_pr_base.md",
+    "mkdir -p skills/hello && cat AGENTS.md",
+    "grep -rn beta memory/",
+    `cat ${WS}/MEMORY.md`,
+  ])("still runs `%s` from inside the workspace", (command) => {
+    // The point of the carve-out. A cwd rule that refused these would have put
+    // the agent back where TASK-1072 found it.
+    expect(preflightRefuses(command, WS)).toBe(false);
+  });
+
+  it("leaves a cwd outside ~/.openclaw judged by the rules that already judged it", () => {
+    expect(preflightRefuses("ls", HOME)).toBe(false);
+    expect(preflightRefuses("cat notes.txt", `${HOME}/projects`)).toBe(false);
+    // …and the text rule still answers for the command, cwd or no cwd.
+    expect(preflightRefuses("cat ~/.openclaw/credentials/x", HOME)).toBe(true);
+    // A lookalike directory is not the state directory.
+    expect(preflightRefuses("cat credentials/x", `${HOME}/openclaw`)).toBe(false);
+  });
+
+  it("does not fire on a path that merely starts the same way", () => {
+    expect(isAllowedPath(`${HOME}/.openclaw-notes.txt`)).toBe(true);
+    expect(isAllowedPath(`${HOME}/openclaw/workspace/MEMORY.md`)).toBe(true);
+    expect(preflightRefuses(`cat ${HOME}/.openclaw-notes.txt`)).toBe(false);
+  });
+
+  it("leaves the Hermes edition exactly as it was", () => {
+    // The carve-out is scoped to the `.openclaw` segment. ~/.hermes has the
+    // same shape of folder inside it and does NOT get one.
+    expect(isAllowedPath("/home/clawbox/.hermes/workspace/MEMORY.md")).toBe(false);
+    expect(isAllowedPath("/home/clawbox/.hermes/skills/pdf/SKILL.md")).toBe(false);
+    expect(SECRET_NAME_RE.test("cat ~/.hermes/config.yaml")).toBe(true);
+  });
+
+  it("keeps the refusal's words about a credential path, and its silence", () => {
+    let thrown: unknown;
+    try {
+      assertPathAllowed(`${OC}/credentials/anthropic.json`);
+    } catch (err) {
+      thrown = err;
+    }
+    const e = thrown as { code?: string; message?: string; next?: string };
+    expect(e.code).toBe("BLOCKED_PATH");
+    expect(e.message).not.toContain(".openclaw");
+    expect(e.next).not.toContain(".openclaw");
+    // The hint points at the harness's own file tools rather than saying "give
+    // up": they are not bound by this guard, and an agent told to stop here
+    // failed the whole request instead of finishing it another way.
+    expect(e.next).toMatch(/own file tools/i);
+    // …but it must not invite the agent to describe a credential path to the
+    // user. Only a workspace file may be named.
+    expect(e.next).toMatch(/never name this path/i);
+  });
+
+  it("tells the agent it may name a WORKSPACE file that was protected", () => {
+    let thrown: unknown;
+    try {
+      assertPathAllowed(`${WS}/.env`);
+    } catch (err) {
+      thrown = err;
+    }
+    const e = thrown as { code?: string; next?: string };
+    expect(e.code).toBe("BLOCKED_PATH");
+    expect(e.next).toMatch(/own file tools/i);
+    expect(e.next).toMatch(/workspace file/i);
   });
 });

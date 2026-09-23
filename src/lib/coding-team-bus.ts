@@ -19,25 +19,41 @@
 
 import {
   type Actor,
+  type ReviewMode,
   type TeamBoard,
   type TeamTask,
   BoardAccessError,
+  REVIEW_MODES,
   assignTask,
+  postMessage,
   postTask,
   raiseAlert,
+  recordFinalReview,
+  retireTask,
   reviewTask,
   saveBoard,
+  setShape,
   submitResult,
   updateStatus,
 } from "@/lib/coding-team-board";
+import { MAX_TEAM_MESSAGE_CHARS, TEAM_MESSAGE_TARGETS, type TeamMessageRefusal, type TeamMessageTarget } from "@/lib/coding-team-messages";
 
 export type TeamMessage =
-  | { type: "task"; task_description: string; depends_on?: string[]; files_hint?: string[] }
+  | { type: "task"; task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string }
+  | { type: "shape"; parallelism: number; review: ReviewMode; rationale: string }
   | { type: "assign"; task_id: string; worker_id: string }
   | { type: "status_update"; task_id: string; status: "in_progress" | "complete" | "failed"; worker_id: string }
   | { type: "result"; task_id: string; result: string; worker_id: string }
   | { type: "review"; task_id: string; verdict: "accepted" | "rejected"; notes: string }
-  | { type: "alert"; reason: string; task_id?: string };
+  | { type: "retire"; task_id: string; reason: string }
+  | { type: "final_review"; verdict: "accepted" | "rejected"; notes: string }
+  | { type: "alert"; reason: string; task_id?: string }
+  /**
+   * A run of the team speaking (coding-team-messages.ts). `undelivered` is
+   * set by the orchestrator for a message the box could not hand on — it is
+   * still the run's message, logged as one, never as an alert.
+   */
+  | { type: "message"; from_run_id: string; to: TeamMessageTarget; to_run_id?: string; text: string; undelivered?: TeamMessageRefusal };
 
 export interface Delivered {
   ts: number;
@@ -60,6 +76,21 @@ export function validateMessage(m: unknown): string | null {
       if (typeof msg.task_description !== "string" || !msg.task_description.trim()) return "A task message needs task_description.";
       if (msg.depends_on !== undefined && (!Array.isArray(msg.depends_on) || !msg.depends_on.every((d) => typeof d === "string" && TASK_ID.test(d)))) return "depends_on must be a list of task ids.";
       if (msg.files_hint !== undefined && (!Array.isArray(msg.files_hint) || !msg.files_hint.every((f) => typeof f === "string"))) return "files_hint must be a list of paths.";
+      if (msg.origin !== undefined && msg.origin !== "plan" && msg.origin !== "lead") return "A task's origin is plan or lead.";
+      if (msg.note !== undefined && typeof msg.note !== "string") return "A task's note must be text.";
+      return null;
+    case "shape":
+      if (typeof msg.parallelism !== "number" || !Number.isInteger(msg.parallelism) || msg.parallelism < 1) return "A shape's parallelism is a whole number of at least 1.";
+      if (!(REVIEW_MODES as readonly unknown[]).includes(msg.review)) return `A shape's review is ${REVIEW_MODES.join(", ")}.`;
+      if (typeof msg.rationale !== "string") return "A shape needs its rationale (may be empty).";
+      return null;
+    case "retire":
+      if (typeof msg.task_id !== "string" || !TASK_ID.test(msg.task_id)) return "A retirement needs a task_id.";
+      if (typeof msg.reason !== "string") return "A retirement needs its reason (may be empty).";
+      return null;
+    case "final_review":
+      if (msg.verdict !== "accepted" && msg.verdict !== "rejected") return "A final review's verdict is accepted or rejected.";
+      if (typeof msg.notes !== "string") return "A final review needs notes (may be empty).";
       return null;
     case "assign":
       if (typeof msg.task_id !== "string" || !TASK_ID.test(msg.task_id)) return "assign needs a task_id.";
@@ -82,6 +113,13 @@ export function validateMessage(m: unknown): string | null {
       return null;
     case "alert":
       if (typeof msg.reason !== "string" || !msg.reason.trim()) return "An alert needs a reason.";
+      return null;
+    case "message":
+      if (typeof msg.from_run_id !== "string" || !RUN_ID.test(msg.from_run_id)) return "A team message needs from_run_id (a run id).";
+      if (typeof msg.to !== "string" || !(TEAM_MESSAGE_TARGETS as readonly string[]).includes(msg.to)) return `A team message goes to ${TEAM_MESSAGE_TARGETS.join(", ")}.`;
+      if (msg.to === "sibling" && (typeof msg.to_run_id !== "string" || !RUN_ID.test(msg.to_run_id))) return "A message to a sibling needs to_run_id (a run id).";
+      if (typeof msg.text !== "string" || !msg.text.trim()) return "A team message needs text.";
+      if (msg.text.length > MAX_TEAM_MESSAGE_CHARS) return `A team message is at most ${MAX_TEAM_MESSAGE_CHARS} characters.`;
       return null;
     default:
       return `Unknown message type ${String(msg.type)}.`;
@@ -111,15 +149,22 @@ export class TeamBus {
     if (actor.kind === "worker" && "worker_id" in message && message.worker_id !== actor.id) {
       return this.refuse(actor, message, `worker ${actor.id} sent a message as ${message.worker_id}`);
     }
+    if (actor.kind === "worker" && message.type === "message" && message.from_run_id !== actor.id) {
+      return this.refuse(actor, message, `worker ${actor.id} sent a team message as ${message.from_run_id}`);
+    }
     let task: TeamTask | null = null;
     try {
       switch (message.type) {
         case "task": task = postTask(this.board, actor, message); break;
+        case "shape": setShape(this.board, actor, { parallelism: message.parallelism, review: message.review, rationale: message.rationale }); break;
         case "assign": task = assignTask(this.board, actor, message.task_id, message.worker_id); break;
         case "status_update": task = updateStatus(this.board, actor, message.task_id, message.status); break;
         case "result": task = submitResult(this.board, actor, message.task_id, message.result); break;
         case "review": task = reviewTask(this.board, actor, message.task_id, message.verdict, message.notes); break;
+        case "retire": task = retireTask(this.board, actor, message.task_id, message.reason); break;
+        case "final_review": recordFinalReview(this.board, actor, message.verdict, message.notes); break;
         case "alert": raiseAlert(this.board, actor, message.reason, message.task_id); break;
+        case "message": postMessage(this.board, actor, message); break;
       }
     } catch (err) {
       // A role refusal and a rule refusal ("t1 cannot go from complete to
@@ -137,7 +182,14 @@ export class TeamBus {
     return delivered;
   }
 
-  private refuse(actor: Actor, message: TeamMessage, reason: string): never {
+  /**
+   * Refuse a message: log it as an alert, persist, throw. Public for the one
+   * caller that has to refuse on grounds the board cannot see — the team's
+   * message route (coding-team.ts), which knows whether a run is still live
+   * and whether a sibling can still be told anything — so that refusal reads
+   * on the board exactly like the ones the board makes itself.
+   */
+  refuse(actor: Actor, message: TeamMessage, reason: string): never {
     raiseAlert(this.board, { kind: "system" }, `Refused ${message.type} from ${actor.kind === "worker" ? `worker ${actor.id}` : actor.kind}: ${reason}`, "task_id" in message ? message.task_id : undefined);
     saveBoard(this.board);
     throw new BoardAccessError(actor, message.type, reason);

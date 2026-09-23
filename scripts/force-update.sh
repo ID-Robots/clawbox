@@ -22,10 +22,20 @@ set -euo pipefail
 
 # Environment:
 #   CLAWBOX_ROOT / CLAWBOX_BRANCH — as below.
+#   CLAWBOX_BUN             — the bun binary (default: the clawbox user's
+#                             ~/.bun/bin/bun, then whatever `bun` is on PATH).
 #   CLAWBOX_GIT_RETRIES     — attempts for the fetch (default: 3).
 #   CLAWBOX_GIT_RETRY_DELAY — seconds before the first retry, doubling (default: 3).
 #   A value that is not a whole number is replaced with the default and a line
 #   is printed saying so. Same two knobs, same rule, as install.sh.
+#
+# A build that fails is never served, and never leaves the checkout ahead of
+# what is served: the serving build is parked before `next build` runs and put
+# back if the new one fails, the checkout goes back to the commit it was on,
+# nothing is restarted, and the script exits non-zero with the tail of the
+# build's output. Before this, a failed build left `git HEAD` on the new commit
+# while the service kept serving the old one — and `.next` half-deleted under
+# it, so the next restart had nothing to load.
 
 PROJECT_DIR="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
 TARGET_BRANCH="${CLAWBOX_BRANCH:-main}"
@@ -47,6 +57,20 @@ fi
 
 if [ ! -d "$PROJECT_DIR/.git" ]; then
   echo "Error: $PROJECT_DIR is not a git repository" >&2
+  exit 1
+fi
+
+# Resolved before anything moves, and held to the same rule as the two values
+# above: it is interpolated into the same `bash -c` strings.
+BUN_BIN="${CLAWBOX_BUN:-}"
+if [ -z "$BUN_BIN" ]; then
+  BUN_BIN="/home/$CLAWBOX_USER/.bun/bin/bun"
+  if [ ! -x "$BUN_BIN" ]; then
+    BUN_BIN="$(command -v bun || echo bun)"
+  fi
+fi
+if ! [[ "$BUN_BIN" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+  echo "Error: invalid bun path '$BUN_BIN' (allowed: A-Z a-z 0-9 . _ / -)" >&2
   exit 1
 fi
 
@@ -132,25 +156,257 @@ fetch_with_retry() {
 
 GIT="git -c safe.directory=$PROJECT_DIR -C $PROJECT_DIR"
 
+BUILD_DIR="$PROJECT_DIR/.next"
+KEPT_DIR="$PROJECT_DIR/.next-old"
+
+# What a failure has to undo, set as each thing happens. give_up reads them.
+PREV_HEAD=""     # the commit checked out before this run
+PREV_BRANCH=""   # the branch it was on; empty for a detached HEAD
+MOVED=0          # the checkout may have left PREV_HEAD
+INSTALLED=0      # `bun install` ran against the new commit's lockfile
+PARKED=0         # the serving build is parked at $KEPT_DIR
+NO_FALLBACK=0    # too little space to park: the build runs over the serving one
+BUILT=0          # `bun run build` has started writing .next
+RESTORED=0       # the parked build was put back after a failed build
+BUILD_LOG_DIR=""
+BUILD_LOG=""
+
+# Same test as install.sh's build_entry_present: `-L` too, because postbuild's
+# nested layout makes the entry a symlink to an absolute path that dangles
+# while its tree is parked.
+build_entry_present() {
+  [ -e "$1/standalone/server.js" ] || [ -L "$1/standalone/server.js" ]
+}
+
+# The same question install.sh's verify_build_present asks after its build —
+# the file the service loads exists, and the build on disk names the commit
+# that is checked out (scripts/verify-build-identity.sh, the one copy of that
+# logic). Copied rather than shared for the reason the fetch retry above is:
+# this script must run when install.sh and the in-app updater cannot.
+verify_build_present() {
+  if [ ! -f "$BUILD_DIR/standalone/server.js" ]; then
+    echo "[force-update] No $BUILD_DIR/standalone/server.js — the build produced nothing the dashboard can load" >&2
+    return 1
+  fi
+  if [ ! -f "$PROJECT_DIR/scripts/verify-build-identity.sh" ]; then
+    echo "[force-update] WARNING: scripts/verify-build-identity.sh is missing — the build's identity was not checked" >&2
+    return 0
+  fi
+  if ! bash "$PROJECT_DIR/scripts/verify-build-identity.sh" --project-dir "$PROJECT_DIR" --quiet; then
+    echo "[force-update] The build on disk does not name the checked-out commit" >&2
+    return 1
+  fi
+}
+
+# Next prints this line, and only this line, on the way out of a build that
+# failed. The exit status is the first verdict; this is the second, so that a
+# status lost anywhere between `next build` and this shell can never be read as
+# a build that worked. One awk, for the reason given at the retry below.
+build_error_in_log() {
+  awk '/Build error occurred/ { hit = 1 } END { exit hit ? 0 : 1 }' "$1"
+}
+
+# Park the serving build at $KEPT_DIR so a failed build can be undone — the
+# same move install.sh's set_previous_build_aside makes, and read that function
+# for the reasoning; only the shape is repeated here.
+#
+#   - A build a killed update left parked is the box's ONLY build when `.next`
+#     has no entry, so it is put back before anything deletes it.
+#   - A filesystem that cannot hold two builds gets no park: the build then
+#     runs over the serving one exactly as it always did here, and says so.
+#   - The parked tree is stamped with this shell's PID, the boot id and this
+#     process's start time: production-server.js refuses its boot-time reclaim
+#     of `.next-old` only while that stamp names a live process, so a service
+#     restart during the build cannot pull the parked tree out from under it,
+#     and a stamp left by a killed run is ignored.
+park_serving_build() {
+  local need avail boot_id="" start_time=""
+  if ! build_entry_present "$BUILD_DIR" && build_entry_present "$KEPT_DIR"; then
+    echo "[force-update] Putting back the build an interrupted update left at $KEPT_DIR..."
+    if ! rm -rf "$BUILD_DIR" || ! mv -T "$KEPT_DIR" "$BUILD_DIR"; then
+      echo "[force-update] Could not put the parked build back" >&2
+      return 1
+    fi
+    rm -f "$BUILD_DIR/.rebuild-pid" || true
+  fi
+  if ! rm -rf "$KEPT_DIR"; then
+    echo "[force-update] Could not clear $KEPT_DIR before parking the build" >&2
+    return 1
+  fi
+  [ -d "$BUILD_DIR" ] || return 0
+  need="$(du -sk "$BUILD_DIR" 2>/dev/null | awk '{print $1}')"
+  avail="$(df -Pk "$BUILD_DIR" 2>/dev/null | awk 'NR==2 {print $4}')"
+  case "$need"  in ''|*[!0-9]*) need="" ;; esac
+  case "$avail" in ''|*[!0-9]*) avail="" ;; esac
+  if [ -n "$need" ] && [ -n "$avail" ] && [ "$avail" -lt "$((need * 2))" ]; then
+    echo "[force-update] Only ${avail}K free for a ${need}K build — building over the current one, so a failed build has nothing to fall back on" >&2
+    NO_FALLBACK=1
+    return 0
+  fi
+  boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" || boot_id=""
+  start_time="$(sed -e 's/^.*) //' "/proc/$$/stat" 2>/dev/null | awk '{print $20}')" || start_time=""
+  case "$start_time" in ''|*[!0-9]*) start_time="" ;; esac
+  if [ -z "$boot_id" ] || [ -z "$start_time" ] \
+     || ! printf '%s %s %s\n' "$$" "$boot_id" "$start_time" > "$BUILD_DIR/.rebuild-pid"; then
+    echo "[force-update] Warning: could not stamp the parked build as this run's — a dashboard restarting mid-build may reclaim it" >&2
+  fi
+  echo "[force-update] Setting the serving build aside..."
+  # `-T`: with $KEPT_DIR present a bare `mv` would move the build inside it.
+  if ! mv -T "$BUILD_DIR" "$KEPT_DIR"; then
+    rm -f "$BUILD_DIR/.rebuild-pid" || true
+    echo "[force-update] Could not set the serving build aside" >&2
+    return 1
+  fi
+  PARKED=1
+}
+
+restore_serving_build() {
+  [ "$PARKED" -eq 1 ] || return 0
+  if [ ! -d "$KEPT_DIR" ]; then
+    echo "[force-update] The parked build is gone from $KEPT_DIR — there is no previous build to put back" >&2
+    return 1
+  fi
+  if ! rm -rf "$BUILD_DIR" || ! mv -T "$KEPT_DIR" "$BUILD_DIR"; then
+    echo "[force-update] Could not put the previous build back — it is still at $KEPT_DIR" >&2
+    return 1
+  fi
+  # The stamp said "a rebuild owns this tree"; it must not ride along into the
+  # build the box serves.
+  rm -f "$BUILD_DIR/.rebuild-pid" || true
+  PARKED=0
+  RESTORED=1
+  echo "[force-update] Put the previous build back."
+}
+
+roll_back_checkout() {
+  [ "$MOVED" -eq 1 ] || return 0
+  if [ -z "$PREV_HEAD" ]; then
+    echo "[force-update] The commit checked out before this run could not be read, so the checkout stays where it is" >&2
+    return 1
+  fi
+  # `-q`: the rollback may be running BECAUSE stdout has gone (see give_up),
+  # and `git reset --hard` exits 141 on its "HEAD is now at" line into a closed
+  # pipe — SIGPIPE ignored or not — failing the very step it just did.
+  if [ -n "$PREV_BRANCH" ]; then
+    if ! run_as_clawbox "$GIT checkout -q -f $PREV_BRANCH" || ! run_as_clawbox "$GIT reset -q --hard $PREV_HEAD"; then
+      echo "[force-update] Could not move the checkout back to $PREV_BRANCH @ ${PREV_HEAD:0:7}" >&2
+      return 1
+    fi
+  elif ! run_as_clawbox "$GIT checkout -q -f --detach $PREV_HEAD"; then
+    echo "[force-update] Could not move the checkout back to ${PREV_HEAD:0:7}" >&2
+    return 1
+  fi
+  MOVED=0
+  echo "[force-update] Checkout rolled back to ${PREV_BRANCH:-a detached HEAD} @ ${PREV_HEAD:0:7}."
+  # node_modules was installed for the lockfile of the commit that failed; put
+  # it back in step with the one that is checked out again. Best-effort: the
+  # restored build carries its own traced node_modules in .next/standalone.
+  if [ "$INSTALLED" -eq 1 ] && ! run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN install"; then
+    echo "[force-update] Warning: bun install for the restored commit failed — run it again before the next build" >&2
+  fi
+}
+
+# Undo, say what happened, exit non-zero. Every failure after the checkout
+# starts to move ends here, and so does an interrupt (an SSH session dropping
+# mid-build is SIGHUP) and an exit nobody planned for (the EXIT trap armed with
+# the move — an `echo` into a closed pipe or a dead terminal ends a `set -e`
+# script too), so no path out of this script leaves HEAD on a commit whose
+# build is not the one being served.
+give_up() {
+  local why="$1" code="$2"
+  set +e
+  trap - HUP INT TERM EXIT
+  # Ignored, not reset: if a closed pipe is why we are here, the lines below
+  # write into it too, and SIGPIPE's default would kill the rollback halfway.
+  trap '' PIPE
+  echo "[force-update] $why — rolling back." >&2
+  restore_serving_build
+  roll_back_checkout
+  if [ -n "$BUILD_LOG" ] && [ -s "$BUILD_LOG" ]; then
+    echo "[force-update] Last 30 lines of the build output:" >&2
+    tail -n 30 "$BUILD_LOG" >&2
+  fi
+  if [ -n "$BUILD_LOG_DIR" ]; then rm -rf "$BUILD_LOG_DIR"; fi
+  # Nothing is restarted onto a build that failed. The service was never
+  # stopped, so it is still up on the build that was put back — unless it went
+  # down while that build was parked, and then it is brought back on it. Only
+  # when .next really holds that build: no build has run yet, or the parked one
+  # was put back. Otherwise .next is what the failed build left — nothing was
+  # parked (no room, or no .next to park) or the put-back itself failed — and a
+  # restart would serve exactly that.
+  if systemctl is-active --quiet clawbox-setup; then
+    echo "[force-update] clawbox-setup was not restarted: it is still serving the previous build." >&2
+  elif [ "$BUILT" -eq 0 ] || [ "$RESTORED" -eq 1 ]; then
+    echo "[force-update] clawbox-setup is not running — starting it again on the previous build." >&2
+    sudo systemctl restart clawbox-setup || true
+  else
+    echo "[force-update] clawbox-setup is not running, and was NOT started: .next holds the build that just failed, not the previous one." >&2
+  fi
+  if [ "$MOVED" -eq 1 ] || [ "$PARKED" -eq 1 ]; then
+    echo "[force-update] FAILED (exit $code), and the rollback did not complete — see the lines above." >&2
+  elif [ "$BUILT" -eq 1 ] && [ "$RESTORED" -eq 0 ]; then
+    local why_none="there was no previous build on disk to keep"
+    if [ "$NO_FALLBACK" -eq 1 ]; then why_none="there was no room to keep the previous build"; fi
+    echo "[force-update] FAILED (exit $code). The checkout is back, but $why_none: the dashboard has nothing good to load on its next restart until a build succeeds." >&2
+  else
+    echo "[force-update] FAILED (exit $code). Nothing was updated." >&2
+  fi
+  exit "$code"
+}
+trap 'give_up "Interrupted (SIGHUP)" 129' HUP
+trap 'give_up "Interrupted (SIGINT)" 130' INT
+trap 'give_up "Interrupted (SIGTERM)" 143' TERM
+
 echo "[force-update] Fixing .git ownership (any root-owned bits left by install.sh)..."
 sudo chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
 
+# Where the rollback goes back to. A SHA is hex and nothing else; a branch name
+# git accepts can still hold characters the `bash -c` strings must not see, so
+# one outside the safe set is rolled back to as a detached HEAD instead.
+#
+# 40 hex digits (SHA-1) or 64 (SHA-256), with the length as an explicit test
+# rather than a bounded repeat `{40}`: `[[ =~ ]]` is glibc regex, which expands
+# one into an NFA state per repetition — the construct behind the 260 MB
+# TASK-1066 took out of scripts/run-tunnel.sh, which
+# src/tests/unit/shell-regex-hygiene.test.ts keeps out of every script. Same
+# accepted and rejected values as before.
+PREV_HEAD="$(run_as_clawbox "$GIT rev-parse --verify --quiet HEAD" 2>/dev/null || true)"
+case "${#PREV_HEAD}" in 40|64) ;; *) PREV_HEAD="" ;; esac
+if ! [[ "$PREV_HEAD" =~ ^[0-9a-f]+$ ]]; then
+  PREV_HEAD=""
+  echo "[force-update] Warning: could not read the commit checked out now — a failed build cannot be rolled back" >&2
+fi
+PREV_BRANCH="$(run_as_clawbox "$GIT symbolic-ref --quiet --short HEAD" 2>/dev/null || true)"
+if ! [[ "$PREV_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then PREV_BRANCH=""; fi
+
 echo "[force-update] Hard-syncing $PROJECT_DIR to $UPSTREAM..."
 fetch_with_retry
-run_as_clawbox "$GIT reset --hard HEAD"
-run_as_clawbox "$GIT checkout $TARGET_BRANCH 2>/dev/null || $GIT checkout -b $TARGET_BRANCH $UPSTREAM"
-run_as_clawbox "$GIT reset --hard $UPSTREAM"
-run_as_clawbox "$GIT clean -fd"
+# From here on there is something to undo, so ANY way out rolls back — not
+# only the failures handled below and the three interrupts above. Armed here
+# and not with those: before the move an exit has nothing to undo, and a fetch
+# that fails says so itself.
+trap 'give_up "Interrupted (SIGPIPE)" 141' PIPE
+trap 'rc=$?; give_up "Exited unexpectedly (status $rc)" "$(( rc == 0 ? 1 : rc ))"' EXIT
+MOVED=1
+if ! run_as_clawbox "$GIT reset --hard HEAD" \
+   || ! run_as_clawbox "$GIT checkout $TARGET_BRANCH 2>/dev/null || $GIT checkout -b $TARGET_BRANCH $UPSTREAM" \
+   || ! run_as_clawbox "$GIT reset --hard $UPSTREAM" \
+   || ! run_as_clawbox "$GIT clean -fd"; then
+  give_up "Could not sync the checkout to $UPSTREAM" 1
+fi
 
-HEAD_SHA=$(run_as_clawbox "$GIT rev-parse --short HEAD")
+HEAD_SHA=$(run_as_clawbox "$GIT rev-parse --short HEAD") || HEAD_SHA="?"
 echo "[force-update] Now at $TARGET_BRANCH @ $HEAD_SHA"
 
 echo "[force-update] Rebuilding (this takes 1-3 minutes on Jetson)..."
-BUN_BIN="/home/$CLAWBOX_USER/.bun/bin/bun"
-if [ ! -x "$BUN_BIN" ]; then
-  BUN_BIN="$(command -v bun || echo bun)"
+INSTALLED=1
+if ! run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN install"; then
+  give_up "bun install failed" 1
 fi
-run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN install"
+
+if ! park_serving_build; then
+  give_up "Could not set the serving build aside" 1
+fi
 
 # ONE retry, and only for the mid-build file-trace race — the same guard
 # `run_next_build` carries in install.sh, copied rather than shared because
@@ -158,17 +414,15 @@ run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN install"
 # in-app updater is already broken) and has its own helper names. See that
 # function for why the race exists and why one rebuild is the whole repair.
 #
-# It matters MORE here than there: `git reset --hard` and `git clean -fd` run
-# a few lines above, `next build` wipes `.next/standalone` before it copies
-# anything, and this path parks NO previous build — so a mid-copy ENOENT
-# leaves the box with no standalone entry and nothing to fall back on.
+# `tee` truncates the log on every attempt, so what the checks below read is
+# the LAST attempt's output — a retry that worked is judged on its own run.
 # A private `mktemp -d` directory, never a predictable path — this script runs
 # as root and a fixed name under TMPDIR is a symlink a local user can plant.
 # See run_next_build in install.sh.
 BUILD_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-force-update-XXXXXX" 2>/dev/null || true)"
-BUILD_LOG=""
 if [ -n "$BUILD_LOG_DIR" ]; then BUILD_LOG="$BUILD_LOG_DIR/build.log"; fi
 BUILD_RC=0
+BUILT=1
 for BUILD_ATTEMPT in 1 2; do
   if [ -n "$BUILD_LOG" ]; then
     if run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN run build" 2>&1 | tee "$BUILD_LOG"; then
@@ -188,10 +442,34 @@ for BUILD_ATTEMPT in 1 2; do
   awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$BUILD_LOG" || break
   echo "[force-update] A file the build was tracing changed while it ran — building once more"
 done
-if [ -n "$BUILD_LOG_DIR" ]; then rm -rf "$BUILD_LOG_DIR"; fi
+
+# Three verdicts, and the build has to pass all of them before anything is
+# restarted onto it: its exit status, its own output, and what it left on disk.
 if [ "$BUILD_RC" -ne 0 ]; then
-  echo "[force-update] Build failed (exit $BUILD_RC)." >&2
-  exit "$BUILD_RC"
+  give_up "Build failed (exit $BUILD_RC)" "$BUILD_RC"
+fi
+if [ -n "$BUILD_LOG" ] && build_error_in_log "$BUILD_LOG"; then
+  give_up "Build failed (it exited 0, but printed \"Build error occurred\")" 1
+fi
+if ! verify_build_present; then
+  give_up "Build failed (it exited 0, but left no build the dashboard can serve)" 1
+fi
+
+# The new build is accepted: nothing after this point may undo it. So the
+# rollback is disarmed BEFORE the parked build is deleted, traps first — an
+# interrupt during that `rm -rf` (seconds, for a tree with its own
+# node_modules) would otherwise delete the build that just passed, put the
+# half-deleted previous one back over it, and move the checkout back.
+trap - HUP INT TERM PIPE EXIT
+MOVED=0
+DROP_PARKED="$PARKED"
+PARKED=0
+if [ -n "$BUILD_LOG_DIR" ]; then rm -rf "$BUILD_LOG_DIR"; fi
+BUILD_LOG=""
+if [ "$DROP_PARKED" -eq 1 ]; then
+  # The parked build is only disk now. A tree left behind is harmless — the
+  # next park clears it — so this does not fail the run.
+  rm -rf "$KEPT_DIR" || echo "[force-update] Warning: could not remove the previous build at $KEPT_DIR" >&2
 fi
 
 echo "[force-update] Restarting clawbox-setup..."

@@ -90,6 +90,10 @@ plans cover, in 4.0:
   values before it reaches the record.
 - **Isolation.** A run's parent process is spawned through `setpriv` with the
   ambient and inheritable capability sets emptied and no-new-privs set.
+- **A run on your own Anthropic account uses Claude Opus 5.5.** `claude-opus-5-5`
+  is the default there, and `claude-opus-5` and `claude-sonnet-5` are still
+  accepted when a run asks for one by name. A run on the box's own ClawBox AI
+  plan is unchanged — the plan chooses the model, so one cannot be named for it.
 - The feature needs a paid ClawBox AI plan, Pro or Max. A box already enabled
   when a subscription lapses is never auto-disabled.
 - MCP tools: `coding_agent_run`, `coding_agent_status`, `coding_agent_resume`,
@@ -187,7 +191,9 @@ plans cover, in 4.0:
 - A failed turn now prints the provider's own reason instead of a generic
   failure, and a reply written by a fallback model says which model wrote it.
 - Third-party credentials are kept in OpenClaw 2's sqlite auth store.
-- OpenClaw is pinned to 2026.9.3.
+- OpenClaw is pinned to 2026.9.4 (state schema 17). An update now refuses up
+  front, before it changes anything, when the device's state database is on a
+  schema newer than the core it is about to install.
 
 ### Local AI
 

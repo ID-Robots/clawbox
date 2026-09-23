@@ -267,6 +267,28 @@ export const PROTECTED_PATH_COMMAND_CASES: ProtectedPathCommandCase[] = [
     denied: false,
     why: "…and sed WITHOUT -i only reads",
   },
+
+  // ── TASK-1072: the agent's own workspace is not this rule's business ─────
+  // The `.openclaw` carve-out is a CREDENTIAL-guard change (src/lib/file-guard.ts
+  // and mcp/lib/guard.ts). This table is TASK-605's ruling, which names three
+  // path roots and none of them is `~/.openclaw` — so both harnesses already
+  // answered these the same way, and these cases exist to keep it that way when
+  // the carve-out tempts someone to add a root or an exception here.
+  {
+    command: "cat ~/.openclaw/workspace/MEMORY.md",
+    denied: false,
+    why: "reading the agent's own memory file was never TASK-605's business, on either edition",
+  },
+  {
+    command: "rm ~/.openclaw/workspace/skills/hello/SKILL.md",
+    denied: false,
+    why: "…and neither is deleting one: the ruling is deliberately narrow — the checkout and the two model stores, nothing else",
+  },
+  {
+    command: "cp ~/.openclaw/workspace/MEMORY.md /tmp/ && rm ~/clawbox/data/x",
+    denied: true,
+    why: "…but a workspace path in the other half of a compound command does not buy the tree an exemption",
+  },
 ];
 
 export interface ProtectedPathToolCase {

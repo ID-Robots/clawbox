@@ -1168,6 +1168,10 @@ interface SnapshotsResponse {
   kind?: string;
   snapshots?: CloudSnapshot[];
   quotaBytes?: number;
+  /** Part of the daemon's wire contract, deliberately not consumed: usage is
+   * summed from `snapshots` instead, so an older daemon relaying the portal's
+   * stale counter can't put a number in state.json that the bucket disagrees
+   * with. See syncStateFromCloud(). */
   cloudBytes?: number;
 }
 
@@ -1400,9 +1404,14 @@ export async function syncStateFromCloud(): Promise<void> {
   }
   const snapshots = resp.snapshots ?? [];
   const lastBackupAtMs = snapshots.reduce((max, s) => Math.max(max, s.last_modified_ms ?? 0), 0);
-  // Prefer the daemon's authoritative prefix total; fall back to summing the
-  // per-snapshot sizes only if an older daemon doesn't report cloudBytes.
-  const cloudBytes = resp.cloudBytes ?? snapshots.reduce((sum, s) => sum + (s.size_bytes ?? 0), 0);
+  // Sum the snapshots we were just handed, rather than taking `resp.cloudBytes`
+  // on trust. A current daemon derives that field from the same listing, so the
+  // two agree — but an older one passes the portal's `cloudBytes` counter
+  // straight through, and that counter is an accumulator: it keeps the size of
+  // snapshots the account no longer has, and writing it into state.json is what
+  // made the dashboard insist on "9.8 GB used" against a prefix the portal
+  // itself reported as empty. The objects are the only honest answer.
+  const cloudBytes = snapshots.reduce((sum, s) => sum + (s.size_bytes ?? 0), 0);
   await writeStateFile({
     last_backup_at_ms: lastBackupAtMs,
     last_cloud_bytes: cloudBytes,

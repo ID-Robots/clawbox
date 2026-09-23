@@ -60,15 +60,15 @@ import { ToolError } from "../lib/errors";
 import {
   DEFAULT_CWD,
   HOME,
-  SECRET_NAME_RE,
   filterAllowedPaths,
   isAllowedPath,
   assertPathAllowed,
-  commandDeniedByPathGuard,
+  commandPathRefusal,
   resolveGuardedPath,
   hasBinary,
   resolveUserPath,
   spawnArgv,
+  type CommandPathRefusal,
 } from "../lib/guard";
 import { getJob, inspectCommand, runShell, startJob, stopJob } from "../lib/jobs";
 import { hostMatchesDomain, htmlToText, safeFetch, stripTagsToFixedPoint } from "../lib/web";
@@ -226,57 +226,46 @@ async function assertNotStale(abs: string): Promise<void> {
 }
 
 /**
- * Best-effort pre-flight for `bash`. DEFENCE IN DEPTH, NOT A BOUNDARY.
+ * The refusals `bash` answers with, one per kind the pre-flight recognises
+ * (`commandPathRefusal` in mcp/lib/guard.ts, which is where the rule itself is).
  *
- * State the guarantee precisely, because it is easy to read a list of blocked
- * cases as containment. `bash` evaluates an arbitrary shell string, and a shell
- * can name the same file in many ways; this pre-flight recognises the direct
- * spellings, not all of them. It is a guard rail against a mistake, not a
- * sandbox, and nothing here should be relied on as one.
- *
- * What actually bounds this tool: it is registered on no shipped device — only
- * where an owner set CLAWBOX_MCP_CODING_TOOLS=1 — every other tool is
- * argv-driven and goes through the real path guard, and its own description
- * tells the agent never to run a command that came from content it read. Assume
- * `bash` can reach anything the device user can.
- *
- * Two passes, both cheap:
- *   1. tokens that look like paths, resolved and checked against the guard;
- *   2. the whole command scanned for a credential-store NAME anywhere in it, so
- *      a path assembled indirectly is still recognised.
- */
-function commandTouchesProtectedPath(command: string, cwd?: string): string | null {
-  const tokens = command.split(/[\s;|&<>()'"`]+/).filter(Boolean);
-  for (const raw of tokens) {
-    if (!raw.startsWith("/") && !raw.startsWith("~") && !raw.startsWith("./")) continue;
-    try {
-      if (!isAllowedPath(resolveUserPath(raw))) return CREDENTIAL_REASON;
-    } catch { /* not a resolvable path */ }
-  }
-  // TASK-605: the same rule the two harnesses enforce on their own shells.
-  // Wherever this tool is switched on, the harness's own shell is already
-  // covered by the before_tool_call hook — and this is a SECOND shell, reached
-  // by a different tool id, so without this the deny would have a door in it.
-  //
-  // The WORKING DIRECTORY goes with the command. It is the reason the hook
-  // reads `workdir` at all: `cd <protected> && rm x` reaches a text matcher as
-  // two tokens it cannot relate, and this tool is handed the directory as an
-  // argument, so the same hole was open here in a simpler form.
-  const guarded = commandDeniedByPathGuard(command, cwd);
-  if (guarded) return guarded;
-  return SECRET_NAME_RE.test(command) ? CREDENTIAL_REASON : null;
-}
-
-/**
- * The refusal for a credential path, kept apart from the protected-path one.
- *
- * The two answers are different on purpose: a credential store's refusal names
- * nothing (this tool is reachable from untrusted page content, and "blocked
- * because it is ~/.hermes/.env" is a map of where the secrets are), while a
+ * The three answers are different on purpose. A credential store's refusal
+ * names nothing — this tool is reachable from untrusted page content, and
+ * "blocked because it is ~/.hermes/.env" is a map of where the secrets are. A
  * TASK-605 refusal names the rule, because there is nothing secret about where
  * the device keeps its own code and an agent told WHY stops trying spellings.
+ * And a refusal inside the agent's OWN state directory sends it to the
+ * harness's file tools instead of telling it to give up: those are not bound by
+ * this guard, and everything in `~/.openclaw` except the workspaces is refused
+ * here whatever the request was (TASK-1072). That last one is also the only
+ * refusal `cwd` alone can earn, so it says so — an agent told "another
+ * spelling" that then re-ran the same command from inside the folder would be
+ * following the hint into the same wall.
  */
-const CREDENTIAL_REASON = "__credential__";
+function commandRefusal(refusal: CommandPathRefusal): ToolError {
+  if (refusal.kind === "credential") {
+    return new ToolError(
+      "BLOCKED_PATH",
+      "That command names a protected device file.",
+      "Do not try variations of it. Tell the user that file holds device credentials.",
+    );
+  }
+  if (refusal.kind === "openclaw") {
+    return new ToolError(
+      "BLOCKED_PATH",
+      "That command reaches part of this device's own agent state that is not open to tools — by naming it, or by being run from inside it. The agent workspaces inside it are open.",
+      "Do not try another spelling here, and do not retry it with cwd inside that folder. Your own file tools are not bound by this guard — use one of those for a workspace file, and tell the user only that a protected device file was involved.",
+    );
+  }
+  // The rule, not the credential sentence: `rm -rf ~/clawbox` holds no
+  // credentials, and telling the agent it does sends it to the owner with the
+  // wrong explanation.
+  return new ToolError(
+    "BLOCKED_PATH",
+    `That command is refused on this device: ${refusal.reason}. The ClawBox install tree and the local-model folders can be read, but not deleted, overwritten, truncated or moved.`,
+    "Do not retry or rephrase it. Tell the user what you were asked to do and that the device refused it.",
+  );
+}
 
 function tooLargeToFetch(): ToolError {
   return new ToolError(
@@ -375,24 +364,8 @@ export function registerCodingTools(reg: Registrar): void {
           );
         }
       }
-      const blockedReason = commandTouchesProtectedPath(command, workDir);
-      if (blockedReason === CREDENTIAL_REASON) {
-        throw new ToolError(
-          "BLOCKED_PATH",
-          "That command names a protected device file.",
-          "Do not try variations of it. Tell the user that file holds device credentials.",
-        );
-      }
-      if (blockedReason) {
-        // The rule, not the credential sentence: `rm -rf ~/clawbox` holds no
-        // credentials, and telling the agent it does sends it to the owner with
-        // the wrong explanation.
-        throw new ToolError(
-          "BLOCKED_PATH",
-          `That command is refused on this device: ${blockedReason}. The ClawBox install tree and the local-model folders can be read, but not deleted, overwritten, truncated or moved.`,
-          "Do not retry or rephrase it. Tell the user what you were asked to do and that the device refused it.",
-        );
-      }
+      const refusal = commandPathRefusal(command, workDir);
+      if (refusal) throw commandRefusal(refusal);
       const { blocked, warnings } = inspectCommand(command);
       if (blocked.length && !allow_dangerous) {
         throw new ToolError(

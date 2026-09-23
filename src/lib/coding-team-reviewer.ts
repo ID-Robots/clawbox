@@ -23,11 +23,26 @@ export const REVIEWER_BRIEF = [
   "You are the REVIEWER of a small coding team working unattended in this folder. One worker has just finished the task quoted below and its work is already merged into this checkout.",
   "Read the changed files (listed) against the task: was it done as asked, does it build or run as the task's own verification says, did it break anything beside it? Change NOTHING: you may not edit, create, delete or run anything that writes.",
   'Answer with ONLY a JSON object, no prose before or after: {"verdict": "accepted" | "rejected", "notes": string}. Reject only for something concrete — a missing piece of the task, a broken build, a wrong file — and say in notes exactly what the next worker must fix; accept with notes empty or a one-line remark.',
+  "If the verdict turns on something you cannot settle — the files the task names are missing, the work needs a sibling's output that is not there, or a decision only the owner can take — you may say so in one short team_message to the lead or to the owner's assistant, never for progress or acknowledgements, and still answer with the JSON object.",
+].join(" ");
+
+/**
+ * The one reviewer of a team the planner shaped with review `final`: every
+ * task already passed the rule, and this run judges the merged result once,
+ * as a whole, instead of a reviewer per task.
+ */
+export const FINAL_REVIEWER_BRIEF = [
+  "You are the REVIEWER of a small coding team working unattended in this folder. Every task of the team is finished and merged into this checkout, and you review the merged result ONCE, as a whole.",
+  "Read the files the tasks touched against the goal: is the goal met, does it build or run as the tasks' own verification says, did one task break another? Change NOTHING: you may not edit, create, delete or run anything that writes.",
+  'Answer with ONLY a JSON object, no prose before or after: {"verdict": "accepted" | "rejected", "notes": string}. Reject only for something concrete — a part of the goal missing, a broken build, a task that undid another — and say in notes exactly what is wrong; accept with notes empty or a one-line remark.',
+  "If the verdict turns on something you cannot settle — files the goal names are missing, or a decision only the owner can take — you may say so in one short team_message to the owner's assistant, never for progress or acknowledgements, and still answer with the JSON object.",
 ].join(" ");
 
 export const MAX_NOTES_CHARS = 2_000;
 /** How many changed files the reviewer is told about by name; the rest are counted. */
 export const MAX_REVIEW_FILES = 40;
+/** How much of the goal the final reviewer is quoted; the board's digest takes the room after it. */
+const FINAL_GOAL_CHARS = 1_200;
 
 /** The reviewer's task text: the task, what changed, what the worker said — inside the run route's cap. */
 export function reviewerTask(input: { taskId: string; description: string; files: string[]; report: string; goal: string }): string {
@@ -40,6 +55,34 @@ export function reviewerTask(input: { taskId: string; description: string; files
     `The worker's report:\n${input.report.trim() || "(none)"}`,
   ].join("\n\n");
   return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
+}
+
+/**
+ * The final reviewer's task text: the goal, where the work is, the files the
+ * tasks were given, and the board — each task and what its worker reported —
+ * inside the run route's cap. `digest` is built for the room this leaves
+ * (`finalReviewRoom`).
+ */
+export function finalReviewerTask(input: { goal: string; branch: string | null; base: string | null; files: string[]; digest: string }): string {
+  const text = [...finalReviewHead(input), `The board — every task, what its worker reported, the latest alerts:\n${input.digest.trim() || "(empty)"}`].join("\n\n");
+  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
+}
+
+/** How many characters the final reviewer's task text leaves for the board's digest. */
+export function finalReviewRoom(input: { goal: string; branch: string | null; base: string | null; files: string[] }): number {
+  const head = finalReviewHead(input).join("\n\n");
+  return Math.max(0, MAX_TASK_CHARS - head.length - "\n\nThe board — every task, what its worker reported, the latest alerts:\n".length);
+}
+
+function finalReviewHead(input: { goal: string; branch: string | null; base: string | null; files: string[] }): string[] {
+  const named = input.files.slice(0, MAX_REVIEW_FILES);
+  const more = input.files.length - named.length;
+  const goal = input.goal.length > FINAL_GOAL_CHARS ? `${input.goal.slice(0, FINAL_GOAL_CHARS - 1)}…` : input.goal;
+  return [
+    `Review the team's whole result for its goal: ${goal}`,
+    input.branch ? `The merged work is on the team's branch ${input.branch}${input.base ? `, forked from ${input.base}` : ""}, checked out here.` : "The merged work is in this folder.",
+    named.length ? `Files the tasks were given:\n${named.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- … and ${more} more` : ""}` : "The tasks named no files.",
+  ];
 }
 
 export function parseVerdict(text: string | null | undefined): { ok: true; verdict: Verdict } | { ok: false; reason: string } {
