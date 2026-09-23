@@ -117,7 +117,11 @@ export interface TeamMetrics {
   messagesToLead: number;
   messagesToSibling: number;
   messagesUndelivered: number;
-  /** Refused actions that only looked (`readOnlyDenial`): on the log as notes, never alerts, never a rejection. */
+  /**
+   * Refused actions that changed nothing — they only looked (`readOnlyDenial`)
+   * or wrote outside the worker's folders (`outsideFolderWriteDenial`): on the
+   * log as notes, never alerts, never a rejection.
+   */
   readOnlyRefusals: number;
 }
 
@@ -692,8 +696,9 @@ export function raiseAlert(board: TeamBoard, actor: Actor, reason: string, taskI
 /**
  * A guardrail line that is NOT an alert: on the record, never counted toward
  * the team's alert ceiling. Only the system (the orchestrator) writes one —
- * today, a worker whose every refusal only LOOKED (`readOnlyDenial`), with
- * how many, which the figures count; and a plan's text cut to fit its bound
+ * today, a worker whose every refusal only LOOKED (`readOnlyDenial`) or wrote
+ * outside its folders (`outsideFolderWriteDenial`), with how many, which the
+ * figures count; and a plan's text cut to fit its bound
  * (`clippedNote`), every cut on one line.
  */
 export function postNote(board: TeamBoard, actor: Actor, text: string, taskId?: string, readOnlyRefusals?: number): void {
@@ -847,6 +852,36 @@ export function readOnlyDenial(action: string): boolean {
     // `rg --pre <cmd>` runs <cmd> on every file it searches.
     if (word === "rg") return !rest.some((w) => w.startsWith("--pre"));
     return word !== "find" || !rest.some((w) => FIND_WRITES.test(w));
+  });
+}
+
+/** Tools that may write, as the runner names a refused one. */
+const WRITE_TOOLS: ReadonlySet<string> = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]);
+/** An absolute path in a refused action's text: at its start, or after a space, a quote, `=`, `(`, `>` or `<`. */
+const ABSOLUTE_PATH = /(?:^|[\s"'=(<>])(\/[^\s"'`;|&()<>]*)/;
+
+/**
+ * True when a refused WRITE — a file tool, or a shell command — was aimed
+ * outside every one of the worker's `folders` (its worktree, the project),
+ * judged by the first absolute path in the action's text: a check script in
+ * /tmp, a note in the harness's own memory folder. The refusal is the proof
+ * it changed nothing, and nothing of the task's was there. No absolute path,
+ * one inside a folder, or one the runner's cut may have ended early is false:
+ * the team judges it the way it always did.
+ */
+export function outsideFolderWriteDenial(action: string, folders: readonly string[]): boolean {
+  const colon = action.indexOf(": ");
+  if (colon <= 0 || !WRITE_TOOLS.has(action.slice(0, colon))) return false;
+  const roots = folders.filter((f) => path.posix.isAbsolute(f)).map((f) => path.posix.resolve(f));
+  const text = action.slice(colon + 2);
+  const found = ABSOLUTE_PATH.exec(text);
+  if (!roots.length || !found) return false;
+  // Cut by the runner mid-path: the rest may have gone on inside a folder.
+  if (action.length >= DENIAL_TEXT_CUT && found.index + found[0].length >= text.length) return false;
+  const target = path.posix.resolve(found[1]);
+  return roots.every((root) => {
+    const rel = path.posix.relative(root, target);
+    return rel === ".." || rel.startsWith("../");
   });
 }
 
