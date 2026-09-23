@@ -519,7 +519,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "webapp_create",
-    "Create a one-file web app on the ClawBox desktop from complete standalone HTML, with CSS and JavaScript inline and no links to the internet. For an app of more than one file, use code_project_init. Call clawbox_context first for the storage and styling rules.",
+    "Create a one-file web app on the ClawBox desktop from complete standalone HTML (read clawbox_context first for the storage and styling rules).",
     {
       app_id: zSlug("Unique id, lowercase with hyphens, e.g. \"todo-list\""),
       name: zText(60, "Name shown under the desktop icon"),
@@ -595,7 +595,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "code_project_init",
-    "Start a multi-file web app project on the ClawBox. It creates a folder of starter files and returns the ABSOLUTE path of that folder; edit the files with your own file-editing tools using that absolute path exactly as given, never a shortened or relative form, then call code_project_build to install it on the desktop. Call clawbox_context first for the storage rules.",
+    "Start a multi-file web app project on the ClawBox (read clawbox_context first for the storage rules), edit its files at the ABSOLUTE path it returns, exactly as given, then call code_project_build.",
     {
       project_id: zSlug("Unique id, lowercase with hyphens"),
       name: zText(60, "Name shown under the desktop icon"),

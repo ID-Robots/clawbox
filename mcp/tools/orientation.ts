@@ -9,9 +9,20 @@ import { json, text, type Ed, type Registrar } from "../lib/register";
 import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault, reported, type HermesDefaultSource } from "../lib/report";
 import type { McpContext } from "../lib/context";
 import { shipsOpenclaw, type VersionsPayload } from "../lib/versions";
+import { toolNotesFor } from "../lib/tool-notes";
 import { WEBAPP_KV_CLIENT_SNIPPET } from "../../src/lib/webapp-sandbox";
 
 const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
+
+/**
+ * `clawbox_context`'s output cap. 24,000 until TASK-1080 moved the caveats out
+ * of the tool descriptions and into the tool notes it now serves too; the
+ * widest box (a dual install with every family registered, the coding family
+ * too) came to about 27,600. The cap truncates the TAIL — the browser guide
+ * goes first — so
+ * src/tests/unit/clawbox-field-guide-edition.test.ts holds every box under it.
+ */
+export const FIELD_GUIDE_MAX_CHARS = 32_000;
 
 // The OpenClaw answer to CURRENT_CHAT_MODEL_NOTE, and it is the opposite one.
 // The chat header's pick is POSTed to /setup-api/chat/model, which writes
@@ -342,7 +353,7 @@ function rootDisk(stats: StatsPayload | null) {
 export function registerOrientationTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
     "device_status",
-    `Report what this ClawBox is: edition, active agent, the device's default AI provider and model (${ctx.install === "dual" ? DEFAULT_QUALIFIER.hermes : DEFAULT_QUALIFIER[ctx.edition]}), the default model's configured context/output limits, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself or its model limits. Any part that cannot be read reports "unknown" instead of failing the whole call.`,
+    `Report what this ClawBox is: edition, active agent, the device's default AI provider and model (${ctx.install === "dual" ? DEFAULT_QUALIFIER.hermes : DEFAULT_QUALIFIER[ctx.edition]}), the default model's configured context/output limits, thinking level, free disk space, and whether a software update is waiting. Call this before answering any question about the device itself or its model limits.`,
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
     async () => {
@@ -524,15 +535,21 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
 
   reg.tool(
     "clawbox_context",
-    "Load the ClawBox field guide: what this device is, its mascot, its architecture, the house rules, how to hand a coding task to the coding agent and then steer and check on it, how to store data in a webapp you build, and whose screen the browser tools drive. Call it once at the start of a session, and always before answering \"what is this\" or \"what can you do\".",
+    "Load the ClawBox field guide: what this device is, its architecture, the house rules, how to hand a coding task to the coding agent and steer it, how to store data in a webapp you build, whose screen the browser tools drive, and the notes behind each tool. Call it once at the start of a session, and always before answering \"what is this\" or \"what can you do\".",
     {},
-    { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 24_000 },
+    { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: FIELD_GUIDE_MAX_CHARS },
     async () => {
       const raw = loadFieldGuide();
       const guide = raw === null ? null : fieldGuideForEdition(raw, ctx.edition, ctx.install);
       const parts: string[] = [];
       if (guide && guide.trim()) parts.push(guide);
       else parts.push(`(The device field guide is not installed on this ClawBox.)`);
+      // Read at CALL time, not at registration: this tool is registered first,
+      // and the mailbox tools come and go with Settings → Email, so only the
+      // list as it stands now says which notes apply. Built in code rather than
+      // kept in Clawbox.md so they cannot go missing with it on a fresh box.
+      const notes = toolNotesFor(reg.list().map((t) => t.name));
+      if (notes) parts.push(notes);
       parts.push(WEBAPP_STORAGE_GUIDE);
       parts.push(BROWSER_GUIDE);
       return text(parts.join("\n\n---\n\n"));

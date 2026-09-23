@@ -458,7 +458,7 @@ export function hasMailboxSurface(reg: Registrar): boolean {
 export function registerEmailReadTools(reg: Registrar): void {
   reg.tool(
     "email_list",
-    "List the newest messages in the ClawBox's own mailbox: who each is from, its subject, its date, and whether it is unread. Returns an id for each one, which email_read takes. Use it only when the user asks you to look at their email. After summarising messages, end your reply with one `EMAIL:<id>` line per message so the user can open the full email — `show_the_user_the_real_message` in the result states the rule, including the one case where those lines must be left out.",
+    "List the newest messages in the ClawBox's own mailbox — sender, subject, date, unread, and the id email_read takes — only when the user asks you to look at their email. End your reply with one `EMAIL:<id>` line per message; `show_the_user_the_real_message` in the result states the rule, including the one case where those lines must be left out.",
     {
       count: zInt(1, 50, 10, "How many of the newest messages to list."),
     },
@@ -503,7 +503,7 @@ export function registerEmailReadTools(reg: Registrar): void {
 
   reg.tool(
     "email_read",
-    "Read one message from the ClawBox's own mailbox, by the id email_list gave for it. Returns the sender, subject, date and the message text. Long messages are shortened. Reading does NOT mark the message as read. End your reply with an `EMAIL:<id>` line so the user can open the full, formatted message themselves — `show_the_user_the_real_message` in the result states the rule, including the one case where those lines must be left out.",
+    "Read one message from the ClawBox's own mailbox by the id email_list gave: sender, subject, date and text, shortened when long; reading does NOT mark it read. End your reply with an `EMAIL:<id>` line; `show_the_user_the_real_message` in the result states the rule, including the one case where it must be left out.",
     {
       message_id: zReqInt(1, 4_294_967_295, "The id of the message, from email_list."),
     },

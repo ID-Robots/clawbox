@@ -12,8 +12,11 @@
  * the coding family is registered on no edition without it, so without this
  * posture nine shipped tools would be built nowhere and reported nowhere) — and:
  *   1. asserts the tool contract (name regex, description length and banned
- *      phrases, parameter-name regex, readOnly/destructive coherence) over
- *      every distinct tool SHAPE any posture produces;
+ *      phrases, parameter-name regex, parameter-description length,
+ *      readOnly/destructive coherence) over every distinct tool SHAPE any
+ *      posture produces — the length ceilings are MAX_DESCRIPTION_CHARS and
+ *      MAX_PARAM_DESCRIPTION_CHARS in mcp/lib/register.ts, and a longer
+ *      description fails the run;
  *   2. asserts each capability gate against its own posture, in both
  *      directions, and that the set of gated tools is the one this file names
  *      — so a family that loses its gate, or gains one nobody recorded, is a
@@ -37,7 +40,7 @@
 process.env.CLAWBOX_MCP_NO_AUTOSTART = "1";
 
 import { z } from "zod";
-import { contractViolations, type RegisteredToolInfo } from "./lib/register";
+import { contractViolations, paramDescriptionViolations, type RegisteredToolInfo } from "./lib/register";
 // The directory the probes actually spawn in — imported, not restated: a third
 // copy of that path is a third thing to keep in step with the other two.
 import { DEFAULT_CWD, defaultSpawnCwd } from "./lib/guard";
@@ -470,7 +473,11 @@ async function check(): Promise<void> {
       const key = `${tool.name}\u0000${tool.description}\u0000${emitted}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      problems.push(...contractViolations(tool), ...schemaShapeViolations(tool, emitted));
+      problems.push(
+        ...contractViolations(tool),
+        ...paramDescriptionViolations(tool),
+        ...schemaShapeViolations(tool, emitted),
+      );
     }
 
     // The matrix and the edition gating are about what a BOX gets, so they read
