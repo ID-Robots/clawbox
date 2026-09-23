@@ -284,12 +284,15 @@ roll_back_checkout() {
     echo "[force-update] The commit checked out before this run could not be read, so the checkout stays where it is" >&2
     return 1
   fi
+  # `-q`: the rollback may be running BECAUSE stdout has gone (see give_up),
+  # and `git reset --hard` exits 141 on its "HEAD is now at" line into a closed
+  # pipe — SIGPIPE ignored or not — failing the very step it just did.
   if [ -n "$PREV_BRANCH" ]; then
-    if ! run_as_clawbox "$GIT checkout -f $PREV_BRANCH" || ! run_as_clawbox "$GIT reset --hard $PREV_HEAD"; then
+    if ! run_as_clawbox "$GIT checkout -q -f $PREV_BRANCH" || ! run_as_clawbox "$GIT reset -q --hard $PREV_HEAD"; then
       echo "[force-update] Could not move the checkout back to $PREV_BRANCH @ ${PREV_HEAD:0:7}" >&2
       return 1
     fi
-  elif ! run_as_clawbox "$GIT checkout -f --detach $PREV_HEAD"; then
+  elif ! run_as_clawbox "$GIT checkout -q -f --detach $PREV_HEAD"; then
     echo "[force-update] Could not move the checkout back to ${PREV_HEAD:0:7}" >&2
     return 1
   fi
@@ -305,12 +308,17 @@ roll_back_checkout() {
 
 # Undo, say what happened, exit non-zero. Every failure after the checkout
 # starts to move ends here, and so does an interrupt (an SSH session dropping
-# mid-build is SIGHUP), so no path out of this script leaves HEAD on a commit
-# whose build is not the one being served.
+# mid-build is SIGHUP) and an exit nobody planned for (the EXIT trap armed with
+# the move — an `echo` into a closed pipe or a dead terminal ends a `set -e`
+# script too), so no path out of this script leaves HEAD on a commit whose
+# build is not the one being served.
 give_up() {
   local why="$1" code="$2"
   set +e
-  trap - HUP INT TERM
+  trap - HUP INT TERM EXIT
+  # Ignored, not reset: if a closed pipe is why we are here, the lines below
+  # write into it too, and SIGPIPE's default would kill the rollback halfway.
+  trap '' PIPE
   echo "[force-update] $why — rolling back." >&2
   restore_serving_build
   roll_back_checkout
@@ -373,6 +381,12 @@ if ! [[ "$PREV_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then PREV_BRANCH=""; fi
 
 echo "[force-update] Hard-syncing $PROJECT_DIR to $UPSTREAM..."
 fetch_with_retry
+# From here on there is something to undo, so ANY way out rolls back — not
+# only the failures handled below and the three interrupts above. Armed here
+# and not with those: before the move an exit has nothing to undo, and a fetch
+# that fails says so itself.
+trap 'give_up "Interrupted (SIGPIPE)" 141' PIPE
+trap 'rc=$?; give_up "Exited unexpectedly (status $rc)" "$(( rc == 0 ? 1 : rc ))"' EXIT
 MOVED=1
 if ! run_as_clawbox "$GIT reset --hard HEAD" \
    || ! run_as_clawbox "$GIT checkout $TARGET_BRANCH 2>/dev/null || $GIT checkout -b $TARGET_BRANCH $UPSTREAM" \
@@ -441,16 +455,22 @@ if ! verify_build_present; then
   give_up "Build failed (it exited 0, but left no build the dashboard can serve)" 1
 fi
 
+# The new build is accepted: nothing after this point may undo it. So the
+# rollback is disarmed BEFORE the parked build is deleted, traps first — an
+# interrupt during that `rm -rf` (seconds, for a tree with its own
+# node_modules) would otherwise delete the build that just passed, put the
+# half-deleted previous one back over it, and move the checkout back.
+trap - HUP INT TERM PIPE EXIT
+MOVED=0
+DROP_PARKED="$PARKED"
+PARKED=0
 if [ -n "$BUILD_LOG_DIR" ]; then rm -rf "$BUILD_LOG_DIR"; fi
 BUILD_LOG=""
-if [ "$PARKED" -eq 1 ]; then
-  # The new build passed; the parked one is only disk now. A tree left behind
-  # is harmless — the next park clears it — so this does not fail the run.
+if [ "$DROP_PARKED" -eq 1 ]; then
+  # The parked build is only disk now. A tree left behind is harmless — the
+  # next park clears it — so this does not fail the run.
   rm -rf "$KEPT_DIR" || echo "[force-update] Warning: could not remove the previous build at $KEPT_DIR" >&2
-  PARKED=0
 fi
-MOVED=0
-trap - HUP INT TERM
 
 echo "[force-update] Restarting clawbox-setup..."
 sudo systemctl restart clawbox-setup

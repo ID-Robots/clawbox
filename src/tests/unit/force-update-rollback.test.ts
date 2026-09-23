@@ -48,19 +48,36 @@ type BuildOutcome =
   | "trace-race-then-succeeds"
   | "slow-success";
 
+// Holds a step until the test writes $STUB_LOG/release — and never for more than
+// 30 s, so a test that fails before it releases cannot hang the run.
+const STUB_HOLD = `hold() {
+  touch "$STUB_LOG/$1"
+  local i=0
+  while [ ! -e "$STUB_LOG/release" ] && [ "$i" -lt 300 ]; do command -p sleep 0.1; i=$((i + 1)); done
+}`;
+
 const STUB_BUN = `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$STUB_LOG/bun.log"
-[ "$1" = "install" ] && exit 0
+${STUB_HOLD}
+if [ "$1" = "install" ]; then
+  # Only the first install, the new commit's: the checkout has moved by then.
+  if [ -n "\${STUB_HOLD_INSTALL:-}" ] && [ ! -e "$STUB_LOG/install-started" ]; then hold install-started; fi
+  exit 0
+fi
 [ "$1 $2" = "run build" ] || exit 64
 attempt=$(( $(cat "$STUB_LOG/builds" 2>/dev/null || echo 0) + 1 ))
 echo "$attempt" > "$STUB_LOG/builds"
 # What next build does first: it empties the output directory.
-rm -rf .next/standalone .next/BUILD_ID
+rm -rf .next/standalone .next/BUILD_ID .next/build-info.json
 mkdir -p .next
+# Stamped the way the real build is (scripts/write-build-info.mjs), with the
+# commit it was built from, so the identity check after it has something true
+# to read.
 produce() {
   mkdir -p .next/standalone
   echo "new build" > .next/standalone/server.js
   echo "new-build-id" > .next/BUILD_ID
+  printf '{"commit":"%s","buildId":"new-build-id"}\\n' "$(git rev-parse HEAD)" > .next/build-info.json
 }
 echo "   Creating an optimized production build ..."
 case "$STUB_BUILD" in
@@ -94,11 +111,21 @@ case "$STUB_BUILD" in
     fi
     produce; exit 0 ;;
   slow-success)
-    touch "$STUB_LOG/build-started"
-    command -p sleep 2
+    # Held open until the test has sent its signal, however late it gets to.
+    hold build-started
     produce; exit 0 ;;
 esac
 exit 70
+`;
+
+// Holds the deletion of the parked build, once there is one to delete, so a
+// signal can land while it runs. The real rm does the work.
+const STUB_RM = `#!/usr/bin/env bash
+${STUB_HOLD}
+if [ -n "\${STUB_HOLD_DROP:-}" ] && [ "\${!#}" = "$CLAWBOX_ROOT/.next-old" ] && [ -d "\${!#}" ]; then
+  hold drop-started
+fi
+command -p rm "$@"
 `;
 
 const STUB_SUDO = `#!/usr/bin/env bash
@@ -183,6 +210,19 @@ function logOf(name: string): string {
 
 const read = (rel: string) => fs.readFileSync(path.join(box, rel), "utf-8");
 
+/** Wait for a stub to say it has reached a step it is holding. */
+async function waitForMarker(name: string): Promise<void> {
+  await vi.waitFor(() => {
+    if (!fs.existsSync(path.join(stubLog, name))) throw new Error(`the stub has not reached ${name} yet`);
+  }, { timeout: 30_000, interval: 50 });
+}
+
+/** The build passed the checkout's own identity check, not a skipped one. */
+function expectIdentityChecked(output: string): void {
+  expect(output).not.toContain("identity was not checked");
+  expect(JSON.parse(read(".next/build-info.json")).commit).toBe(newHead);
+}
+
 function expectPreviousBuildServed(): void {
   expect(read(".next/standalone/server.js")).toBe("old build\n");
   expect(read(".next/BUILD_ID")).toBe("old-build-id\n");
@@ -202,6 +242,10 @@ beforeEach(() => {
 
   git(seed, "init", "-q");
   fs.writeFileSync(path.join(seed, ".gitignore"), ".next/\n.next-old/\nnode_modules/\ndata/\n");
+  // The real identity check, where the run looks for it: under the checkout's
+  // own scripts/. A build that works has to pass it, as it does on a box.
+  fs.mkdirSync(path.join(seed, "scripts"));
+  fs.copyFileSync(path.join(REPO, "scripts", "verify-build-identity.sh"), path.join(seed, "scripts", "verify-build-identity.sh"));
   commit(seed, "served");
   git(tmp, "clone", "-q", seed, box);
   prevHead = git(box, "rev-parse", "HEAD");
@@ -271,12 +315,6 @@ d("scripts/force-update.sh never serves a build that failed", () => {
   });
 
   it("refuses a build that does not name the commit it was built from", () => {
-    // The real identity check, committed into the scratch origin so the run
-    // finds it where it looks: under the checkout's own scripts/.
-    fs.mkdirSync(path.join(seed, "scripts"));
-    fs.copyFileSync(path.join(REPO, "scripts", "verify-build-identity.sh"), path.join(seed, "scripts", "verify-build-identity.sh"));
-    commit(seed, "update with the identity check");
-
     const r = runForceUpdate("names-another-commit");
 
     expect(r.status, r.output).not.toBe(0);
@@ -331,22 +369,52 @@ d("scripts/force-update.sh never serves a build that failed", () => {
     expectPreviousBuildServed();
   });
 
-  it("rolls back when the run is interrupted mid-build, even if the build then finishes", async () => {
-    // An SSH session dropping is SIGHUP; Ctrl-C and `systemctl stop` are the
-    // other two. bash runs the trap once the build in the foreground ends.
+  it.each([
+    ["SIGTERM", 143],
+    ["SIGPIPE", 141],
+  ] as const)("rolls back when the run is interrupted mid-build by %s, even if the build then finishes", async (signal, code) => {
+    // An SSH session dropping is SIGHUP; Ctrl-C and `systemctl stop` are two
+    // more, and a reader that goes away is SIGPIPE on the next line written.
+    // bash runs the trap once the build in the foreground ends — which the
+    // stub holds off until the signal has been sent.
     const child = spawn("bash", [SCRIPT], { env: scriptEnv("slow-success"), stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (b: Buffer) => { stderr += b.toString(); });
-    const exited = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
+    const exited = new Promise<number | null>((resolve) => child.on("exit", (c) => resolve(c)));
 
-    await vi.waitFor(() => {
-      if (!fs.existsSync(path.join(stubLog, "build-started"))) throw new Error("the build has not started yet");
-    }, { timeout: 30_000, interval: 50 });
-    child.kill("SIGTERM");
+    await waitForMarker("build-started");
+    child.kill(signal);
+    fs.writeFileSync(path.join(stubLog, "release"), "");
 
-    expect(await exited).toBe(143);
-    expect(stderr).toContain("Interrupted (SIGTERM)");
+    expect(await exited, stderr).toBe(code);
+    expect(stderr).toContain(`Interrupted (${signal})`);
     expect(git(box, "rev-parse", "HEAD")).toBe(prevHead);
+    expectPreviousBuildServed();
+    expect(logOf("systemctl.log")).not.toMatch(/restart/);
+  });
+
+  it("rolls back on an exit nobody planned for, once the checkout has moved", async () => {
+    // Under `set -e` a failed `echo` ends the script too: into a pipe whose
+    // reader has gone while SIGPIPE is ignored (as a supervisor or `nohup`
+    // may leave it), or into a terminal that has gone away. Here the reader
+    // goes while the new commit's `bun install` runs; the next line written to
+    // stdout is the trace-race retry's "building once more".
+    const child = spawn("bash", ["-c", 'trap "" PIPE; exec bash "$0"', SCRIPT], {
+      env: scriptEnv("trace-race-then-succeeds", { STUB_HOLD_INSTALL: "1" }),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (b: Buffer) => { stderr += b.toString(); });
+    const exited = new Promise<number | null>((resolve) => child.on("exit", (c) => resolve(c)));
+
+    await waitForMarker("install-started");
+    child.stdout.destroy();
+    fs.writeFileSync(path.join(stubLog, "release"), "");
+
+    expect(await exited, stderr).toBe(1);
+    expect(stderr).toContain("Exited unexpectedly (status 1)");
+    expect(git(box, "rev-parse", "HEAD"), stderr).toBe(prevHead);
+    expect(git(box, "symbolic-ref", "--short", "HEAD")).toBe("beta");
     expectPreviousBuildServed();
     expect(logOf("systemctl.log")).not.toMatch(/restart/);
   });
@@ -359,6 +427,7 @@ d("scripts/force-update.sh on a build that works", () => {
     expect(r.status, r.output).toBe(0);
     expect(git(box, "rev-parse", "HEAD")).toBe(newHead);
     expect(read(".next/standalone/server.js")).toBe("new build\n");
+    expectIdentityChecked(r.output);
     expect(fs.existsSync(path.join(box, ".next-old"))).toBe(false);
     expect(logOf("systemctl.log")).toMatch(/^restart clawbox-setup$/m);
     expect(r.output).toContain("recovered the UI only");
@@ -371,5 +440,30 @@ d("scripts/force-update.sh on a build that works", () => {
     expect(logOf("builds").trim()).toBe("2");
     expect(git(box, "rev-parse", "HEAD")).toBe(newHead);
     expect(read(".next/standalone/server.js")).toBe("new build\n");
+    expectIdentityChecked(r.output);
+  });
+
+  it("keeps the new build when it is interrupted while the parked one is being deleted", async () => {
+    // The build passed all three checks, so the update is done; deleting the
+    // parked tree takes seconds on a box. An interrupt then used to run the
+    // rollback over it — the new build deleted, the half-deleted previous one
+    // put back, the checkout moved back.
+    writeExecutable(path.join(bin, "rm"), STUB_RM);
+    const child = spawn("bash", [SCRIPT], { env: scriptEnv("succeeds", { STUB_HOLD_DROP: "1" }), stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (b: Buffer) => { stderr += b.toString(); });
+    const exited = new Promise<NodeJS.Signals | number | null>((resolve) => child.on("exit", (c, s) => resolve(s ?? c)));
+
+    await waitForMarker("drop-started");
+    child.kill("SIGTERM");
+    fs.writeFileSync(path.join(stubLog, "release"), "");
+
+    // Nothing traps the signal any more: it ends the script where it stands.
+    expect(await exited, stderr).toBe("SIGTERM");
+    expect(stderr).not.toContain("rolling back");
+    expect(git(box, "rev-parse", "HEAD")).toBe(newHead);
+    expect(read(".next/standalone/server.js")).toBe("new build\n");
+    // The rm the signal did not reach finishes on its own.
+    await vi.waitFor(() => expect(fs.existsSync(path.join(box, ".next-old"))).toBe(false), { timeout: 30_000, interval: 50 });
   });
 });
