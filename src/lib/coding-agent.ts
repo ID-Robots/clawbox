@@ -194,6 +194,7 @@ import {
   isPrFoundBy,
   isPrPending,
   isPrPhase,
+  markPullRequestReady,
   mergePullRequest,
   openPullRequest,
   updatePullRequestBody,
@@ -234,6 +235,7 @@ import {
   pushBranch,
   readFailedCheckLogs,
   readReviewSnapshot,
+  requestCodeRabbitReview,
   REVIEW_MAX_WAIT_MS,
   reviewPollIntervalMs,
   reviewProblems,
@@ -3516,6 +3518,7 @@ function normalizePr(raw: unknown): PrState | null {
     // who opened its pull request, and "opened" would be this code claiming
     // credit it has no evidence for.
     foundBy: isPrFoundBy(v.foundBy) ? v.foundBy : null,
+    readyAt: typeof v.readyAt === "number" && Number.isFinite(v.readyAt) ? v.readyAt : null,
   };
 }
 
@@ -4925,6 +4928,18 @@ const HEADLESS_BRIEF_TEMPLATE = [
 export const HEADLESS_BRIEF = headlessBrief({ reviewedSeparately: false });
 
 /**
+ * Added for a run whose branch the box will open a pull request from (the
+ * auto-PR switch was on when it started). A run whose task says to open its
+ * own runs `gh pr create`, and the settle adopts that pull request and
+ * watches it (maybeOpenPullRequest). It has to be a draft for the same reason
+ * the box's own are: CodeRabbit reviews a pull request once, when it becomes
+ * ready, and the watcher readies it only after the checks pass. Left out for
+ * every other run, because a draft that nothing watches is never readied.
+ */
+export const PR_DRAFT_BRIEF =
+  "If your task asks you to open a pull request, open it as a draft (`gh pr create --draft`; without --draft only when GitHub refuses drafts in that repository): this device watches it, marks it ready for review once its checks pass, which is when CodeRabbit gives its one review, and merges it or hands it back as the owner's settings say. Do not mark it ready, ask for a review or merge it yourself.";
+
+/**
  * Added to the brief under ultracode only: what the Workflow tool is for on
  * this box. The CLI's own reminder says "use it on every substantive task;
  * token cost is not a constraint", and the inline reference it ships offers
@@ -5288,7 +5303,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT.
   const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
@@ -5304,6 +5319,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // it below), so it hears nothing about drawing or speaking.
     ...(opts.run?.media?.images && !opts.readOnly ? [MEDIA_BRIEF_IMAGES] : []),
     ...(opts.run?.media?.audio && !opts.readOnly ? [MEDIA_BRIEF_AUDIO] : []),
+    ...(opts.draftPullRequests && !opts.readOnly ? [PR_DRAFT_BRIEF] : []),
     // A team's role for this run — the planner's "answer with a JSON array",
     // a worker's "this is your task among these" — after the device's own
     // words, never instead of them.
@@ -7181,6 +7197,9 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
         base: prBase,
         title: firstLineOf(origin.task),
         body: prBody(origin, finished),
+        // A draft until its checks pass: the watcher readies it then, and that
+        // is when CodeRabbit gives the one review it gives a pull request.
+        draft: true,
       });
       if (!created.ok) {
         settlePr(origin, "failed", created.detail);
@@ -7240,6 +7259,7 @@ async function beginPullRequestWatch(origin: CodingRun, input: {
     endedAt: null,
     reviewOk: input.reviewOk,
     foundBy: input.foundBy,
+    readyAt: null,
   };
   pushProgress(origin, input.foundBy === "adopted"
     ? RUNNER_STEP.pullRequestAdopted(input.number, input.base)
@@ -7261,6 +7281,8 @@ async function beginPullRequestWatch(origin: CodingRun, input: {
       fixRunId: null,
       fixMode: null,
       fixDetail: null,
+      readyAt: null,
+      codeRabbitAskedFor: null,
     };
   }
   persist(true);
@@ -7463,8 +7485,33 @@ function watchPullRequest(runId: string): void {
     run.pr = { ...run.pr, checks: snapshot.checks };
     persist(true);
 
-    const verdict = decideMerge({ snapshot, waitedMs: Date.now() - run.pr.startedAt, reviewOk: run.pr.reviewOk });
+    const readyAt = typeof run.pr.readyAt === "number" ? run.pr.readyAt : null;
+    const verdict = decideMerge({
+      snapshot,
+      // From the moment it was readied, once it was: the review that starts
+      // then gets the whole wait, not what the suite left of it.
+      waitedMs: Date.now() - (readyAt ?? run.pr.startedAt),
+      reviewOk: run.pr.reviewOk,
+      sinceReadyMs: readyAt === null ? null : Date.now() - readyAt,
+    });
     if (verdict.action === "wait") { schedule(); return; }
+    if (verdict.action === "ready") {
+      const readied = await markPullRequestReady(run.directory, prNumber);
+      const current = loadRuns().find((r) => r.id === runId);
+      if (!current?.pr || current.pr.phase !== "waiting") { prWatchers.delete(runId); return; }
+      if (readied.ok) {
+        current.pr = { ...current.pr, readyAt: Date.now() };
+        persist(true);
+        console.error(`[coding-agent] ${runId} marked PR #${prNumber} ready for review`);
+      } else if (Date.now() - current.pr.startedAt >= PR_MAX_WAIT_MS) {
+        // Retried on the next poll, under the ceiling every other wait has.
+        settlePr(current, "blocked", readied.detail);
+        prWatchers.delete(runId);
+        return;
+      }
+      schedule();
+      return;
+    }
     if (verdict.action === "block") {
       settlePr(run, "blocked", verdict.detail);
       prWatchers.delete(runId);
@@ -7646,10 +7693,39 @@ function watchReviewLoop(runId: string): void {
       // rebuilt after a restart decides as the first one did.
       reviewOk: run.pr?.reviewOk !== false,
       base: review.base,
+      sinceReadyMs: typeof review.readyAt === "number" ? Date.now() - review.readyAt : null,
+      codeRabbitAskedFor: review.codeRabbitAskedFor ?? null,
     });
 
     if (verdict.action === "wait") { schedule(); return; }
     if (verdict.action === "done") { settleReview(run, verdict.state, verdict.detail); stop(); return; }
+    if (verdict.action === "ready" || verdict.action === "ask_coderabbit") {
+      // Neither is a round: nothing goes to the harness. Each starts something
+      // on GitHub (the review, or its status on this head), so the round's
+      // clock restarts with it, and the grace in codeRabbitGate measures "just
+      // asked" rather than "asked an hour ago".
+      const readying = verdict.action === "ready";
+      const done = readying
+        ? await markPullRequestReady(run.directory, review.prNumber)
+        : await requestCodeRabbitReview(run.directory, review.prNumber);
+      const current = loadRuns().find((r) => r.id === runId);
+      if (!current?.review || current.review.state !== "polling") { stop(); return; }
+      if (done.ok) {
+        const now = Date.now();
+        current.review = readying
+          ? { ...current.review, readyAt: now, roundStartedAt: now }
+          : { ...current.review, codeRabbitAskedFor: snapshot.headSha ?? "unknown", roundStartedAt: now };
+        persist(true);
+        console.error(`[coding-agent] ${runId} ${readying ? "marked PR ready for review" : "asked CodeRabbit to review the head"} (#${review.prNumber})`);
+      } else if (waitedMs >= REVIEW_MAX_WAIT_MS) {
+        // Retried on the next poll, under the ceiling every other wait has.
+        settleReview(current, "needs_owner", done.detail);
+        stop();
+        return;
+      }
+      schedule();
+      return;
+    }
     if (verdict.action === "merge") {
       const merged = await mergePullRequest(run.directory, review.prNumber);
       settleReview(run, merged.ok ? "merged" : "needs_owner", merged.ok ? null : merged.detail);
@@ -9923,7 +9999,11 @@ function spawnRun(
   // for the life of the run, so a message the owner sends at minute three can
   // be written as the next user turn instead of waiting for a boundary.
   const streamInput = streamInputAvailable();
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
+  // "opening" is the auto-PR path's promise to open or adopt a pull request
+  // from this run's branch when it settles, and then to watch it — see
+  // PR_DRAFT_BRIEF.
+  const draftPullRequests = run.pr?.phase === "opening";
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.

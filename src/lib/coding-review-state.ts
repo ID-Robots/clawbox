@@ -152,6 +152,19 @@ export interface ReviewLoop {
    * rotated long before a pull request is looked at again.
    */
   fixDetail: string | null;
+  /**
+   * When the box marked this pull request ready for review, or null when it
+   * never had to. The box opens its pull requests as drafts and readies them
+   * once the checks are green (see decideReviewRound); on the record so a
+   * restart cannot ready one a second time after somebody turned it back into
+   * a draft. Optional because records written before the field lack it.
+   */
+  readyAt?: number | null;
+  /**
+   * The head commit the box last asked CodeRabbit to review with
+   * `@coderabbitai review`, or null. One ask per head — see codeRabbitGate.
+   */
+  codeRabbitAskedFor?: string | null;
 }
 
 /** True while the box is still watching this pull request. */
@@ -219,6 +232,133 @@ export function parseCheckRollup(rollup: unknown): ReviewCheck[] {
   return checks;
 }
 
+/**
+ * CODERABBIT, the review bot, gets rules of its own for one reason: it reviews
+ * a pull request ONCE. Reviews are rationed per seat per hour and every pull
+ * request this box opens comes from the same account, so the repository turns
+ * incremental reviews off. It reviews when a pull request becomes ready for
+ * review and then stays quiet about the commits that follow. So the loop:
+ *  - opens the pull request as a draft and readies it once every other check
+ *    is green, which makes that one review land on code that already passes;
+ *  - never waits for a second review after a fix push, because none is coming;
+ *  - counts a CodeRabbit thread that somebody answered as done, because
+ *    CodeRabbit resolves its threads only when it reviews again.
+ * Its commit status is named "CodeRabbit" and its GitHub login is
+ * "coderabbitai" ("coderabbitai[bot]" over REST).
+ */
+export function isCodeRabbitCheck(name: string | null | undefined): boolean {
+  return typeof name === "string" && /coderabbit/i.test(name);
+}
+
+export function isCodeRabbitLogin(login: unknown): boolean {
+  return typeof login === "string" && /^coderabbit(ai)?(\[bot\])?$/i.test(login.trim());
+}
+
+/** What CodeRabbit has left on a pull request, read off the review GraphQL. */
+export interface CodeRabbitFacts {
+  /** It left something on the pull request: a review or a comment. It posts
+   *  a summary comment on every pull request it sees, a skipped one included. */
+  present: boolean;
+  /** It reviewed a commit of this pull request other than the head: its one
+   *  review is behind us and the head is a later commit. */
+  reviewedEarlier: boolean;
+}
+
+/** A reviewer whose latest verdict on the pull request is "changes requested". */
+export interface ChangesRequest {
+  author: string | null;
+  /** The commit the verdict was given on, or null when GitHub did not say. */
+  commit: string | null;
+}
+
+/**
+ * CodeRabbit's footprint and the outstanding change requests, out of the same
+ * GraphQL answer as the threads (see REVIEW_QUERY in ./coding-review).
+ *
+ * `headSha` is what "earlier" is measured against. Without it no review can be
+ * shown to be on an earlier commit, so `reviewedEarlier` stays false: the
+ * cautious answer, because "earlier" is what lets the loop stop waiting.
+ */
+export function parseReviewFacts(raw: unknown, headSha: string | null): {
+  codeRabbit: CodeRabbitFacts;
+  changesRequestedBy: ChangesRequest[];
+} {
+  const pr = at(raw, ["data", "repository", "pullRequest"]);
+  const reviews = at(pr, ["reviews", "nodes"]);
+  const comments = at(pr, ["comments", "nodes"]);
+  let present = false;
+  let reviewedEarlier = false;
+  // The latest verdict per reviewer, in the order GitHub lists the reviews
+  // (oldest first). A plain comment does not change a verdict; a dismissal
+  // withdraws it.
+  const latest = new Map<string, ChangesRequest & { state: string }>();
+  if (Array.isArray(reviews)) {
+    for (const node of reviews) {
+      const author = str(at(node, ["author", "login"])) || null;
+      const commit = str(at(node, ["commit", "oid"])) || null;
+      const state = str(at(node, ["state"])).toUpperCase();
+      if (isCodeRabbitLogin(author)) {
+        present = true;
+        if (headSha && commit && commit !== headSha) reviewedEarlier = true;
+      }
+      if (state === "APPROVED" || state === "CHANGES_REQUESTED" || state === "DISMISSED") {
+        latest.set(author ?? "", { author, commit, state });
+      }
+    }
+  }
+  if (Array.isArray(comments) && comments.some((node) => isCodeRabbitLogin(at(node, ["author", "login"])))) {
+    present = true;
+  }
+  const changesRequestedBy = [...latest.values()]
+    .filter((v) => v.state === "CHANGES_REQUESTED")
+    .map(({ author, commit }) => ({ author, commit }));
+  return { codeRabbit: { present, reviewedEarlier }, changesRequestedBy };
+}
+
+/** CodeRabbit's commit status on the head, out of the parsed rollup. */
+export function codeRabbitHeadStatus(checks: readonly ReviewCheck[]): ReviewCheckState | "missing" {
+  return checks.find((c) => isCodeRabbitCheck(c.name))?.state ?? "missing";
+}
+
+/**
+ * Where CodeRabbit stands on this pull request, for the loop.
+ *
+ *  - `absent` — it is not on this pull request at all (most repositories).
+ *  - `done`   — its status on the head is a success: reviewed, skipped or
+ *               rate-limited. All three are a "yes" to GitHub, so none of them
+ *               holds anything up. A failure is not handled here; it is a
+ *               failing check like any other (see reviewProblems).
+ *  - `waiting` — its one review is due or running: the first status is still
+ *               pending, or it has not posted on a fresh head yet.
+ *  - `stale`  — the head is a later commit it will not review by itself. It
+ *               holds up nothing the LOOP does, but GitHub will not merge
+ *               without the status when CodeRabbit is a required check, so
+ *               the merge asks for it once (`@coderabbitai review`).
+ *
+ * The grace is REVIEW_NO_CHECKS_GRACE_MS from the round's start, which is reset
+ * when the box readies the pull request or asks for a review, so "just asked"
+ * and "never coming" stay apart.
+ */
+export type CodeRabbitGate = "absent" | "done" | "waiting" | "stale";
+
+export function codeRabbitGate(snapshot: ReviewSnapshot, waitedMs: number): CodeRabbitGate {
+  const head = codeRabbitHeadStatus(snapshot.checks);
+  if (head === "pass" || head === "fail") return "done";
+  const facts = snapshot.codeRabbit ?? null;
+  if (head === "pending") {
+    // Its first review, running: this is the one worth waiting for. On a
+    // later head a pending status is a review nobody asked for, or one that
+    // will never finish, so it only gets the grace.
+    if (!facts?.reviewedEarlier) return "waiting";
+    return waitedMs < REVIEW_NO_CHECKS_GRACE_MS ? "waiting" : "stale";
+  }
+  // No status on the head, and nothing of CodeRabbit's on the pull request (or
+  // the GraphQL could not be read): nothing here says it exists, so nothing
+  // waits for it.
+  if (!facts?.present) return "absent";
+  return waitedMs < REVIEW_NO_CHECKS_GRACE_MS ? "waiting" : "stale";
+}
+
 /** One unresolved review thread, as the run is told about it. */
 export interface ReviewThread {
   path: string | null;
@@ -239,6 +379,14 @@ export interface ReviewThread {
  * Only the FIRST comment of each thread is quoted. The rest of a thread is the
  * conversation about the finding; the finding is the first message, and the
  * whole thread would blow the feedback budget on a busy pull request.
+ *
+ * A CodeRabbit thread that somebody ANSWERED is dropped as well. CodeRabbit
+ * resolves its own threads when it reviews again, and it reviews a pull request
+ * once (see isCodeRabbitCheck), so its threads stay unresolved after the fix
+ * has been pushed and replied to. Counted as open, they would send every round
+ * back to findings already answered and end the loop at `needs_owner`. The
+ * replies come from the `replies` alias in the query; an answer without it
+ * reads as unanswered, which costs a round and never skips a finding.
  */
 export function parseReviewThreads(raw: unknown): ReviewThread[] {
   const nodes = at(raw, ["data", "repository", "pullRequest", "reviewThreads", "nodes"]);
@@ -256,6 +404,14 @@ export function parseReviewThreads(raw: unknown): ReviewThread[] {
     const body = str(first?.body).trim();
     // A thread with no readable comment is a thread with no finding in it.
     if (!body) continue;
+    if (isCodeRabbitLogin(at(first, ["author", "login"]))) {
+      const replies = at(thread, ["replies", "nodes"]);
+      const answered = Array.isArray(replies) && replies.slice(1).some((reply) => {
+        const login = at(reply, ["author", "login"]);
+        return typeof login === "string" && login !== "" && !isCodeRabbitLogin(login);
+      });
+      if (answered) continue;
+    }
     threads.push({
       path: str(thread.path) || null,
       line: typeof thread.line === "number" ? thread.line : null,
@@ -282,12 +438,27 @@ export interface ReviewSnapshot {
    *  AT ALL, which is not the same as a check that is pending. */
   noChecks: boolean;
   threads: ReviewThread[];
+  /** True while the pull request is a draft. Optional, like the three below,
+   *  so a snapshot from before the fields reads as it always did. */
+  isDraft?: boolean;
+  /** The head commit, or null when GitHub did not say. */
+  headSha?: string | null;
+  /** What CodeRabbit has left on the pull request, or null when the review
+   *  GraphQL could not be read. */
+  codeRabbit?: CodeRabbitFacts | null;
+  /** The reviewers whose latest verdict requests changes, or null when unread. */
+  changesRequestedBy?: ChangesRequest[] | null;
 }
 
 /** What the loop should do with what it just saw. */
 export type ReviewDecision =
   | { action: "wait" }
   | { action: "feedback"; problems: ReviewProblems }
+  /** Mark the draft ready for review (`gh pr ready`), then keep watching. */
+  | { action: "ready" }
+  /** Post `@coderabbitai review` so the head gets the status a merge needs,
+   *  then keep watching. */
+  | { action: "ask_coderabbit" }
   | { action: "merge" }
   | { action: "done"; state: Exclude<ReviewLoopState, "polling" | "working">; detail: string | null };
 
@@ -312,8 +483,27 @@ export function reviewProblems(snapshot: ReviewSnapshot): ReviewProblems {
     failedChecks: snapshot.checks.filter((c) => c.state === "fail"),
     threads: snapshot.threads,
     conflicting: snapshot.mergeable === "CONFLICTING",
-    changesRequested: snapshot.reviewDecision === "CHANGES_REQUESTED",
+    changesRequested: snapshot.reviewDecision === "CHANGES_REQUESTED" && !codeRabbitRequestAnswered(snapshot),
   };
+}
+
+/**
+ * True when the ONLY "changes requested" on the pull request is CodeRabbit's,
+ * given on a commit before the head.
+ *
+ * CodeRabbit requests changes when its review finds something, and lifts the
+ * request only when it reviews again, which it will not do (see
+ * isCodeRabbitCheck). Once a later commit has been pushed, the round that
+ * answered the request is over, and GitHub's CHANGES_REQUESTED would send the
+ * loop back to the same review until the rounds ran out. Its findings are
+ * still tracked, as its threads. Anybody else's request counts, and so does a
+ * list that could not be read.
+ */
+function codeRabbitRequestAnswered(snapshot: ReviewSnapshot): boolean {
+  const requests = snapshot.changesRequestedBy;
+  const head = snapshot.headSha;
+  if (!Array.isArray(requests) || requests.length === 0 || !head) return false;
+  return requests.every((r) => isCodeRabbitLogin(r.author) && r.commit !== null && r.commit !== head);
 }
 
 /**
@@ -378,6 +568,16 @@ export function isQuotableRef(ref: string | null | undefined): ref is string {
  *  - An empty rollup after the grace is NOT a pass. `autoMerge` over a pull
  *    request where no check ever ran is a vacuous green, and the loop says so
  *    rather than merging on it.
+ *  - CodeRabbit is held apart from the other checks (see isCodeRabbitCheck).
+ *    Its first review is waited on like a running check, so its findings and
+ *    the suite's go back in one round. After that it never holds the loop up.
+ *  - A draft is readied only once nothing is pending and nothing is wrong, so
+ *    the one CodeRabbit review lands on code that passes. It comes before the
+ *    endings that leave the pull request with the owner, so none of them hands
+ *    back a draft over a green suite.
+ *  - A head CodeRabbit never gave a status is asked about only at the merge.
+ *    It blocks nothing else, but a required check with no status blocks
+ *    GitHub's merge for good.
  */
 export function decideReviewRound(input: {
   snapshot: ReviewSnapshot;
@@ -397,8 +597,14 @@ export function decideReviewRound(input: {
    */
   reviewOk: boolean;
   base: string | null;
+  /** How long ago the box marked the pull request ready (`ReviewLoop.readyAt`),
+   *  or null when it never did. */
+  sinceReadyMs?: number | null;
+  /** The head the box already asked CodeRabbit about (`ReviewLoop.codeRabbitAskedFor`). */
+  codeRabbitAskedFor?: string | null;
 }): ReviewDecision {
   const { snapshot, round, maxRounds, waitedMs, autoMerge, reviewOk, base } = input;
+  const sinceReadyMs = typeof input.sinceReadyMs === "number" ? input.sinceReadyMs : null;
 
   if (snapshot.state === "MERGED") {
     return { action: "done", state: "merged", detail: "The pull request is merged." };
@@ -408,16 +614,25 @@ export function decideReviewRound(input: {
   }
 
   const problems = reviewProblems(snapshot);
-  const counts = foldReviewChecks(snapshot.checks);
+  // CodeRabbit's status is not counted with the suite. Its own gate decides
+  // when to wait for it, and a failing status still counts as a problem.
+  const counts = foldReviewChecks(snapshot.checks.filter((c) => !isCodeRabbitCheck(c.name)));
+  const codeRabbit = codeRabbitGate(snapshot, waitedMs);
+  // A pull request readied moments ago still carries the status of its draft
+  // ("Review skipped: draft"), which reads as done. The grace covers the gap
+  // until CodeRabbit starts the review.
+  const justReadied = sinceReadyMs !== null && sinceReadyMs < REVIEW_NO_CHECKS_GRACE_MS && codeRabbit !== "absent";
 
   // Conflicts do not resolve themselves, so they are answered even while the
   // suite is still running — the rebase is what the run has to do either way.
-  if (counts.pending > 0 && !problems.conflicting) {
+  if ((counts.pending > 0 || codeRabbit === "waiting" || justReadied) && !problems.conflicting) {
     if (waitedMs >= REVIEW_MAX_WAIT_MS) {
       return {
         action: "done",
         state: "needs_owner",
-        detail: `Gave up waiting for GitHub: ${counts.pending} of ${counts.total} checks were still running after an hour. The pull request is open.`,
+        detail: counts.pending > 0
+          ? `Gave up waiting for GitHub: ${counts.pending} of ${counts.total} checks were still running after an hour. The pull request is open.`
+          : "Gave up waiting for CodeRabbit: its review had not finished after an hour. The pull request is open.",
       };
     }
     return { action: "wait" };
@@ -434,6 +649,25 @@ export function decideReviewRound(input: {
       };
     }
     return { action: "feedback", problems };
+  }
+
+  // Green, and still a draft. The box opens its pull requests as drafts, so
+  // this is the moment to ready it: that is what starts CodeRabbit's one
+  // review. A pull request the box already readied once has been turned back
+  // into a draft by somebody, and that decision is theirs to keep.
+  if (snapshot.isDraft) {
+    if (sinceReadyMs !== null) {
+      if (sinceReadyMs < REVIEW_NO_CHECKS_GRACE_MS) return { action: "wait" };
+      return {
+        action: "done",
+        state: "needs_owner",
+        detail: "The pull request was turned back into a draft after ClawBox marked it ready, so it is left for you.",
+      };
+    }
+    // No check at all yet: the grace separates "not yet" from "this
+    // repository has no CI", as it does for the merge below.
+    if ((snapshot.noChecks || counts.total === 0) && waitedMs < REVIEW_NO_CHECKS_GRACE_MS) return { action: "wait" };
+    return { action: "ready" };
   }
 
   // Nothing GitHub can see is wrong. The review pass is the thing it cannot
@@ -460,7 +694,9 @@ export function decideReviewRound(input: {
       detail: `Everything is green, but this pull request targets ${base} and ClawBox never merges into that branch. Merge it yourself.`,
     };
   }
-  if (snapshot.noChecks || counts.total === 0) {
+  // Every check, CodeRabbit's included, as it always was: a repository whose
+  // one check is CodeRabbit has something that went green.
+  if (snapshot.noChecks || snapshot.checks.length === 0) {
     if (waitedMs < REVIEW_NO_CHECKS_GRACE_MS) return { action: "wait" };
     return {
       action: "done",
@@ -477,6 +713,23 @@ export function decideReviewRound(input: {
   if (snapshot.mergeable !== "MERGEABLE") {
     if (waitedMs >= REVIEW_MAX_WAIT_MS) {
       return { action: "done", state: "needs_owner", detail: "GitHub never said whether this pull request can be merged. It is open." };
+    }
+    return { action: "wait" };
+  }
+  // A later head CodeRabbit has no finished status on. Nothing above waited
+  // for it, but a required check with no status keeps GitHub's merge shut, so
+  // CodeRabbit is asked once for this head. The ask is an incremental review
+  // of what changed since its review, not a second full one.
+  if (codeRabbit === "stale") {
+    const head = snapshot.headSha ?? "unknown";
+    const pending = codeRabbitHeadStatus(snapshot.checks) === "pending";
+    if (!pending && input.codeRabbitAskedFor !== head) return { action: "ask_coderabbit" };
+    if (waitedMs >= REVIEW_MAX_WAIT_MS) {
+      return {
+        action: "done",
+        state: "needs_owner",
+        detail: "Everything else is green, but CodeRabbit has not finished a status on the latest commit, and GitHub will not merge without it. Merge it yourself once it has.",
+      };
     }
     return { action: "wait" };
   }
@@ -689,6 +942,15 @@ export function buildReviewFeedback(input: {
       + " or `gh pr comment` when there is no thread to reply on). If a comment is wrong, reply with the"
       + " reason instead of changing the code. Do not leave a comment unanswered.",
     );
+    // A reply on its thread is how a CodeRabbit finding counts as answered
+    // (parseReviewThreads). A new review is not: it reviews each pull request
+    // once, and a request for another spends the owner's review allowance.
+    if (threads.some((thread) => isCodeRabbitLogin(thread.author))) {
+      lines.push(
+        "CodeRabbit will not review this pull request again: your reply on each of its threads is what closes it."
+        + " Do not ask it for another review (`@coderabbitai review`); the device does that itself if a merge needs it.",
+      );
+    }
   }
 
   lines.push(
@@ -754,6 +1016,8 @@ export function parseReviewLoop(raw: unknown): ReviewLoop | null {
     fixRunId: str(value.fixRunId) || null,
     fixMode: isReviewFixMode(value.fixMode) ? value.fixMode : null,
     fixDetail: typeof value.fixDetail === "string" ? value.fixDetail.slice(0, 600) : null,
+    readyAt: typeof value.readyAt === "number" && Number.isFinite(value.readyAt) ? value.readyAt : null,
+    codeRabbitAskedFor: str(value.codeRabbitAskedFor).slice(0, 64) || null,
   };
 }
 
