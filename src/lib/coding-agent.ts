@@ -9609,13 +9609,19 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // settles, and until it was tracked nothing — not even the module's own
   // reset — could wait for it. See `trackSettleWork`.
   const settled = run.status;
+  // Read now, not after the commit below: the owner's Kill clears it while the
+  // group it named may still be on its way out.
+  const leftRunning = run.leftover;
   trackSettleWork((async () => {
     await recordRunWork(run);
     // Before "finished", so the owner reads why something left the evidence
     // folder next to the run that put it there — and before any waiter or
-    // update can find it: see pruneArtifacts.
-    const pruned = await pruneArtifacts(run.id);
-    if (pruned.length > 0) pushProgress(run, RUNNER_STEP.evidencePruned(prunedPaths(pruned)));
+    // update can find it: see pruneArtifacts. Not while something the run
+    // started is still running: it can still change the folder under the walk.
+    if (!leftRunning) {
+      const pruned = await pruneArtifacts(run.id);
+      if (pruned.length > 0) pushProgress(run, RUNNER_STEP.evidencePruned(prunedPaths(pruned)));
+    }
     pushProgress(run, settled === "paused" ? RUNNER_STEP.paused : RUNNER_STEP.finished(settled));
     persist(true);
     wakeWaiters(run.id);
