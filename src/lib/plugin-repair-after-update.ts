@@ -73,7 +73,11 @@ export function pluginRepairsDueAfterCoreUpdate(
 export interface AfterCoreUpdateRetryHooks {
   /** The installed core's release. Null skips the retry: it cannot be bounded per core without one. */
   release: () => Promise<string | null>;
-  /** Run with the gateway stopped and masked — the updater's `withGatewayQuiesced`. */
+  /**
+   * Run with the gateway stopped and masked — the updater's `withGatewayQuiesced`.
+   * It lifts the mask afterwards but does NOT start the gateway again, so every
+   * quiesce here is followed by `restartAndVerify`.
+   */
   quiesce: <T>(operation: () => Promise<T>) => Promise<T>;
   /** Restart the gateway and resolve only once it is READY; throw when it is not. */
   restartAndVerify: () => Promise<void>;
@@ -202,7 +206,13 @@ export async function retryPluginRepairsAfterCoreUpdate(
         + `so it stays switched off.${verdict.cause}`,
     );
   }
-  if (repairedOnDisk.length === 0) return { release, repaired: [], failed };
+  if (repairedOnDisk.length === 0) {
+    // Nothing to load — but the quiesce STOPPED the gateway, and lifting the
+    // mask does not start it. Bring it back exactly as the update found it: up,
+    // without the plugins that are still switched off.
+    await hooks.restartAndVerify();
+    return { release, repaired: [], failed };
+  }
 
   // THE RESTART IS WHAT LOADS THEM, and the only proof worth a cleared badge is
   // a gateway that came back READY with them switched on. A command that ran is

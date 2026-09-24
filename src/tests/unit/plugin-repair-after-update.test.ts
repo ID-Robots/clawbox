@@ -45,6 +45,8 @@ interface Box {
   execCalls: string[][];
   configWrites: string[][];
   events: string[];
+  /** Whether the gateway is running — the updater's quiesce STOPS it, and only a restart starts it. */
+  gatewayUp: boolean;
 }
 let box: Box;
 
@@ -156,8 +158,11 @@ function hooks(overrides: {
   const release = vi.fn(async () => (overrides.release === undefined ? RELEASE : overrides.release));
   return {
     release,
+    // As `withGatewayQuiesced` does it: masked and STOPPED, and the mask lifted
+    // afterwards WITHOUT starting it again.
     quiesce: async <T>(operation: () => Promise<T>): Promise<T> => {
       box.events.push("quiesce");
+      box.gatewayUp = false;
       try {
         return await operation();
       } finally {
@@ -169,6 +174,7 @@ function hooks(overrides: {
       box.events.push(`restart:${restarts}`);
       await overrides.onRestart?.(restarts);
       if (overrides.notReadyOn?.includes(restarts)) throw new Error("OpenClaw gateway still offline");
+      box.gatewayUp = true;
     }),
     log: vi.fn(),
   };
@@ -187,6 +193,7 @@ beforeEach(() => {
     execCalls: [],
     configWrites: [],
     events: [],
+    gatewayUp: true,
   };
 });
 
@@ -224,6 +231,7 @@ describe("after a core update — the rows an older core left", () => {
     expect(seenDuringRepair.deepseek.retriedCore).toBe(RELEASE);
     // Installed with the gateway stopped, THEN restarted and proved.
     expect(box.events).toEqual(["quiesce", "unquiesce", "restart:1"]);
+    expect(box.gatewayUp).toBe(true);
   });
 
   it("writes nothing to openclaw.json but the two entries' enabled bits — never the credentials or the provider choice", async () => {
@@ -301,8 +309,27 @@ describe("after a core update — the rows an older core left", () => {
     expect(result.failed).toEqual(["deepseek"]);
     expect(box.entries.deepseek).toBe(false);
     expect(marker().deepseek.reason).toContain("was reinstalled but the core does not report it loaded");
-    // Nothing to load, so no restart for it.
-    expect(h.restartAndVerify).not.toHaveBeenCalled();
+    // Nothing to load — but the quiesce stopped the gateway, so it is brought
+    // back up, without the plugin.
+    expect(h.restartAndVerify).toHaveBeenCalledTimes(1);
+    expect(box.gatewayUp).toBe(true);
+  });
+
+  it("never leaves the gateway stopped when every retry failed", async () => {
+    // The updater's quiesce stops the gateway and lifts the mask without
+    // starting it; an early return here ended the update with no gateway.
+    writeMarker({ codex: CODEX_ROW, deepseek: DEEPSEEK_ROW });
+    box.refuseInstall.set("@openclaw/codex@2026.9.4", "npm error code ETIMEDOUT");
+    box.refuseInstall.set("deepseek", "clawhub registry answered 503");
+    const { retryPluginRepairsAfterCoreUpdate } = await load();
+    const h = hooks();
+
+    const result = await retryPluginRepairsAfterCoreUpdate(h);
+
+    expect(result.failed).toEqual(["codex", "deepseek"]);
+    expect(box.events).toEqual(["quiesce", "unquiesce", "restart:1"]);
+    expect(box.gatewayUp).toBe(true);
+    expect(box.entries).toEqual({ codex: false, deepseek: false });
   });
 
   it("puts the plugins back off when the gateway does not come back with them, and says so", async () => {
