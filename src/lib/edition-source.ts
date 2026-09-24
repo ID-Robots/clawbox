@@ -80,19 +80,39 @@ export interface EditionSource {
  */
 export function readEditionSource(): EditionSource {
   try {
-    const stat = fs.statSync(/* turbopackIgnore: true */ EDITION_FILE);
-    if (cache && cache.mtimeMs === stat.mtimeMs) return { edition: cache.edition, defaulted: false };
-    const parsed = normalizeEdition(parseEditionEnvFile(fs.readFileSync(/* turbopackIgnore: true */ EDITION_FILE, "utf-8")));
-    if (parsed) {
-      cache = { mtimeMs: stat.mtimeMs, edition: parsed };
-      return { edition: parsed, defaulted: false };
-    }
+    const parsed = readEditionLock();
+    if (parsed) return { edition: parsed, defaulted: false };
   } catch {
-    // No /etc/clawbox/edition.env (dev box, CI, pre-3.x install) — fall back to
-    // the environment below rather than failing closed on an unrelated SKU.
+    // No /etc/clawbox/edition.env (dev box, CI, pre-3.x install), or one that
+    // cannot be opened — fall back to the environment below rather than
+    // failing closed on an unrelated SKU.
   }
   const fromEnv = normalizeEdition(process.env.CLAWBOX_EDITION);
   return fromEnv ? { edition: fromEnv, defaulted: false } : { edition: "openclaw", defaulted: true };
+}
+
+/**
+ * The edition the lock file names, read through the descriptor it was checked
+ * on: opened once with O_NOFOLLOW (a symlink fails to open at all, ELOOP), then
+ * `fstat` on that same open file supplies the mtime for the cache and the read
+ * comes from it too. Statting the path and then reading the path again would
+ * leave a gap in which the entry could be swapped for something else.
+ *
+ * Null when the lock is not a regular file or names no edition; throws when it
+ * cannot be opened or read, which the caller treats the same as missing.
+ */
+function readEditionLock(): EditionName | null {
+  const fd = fs.openSync(/* turbopackIgnore: true */ EDITION_FILE, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return null;
+    if (cache && cache.mtimeMs === stat.mtimeMs) return cache.edition;
+    const parsed = normalizeEdition(parseEditionEnvFile(fs.readFileSync(fd, "utf-8")));
+    if (parsed) cache = { mtimeMs: stat.mtimeMs, edition: parsed };
+    return parsed;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 export function readEdition(): EditionName {
