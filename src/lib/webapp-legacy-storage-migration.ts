@@ -77,21 +77,52 @@ function readAppCode(dir: string): { code: string } | { refused: string } {
   const parts: string[] = [];
   let total = 0;
   for (const name of ordered) {
-    const file = path.join(dir, name);
-    const st = fs.lstatSync(file);
-    if (st.isSymbolicLink() || !st.isFile()) {
+    const read = readCodeFile(path.join(dir, name), MAX_APP_CODE_BYTES - total);
+    if (read === "not-a-file") {
       if (name === "index.html") return { refused: "index.html is not a regular file" };
       continue;
     }
-    if (st.size > MAX_APP_FILE_BYTES) {
+    if (read === "too-large") {
       if (name === "index.html") return { refused: "index.html is too large" };
       continue;
     }
-    if (total + st.size > MAX_APP_CODE_BYTES) break;
-    total += st.size;
-    parts.push(fs.readFileSync(file, "utf-8"));
+    if (read === "over-budget") break;
+    total += read.size;
+    parts.push(read.text);
   }
   return { code: parts.join("\n") };
+}
+
+/**
+ * One code file, read through the descriptor it was checked on: opened with
+ * O_NOFOLLOW (a symlink fails to open at all), then `fstat` on that same open
+ * file decides whether it is a regular file of a size worth reading. Checking
+ * a path and then reading the path again would leave a gap in which the entry
+ * could be swapped for something else.
+ */
+function readCodeFile(
+  file: string,
+  budget: number,
+): { text: string; size: number } | "not-a-file" | "too-large" | "over-budget" {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  } catch (err) {
+    // ELOOP is O_NOFOLLOW's answer to a symlink; anything else (a folder
+    // opened for reading is fine on Linux and refused by fstat below) is the
+    // caller's EACCES/ENOENT to file against the app.
+    if ((err as NodeJS.ErrnoException).code === "ELOOP") return "not-a-file";
+    throw err;
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return "not-a-file";
+    if (st.size > MAX_APP_FILE_BYTES) return "too-large";
+    if (st.size > budget) return "over-budget";
+    return { text: fs.readFileSync(fd, "utf-8"), size: st.size };
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /**
