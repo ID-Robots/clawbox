@@ -96,6 +96,20 @@ import {
   STARTING_MAX_RETRIES,
   STARTING_RETRY_DELAY_MS,
 } from '@/lib/chat-gateway-starting'
+// Bringing the conversation back, with an end — the rules the mascot chat runs
+// too, so the two surfaces cannot drift on when a restore gives up (TASK-1158).
+import {
+  GATEWAY_REQUEST_TIMEOUT_MS,
+  HISTORY_ATTEMPT_TIMEOUT_MS,
+  HISTORY_RESTORE_DEADLINE_MS,
+  HISTORY_RETRY_DELAYS_MS,
+  RESTORE_HANDSHAKE_TIMEOUT_MS,
+  classifyRestoreFailure,
+  isRestoreAborted,
+  restoreWithRetry,
+  type RestoreFailureKind,
+} from '@/lib/chat-session-restore'
+import { useTr } from '@/lib/i18n-floor'
 
 
 interface ChatAppProps {
@@ -117,6 +131,7 @@ const COMPOSER_OPTIONS_ID = 'chatapp-composer-options'
 
 function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChange }: ChatAppProps) {
   const { t, locale } = useT()
+  const tr = useTr()
   // The phone layout (TASK-1157), the same view settings the mascot chat uses
   // (lib/chat-phone-layout.ts): fullscreen chat folds the header into a strip
   // and the composer down to the text box and Send, and the conversation's
@@ -205,6 +220,19 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   const [sending, setSending] = useState(false)
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   const [errorMsg, setErrorMsg] = useState('')
+  /**
+   * The conversation being brought back, or one that could not be (TASK-1158).
+   *
+   * `retrying` once a read has failed with a "not yet" and another is
+   * scheduled; `failed` when the restore ran out of attempts or time — the
+   * state that puts the reason and Try again on screen instead of an empty
+   * conversation that looks like a new one.
+   */
+  const [restoreState, setRestoreState] = useState<
+    | { phase: 'retrying' }
+    | { phase: 'failed'; kind: RestoreFailureKind }
+    | null
+  >(null)
   // Staged ON THE BOX, never held as base64 in the page — see the import note.
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([])
   const [attachmentError, setAttachmentError] = useState<(StagingFailure & { file: string }) | null>(null)
@@ -230,6 +258,14 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   // retried on this ladder; reset once a connect lands.
   const startingRetriesRef = useRef(0)
   const startingRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // One socket attempt's own clock, from `new WebSocket` to the hello
+  // (TASK-1158). A socket the gateway accepts and never answers fires no close
+  // event, so without it this page said "Connecting…" for as long as it stayed
+  // open.
+  const handshakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The conversation read a restore is running, so a newer socket or the page
+  // going away can call it off.
+  const restoreAbortRef = useRef<AbortController | null>(null)
   // Has this component gone? The starting-retry timer is the one deferred piece
   // of work here that OPENS A SOCKET rather than touching state, so a pending
   // one on an unmounted component is up to two minutes of sockets and ws-config
@@ -298,7 +334,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           pendingRef.current.delete(id)
           reject(new Error('Request timeout'))
         }
-      }, 120000)
+      }, GATEWAY_REQUEST_TIMEOUT_MS)
     })
   }, [])
 
@@ -425,11 +461,21 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     })
   }, [])
 
-  const loadHistory = useCallback(async () => {
+  const loadHistory = useCallback(async (opts?: { restore?: boolean }) => {
     const transport = adapterRef.current
     // A harness with no replay has nothing to read, and asking would be a call
     // the adapter's own contract answers `unsupported`.
     if (!transport.capabilities.canListHistory) return
+    // A RESTORE — the read on the hello, the replay, Try again — is bounded and
+    // retried only while the gateway says "not yet" or does not answer; the
+    // ack-only refetch stays the single best-effort read it always was
+    // (TASK-1158; the rules are in lib/chat-session-restore.ts).
+    let restoreCtl: AbortController | null = null
+    if (opts?.restore === true) {
+      restoreAbortRef.current?.abort()
+      restoreCtl = new AbortController()
+      restoreAbortRef.current = restoreCtl
+    }
     try {
       // Through the ADAPTER, which is what makes one call serve both editions:
       // the gateway's `chat.history` plus the durable spoken-reply backstop, or
@@ -440,7 +486,22 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
       // spoken reply into the bubble it belongs to — and it also folds
       // `/setup-api/chat/spoken-history`, which this page passed `null` for and
       // therefore lost on any gateway that omits the supplement.
-      const { messages: chatMsgs } = await transport.loadHistory()
+      //
+      // It used to be this single read with its failure sent to the console: a
+      // conversation the gateway was still rebuilding came back empty, looking
+      // exactly like a new one, with nothing to press.
+      const read = () => transport.loadHistory()
+      const { messages: chatMsgs } = restoreCtl
+        ? await restoreWithRetry(read, {
+          signal: restoreCtl.signal,
+          attemptTimeoutMs: HISTORY_ATTEMPT_TIMEOUT_MS,
+          deadlineMs: HISTORY_RESTORE_DEADLINE_MS,
+          delaysMs: HISTORY_RETRY_DELAYS_MS,
+          onRetry: () => setRestoreState({ phase: 'retrying' }),
+        })
+        : await read()
+      // Any read that answers ends a restore's wait or failure.
+      setRestoreState(null)
       // Server is canonical for everything it knows about, but a user turn
       // typed between connect-ack and history-arrival ("optimistic local")
       // hasn't reached the server yet — preserve it by appending any prev
@@ -452,7 +513,15 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         return inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
       })
     } catch (err) {
+      // Called off: a newer socket, Try again or the page going away owns the
+      // conversation now. Nothing to report.
+      if (restoreCtl && isRestoreAborted(err)) return
       console.error('Failed to load history:', err)
+      // Only a restore ends in the panel: an ordinary refetch failing leaves
+      // the transcript that is already painted, exactly as before.
+      if (restoreCtl) setRestoreState({ phase: 'failed', kind: classifyRestoreFailure(err) })
+    } finally {
+      if (restoreCtl && restoreAbortRef.current === restoreCtl) restoreAbortRef.current = null
     }
     // No dependencies on purpose: the socket's hello handler closes over this
     // callback for the life of the connection, so it has to keep one identity
@@ -475,6 +544,13 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // under the run. Safe for the Retry button, which only renders in the error
     // state, where there is no open socket. Same guard, same place, as ChatPopup.
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return
+    // A new attempt owns the handshake and the conversation from here: the old
+    // attempt's clock must not end this one, and a history read still retrying
+    // for the old socket would only report the old socket's failure.
+    if (handshakeTimerRef.current) clearTimeout(handshakeTimerRef.current)
+    handshakeTimerRef.current = null
+    restoreAbortRef.current?.abort()
+    setRestoreState(null)
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
@@ -508,15 +584,24 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     }
 
     let connectSent = false
+    // The connect frame's request id, so an attempt its handshake clock ends
+    // can take the frame out of the pending map before the socket goes.
+    let connectRequestId: string | null = null
     let ws: WebSocket
+    const clearHandshakeTimer = () => {
+      if (handshakeTimerRef.current) clearTimeout(handshakeTimerRef.current)
+      handshakeTimerRef.current = null
+    }
 
     const sendConnect = (challenge?: Record<string, unknown>) => {
       if (connectSent || !ws || ws.readyState !== WebSocket.OPEN) return
       connectSent = true
 
       const id = uuid()
+      connectRequestId = id
       pendingRef.current.set(id, {
         resolve: (hello: unknown) => {
+          clearHandshakeTimer()
           setStatus('connected')
           connectedOnceRef.current = true
           startingRetriesRef.current = 0
@@ -526,9 +611,12 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
           sessionKeyRef.current = mainSessionKey
           setBoundSessionKey(mainSessionKey)
-          loadHistory()
+          // The restore itself: bounded, and ended with the reason and Try
+          // again rather than an empty conversation when it cannot be done.
+          void loadHistory({ restore: true })
         },
         reject: (err: Error) => {
+          clearHandshakeTimer()
           // A gateway that is still booting refuses the connect frame with the
           // core's own retryable startup-sidecars shape — every restart does,
           // for ten to twenty seconds. Not a refusal to park on: stay in the
@@ -774,6 +862,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     }
 
     const onClose = () => {
+      // Its own clock only: a late close from a socket a newer connect has
+      // already replaced must not disarm the newer attempt's.
+      if (wsRef.current === ws) clearHandshakeTimer()
       wsRef.current = null
       // Same reason as the reconnect path: a request still waiting on a socket
       // that has gone away has to be told, or it never settles.
@@ -795,6 +886,23 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     ws.onmessage = onMessage
     ws.onclose = onClose
     ws.onerror = () => {}
+    // This attempt's own clock (TASK-1158). A gateway that is up answers the
+    // connect frame at once — with a hello, or with the retryable boot refusal
+    // handled above — so a handshake still open after this long is a socket
+    // nobody is answering. It ends the way a refused first attempt ends: the
+    // error panel and its Retry, instead of a spinner with no end.
+    handshakeTimerRef.current = setTimeout(() => {
+      handshakeTimerRef.current = null
+      if (unmountedRef.current || wsRef.current !== ws) return
+      if (connectRequestId) pendingRef.current.delete(connectRequestId)
+      ws.onclose = null
+      ws.onmessage = null
+      try { ws.close() } catch { /* already closing */ }
+      wsRef.current = null
+      failPending('Not connected')
+      setStatus('error')
+      setErrorMsg('Could not connect to gateway')
+    }, RESTORE_HANDSHAKE_TIMEOUT_MS)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handed to the transport so `GatewayLink.open()` reaches the CURRENT connect.
@@ -1145,7 +1253,8 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     if (caps.hasLiveConnection || !caps.canListHistory) return
     if (replayedRef.current) return
     replayedRef.current = true
-    void loadHistory()
+    // The same bounded restore the socket runs on its hello.
+    void loadHistory({ restore: true })
   }, [harnessLoaded, caps.hasLiveConnection, caps.canListHistory, loadHistory])
 
   // Tear down on unmount, and only on unmount: `connect` is memoised with no
@@ -1162,6 +1271,10 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
       // turn it was running. The direct close stays beside it because the socket
       // is this component's to own whatever the adapter turns out to be.
       unmountedRef.current = true
+      // Before the disconnect below rejects the read it is waiting on.
+      restoreAbortRef.current?.abort()
+      if (handshakeTimerRef.current) clearTimeout(handshakeTimerRef.current)
+      handshakeTimerRef.current = null
       adapterRef.current.disconnect()
       wsRef.current?.close()
       wsRef.current = null
@@ -1411,7 +1524,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           </div>
         )}
 
-        {status === 'connected' && messages.length === 0 && !streaming && (
+        {status === 'connected' && messages.length === 0 && !streaming && !restoreState && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: '0 16px' }}>
             <img src="/clawbox-crab.png" alt="" style={{ width: 25, height: 25, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
@@ -1596,6 +1709,57 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
               ))}
             </div>
           </div>
+        )}
+
+        {/* The conversation being brought back, or one that could not be
+            (TASK-1158). While a "not yet" is being waited out, one quiet line;
+            once the restore has run out of attempts or time, the reason and Try
+            again — which reads the conversation again, or reconnects first when
+            the socket has gone. Nothing is reset or deleted. */}
+        {restoreState && status === 'connected' && (
+          restoreState.phase === 'retrying' ? (
+            <div
+              data-testid="chatapp-restore-status"
+              role="status"
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 2px', fontSize: 12, color: 'rgba(255,255,255,0.5)' }}
+            >
+              <span aria-hidden="true" style={{ width: 10, height: 10, border: '2px solid rgba(249,115,22,0.3)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'chatapp-spin 0.8s linear infinite', flexShrink: 0 }} />
+              <span>{tr('chat.restore.restoring', 'Restoring this conversation…')}</span>
+            </div>
+          ) : (
+            <div
+              data-testid="chatapp-restore-failed"
+              role="alert"
+              style={{ margin: '8px 0', padding: '12px 14px', borderRadius: 10, background: 'rgba(249,115,22,0.08)', border: '1px solid rgba(249,115,22,0.25)', display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, color: 'rgba(255,255,255,0.85)' }}
+            >
+              <span>
+                {restoreState.kind === 'busy'
+                  ? tr('chat.restore.busy', 'This conversation is still busy on the box — it did not answer in time.')
+                  : restoreState.kind === 'timeout'
+                    ? tr('chat.restore.timeout', 'The box did not answer while this conversation was being restored.')
+                    : tr('chat.restore.failed', 'This conversation could not be restored.')}
+              </span>
+              <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>
+                {tr('chat.restore.hintRetry', 'Try again in a moment. Nothing in this conversation is deleted.')}
+              </span>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    // A socket that went away under a connected page is not
+                    // reopened by anything else here; the hello restores.
+                    if (caps.hasLiveConnection && wsRef.current?.readyState !== WebSocket.OPEN) {
+                      void connect()
+                      return
+                    }
+                    setRestoreState({ phase: 'retrying' })
+                    void loadHistory({ restore: true })
+                  }}
+                  style={{ background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)', color: '#f97316', borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 500 }}
+                >{tr('chat.restore.retry', 'Try again')}</button>
+              </div>
+            </div>
+          )
         )}
 
         <div ref={messagesEndRef} />
