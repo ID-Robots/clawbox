@@ -92,8 +92,10 @@ unchanged:
 
 ${WEBAPP_KV_CLIENT_SNIPPET}
 
-An app written earlier against fetch('/setup-api/kv') no longer reaches its
-saved data; move it to window.clawboxKv with webapp_update or a rebuild.
+An app built before v4.0 against fetch('/setup-api/kv') or localStorage keeps
+its data: the desktop answers those calls from the app's own namespace. New
+code should still use window.clawboxKv; when you move such an app to it, its
+saved keys are in window.clawboxKv.list() under their full stored names.
 
 Style single-file apps dark: background #1a1a2e, text #e0e0e0, accent #f97316.
 No CDN links — the device may be offline.
