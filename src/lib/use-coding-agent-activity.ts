@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isCodingRunStatus, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { onCodingRunStarted } from "@/lib/ui-events";
-import { isPrPending, type PrState } from "@/lib/coding-pr-state";
+import { isPrPending, isPrPhase, type PrPhase, type PrState } from "@/lib/coding-pr-state";
 
 /**
  * The coding runs this conversation has seen, and what became of them.
@@ -30,9 +30,9 @@ import { isPrPending, type PrState } from "@/lib/coding-pr-state";
  * Stays, that is, until the OWNER puts it away: the card carries a × and the
  * chat keeps the dismissed run ids (ChatPopup's `dismissedCodingRuns`), with
  * one small 🤖 chip at the end of the transcript that brings every dismissed
- * card back in its place. A card whose run the chat SAW finish cleanly also
- * goes on its own after five seconds (src/lib/use-coding-run-auto-hide.ts),
- * behind the same chip. This hook knows nothing of either — a hidden run is
+ * card back in its place. A card whose run the chat SAW finish cleanly — and
+ * whose pull request, if it has one, merged — also goes on its own after five
+ * seconds (src/lib/use-coding-run-auto-hide.ts), behind the same chip. This hook knows nothing of either — a hidden run is
  * still a run it holds and polls; only the card is not drawn.
  *
  * WHAT IT ADOPTS, AND WHAT IT LEAVES ALONE
@@ -116,6 +116,15 @@ export interface CodingAgentActivity {
   transcriptPath: string | null;
   sessionId: string | null;
   directory: string | null;
+  /**
+   * Where the run's pull request stands, or null when it has none (auto-PR
+   * off, a folder with no repository, a record from before the feature). The
+   * card does not draw it; the chat reads it to tell a run that is done with
+   * from one still waiting on GitHub or on the owner — see
+   * use-coding-run-auto-hide.ts. Optional so a hand-built activity need not
+   * carry it.
+   */
+  prPhase?: PrPhase | null;
 }
 
 interface RunPayload {
@@ -219,7 +228,22 @@ function toActivity(r: RunPayload): CodingAgentActivity {
     transcriptPath: typeof r.transcriptPath === "string" && r.transcriptPath ? r.transcriptPath : null,
     sessionId: typeof r.sessionId === "string" && r.sessionId ? r.sessionId : null,
     directory: typeof r.directory === "string" && r.directory ? r.directory : null,
+    prPhase: toPrPhase(r.pr),
   };
+}
+
+/**
+ * Where the run's pull request stands — null when there is none. A record
+ * that went `blocked` without ever getting a number is a pull request the box
+ * never opened: the run committed nothing (maybeOpenPullRequest in
+ * coding-agent.ts), so there is nothing on GitHub and nothing for the owner
+ * to decide. Every other `blocked` is written by the watcher of a pull
+ * request that exists.
+ */
+function toPrPhase(pr: PrState | null | undefined): PrPhase | null {
+  if (!pr || !isPrPhase(pr.phase)) return null;
+  if (pr.phase === "blocked" && pr.number == null) return null;
+  return pr.phase;
 }
 
 /** True when the tool the chat just saw is one of the coding-agent family. */

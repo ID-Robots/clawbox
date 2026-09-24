@@ -24,15 +24,16 @@ vi.mock("@/lib/i18n", async (importOriginal) => {
  * The clock itself is pinned in coding-run-auto-hide.test.tsx; this pins the
  * chat's side of it: the card is filtered out like a dismissed one (the rest
  * of the transcript untouched), the same 🤖 chip brings it back in its place,
- * and a run that is still going, failed, or was already finished when the
- * chat opened keeps its card.
+ * and a run that is still going, failed, still has its pull request with
+ * GitHub, or was already finished when the chat opened keeps its card. A
+ * card that leaves holding the keyboard focus hands it to that chip.
  *
  * The device's run record is stubbed at the hook with real React state, so a
  * test can move a run on the way a poll would.
  */
 const NOW = Date.now();
 type Status = "running" | "completed" | "failed";
-const run = (id: string, task: string, status: Status) => ({
+const run = (id: string, task: string, status: Status, prPhase: string | null = null) => ({
   id, projectId: "timer", task,
   startedAt: NOW - 30_000, completedAt: status === "running" ? null : NOW,
   status, source: "agent" as const,
@@ -40,6 +41,7 @@ const run = (id: string, task: string, status: Status) => ({
   tokensUsed: 0, thinkingTokens: 0, filesTouched: 0, numTurns: 0,
   progress: [], screenshots: [], todos: [],
   transcriptPath: null, sessionId: null, directory: null,
+  prPhase,
 });
 
 const feed = vi.hoisted(() => ({
@@ -198,5 +200,53 @@ describe("a coding-run card that finished cleanly leaves on its own", () => {
     expect(cards()).toHaveLength(0);
     // One chip for both, as for cards put away by hand.
     expect(screen.getAllByTestId("coding-agent-restore")).toHaveLength(1);
+  });
+
+  it("keeps a finished run's card while its pull request is with GitHub, and lets it go 5 s after the merge", async () => {
+    await open([run("run-alpha", "Alpha task", "running", "opening")]);
+
+    push([run("run-alpha", "Alpha task", "completed", "review")]);
+    expect(cards()[0]).toHaveAttribute("data-status", "completed");
+    expect(cards()[0]).not.toHaveClass("coding-agent-autohide");
+    advance(60_000);
+    expect(cards()).toHaveLength(1);
+
+    push([run("run-alpha", "Alpha task", "completed", "merged")]);
+    expect(cards()[0]).toHaveClass("coding-agent-autohide");
+    advance(4_999);
+    expect(cards()).toHaveLength(1);
+    advance(1);
+    expect(cards()).toHaveLength(0);
+  });
+
+  it("keeps a finished run's card whose pull request was left for the owner", async () => {
+    await open([run("run-alpha", "Alpha task", "running", "opening")]);
+    push([run("run-alpha", "Alpha task", "completed", "blocked")]);
+    advance(60_000);
+    expect(cards()).toHaveLength(1);
+    expect(screen.queryByTestId("coding-agent-restore")).not.toBeInTheDocument();
+  });
+
+  it("hands the keyboard focus to the 🤖 chip when the card holding it leaves", async () => {
+    await open([run("run-alpha", "Alpha task", "running")]);
+    push([run("run-alpha", "Alpha task", "completed")]);
+    const view = cards()[0].querySelector<HTMLButtonElement>('[data-testid="coding-agent-activity-view"]')!;
+    act(() => { view.focus(); });
+    expect(document.activeElement).toBe(view);
+
+    advance(5_000);
+    expect(cards()).toHaveLength(0);
+    expect(document.activeElement).toBe(screen.getByTestId("coding-agent-restore"));
+  });
+
+  it("leaves the focus where it is when the card that leaves does not hold it", async () => {
+    await open([run("run-alpha", "Alpha task", "running"), run("run-beta", "Beta task", "running")]);
+    push([run("run-alpha", "Alpha task", "completed"), run("run-beta", "Beta task", "running")]);
+    const betaView = cards()[1].querySelector<HTMLButtonElement>('[data-testid="coding-agent-activity-view"]')!;
+    act(() => { betaView.focus(); });
+
+    advance(5_000);
+    expect(cardTitles()).toEqual([expect.stringContaining("Beta task")]);
+    expect(document.activeElement).toBe(betaView);
   });
 });

@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useMemo, useRef, useCallback, memo } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, memo } from 'react'
 import { createPortal } from 'react-dom'
 
 // ── Gateway WebSocket chat widget ──
@@ -1089,13 +1089,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [])
   // A card whose run the chat saw finish CLEANLY also goes on its own, five
   // seconds after it turned green — nothing is left for anyone to do about
-  // it. Anything still going, or needing the owner, stays. The same 🤖 chip
-  // brings these back too. See src/lib/use-coding-run-auto-hide.ts.
+  // it. Anything still going, or needing the owner — a pull request still in
+  // review or left for the owner included — stays. The same 🤖 chip brings
+  // these back too. See src/lib/use-coding-run-auto-hide.ts.
+  //
+  // The owner did not ask for this one to go, so it must not take the
+  // keyboard with it: a card that holds the focus (Tab onto its View, say)
+  // hands it to the 🤖 chip, which appears in the same render and is the way
+  // back to the card. Checked as the clock runs out, while the card is still
+  // in the document; moved once the chip is.
+  const restoreChipRef = useRef<HTMLButtonElement>(null)
+  const focusRestoreChipRef = useRef(false)
   const {
     finishing: finishingCodingRuns,
     hidden: autoHiddenCodingRuns,
     restore: restoreAutoHiddenCodingRuns,
-  } = useCodingRunAutoHide(codingRuns)
+  } = useCodingRunAutoHide(codingRuns, (id) => {
+    const focused = document.activeElement?.closest('[data-testid="coding-agent-activity"]')
+    if (focused?.getAttribute('data-run-id') === id) focusRestoreChipRef.current = true
+  })
+  useLayoutEffect(() => {
+    if (!focusRestoreChipRef.current) return
+    focusRestoreChipRef.current = false
+    restoreChipRef.current?.focus()
+  }, [autoHiddenCodingRuns])
   const restoreCodingRuns = useCallback(() => {
     setDismissedCodingRuns(new Set())
     restoreAutoHiddenCodingRuns()
@@ -7148,6 +7165,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             style={{ position: 'sticky', bottom: 0, alignSelf: 'flex-end', display: 'flex', justifyContent: 'flex-end', zIndex: 1, pointerEvents: 'none' }}
           >
             <button
+              ref={restoreChipRef}
               type="button"
               data-testid="coding-agent-restore"
               onClick={restoreCodingRuns}

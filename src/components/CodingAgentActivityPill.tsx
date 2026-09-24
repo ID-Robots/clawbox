@@ -330,6 +330,7 @@ export default function CodingAgentActivityPill(
   return (
     <div
       data-testid="coding-agent-activity"
+      data-run-id={run.id}
       data-status={run.status}
       data-expanded={expanded ? "true" : "false"}
       className={autoHiding ? "coding-agent-autohide" : undefined}

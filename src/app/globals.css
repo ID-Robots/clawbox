@@ -2139,7 +2139,15 @@ input[type="range"].appearance-none::-moz-range-track {
    the transcript closes over it instead of jumping: delay + duration = 5s,
    the moment the chat removes it. The fold interpolates `height: auto`
    where the browser can (interpolate-size); elsewhere the height snaps at
-   the halfway frame, under a card that is already half faded. Reduced
+   the halfway frame, under a card that is already half faded. The card
+   sits in the transcript's flex column (ChatPopup's `chat-transcript`,
+   `gap: 10`), and a gap is not the card's to fold: a card folded to 0 still
+   left its 10px, and the transcript jumped by it at the removal. The
+   negative margin takes the gap in with the card, so the last frame is the
+   layout the removal leaves. The border goes by its style, not only its
+   width: a browser snaps a width between 0 and 1px UP to 1px, so the card's
+   1px borders held on to the last frame and left a 2px step at the removal;
+   the style flips to none halfway, inside the fold's own motion. Reduced
    motion: no fade, no fold — the card stays as it is and is simply removed
    at 5s (the blanket 0.01ms rule would otherwise end it 240ms early). */
 @keyframes coding-agent-autohide {
@@ -2151,6 +2159,9 @@ input[type="range"].appearance-none::-moz-range-track {
     padding-bottom: 0;
     border-top-width: 0;
     border-bottom-width: 0;
+    border-top-style: none;
+    border-bottom-style: none;
+    margin-bottom: -10px;
     overflow: hidden;
   }
 }
