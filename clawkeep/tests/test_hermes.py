@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
+import socket
 import sqlite3
 import tarfile
 from datetime import datetime, timezone
@@ -544,3 +546,77 @@ def test_a_hard_linked_file_travels_whole_under_every_name(box: Path, tmp_path: 
             assert tf.extractfile(members[name]).read() == b"same inode\n"
         # Everything after them still reads: the stream is aligned.
         assert any(m.name.endswith("/manifest.json") for m in tf.getmembers())
+
+
+def _entries(tmp_path: Path) -> Path:
+    """One of every member type tar can meet in a live tree."""
+    tree = tmp_path / "tree"
+    (tree / "dir").mkdir(parents=True)
+    (tree / "file").write_bytes(b"kept\n")
+    (tree / "link").symlink_to("file")
+    (tree / "dangling").symlink_to("gone")
+    os.mkfifo(tree / "pipe")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.bind(str(tree / "sock"))
+    finally:
+        sock.close()
+    return tree
+
+
+def test_a_member_is_classified_once_and_never_looked_up_by_name_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`TarFile.add` resolves the name a SECOND time. A directory or link that
+    has become a regular file in between is then copied by name, header first —
+    and a file the agent truncates mid-copy misaligns every later member, which
+    is the corruption `_add_file_snapshot` exists to prevent. Each entry is
+    classified once, and nothing but a header is written for the types that
+    carry no data."""
+    tree = _entries(tmp_path)
+
+    def refuse(self, *args, **kwargs):
+        raise AssertionError("_add_member looked the entry up a second time")
+
+    monkeypatch.setattr(tarfile.TarFile, "add", refuse)
+    archive = tmp_path / "members.tar"
+    with tarfile.open(archive, "w") as tf:
+        for name in ("dir", "link", "dangling", "pipe", "sock", "file"):
+            written = hermes._add_member(tf, tree / name, arcname=name, spool_dir=tmp_path)
+            assert written == (len(b"kept\n") if name == "file" else 0)
+
+    with tarfile.open(archive) as tf:
+        members = {m.name: m for m in tf.getmembers()}
+        # A socket has no tar member at all, exactly as `add` skips one.
+        assert set(members) == {"dir", "link", "dangling", "pipe", "file"}
+        assert members["dir"].isdir()
+        assert members["link"].issym() and members["link"].linkname == "file"
+        assert members["dangling"].issym() and members["dangling"].linkname == "gone"
+        assert members["pipe"].isfifo()
+        # The stream is aligned: the member written last still reads whole.
+        assert tf.extractfile(members["file"]).read() == b"kept\n"
+
+
+def test_a_fifo_in_the_place_of_a_file_is_refused_instead_of_blocking(
+    tmp_path: Path,
+) -> None:
+    """A FIFO that takes a regular file's place between the classification and
+    the open would park the whole backup on `open` until someone writes to it.
+    `O_NONBLOCK` returns at once and the `fstat` check refuses it."""
+    pipe = tmp_path / "pipe"
+    os.mkfifo(pipe)
+
+    def blew(signum, frame):
+        raise TimeoutError("the open blocked on the FIFO")
+
+    previous = signal.signal(signal.SIGALRM, blew)
+    signal.setitimer(signal.ITIMER_REAL, 5.0)
+    try:
+        with tarfile.open(tmp_path / "fifo.tar", "w") as tf, pytest.raises(OSError) as info:
+            hermes._add_file_snapshot(tf, pipe, arcname="pipe", spool_dir=tmp_path)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+    # TimeoutError is an OSError too, so say which one it was.
+    assert "no longer a regular file" in str(info.value)

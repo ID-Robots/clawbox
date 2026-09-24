@@ -217,3 +217,71 @@ def test_copies_of_one_database_never_prune_another_databases_copy(tmp_path: Pat
 
     assert first.preserved_copy.exists(), "agent a's only copy was pruned by another database"
     assert _rows(first.preserved_copy) == _rows(agent_a)
+
+
+def test_a_truncated_integrity_report_is_damage_and_never_a_rebuild(
+    roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`integrity_check(N)` stops after N problems. A report that REACHES the
+    limit is cut off, so whatever it did not reach is unknown — and a rebuild
+    is only ever started when EVERY line is index bookkeeping. A box whose
+    first 10,000 lines are all index-only must still be left exactly as found."""
+    state, recovery = roots
+    db = state / "logs.sqlite"
+    _logs_db(db)
+    before = _sha(db)
+    lines = [
+        f"row {n} missing from index idx_logs_ts"
+        for n in range(sqlite_recovery._CHECK_LIMIT)
+    ]
+    monkeypatch.setattr(sqlite_recovery, "_checks", lambda conn: (list(lines), []))
+
+    found = sqlite_recovery.diagnose(db)
+    assert found.status == sqlite_recovery.STATUS_DAMAGED
+    assert found.indexes == ()
+    assert found.problems == tuple(lines[:5])
+
+    outcome = sqlite_recovery.recover(db, allowed_roots=[str(state)], recovery_dir=recovery)
+    assert outcome.status == sqlite_recovery.RECOVERY_REFUSED
+    assert _sha(db) == before, "the database was written to"
+    assert not recovery.exists(), "nothing was copied for a repair that never starts"
+    # The sentence a person reads must say what was actually found. The usual
+    # one for damage asserts the DATA is broken; here nobody knows that.
+    assert "stopped after" in outcome.reason and "never reported" in outcome.reason
+    assert "the damage is in its data" not in outcome.reason
+
+
+def test_real_data_damage_still_says_the_data_is_damaged(
+    roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The truncated report's own sentence must not have replaced the one for
+    a database whose data really is broken."""
+    state, recovery = roots
+    db = state / "logs.sqlite"
+    _logs_db(db)
+    monkeypatch.setattr(
+        sqlite_recovery, "_checks", lambda conn: (["row 3 missing from page 4"], []),
+    )
+
+    outcome = sqlite_recovery.recover(db, allowed_roots=[str(state)], recovery_dir=recovery)
+    assert outcome.status == sqlite_recovery.RECOVERY_REFUSED
+    assert "the damage is in its data" in outcome.reason
+
+
+def test_index_only_damage_below_the_limit_is_still_rebuilt(
+    roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The limit is the only thing that changes the answer: one line short of
+    it, a report of nothing but index bookkeeping is still a rebuild."""
+    state, _ = roots
+    db = state / "logs.sqlite"
+    _logs_db(db)
+    lines = [
+        f"row {n} missing from index idx_logs_ts"
+        for n in range(sqlite_recovery._CHECK_LIMIT - 1)
+    ]
+    monkeypatch.setattr(sqlite_recovery, "_checks", lambda conn: (list(lines), []))
+
+    found = sqlite_recovery.diagnose(db)
+    assert found.status == sqlite_recovery.STATUS_INDEX_ONLY
+    assert found.indexes == ("idx_logs_ts",)
