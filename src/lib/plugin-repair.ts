@@ -356,6 +356,49 @@ export async function setPluginRepairInProgress(
   running: boolean,
   options: { retriedCore?: string } = {},
 ): Promise<boolean> {
+  return withStampLock(async () => {
+    const outcome = await stampRows(id, running, options, { onlyWhenIdle: false });
+    return outcome !== "absent";
+  });
+}
+
+/**
+ * Check that no repair of this row is running AND stamp it as running, as ONE
+ * step (TASK-1088). The Retry route and the updater's after-update retry live
+ * in the same server process, and "read the row, see no stamp, write a stamp"
+ * as two steps let two presses — or a press under the after-update retry —
+ * both pass the check and both run `plugins install --force` over each other.
+ * The read-check-write runs under the same in-process turn as every other
+ * stamp, so exactly one caller gets `claimed`; the others get `busy` without
+ * having written anything.
+ *
+ * In-process only, and deliberately so: the boot script's writer runs inside a
+ * gateway start, which both callers here trigger only AFTER their stamp is
+ * down, and its own re-file drops the stamp on purpose (see
+ * `clearPluginRepairUnlessRefiled`).
+ */
+export async function claimPluginRepair(
+  id: string,
+  options: { retriedCore?: string } = {},
+): Promise<"claimed" | "busy" | "absent"> {
+  return withStampLock(() => stampRows(id, true, options, { onlyWhenIdle: true }));
+}
+
+let stampTurn: Promise<unknown> = Promise.resolve();
+
+/** One stamp at a time inside this process; a failed one does not poison the next. */
+function withStampLock<T>(operation: () => Promise<T>): Promise<T> {
+  const turn = stampTurn.then(operation, operation);
+  stampTurn = turn.catch(() => undefined);
+  return turn;
+}
+
+async function stampRows(
+  id: string,
+  running: boolean,
+  options: { retriedCore?: string },
+  guard: { onlyWhenIdle: boolean },
+): Promise<"claimed" | "busy" | "absent"> {
   const target = pluginRepairPath();
   const rows = await readRowsForUpdate(target);
   const wanted = canonicalPluginId(id);
@@ -366,6 +409,10 @@ export async function setPluginRepairInProgress(
     const rowId = typeof row.id === "string" && row.id.trim() ? row.id.trim() : key;
     if (canonicalPluginId(rowId) !== wanted) continue;
     if (running) {
+      if (guard.onlyWhenIdle) {
+        const parsed = parseEntry(key, row);
+        if (parsed && pluginRepairInProgress(parsed)) return "busy";
+      }
       row.repairingSinceMs = Date.now();
       if (options.retriedCore) row.retriedCore = options.retriedCore;
     } else if ("repairingSinceMs" in row) {
@@ -375,8 +422,9 @@ export async function setPluginRepairInProgress(
     }
     touched = true;
   }
-  if (touched) await writeRowsAtomically(target, rows);
-  return touched;
+  if (!touched) return "absent";
+  await writeRowsAtomically(target, rows);
+  return "claimed";
 }
 
 /**

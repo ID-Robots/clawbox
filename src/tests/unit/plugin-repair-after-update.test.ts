@@ -351,6 +351,34 @@ describe("after a core update — the rows an older core left", () => {
     expect(box.events).toEqual(["quiesce", "unquiesce", "restart:1", "quiesce", "unquiesce", "restart:2"]);
   });
 
+  it("still switches the plugins off and says why when the gateway cannot even be quiesced for the rollback", async () => {
+    writeMarker({ codex: CODEX_ROW, deepseek: DEEPSEEK_ROW });
+    const { retryPluginRepairsAfterCoreUpdate } = await load();
+    const h = hooks({ notReadyOn: [1] });
+    const inner = h.quiesce;
+    let quiesces = 0;
+    h.quiesce = async (operation) => {
+      quiesces += 1;
+      // The first quiesce runs the installs; the second — the rollback — finds
+      // a gateway restart-looping over the plugin it just loaded and gives up.
+      if (quiesces === 2) throw new Error("gateway pre-start did not finish in 90 s");
+      return inner(operation);
+    };
+
+    const result = await retryPluginRepairsAfterCoreUpdate(h);
+
+    expect(result.repaired).toEqual([]);
+    expect(result.failed.sort()).toEqual(["codex", "deepseek"]);
+    expect(box.entries).toEqual({ codex: false, deepseek: false });
+    for (const row of Object.values(marker())) {
+      expect(row.disabled).toBe(true);
+      expect(row.repairingSinceMs).toBeUndefined();
+      expect(row.reason).toContain("so it was switched off again");
+    }
+    expect(h.restartAndVerify).toHaveBeenCalledTimes(2);
+    expect(h.log).toHaveBeenCalledWith(expect.stringContaining("switching them off anyway"));
+  });
+
   it("leaves a row the restart's own boot script filed again as that boot filed it", async () => {
     writeMarker({ codex: CODEX_ROW });
     const { retryPluginRepairsAfterCoreUpdate } = await load();

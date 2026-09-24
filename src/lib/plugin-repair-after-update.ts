@@ -224,12 +224,24 @@ export async function retryPluginRepairsAfterCoreUpdate(
     log(`the gateway did not come back with the repaired plugins switched on (${detail}); switching them off again`);
     // PUT THE BOX BACK exactly as the update found it: the plugins off, the rows
     // saying why, and a gateway that comes up without them.
-    await hooks.quiesce(async () => {
+    const switchOffAll = async () => {
       for (const { row } of repairedOnDisk) {
         await runOpenclawConfigSet([`plugins.entries["${row.id}"].enabled`, "false", "--strict-json"])
           .catch(() => undefined);
       }
-    });
+    };
+    try {
+      await hooks.quiesce(switchOffAll);
+    } catch (quiesceErr) {
+      // A gateway restart-looping over the plugin it just loaded is exactly
+      // the one the quiesce can fail to wait out. The entries still come off
+      // — `config set` needs no gateway — and the rows below still say why;
+      // leaving either behind would hand `ensureGatewayHealthy` a box that
+      // reads "Repairing…" over a config it is about to recover.
+      const why = quiesceErr instanceof Error ? quiesceErr.message : String(quiesceErr);
+      log(`could not quiesce the gateway to switch the repaired plugins off (${why}); switching them off anyway`);
+      await switchOffAll();
+    }
     for (const { row, stage, spec } of repairedOnDisk) {
       failed.push(canonicalPluginId(row.id));
       await refile(

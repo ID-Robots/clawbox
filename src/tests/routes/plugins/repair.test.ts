@@ -24,6 +24,7 @@ vi.mock("@/lib/plugin-repair", async () => {
     clearPluginRepair: vi.fn(),
     clearPluginRepairUnlessRefiled: vi.fn(),
     setPluginRepairInProgress: vi.fn(),
+    claimPluginRepair: vi.fn(),
   };
 });
 
@@ -53,6 +54,7 @@ let readPluginRepairs: Mock;
 let clearPluginRepair: Mock;
 let clearUnlessRefiled: Mock;
 let setInProgress: Mock;
+let claimRepair: Mock;
 
 // `promisify(execFile)` reads the custom symbol at MODULE LOAD, so the symbol
 // has to be on the mock before the route is imported — a stub installed later
@@ -104,11 +106,13 @@ beforeEach(async () => {
     clearPluginRepair,
     clearPluginRepairUnlessRefiled: clearUnlessRefiled,
     setPluginRepairInProgress: setInProgress,
+    claimPluginRepair: claimRepair,
   } = (await import("@/lib/plugin-repair")) as unknown as {
     readPluginRepairs: Mock;
     clearPluginRepair: Mock;
     clearPluginRepairUnlessRefiled: Mock;
     setPluginRepairInProgress: Mock;
+    claimPluginRepair: Mock;
   });
   execCalls = [];
   execImpl = async () => ({ stdout: "" });
@@ -124,6 +128,7 @@ beforeEach(async () => {
   clearPluginRepair.mockResolvedValue(true);
   clearUnlessRefiled.mockResolvedValue("cleared");
   setInProgress.mockResolvedValue(true);
+  claimRepair.mockResolvedValue("claimed");
   installedRelease.mockResolvedValue(null);
   readPluginRepairs.mockResolvedValue(marker());
   ({ GET, POST } = await import("@/app/setup-api/plugins/repair/route"));
@@ -513,7 +518,22 @@ describe("plugins/repair — a row an older core left (TASK-1088)", () => {
 
     await post({ pluginId: "codex" });
 
-    expect(setInProgress.mock.calls).toEqual([["codex", true], ["codex", false]]);
+    expect(claimRepair.mock.calls).toEqual([["codex"]]);
+    expect(setInProgress.mock.calls).toEqual([["codex", false]]);
+  });
+
+  it("refuses the press that lost the claim, even though the row read idle a moment earlier", async () => {
+    // Two presses both read the row before either stamped it: the check and
+    // the stamp are one step in the store, so exactly one of them starts.
+    claimRepair.mockResolvedValue("busy");
+    stubExec(async () => ({ stdout: LOADED }));
+
+    const r = await post({ pluginId: "codex" });
+
+    expect(r.status).toBe(409);
+    expect(await r.json()).toMatchObject({ ok: false, code: "repair_in_progress" });
+    expect(execCalls).toEqual([]);
+    expect(setInProgress).not.toHaveBeenCalled();
   });
 
   it("refuses a second press while a repair of the row is running", async () => {

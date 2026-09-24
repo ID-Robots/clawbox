@@ -324,6 +324,23 @@ describe("plugin-repair — a repair in flight, and one already spent (TASK-1088
     expect(await setPluginRepairInProgress("codex", true)).toBe(false);
   });
 
+  it("hands a repair to exactly one of two callers that claim it at the same time", async () => {
+    write({ codex });
+    const { claimPluginRepair, readPluginRepairs, setPluginRepairInProgress } = await load();
+
+    const outcomes = await Promise.all([claimPluginRepair("codex"), claimPluginRepair("@openclaw/codex")]);
+    expect(outcomes.sort()).toEqual(["busy", "claimed"]);
+    expect(typeof (await readPluginRepairs()).codex.repairingSinceMs).toBe("number");
+
+    // A stamp a killed repair left behind past the ceiling does not hold the claim.
+    write({ codex: { ...codex, repairingSinceMs: Date.now() - 21 * 60_000 } });
+    expect(await claimPluginRepair("codex")).toBe("claimed");
+    // Ending the repair gives the claim back; a row that is not there is said so.
+    expect(await setPluginRepairInProgress("codex", false)).toBe(true);
+    expect(await claimPluginRepair("codex")).toBe("claimed");
+    expect(await claimPluginRepair("deepseek")).toBe("absent");
+  });
+
   it("does not believe a stamp older than the ceiling, or one from the future", async () => {
     const { pluginRepairInProgress, PLUGIN_REPAIR_IN_PROGRESS_MS } = await load();
     const now = 1_000_000_000;

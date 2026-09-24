@@ -8,6 +8,7 @@ import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   canonicalPluginId,
+  claimPluginRepair,
   clearPluginRepairUnlessRefiled,
   pluginRepairInProgress,
   readPluginRepairs,
@@ -130,9 +131,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, code: "repair_in_progress" }, { status: 409 });
   }
   // Said ON THE ROW, not only in this tab, so every surface that draws it says
-  // "Repairing…" until this answers. Best effort: a row that cannot carry the
-  // stamp can still be repaired.
-  await setPluginRepairInProgress(entry.id, true).catch(() => false);
+  // "Repairing…" until this answers — and CLAIMED in the same step as the fresh
+  // check, so two presses that both read the row above before either wrote
+  // cannot both start. Best effort past that: a row that cannot carry the stamp
+  // can still be repaired.
+  if ((await claimPluginRepair(entry.id).catch(() => "claimed" as const)) === "busy") {
+    return NextResponse.json({ ok: false, code: "repair_in_progress" }, { status: 409 });
+  }
   const ended = () => setPluginRepairInProgress(entry.id, false).catch(() => false);
 
   // The core that is on the box NOW, so a row written against an older one
