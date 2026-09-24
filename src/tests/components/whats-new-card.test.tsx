@@ -135,6 +135,24 @@ describe("WhatsNewCard", () => {
     expect(screen.queryByText(/FREEMONTH-123/)).toBeNull();
   });
 
+  it("fades the list's bottom edge only while part of it is hidden below", () => {
+    render(<WhatsNewCard state={FREE_OPENCLAW} onDismiss={() => {}} />);
+    const list = screen.getByRole("list", { name: en["whatsNew.highlightsLabel"] }).parentElement as HTMLElement;
+    // jsdom has no layout: give the scroll box a short window onto a taller list.
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: 250 });
+    Object.defineProperty(list, "scrollHeight", { configurable: true, value: 320 });
+    fireEvent.scroll(list);
+    expect(list).toHaveAttribute("data-more-below", "true");
+    expect(list.className).toContain("mask-image");
+
+    list.scrollTop = 70;
+    fireEvent.scroll(list);
+    expect(list).not.toHaveAttribute("data-more-below");
+    expect(list.className).not.toContain("mask-image");
+    // The docs link is outside the scroll box, so it never scrolls out of sight.
+    expect(list).not.toContainElement(screen.getByRole("link", { name: new RegExp(en["whatsNew.readMore"]) }));
+  });
+
   it("both the close button and Got it dismiss the card", () => {
     const onDismiss = vi.fn();
     render(<WhatsNewCard state={FREE_OPENCLAW} onDismiss={onDismiss} />);

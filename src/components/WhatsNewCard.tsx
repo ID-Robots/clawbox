@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { useT } from "@/lib/i18n";
 import {
   displayVersion,
@@ -41,6 +42,8 @@ export default function WhatsNewCard({ state, onDismiss }: WhatsNewCardProps) {
   const { t } = useT();
   const version = displayVersion(state.version);
   const showPlan = hasPlanCta(state.cta);
+  const listRef = useRef<HTMLDivElement>(null);
+  const moreBelow = useMoreBelow(listRef);
 
   return (
     <section
@@ -74,10 +77,16 @@ export default function WhatsNewCard({ state, onDismiss }: WhatsNewCardProps) {
 
       {/* The column is 320 px wide, and the longer locales wrap the highlights
           to twice the English height. A normal desktop shows the whole card.
-          On a short screen the highlights scroll, and the plan section and the
-          buttons stay in reach. 320 px is the rest of the card, plus the column's
-          top margin and the shelf. */}
-      <div className="px-4 max-h-[max(160px,calc(100dvh_-_320px))] overflow-y-auto">
+          On a short screen the highlights scroll, and the docs link, the plan
+          section and the buttons stay in reach. 350 px is the rest of the card,
+          plus the column's top margin and the shelf. The desktop's scrollbar is
+          nearly transparent, so while more is hidden below, the bottom edge
+          fades out to show that the list scrolls. */}
+      <div
+        ref={listRef}
+        className={`px-4 pb-2 max-h-[max(160px,calc(100dvh_-_350px))] overflow-y-auto${moreBelow ? " [mask-image:linear-gradient(to_bottom,black_calc(100%_-_40px),transparent)]" : ""}`}
+        data-more-below={moreBelow ? "true" : undefined}
+      >
         <ul className="list-none m-0 p-0 space-y-2.5" aria-label={t("whatsNew.highlightsLabel")}>
           {HIGHLIGHTS.map((item) => (
             <li key={item.title} className="flex items-start gap-2.5">
@@ -95,11 +104,13 @@ export default function WhatsNewCard({ state, onDismiss }: WhatsNewCardProps) {
             </li>
           ))}
         </ul>
+      </div>
+      <div className="px-4 pt-1">
         <a
           href={WHATS_NEW_DOCS_URL}
           target="_blank"
           rel="noopener noreferrer"
-          className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-orange-300 hover:text-orange-200 no-underline"
+          className="inline-flex items-center gap-1 text-xs font-medium text-orange-300 hover:text-orange-200 no-underline"
         >
           {t("whatsNew.readMore")}
           <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
@@ -144,4 +155,28 @@ export default function WhatsNewCard({ state, onDismiss }: WhatsNewCardProps) {
       </div>
     </section>
   );
+}
+
+/**
+ * Is part of this scroll box hidden below its bottom edge? This is checked on
+ * scroll and whenever the box or the window changes size.
+ */
+function useMoreBelow(ref: RefObject<HTMLDivElement | null>): boolean {
+  const [moreBelow, setMoreBelow] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => setMoreBelow(el.scrollTop + el.clientHeight < el.scrollHeight - 1);
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", update);
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => {
+      el.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+      observer.disconnect();
+    };
+  }, [ref]);
+  return moreBelow;
 }
