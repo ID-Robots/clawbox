@@ -81,7 +81,7 @@ So a choice made after first boot has to end with the units provisioned for the 
 | Image vs today's Hermes golden | + OpenClaw ≈ 0.55 GB, plus the `@openclaw/*` channel plugins | − Hermes ≈ 2.0–2.7 GB |
 | Download at setup | **none** | OpenClaw ≈ 0.24 GB from npm (*measured* fresh-cache fetch), plus plugins. Hermes ≈ 0.7–0.9 GB from GitHub, PyPI, npm and the Playwright CDN (*measured* sum of the parts above) |
 | Setup time of the choice | Lock, provision and remove; no network. *Estimate* 1–3 min, dominated by the first harness start and MCP registration ("a couple of minutes on a loaded Orin", `src/lib/clawbox-mcp-registration.ts:80-82`). PR 2 measures it | OpenClaw: the npm core alone is "33 s on an Orin over WiFi" (`install.sh:5562`), then patch, config, plugins and gateway. Hermes: "a few minutes" (`docs-site/editions/switching.mdx:52`), with 3 GiB free and 1.5 GB RAM required (`harness-swap.ts:78-80`). *Measured* 74 s wall for Hermes on a fast wired x86 link |
-| Offline setup | **Works for both choices**, as today. Update can be skipped and "setup is never blocked" (`UpdateStep.tsx:376-384`). Gemma is fetched at flash (`install.sh:4459`) | **Fails for both.** No agent until a download succeeds. Hermes also pipes upstream's installer from raw.githubusercontent.com into bash (`install.sh:4112,4298-4301`) on every customer's first boot |
+| Offline setup | **Works for both choices**, as today. Update can be skipped and "setup is never blocked" (`UpdateStep.tsx:376-384`). Gemma is fetched at flash (`step_llamacpp_install` → `ensure_llamacpp_model_cached`, `install.sh:9546`) | **Fails for both.** No agent until a download succeeds. Hermes also pipes upstream's installer from raw.githubusercontent.com into bash (`install.sh:4112,4298-4301`) on every customer's first boot |
 | Where it fails | At the rig, where `[provision-status]` already catches it (`install.sh:11156-11159,11325-11344`) | At the customer's desk: GitHub's anonymous rate limit (`UpdateStep.tsx:382`, TASK-655), PyPI or npm outages, region blocks. Nobody from us is there |
 | Flash rig | One image, larger by the rows above, so flashing each box takes longer | Smaller image, but the rig can no longer prove the agent runs |
 
@@ -108,7 +108,7 @@ It must come after WiFi:
 **What it writes.** The step writes one request, and root does the rest.
 
 1. The browser sends `POST /setup-api/setup/edition {edition: "openclaw"|"hermes"}`.
-   - It is added to the bootstrap allow-list beside `/setup-api/update/run` (`src/lib/setup-api-gate.ts:62`). Steps 1–3 run before a password exists (`src/middleware.ts:152`).
+   - It is added to the bootstrap allow-list beside `/setup-api/update/run` (`src/lib/setup-api-gate.ts:62`). Steps 1–3 run before a password exists (`src/middleware.ts:152,618`).
    - It refuses when `setup_complete` is set or the lock is not `unselected`.
 2. The route writes `data/edition-select.env` (`TARGET_EDITION`, `REQUESTED_AT`), in the same shape as the swap request (`harness-swap.ts:240`). It then starts the root step and streams its phases. `GET` answers `{unselected, hint}`.
 3. The root step `edition_select` (new) does the following.
@@ -151,7 +151,7 @@ This supersedes TASK-1019's two-button golden. The rig code lives in nano-lab. T
 
 - **The edition on an order becomes informational.** Both listings stay the same hardware at the same price (`docs-site/index.mdx:40`). The order says "you'll pick your agent during setup; Hermes Edition orders arrive with Hermes preselected".
 - **No existing channel can carry the order's edition to the box:**
-  - The portal heartbeat is outbound only, and it only runs once a `claw_` token exists (`portal-heartbeat.ts:98,125`).
+  - The portal heartbeat carries no order data. It only runs once a `claw_` token exists, posts the box's id and tunnel URL, and reads back only tunnel credentials (`portal-heartbeat.ts:98,125,140-141`).
   - ClawBox AI sign-in happens after the choice, and a Hermes buyer needs no subscription (`docs-site/index.mdx:45`).
 - **Proposed mechanism (PR 5, needs a clawbox.com endpoint):**
   1. At packing, fulfilment scans the label's `dev_` QR into the order.
@@ -165,7 +165,7 @@ This supersedes TASK-1019's two-button golden. The rig code lives in nano-lab. T
 
 ## 6. Upgrade path: deployed boxes keep their edition
 
-Every deployed box has a lock naming `openclaw`, `hermes` or `dual`, because the first update after 3.x baked one (`install.sh:8370`). This chain holds today, and the plan keeps it byte-identical for those three values:
+A deployed box has a lock naming `openclaw`, `hermes` or `dual` (every update re-bakes it, `install.sh:8370`). The exception is a pre-3.x box that has never updated: it has no lock and reads as a defaulted `openclaw` (`edition-source.ts:94-95`). Neither case is `unselected`. This chain holds today, and the plan keeps it byte-identical for those values:
 
 1. The in-app update runs `install.sh --step …` under `clawbox-root-update@.service`, which loads the lock as its env (`config/clawbox-root-update@.service:13`). The web server gets the same file last, so it wins over the user-writable `.env` (`config/clawbox-setup.service:42`).
 2. `install.sh` resolves env, then lock, then drop-in, then seed (`install.sh:716-745`). Any recorded-vs-requested difference exits 1 before any unit is touched (`install.sh:782-833`).
