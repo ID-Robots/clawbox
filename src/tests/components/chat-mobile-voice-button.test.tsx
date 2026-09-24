@@ -225,8 +225,10 @@ describe("the phone chat's microphone", () => {
 
     expect(record).toHaveAttribute("data-size", "large");
     expect(record).toHaveClass("chat-voice-large");
-    // Out of the crowded button row, beside the text box.
-    expect(screen.getByTestId("chat-composer-row")).not.toContainElement(record);
+    // Out of the crowded button row — which a phone folds away in fullscreen
+    // chat (TASK-1157) — and beside the text box.
+    expect(screen.queryByTestId("chat-composer-row")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-composer-primary")).toContainElement(record);
     expect(record.parentElement).toContainElement(screen.getByRole("textbox"));
     // Exactly one microphone — the compact one is not drawn as well.
     expect(screen.getAllByTestId("voice-record")).toHaveLength(1);
@@ -281,13 +283,17 @@ describe("the phone chat's microphone", () => {
     installFetch("hello");
     const { unmount } = render(<ChatPopup isOpen onClose={() => {}} mobile />);
     await readyToRecord();
+    // On a phone it is one of the composer extras the fold control tucks away
+    // (TASK-1157): out of sight until asked for, and then a real, named button
+    // in the row the control opens.
+    expect(screen.queryByTestId("chat-attach")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("composer-options-toggle"));
     // The paperclip is a Material Symbols ligature: its text content is the
     // glyph name, which a screen reader would otherwise announce verbatim.
     const attach = screen.getByTestId("chat-attach");
     expect(attach).toHaveAccessibleName("Attach file");
     expect(attach.querySelector(".material-symbols-rounded")).toHaveAttribute("aria-hidden", "true");
-    // On a phone it sits in the primary row beside the text box.
-    expect(attach.parentElement).toContainElement(screen.getByRole("textbox"));
+    expect(screen.getByTestId("chat-composer-row")).toContainElement(attach);
     unmount();
 
     render(<ChatPopup isOpen onClose={() => {}} />);
@@ -372,15 +378,17 @@ describe("the portrait phone composer", () => {
   // input. On a 390px phone that row — plus the pickers under it — left the
   // composer three rows tall and the conversation squeezed into what was left.
   // The control did not change; only the row it sits on did.
-  it("reads attachment → field → microphone → Send on one input row", async () => {
+  it("reads fold control → field → microphone → Send on one input row", async () => {
     installFetch("hello");
     render(<ChatPopup isOpen onClose={() => {}} mobile />);
     const record = await readyToRecord();
 
     const primary = screen.getByTestId("chat-composer-primary");
     const buttons = Array.from(primary.children).filter((el) => el.tagName !== "TEXTAREA");
+    // The fold control leads the row in place of the paperclip, which it now
+    // tucks away with the pickers (TASK-1157).
     expect(Array.from(primary.children).map((el) => el.getAttribute("data-testid") ?? el.tagName)).toEqual([
-      "chat-attach", "TEXTAREA", "voice-record", "chat-send",
+      "composer-options-toggle", "TEXTAREA", "voice-record", "chat-send",
     ]);
     expect(buttons).toHaveLength(3);
     expect(primary).toContainElement(record);
@@ -389,7 +397,10 @@ describe("the portrait phone composer", () => {
     expect(screen.queryByTestId("chat-composer-voice-row")).not.toBeInTheDocument();
     expect(record).toHaveAttribute("data-size", "large");
     expect(record).toHaveClass("chat-voice-large");
-    // The pickers' row follows the input row directly — nothing in between.
+    // Folded, the input row IS the composer; unfolded, the pickers' row
+    // follows it directly — nothing in between.
+    expect(primary.nextElementSibling).toBeNull();
+    fireEvent.click(screen.getByTestId("composer-options-toggle"));
     expect(primary.nextElementSibling).toBe(screen.getByTestId("chat-composer-row"));
     expect(screen.getAllByTestId("voice-record")).toHaveLength(1);
     expect(screen.getByTestId("chat-popup")).toHaveAttribute("data-chat-portrait", "true");
@@ -415,15 +426,19 @@ describe("the portrait phone composer", () => {
 
     const toggle = screen.getByTestId("composer-options-toggle");
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(toggle).toHaveAttribute("aria-controls", "chat-composer-options");
-    // Folded: no pickers, no Create — but the choice is still on screen.
+    // Folded: no pickers, no Create, no paperclip — but the choice is still on
+    // screen, on the fullscreen chat's strip (TASK-1157).
     expect(screen.queryByTestId("chat-new-app-toggle")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("chat-attach")).not.toBeInTheDocument();
     expect(document.querySelectorAll(".chat-header-pills")).toHaveLength(0);
-    expect(screen.getByTestId("chat-pill-summary")).toBeInTheDocument();
+    expect(screen.getByTestId("chat-header-strip")).toContainElement(screen.getByTestId("chat-pill-summary"));
 
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveAttribute("aria-controls", "chat-composer-options");
+    expect(screen.getByTestId("chat-composer-row")).toHaveAttribute("id", "chat-composer-options");
     expect(screen.getByTestId("chat-new-app-toggle")).toBeInTheDocument();
+    expect(screen.getByTestId("chat-attach")).toBeInTheDocument();
     expect(document.querySelectorAll(".chat-header-pills")).toHaveLength(1);
     // The summary steps aside once the pills themselves are readable.
     expect(screen.queryByTestId("chat-pill-summary")).not.toBeInTheDocument();

@@ -91,6 +91,9 @@ const CHAT_KEYS = [
   "chat.effort.off", "chat.effort.minimal", "chat.effort.low", "chat.effort.medium",
   "chat.effort.high", "chat.effort.xhigh", "chat.effort.max", "chat.effort.adaptive",
   "mascot.openChat", "mascot.menuSleep", "mascot.menuHide",
+  // The phone chat's fullscreen strip and text size bar (TASK-1157).
+  "chat.view.showHeader", "chat.view.hideHeader", "chat.view.fullscreen", "chat.view.exitFullscreen",
+  "chat.view.textSize", "chat.view.textSmaller", "chat.view.textLarger", "chat.view.textReset",
 ];
 
 /**

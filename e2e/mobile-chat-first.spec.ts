@@ -209,25 +209,25 @@ for (const locale of ["bg", "de"]) {
         const composer = page.getByTestId("chat-composer");
         const primary = composer.locator(".chat-composer-primary");
         const pills = composer.locator(".header-dropdown-trigger");
-        // A phone held upright carries the microphone in the input row and
-        // folds the pickers behind one control (TASK-1003); landscape and
-        // desktop keep the one-row composer with all three pills on show.
+        // A phone held upright carries the microphone in the input row
+        // (TASK-1003). Either way up a phone opens in fullscreen chat
+        // (TASK-1157): the fold control leads the input row and the
+        // attachment, Create and the pickers wait behind it.
         const portrait = viewport.height > viewport.width;
         const fold = page.getByTestId("composer-options-toggle");
         await expect(page.getByTestId("voice-record")).toBeEnabled();
         // The greeting turn is over, so the slot beside the field is at rest.
         await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
-        if (portrait) {
-          // Folded by default — and the choice still legible without a tap.
-          await expect(pills).toHaveCount(0);
-          await expect(page.getByTestId("chat-pill-summary")).toBeVisible();
-          await fold.click();
-        }
+        // Folded by default — and the choice still legible without a tap.
+        await expect(pills).toHaveCount(0);
+        await expect(page.getByTestId("chat-pill-summary")).toBeVisible();
+        await fold.click();
         await expect(pills).toHaveCount(3);
         await expect(pills.nth(1)).toContainText(modelLabel);
+        await assertLayout(false, true);
         // Measure the composer in the state a phone actually opens in.
-        if (portrait) await fold.click();
-        async function assertLayout(typing: boolean) {
+        await fold.click();
+        async function assertLayout(typing: boolean, unfolded = false) {
           const geometry = await composer.evaluate(el => {
             const primary = el.querySelector(".chat-composer-primary")!.getBoundingClientRect();
             const voiceRowEl = el.querySelector(".chat-composer-voice-row");
@@ -256,16 +256,19 @@ for (const locale of ["bg", "de"]) {
               voiceRow, primaryOrder, mic, rows, composerCentre: composerBox.left + composerBox.width / 2,
             };
           });
+          // The fold control first, in place of the paperclip it tucks away.
+          expect(geometry.primaryOrder[0]).toBe("composer-options-toggle");
+          // The whole composer: the input row alone while folded, the picker
+          // row under it once unfolded.
+          expect(geometry.rows).toBe(unfolded ? 2 : 1);
           if (portrait) {
-            // attachment → field → microphone → Send, all on the input row, and
-            // no row of the microphone's own anywhere (TASK-1003).
-            expect(geometry.primaryOrder).toEqual(["chat-attach", "TEXTAREA", "voice-record", "chat-send"]);
+            // fold control → field → microphone → Send, all on the input row,
+            // and no row of the microphone's own anywhere (TASK-1003).
+            expect(geometry.primaryOrder).toEqual(["composer-options-toggle", "TEXTAREA", "voice-record", "chat-send"]);
             expect(geometry.voiceRow).toBeNull();
             // Moving it must not shrink it below a thumb's reach.
             expect(geometry.mic!.width).toBeGreaterThanOrEqual(44);
             expect(geometry.mic!.height).toBeGreaterThanOrEqual(44);
-            // The whole composer: the input row and the folded picker row.
-            expect(geometry.rows).toBe(2);
           } else {
             expect(geometry.voiceRow).toBeNull();
             expect(geometry.primaryOrder[2]).toBe(typing ? "chat-send" : "voice-record");
@@ -283,8 +286,13 @@ for (const locale of ["bg", "de"]) {
               expect(a.right <= b.x + 0.5 || b.right <= a.x + 0.5 || a.bottom <= b.y + 0.5 || b.bottom <= a.y + 0.5).toBe(true);
             }
           }
-          expect(Math.min(...geometry.pills)).toBeGreaterThanOrEqual(geometry.primaryBottom);
-          expect(Math.max(...geometry.pills) - Math.min(...geometry.pills)).toBeLessThan(1);
+          if (unfolded) {
+            expect(geometry.pills).toHaveLength(3);
+            expect(Math.min(...geometry.pills)).toBeGreaterThanOrEqual(geometry.primaryBottom);
+            expect(Math.max(...geometry.pills) - Math.min(...geometry.pills)).toBeLessThan(1);
+          } else {
+            expect(geometry.pills).toHaveLength(0);
+          }
         }
         await assertLayout(false);
         await page.screenshot({ path: testInfo.outputPath("composer-idle.png") });
@@ -295,7 +303,7 @@ for (const locale of ["bg", "de"]) {
         await page.screenshot({ path: testInfo.outputPath("composer-typing.png") });
         // Truncated values still open a full, usable picker inside the viewport
         // — on a phone that means unfolding the row they live on first.
-        if (portrait) await fold.click();
+        await fold.click();
         await pills.nth(1).click();
         const menu = page.getByRole("listbox");
         await expect(menu).toBeVisible();
@@ -307,6 +315,118 @@ for (const locale of ["bg", "de"]) {
       });
     });
   }
+}
+
+/**
+ * Fullscreen chat (TASK-1157): a phone opens with the header folded into a slim
+ * strip and the composer down to the text box and its send action, so the
+ * conversation gets the screen. Every folded control is one tap away, leaving
+ * fullscreen is remembered across a reload, and the conversation's text size
+ * steps without touching anything around it.
+ */
+for (const viewport of [{ width: 360, height: 780 }, { width: 740, height: 360 }]) {
+  test.describe(`fullscreen chat ${viewport.width}x${viewport.height}`, () => {
+    test.use({ viewport, hasTouch: true, isMobile: true });
+
+    test("gives the conversation the screen, keeps every control reachable, and remembers the choice", async ({ page }, testInfo) => {
+      await installFakeGatewaySocket(page);
+      await installClawboxMocks(page, SETUP);
+      await page.goto("/");
+      await chatOpen(page);
+      await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
+
+      const strip = page.getByTestId("chat-header-strip");
+      const header = page.getByTestId("chat-header");
+      const transcript = page.getByTestId("chat-transcript");
+      await expect(strip).toBeVisible();
+      await expect(header).toBeHidden();
+      // The chat slides up from the bottom on a phone (with a little spring);
+      // measure it once it has landed at the top.
+      await expect.poll(async () => {
+        const first = (await strip.boundingBox())?.y ?? -1;
+        await page.waitForTimeout(120);
+        const second = (await strip.boundingBox())?.y ?? -2;
+        return Math.abs(first - second) < 0.5 && Math.round(second) === 0;
+      }).toBe(true);
+      const stripBox = (await strip.boundingBox())!;
+      expect(stripBox.height).toBeLessThanOrEqual(36);
+      // The strip's three controls — the header toggle, text size, fullscreen —
+      // sit inside the screen and above the minimum target size.
+      const stripControls = await strip.evaluate(el => [...el.querySelectorAll("button")].map(b => {
+        const r = b.getBoundingClientRect();
+        return { x: r.x, right: r.right, width: r.width, height: r.height };
+      }));
+      expect(stripControls).toHaveLength(3);
+      for (const box of stripControls) {
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.right).toBeLessThanOrEqual(viewport.width);
+        expect(box.width).toBeGreaterThanOrEqual(24);
+        expect(box.height).toBeGreaterThanOrEqual(24);
+      }
+      const fullscreenHeight = (await transcript.boundingBox())!.height;
+      await page.screenshot({ path: testInfo.outputPath("fullscreen.png") });
+
+      // The header opens UNDER the strip, so the toggle just pressed stays put.
+      const toggle = page.getByTestId("chat-header-toggle");
+      const toggleBefore = (await toggle.boundingBox())!;
+      await toggle.click();
+      await expect(header).toBeVisible();
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await expect(page.getByTestId("chat-popup-close")).toBeInViewport();
+      expect(Math.abs((await toggle.boundingBox())!.y - toggleBefore.y)).toBeLessThan(1);
+      expect((await header.boundingBox())!.y).toBeGreaterThanOrEqual(stripBox.y + stripBox.height - 1);
+      await page.screenshot({ path: testInfo.outputPath("fullscreen-header-open.png") });
+      await toggle.click();
+      await expect(header).toBeHidden();
+
+      // The conversation's text size, and nothing around it.
+      const reply = page.getByText("Hello from the fake gateway");
+      const replyHeight = (await reply.boundingBox())!.height;
+      const fieldFont = await page.locator("[data-testid='chat-composer'] textarea").evaluate(el => getComputedStyle(el).fontSize);
+      await page.getByTestId("chat-text-size-toggle").click();
+      await page.getByTestId("chat-text-size-larger").click();
+      await page.getByTestId("chat-text-size-larger").click();
+      await expect(page.getByTestId("chat-text-size-value")).toHaveText("130%");
+      await expect(transcript).toHaveAttribute("data-chat-text-scale", "1.3");
+      await expect.poll(async () => (await reply.boundingBox())!.height / replyHeight).toBeGreaterThan(1.2);
+      expect(await page.locator("[data-testid='chat-composer'] textarea").evaluate(el => getComputedStyle(el).fontSize)).toBe(fieldFont);
+      // No sideways scrolling: the larger text re-flows inside the same frame.
+      const overflow = await transcript.evaluate(el => el.scrollWidth - el.clientWidth);
+      expect(overflow).toBeLessThanOrEqual(1);
+      await page.screenshot({ path: testInfo.outputPath("text-130.png") });
+      await page.getByTestId("chat-text-size-reset").click();
+      await expect(transcript).not.toHaveAttribute("data-chat-text-scale");
+      await page.getByTestId("chat-text-size-toggle").click();
+
+      // Leaving fullscreen brings the header and every composer control back…
+      await page.getByTestId("chat-fullscreen-toggle").click();
+      await expect(strip).toHaveCount(0);
+      await expect(header).toBeVisible();
+      await expect(page.getByTestId("chat-composer-row")).toBeVisible();
+      await expect(page.getByTestId("chat-attach")).toBeVisible();
+      const headerControls = await header.evaluate(el => [...el.querySelectorAll("button")].map(b => {
+        const r = b.getBoundingClientRect();
+        return { x: r.x, right: r.right };
+      }));
+      for (const box of headerControls) {
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.right).toBeLessThanOrEqual(viewport.width);
+      }
+      // …at a clear cost to the conversation, which is what fullscreen buys back.
+      const standardHeight = (await transcript.boundingBox())!.height;
+      expect(fullscreenHeight - standardHeight).toBeGreaterThanOrEqual(40);
+      await page.screenshot({ path: testInfo.outputPath("standard.png") });
+
+      // …and the choice survives a reload.
+      await page.reload();
+      await chatOpen(page);
+      await expect(page.getByTestId("chat-header")).toBeVisible();
+      await expect(page.getByTestId("chat-header-strip")).toHaveCount(0);
+      await page.getByTestId("chat-fullscreen-toggle").click();
+      await expect(page.getByTestId("chat-header-strip")).toBeVisible();
+      await expect(page.getByTestId("chat-header")).toBeHidden();
+    });
+  });
 }
 
 test.describe("on a phone", () => {
@@ -335,6 +455,10 @@ test.describe("on a phone", () => {
     expect(box?.y ?? 0).toBeGreaterThan(844 / 2);
     await page.screenshot({ path: testInfo.outputPath("phone-chat.png") });
 
+    // Fullscreen chat folds the header into a strip (TASK-1157); the way to
+    // the desktop is one tap behind it.
+    await expect(page.getByTestId("chat-popup-close")).toBeHidden();
+    await page.getByTestId("chat-header-toggle").click();
     await page.getByTestId("chat-popup-close").click();
     await chatClosed(page);
     await expect(page.getByTestId("desktop-root")).toBeVisible();

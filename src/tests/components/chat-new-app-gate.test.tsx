@@ -91,6 +91,9 @@ describe("the chat's Create App button and the Coding Agent's setup", () => {
     const opened = watchOpens();
     const onClose = vi.fn();
     render(<ChatPopup isOpen mobile onClose={onClose} />);
+    // A phone opens in fullscreen chat, with Create folded behind the
+    // composer's one control (TASK-1157).
+    fireEvent.click(await screen.findByTestId("composer-options-toggle"));
     fireEvent.click(await screen.findByTestId("chat-new-app-toggle"));
     await waitFor(() => expect(opened).toEqual([{ appId: "coding" }]));
     expect(onClose).toHaveBeenCalledTimes(1);

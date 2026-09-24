@@ -416,6 +416,8 @@ import {
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 import { usePortrait } from '@/lib/use-portrait'
+import { useChatFullscreen, useChatTextScale } from '@/lib/use-chat-phone-layout'
+import { ChatFullscreenButton, ChatHeaderStrip, ChatTextSizeBar, ChatTextSizeButton } from '@/components/ChatPhoneChrome'
 import { isConfigBusyPayload } from '@/lib/config-conflict'
 import { useT } from '@/lib/i18n'
 import { useTr } from '@/lib/i18n-floor'
@@ -709,6 +711,9 @@ const TAB_LABEL_MAX = 24
 
 /** The transcript, as the tab strip's one panel. */
 const TRANSCRIPT_PANEL_ID = 'chat-transcript-panel'
+// What the phone's fullscreen strip and its text size button open (TASK-1157).
+const HEADER_REGION_ID = 'chat-header-region'
+const TEXT_SIZE_BAR_ID = 'chat-text-size-bar'
 /**
  * A tab's DOM id, derived from its session key so the panel can name the
  * selected tab as its label without either side holding an index. `null` is the
@@ -909,20 +914,46 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // hands it back as `initialPanelWidth`), so widening the window docks the
   // chat again instead of losing the owner's layout.
   const panelMode = panelWidth !== null && !mobile
-  // A phone held upright gets its own composer: attach, text, microphone and
-  // Send share one row, and the pickers below them fold behind a single
-  // control (TASK-1003). Landscape and desktop keep the one-row composer with
-  // everything on show.
+  // A phone held upright gets its own input row: text, microphone and Send side
+  // by side (TASK-1003); landscape shares one slot between the microphone and
+  // Send. Either way up, the rest of the composer folds behind one control
+  // (TASK-1157, below); the desktop keeps the one-row composer with everything
+  // on show.
   const portraitComposer = usePortrait(mobile) && mobile
-  // Folded by default: on a 390px screen three pickers and Create pushed the
-  // conversation up by a whole row for a choice that changes once a week.
-  const [composerOptionsOpen, setComposerOptionsOpen] = useState(false)
-  // Closing the chat, or rotating out of portrait, puts the pickers back where
-  // they belong — otherwise the row would come back open on the next visit,
-  // which is not what "folded by default" means.
-  useEffect(() => {
-    if (!isOpen || !portraitComposer) setComposerOptionsOpen(false)
-  }, [isOpen, portraitComposer])
+  // Fullscreen chat (TASK-1157): on a phone the header folds into a slim strip
+  // and the composer keeps only the text box and its send action, so the
+  // conversation gets the screen. On until the owner leaves it, and remembered
+  // either way (lib/chat-phone-layout.ts). A phone only — the desktop never
+  // reads it.
+  const [fullscreenPref, setFullscreenPref] = useChatFullscreen()
+  const fullscreenChat = mobile && fullscreenPref
+  // The conversation's text size, on a phone only; the desktop stays at 100%.
+  const [textScalePref, setTextScalePref] = useChatTextScale()
+  const textScale = mobile ? textScalePref : 1
+  const [textSizeOpen, setTextSizeOpen] = useState(false)
+  // The full header, opened from the strip for a moment while in fullscreen.
+  const [headerPeek, setHeaderPeek] = useState(false)
+  // The composer's pickers, attachment and Create, behind one control on a
+  // phone: folded in fullscreen chat, on show otherwise, and either way the
+  // owner can flip them — on a 390px screen three pickers and Create pushed
+  // the conversation up by a whole row for a choice that changes once a week.
+  const [composerOptionsOpen, setComposerOptionsOpen] = useState(!fullscreenChat)
+  // Closing the chat, or switching fullscreen, puts both back where the mode
+  // says they belong — otherwise a peek would come back open on the next
+  // visit, which is not what "folded by default" means. Adjusted while
+  // rendering (React's pattern for state that follows a value), so no frame is
+  // drawn with the previous mode's regions.
+  const layoutKey = !isOpen ? 'closed' : fullscreenChat ? 'fullscreen' : 'standard'
+  const [layoutFor, setLayoutFor] = useState(layoutKey)
+  if (layoutFor !== layoutKey) {
+    setLayoutFor(layoutKey)
+    setHeaderPeek(false)
+    setComposerOptionsOpen(!fullscreenChat)
+    if (!isOpen) setTextSizeOpen(false)
+  }
+  const toggleFullscreenChat = useCallback(() => {
+    setFullscreenPref(!fullscreenPref)
+  }, [fullscreenPref, setFullscreenPref])
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Gateway is canonical; render an empty list until chat.history arrives.
@@ -6143,9 +6174,58 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
     return parts.filter(Boolean).join(' · ')
   })()
-  // Everything in the settings row except the fold control itself. Folded on a
-  // portrait phone until asked for; always on show anywhere else.
-  const composerExtrasShown = !portraitComposer || composerOptionsOpen
+  // The whole settings row — attachment, Create, the pickers. Behind the fold
+  // control on a phone (folded in fullscreen chat until asked for); always on
+  // show on a big screen.
+  const composerExtrasShown = !mobile || composerOptionsOpen
+  // The phone's fold control. It leads the input row in BOTH states, so the
+  // button a thumb (or the keyboard focus) just pressed never moves: folding
+  // takes the row under it away and nothing else.
+  const renderComposerToggle = () => {
+    const label = tr('chat.composer.options', 'Chat options')
+    return (
+      <button
+        type="button"
+        onClick={() => setComposerOptionsOpen(open => !open)}
+        // The folded pickers' answer rides along as the description, so the
+        // choice is still said while the pills are out of sight.
+        title={!composerOptionsOpen && pillSummary ? `${label} · ${pillSummary}` : label}
+        aria-label={label}
+        aria-expanded={composerOptionsOpen}
+        aria-controls={composerOptionsOpen ? 'chat-composer-options' : undefined}
+        data-testid="composer-options-toggle"
+        className="chat-composer-options-toggle"
+        style={{
+          background: composerOptionsOpen ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
+          color: composerOptionsOpen ? '#f97316' : 'rgba(255,255,255,0.4)',
+        }}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+          <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
+          <circle cx="16" cy="6" r="2" />
+          <circle cx="10" cy="12" r="2" />
+          <circle cx="16" cy="18" r="2" />
+        </svg>
+      </button>
+    )
+  }
+  // What the fullscreen strip says in place of the header: the conversation on
+  // screen, and whether another one is answering or holds an unread reply —
+  // the per-tab dots it would otherwise hide.
+  const activeTabLabel = activeTabKey === null
+    ? 'ClawBox'
+    : (tabs.find(tb => tb.key === activeTabKey)?.label ?? 'ClawBox')
+  const shownSessionKey = activeTabKey ?? mainSessionKey
+  const stripActivity: 'busy' | 'unread' | null = [...busyKeys].some(k => !!k && k !== shownSessionKey)
+    ? 'busy'
+    : [...unreadKeys].some(k => !!k && k !== shownSessionKey) ? 'unread' : null
+  const headerHidden = fullscreenChat && !headerPeek
+  const renderViewControls = (size: number) => (
+    <>
+      <ChatTextSizeButton open={textSizeOpen} onToggle={() => setTextSizeOpen(open => !open)} controls={TEXT_SIZE_BAR_ID} size={size} />
+      <ChatFullscreenButton fullscreen={fullscreenChat} onToggle={toggleFullscreenChat} size={size} />
+    </>
+  )
   // Compact desktop mic; 44px in-flow phone target with shared recording feedback.
   const renderVoiceButton = (large: boolean) => {
     if (voice.state === 'recording') {
@@ -6341,15 +6421,36 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           transcript symmetrically. Still no backdrop blur — a per-frame
           filter on the Jetson iGPU is the frame drop the burst animation's
           note warns about, and a solid bar needs none. */}
+      {/* Fullscreen chat on a phone: all that stays of the header is this slim
+          strip. Its toggle opens the header UNDER it — the strip never moves,
+          so neither does the control that was just pressed. */}
+      {fullscreenChat && (
+        <ChatHeaderStrip
+          headerId={HEADER_REGION_ID}
+          headerOpen={headerPeek}
+          onToggleHeader={setHeaderPeek}
+          label={activeTabLabel}
+          activity={stripActivity}
+          summary={!composerOptionsOpen ? pillSummary : undefined}
+        >
+          {renderViewControls(32)}
+        </ChatHeaderStrip>
+      )}
       <div
         data-testid="chat-header"
+        id={HEADER_REGION_ID}
+        // Out of the layout AND the accessibility tree while folded, never just
+        // transparent; the strip's toggle is how both get it back.
+        hidden={headerHidden || undefined}
         onPointerDown={mobile || panelMode ? undefined : onDragStart}
         style={{
           flexShrink: 0,
           minHeight: 40,
-          display: 'flex',
+          display: headerHidden ? 'none' : 'flex',
           alignItems: 'center',
-          gap: 8,
+          // The phone header carries two more controls outside fullscreen; a
+          // tighter gap keeps the tab its room on a 360px screen.
+          gap: mobile && !fullscreenChat ? 4 : 8,
           padding: '0 8px 0 14px',
           background: 'rgba(0,0,0,0.2)',
           borderBottom: '1px solid rgba(255,255,255,0.06)',
@@ -6576,6 +6677,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </svg>
           </button>
         )}
+        {/* A phone outside fullscreen: the text size and the way into
+            fullscreen chat. In fullscreen both live on the strip instead. */}
+        {mobile && !fullscreenChat && renderViewControls(40)}
         {mobile ? (
           // On a phone the chat is where the page LANDS (src/lib/mobile-chat-first.ts),
           // so closing it is not dismissing a popup but going to the desktop
@@ -6617,6 +6721,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         )}
       </div>
 
+      {mobile && textSizeOpen && (
+        <ChatTextSizeBar id={TEXT_SIZE_BAR_ID} scale={textScalePref} onChange={setTextScalePref} />
+      )}
+
       {/* Messages area — sits under the header bar in the flow, so it needs
           no clearance beyond its own breathing room.
 
@@ -6633,12 +6741,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         aria-labelledby={tabDomId(activeTabKey)}
         tabIndex={0}
         data-testid="chat-transcript"
+        // The phone's text size, applied to each entry of the conversation
+        // (globals.css, `[data-chat-text-scale]`) and to nothing around it.
+        data-chat-text-scale={textScale !== 1 ? textScale : undefined}
         style={{
           flex: 1, overflowY: 'auto', padding: '12px 14px 12px',
           display: 'flex', flexDirection: 'column', gap: 10,
           userSelect: 'text',
           scrollbarWidth: 'thin',
           scrollbarColor: 'rgba(255,255,255,0.1) transparent',
+          ...(textScale !== 1 ? { '--chat-text-scale': String(textScale) } as React.CSSProperties : {}),
         }}
       >
         {(status === 'connecting' || reloadingSkill) && (reloadingSkill || messages.length === 0) && (
@@ -7390,10 +7502,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', flexDirection: 'column', gap: 8,
       }}>
-        {/* Primary phone row: attachment, text, then send/stop (portrait) or
-            microphone-or-send/stop (landscape). */}
+        {/* Primary phone row: the fold control, text, then microphone and
+            send/stop (portrait) or microphone-or-send/stop (landscape). Folded,
+            this row IS the composer — the text box and its send action. */}
         <div className="chat-composer-primary" data-testid={mobile ? 'chat-composer-primary' : undefined} style={mobile ? { display: 'flex', alignItems: 'flex-end', gap: 8 } : { display: 'contents' }}>
-        {mobile && renderAttachmentButton()}
+        {mobile && renderComposerToggle()}
         <textarea
           ref={inputRef}
           value={input}
@@ -7470,45 +7583,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
         {/* The row's layout lives in globals.css (.chat-composer-row), because
             what the pills need against the 36px buttons beside them is a wrap
-            rule and a flex-basis — see the block there. */}
+            rule and a flex-basis — see the block there.
+
+            On a phone the whole row is what the fold control above opens: the
+            attachment, Create and the pickers come and go together, and are
+            never rebuilt somewhere else — their popovers, handlers and order
+            are exactly the ones every other viewport gets. */}
+        {composerExtrasShown && (
         <div data-testid="chat-composer-row" className="chat-composer-row" id="chat-composer-options">
-        {/* Portrait phone: one control in front of the pickers, and beside it
-            the answer they would have given. Tapping it expands this same row
-            — the pickers are never rebuilt somewhere else, so their popovers,
-            handlers and order are exactly the ones every other viewport gets. */}
-        {portraitComposer && (
-          <>
-            <button
-              onClick={() => setComposerOptionsOpen(open => !open)}
-              title={tr('chat.composer.options', 'Chat options')}
-              aria-label={tr('chat.composer.options', 'Chat options')}
-              aria-expanded={composerOptionsOpen}
-              aria-controls="chat-composer-options"
-              data-testid="composer-options-toggle"
-              className="chat-composer-options-toggle"
-              style={{
-                background: composerOptionsOpen ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
-                color: composerOptionsOpen ? '#f97316' : 'rgba(255,255,255,0.4)',
-              }}
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-                <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
-                <circle cx="16" cy="6" r="2" />
-                <circle cx="10" cy="12" r="2" />
-                <circle cx="16" cy="18" r="2" />
-              </svg>
-            </button>
-            {!composerOptionsOpen && pillSummary && (
-              <span data-testid="chat-pill-summary" className="chat-pill-summary">{pillSummary}</span>
-            )}
-          </>
-        )}
         {/* Shown only where a file staged here can actually reach the model.
             The alternative is worse than a missing button: the picture is drawn
             into the user's own bubble and then dropped, so the customer sees
             their screenshot in the transcript and an answer that never looked
             at it. */}
-        {!mobile && renderAttachmentButton()}
+        {renderAttachmentButton()}
         {/* Voice input. Shown wherever the box has something to transcribe WITH
             — the route itself is edition-neutral, so what actually decides is
             whether this device holds a ClawBox AI credential. Offering the
@@ -7517,7 +7605,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         {/* Create: the Coding Agent's New app wizard, right here. The owner
             asked for it beside the attach and microphone buttons — the chat is
             where the handoff lands, so it is where the request should start. */}
-        {composerExtrasShown && (
         <button
           onClick={toggleNewApp}
           title={t("codingAgent.createNewProject")}
@@ -7537,7 +7624,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         >
           <span className="material-symbols-rounded" style={{ fontSize: 22 }}>add</span>
         </button>
-        )}
         {/* Making a picture, where the AGENT cannot.
             Shown on the trigger and not on `canGenerateImages`, because the two
             answer different questions: the flag says a picture can be made
@@ -7545,7 +7631,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             asks and the agent's own tool draws — a button there would be a
             second way to ask for something the chat already does, and the
             adapter refuses it outright. */}
-        {caps.imageGenerationTrigger === 'composer' && composerExtrasShown && (
+        {caps.imageGenerationTrigger === 'composer' && (
           <button
             onClick={() => { void generatePicture() }}
             // Disabled with nothing typed, because the composer's text IS the
@@ -7581,7 +7667,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               paperclip with the whole width empty beside it. Sharing one basis
               (the pills' plus the gap plus the button) makes the break happen
               in front of both or neither, at 3, 4 or 5 buttons. */}
-          {composerExtrasShown && (
           <div className="chat-composer-tail">
           <div className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
           {harnessId === 'hermes' ? (
@@ -7880,8 +7965,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
         {!mobile && renderSendButton()}
         </div>
-        )}
         </div>
+        )}
       </div>
 
       {/* Where a drop against an edge would land the chat — the same plate the

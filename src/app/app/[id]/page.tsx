@@ -358,6 +358,9 @@ export default function StandaloneAppPage() {
   // desktop's copy of this pair.
   const [wallpaperHarness, setWallpaperHarness] = useState<string | null>(null);
   const appearance = useAppearance(id === "settings", wallpaperHarness);
+  // The chat's fullscreen mode on a phone folds this page's title bar away
+  // too; the chat then carries the link back to the desktop (TASK-1157).
+  const [chatChromeHidden, setChatChromeHidden] = useState(false);
 
   useEffect(() => {
     const probe = new AbortController();
@@ -494,7 +497,7 @@ export default function StandaloneAppPage() {
     }
     switch (id) {
       case "clawbox":
-        return <ChatApp />;
+        return <ChatApp onPhoneChromeHiddenChange={setChatChromeHidden} />;
       case "clawkeep":
         return <ClawKeepApp />;
       case "system_update":
@@ -570,7 +573,10 @@ export default function StandaloneAppPage() {
     <I18nProvider>
       <div className="h-dvh w-full bg-[var(--ground)] text-white flex flex-col">
         {/* Minimal title bar */}
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-[#111827] border-b border-white/10 shrink-0">
+        <div
+          data-testid="standalone-title-bar"
+          className={`${id === "clawbox" && chatChromeHidden ? "hidden" : "flex"} items-center gap-2 px-3 py-1.5 bg-[#111827] border-b border-white/10 shrink-0`}
+        >
           <Image src="/clawbox-logo.png" alt="" width={20} height={20} className="w-5 h-5 rounded" />
           <StandaloneTitle nameKey={titleKey} literal={titleLiteral} />
           <Link href="/" className="ml-auto text-xs text-white/30 hover:text-white/60 no-underline">
