@@ -198,6 +198,21 @@ describe("useCodingRunAutoHide", () => {
     expect(h.hidden()).toEqual([]);
   });
 
+  it("takes a new array with the same statuses on every render without looping", () => {
+    function Inline({ status }: { status: CodingRunStatus }) {
+      // A fresh array literal each render, the careless caller's shape.
+      const { finishing } = useCodingRunAutoHide([{ id: "a", status }]);
+      return <span data-testid="finishing">{[...finishing].join(",")}</span>;
+    }
+    const { rerender } = render(<Inline status="running" />);
+    rerender(<Inline status="completed" />);
+    expect(screen.getByTestId("finishing").textContent).toBe("a");
+    act(() => { vi.advanceTimersByTime(4_999); });
+    expect(screen.getByTestId("finishing").textContent).toBe("a");
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(screen.getByTestId("finishing").textContent).toBe("");
+  });
+
   it("restore() brings back every card that went on its own, and they stay", () => {
     const h = mount([{ id: "a", status: "running" }, { id: "b", status: "running" }]);
     h.push([{ id: "a", status: "completed" }, { id: "b", status: "completed" }]);

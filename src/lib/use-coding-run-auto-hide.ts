@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { CodingRunStatus } from "@/lib/coding-agent-status";
 import { useAutoHide } from "@/lib/use-auto-hide";
 
@@ -34,6 +34,12 @@ function including(set: ReadonlySet<string>, ids: readonly string[]): ReadonlySe
   return next;
 }
 
+type RunState = { id: string; status: CodingRunStatus };
+
+function sameStatuses(a: readonly RunState[], b: readonly RunState[]): boolean {
+  return a === b || (a.length === b.length && a.every((run, i) => run.id === b[i].id && run.status === b[i].status));
+}
+
 /**
  * Which chat run cards are counting down to leaving, and which have left.
  *
@@ -54,7 +60,7 @@ function including(set: ReadonlySet<string>, ids: readonly string[]): ReadonlySe
  * This hides CARDS, not runs: `restore()` brings back every card that went on
  * its own, and they do not count down again.
  */
-export function useCodingRunAutoHide(runs: readonly { id: string; status: CodingRunStatus }[]): {
+export function useCodingRunAutoHide(runs: readonly RunState[]): {
   /** Runs whose card is still shown but will leave when its clock runs out. */
   finishing: ReadonlySet<string>;
   /** Runs whose card has left on its own. */
@@ -64,33 +70,35 @@ export function useCodingRunAutoHide(runs: readonly { id: string; status: Coding
 } {
   const [finishing, setFinishing] = useState(NONE);
   const [hidden, setHidden] = useState(NONE);
-  // The status each run had the last time `runs` changed — what makes a
-  // `completed` a transition rather than a first sight.
-  const seen = useRef(new Map<string, CodingRunStatus>());
-
-  useEffect(() => {
-    const last = seen.current;
+  // The runs as they were the last time a status changed — what makes a
+  // `completed` a transition rather than a first sight. Compared while
+  // rendering, the way React documents adjusting state to a changed prop,
+  // rather than in an effect: the card that just turned green starts its
+  // countdown in that same render, with no second pass to catch up. By
+  // CONTENT, not identity, so a caller that builds a new array every render
+  // cannot turn this into a render loop.
+  const [last, setLast] = useState(runs);
+  if (!sameStatuses(last, runs)) {
+    const before = new Map(last.map((run) => [run.id, run.status]));
     const finished: string[] = [];
     const cleared: string[] = [];
     const present = new Set<string>();
     for (const { id, status } of runs) {
       present.add(id);
-      const before = last.get(id);
-      last.set(id, status);
-      if (before === undefined || before === status) continue;
+      const was = before.get(id);
+      if (was === undefined || was === status) continue;
       if (status === "completed") finished.push(id);
-      else if (before === "completed") cleared.push(id);
+      else if (was === "completed") cleared.push(id);
     }
-    for (const [id, status] of last) {
-      if (present.has(id)) continue;
-      last.delete(id);
-      if (status === "completed") cleared.push(id);
+    for (const [id, was] of before) {
+      if (!present.has(id) && was === "completed") cleared.push(id);
     }
+    setLast(runs);
     if (finished.length > 0 || cleared.length > 0) {
       setFinishing((prev) => including(without(prev, cleared), finished));
     }
     if (cleared.length > 0) setHidden((prev) => without(prev, cleared));
-  }, [runs]);
+  }
 
   const counting = useMemo(() => [...finishing], [finishing]);
   const expire = useCallback((id: string) => {
