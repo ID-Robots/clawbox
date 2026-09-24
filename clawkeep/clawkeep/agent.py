@@ -30,7 +30,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import hermes, openclaw
+from . import backup_guard, hermes, openclaw
 from .config import Config
 
 #: The root-owned edition lock, same file `src/lib/edition-source.ts` reads.
@@ -120,7 +120,9 @@ def create_archive(cfg: Config, *, output_dir: Path) -> openclaw.Archive:
     """Build one archive with whichever backend this device calls for.
 
     Raises `openclaw.OpenclawError` or `hermes.HermesError`; `runner` catches
-    :data:`ARCHIVE_ERRORS` so it does not have to know which ran.
+    :data:`ARCHIVE_ERRORS` so it does not have to know which ran. The OpenClaw
+    CLI is called through :mod:`clawkeep.backup_guard`, ClawKeep's pre-flight
+    and recovery around it.
     """
     if device_agent() == AGENT_HERMES:
         return hermes.create_archive(
@@ -128,13 +130,7 @@ def create_archive(cfg: Config, *, output_dir: Path) -> openclaw.Archive:
             only_config=cfg.openclaw.only_config,
             verify=cfg.openclaw.verify,
         )
-    return openclaw.create_archive(
-        cfg.openclaw.binary,
-        output_dir=output_dir,
-        include_workspace=cfg.openclaw.include_workspace,
-        only_config=cfg.openclaw.only_config,
-        verify=cfg.openclaw.verify,
-    )
+    return backup_guard.create_archive(cfg, output_dir=output_dir)
 
 
 #: The exception types :func:`create_archive` and :func:`verify_archive` can

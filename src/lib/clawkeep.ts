@@ -1105,6 +1105,32 @@ export function backupExitError(exitCode: number): ClawKeepError | null {
       );
     case 10: // EXIT_ENCRYPTION_FAILED
       return new ClawKeepError("The backup could not be encrypted", 500, "encryption_failed");
+    case 11:
+      // EXIT_ARCHIVE_BUSY — files kept changing under every bounded rebuild
+      // (TASK-1000). Nothing is broken; the next slot tries again. 503 so a
+      // client reading only the class sees "not now" rather than "broken".
+      return new ClawKeepError(
+        "Files kept changing while the backup was being built — it will try again at the next scheduled time",
+        503,
+        "archive_busy",
+      );
+    case 12:
+      // EXIT_ARCHIVE_DB_DAMAGED — a database failed OpenClaw's integrity gate
+      // and was not an index-only repair ClawKeep could make. The daemon left
+      // it untouched; the owner needs support, not another click.
+      return new ClawKeepError(
+        "A database in the assistant's data is damaged, so the backup stopped rather than save damaged data — earlier backups are untouched",
+        500,
+        "database_damaged",
+      );
+    case 13:
+      // EXIT_ARCHIVE_CONFLICT — two sources claim one archive path, or a
+      // symbolic link points out of the backup. The daemon's log names them.
+      return new ClawKeepError(
+        "Something in the assistant's data cannot be packed safely (a duplicate path or a link pointing outside it) — earlier backups are untouched",
+        500,
+        "archive_conflict",
+      );
     case 64: // daemon.py, EX_USAGE — a bad config, before the run begins
       return new ClawKeepError("The ClawKeep configuration is unusable", 500, "config_error");
     case 65:

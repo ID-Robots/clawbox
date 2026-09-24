@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,8 +32,41 @@ class Archive:
     asset_count: int  # number of state assets (state, credentials, …)
 
 
+#: What a failed archive build was ABOUT — the words `Failure.kind` takes.
+#: The runner turns them into exit codes and the TS bridge into a sentence, so
+#: nothing downstream has to match on the CLI's English.
+FAILURE_SYMLINK = "symlink"      # a link the archiver refuses to carry
+FAILURE_DUPLICATE = "duplicate"  # two sources claim one archive path
+FAILURE_VANISHED = "vanished"    # a file went away while the walk ran
+FAILURE_RACE = "race"            # live writes the CLI itself calls retryable
+FAILURE_SQLITE = "sqlite"        # a database failed the integrity gate
+FAILURE_OTHER = "other"
+
+
+@dataclass(frozen=True)
+class Failure:
+    """One archive failure, read from the archiver's own sentence.
+
+    `paths` are what the sentence names — SOURCE paths on this box where the
+    CLI gave them, archive entry paths where it only had those
+    (:func:`archive_source_path` maps one back). `transient` means a fresh
+    walk can succeed without anybody doing anything: the tree was being
+    written while it was read.
+    """
+
+    kind: str
+    paths: tuple[str, ...] = ()
+    transient: bool = False
+
+
 class OpenclawError(Exception):
-    pass
+    """A failed `openclaw` call. `failure` is set where the caller already
+    knows what the failure was about; :func:`failure_of` reads it back, or
+    classifies the message when it is absent."""
+
+    def __init__(self, message: str, *, failure: Failure | None = None) -> None:
+        super().__init__(message)
+        self.failure = failure
 
 
 @dataclass(frozen=True)
@@ -125,8 +159,15 @@ def create_archive(
 
     cp = _run(binary, args, timeout=timeout)
     if cp.returncode != 0:
-        tail = ((cp.stderr or "") + (cp.stdout or "")).strip()[-500:]
-        raise OpenclawError(f"openclaw backup create failed (rc={cp.returncode}): {tail}")
+        # The CLI's own sentence, WHOLE: under `--json` it is the envelope's
+        # `error.message`. The raw stderr+stdout tail this used to keep was
+        # the last 500 characters of that envelope, which cut the front off
+        # the long ones — the SQLite refusal names its database at the START.
+        reason = _cli_error_message(cp)
+        raise OpenclawError(
+            f"openclaw backup create failed (rc={cp.returncode}): {reason}",
+            failure=classify_failure(reason),
+        )
 
     meta = _parse_json(cp.stdout, "openclaw backup create")
     archive_path_str = meta.get("archivePath")
@@ -333,6 +374,163 @@ def plan_roots(binary: str, *, timeout: float = 5 * 60) -> tuple[PlannedRoot, ..
         f"openclaw backup create --dry-run failed (rc={cp.returncode}): {reason}; "
         f"and without the workspace (rc={retry.returncode}): {retry_reason}",
     )
+
+
+@dataclass(frozen=True)
+class PlannedAsset:
+    """One root `openclaw backup create` WILL archive, as its dry-run says."""
+
+    kind: str
+    source_path: str
+    archive_path: str
+
+
+@dataclass(frozen=True)
+class BackupPlan:
+    """The dry-run answer for the backup this box is about to take.
+
+    `skipped` keeps every `(kind, sourcePath, reason)` the CLI declined, so a
+    walk over `assets` can step over what the archiver will step over
+    (`regenerable` package trees, `private` update captures).
+    """
+
+    archive_root: str
+    assets: tuple[PlannedAsset, ...]
+    skipped: tuple[tuple[str, str, str], ...]
+
+
+def plan_backup(
+    binary: str,
+    *,
+    include_workspace: bool = True,
+    only_config: bool = False,
+    timeout: float = 5 * 60,
+) -> BackupPlan:
+    """`openclaw backup create --dry-run --json` with THIS backup's options.
+
+    Not :func:`plan_roots`: that one is restore's allowlist and is always the
+    full plan whatever the options say. This is the plan of the archive the
+    very next call will write, which is what a pre-flight has to look at.
+    Raises `OpenclawError` when the CLI cannot answer.
+    """
+    args = ["backup", "create", "--dry-run", "--json"]
+    if not include_workspace:
+        args.append("--no-include-workspace")
+    if only_config:
+        args.append("--only-config")
+    cp = _run(binary, args, timeout=timeout)
+    if cp.returncode != 0:
+        reason = _cli_error_message(cp)
+        raise OpenclawError(
+            f"openclaw backup create --dry-run failed (rc={cp.returncode}): {reason}",
+        )
+    meta = _parse_json(cp.stdout, "openclaw backup create --dry-run")
+    assets: list[PlannedAsset] = []
+    for entry in meta.get("assets") or []:
+        if not isinstance(entry, dict):
+            continue
+        kind, source, archive = entry.get("kind"), entry.get("sourcePath"), entry.get("archivePath")
+        if all(isinstance(v, str) and v for v in (kind, source, archive)):
+            assets.append(PlannedAsset(kind=kind, source_path=source, archive_path=archive))
+    skipped: list[tuple[str, str, str]] = []
+    for entry in meta.get("skipped") or []:
+        if not isinstance(entry, dict):
+            continue
+        kind, source, reason = entry.get("kind"), entry.get("sourcePath"), entry.get("reason")
+        if all(isinstance(v, str) and v for v in (kind, source, reason)):
+            skipped.append((kind, source, reason))
+    return BackupPlan(
+        archive_root=str(meta.get("archiveRoot") or ""),
+        assets=tuple(assets),
+        skipped=tuple(skipped),
+    )
+
+
+# ── what a failed `backup create` was about ──────────────────────────────────
+#
+# Each pattern is the CLI's own sentence in OpenClaw 2026.9.4
+# (`src/infra/backup-archive-path-policy.ts`, `backup-verify.ts`,
+# `backup-create.ts`, `backup-tar-retry.ts`). A sentence none of them matches
+# is FAILURE_OTHER, which is what every failure was before this existed.
+
+_SYMLINK_RE = re.compile(
+    r"Archive symbolic link (?:target must be relative|target must use forward slashes"
+    r"|target is outside the declared archive root|is outside the declared backup assets"
+    r"|is missing its target): (?P<rest>[^\n]+)",
+)
+_DUPLICATE_RE = re.compile(r"Archive contains duplicate entry path: (?P<entry>[^\n]+)")
+_COLLISION_RE = re.compile(
+    r"Archive contains a portable path collision: (?P<a>[^\n]+?) and (?P<b>[^\n]+)",
+)
+_SQLITE_RE = re.compile(
+    r"SQLite database cannot be compacted safely for backup: (?P<path>[^\n]+?\.sqlite)\.(?:\s|$)",
+)
+_ENOENT_RE = re.compile(r"ENOENT: no such file or directory, [a-z]+ '(?P<path>[^'\n]+)'")
+_OFFENDING_RE = re.compile(r"\(last offending path: (?P<path>[^\n]+?), after \d+ attempts?\)")
+#: Sentences the CLI itself answers with "retry": live writes it caught.
+_RACE_RES = (
+    re.compile(r"SQLite state appeared after snapshot discovery: (?P<path>[^\n]+?)\. Retry backup"),
+    re.compile(r"Canonical SQLite path changed after discovery: (?P<path>[^\n]+)"),
+    re.compile(r"SQLite file generation did not stabilize during confirmation: (?P<path>[^\n]+)"),
+    re.compile(r"Legacy audit database rows changed during SQLite backup"),
+    re.compile(r"(?:did not encounter expected|encountered unexpected) EOF|TAR_BAD_ARCHIVE", re.I),
+)
+#: The retry wrapper's tail, "(after 1 attempt)" or "(last offending path: …,
+#: after 3 attempts)", which follows whatever the sentence ended with.
+_ATTEMPT_TAIL_RE = re.compile(r"\s*\((?:last offending path: [^\n]*, )?after \d+ attempts?\)\s*$")
+
+
+def _clean_tail(value: str) -> str:
+    return _ATTEMPT_TAIL_RE.sub("", value).strip().rstrip(".")
+
+
+def archive_source_path(entry: str) -> str | None:
+    """The source path an archive entry was written from: the CLI names
+    members `<root>/payload/posix/<absolute path without its leading slash>`.
+    `None` for a name that is not in that shape (the manifest, say)."""
+    parts = entry.strip().lstrip("/").split("/", 3)
+    if len(parts) < 4 or parts[1] != "payload" or parts[2] != "posix":
+        return None
+    return "/" + parts[3]
+
+
+def classify_failure(message: str) -> Failure:
+    """Read a `backup create` failure. Pure; the tests feed it the CLI's
+    sentences verbatim."""
+    text = message or ""
+    match = _SQLITE_RE.search(text)
+    if match:
+        return Failure(FAILURE_SQLITE, (match.group("path"),))
+    match = _SYMLINK_RE.search(text)
+    if match:
+        rest = _clean_tail(match.group("rest"))
+        entry, _, link = rest.partition(" -> ")
+        return Failure(FAILURE_SYMLINK, tuple(p for p in (entry.strip(), link.strip()) if p))
+    match = _DUPLICATE_RE.search(text)
+    if match:
+        return Failure(FAILURE_DUPLICATE, (_clean_tail(match.group("entry")),))
+    match = _COLLISION_RE.search(text)
+    if match:
+        return Failure(FAILURE_DUPLICATE, (match.group("a").strip(), _clean_tail(match.group("b"))))
+    for pattern in _RACE_RES:
+        match = pattern.search(text)
+        if match:
+            path = match.groupdict().get("path")
+            return Failure(FAILURE_RACE, (_clean_tail(path),) if path else (), transient=True)
+    match = _ENOENT_RE.search(text) or _OFFENDING_RE.search(text)
+    if match:
+        return Failure(FAILURE_VANISHED, (match.group("path"),), transient=True)
+    if re.search(r"\bENOENT\b", text):
+        # Node's code without its usual ", op 'path'" — still a path that was
+        # there when the walk listed it and gone when it came back for it.
+        return Failure(FAILURE_VANISHED, (), transient=True)
+    return Failure(FAILURE_OTHER)
+
+
+def failure_of(exc: BaseException) -> Failure:
+    """The `Failure` an archive error carries, or the one its message reads as."""
+    failure = getattr(exc, "failure", None)
+    return failure if isinstance(failure, Failure) else classify_failure(str(exc))
 
 
 def verify_archive(

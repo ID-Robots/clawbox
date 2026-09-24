@@ -40,6 +40,11 @@ EXIT_OPENCLAW = 7   # building the archive failed (either edition's backend)
 EXIT_UPLOAD = 8     # S3 PUT failed
 EXIT_NEED_PASSPHRASE = 9  # encryption is mandatory but no passphrase set on device
 EXIT_ENCRYPTION_FAILED = 10  # openssl enc returned non-zero (corrupt openssl, disk full, …)
+# Three archive failures with a remedy of their own, split out of EXIT_OPENCLAW
+# (`openclaw.Failure.kind`) so the bridge can say which one it was.
+EXIT_ARCHIVE_BUSY = 11        # files kept changing through every bounded rebuild
+EXIT_ARCHIVE_DB_DAMAGED = 12  # a database failed the integrity gate; left untouched
+EXIT_ARCHIVE_CONFLICT = 13    # two sources claim one archive path, or a link out of it
 EXIT_UNKNOWN = 99
 
 # Backup phase identifiers — kept in lockstep with `STEP_LABELS` in
@@ -51,32 +56,36 @@ STEP_ENCRYPTING = "encrypting"
 STEP_UPLOADING = "uploading"
 STEP_CHECKING_STATS = "checking-stats"
 
-ARCHIVE_RACE_ATTEMPTS = 3
-ARCHIVE_RACE_DELAYS = (1.0, 3.0)
+ARCHIVE_RACE_ATTEMPTS = 4
+ARCHIVE_RACE_DELAYS = (1.0, 5.0, 15.0)
 
 
 def _create_archive_with_race_retry(cfg: Config, staging: Path) -> openclaw.Archive:
-    """Retry OpenClaw's transient session-file race without hiding real errors.
+    """Rebuild the archive when the tree changed under the walk — bounded.
 
-    Active sessions rotate ``.jsonl``/``.trajectory.jsonl`` files while the
-    backup tar walk is running. OpenClaw currently reports that as ENOENT.
-    A fresh walk is safe; configuration, permission, disk and timeout errors
-    must still fail immediately.
+    A live agent keeps writing while the archiver reads: sessions rotate and
+    prune their transcripts, lock files come and go, a database is replaced
+    between discovery and snapshot. The archiver reports that as ENOENT on a
+    path it had just listed, or with its own "retry backup" sentences
+    (`openclaw.Failure.transient`), and a fresh walk is safe. Any path, not a
+    list of suffixes: the box that failed every night was failing on a file no
+    suffix list had named yet. Configuration, permission, disk, integrity and
+    timeout errors still fail at once, and a race that outlasts every attempt
+    ends the run as EXIT_ARCHIVE_BUSY — it is the next slot's to try again, not
+    a fault anyone has to fix.
     """
     for attempt in range(ARCHIVE_RACE_ATTEMPTS):
         try:
             return agent.create_archive(cfg, output_dir=staging)
         except agent.ARCHIVE_ERRORS as exc:
-            message = str(exc).lower()
-            transient = "enoent" in message and (
-                ".jsonl" in message or ".jsonl.lock" in message
-            )
-            if not transient or attempt + 1 >= ARCHIVE_RACE_ATTEMPTS:
+            failure = openclaw.failure_of(exc)
+            if not failure.transient or attempt + 1 >= ARCHIVE_RACE_ATTEMPTS:
                 raise
             delay = ARCHIVE_RACE_DELAYS[attempt]
             log.warning(
-                "session file changed during archive walk; retrying archive "
+                "the tree changed while the archive was being built (%s); rebuilding it "
                 "(%d/%d) in %.0fs: %s",
+                ", ".join(failure.paths) or "a file the archiver had listed",
                 attempt + 1,
                 ARCHIVE_RACE_ATTEMPTS,
                 delay,
@@ -85,6 +94,18 @@ def _create_archive_with_race_retry(cfg: Config, staging: Path) -> openclaw.Arch
             time.sleep(delay)
 
     raise AssertionError("archive retry loop exhausted")
+
+
+def _archive_exit_code(exc: BaseException) -> int:
+    """The exit code for an archive build that failed for good."""
+    failure = openclaw.failure_of(exc)
+    if failure.transient:
+        return EXIT_ARCHIVE_BUSY
+    if failure.kind == openclaw.FAILURE_SQLITE:
+        return EXIT_ARCHIVE_DB_DAMAGED
+    if failure.kind in (openclaw.FAILURE_SYMLINK, openclaw.FAILURE_DUPLICATE):
+        return EXIT_ARCHIVE_CONFLICT
+    return EXIT_OPENCLAW
 
 
 def _heartbeat_safe(server: str, token: str, **kwargs: object) -> bool:
@@ -344,7 +365,7 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
             )
             _stamp_heartbeat(st, ok, "error")
             state.save(st)
-            return EXIT_OPENCLAW
+            return _archive_exit_code(e)
 
         # Encrypt the freshly-built tarball before it leaves the device.
         # The encrypted file replaces the plaintext for the upload step;

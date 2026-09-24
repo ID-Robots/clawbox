@@ -162,6 +162,14 @@ function backupErrorText(
     case "timed_out":
     case "portal_error":
       return t("clawkeep.error.cannotReach");
+    // TASK-1000: three archive failures with a remedy of their own — wait for
+    // the next slot, get the database repaired, fix the named path.
+    case "archive_busy":
+      return t("clawkeep.error.filesChanging");
+    case "database_damaged":
+      return t("clawkeep.error.databaseDamaged");
+    case "archive_conflict":
+      return t("clawkeep.error.archiveConflict");
     case "backup_failed":
     case "archive_failed":
     case "upload_failed":
