@@ -3,7 +3,7 @@ import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { getAll as configGetAll } from "@/lib/config-store";
 import { OpenclawConfigUnreadableError, openclawSkillRoot, findOpenclawBin, openclawSkillsAgentArgs } from "@/lib/openclaw-config";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR, type InstalledMeta } from "@/lib/store-categories";

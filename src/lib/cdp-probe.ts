@@ -18,7 +18,7 @@ import { execFile } from "child_process";
 import fs from "fs";
 import http from "http";
 import os from "os";
-import path from "path";
+import path from "./runtime-path";
 import { randomBytes } from "crypto";
 import { promisify } from "util";
 

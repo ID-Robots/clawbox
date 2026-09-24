@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import path from "path";
+import path from "@/lib/runtime-path";
 import {
   getEditionSource, setActiveHarness, isHarness, harnessHealthy, isSingleHarnessEdition, type Harness,
 } from "@/lib/harness";

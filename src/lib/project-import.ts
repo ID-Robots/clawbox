@@ -40,7 +40,7 @@
  */
 import fs from "fs";
 import os from "os";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { type ChildResult, failureDetail, runChild, startedMissing, wasKilled } from "@/lib/child-run";
 import { CONFIG_ROOT } from "@/lib/config-store";
 import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";

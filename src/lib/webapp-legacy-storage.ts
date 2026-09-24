@@ -11,7 +11,7 @@
  * any app is served.
  */
 import fs from "fs";
-import path from "path";
+import path, { untraced } from "./runtime-path";
 import { DATA_DIR } from "./config-store";
 import { kvReadStrict, kvUpdateStrict } from "./kv-store";
 import {
@@ -101,7 +101,7 @@ export function readLegacyStorageRecord(): LegacyStorageRecord | null {
 /** Atomic, 0600 — the tokens are the app's own code, but nothing else needs to read them. */
 export function writeLegacyStorageRecord(record: LegacyStorageRecord): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = `${LEGACY_STORAGE_RECORD_PATH}.${process.pid}.tmp`;
+  const tmp = untraced(`${LEGACY_STORAGE_RECORD_PATH}.${process.pid}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
   fs.renameSync(tmp, LEGACY_STORAGE_RECORD_PATH);
 }

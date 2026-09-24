@@ -24,7 +24,7 @@
  * an implementation written from memory of a newer gh fails silently.
  */
 
-import path from "path";
+import path from "./runtime-path";
 import { runChild, type ChildResult, failureDetail } from "./child-run";
 import {
   emptyChecks,

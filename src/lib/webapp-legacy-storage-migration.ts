@@ -26,7 +26,7 @@
  * rolled back to v3.9 still finds its apps' data where they left it.
  */
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 import { APP_ID_RE, WEBAPPS_DIR } from "./code-projects";
 import { kvReadStrict, kvUpdateStrict } from "./kv-store";
 import { isReservedAppId } from "./webapp-registry";

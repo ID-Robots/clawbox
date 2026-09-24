@@ -25,7 +25,7 @@
 // (the Settings strip, the MCP reply) treats it as untrusted content.
 
 import fs from "fs";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { createHash, randomUUID } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
 import { EMAIL_ADDRESS_RE } from "@/lib/smtp-client";
@@ -268,7 +268,7 @@ function writeAll(drafts: PendingEmail[]): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   // Same reasoning as config-store.writeConfig: fresh temp at 0600, chmod in
   // case a stale temp survived a crash at 0644, then atomic rename.
-  const tmp = `${PENDING_PATH}.tmp`;
+  const tmp = untraced(`${PENDING_PATH}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(drafts, null, 2), { mode: 0o600 });
   try {
     fs.chmodSync(tmp, 0o600);

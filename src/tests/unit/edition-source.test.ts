@@ -11,10 +11,22 @@ import path from "path";
 let tmpDir: string;
 let editionFile: string;
 
-async function loadReader() {
+async function loadModule() {
   vi.resetModules();
-  const mod = await import("@/lib/edition-source");
-  return mod.readEdition;
+  return import("@/lib/edition-source");
+}
+
+async function loadReader() {
+  return (await loadModule()).readEdition;
+}
+
+// A fixed mtime, so "the same mtime" is exact rather than whatever the
+// filesystem's timestamp granularity makes of two writes in a row.
+const BAKED_AT = 1_700_000_000;
+
+function bake(contents: string, mtime = BAKED_AT) {
+  fs.writeFileSync(editionFile, contents);
+  fs.utimesSync(editionFile, mtime, mtime);
 }
 
 beforeEach(() => {
@@ -69,5 +81,74 @@ describe("readEdition", () => {
     const future = new Date(Date.now() + 5000);
     fs.utimesSync(editionFile, future, future);
     expect(readEdition()).toBe("hermes");
+  });
+});
+
+describe("readEditionSource", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("answers from the cache while the mtime is unchanged, without reading the file again", async () => {
+    bake("CLAWBOX_EDITION=hermes\n");
+    const { readEditionSource } = await loadModule();
+    expect(readEditionSource()).toEqual({ edition: "hermes", defaulted: false });
+
+    // Same mtime, different contents: only a re-read could see "dual".
+    bake("CLAWBOX_EDITION=dual\n");
+    const read = vi.spyOn(fs, "readFileSync");
+    expect(readEditionSource()).toEqual({ edition: "hermes", defaulted: false });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("re-reads the file once its mtime changes", async () => {
+    bake("CLAWBOX_EDITION=hermes\n");
+    const { readEditionSource } = await loadModule();
+    expect(readEditionSource()).toEqual({ edition: "hermes", defaulted: false });
+
+    bake("CLAWBOX_EDITION=dual\n", BAKED_AT + 60);
+    const read = vi.spyOn(fs, "readFileSync");
+    expect(readEditionSource()).toEqual({ edition: "dual", defaulted: false });
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the environment when the file is missing", async () => {
+    process.env.CLAWBOX_EDITION = "dual";
+    const { readEditionSource } = await loadModule();
+    expect(readEditionSource()).toEqual({ edition: "dual", defaulted: false });
+  });
+
+  it("says the answer was a guess when neither the file nor the environment names an edition", async () => {
+    const { readEditionSource } = await loadModule();
+    expect(readEditionSource()).toEqual({ edition: "openclaw", defaulted: true });
+  });
+
+  it("treats a symlinked lock as missing instead of following it", async () => {
+    const target = path.join(tmpDir, "elsewhere.env");
+    fs.writeFileSync(target, "CLAWBOX_EDITION=dual\n");
+    fs.symlinkSync(target, editionFile);
+    const { readEditionSource } = await loadModule();
+
+    expect(readEditionSource()).toEqual({ edition: "openclaw", defaulted: true });
+    process.env.CLAWBOX_EDITION = "hermes";
+    expect(readEditionSource()).toEqual({ edition: "hermes", defaulted: false });
+  });
+
+  it("does not serve a cached edition once the lock is swapped for a symlink with the same mtime", async () => {
+    bake("CLAWBOX_EDITION=hermes\n");
+    const { readEditionSource } = await loadModule();
+    expect(readEditionSource()).toEqual({ edition: "hermes", defaulted: false });
+
+    const target = path.join(tmpDir, "elsewhere.env");
+    fs.renameSync(editionFile, target);
+    fs.symlinkSync(target, editionFile);
+    expect(readEditionSource()).toEqual({ edition: "openclaw", defaulted: true });
+  });
+
+  it("treats a lock path that is not a regular file as missing", async () => {
+    fs.mkdirSync(editionFile);
+    process.env.CLAWBOX_EDITION = "hermes";
+    const { readEditionSource } = await loadModule();
+    expect(readEditionSource()).toEqual({ edition: "hermes", defaulted: false });
   });
 });

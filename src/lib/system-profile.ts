@@ -21,7 +21,7 @@
 
 import { execFile } from "child_process";
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 import { promisify } from "util";
 import * as configStore from "./config-store";
 
@@ -72,13 +72,18 @@ export interface PowerModeStatus {
  * always use it. `--check` falls back to the repo copy because it changes
  * nothing and needs no privilege — without that fallback the Settings panel
  * would be blank on a dev machine and in the component tests.
+ *
+ * In production the repo copy is the checkout's, never the cwd's: the server
+ * runs from `.next/standalone`, and since TASK-1102 the build no longer copies
+ * scripts/ in there (src/lib/runtime-path.ts).
  */
 export function resolveScript(name: string, opts: { allowRepoFallback?: boolean } = {}): string | null {
   const installed = path.join(LIBEXEC_DIR, name);
   if (fs.existsSync(installed)) return installed;
   if (!opts.allowRepoFallback) return null;
   const repo = path.join(
-    process.env.CLAWBOX_ROOT || process.cwd(),
+    process.env.CLAWBOX_ROOT
+      || (process.env.NODE_ENV === "production" ? "/home/clawbox/clawbox" : process.cwd()),
     "scripts",
     name,
   );

@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { HERMES_BIN } from "@/lib/harness";
 import { spawnFailureMessage } from "@/lib/hermes-cli-message";
 

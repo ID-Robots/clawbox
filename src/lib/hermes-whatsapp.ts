@@ -39,7 +39,7 @@
 // writer used here, matching the adapter's own `save_env_value` calls.
 
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { hermesHome, readHermesEnv, setHermesEnvValues } from "@/lib/hermes-env";
 
 export const WHATSAPP_ENV_ENABLED = "WHATSAPP_ENABLED";

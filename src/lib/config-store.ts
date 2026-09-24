@@ -1,4 +1,4 @@
-import path from "path";
+import path, { untraced } from "./runtime-path";
 import fs from "fs";
 
 /**
@@ -256,7 +256,7 @@ function writeConfig(data: Record<string, unknown>): void {
   // is ignored when the destination already exists, e.g. a 0644 file from an
   // older build). chmod the temp too, in case a stale temp survived a crash
   // and pre-existed at 0644 (rename would then carry those perms across).
-  const tmp = CONFIG_PATH + ".tmp";
+  const tmp = untraced(CONFIG_PATH + ".tmp");
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
   try {
     fs.chmodSync(tmp, 0o600);

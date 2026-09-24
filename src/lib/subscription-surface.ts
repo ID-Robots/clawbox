@@ -1,5 +1,5 @@
 import { promises as fsp } from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import {
   getProviderCatalog,

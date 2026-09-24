@@ -2,7 +2,7 @@ import { spawn } from "child_process";
 import crypto from "crypto";
 import fs from "fs/promises";
 import os from "os";
-import path from "path";
+import path from "./runtime-path";
 import { DATA_DIR, get, set } from "./config-store";
 
 const SECRET_PATH = path.join(DATA_DIR, ".session-secret");

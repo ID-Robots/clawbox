@@ -17,7 +17,7 @@
 
 import crypto from "crypto";
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 
 // PEM SPKI ed25519 PUBLIC key for the dual-harness premium license. Safe to
 // ship — it can only VERIFY licenses, never mint them (the private signing key

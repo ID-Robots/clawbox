@@ -18,7 +18,7 @@
 
 import crypto from "crypto";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { runChild } from "@/lib/child-run";
 import { EXTRACTABLE_EXTENSIONS } from "@/lib/memory-shard-state";

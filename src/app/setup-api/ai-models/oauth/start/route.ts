@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import fs from "fs/promises";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { clearHandoffTokens } from "@/lib/oauth-handoff";
 import { OAUTH_PROVIDERS, isGoogleConfigured } from "@/lib/oauth-config";
@@ -50,7 +50,7 @@ export async function POST(request: Request) {
     await fs.mkdir(DATA_DIR, { recursive: true });
 
     // Write atomically via temp file + rename (rename replaces symlinks atomically)
-    const tmpPath = STATE_PATH + `.tmp.${crypto.randomBytes(4).toString("hex")}`;
+    const tmpPath = untraced(STATE_PATH + `.tmp.${crypto.randomBytes(4).toString("hex")}`);
     await fs.writeFile(
       tmpPath,
       JSON.stringify({ codeVerifier, state, provider, createdAt: Date.now() }),

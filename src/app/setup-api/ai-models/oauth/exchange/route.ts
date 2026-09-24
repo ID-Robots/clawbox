@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import fs from "fs/promises";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 // Server-only handoff file the configure route reads on the `oauthHandoff`
 // path — the SAME file the device-code flow (device-poll) uses, so both take
@@ -25,7 +25,7 @@ async function persistTokensAndAck(
   extra?: { projectId?: string },
 ): Promise<NextResponse> {
   await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmpPath = `${HANDOFF_TOKENS_PATH}.tmp.${crypto.randomBytes(8).toString("hex")}`;
+  const tmpPath = untraced(`${HANDOFF_TOKENS_PATH}.tmp.${crypto.randomBytes(8).toString("hex")}`);
   await fs.writeFile(
     tmpPath,
     JSON.stringify({ provider, ...tokens, createdAt: Date.now() }),

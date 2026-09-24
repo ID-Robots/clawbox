@@ -34,7 +34,7 @@ import { spawn, type ChildProcess } from "child_process";
 import crypto from "crypto";
 import fs from "fs/promises";
 import { constants as fsConstants } from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { HERMES_BIN } from "@/lib/harness";
 import { readHermesEnv, setHermesEnvValues } from "@/lib/hermes-env";
 

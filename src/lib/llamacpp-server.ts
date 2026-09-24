@@ -1,6 +1,6 @@
 import fs from "fs/promises";
 import type { FileHandle } from "fs/promises";
-import path from "path";
+import path from "./runtime-path";
 import { CONFIG_ROOT, DATA_DIR, getAll } from "./config-store";
 import {
   getDefaultLlamaCppFile,

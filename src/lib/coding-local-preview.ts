@@ -5,7 +5,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
-import path from "path";
+import path from "./runtime-path";
 const exec = promisify(execFile);
 export interface PreviewRun { directory: string; pgid: number | null; status: string }
 export async function ownsLocalPreview(url: URL, run: PreviewRun | null): Promise<boolean> {

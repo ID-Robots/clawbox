@@ -2,7 +2,7 @@ import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile, realpath, rm, writeFile } from "fs/promises";
 import { existsSync } from "fs";
-import path from "path";
+import path from "./runtime-path";
 import { get, getKnown, set, setMany } from "./config-store";
 import {
   findOpenclawBin,

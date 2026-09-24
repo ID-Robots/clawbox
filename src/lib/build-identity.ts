@@ -21,7 +21,7 @@
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile, stat } from "fs/promises";
-import path from "path";
+import path from "./runtime-path";
 import { isSafeBranch } from "./update-branch";
 import {
   DRIFT_ACTION_REALIGN,

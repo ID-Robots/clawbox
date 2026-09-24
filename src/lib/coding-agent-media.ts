@@ -30,7 +30,7 @@
  * time on a single-owner appliance those are the same thing.
  */
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { randomUUID } from "crypto";
 import { NextResponse } from "next/server";
 import { isProtectedFilePath } from "@/lib/file-guard";

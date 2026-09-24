@@ -17,7 +17,7 @@
 // the owner was warned about, and when. It is never served to the browser.
 
 import fs from 'fs/promises';
-import path from 'path';
+import path from '@/lib/runtime-path';
 import { getSystemUsername } from '@/lib/auth';
 import type { CapabilityId, FindingSeverity } from '@/lib/hermes-skill-capabilities';
 

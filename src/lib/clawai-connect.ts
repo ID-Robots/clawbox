@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import fs from "fs/promises";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 
 // `configuring` is the intermediate state held while the device-side
@@ -72,7 +72,7 @@ export function createClawAiDeviceId(): string {
 
 export async function writeClawAiSession(session: ClawAiConnectSession) {
   await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmpPath = `${STATE_PATH}.tmp.${crypto.randomBytes(4).toString("hex")}`;
+  const tmpPath = untraced(`${STATE_PATH}.tmp.${crypto.randomBytes(4).toString("hex")}`);
   await fs.writeFile(tmpPath, JSON.stringify(session), { mode: 0o600 });
   await fs.rename(tmpPath, STATE_PATH);
 }

@@ -53,7 +53,7 @@
 // schema moves under us loses the reasoning panel and the tool chips. It does
 // not lose the reply.
 
-import path from "path";
+import path from "../runtime-path";
 
 /** One tool the agent invoked during a turn. */
 export interface HermesToolCall {

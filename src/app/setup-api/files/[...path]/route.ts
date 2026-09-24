@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { Readable } from "stream";
 import { filesBrowseRoot, isProtectedContainer, isProtectedFilePath } from "@/lib/file-guard";
 
@@ -78,7 +78,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
 
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(abs);
+    stat = fs.statSync(/* turbopackIgnore: true */ abs);
   } catch (err) {
     return fsErrorResponse(err, "Failed to read file");
   }
@@ -88,7 +88,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
   // multi-hundred-MB download must not OOM the Jetson.
   let nodeStream: fs.ReadStream;
   try {
-    nodeStream = fs.createReadStream(abs);
+    nodeStream = fs.createReadStream(/* turbopackIgnore: true */ abs);
   } catch (err) {
     return fsErrorResponse(err, "Failed to read file");
   }
@@ -121,7 +121,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
   // Before the existence check: `data` is renamable precisely because it is
   // there and `safePath` lets it through.
   if (isProtectedContainer(abs)) return protectedContainerResponse();
-  if (!fs.existsSync(abs)) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!fs.existsSync(/* turbopackIgnore: true */ abs)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   // `.catch` covers a body that is not JSON at all; this covers one that IS —
   // a request whose body is literally `null` parses to `null`, and reading
@@ -175,9 +175,9 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   // the session secret and every token in one request; on the browse root it
   // removes the home. Neither is a file-manager gesture.
   if (isProtectedContainer(abs)) return protectedContainerResponse();
-  if (!fs.existsSync(abs)) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!fs.existsSync(/* turbopackIgnore: true */ abs)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const stat = fs.statSync(abs);
+  const stat = fs.statSync(/* turbopackIgnore: true */ abs);
   try {
     if (stat.isDirectory()) {
       fs.rmSync(abs, { recursive: true, force: true });

@@ -3,7 +3,7 @@
  * Journal ordering proves per-workflow overlap, not simultaneous inference.
  */
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 
 export interface WorkflowTelemetry {
   workflows: Array<{ id: string; children: Array<{ id: string; label: string; status: string }>; peakActive: number }>;

@@ -4,7 +4,7 @@ import { listAgentIds, readSessionEntries, sessionStorePath } from "./openclaw-s
 import { isPatchableSession, patchSessionModels, type GatewayRpcCall } from "./openclaw-session-model";
 import { clearPairingState, readPairingAllowEntries, readPairingRequests } from "./openclaw-state-store";
 import fsSync from "fs";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { execFile, spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { isDeepStrictEqual, promisify } from "util";
@@ -377,7 +377,7 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
 
   return new Promise((resolve, reject) => {
     let settled = false;
-    const child = spawn(bin, args, {
+    const child = spawn(/* turbopackIgnore: true */ bin, args, {
       stdio: [stdinData !== undefined ? "pipe" : "ignore", captureStdout ? "pipe" : "ignore", "pipe"],
       cwd,
       ...(uid !== undefined ? { uid } : {}),
@@ -1640,7 +1640,7 @@ function existingChannelBlock(
  * carry it across the rename if the chmod failed.
  */
 async function writeSecretJsonAtomically(file: string, data: unknown): Promise<void> {
-  const tmpPath = `${file}.tmp`;
+  const tmpPath = untraced(`${file}.tmp`);
   await fs.rm(tmpPath, { force: true });
   await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600, encoding: "utf-8" });
   try {
@@ -1802,7 +1802,7 @@ async function inspectReclaimGuard(guardPath: string): Promise<ReclaimGuardState
     if (!Number.isFinite(guardMtimeMs) || Date.now() - guardMtimeMs <= OPENCLAW_CONFIG_LOCK_STALE_MS) {
       return "active";
     }
-    const quarantinePath = `${guardPath}.quarantine-${randomUUID()}`;
+    const quarantinePath = untraced(`${guardPath}.quarantine-${randomUUID()}`);
     try {
       await fs.rename(guardPath, quarantinePath);
     } catch (err) {
@@ -1905,7 +1905,7 @@ async function releaseOwnedLock(lockPath: string, heldStat: FileStat | null, own
  * CLI mutations as well as other setup writers that acquire this lock.
  */
 async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promise<T> {
-  const lockPath = `${CONFIG_PATH}.lock`;
+  const lockPath = untraced(`${CONFIG_PATH}.lock`);
   const reclaimGuardPath = `${lockPath}.reclaim`;
   const deadline = Date.now() + 30_000;
   let attempt = 0;
@@ -2469,7 +2469,7 @@ export async function writeDiscordGatewayEnv(botToken: string): Promise<void> {
     throw new Error("Refusing to write an unsafe Discord token to the gateway env file");
   }
   await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmpPath = `${DISCORD_ENV_PATH}.tmp`;
+  const tmpPath = untraced(`${DISCORD_ENV_PATH}.tmp`);
   const body =
     "# Written by ClawBox. Loaded by clawbox-gateway.service (EnvironmentFile).\n" +
     "# Do not edit by hand — the Discord section of Settings rewrites this file.\n" +
@@ -3326,7 +3326,7 @@ export function findOpenclawBin(): string {
     }
   } catch {}
   for (const p of candidates) {
-    if (fsSync.existsSync(p)) return p;
+    if (fsSync.existsSync(/* turbopackIgnore: true */ p)) return p;
   }
   return "openclaw";
 }

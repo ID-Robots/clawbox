@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
@@ -121,7 +121,7 @@ export async function POST(request: Request) {
   // actually read, never to a symlink's name.
   let real: string;
   try {
-    real = await fs.realpath(typed);
+    real = await fs.realpath(/* turbopackIgnore: true */ typed);
   } catch {
     return NextResponse.json({ error: "There is no file at that path." }, { status: 404 });
   }
@@ -152,7 +152,7 @@ export async function POST(request: Request) {
   // before a byte is read.
   let data: Buffer;
   try {
-    const handle = await fs.open(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const handle = await fs.open(/* turbopackIgnore: true */ target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) return NextResponse.json({ error: "That path is not a file." }, { status: 400 });

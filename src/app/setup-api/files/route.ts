@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import fsp from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import Busboy from "busboy";
@@ -251,7 +251,7 @@ export async function GET(req: NextRequest) {
   const abs = safePath(dir);
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
 
-  if (!fs.existsSync(abs)) {
+  if (!fs.existsSync(/* turbopackIgnore: true */ abs)) {
     // Auto-create if it's the base dir
     if (abs === path.resolve(BASE_DIR)) {
       fs.mkdirSync(abs, { recursive: true });
@@ -262,7 +262,7 @@ export async function GET(req: NextRequest) {
 
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(abs);
+    stat = fs.statSync(/* turbopackIgnore: true */ abs);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code === "EACCES" || code === "EPERM") {
@@ -287,7 +287,7 @@ export async function GET(req: NextRequest) {
   // button — filtering server-side would defeat that toggle.
   let entries: string[];
   try {
-    entries = fs.readdirSync(abs);
+    entries = fs.readdirSync(/* turbopackIgnore: true */ abs);
   } catch (err) {
     // A 700 / root-owned directory yields EACCES from scandir — return a clean
     // 403 instead of a 500 that leaks the absolute path in the syscall string.
@@ -332,7 +332,7 @@ export async function POST(req: NextRequest) {
 
   if (contentType.includes("multipart/form-data")) {
     if (!req.body) return NextResponse.json({ error: "No body" }, { status: 400 });
-    if (!fs.existsSync(abs)) fs.mkdirSync(abs, { recursive: true });
+    if (!fs.existsSync(/* turbopackIgnore: true */ abs)) fs.mkdirSync(abs, { recursive: true });
 
     // Two bounds, because the finding was two holes. Busboy's `limits` count
     // the parts, files and fields (a thousand-part body used to open a
@@ -492,7 +492,7 @@ export async function POST(req: NextRequest) {
     if (!body.name) return NextResponse.json({ error: "Name required" }, { status: 400 });
     const newDir = safePath(path.join(dir, body.name));
     if (!newDir) return NextResponse.json({ error: "Invalid name" }, { status: 400 });
-    if (fs.existsSync(newDir)) return NextResponse.json({ error: "Already exists" }, { status: 409 });
+    if (fs.existsSync(/* turbopackIgnore: true */ newDir)) return NextResponse.json({ error: "Already exists" }, { status: 409 });
     fs.mkdirSync(newDir, { recursive: true });
     return NextResponse.json({ ok: true });
   }
@@ -524,7 +524,7 @@ export async function PUT(req: NextRequest) {
   const destPath = safePath(path.join(dir, name));
   if (!destPath) return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
 
-  if (!fs.existsSync(abs)) fs.mkdirSync(abs, { recursive: true });
+  if (!fs.existsSync(/* turbopackIgnore: true */ abs)) fs.mkdirSync(abs, { recursive: true });
 
   if (!req.body) return NextResponse.json({ error: "No body" }, { status: 400 });
 

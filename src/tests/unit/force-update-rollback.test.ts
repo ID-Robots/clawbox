@@ -46,6 +46,8 @@ type BuildOutcome =
   | "leaves-no-entry"
   | "names-another-commit"
   | "trace-race-then-succeeds"
+  | "copy-warning-then-succeeds"
+  | "copy-warning-always"
   | "slow-success";
 
 // Holds a step until the test writes $STUB_LOG/release — and never for more than
@@ -110,6 +112,18 @@ case "$STUB_BUILD" in
       exit 1
     fi
     produce; exit 0 ;;
+  # What Next prints when it cannot copy a ROUTE's traced file: it catches
+  # the error, warns, and the build exits 0 short of that file.
+  copy-warning-then-succeeds)
+    produce
+    if [ "$attempt" -eq 1 ]; then
+      echo " ⚠ Failed to copy traced files for /x/.next/server/app/api/route.js Error: ENOENT: no such file or directory, copyfile '/x/node_modules/a/index.js' -> '/x/.next/standalone/node_modules/a/index.js'" >&2
+    fi
+    exit 0 ;;
+  copy-warning-always)
+    produce
+    echo " ⚠ Failed to copy traced files for /x/.next/server/app/api/route.js Error: ENOENT: no such file or directory, copyfile '/x/node_modules/a/index.js' -> '/x/.next/standalone/node_modules/a/index.js'" >&2
+    exit 0 ;;
   slow-success)
     # Held open until the test has sent its signal, however late it gets to.
     hold build-started
@@ -306,6 +320,20 @@ d("scripts/force-update.sh never serves a build that failed", () => {
     expect(logOf("systemctl.log")).not.toMatch(/restart/);
   });
 
+  it("refuses a build that exited 0 but could not copy a traced file, after one retry (TASK-1102)", () => {
+    // Next catches a failed copy for a route, warns and exits 0, and the
+    // standalone tree it leaves is short of that file. The brief's rule: rc is
+    // non-zero on ANY build or copy failure, and HEAD does not stay ahead.
+    const r = runForceUpdate("copy-warning-always");
+
+    expect(r.status, r.output).toBe(1);
+    expect(logOf("builds").trim()).toBe("2");
+    expect(r.stderr).toContain("could not copy every traced file");
+    expect(git(box, "rev-parse", "HEAD")).toBe(prevHead);
+    expectPreviousBuildServed();
+    expect(logOf("systemctl.log")).not.toMatch(/restart/);
+  });
+
   it("refuses a build that exited 0 but left nothing the dashboard can load", () => {
     const r = runForceUpdate("leaves-no-entry");
 
@@ -435,6 +463,16 @@ d("scripts/force-update.sh on a build that works", () => {
 
   it("still retries the mid-build trace race once, and judges the retry on its own output", () => {
     const r = runForceUpdate("trace-race-then-succeeds");
+
+    expect(r.status, r.output).toBe(0);
+    expect(logOf("builds").trim()).toBe("2");
+    expect(git(box, "rev-parse", "HEAD")).toBe(newHead);
+    expect(read(".next/standalone/server.js")).toBe("new build\n");
+    expectIdentityChecked(r.output);
+  });
+
+  it("retries a copy Next only warned about, and accepts the build that copied everything", () => {
+    const r = runForceUpdate("copy-warning-then-succeeds");
 
     expect(r.status, r.output).toBe(0);
     expect(logOf("builds").trim()).toBe("2");

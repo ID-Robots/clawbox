@@ -17,7 +17,7 @@
  */
 import fs from "fs/promises";
 import os from "os";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { dirBytes } from "@/lib/install-disk";
 import { KOKORO_STAMP, KOKORO_UNIT, removeUserUnit } from "@/lib/local-models";
 

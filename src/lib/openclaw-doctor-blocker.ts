@@ -1,4 +1,4 @@
-import path from "path";
+import path from "./runtime-path";
 import { existsSync } from "fs";
 
 /**

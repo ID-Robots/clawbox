@@ -24,7 +24,7 @@
 // ?refresh=true and no TTY — non-interactive and safe from a route handler.
 
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { hermesConfigGet, invalidateHermesConfigCache } from "@/lib/hermes-config-cache";
 import {

@@ -8,7 +8,7 @@
  */
 
 import { readFile } from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { CONFIG_ROOT, get, set } from "@/lib/config-store";
 import { readEditionSource, type EditionSource } from "@/lib/edition-source";
 import { readSwapPlan, swapAllowed, swapTargetFor } from "@/lib/harness-swap";

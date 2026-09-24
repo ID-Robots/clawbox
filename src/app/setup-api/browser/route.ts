@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { execFile } from "child_process";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { promisify } from "util";
 import { describePortOwner, findPlaywrightChromium, probeCdp } from "@/lib/cdp-probe";
 import net from "net";

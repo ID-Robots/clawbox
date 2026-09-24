@@ -15,7 +15,7 @@
  */
 
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { get as configGet, set as configSet } from "@/lib/config-store";
 
 export const BROWSER_SETUP_CONFIG_KEY = "browser_setup_complete";

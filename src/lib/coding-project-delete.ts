@@ -73,7 +73,7 @@
  */
 
 import fs from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { gitIn, WORKTREES_DIR } from "@/lib/coding-team-worktree";
 import type { ChildResult } from "@/lib/child-run";

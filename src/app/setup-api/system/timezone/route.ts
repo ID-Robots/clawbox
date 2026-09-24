@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { randomUUID } from "crypto";
 import { get, set } from "@/lib/config-store";
 import { hasOwnerSession } from "@/lib/owner-session";

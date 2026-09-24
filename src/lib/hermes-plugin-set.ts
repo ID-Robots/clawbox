@@ -2,7 +2,7 @@ import { execFile } from "child_process";
 import crypto from "crypto";
 import fs from "fs/promises";
 import os from "os";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { promisify } from "util";
 import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
 import { hermesHome } from "@/lib/hermes-env";

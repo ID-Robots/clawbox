@@ -17,7 +17,7 @@
 
 import { promises as fs } from "fs";
 import os from "os";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { failureDetail, runChild } from "@/lib/child-run";
 
 /** The interpreter the user unit itself runs under; the script needs no venv. */

@@ -12,7 +12,7 @@
  */
 
 import fs from "fs/promises";
-import path from "path";
+import path from "./runtime-path";
 import { DATA_DIR } from "./config-store";
 
 export const HANDOFF_TOKENS_PATH = path.join(DATA_DIR, "oauth-device-tokens.json");

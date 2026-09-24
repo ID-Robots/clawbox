@@ -1,5 +1,5 @@
 import fs from "fs/promises";
-import path from "path";
+import path from "./runtime-path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { DATA_DIR } from "./config-store";

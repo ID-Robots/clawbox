@@ -25,7 +25,7 @@
 
 import fs from "fs";
 import os from "os";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { randomBytes } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
 import {
@@ -305,7 +305,7 @@ export function saveBoard(board: TeamBoard): void {
   const file = boardPath(board.id);
   // The one writer, so the figures on disk are never older than the board they describe.
   board.metrics = teamMetrics(board);
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = untraced(`${file}.${process.pid}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(board, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, file);
 }

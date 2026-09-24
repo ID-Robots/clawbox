@@ -1,5 +1,5 @@
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
 

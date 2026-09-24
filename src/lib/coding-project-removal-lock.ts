@@ -38,7 +38,7 @@
  * box cannot enforce.
  */
 
-import path from "path";
+import path from "./runtime-path";
 
 /**
  * Project folders a removal holds, and HOW MANY removals hold each.

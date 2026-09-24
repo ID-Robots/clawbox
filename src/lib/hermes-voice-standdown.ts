@@ -1,9 +1,9 @@
 import fs from "fs/promises";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { hermesHome } from "@/lib/hermes-env";
 
 function stampPath(): string {
-  return `${path.join(hermesHome(), "config.yaml")}.clawbox-voice-standdown.json`;
+  return untraced(`${path.join(hermesHome(), "config.yaml")}.clawbox-voice-standdown.json`);
 }
 
 /** Contains selection history only, never the cloud credential. */

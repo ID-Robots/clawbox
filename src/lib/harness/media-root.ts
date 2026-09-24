@@ -1,4 +1,4 @@
-import path from "path";
+import path from "@/lib/runtime-path";
 import fsp from "fs/promises";
 import { getActiveHarness } from "@/lib/harness";
 import { OPENCLAW_HOME } from "@/lib/openclaw-config";

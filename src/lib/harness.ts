@@ -8,7 +8,7 @@
 // Settings picker both read it.
 
 import fs from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { getKnown, swap } from "@/lib/config-store";
 import { envPort } from "@/lib/port-probe";
 import { verifyDualLicense } from "@/lib/edition-license";

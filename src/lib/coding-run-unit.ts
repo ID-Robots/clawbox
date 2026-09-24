@@ -26,7 +26,7 @@
  */
 import { execFile } from "child_process";
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);

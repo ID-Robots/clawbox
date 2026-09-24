@@ -206,6 +206,15 @@ build_error_in_log() {
   awk '/Build error occurred/ { hit = 1 } END { exit hit ? 0 : 1 }' "$1"
 }
 
+# A route whose traced files Next could not copy: it catches that error, prints
+# this line and exits 0, and the build it leaves is short of the file. The
+# same verdict run_next_build in install.sh gives it: one retry, then a failed
+# build. Before TASK-1102 this was data/ churning under the build. Traces no
+# longer reach data/ (src/lib/runtime-path.ts), so what is left is a real hole.
+copy_failure_in_log() {
+  awk '/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$1"
+}
+
 # Park the serving build at $KEPT_DIR so a failed build can be undone — the
 # same move install.sh's set_previous_build_aside makes, and read that function
 # for the reasoning; only the shape is repeated here.
@@ -427,29 +436,35 @@ for BUILD_ATTEMPT in 1 2; do
   if [ -n "$BUILD_LOG" ]; then
     if run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN run build" 2>&1 | tee "$BUILD_LOG"; then
       BUILD_RC=0
-      break
+    else
+      # The BUILD's status, never the pipeline's: a log this script could not
+      # write must not turn a build that worked into a failed recovery.
+      BUILD_RC=${PIPESTATUS[0]}
     fi
-    # The BUILD's status, never the pipeline's: a log this script could not
-    # write must not turn a build that worked into a failed recovery.
-    BUILD_RC=${PIPESTATUS[0]}
-    if [ "$BUILD_RC" -eq 0 ]; then break; fi
+    # Done, unless Next reported a traced file it could not copy (below).
+    if [ "$BUILD_RC" -eq 0 ] && ! copy_failure_in_log "$BUILD_LOG"; then break; fi
   else
     if run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN run build"; then BUILD_RC=0; else BUILD_RC=$?; fi
     break
   fi
   if [ "$BUILD_ATTEMPT" -eq 2 ]; then break; fi
+  # Both shapes of the race, the fatal copy and the one Next only warns about.
   # One awk, not two greps in a pipe — see run_next_build in install.sh.
-  awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$BUILD_LOG" || break
+  awk '/ENOENT.*copyfile/ { hit = 1 } END { exit hit ? 0 : 1 }' "$BUILD_LOG" || break
   echo "[force-update] A file the build was tracing changed while it ran — building once more"
 done
 
-# Three verdicts, and the build has to pass all of them before anything is
-# restarted onto it: its exit status, its own output, and what it left on disk.
+# Four verdicts, and the build has to pass all of them before anything is
+# restarted onto it: its exit status, its own output (twice), and what it left
+# on disk.
 if [ "$BUILD_RC" -ne 0 ]; then
   give_up "Build failed (exit $BUILD_RC)" "$BUILD_RC"
 fi
 if [ -n "$BUILD_LOG" ] && build_error_in_log "$BUILD_LOG"; then
   give_up "Build failed (it exited 0, but printed \"Build error occurred\")" 1
+fi
+if [ -n "$BUILD_LOG" ] && copy_failure_in_log "$BUILD_LOG"; then
+  give_up "Build failed (it exited 0, but could not copy every traced file into .next/standalone)" 1
 fi
 if ! verify_build_present; then
   give_up "Build failed (it exited 0, but left no build the dashboard can serve)" 1
