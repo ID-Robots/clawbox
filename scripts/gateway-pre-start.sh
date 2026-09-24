@@ -4400,6 +4400,14 @@ rows[plugin_id] = {
     # either way: a re-file changes the stage, never which package it is.
     "spec": os.environ.get("CLAWBOX_REPAIR_SPEC") or previous_spec,
 }
+# THE UPDATER'S AFTER-UPDATE RETRY IS KEPT the same way (TASK-1088):
+# `retriedCore` records the core release that retry was already spent on, and a
+# boot that fails the same row again has not given it that retry — dropping the
+# field would buy the row a second one on the same core. The updater's
+# in-progress stamp is the opposite and is NOT carried: a re-file is the end of
+# an attempt, and a row that went on saying "Repairing…" would be a lie.
+if isinstance(existing, dict) and isinstance(existing.get("retriedCore"), str) and existing["retriedCore"]:
+    rows[plugin_id]["retriedCore"] = existing["retriedCore"]
 directory = os.path.dirname(path) or "."
 os.makedirs(directory, exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=directory, prefix=".plugin-repair.", suffix=".tmp")
@@ -4510,8 +4518,45 @@ PY
   fi
 }
 
+# Is this entry OFF because an earlier run of this script switched it off?
+#
+# Answers 1 only when BOTH say so: the entry is explicitly `enabled: false` and
+# the repair row on file for this exact key says `disabled: true`. 0 for
+# anything else, including a config or a record this cannot read.
+clawbox_plugin_still_switched_off_by_us() {
+  CLAWBOX_PLUGIN_ID="$1" python3 - "$OPENCLAW_CONFIG" "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null || echo 0
+import json, os, sys
+plugin_id = os.environ["CLAWBOX_PLUGIN_ID"]
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        entries = (json.load(fh).get("plugins") or {}).get("entries") or {}
+    with open(sys.argv[2], encoding="utf-8") as fh:
+        rows = json.load(fh)
+except (OSError, ValueError, AttributeError):
+    print("0"); raise SystemExit(0)
+entry = entries.get(plugin_id) if isinstance(entries, dict) else None
+row = rows.get(plugin_id) if isinstance(rows, dict) else None
+print("1" if isinstance(entry, dict) and entry.get("enabled") is False
+      and isinstance(row, dict) and row.get("disabled") is True else "0")
+PY
+}
+
 # The whole "boot without it" move: switch the entry off if there is one to
 # switch off, record why, and say it in the boot log.
+#
+# A SWITCH-OFF ON RECORD STAYS OURS (TASK-1088). The codex and DeepSeek install
+# blocks retry on every boot while their payload is missing or skewed, and each
+# failure lands here again — with the entry ALREADY off, because a previous boot
+# switched it off. Reading "is it enabled?" alone then answered no, and the row
+# was re-filed `disabled: false`: "ClawBox changed nothing, the owner turned it
+# off". That one bit is what every repair reads to decide it may put the entry
+# back — `clawbox_plugin_repair_clear` here, `clawboxDisabledEntryId` and the
+# updater's after-update retry — so the first failed retry handed a plugin
+# ClawBox had switched off to the owner for good, and the NEXT successful
+# install took the badge away over an entry that stayed off: ClawBox AI, or
+# ChatGPT, "connected" and not running. `clawbox_plugin_reattempt_failed` below
+# already asserts the same thing for the re-attempt block; this is that rule
+# for every other writer.
 clawbox_plugin_boot_without() {
   local id="$1" stage="$2" reason="$3" spec="${4:-}" disabled=0
   if [ "$(clawbox_plugin_entry_enabled "$id")" = "1" ]; then
@@ -4521,6 +4566,9 @@ clawbox_plugin_boot_without() {
     else
       echo "  WARN: could not switch the $id plugin off — the gateway may refuse readiness until it is repaired" >&2
     fi
+  elif [ "$(clawbox_plugin_still_switched_off_by_us "$id")" = "1" ]; then
+    disabled=1
+    echo "  Leaving the $id plugin switched off; Settings shows it as needing repair"
   fi
   clawbox_plugin_repair_mark "$id" "$stage" "$disabled" "$reason" "$spec"
 }
@@ -5554,15 +5602,26 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   # log a warning and let the gateway start anyway. Codex is one provider;
   # a degraded Codex is far better than a dead box, and the next boot (or a
   # manual `openclaw plugins install`) can still repair it.
-  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force "${CODEX_CAPABILITY_ARGS[@]}" >/dev/null 2>&1; then
+  #
+  # CAPTURED, not discarded (TASK-1088), exactly as the consent arm below has
+  # been since TASK-785. The row this arm files said "the device may be offline"
+  # on a box whose install had in fact been refused by a core that could not
+  # open its own state store — a guess, sitting where the owner reads the cause,
+  # over a failure the core had named. `clawbox_run_openclaw_capture` also adds
+  # the `-k 5` every other timed CLI call here has.
+  CODEX_INSTALL_RC=0
+  clawbox_run_openclaw_capture 120 plugins install "$CODEX_SPEC" --force "${CODEX_CAPABILITY_ARGS[@]}" \
+    || CODEX_INSTALL_RC=$?
+  if [ "$CODEX_INSTALL_RC" = "0" ]; then
     echo "  Codex runtime plugin installed/repaired ($CODEX_SPEC)"
     clawbox_plugin_repair_clear codex
   else
     # NOT "gateway will still start" any more — see the "Booting WITHOUT a
     # plugin" block above for why that sentence was false under OpenClaw 2.
-    echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; booting without Codex"
+    CODEX_INSTALL_CAUSE="$(clawbox_plugin_cli_cause "openclaw plugins install" "$CODEX_INSTALL_RC" "$CLAWBOX_CLI_OUT")"
+    echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; booting without Codex.$CODEX_INSTALL_CAUSE"
     clawbox_plugin_boot_without codex install \
-      "The ChatGPT (Codex) plugin could not be installed. The device may be offline, or the package registry unreachable." \
+      "The ChatGPT (Codex) plugin could not be installed. The device may be offline, or the package registry unreachable.$CODEX_INSTALL_CAUSE" \
       "$CODEX_SPEC"
   fi
 elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
@@ -5758,7 +5817,10 @@ MANAGEDPY
         CLAWBOX_CONSENT_STATES=""
         CLAWBOX_CONSENT_STATES_READY=0
         CLAWBOX_CONSENT_POSTWRITE_READY=0
-        if timeout -k 5 120 "$OPENCLAW_BIN" plugins install "$MANAGED_PLUGIN_SPEC" --force --accept-capabilities </dev/null >/dev/null 2>&1; then
+        MANAGED_REINSTALL_RC=0
+        clawbox_run_openclaw_capture 120 plugins install "$MANAGED_PLUGIN_SPEC" --force --accept-capabilities \
+          || MANAGED_REINSTALL_RC=$?
+        if [ "$MANAGED_REINSTALL_RC" = "0" ]; then
           echo "  $MANAGED_PLUGIN plugin payload reinstalled ($MANAGED_PLUGIN_SPEC)"
           clawbox_plugin_repair_clear "$MANAGED_PLUGIN"
           continue
@@ -5766,10 +5828,11 @@ MANAGEDPY
         # The reinstall was the repair and it did not work, so readiness would
         # stay blocked on this entry. The marker carries the SPEC this script
         # tried, so the Settings Retry re-runs the pinned install rather than
-        # resolving @latest.
+        # resolving @latest — and, since TASK-1088, the install's own refusal,
+        # which was thrown away here while the consent arm below kept its.
         echo "  WARN: could not reinstall the $MANAGED_PLUGIN plugin payload ($MANAGED_PLUGIN_SPEC); booting without it"
         clawbox_plugin_boot_without "$MANAGED_PLUGIN" install \
-          "The plugin payload is missing and could not be reinstalled, so the gateway would refuse to start with it enabled." \
+          "The plugin payload is missing and could not be reinstalled, so the gateway would refuse to start with it enabled.$(clawbox_plugin_cli_cause "openclaw plugins install" "$MANAGED_REINSTALL_RC" "$CLAWBOX_CLI_OUT")" \
           "$MANAGED_PLUGIN_SPEC"
         continue
         ;;
@@ -5850,7 +5913,10 @@ fi
 # different one. No payload reinstall here either — a re-attempt that hits
 # `Plugin not found` re-files the row as the `install` it needs, with the pinned
 # spec, and leaves that 120 s repair to the Retry and the updater, which have
-# the budget for it.
+# the budget for it. (The updater's half is `plugin-repair-after-update.ts`
+# since TASK-1088: once per core it installs, for Codex and the DeepSeek
+# provider — the journal-driven repair never saw a plugin this script had
+# switched off, because the gateway does not refuse one that is off.)
 #
 # WEAKER PROOF THAN THE RETRY'S, on purpose and worth naming: this verifies
 # against the cheap `plugins inspect --all --json` snapshot, while
@@ -7248,14 +7314,31 @@ PY
       DEEPSEEK_PLUGIN_PINNED="${DEEPSEEK_PLUGIN_SPEC}@${CLAWBOX_OPENCLAW_EFFECTIVE}"
     fi
     echo "  Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it; ClawBox AI needs it)..."
-    if [ -n "$DEEPSEEK_PLUGIN_PINNED" ] \
-      && timeout 180 "$OPENCLAW_BIN" plugins install "$DEEPSEEK_PLUGIN_PINNED" --accept-capabilities </dev/null; then
-      echo "  DeepSeek provider plugin installed ($DEEPSEEK_PLUGIN_PINNED)"
-      clawbox_plugin_repair_clear deepseek
-    elif timeout 180 "$OPENCLAW_BIN" plugins install "$DEEPSEEK_PLUGIN_SPEC" --accept-capabilities </dev/null; then
-      echo "  DeepSeek provider plugin installed ($DEEPSEEK_PLUGIN_SPEC)"
+    # CAPTURED (TASK-1088), like the codex install above: the row below used to
+    # say "the device may be offline" whatever the core had actually answered.
+    # The FIRST refusal is the one kept — the pinned spec is the one the row
+    # records and the Retry runs, and the unpinned one is only its fallback.
+    DEEPSEEK_INSTALL_RC=""
+    DEEPSEEK_INSTALL_OUT=""
+    DEEPSEEK_INSTALLED=""
+    for DEEPSEEK_TRY_SPEC in $DEEPSEEK_PLUGIN_PINNED $DEEPSEEK_PLUGIN_SPEC; do
+      DEEPSEEK_TRY_RC=0
+      clawbox_run_openclaw_capture 180 plugins install "$DEEPSEEK_TRY_SPEC" --accept-capabilities \
+        || DEEPSEEK_TRY_RC=$?
+      if [ "$DEEPSEEK_TRY_RC" = "0" ]; then
+        DEEPSEEK_INSTALLED="$DEEPSEEK_TRY_SPEC"
+        break
+      fi
+      if [ -z "$DEEPSEEK_INSTALL_RC" ]; then
+        DEEPSEEK_INSTALL_RC="$DEEPSEEK_TRY_RC"
+        DEEPSEEK_INSTALL_OUT="$CLAWBOX_CLI_OUT"
+      fi
+    done
+    if [ -n "$DEEPSEEK_INSTALLED" ]; then
+      echo "  DeepSeek provider plugin installed ($DEEPSEEK_INSTALLED)"
       clawbox_plugin_repair_clear deepseek
     else
+      DEEPSEEK_INSTALL_CAUSE="$(clawbox_plugin_cli_cause "openclaw plugins install" "${DEEPSEEK_INSTALL_RC:-1}" "$DEEPSEEK_INSTALL_OUT")"
       # STATED PRECISELY, because this one is not fully repairable from here.
       # The readiness refusal for DeepSeek comes from a CONFIGURED PROVIDER with
       # no plugin behind it, not from an enabled plugin entry — so switching an
@@ -7264,9 +7347,9 @@ PY
       # AI off the box without the owner asking. The marker is what makes the
       # difference visible in Settings instead of leaving a boot loop nobody can
       # read.
-      echo "  WARN: could not install @openclaw/deepseek-provider; recording it for repair in Settings"
+      echo "  WARN: could not install @openclaw/deepseek-provider; recording it for repair in Settings.$DEEPSEEK_INSTALL_CAUSE"
       clawbox_plugin_boot_without deepseek install \
-        "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. The device may be offline, or the package registry unreachable." \
+        "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. The device may be offline, or the package registry unreachable.$DEEPSEEK_INSTALL_CAUSE" \
         "${DEEPSEEK_PLUGIN_PINNED:-$DEEPSEEK_PLUGIN_SPEC}"
     fi
   fi

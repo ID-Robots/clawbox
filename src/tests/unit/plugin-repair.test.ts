@@ -287,3 +287,86 @@ describe("plugin-repair — recording a row from the server side", () => {
     expect(pluginHasSettingsRow("vydra")).toBe(false);
   });
 });
+
+// TASK-1088: the two fields the after-update retry and the "Repairing…" state
+// add, and the clear that no longer deletes a failure filed while it ran.
+describe("plugin-repair — a repair in flight, and one already spent (TASK-1088)", () => {
+  const codex = {
+    id: "codex", stage: "install", reason: "offline", atMs: 7, disabled: true, spec: "@openclaw/codex@2026.9.3",
+  };
+
+  it("reads a row written before the fields existed exactly as before", async () => {
+    write({ codex });
+    const { readPluginRepairs } = await load();
+    expect((await readPluginRepairs()).codex).toEqual(codex);
+  });
+
+  it("stamps a row as being repaired without moving the atMs a clear compares against", async () => {
+    write({ codex, deepseek: { ...codex, id: "deepseek", atMs: 9 } });
+    const { readPluginRepairs, setPluginRepairInProgress, pluginRepairInProgress } = await load();
+
+    expect(await setPluginRepairInProgress("@openclaw/codex", true, { retriedCore: "2026.9.4" })).toBe(true);
+    const rows = await readPluginRepairs();
+    expect(rows.codex.atMs).toBe(7);
+    expect(rows.codex.retriedCore).toBe("2026.9.4");
+    expect(pluginRepairInProgress(rows.codex)).toBe(true);
+    expect(rows.deepseek.repairingSinceMs).toBeUndefined();
+
+    expect(await setPluginRepairInProgress("codex", false)).toBe(true);
+    const after = (await readPluginRepairs()).codex;
+    expect(pluginRepairInProgress(after)).toBe(false);
+    // The retry stays spent: ending the attempt does not give it back.
+    expect(after.retriedCore).toBe("2026.9.4");
+  });
+
+  it("answers that there was nothing to stamp on a box with no such row", async () => {
+    const { setPluginRepairInProgress } = await load();
+    expect(await setPluginRepairInProgress("codex", true)).toBe(false);
+  });
+
+  it("does not believe a stamp older than the ceiling, or one from the future", async () => {
+    const { pluginRepairInProgress, PLUGIN_REPAIR_IN_PROGRESS_MS } = await load();
+    const now = 1_000_000_000;
+    const row = { ...codex, stage: "install" as const };
+    expect(pluginRepairInProgress({ ...row, repairingSinceMs: now - 1_000 }, now)).toBe(true);
+    expect(pluginRepairInProgress({ ...row, repairingSinceMs: now - PLUGIN_REPAIR_IN_PROGRESS_MS }, now)).toBe(false);
+    expect(pluginRepairInProgress({ ...row, repairingSinceMs: now + 60_000 }, now)).toBe(false);
+    expect(pluginRepairInProgress(row, now)).toBe(false);
+  });
+
+  it("keeps the spent retry across a re-file, and drops the in-progress stamp", async () => {
+    write({ codex: { ...codex, retriedCore: "2026.9.4", repairingSinceMs: 5 } });
+    const { readPluginRepairs, recordPluginRepair } = await load();
+
+    await recordPluginRepair({ id: "codex", stage: "install", reason: "still refused", disabled: true, spec: "" });
+
+    const row = (await readPluginRepairs()).codex;
+    expect(row.retriedCore).toBe("2026.9.4");
+    expect(row.repairingSinceMs).toBeUndefined();
+    expect(row.spec).toBe("@openclaw/codex@2026.9.3");
+    expect(row.reason).toBe("still refused");
+  });
+
+  it("clears the row it set out to repair", async () => {
+    write({ codex, discord: { ...codex, id: "discord" } });
+    const { readPluginRepairs, clearPluginRepairUnlessRefiled } = await load();
+    expect(await clearPluginRepairUnlessRefiled("codex", 7)).toBe("cleared");
+    expect(Object.keys(await readPluginRepairs())).toEqual(["discord"]);
+  });
+
+  it("leaves a row the restart's boot script filed again while the repair ran", async () => {
+    // The restart that loads the repaired plugin runs the boot script, which
+    // switches it off again and re-files the row when the core still refuses
+    // it. That fresh row is the truth; deleting it was the badge going over a
+    // plugin that stayed off.
+    write({ codex: { ...codex, atMs: 99, reason: "refused at start" } });
+    const { readPluginRepairs, clearPluginRepairUnlessRefiled } = await load();
+    expect(await clearPluginRepairUnlessRefiled("codex", 7)).toBe("refiled");
+    expect((await readPluginRepairs()).codex.reason).toBe("refused at start");
+  });
+
+  it("says a row the boot script cleared itself is gone", async () => {
+    const { clearPluginRepairUnlessRefiled } = await load();
+    expect(await clearPluginRepairUnlessRefiled("codex", 7)).toBe("absent");
+  });
+});

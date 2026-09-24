@@ -114,6 +114,30 @@ vi.mock("@/lib/plugin-repair", () => ({
   readPluginRepairs: mockReadPluginRepairs,
   clawboxDisabledEntryId: mockClawboxDisabledEntryId,
   recordPluginRepair: mockRecordPluginRepair,
+  // The TASK-1088 half of the same file. Inert here: the after-update retry
+  // that calls them is its own module, stubbed below and tested on its own
+  // (plugin-repair-after-update.test.ts).
+  pluginRepairInProgress: vi.fn(() => false),
+  setPluginRepairInProgress: vi.fn(async () => false),
+  clearPluginRepairUnlessRefiled: vi.fn(async () => "absent"),
+}));
+
+// The retry a core update owes the rows an older core left (TASK-1088). Its
+// rule — what is retried, once per core, proved by a gateway that came back —
+// is `plugin-repair-after-update.test.ts`'s; what this suite pins is that the
+// update RUNS it, after the gateway is known healthy, and hands it the
+// update's own quiesce and readiness check.
+const { mockRetryAfterCoreUpdate } = vi.hoisted(() => ({
+  mockRetryAfterCoreUpdate: vi.fn<(hooks: {
+    release: () => Promise<string | null>;
+    quiesce: <T>(operation: () => Promise<T>) => Promise<T>;
+    restartAndVerify: () => Promise<void>;
+  }) => Promise<{ release: string | null; repaired: string[]; failed: string[] }>>(
+    async () => ({ release: null, repaired: [], failed: [] }),
+  ),
+}));
+vi.mock("@/lib/plugin-repair-after-update", () => ({
+  retryPluginRepairsAfterCoreUpdate: mockRetryAfterCoreUpdate,
 }));
 
 import { get, set, setMany } from "@/lib/config-store";
@@ -2666,6 +2690,23 @@ describe("updater", () => {
         call.includes("systemctl restart clawbox-gateway.service"),
       )).toBe(false);
     });
+
+    it("retries the plugin repairs the old core left once the new one is up (TASK-1088)", async () => {
+      // The core-only update changes the core too, so it owes the same retry
+      // the full update's gateway_verify runs.
+      updater.resetUpdateState();
+
+      expect(updater.startOpenclawUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      expect(mockRetryAfterCoreUpdate).toHaveBeenCalledTimes(1);
+      const restartCalls = mockExecFile.mock.invocationCallOrder.filter((_order, index) =>
+        (mockExecFile.mock.calls[index][1] as string[]).join(" ").includes("systemctl restart clawbox-gateway.service"),
+      );
+      // After the gateway restart the step exists for, never before it.
+      expect(restartCalls.length).toBeGreaterThan(0);
+      expect(Math.min(...restartCalls)).toBeLessThan(mockRetryAfterCoreUpdate.mock.invocationCallOrder[0]);
+    });
   });
 
   describe("checkContinuation", () => {
@@ -2695,6 +2736,64 @@ describe("updater", () => {
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ update_needs_continuation: undefined }),
       );
+    });
+
+    it("retries the plugin repairs an older core left, once the gateway is known healthy (TASK-1088)", async () => {
+      // The 2026.9.3 box: Codex and the DeepSeek provider were switched off by
+      // the boot script against the old core, so the gateway comes through the
+      // update HEALTHY — nothing in its journal for the journal-driven repair to
+      // act on — and before this the two rows were never looked at again.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      let hooks: Parameters<typeof mockRetryAfterCoreUpdate>[0] | undefined;
+      mockRetryAfterCoreUpdate.mockImplementationOnce(async (given) => {
+        hooks = given;
+        return { release: "2026.9.4", repaired: ["codex", "deepseek"], failed: [] };
+      });
+
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      expect(mockRetryAfterCoreUpdate).toHaveBeenCalledTimes(1);
+      // AFTER the health check: a repair can only be proved against a gateway
+      // that was ready without it.
+      expect(mockGatewayUp.mock.invocationCallOrder[0])
+        .toBeLessThan(mockRetryAfterCoreUpdate.mock.invocationCallOrder[0]);
+      // With the update's own quiesce, which masks and stops the gateway so the
+      // store has one writer while plugins are installed.
+      mockExecFile.mockClear();
+      expect(await hooks!.quiesce(async () => "ran")).toBe("ran");
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+      expect(calls.some((call) => call.includes("clawbox-gateway-maintenance.sh enter"))).toBe(true);
+      expect(calls.some((call) => call.includes("systemctl stop clawbox-gateway.service"))).toBe(true);
+      expect(calls.some((call) => call.includes("clawbox-gateway-maintenance.sh leave"))).toBe(true);
+    });
+
+    it("does not fail an update whose gateway is healthy because the plugin retry went wrong", async () => {
+      // The retry is a repair the update offers, not one it depends on: the
+      // gateway was ready WITHOUT those plugins a moment earlier.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      mockRetryAfterCoreUpdate.mockRejectedValueOnce(new Error("could not mask the gateway"));
+
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      expect(mockRetryAfterCoreUpdate).toHaveBeenCalledTimes(1);
+      expect(updater.getUpdateState().steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+    });
+
+    it("never retries plugin repairs on the x64 desktop package, whose gateway is the owner's", async () => {
+      mockX64Integration.mockReturnValue(true);
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      // gateway_verify ran — it is what completed — and handed nothing over.
+      expect(updater.getUpdateState().steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+      expect(mockRetryAfterCoreUpdate).not.toHaveBeenCalled();
     });
 
     it("treats the restart it asked for as expected, not as an interruption", async () => {

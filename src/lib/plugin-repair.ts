@@ -133,9 +133,51 @@ export interface PluginRepairEntry {
    * is what refuses a build that does not fit.
    */
   spec: string;
+  /**
+   * The core release the automatic after-update retry has been spent on
+   * (TASK-1088), absent until one has run.
+   *
+   * THE BOUND on that retry. A core update strands exactly these rows — the
+   * 2026.9.3 → 2026.9.4 box showed both ChatGPT and ClawBox AI as "Needs repair"
+   * over failures recorded against the older core — so the updater retries each
+   * row ClawBox switched off once per core it installs, and this is the record
+   * that it did. A second run on the same core (a resumed update, a re-run)
+   * finds it and does nothing; the next core bump retries again. Every writer
+   * that re-files a row keeps it, like `spec`: a boot that fails the same row
+   * again has not given it the after-update retry.
+   */
+  retriedCore?: string;
+  /**
+   * Set while a repair of this row is RUNNING — the owner's Retry or the
+   * updater's after-update retry — and gone when it ends, epoch ms.
+   *
+   * So the panel can tell the truth in between: "Repairing…" rather than a
+   * Retry that would start a second install over the first. Read through
+   * `pluginRepairInProgress`, which ignores a stamp older than
+   * `PLUGIN_REPAIR_IN_PROGRESS_MS`: a web server killed mid-repair must not
+   * leave a row saying "Repairing…" for ever. Every re-file drops it, because a
+   * re-file is the end of an attempt.
+   */
+  repairingSinceMs?: number;
 }
 
 export type PluginRepairs = Record<string, PluginRepairEntry>;
+
+/**
+ * How long a `repairingSinceMs` stamp is believed.
+ *
+ * Longer than the slowest repair either writer runs — an install (180 s), a
+ * runtime inspect (120 s), an enable and a gateway restart, twice over for the
+ * two plugins the updater may retry together — and short enough that a stamp
+ * left behind by a killed process gives the Retry back within the same sitting.
+ */
+export const PLUGIN_REPAIR_IN_PROGRESS_MS = 20 * 60_000;
+
+/** Is a repair of this row running right now, by its own stamp? */
+export function pluginRepairInProgress(entry: PluginRepairEntry, nowMs: number = Date.now()): boolean {
+  const since = entry.repairingSinceMs;
+  return typeof since === "number" && since <= nowMs && nowMs - since < PLUGIN_REPAIR_IN_PROGRESS_MS;
+}
 
 function parseEntry(key: string, raw: unknown): PluginRepairEntry | null {
   if (!raw || typeof raw !== "object") return null;
@@ -155,7 +197,14 @@ function parseEntry(key: string, raw: unknown): PluginRepairEntry | null {
   // resolve. The key is the fallback for a row written before the field.
   const id = typeof r.id === "string" && r.id.trim() ? r.id.trim() : key;
   const spec = typeof r.spec === "string" ? r.spec.trim() : "";
-  return { id, stage, reason, atMs, disabled: r.disabled === true, spec };
+  const entry: PluginRepairEntry = { id, stage, reason, atMs, disabled: r.disabled === true, spec };
+  // Both optional, and only carried when they are what they say: a row written
+  // before TASK-1088 has neither, and reads exactly as it always did.
+  if (typeof r.retriedCore === "string" && r.retriedCore.trim()) entry.retriedCore = r.retriedCore.trim();
+  if (typeof r.repairingSinceMs === "number" && Number.isFinite(r.repairingSinceMs)) {
+    entry.repairingSinceMs = r.repairingSinceMs;
+  }
+  return entry;
 }
 
 /**
@@ -251,12 +300,83 @@ export async function recordPluginRepair(row: PluginRepairRecord): Promise<void>
   // a caller that cannot build the spec would otherwise wipe the string the
   // Retry needs. A re-file changes the stage, never which package it is.
   const previous = rows[row.id];
-  const previousSpec = previous && typeof previous === "object" && !Array.isArray(previous)
-    ? (previous as { spec?: unknown }).spec
-    : undefined;
-  const spec = row.spec || (typeof previousSpec === "string" ? previousSpec : "");
-  rows[row.id] = { ...row, spec, atMs: Date.now() };
+  const previousRow = previous && typeof previous === "object" && !Array.isArray(previous)
+    ? previous as { spec?: unknown; retriedCore?: unknown }
+    : {};
+  const spec = row.spec || (typeof previousRow.spec === "string" ? previousRow.spec : "");
+  // THE AFTER-UPDATE RETRY IS KEPT the same way (TASK-1088): a re-file by
+  // another writer has not given this row that retry, and dropping the record
+  // would buy it a second one on the same core. The in-progress stamp is the
+  // opposite — a re-file is the END of an attempt — so it is never carried.
+  const retriedCore = row.retriedCore
+    || (typeof previousRow.retriedCore === "string" ? previousRow.retriedCore : undefined);
+  const next: Record<string, unknown> = { ...row, spec, atMs: Date.now() };
+  delete next.repairingSinceMs;
+  if (retriedCore) next.retriedCore = retriedCore;
+  else delete next.retriedCore;
+  rows[row.id] = next;
   await writeRowsAtomically(target, rows);
+}
+
+/**
+ * Read the file for a write that must not lose other rows: a file that EXISTS
+ * and cannot be read throws, an absent or unparseable one is an empty map —
+ * `recordPluginRepair`'s rule, for the two writers below that edit one field.
+ */
+async function readRowsForUpdate(target: string): Promise<Record<string, unknown>> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(target, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+    throw err;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Say that a repair of this row has started (`true`) or ended (`false`),
+ * without touching anything else on it — `atMs` above all, which is what
+ * `clearPluginRepairUnlessRefiled` compares against. Answers whether a row was
+ * there to stamp. Matched on the canonical id, like every reader.
+ *
+ * `retriedCore` spends the after-update retry in the SAME write that starts it
+ * (TASK-1088): a process killed mid-repair has still had its one attempt on
+ * that core, which is what keeps the retry bounded rather than once per crash.
+ */
+export async function setPluginRepairInProgress(
+  id: string,
+  running: boolean,
+  options: { retriedCore?: string } = {},
+): Promise<boolean> {
+  const target = pluginRepairPath();
+  const rows = await readRowsForUpdate(target);
+  const wanted = canonicalPluginId(id);
+  let touched = false;
+  for (const [key, value] of Object.entries(rows)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const row = value as Record<string, unknown>;
+    const rowId = typeof row.id === "string" && row.id.trim() ? row.id.trim() : key;
+    if (canonicalPluginId(rowId) !== wanted) continue;
+    if (running) {
+      row.repairingSinceMs = Date.now();
+      if (options.retriedCore) row.retriedCore = options.retriedCore;
+    } else if ("repairingSinceMs" in row) {
+      delete row.repairingSinceMs;
+    } else {
+      continue;
+    }
+    touched = true;
+  }
+  if (touched) await writeRowsAtomically(target, rows);
+  return touched;
 }
 
 /**
@@ -305,6 +425,35 @@ export async function clearPluginRepair(id: string): Promise<boolean> {
   for (const key of keys) delete current[key];
   await writeRowsAtomically(pluginRepairPath(), current);
   return true;
+}
+
+/**
+ * `clearPluginRepair`, unless somebody FILED THE ROW AGAIN while the repair ran.
+ *
+ * TASK-1088. Both repairs end in a gateway restart, and the restart runs
+ * `scripts/gateway-pre-start.sh`, which asks the core about this very plugin
+ * and — when the answer is still no — switches it off again and re-files the
+ * row with a fresh `atMs` and the cause. A clear by id after that deleted the
+ * failure the boot script had just recorded: the badge went, the plugin stayed
+ * off, and the Providers page said "connected" over a provider that could not
+ * run. So the caller passes the `atMs` of the row it set out to repair, and a
+ * row whose `atMs` has moved is left exactly as it is.
+ *
+ * `"absent"` is a success too: the boot script's own consent loop clears the
+ * row itself when the restarted core confirms the plugin.
+ */
+export async function clearPluginRepairUnlessRefiled(
+  id: string,
+  atMs: number,
+): Promise<"cleared" | "absent" | "refiled"> {
+  const current = await readPluginRepairs();
+  const wanted = canonicalPluginId(id);
+  const keys = Object.keys(current).filter((key) => canonicalPluginId(current[key].id) === wanted);
+  if (keys.length === 0) return "absent";
+  if (keys.some((key) => current[key].atMs !== atMs)) return "refiled";
+  for (const key of keys) delete current[key];
+  await writeRowsAtomically(pluginRepairPath(), current);
+  return "cleared";
 }
 
 /**

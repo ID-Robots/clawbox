@@ -29,6 +29,7 @@ import { getModelOptions, probeStillOwed } from "@/lib/hermes-model-options";
 import { runHermesCli } from "@/lib/hermes-cli";
 import {
   pluginHasSettingsRow,
+  pluginRepairInProgress,
   readPluginRepairs,
   repairFor,
   type PluginRepairStage,
@@ -101,6 +102,13 @@ export interface ProviderStatusRow {
     stage: PluginRepairStage;
     reason: string;
     atMs: number;
+    /**
+     * Present, and true, only while a repair of it is RUNNING — the owner's
+     * Retry or the updater's after-update retry (TASK-1088). The row still
+     * needs repair until that repair is proved; what changes is that the panel
+     * says so instead of offering a second Retry over the first.
+     */
+    repairing?: true;
   };
 }
 
@@ -665,6 +673,7 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
                 stage: repair.stage,
                 reason: repair.reason,
                 atMs: repair.atMs,
+                ...(pluginRepairInProgress(repair) ? { repairing: true as const } : {}),
               },
             }
             : {}),
