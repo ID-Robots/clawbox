@@ -146,19 +146,28 @@ const walk = (dir) => {
 };
 walk("src");
 let n = 0;
+// A name that ends in "/" is a directory: it gets a file to hold. A name that
+// cannot be planted, because another one already holds that path as a file,
+// is skipped rather than crashing the check before it has built anything.
+const plant = (file) => {
+  if (file.endsWith("/")) file += "x";
+  if (fs.existsSync(file)) return false;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "fixture\n");
+    return true;
+  } catch {
+    return false;
+  }
+};
+let planted = 0;
 for (const name of names) {
-  // A name that ends in "/" is a directory: give it a file to hold.
-  const file = path.join(out, String(n++), name.endsWith("/") ? name + "x" : name);
-  if (!file.startsWith(out + path.sep)) continue;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, "fixture\n");
+  const file = path.join(out, String(n++), name); // keeps a trailing "/"
+  if (file.startsWith(out + path.sep) && plant(file)) planted++;
 }
-for (const rel of exact) {
-  if (fs.existsSync(rel)) continue;
-  fs.mkdirSync(path.dirname(rel), { recursive: true });
-  fs.writeFileSync(rel, "fixture\n");
-}
-console.log(`check-build-isolation: planted ${n} file names the server code can build under ${out}, and ${exact.size} it names outright`);
+let named = 0;
+for (const rel of exact) if (plant(rel)) named++;
+console.log(`check-build-isolation: planted ${planted} file names the server code can build under ${out}, and ${named} it names outright`);
 NODE
 
 # 2. Files that appear and vanish for as long as the build runs, the way a live

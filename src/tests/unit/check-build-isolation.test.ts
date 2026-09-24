@@ -121,6 +121,24 @@ describe("scripts/check-build-isolation.sh", () => {
     expectNothingLeft();
   });
 
+  it("plants a directory-shaped name, skips one it cannot plant, and still reaches a verdict", () => {
+    // A literal ending in "/" crashed the planting with EISDIR, and one under
+    // a path the fixture already holds as a file crashed it with ENOTDIR:
+    // CI got a node stack trace instead of an answer about the build.
+    fs.writeFileSync(
+      path.join(root, "src", "lib", "defaults.ts"),
+      'export const APPS = "/home/clawbox/clawbox/data/webapps/";\n'
+        + 'export const BAD = "/home/clawbox/clawbox/data/config.json/sub";\n'
+        + "export const SESSIONS = (d: string) => `${d}/sessions/`;\n",
+    );
+
+    const r = run("clean");
+
+    expect(r.status, r.output).toBe(0);
+    expect(r.stdout).toContain("check-build-isolation: OK");
+    expectNothingLeft();
+  });
+
   it.each([
     ["traces-data", "data/coding-agent-streams/run-fixture.err"],
     ["traces-worktree", ".clawbox/worktrees/run-fixture/notes.txt"],
