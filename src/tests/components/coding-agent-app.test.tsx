@@ -877,6 +877,23 @@ describe("CodingAgentApp", () => {
       }
     });
 
+    it("resumes an Anthropic run on Anthropic — the wrapper's default would look in ~/.claude-ds and find no such session", async () => {
+      const session = "1dd8db8b-5c1e-4f0a-9d2b-3e4f5a6b7c8d";
+      const anthropic = { ...RUN, id: "run-anthro01", provider: "anthropic", sessionId: session };
+      stubFetch({ enabled: true, readiness: READY }, [anthropic], { projects: [SITE_PROJECT] });
+      const opened: string[] = [];
+      const onTerminal = (e: Event) => opened.push((e as CustomEvent<{ command: string }>).detail.command);
+      window.addEventListener("clawbox:open-terminal", onTerminal);
+      try {
+        render(<CodingAgentApp />);
+        await openRuns();
+        fireEvent.click(await screen.findByTestId("coding-agent-terminal-run-anthro01"));
+        expect(opened).toEqual([`cd '${RUN.directory}' && CLAUDE_DS_PROVIDER=anthropic claude-ds --resume '${session}'`]);
+      } finally {
+        window.removeEventListener("clawbox:open-terminal", onTerminal);
+      }
+    });
+
     it("labels a review pass with the run it reviewed, and a tap opens that run's page", async () => {
       // The record carries reviewOf but the row used to read as an ordinary
       // run whose task was a wall of the fixed review text.

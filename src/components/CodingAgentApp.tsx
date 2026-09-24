@@ -812,6 +812,7 @@ export default function CodingAgentApp() {
       // Resume is the control that brings the copy back.
       directory: run.worktree?.removed ? null : run.directory,
       live: run.status === "running",
+      provider: run.provider ?? null,
     });
     if (!command) return;
     window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command } }));

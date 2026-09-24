@@ -2599,7 +2599,7 @@ describe("the team's spawn slot", () => {
 
 it("encodes dotted, spaced and underscored worktree transcript directories like the CLI", () => {
   const directory = path.join(home, "Projects", "my_app", ".clawbox", "worktrees", "t1 1");
-  const actual = lib.transcriptPath({ sessionId: "sess-123", directory });
+  const actual = lib.transcriptPath({ sessionId: "sess-123", directory, provider: "clawbox-ai" });
   expect(actual).toBe(path.join(home, ".claude-ds", "projects", directory.replace(/[^a-zA-Z0-9]/g, "-"), "sess-123.jsonl"));
 });
 

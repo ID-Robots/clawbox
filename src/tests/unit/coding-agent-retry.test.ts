@@ -178,6 +178,7 @@ describe("finding a run's transcript", () => {
     const p = lib.transcriptPath({
       sessionId: "74a566d4-ff46-4c7c-948a-fae8bf244479",
       directory: "/home/clawbox/clawbox/data/code-projects/system-dashboard",
+      provider: "clawbox-ai",
     });
     // Verified against a real live run on the box: every slash becomes a dash.
     expect(p).toMatch(/projects\/-home-clawbox-clawbox-data-code-projects-system-dashboard\//);
@@ -186,6 +187,6 @@ describe("finding a run's transcript", () => {
 
   it("has nothing to offer until the run has a session", async () => {
     const lib = await import("@/lib/coding-agent");
-    expect(lib.transcriptPath({ sessionId: null, directory: "/home/clawbox/Projects" })).toBeNull();
+    expect(lib.transcriptPath({ sessionId: null, directory: "/home/clawbox/Projects", provider: "clawbox-ai" })).toBeNull();
   });
 });
