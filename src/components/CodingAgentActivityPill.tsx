@@ -210,7 +210,7 @@ function StepChip({ step, label, detail, onClick, title }: {
 }
 
 export default function CodingAgentActivityPill(
-  { run, labels, openLabel, onOpen, onPreview, onDismiss }: {
+  { run, labels, openLabel, onOpen, onPreview, onDismiss, autoHiding = false }: {
     run: CodingAgentActivity;
     /**
      * One per status, plus the owner-started variant of "running", plus the
@@ -230,6 +230,12 @@ export default function CodingAgentActivityPill(
      * top), so the card only asks; with no handler there is no × at all.
      */
     onDismiss?: () => void;
+    /**
+     * The run just finished cleanly and the chat will put this card away on
+     * its own (src/lib/use-coding-run-auto-hide.ts). The card only fades out
+     * at the end of that countdown; the chat owns the clock and the removal.
+     */
+    autoHiding?: boolean;
   },
 ) {
   const live = run.status === "running";
@@ -326,6 +332,7 @@ export default function CodingAgentActivityPill(
       data-testid="coding-agent-activity"
       data-status={run.status}
       data-expanded={expanded ? "true" : "false"}
+      className={autoHiding ? "coding-agent-autohide" : undefined}
       role="status"
       // The elapsed time re-renders every second. Inside a polite live region
       // that makes a screen reader announce the whole card on every tick for

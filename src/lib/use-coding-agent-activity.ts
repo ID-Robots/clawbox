@@ -30,8 +30,10 @@ import { isPrPending, type PrState } from "@/lib/coding-pr-state";
  * Stays, that is, until the OWNER puts it away: the card carries a × and the
  * chat keeps the dismissed run ids (ChatPopup's `dismissedCodingRuns`), with
  * one small 🤖 chip at the end of the transcript that brings every dismissed
- * card back in its place. This hook knows nothing of that — a dismissed run
- * is still a run it holds and polls; only the card is not drawn.
+ * card back in its place. A card whose run the chat SAW finish cleanly also
+ * goes on its own after five seconds (src/lib/use-coding-run-auto-hide.ts),
+ * behind the same chip. This hook knows nothing of either — a hidden run is
+ * still a run it holds and polls; only the card is not drawn.
  *
  * WHAT IT ADOPTS, AND WHAT IT LEAVES ALONE
  *
