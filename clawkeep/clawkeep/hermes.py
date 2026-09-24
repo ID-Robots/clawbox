@@ -90,15 +90,25 @@ import logging
 import os
 import shutil
 import sqlite3
+import stat
 import tarfile
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .openclaw import Archive
+from .openclaw import FAILURE_DUPLICATE, Archive, Failure
 
 log = logging.getLogger(__name__)
+
+#: The `skipped[].reason` for a file or asset that was listed and then gone by
+#: the time it was read — the agent deleted or rotated it mid-backup. Recorded
+#: so the manifest says it, never a whole failed backup.
+VANISHED = "vanished during backup"
+
+#: A file larger than this is spooled to the 0700 staging directory rather
+#: than held in memory while it is snapshotted.
+_SNAPSHOT_SPOOL_BYTES = 8 * 1024 * 1024
 
 #: Identifies which agent wrote an archive. Lands in the manifest as `agent`
 #: and is what lets a restore refuse a snapshot that belongs to the other
@@ -114,8 +124,13 @@ SCHEMA_VERSION = 1
 class HermesError(Exception):
     """Anything that stops a Hermes archive being built or verified.
 
-    Mirrors `openclaw.OpenclawError` so `runner` can catch one union type.
+    Mirrors `openclaw.OpenclawError` so `runner` can catch one union type —
+    `failure` included, which `runner` reads for the exit code.
     """
+
+    def __init__(self, message: str, *, failure: Failure | None = None) -> None:
+        super().__init__(message)
+        self.failure = failure
 
 
 @dataclass(frozen=True)
@@ -267,6 +282,112 @@ def _is_transient(rel: Path) -> bool:
     return rel.name.endswith(TRANSIENT_SUFFIXES)
 
 
+def _walk(src: Path, *, kind: str, skipped: list[dict[str, str]]) -> list[Path]:
+    """Everything under `src`, sorted, never following a link.
+
+    `os.scandir`, not `Path.rglob`: on the Python 3.10 the device ships, a
+    directory that disappears while rglob is inside it — a session folder
+    pruned mid-backup — raises FileNotFoundError out of the generator, and
+    that one folder took the whole backup down with it. Here a directory that
+    is gone is recorded as VANISHED and one that cannot be listed as
+    unreadable, and the walk goes on."""
+    found: list[Path] = []
+    stack = [src]
+    while stack:
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as it:
+                entries = list(it)
+        except (FileNotFoundError, NotADirectoryError):
+            if directory != src:
+                skipped.append({
+                    "kind": kind, "path": directory.relative_to(src).as_posix(), "reason": VANISHED,
+                })
+            continue
+        except OSError as e:
+            log.warning("skipping unreadable %s: %s", directory, e)
+            skipped.append({
+                "kind": kind,
+                "path": directory.relative_to(src).as_posix() if directory != src else ".",
+                "reason": f"unreadable: {e}",
+            })
+            continue
+        for entry in entries:
+            path = Path(entry.path)
+            found.append(path)
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(path)
+            except OSError:
+                continue
+    return sorted(found)
+
+
+def _add_file_snapshot(
+    tf: tarfile.TarFile, path: Path, *, arcname: str, spool_dir: Path,
+) -> int:
+    """Add one regular file as ONE consistent read of it.
+
+    `TarFile.add` stats the file, writes a header promising that many bytes,
+    then copies — and a file the agent truncates or rewrites in between ends
+    the copy early with the header already written, leaving every later
+    member misaligned: a corrupt tarball, not a skipped file. Here the file is
+    opened once (without following a link that replaced it), read to its end
+    into a spool, and the header is written for exactly the bytes that were
+    read. A file gone before the open raises FileNotFoundError for the caller
+    to record as VANISHED.
+
+    `O_NONBLOCK` is there so the open itself can never hang: a FIFO that took
+    the file's place between the classification and this open would otherwise
+    park the whole backup until someone writes to it. With it the open returns
+    at once and the `fstat` below refuses it as no longer a regular file."""
+    fd = os.open(
+        path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+    )
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise OSError(f"{path} is no longer a regular file")
+        info = tf.gettarinfo(arcname=arcname, fileobj=fh)
+        # Every name of a hard-linked file travels as its own regular member,
+        # as OpenClaw's archiver does: `gettarinfo` answers a second name with
+        # a data-less LNKTYPE header, and the bytes written after it here
+        # would misalign the rest of the archive.
+        info.type = tarfile.REGTYPE
+        info.linkname = ""
+        with tempfile.SpooledTemporaryFile(
+            max_size=_SNAPSHOT_SPOOL_BYTES, dir=str(spool_dir),
+        ) as spool:
+            shutil.copyfileobj(fh, spool)
+            info.size = spool.tell()
+            spool.seek(0)
+            tf.addfile(info, spool)
+    return info.size
+
+
+def _add_member(
+    tf: tarfile.TarFile, path: Path, *, arcname: str, spool_dir: Path,
+) -> int:
+    """A directory or link as its header; a regular file as a snapshot.
+
+    The entry is classified ONCE, by `gettarinfo` — which lstats it and never
+    follows a link. Looking the name up a second time (what `TarFile.add`
+    does) would let a directory or link that has become a regular file in
+    between be copied by name, header first: exactly the misaligned archive
+    `_add_file_snapshot` exists to prevent. A regular file — including the
+    second name of a hard-linked one, which travels whole here — goes to the
+    snapshot, which re-checks the type against its own descriptor. Everything
+    else is written as a header and nothing more, from the entry that was
+    classified; those headers carry no data, so no later member can shift.
+    A type tar has no member for (a socket) is skipped, as `add` skips it."""
+    info = tf.gettarinfo(str(path), arcname=arcname)
+    if info is None:
+        return 0
+    if info.isreg() or info.islnk():
+        return _add_file_snapshot(tf, path, arcname=arcname, spool_dir=spool_dir)
+    tf.addfile(info)
+    return 0
+
+
 def _add_tree(
     tf: tarfile.TarFile,
     *,
@@ -274,6 +395,8 @@ def _add_tree(
     arcname: str,
     kind: str,
     skipped: list[dict[str, str]],
+    seen: set[str],
+    spool_dir: Path,
 ) -> int:
     """Add `src` (a directory) under `arcname`, returning bytes of regular
     files added. Symlinks are stored as links, not followed — following them
@@ -282,18 +405,31 @@ def _add_tree(
     A member we cannot read is appended to `skipped`, which lands in the
     manifest. One unreadable file must not lose the customer the other
     thousand, but it must not vanish either: a backup quietly missing a file
-    is only discovered at restore, when it is far too late to do anything."""
+    is only discovered at restore, when it is far too late to do anything.
+    A member that is GONE by the time it is read is recorded as VANISHED —
+    the agent deleted it mid-backup, which is not a fault of the box.
+
+    `seen` holds every member name already in the archive: a name is written
+    once, first come first kept, and a second claim on it is recorded rather
+    than written as a duplicate member."""
     total = 0
     tf.add(src, arcname=arcname, recursive=False)
-    for entry in sorted(src.rglob("*")):
+    seen.add(arcname)
+    for entry in _walk(src, kind=kind, skipped=skipped):
         rel = entry.relative_to(src)
         if _is_transient(rel):
             continue
         name = f"{arcname}/{rel.as_posix()}"
+        if name in seen:
+            skipped.append({
+                "kind": kind, "path": rel.as_posix(), "reason": "duplicate archive path",
+            })
+            continue
         try:
-            tf.add(entry, arcname=name, recursive=False)
-            if entry.is_file() and not entry.is_symlink():
-                total += entry.stat().st_size
+            total += _add_member(tf, entry, arcname=name, spool_dir=spool_dir)
+        except FileNotFoundError:
+            skipped.append({"kind": kind, "path": rel.as_posix(), "reason": VANISHED})
+            continue
         except OSError as e:
             log.warning("skipping unreadable %s: %s", entry, e)
             skipped.append({
@@ -301,7 +437,36 @@ def _add_tree(
                 "path": rel.as_posix(),
                 "reason": f"unreadable: {e}",
             })
+            continue
+        seen.add(name)
     return total
+
+
+def _assert_disjoint_sources(wanted: list[HermesAsset]) -> None:
+    """Refuse — before the tarball is opened — two assets whose sources are
+    the same place or one inside the other. Both would be written under one
+    archive path (every member twice), and restore would swap the inner one
+    in and then the outer one over it. Happens only when HERMES_HOME or
+    CLAWBOX_HOME point somewhere unusual; the sentence names both.
+
+    A source that is itself a symlink is left out: it is archived as one link
+    member (or refused, for a directory) and never walked, so it cannot put a
+    second copy of anything in the archive."""
+    resolved = sorted(
+        (os.path.realpath(source_path(asset)), asset.kind, str(source_path(asset)))
+        for asset in wanted
+        if source_path(asset).exists() and not source_path(asset).is_symlink()
+    )
+    for i, (real_a, kind_a, shown_a) in enumerate(resolved):
+        for real_b, kind_b, shown_b in resolved[i + 1:]:
+            if real_a == real_b or real_b.startswith(real_a.rstrip("/") + "/"):
+                raise HermesError(
+                    f"refusing to build the backup: the {kind_a} asset {shown_a!r} and the "
+                    f"{kind_b} asset {shown_b!r} are the same place or one inside the other "
+                    f"({real_b!r}), so both would be written under one archive path. Check "
+                    "HERMES_HOME and CLAWBOX_HOME; nothing was archived",
+                    failure=Failure(FAILURE_DUPLICATE, (shown_a, shown_b)),
+                )
 
 
 def create_archive(
@@ -347,11 +512,16 @@ def create_archive(
 
     manifest_assets: list[dict[str, object]] = []
     skipped: list[dict[str, str]] = []
+    manifest_name = f"{archive_root}/manifest.json"
+    # Every member name written so far, the manifest's reserved from the start.
+    seen: set[str] = {manifest_name}
     # Staging for sqlite snapshots — they cannot be added straight from the
-    # live path. 0700 because `state.db` is conversation history.
+    # live path — and for the file snapshots `_add_file_snapshot` spools.
+    # 0700 because `state.db` is conversation history.
     staging = Path(tempfile.mkdtemp(prefix="clawkeep-hermes-", dir=str(output_dir)))
     try:
         os.chmod(staging, 0o700)
+        _assert_disjoint_sources(wanted)
         with tarfile.open(archive_path, "w:gz") as tf:
             for asset in wanted:
                 target = source_path(asset)
@@ -379,20 +549,41 @@ def create_archive(
                     continue
 
                 arcname = _archive_subpath(archive_root, target)
+                if arcname in seen:
+                    # `_assert_disjoint_sources` makes this unreachable; kept
+                    # so a regression there records instead of duplicating.
+                    skipped.append({"kind": asset.kind, "reason": "duplicate archive path"})
+                    continue
                 try:
                     if asset.sqlite:
                         snap = staging / f"{asset.kind}.db"
-                        _sqlite_snapshot(target, snap)
-                        tf.add(snap, arcname=arcname, recursive=False)
+                        try:
+                            _sqlite_snapshot(target, snap)
+                        except HermesError:
+                            if target.exists():
+                                raise
+                            # Deleted between the look above and the open.
+                            raise FileNotFoundError(target) from None
+                        _add_file_snapshot(tf, snap, arcname=arcname, spool_dir=staging)
                     elif asset.entry == "file":
-                        tf.add(target, arcname=arcname, recursive=False)
+                        _add_member(tf, target, arcname=arcname, spool_dir=staging)
                     else:
                         _add_tree(
                             tf, src=target, arcname=arcname,
                             kind=asset.kind, skipped=skipped,
+                            seen=seen, spool_dir=staging,
                         )
+                    seen.add(arcname)
                 except HermesError:
                     raise
+                except FileNotFoundError:
+                    # Listed a moment ago, gone now: the agent removed it
+                    # while the backup ran. Said in the manifest; the rest of
+                    # the box is still worth backing up.
+                    log.warning("%s (%s) vanished during the backup; recorded as skipped",
+                                asset.kind, target)
+                    skipped.append({"kind": asset.kind, "reason": VANISHED})
+                    continue
                 except OSError as e:
                     raise HermesError(f"could not archive {asset.kind} ({target}): {e}") from e
 
@@ -436,7 +627,7 @@ def create_archive(
                 "skipped": skipped,
             }
             blob = json.dumps(manifest, indent=2).encode("utf-8")
-            info = tarfile.TarInfo(f"{archive_root}/manifest.json")
+            info = tarfile.TarInfo(manifest_name)
             info.size = len(blob)
             info.mtime = int(moment.timestamp())
             info.mode = 0o600
@@ -456,7 +647,11 @@ def create_archive(
         raise HermesError(f"could not stat archive {archive_path}: {e}") from e
 
     if verify:
-        verify_archive(archive_path)
+        try:
+            verify_archive(archive_path, unique_members=True)
+        except HermesError:
+            archive_path.unlink(missing_ok=True)
+            raise
 
     return Archive(
         path=archive_path,
@@ -493,7 +688,7 @@ def read_manifest(archive: Path) -> dict:
     raise HermesError(f"archive {archive} has no top-level manifest.json")
 
 
-def verify_archive(archive: Path) -> None:
+def verify_archive(archive: Path, *, unique_members: bool = False) -> None:
     """The Hermes half of `openclaw backup verify`.
 
     Checks, in order: the tarball opens; it carries a manifest; the manifest
@@ -501,6 +696,11 @@ def verify_archive(archive: Path) -> None:
     actually has bytes under its `archivePath`. That last one is the check
     that matters — a manifest listing an asset the payload does not contain is
     exactly the archive that restores 4 of 5 assets and calls it a success.
+
+    `unique_members` also refuses a member name that appears twice, the rule
+    `openclaw backup verify` applies ("Archive contains duplicate entry
+    path"). `create_archive` asks for it on the archive it just wrote; a
+    restore does not, so a snapshot already in the cloud stays restorable.
     """
     manifest = read_manifest(archive)
     if manifest.get("agent") != AGENT_ID:
@@ -523,9 +723,17 @@ def verify_archive(archive: Path) -> None:
         wanted[sub] = kind
 
     seen: set[str] = set()
+    names: set[str] = set()
     try:
         with tarfile.open(archive, "r:gz") as tf:
             for member in tf:
+                name = member.name.rstrip("/")
+                if unique_members and name in names:
+                    raise HermesError(
+                        f"archive contains duplicate entry path: {name}",
+                        failure=Failure(FAILURE_DUPLICATE, (name,)),
+                    )
+                names.add(name)
                 for sub in wanted:
                     if member.name == sub or member.name.startswith(sub + "/"):
                         seen.add(sub)

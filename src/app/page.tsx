@@ -5,7 +5,6 @@ import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
-import { isProxiedAppUrl, WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import WhatsNewCard from "@/components/WhatsNewCard";
@@ -34,6 +33,7 @@ import CodingAgentApp from "@/components/CodingAgentApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
+import WebappFrame from "@/components/WebappFrame";
 import ChatPopup, { CHAT_PANEL_GAP, noticeColumnInset, type ChatFloatingRect } from "@/components/ChatPopup";
 
 /** How long a coding run's finish card stays on the desktop before it hides itself. */
@@ -2342,21 +2342,10 @@ function ChromeDesktopInner() {
         // Sandboxed to an opaque origin, the same as /app/[id]: the app is HTML
         // the agent wrote, and with allow-same-origin it ran in the desktop's
         // origin with the owner's session. Its persistence goes through the KV
-        // bridge (data-webapp-id is how the bridge knows whose keys to serve).
-        // A project's own server proxied under /apps/<id>/ is the exception
-        // to the ATTRIBUTE: a sandboxed frame's navigation carries no cookie
-        // and that document needs the owner's; the proxy serves it under a
-        // CSP sandbox instead, which boxes it the same way
-        // (src/lib/app-proxy.ts).
-        return (
-          <iframe
-            src={webappSrc}
-            style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
-            sandbox={isProxiedAppUrl(webappSrc) ? undefined : WEBAPP_IFRAME_SANDBOX}
-            data-webapp-id={app.storeApp?.id}
-            title={resolveAppName(app)}
-          />
-        );
+        // bridge (data-webapp-id is how the bridge knows whose keys to serve);
+        // WebappFrame is the one frame both pages draw, the proxied /apps/<id>/
+        // exception and the pre-v4.0 storage import included.
+        return <WebappFrame appId={app.storeApp?.id} src={webappSrc} title={resolveAppName(app)} />;
       }
       case "setup":
         return (

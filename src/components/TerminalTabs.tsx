@@ -58,8 +58,11 @@ export function terminalTabTitle(tab: { id: number; command?: string; title?: st
   if (tab.title?.trim()) return tab.title.trim();
   const first = tab.command?.trim().split(/\s+/)[0];
   if (first) {
-    // `cd '/x' && claude-ds --resume abc` names the thing after the cd.
-    const named = tab.command!.match(/&&\s*(\S+)/)?.[1] ?? first;
+    // `cd '/x' && claude-ds --resume abc` names the thing after the cd, and
+    // `… && CLAUDE_DS_PROVIDER=anthropic claude-ds …` the program, not the
+    // variable set for it.
+    const rest = tab.command!.match(/&&\s*(.*)$/)?.[1] ?? tab.command!;
+    const named = rest.trim().split(/\s+/).find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) ?? first;
     const base = named.split("/").pop() ?? named;
     if (base && base !== "cd") return base;
   }

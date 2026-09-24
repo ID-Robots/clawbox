@@ -697,3 +697,121 @@ def test_failed_run_still_corrects_usage(isolate_state: Path, tmp_path: Path) ->
     final = state.load(isolate_state)
     assert final.last_cloud_bytes == 0
     assert final.last_snapshot_count == 0
+
+
+# ── TASK-1000: archive failures that have a remedy of their own ─────────────
+
+def _run_with_archive_error(tmp_path: Path, error: Exception) -> tuple[int, list[dict], object]:
+    cfg = _cfg(tmp_path)
+    heartbeats: list[dict] = []
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch(
+            "clawkeep.runner.api.heartbeat",
+            side_effect=lambda s, t, **kw: heartbeats.append(kw),
+        ),
+        patch("clawkeep.runner.agent.create_archive", side_effect=error) as create,
+        patch("clawkeep.runner.time.sleep"),
+        patch("clawkeep.runner.s3.upload") as upload,
+    ):
+        rc = runner.run_once(cfg, "claw_x")
+    upload.assert_not_called()
+    return rc, heartbeats, create
+
+
+@pytest.mark.parametrize(
+    ("failure", "exit_code"),
+    [
+        (
+            openclaw.Failure(openclaw.FAILURE_SQLITE, ("/s/logs.sqlite",)),
+            runner.EXIT_ARCHIVE_DB_DAMAGED,
+        ),
+        (
+            openclaw.Failure(openclaw.FAILURE_SYMLINK, ("/s/a", "/elsewhere")),
+            runner.EXIT_ARCHIVE_CONFLICT,
+        ),
+        (
+            openclaw.Failure(openclaw.FAILURE_DUPLICATE, ("/s/a", "/s/A")),
+            runner.EXIT_ARCHIVE_CONFLICT,
+        ),
+        (openclaw.Failure(openclaw.FAILURE_OTHER), runner.EXIT_OPENCLAW),
+    ],
+)
+def test_archive_failures_get_their_own_exit_code(
+    isolate_state: Path, tmp_path: Path, failure: openclaw.Failure, exit_code: int,
+) -> None:
+    rc, heartbeats, create = _run_with_archive_error(
+        tmp_path, OpenclawError("the sentence", failure=failure),
+    )
+    assert rc == exit_code
+    create.assert_called_once()
+    assert heartbeats[-1]["status"] == "error"
+    assert "the sentence" in heartbeats[-1]["error"]
+
+
+def test_the_sentence_of_the_real_cli_is_enough_for_the_exit_code(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """A plain `OpenclawError` carrying only the CLI's English still maps."""
+    rc, _, _ = _run_with_archive_error(tmp_path, OpenclawError(
+        "openclaw backup create failed (rc=1): SQLite database cannot be compacted safely for "
+        "backup: /home/clawbox/.openclaw/logs/logs.sqlite. SQLite integrity_check failed …",
+    ))
+    assert rc == runner.EXIT_ARCHIVE_DB_DAMAGED
+
+
+def test_a_file_that_vanishes_on_every_walk_is_a_bounded_race(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """Any path, not a suffix list: this one is a rotated transcript the old
+    `.jsonl`-only rule happened to catch — and a workspace file it did not."""
+    cfg = _cfg(tmp_path)
+    race = OpenclawError(
+        "Backup archive write failed: ENOENT: no such file or directory, open "
+        "'/home/clawbox/.openclaw/workspace/notes/today.md.tmp-swap' (after 1 attempt)",
+    )
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.agent.create_archive", side_effect=race) as create,
+        patch("clawkeep.runner.time.sleep") as sleep,
+        patch("clawkeep.runner.s3.upload") as upload,
+    ):
+        rc = runner.run_once(cfg, "claw_x")
+
+    assert rc == runner.EXIT_ARCHIVE_BUSY
+    assert create.call_count == runner.ARCHIVE_RACE_ATTEMPTS
+    assert [c.args[0] for c in sleep.call_args_list] == list(runner.ARCHIVE_RACE_DELAYS)
+    upload.assert_not_called()
+
+
+def test_a_race_that_clears_on_a_later_walk_backs_up(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    archive = _archive(tmp_path)
+    race = OpenclawError(
+        "x", failure=openclaw.Failure(openclaw.FAILURE_VANISHED, ("/s/a",), transient=True),
+    )
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.agent.create_archive", side_effect=[race, race, archive]) as create,
+        patch("clawkeep.runner.time.sleep"),
+        patch("clawkeep.runner.s3.upload"),
+        patch("clawkeep.runner.s3.stats", return_value=CloudStats(0, 1)),
+    ):
+        rc = runner.run_once(cfg, "claw_x")
+    assert rc == runner.EXIT_OK
+    assert create.call_count == 3
+
+
+def test_a_vanished_path_the_guard_ruled_out_is_not_retried(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    rc, _, create = _run_with_archive_error(tmp_path, OpenclawError(
+        "ENOENT: no such file or directory, open '/usr/lib/x.mjs'",
+        failure=openclaw.Failure(openclaw.FAILURE_VANISHED, ("/usr/lib/x.mjs",)),
+    ))
+    assert rc == runner.EXIT_OPENCLAW
+    create.assert_called_once()

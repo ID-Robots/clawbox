@@ -51,7 +51,7 @@ export async function DELETE(request: Request) {
  *  the evidence-folder listing. Opt-in because listing is a readdir + a stat
  *  per file on every run returned, and this route is polled every 5s by two
  *  UIs, only one of which renders artifacts. */
-function withDerived<T extends { id: string; sessionId: string | null; directory: string }>(run: T, withArtifacts: boolean) {
+function withDerived<T extends { id: string } & Parameters<typeof transcriptPath>[0]>(run: T, withArtifacts: boolean) {
   return {
     ...run,
     transcriptPath: transcriptPath(run),

@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useMemo, useRef, useCallback, memo } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, memo } from 'react'
 import { createPortal } from 'react-dom'
 
 // ── Gateway WebSocket chat widget ──
@@ -12,6 +12,7 @@ import {
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { useCodingAgentActivity, isCodingAgentTool, type CodingAgentActivity } from '@/lib/use-coding-agent-activity'
+import { useCodingRunAutoHide } from '@/lib/use-coding-run-auto-hide'
 import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
@@ -1086,11 +1087,40 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const dismissCodingRun = useCallback((id: string) => {
     setDismissedCodingRuns(prev => { const next = new Set(prev); next.add(id); return next })
   }, [])
-  const restoreCodingRuns = useCallback(() => setDismissedCodingRuns(new Set()), [])
+  // A card whose run the chat saw finish CLEANLY also goes on its own, five
+  // seconds after it turned green — nothing is left for anyone to do about
+  // it. Anything still going, or needing the owner — a pull request still in
+  // review or left for the owner included — stays. The same 🤖 chip brings
+  // these back too. See src/lib/use-coding-run-auto-hide.ts.
+  //
+  // The owner did not ask for this one to go, so it must not take the
+  // keyboard with it: a card that holds the focus (Tab onto its View, say)
+  // hands it to the 🤖 chip, which appears in the same render and is the way
+  // back to the card. Checked as the clock runs out, while the card is still
+  // in the document; moved once the chip is.
+  const restoreChipRef = useRef<HTMLButtonElement>(null)
+  const focusRestoreChipRef = useRef(false)
+  const {
+    finishing: finishingCodingRuns,
+    hidden: autoHiddenCodingRuns,
+    restore: restoreAutoHiddenCodingRuns,
+  } = useCodingRunAutoHide(codingRuns, (id) => {
+    const focused = document.activeElement?.closest('[data-testid="coding-agent-activity"]')
+    if (focused?.getAttribute('data-run-id') === id) focusRestoreChipRef.current = true
+  })
+  useLayoutEffect(() => {
+    if (!focusRestoreChipRef.current) return
+    focusRestoreChipRef.current = false
+    restoreChipRef.current?.focus()
+  }, [autoHiddenCodingRuns])
+  const restoreCodingRuns = useCallback(() => {
+    setDismissedCodingRuns(new Set())
+    restoreAutoHiddenCodingRuns()
+  }, [restoreAutoHiddenCodingRuns])
   // The cards on screen, and whether the restore chip has anything to restore
   // — measured against the runs the hook still holds, so a stale id from a
   // run the hook let go cannot leave a chip that restores nothing.
-  const shownCodingRuns = codingRuns.filter(run => !dismissedCodingRuns.has(run.id))
+  const shownCodingRuns = codingRuns.filter(run => !dismissedCodingRuns.has(run.id) && !autoHiddenCodingRuns.has(run.id))
   const hiddenCodingRunCount = codingRuns.length - shownCodingRuns.length
   // Every chat control that opens an app window goes through here. On a phone
   // the chat is full screen ABOVE the one window the phone draws, so the
@@ -1166,6 +1196,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Put the card away; the 🤖 chip at the end of the transcript brings
       // it back. See `dismissedCodingRuns` above.
       onDismiss={() => dismissCodingRun(run.id)}
+      // Counting down to leaving on its own: the card fades out at the end.
+      autoHiding={finishingCodingRuns.has(run.id)}
     />
   )
   // The questions the agent is currently parked on, newest last.
@@ -6942,9 +6974,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             report the outcome — a badge that vanished with the run was gone
             before the owner had read the message above it, since runs here
             take 9-15 seconds. See src/lib/use-coding-agent-activity.ts.
-            The one way a card leaves before the chat closes is the owner's
-            own × on it — `dismissedCodingRuns` — and the 🤖 chip at the end
-            of the transcript brings it back where it was. */}
+            A card leaves before the chat closes two ways: the owner's own ×
+            on it — `dismissedCodingRuns` — or five seconds after the chat
+            saw its run finish cleanly — `autoHiddenCodingRuns`. The 🤖 chip
+            at the end of the transcript brings it back where it was. */}
         {/* MAIN TAB ONLY. A run record carries no session key — the hook adopts
             runs by START TIME, not by conversation — so a card drawn in every
             tab claimed the run belonged to whichever chat happened to be open,
@@ -7132,6 +7165,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             style={{ position: 'sticky', bottom: 0, alignSelf: 'flex-end', display: 'flex', justifyContent: 'flex-end', zIndex: 1, pointerEvents: 'none' }}
           >
             <button
+              ref={restoreChipRef}
               type="button"
               data-testid="coding-agent-restore"
               onClick={restoreCodingRuns}

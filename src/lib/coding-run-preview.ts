@@ -3,7 +3,8 @@
  *
  * Live: `scripts/coding-run-preview <transcript>` tails the run's stream-json
  * transcript as it is written. Settled with a session: `claude-ds --resume`
- * in the run's folder, so the owner continues the conversation. Settled with
+ * in the run's folder, on the run's own provider, so the owner continues the
+ * conversation. Settled with
  * only a transcript: the tail again, which prints what happened and stops.
  * Null when the run has none of that yet (a run that has not written its
  * first line).
@@ -27,13 +28,20 @@ export function livePreviewCommand(run: {
   sessionId: string | null;
   directory: string | null;
   live: boolean;
+  /** The run's own provider, from its record. Absent reads as ClawBox AI. */
+  provider?: string | null;
 }): string | null {
   if (run.live && run.transcriptPath) {
     return `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)}`;
   }
   if (run.sessionId && run.directory && SESSION_ID.test(run.sessionId)) {
+    // An Anthropic run's session lives in Claude Code's default ~/.claude, and
+    // the wrapper only looks there — and bills that account — when told to:
+    // left to its default it opens ~/.claude-ds and finds no such session.
+    // A fixed literal, never the field itself, since this is typed into a shell.
+    const provider = run.provider === "anthropic" ? "CLAUDE_DS_PROVIDER=anthropic " : "";
     // Quoted like the paths: the id is run metadata typed into a shell.
-    return `cd ${quoted(run.directory)} && claude-ds --resume ${quoted(run.sessionId)}`;
+    return `cd ${quoted(run.directory)} && ${provider}claude-ds --resume ${quoted(run.sessionId)}`;
   }
   if (run.transcriptPath) {
     return `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)}`;

@@ -22,7 +22,14 @@
  */
 export const WEBAPP_FRAME_ID_ATTR = "data-webapp-id";
 
-export type WebappKvOp = "get" | "set" | "delete" | "list";
+/**
+ * `legacyKv` and `legacyLocalStorage` are the webapp legacy-storage layer's
+ * (src/lib/webapp-legacy-storage-shim.ts): an app built before v4.0 still
+ * calls `fetch('/setup-api/kv')` and `localStorage`, and the script put in
+ * front of it turns those into these two. They reach the same namespace as the
+ * other four — the frame's own app, answered by /setup-api/webapps/storage.
+ */
+export type WebappKvOp = "get" | "set" | "delete" | "list" | "legacyKv" | "legacyLocalStorage";
 
 export interface WebappKvRequest {
   id: string;
@@ -74,6 +81,7 @@ async function errorOf(res: Response): Promise<string> {
 export async function serveWebappKvRequest(appId: string, req: WebappKvRequest): Promise<WebappKvResult> {
   const { id, op } = req;
   try {
+    if (op === "legacyKv" || op === "legacyLocalStorage") return await serveLegacyStorageRequest(appId, id, op, req.value);
     if (op === "list") {
       const res = await fetch(`/setup-api/kv?prefix=${encodeURIComponent(`${appId}:`)}`);
       if (!res.ok) return { id, ok: false, error: await errorOf(res) };
@@ -103,6 +111,48 @@ export async function serveWebappKvRequest(appId: string, req: WebappKvRequest):
   } catch {
     return { id, ok: false, error: "kv request failed" };
   }
+}
+
+/**
+ * The two legacy ops, served for `appId` — the app the frame belongs to,
+ * never one the message names. `legacyKv` answers `{ status, body }` in the
+ * shape v3.9's /setup-api/kv did, which the guest turns back into a Response;
+ * `legacyLocalStorage` applies one batch of the page's localStorage changes.
+ */
+async function serveLegacyStorageRequest(
+  appId: string,
+  id: string,
+  op: "legacyKv" | "legacyLocalStorage",
+  value: unknown,
+): Promise<WebappKvResult> {
+  const payload = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const body =
+    op === "legacyKv"
+      ? {
+          app: appId,
+          op: "kv",
+          request: {
+            method: typeof payload.method === "string" ? payload.method : "GET",
+            search: typeof payload.search === "string" ? payload.search : "",
+            body: typeof payload.body === "string" ? payload.body : "",
+          },
+        }
+      : {
+          app: appId,
+          op: "localStorage",
+          write: {
+            clear: payload.clear === true,
+            set: payload.set && typeof payload.set === "object" ? payload.set : {},
+            remove: Array.isArray(payload.remove) ? payload.remove : [],
+          },
+        };
+  const res = await fetch("/setup-api/webapps/storage", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return { id, ok: false, error: await errorOf(res) };
+  return { id, ok: true, value: await res.json() };
 }
 
 /**

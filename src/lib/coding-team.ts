@@ -822,7 +822,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
       const judged = kept.length + (hintedCount - hinted.length) >= n;
       const harness = kept.some((d) => readOnlyDenial(d.text) && harnessStateDenial(d.text));
       if (judged && !harness && others.every((a) => readOnlyDenial(a) || outsideWrite(a))) {
-        const rest = others.length === 0 ? "" : others.some(outsideWrite) ? "reads, or writes" : "read-only";
+        const rest = others.length === 0 ? "" : others.every(readOnlyDenial) ? "read-only" : "reads, or writes";
         const what = hintedCount > 0
           ? `action(s) that changed nothing — ${hintedCount} aimed at the project instead of its worktree, each answered with a retry hint at the worktree path${rest ? `; the rest ${rest} outside its folder` : ""}`
           : rest === "read-only" ? "read-only action(s) outside its folder" : "action(s) that changed nothing — reads, or writes outside its folder";

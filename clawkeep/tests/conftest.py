@@ -12,6 +12,32 @@ from __future__ import annotations
 import json
 import subprocess
 
+import pytest
+
+from clawkeep import backup_guard
+
+#: The real pre-flight planner, for the suites that test it on purpose.
+REAL_PLAN = backup_guard._plan
+
+
+@pytest.fixture(autouse=True)
+def no_live_backup_plan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """No test may plan — let alone walk — the REAL box's OpenClaw state, or
+    write into the real ClawKeep data dir.
+
+    Every suite that reaches `agent.create_archive` on the OpenClaw edition
+    goes through `backup_guard.create_archive`, whose pre-flight runs
+    `openclaw backup create --dry-run` and walks what it answers. On a machine
+    with the CLI installed that was the developer's own `~/.openclaw`. The
+    guard's suites hand it a plan built from a fixture tree instead. The data
+    dir (the guard's lock and link journal live there) defaults to a fresh
+    temporary one; a suite that wants its own sets it after this runs.
+    """
+    monkeypatch.setattr(backup_guard, "_plan", lambda cfg: None)
+    monkeypatch.setenv("CLAWKEEP_DATA_DIR", str(tmp_path_factory.mktemp("clawkeep-data")))
+
 
 def cli_failure(message: str, *, envelope: bool = True) -> subprocess.CompletedProcess[str]:
     """How `openclaw backup create --dry-run --json` fails, recorded on the

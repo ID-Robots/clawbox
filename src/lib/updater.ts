@@ -689,6 +689,10 @@ import {
 // string work with no `fs` behind it, and taking it from the reader would tie a
 // pure helper to that module's surface for no reason.
 import { canonicalPluginId } from "./plugin-repair-id";
+// The retry a core update owes the rows an older core left (TASK-1088), and
+// the release it is bounded by.
+import { retryPluginRepairsAfterCoreUpdate } from "./plugin-repair-after-update";
+import { currentCoreRelease } from "./plugin-repair-run";
 // The journal of THIS run of a root step, in one place: `systemctl show -p
 // InvocationID` cannot answer it (systemd has collected the instance by the
 // time anyone asks), and the same read is owed to the follow in
@@ -3261,6 +3265,45 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
 }
 
 /**
+ * Retry the plugin repairs an OLDER CORE left behind, once the gateway is known
+ * to be healthy (TASK-1088).
+ *
+ * The journal-driven repair above cannot see them: a plugin the boot script
+ * switched off is never refused by the gateway, so a box whose Codex and
+ * DeepSeek installs failed against OpenClaw 2026.9.3 came through the 2026.9.4
+ * update healthy, with both still switched off and both still "Needs repair".
+ * `plugin-repair-after-update.ts` owns the rule — what is retried, once per
+ * core, proved by a gateway that comes back ready — and this supplies the
+ * update's own quiesce and readiness check to it.
+ *
+ * Not on the x64 desktop package, for the reason `ensureGatewayHealthy` gives:
+ * that gateway is the owner's user service, and the appliance's repairs are not
+ * its to inherit.
+ */
+async function retryPluginRepairsLeftByOlderCore(): Promise<void> {
+  if (hasX64DesktopIntegration(PROJECT_DIR)) return;
+  try {
+    await retryPluginRepairsAfterCoreUpdate({
+      release: currentCoreRelease,
+      quiesce: withGatewayQuiesced,
+      restartAndVerify: () => ensureGatewayHealthy({ restartFirst: true }),
+    });
+  } catch (err) {
+    // A repair the update OFFERS, never one it depends on: the gateway was
+    // healthy without these plugins a moment ago, and a retry that went wrong
+    // must not turn that into a failed update. Bring the gateway back to that
+    // state — the retry has already switched anything it enabled back off —
+    // and fail the step only if it will not come back even then, which is a
+    // dead gateway and the update's to report.
+    console.warn(
+      "[Updater] the after-update plugin repair did not complete:",
+      err instanceof Error ? err.message : err,
+    );
+    await ensureGatewayHealthy();
+  }
+}
+
+/**
  * Say WHY the gateway is not there, in the order of what the owner can act on.
  *
  * A configuration the core refuses outranks anything in the journal, because
@@ -3428,7 +3471,13 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     id: "gateway_verify",
     label: "Verifying gateway health",
     timeoutMs: 90_000,
-    customRun: () => ensureGatewayHealthy(),
+    // Health first: the after-update plugin retry (TASK-1088) restarts the
+    // gateway only when it has something to load, and only a healthy gateway
+    // is one it can prove a repair against.
+    customRun: async () => {
+      await ensureGatewayHealthy();
+      await retryPluginRepairsLeftByOlderCore();
+    },
     failFast: true,
     // The gateway is absent by design on this SKU — port 18789 is closed and
     // the unit is masked — so this step could only ever throw. It also
@@ -4599,7 +4648,11 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
     id: "gateway_restart",
     label: "Restarting OpenClaw gateway",
     timeoutMs: 30_000,
-    customRun: () => ensureGatewayHealthy({ restartFirst: true }),
+    // The core-only update changes the core too, so it owes the same retry.
+    customRun: async () => {
+      await ensureGatewayHealthy({ restartFirst: true });
+      await retryPluginRepairsLeftByOlderCore();
+    },
   },
 ];
 

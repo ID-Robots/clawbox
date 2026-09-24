@@ -383,4 +383,35 @@ describe("kv-store", () => {
       expect(kvStore.kvGetAll()).toEqual({ fresh: "start" });
     });
   });
+
+  // The strict pair the webapp legacy-storage layer moves the owner's data
+  // with: "could not read the file" must never read as "the store is empty",
+  // because the lenient writers above would then write that emptiness back.
+  describe("kvReadStrict / kvUpdateStrict", () => {
+    it("reads an absent file as empty and a present one as it is", () => {
+      expect(kvStore.kvReadStrict()).toEqual({});
+      kvStore.kvSet("a", "1");
+      expect(kvStore.kvReadStrict()).toEqual({ a: "1" });
+    });
+
+    it("throws over a file it cannot parse, and writes nothing over it", async () => {
+      await fs.writeFile(KV_PATH, "{ torn");
+      expect(() => kvStore.kvReadStrict()).toThrow();
+      expect(() => kvStore.kvUpdateStrict((d) => { d.b = "2"; })).toThrow();
+      expect(fsSync.readFileSync(KV_PATH, "utf-8")).toBe("{ torn");
+      await fs.writeFile(KV_PATH, "[1,2]");
+      expect(() => kvStore.kvReadStrict()).toThrow(/JSON object/);
+    });
+
+    it("applies an update in one write and answers what the mutation returned", () => {
+      kvStore.kvSetMany({ keep: "k", drop: "d" });
+      const answer = kvStore.kvUpdateStrict((d) => {
+        delete d.drop;
+        d.add = "a";
+        return "done";
+      });
+      expect(answer).toBe("done");
+      expect(kvStore.kvGetAll()).toEqual({ keep: "k", add: "a" });
+    });
+  });
 });

@@ -14,7 +14,8 @@ import type { NextRequest } from "next/server";
  * (`clawkeep/clawkeep/runner.py`: `EXIT_BACKUP_FAILED=1`, `EXIT_QUOTA_FULL=2`,
  * `EXIT_AUTH_REVOKED=3`, `EXIT_TIER=4`, `EXIT_SERVER=5`, `EXIT_NETWORK=6`,
  * `EXIT_OPENCLAW=7`, `EXIT_UPLOAD=8`, `EXIT_NEED_PASSPHRASE=9`,
- * `EXIT_ENCRYPTION_FAILED=10`, `EXIT_UNKNOWN=99`; `daemon.py`: 64 for a bad
+ * `EXIT_ENCRYPTION_FAILED=10`, since TASK-1000 `EXIT_ARCHIVE_BUSY=11`,
+ * `EXIT_ARCHIVE_DB_DAMAGED=12`, `EXIT_ARCHIVE_CONFLICT=13`, `EXIT_UNKNOWN=99`; `daemon.py`: 64 for a bad
  * config and 65 for a token error, both before the run begins) and the TS
  * bridge consumed NONE of it — `grep` found no `EXIT_` reader anywhere in
  * `src/` or `mcp/`. The route built its body as `ok: result.exitCode === 0`
@@ -118,7 +119,7 @@ describe("POST /setup-api/clawkeep/backup maps the daemon's EXIT_* taxonomy", ()
   it("never answers 2xx for any non-zero exit the daemon can produce", async () => {
     // The whole taxonomy, plus the two the bridge synthesises itself: 124 for
     // its own kill timer and 127 for a daemon that could not be started.
-    for (const exitCode of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 64, 65, 99, 124, 127]) {
+    for (const exitCode of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 64, 65, 99, 124, 127]) {
       daemon.exitCode = exitCode;
       daemon.stderr = `daemon said something about ${exitCode}`;
       daemon.spawns.length = 0;
@@ -143,6 +144,10 @@ describe("POST /setup-api/clawkeep/backup maps the daemon's EXIT_* taxonomy", ()
       9: { status: 409, code: "needs_passphrase" },
       65: { status: 409, code: "token_unreadable" },
       124: { status: 504, code: "timed_out" },
+      // TASK-1000: the archive failures with a remedy of their own.
+      11: { status: 503, code: "archive_busy" },
+      12: { status: 500, code: "database_damaged" },
+      13: { status: 500, code: "archive_conflict" },
     };
     for (const [exit, want] of Object.entries(expected)) {
       daemon.exitCode = Number(exit);
@@ -166,5 +171,33 @@ describe("POST /setup-api/clawkeep/backup maps the daemon's EXIT_* taxonomy", ()
     expect(res.status).toBe(200);
     expect(body.ok).toBe(true);
     expect(body.exitCode).toBe(0);
+  });
+});
+
+describe("the bridge and the daemon agree on the taxonomy", () => {
+  it("gives every EXIT_* the daemon defines a code of its own", async () => {
+    // TASK-1000 added three; a fourth added to runner.py and not here would
+    // reach the owner as the catch-all "did not finish" — this is the tripwire.
+    const { backupExitError } = await import("@/lib/clawkeep");
+    const runner = await fs.readFile(
+      path.join(process.cwd(), "clawkeep", "clawkeep", "runner.py"),
+      "utf8",
+    );
+    const codes = [...runner.matchAll(/^(EXIT_[A-Z_]+)\s*=\s*(\d+)/gm)].map(
+      ([, name, value]) => ({ name, value: Number(value) }),
+    );
+    expect(codes.map((c) => c.name)).toEqual(
+      expect.arrayContaining(["EXIT_ARCHIVE_BUSY", "EXIT_ARCHIVE_DB_DAMAGED", "EXIT_ARCHIVE_CONFLICT"]),
+    );
+    // OK is not a failure; BACKUP_FAILED and UNKNOWN ARE the catch-all.
+    const specific = codes.filter(
+      (c) => !["EXIT_OK", "EXIT_BACKUP_FAILED", "EXIT_UNKNOWN"].includes(c.name),
+    );
+    for (const { name, value } of specific) {
+      expect({ name, code: backupExitError(value)?.code }).not.toEqual({
+        name,
+        code: "backup_failed",
+      });
+    }
   });
 });
