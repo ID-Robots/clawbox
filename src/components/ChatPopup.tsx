@@ -2348,6 +2348,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // it: the popup stays mounted, socket and all, behind the desktop, and no
   // hello comes to run the read again when it is reopened.
   const restoreAbortRef = useRef<AbortController | null>(null)
+  // A restore that was started and has neither answered nor given up — one a
+  // dropped socket called off. The hello after a gateway restart keeps the
+  // painted transcript and reads nothing, so without this an interrupted
+  // restore never ran again: an empty conversation under "Restoring this
+  // conversation…" with nothing behind the line.
+  const restoreOwedRef = useRef(false)
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -2552,7 +2558,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             const wasProviderChange = reloadReasonRef.current === 'provider'
             // Alias normalization may finish before the first connection.
             // Load the existing transcript just as a normal first hello does.
-            if (wasProviderChange && pendingModelSwitchResetRef.current?.automatic) loadHistory()
+            // …and a restore the restart cut off is still owed: run it again,
+            // bounded, so it ends in the conversation or in the panel.
+            if (restoreOwedRef.current) void loadHistory({ restore: true })
+            else if (wasProviderChange && pendingModelSwitchResetRef.current?.automatic) loadHistory()
             skillInstalledRef.current = false
             reloadReasonRef.current = 'skill' // reset for next reload
             skillEventRef.current = null
@@ -3328,6 +3337,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       restoreAbortRef.current?.abort()
       restoreCtl = new AbortController()
       restoreAbortRef.current = restoreCtl
+      restoreOwedRef.current = true
+    }
+    // Settled — answered, or given up with the panel — rather than called off;
+    // asked of the controller so a stale read cannot settle a newer one's debt.
+    const settleRestore = () => {
+      if (restoreCtl && restoreAbortRef.current === restoreCtl) restoreOwedRef.current = false
     }
     // Optimistically show the typing bubble if an auto-greet might still run,
     // so the user sees feedback during the history round-trip (and is locked
@@ -3370,6 +3385,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           },
         })
         : await read()
+      settleRestore()
       // The owner switched tabs while this read was in flight (the request
       // key was captured at call time): the answer belongs to the tab that
       // was left. Painting it would put one conversation inside another —
@@ -3445,6 +3461,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Called off: a newer socket, a tab switch or Try again owns the
       // conversation now and runs its own read. Nothing to report.
       if (restoreCtl && isRestoreAborted(err)) return
+      settleRestore()
       console.error('Failed to load history:', err)
       // Only a restore, and only on the conversation still on screen, ends in
       // the choice: an ordinary refetch failing leaves the transcript that is

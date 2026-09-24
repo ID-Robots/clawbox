@@ -202,6 +202,21 @@ describe("restoring a conversation (TASK-1158)", () => {
     await waitFor(() => expect(restorePanel()).toBeNull());
   });
 
+  it("restart mid-restore: a restore the dropped socket called off runs again on the next hello", async () => {
+    historyAnswer = "rebuilding";
+    await mount();
+    await screen.findByTestId("chat-restore-status", {}, { timeout: 3_000 });
+    // The gateway restarts while the restore is still waiting out "rebuilding".
+    // The hello after a restart keeps the painted transcript and reads nothing
+    // of its own, so the interrupted restore has to be run again — or the
+    // conversation stays empty under a "Restoring…" line nothing is behind.
+    historyAnswer = "ok";
+    act(() => { sockets[0].drop(); });
+    await screen.findByText("Welcome back — here is where we left off.", {}, { timeout: 8_000 });
+    await waitFor(() => expect(screen.queryByTestId("chat-restore-status")).toBeNull());
+    expect(restorePanel()).toBeNull();
+  });
+
   it("timeout: a history read nobody answers ends in the choice instead of an endless wait", async () => {
     historyAnswer = "hang";
     await mount();
