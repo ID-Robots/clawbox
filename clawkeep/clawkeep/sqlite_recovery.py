@@ -149,6 +149,14 @@ def diagnose(path: Path) -> Diagnosis:
             return Diagnosis(STATUS_DAMAGED, problems=tuple(foreign))
         return Diagnosis(STATUS_HEALTHY)
 
+    if len(integrity) >= _CHECK_LIMIT:
+        # `integrity_check(N)` stops after N problems, so the report is cut
+        # off and whatever it did not reach is unknown. A rebuild is only ever
+        # started when EVERY line is index bookkeeping, and this report cannot
+        # say that — the database is damaged as far as ClawKeep is concerned
+        # and is left exactly as found.
+        return Diagnosis(STATUS_DAMAGED, problems=tuple(integrity[:5]))
+
     indexes: set[str] = set()
     for line in integrity:
         match = next((m for m in (r.match(line) for r in _INDEX_ONLY_RES) if m), None)

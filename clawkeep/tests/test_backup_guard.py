@@ -626,3 +626,58 @@ def test_a_second_build_waits_for_the_first_to_put_its_links_back(box: dict[str,
     worker.join(30)
     assert done.is_set()
     assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+
+def test_a_detach_that_fails_part_way_still_puts_the_links_back(
+    box: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second journal write is the one that fails on a full disk — and by
+    then the links are already out of the tree. The put-back has to run in THIS
+    backup; waiting for the next one leaves the box without its package links
+    until tomorrow."""
+    state = box["state"]
+    link = state / "workspace" / "proj" / "node_modules"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(box["global"].parent)
+
+    real_write = backup_guard._write_journal
+    writes: list[Path] = []
+
+    def full_disk(journal: Path, entries: list[dict[str, str]]) -> None:
+        writes.append(journal)
+        if len(writes) == 2:  # after the unlink, before the build
+            raise OSError(28, "No space left on device")
+        real_write(journal, entries)
+
+    monkeypatch.setattr(backup_guard, "_write_journal", full_disk)
+
+    with pytest.raises(OSError) as info:
+        backup_guard.create_archive(_cfg(box["cli"]), output_dir=box["out"])
+
+    assert info.value.errno == 28
+    assert os.readlink(link) == str(box["global"].parent), "the link never came back"
+    assert not (box["data"] / backup_guard.JOURNAL_NAME).exists()
+    assert _creates(box["calls"]) == 0, "no archive was ever built"
+
+
+def test_a_link_whose_target_is_inside_the_backup_is_never_detached(
+    box: dict[str, Path],
+) -> None:
+    """The blast radius of detaching: only a link the archiver would REFUSE.
+    A worktree whose `node_modules` points at a project the backup also covers
+    keeps its link for the whole build, so a coding run working in it never
+    sees the path go missing."""
+    state = box["state"]
+    ws = state / "workspace"
+    (ws / "proj" / "node_modules" / "left-pad").mkdir(parents=True)
+    live = ws / "proj" / ".clawbox" / "worktrees" / "run-1" / "node_modules"
+    live.parent.mkdir(parents=True)
+    live.symlink_to(ws / "proj" / "node_modules")
+
+    plan = openclaw.plan_backup(str(box["cli"]))
+    assert not [r for r in backup_guard.find_refused_links(plan) if r.path == str(live)]
+
+    made = backup_guard.create_archive(_cfg(box["cli"]), output_dir=box["out"])
+
+    assert os.readlink(live) == str(ws / "proj" / "node_modules")
+    assert _ap(live) in _names(made.path), "the link belongs in the archive"
