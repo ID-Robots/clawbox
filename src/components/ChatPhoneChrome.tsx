@@ -144,17 +144,18 @@ export function ChatTextSizeBar({ id, scale, onChange }: TextSizeBarProps) {
       >
         A−
       </button>
-      {/* The value, as a live region, so a screen reader hears where each
-          press landed; pressing it resets to 100%. */}
+      {/* The value; pressing it resets to 100%. Its name carries the value,
+          since a button's content is presentational and a live region inside
+          it goes unheard. */}
       <button
         type="button"
         onClick={() => onChange(DEFAULT_CHAT_TEXT_SCALE)}
-        aria-label={tr('chat.view.textReset', 'Reset text size')}
+        aria-label={`${tr('chat.view.textReset', 'Reset text size')} (${percent}%)`}
         title={tr('chat.view.textReset', 'Reset text size')}
         data-testid="chat-text-size-reset"
         style={{ ...stepStyle, minWidth: 64, fontVariantNumeric: 'tabular-nums', fontSize: 13, background: 'transparent', border: '1px solid transparent' }}
       >
-        <span aria-live="polite" data-testid="chat-text-size-value">{percent}%</span>
+        <span aria-hidden="true" data-testid="chat-text-size-value">{percent}%</span>
       </button>
       <button
         type="button"
@@ -167,6 +168,11 @@ export function ChatTextSizeBar({ id, scale, onChange }: TextSizeBarProps) {
       >
         A+
       </button>
+      {/* Outside every button, so a screen reader hears where each A− or A+
+          press landed. */}
+      <span className="sr-only" role="status" aria-live="polite" data-testid="chat-text-size-status">
+        {`${tr('chat.view.textSize', 'Text size')} ${percent}%`}
+      </span>
     </div>
   )
 }
@@ -207,10 +213,15 @@ export function ChatHeaderStrip({ headerId, headerOpen, onToggleHeader, label, a
       data-testid="chat-header-strip"
       className="chat-header-strip"
       onPointerDown={(e) => {
+        // Every new press starts clean: a swipe whose finger never produced a
+        // click must not eat the next real tap.
+        swallowClick.current = false
         // Touch and pen only: a mouse press is a click, handled below.
         if (e.pointerType === 'mouse') return
         swipeStartY.current = e.clientY
       }}
+      // Nor the next Enter or Space on the toggle, which comes with no press.
+      onKeyDown={() => { swallowClick.current = false }}
       onPointerUp={(e) => {
         const start = swipeStartY.current
         swipeStartY.current = null
