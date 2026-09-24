@@ -8,9 +8,11 @@ import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
 import { isProxiedAppUrl, WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
+import WhatsNewCard from "@/components/WhatsNewCard";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail } from "@/lib/ui-events";
 import { toastDetailForNotice } from "@/lib/notify-action";
 import { useAutoHide } from "@/lib/use-auto-hide";
+import { useWhatsNew } from "@/lib/use-whats-new";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
@@ -2037,6 +2039,16 @@ function ChromeDesktopInner() {
     openApp("settings");
   }, [openApp]);
 
+  // "What's new in 4.0" (TASK-1059): shown after the box lands on 4.x until the
+  // owner dismisses it, which the box records for every browser. Asked again
+  // when the ClawBox AI tier changes, so an upgrade made in the portal drops
+  // the plan section without a reload. Like every card in the column, it leaves
+  // on its own after NOTICE_AUTO_HIDE_MS. That is not recorded, so it is back
+  // on the next load until it is dismissed.
+  const whatsNew = useWhatsNew(clawboxLogin.tier);
+  const whatsNewKeys = useMemo(() => (whatsNew.visible ? ["whats-new"] : []), [whatsNew.visible]);
+  useAutoHide(whatsNewKeys, whatsNew.hide);
+
   // The system update lives in Settings → System Update now; the notice's
   // button lands there rather than on the old standalone window.
   const openUpdateSettings = useCallback(() => {
@@ -2498,6 +2510,7 @@ function ChromeDesktopInner() {
   // price to pay while nothing is dodging it).
   const noticesUp = Boolean(
     (updateAvailable && !updateNoticeHidden)
+    || whatsNew.visible
     || showClawAiOfferNotification
     || pairingRequests.length > 0
     || codingNotices.length > 0,
@@ -2623,6 +2636,10 @@ function ChromeDesktopInner() {
               </div>
             );
           })()}
+
+          {whatsNew.visible && whatsNew.state && (
+            <WhatsNewCard state={whatsNew.state} onDismiss={whatsNew.dismiss} />
+          )}
 
           {showClawAiOfferNotification && (
             <div

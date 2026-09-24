@@ -12,6 +12,7 @@ import { paidGateEn } from "@/lib/edition-translations/en-paid-gate";
 import { clawaiUsageEn } from "@/lib/edition-translations/en-clawai-usage";
 import { clawaiPitchEn } from "@/lib/edition-translations/en-clawai-pitch";
 import { anthropicAccountsEn } from "@/lib/edition-translations/en-anthropic-accounts";
+import { whatsNewEn } from "@/lib/edition-translations/en-whats-new";
 import { bg } from "@/lib/edition-translations/bg";
 import { de } from "@/lib/edition-translations/de";
 import { es } from "@/lib/edition-translations/es";
@@ -68,6 +69,10 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // owner who cannot read "Limited until 14:30" cannot tell a waiting run from
   // a broken one.
   { name: "Anthropic accounts card", matches: (k) => k.startsWith("settings.anthropicAccounts.") },
+  // The desktop's "What's new in 4.0" card (TASK-1059): the release's
+  // highlights and the plan it takes to use them. The first thing an updated
+  // box says about itself, so it is not left in English on any locale.
+  { name: "What's new in 4.0 card", matches: (k) => k.startsWith("whatsNew.") },
 ];
 
 /**
@@ -143,6 +148,7 @@ describe("edition-translations (TASK-458)", () => {
       ["clawaiUsageEn", clawaiUsageEn, (k) => k.startsWith("clawaiUsage.") || k.startsWith("chat.allowance")],
       ["clawaiPitchEn", clawaiPitchEn, (k) => k.startsWith("settings.clawaiPitch.")],
       ["anthropicAccountsEn", anthropicAccountsEn, (k) => k.startsWith("settings.anthropicAccounts.")],
+      ["whatsNewEn", whatsNewEn, (k) => k.startsWith("whatsNew.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {
