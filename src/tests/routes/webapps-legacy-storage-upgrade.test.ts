@@ -354,6 +354,26 @@ describe("the migration", () => {
     expect(record.apps["todo-list"]).toMatchObject({ copied: [], kept: ["todo:items"] });
   });
 
+  it("refuses only the app whose files it cannot read, and still migrates the rest", () => {
+    const locked = path.join(data, "webapps", "locked");
+    fs.mkdirSync(locked, { recursive: true });
+    fs.writeFileSync(path.join(locked, "index.html"), TODO_HTML);
+    fs.chmodSync(path.join(locked, "index.html"), 0o000);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Root reads a 0000 file anyway; the case only means something without it.
+      if (process.getuid?.() === 0) return;
+      expect(migration.migrateLegacyWebappStorage().ran).toBe(true);
+      const record = JSON.parse(fs.readFileSync(path.join(data, "webapp-legacy-storage.json"), "utf-8"));
+      expect(record.apps.locked.refused).toMatch(/could not be read \(EACCES\)/);
+      expect(readKv()["todo-list:todo:items"]).toBe(KV_V39["todo:items"]);
+      expect(Object.keys(readKv()).filter((k) => k.startsWith("locked:"))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+      fs.chmodSync(path.join(locked, "index.html"), 0o644);
+    }
+  });
+
   it("writes nothing and records nothing over a store it cannot read, and runs once it can", async () => {
     fs.writeFileSync(path.join(data, "kv.json"), "{ half a file");
     expect(() => migration.migrateLegacyWebappStorage()).toThrow();

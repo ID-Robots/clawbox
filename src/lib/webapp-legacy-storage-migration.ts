@@ -113,18 +113,25 @@ function censusApps(): CensusApp[] {
   for (const name of names.sort()) {
     if (!APP_ID_RE.test(name) || isReservedAppId(name)) continue;
     const dir = path.join(WEBAPPS_DIR, name);
-    const st = fs.lstatSync(dir);
-    if (st.isSymbolicLink()) {
-      apps.push({ id: name, code: null, refused: "the app folder is a symlink" });
-      continue;
+    // One app's unreadable file (a root-owned 0600 index.html, a folder that
+    // vanished mid-scan) refuses THAT app. Thrown, it would leave the whole
+    // migration unmarked at every boot and every other app without its data.
+    try {
+      const st = fs.lstatSync(dir);
+      if (st.isSymbolicLink()) {
+        apps.push({ id: name, code: null, refused: "the app folder is a symlink" });
+        continue;
+      }
+      if (!st.isDirectory()) continue;
+      if (path.dirname(fs.realpathSync(dir)) !== root) {
+        apps.push({ id: name, code: null, refused: "the app folder resolves outside data/webapps" });
+        continue;
+      }
+      const read = readAppCode(dir);
+      apps.push("code" in read ? { id: name, code: read.code } : { id: name, code: null, refused: read.refused });
+    } catch (err) {
+      apps.push({ id: name, code: null, refused: `its files could not be read (${(err as NodeJS.ErrnoException).code ?? "error"})` });
     }
-    if (!st.isDirectory()) continue;
-    if (path.dirname(fs.realpathSync(dir)) !== root) {
-      apps.push({ id: name, code: null, refused: "the app folder resolves outside data/webapps" });
-      continue;
-    }
-    const read = readAppCode(dir);
-    apps.push("code" in read ? { id: name, code: read.code } : { id: name, code: null, refused: read.refused });
   }
   return apps;
 }
