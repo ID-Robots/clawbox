@@ -9,7 +9,7 @@ import {
 } from "@/lib/chat-session-restore";
 import { gatewayFrameError } from "@/lib/chat-gateway-starting";
 import { HarnessError } from "@/lib/harness/transport";
-import { describeChatFailure } from "@/lib/chat-error-text";
+import { describeChatFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from "@/lib/chat-error-text";
 
 /**
  * TASK-1158: restoring a conversation must end.
@@ -167,14 +167,24 @@ describe("restoreWithRetry against a gateway that never answers (real timers, fa
 });
 
 describe("a turn the gateway never acknowledged", () => {
-  it("is not told to 'send it again' — the gateway may still be holding it", () => {
-    const text = describeChatFailure("Request timeout");
-    expect(text).toMatch(/still busy/i);
-    expect(text).toMatch(/new chat/i);
-    expect(text).not.toMatch(/send it again/i);
+  it("is recognised by the chat's own request timer, bare or wrapped by the adapter", () => {
+    expect(isUnacknowledgedTurn("Request timeout")).toBe(true);
+    expect(isUnacknowledgedTurn(new HarnessError("timeout", "Request timeout"))).toBe(true);
+    // The adapter puts the `timeout` code on any refusal that mentions one;
+    // those are other failures and keep their own wording.
+    expect(isUnacknowledgedTurn(new HarnessError("timeout", "UNAVAILABLE: tool timeout exceeded"))).toBe(false);
+    expect(isUnacknowledgedTurn("Request timed out.")).toBe(false);
+    expect(isUnacknowledgedTurn(undefined)).toBe(false);
   });
 
-  it("leaves every other failure's wording alone", () => {
+  it("is not told to 'send it again' — the gateway may still be holding it", () => {
+    expect(UNACKNOWLEDGED_TURN_TEXT).toMatch(/still busy/i);
+    expect(UNACKNOWLEDGED_TURN_TEXT).toMatch(/new chat/i);
+    expect(UNACKNOWLEDGED_TURN_TEXT).not.toMatch(/send it again/i);
+  });
+
+  it("leaves describeChatFailure's wording alone — a surface with no new chat must not promise one", () => {
+    expect(describeChatFailure("Request timeout")).not.toBe(UNACKNOWLEDGED_TURN_TEXT);
     expect(describeChatFailure("Request exceeds the size limit")).toBe("Error: Request exceeds the size limit");
   });
 });

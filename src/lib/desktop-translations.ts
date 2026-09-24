@@ -385,6 +385,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.restore.timeout": "The box did not answer while this conversation was being restored.",
     "chat.restore.failed": "This conversation could not be restored.",
     "chat.restore.hint": "Try again, or start a new chat to carry on. Nothing in this conversation is deleted.",
+    "chat.restore.hintRetry": "Try again in a moment. Nothing in this conversation is deleted.",
     "chat.restore.retry": "Try again",
     "chat.restore.newChat": "Start a new chat",
     "chat.voice.record": "Record a voice message",

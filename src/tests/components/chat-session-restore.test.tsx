@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
+import ChatApp from "@/components/ChatApp";
 import { resetHarnessCache } from "@/lib/client-harness";
 
 // A jsdom mount of `ChatPopup` costs seconds under a full parallel run, and the
@@ -223,8 +224,8 @@ describe("restoring a conversation (TASK-1158)", () => {
     await waitFor(() => expect(historyKeys().length).toBe(2));
     const [, fresh] = historyKeys();
     // A NEW session beside the stuck one — nothing was reset or deleted.
-    expect(fresh).not.toBe("agent:main:main");
-    expect(fresh?.startsWith("agent:main:main")).toBe(true);
+    // Same agent, its own session: the key `newTab` mints (openclaw-gateway-adapter).
+    expect(fresh).toMatch(/^agent:main:clawbox-[0-9a-f]{12}$/);
     expect(sent.some((f) => f.method === "sessions.reset" || f.method === "sessions.delete")).toBe(false);
     await waitFor(() => expect(restorePanel()).toBeNull());
   });
@@ -273,5 +274,100 @@ describe("restoring a conversation (TASK-1158)", () => {
     await waitFor(() => expect(screen.queryByText("Could not connect to gateway")).toBeNull());
     await waitFor(() => expect(historyKeys().length).toBe(2));
     await screen.findByText("Welcome back — here is where we left off.");
+  });
+});
+
+/**
+ * The full-page chat (`/app/clawbox` — "Open in new tab", and where a phone
+ * lands) restores the same conversation over its own socket, and had the same
+ * two holes: a handshake nobody answered left "Connecting…" up for good, and a
+ * failed history read only reached the console. Same rules, same clocks.
+ */
+describe("restoring a conversation on the full-page chat (TASK-1158)", () => {
+  const panel = () => screen.queryByTestId("chatapp-restore-failed");
+
+  beforeEach(() => {
+    sockets.length = 0;
+    sent.length = 0;
+    historyAnswer = "ok";
+    history = [assistant("Welcome back — here is where we left off.")];
+    wedged = false;
+    ackSends = true;
+    resetHarnessCache();
+    window.localStorage.clear();
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
+    installFetch();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    resetHarnessCache();
+  });
+
+  async function mountPage() {
+    render(<ChatApp />);
+    await waitFor(() => expect(sockets.length).toBeGreaterThan(0));
+  }
+
+  it("normal: the conversation comes back and no panel is shown", async () => {
+    await mountPage();
+    await screen.findByText("Welcome back — here is where we left off.");
+    expect(panel()).toBeNull();
+    expect(historyKeys()).toEqual(["agent:main:main"]);
+  });
+
+  it("stale: waits out 'history is rebuilding' and shows the conversation", async () => {
+    historyAnswer = "rebuilding";
+    await mountPage();
+    await waitFor(() => expect(historyKeys().length).toBeGreaterThanOrEqual(2));
+    historyAnswer = "ok";
+    await screen.findByText("Welcome back — here is where we left off.", {}, { timeout: 3_000 });
+    expect(panel()).toBeNull();
+  });
+
+  it("busy: stops at the deadline instead of an empty 'new' conversation, and Try again brings it back", async () => {
+    historyAnswer = "rebuilding";
+    await mountPage();
+    const failed = await screen.findByTestId("chatapp-restore-failed", {}, { timeout: 3_000 });
+    expect(failed.textContent).toMatch(/still busy on the box/i);
+    expect(screen.queryByText("chat.saySomething")).toBeNull();
+    const reads = historyKeys().length;
+    await act(async () => { await new Promise((r) => setTimeout(r, 300)); });
+    expect(historyKeys().length).toBe(reads);
+
+    historyAnswer = "ok";
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByText("Welcome back — here is where we left off.");
+    await waitFor(() => expect(panel()).toBeNull());
+  });
+
+  it("timeout and failed: each ends in the panel with its own reason", async () => {
+    historyAnswer = "hang";
+    await mountPage();
+    const timedOut = await screen.findByTestId("chatapp-restore-failed", {}, { timeout: 3_000 });
+    expect(timedOut.textContent).toMatch(/did not answer/i);
+
+    historyAnswer = "unknown-session";
+    const before = historyKeys().length;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(panel()?.textContent).toMatch(/could not be restored/i));
+    // A refusal waiting cannot fix is asked once, not retried.
+    expect(historyKeys().length).toBe(before + 1);
+  });
+
+  it("handshake: a gateway that accepts the socket and never answers ends in the error panel, and Retry recovers", async () => {
+    wedged = true;
+    await mountPage();
+    await screen.findByText("Could not connect to gateway", {}, { timeout: 3_000 });
+    expect(sockets[0].closed).toBe(true);
+    // Nothing left running behind the error panel.
+    await act(async () => { await new Promise((r) => setTimeout(r, 400)); });
+    expect(sockets.length).toBe(1);
+
+    wedged = false;
+    fireEvent.click(screen.getByText("chat.retry"));
+    await screen.findByText("Welcome back — here is where we left off.");
+    expect(screen.queryByText("Could not connect to gateway")).toBeNull();
   });
 });

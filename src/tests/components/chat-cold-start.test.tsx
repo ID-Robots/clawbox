@@ -96,8 +96,15 @@ describe("cold gateway desktop recovery", () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await advance(300_000);
     expect(screen.getByText("Could not connect to gateway")).toBeTruthy();
-    expect(attempts).toBe(1);
+    // Each unanswered attempt is cut at its own 30 s handshake clock and the
+    // ladder tries a fresh socket (TASK-1158) — never more than the deadline
+    // leaves room for, one per clock plus its 3 s retry wait.
+    expect(attempts).toBeGreaterThan(1);
+    expect(attempts).toBeLessThanOrEqual(Math.ceil(300_000 / 33_000) + 1);
     expect(connected).toBe(0);
+    const ended = attempts;
+    await advance(60_000);
+    expect(attempts).toBe(ended);
   });
 
   it("aborts a pending config fetch at the shared five-minute deadline", async () => {

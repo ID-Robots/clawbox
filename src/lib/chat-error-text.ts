@@ -363,12 +363,17 @@ const CREDENTIAL_REJECTED = "That message did not go through — the AI provider
  * on a box, 2026-09-24: acknowledged after 40 minutes, then answered). Sending
  * it again queues a second copy behind the same stall. What helps now is a new
  * chat, which does not wait behind this conversation.
+ *
+ * Not part of `describeChatFailure`: only a surface that can OFFER a new chat
+ * may say so, and only its send path knows the timer was its own — a run's
+ * error frame that happens to read "Request timeout" is a different failure.
  */
-const NOT_ACCEPTED = "The box has not taken this message yet — this conversation is still busy with earlier work. It may still be answered once that work finishes; to carry on now, start a new chat.";
+export const UNACKNOWLEDGED_TURN_TEXT = "The box has not taken this message yet — this conversation is still busy with earlier work. It may still be answered once that work finishes; to carry on now, start a new chat.";
 
 /** The chat's own RPC timer — the exact sentence `wsRequest` rejects with. */
-function isUnacknowledgedTurn(raw: string): boolean {
-  return /^request timeout$/i.test(raw);
+export function isUnacknowledgedTurn(raw: unknown): boolean {
+  const text = raw instanceof Error ? raw.message : typeof raw === "string" ? raw : "";
+  return /^request timeout$/i.test(text.trim());
 }
 
 /** The conversation changed under the turn; retry may work, New chat always does. */
@@ -440,7 +445,6 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
   if (!evidence) return GENERIC;
   if (isSessionTakeover(text)) return TAKEOVER;
-  if (isUnacknowledgedTurn(text)) return NOT_ACCEPTED;
   // Ahead of the rate limit: a spent allowance also arrives as a 429, and the
   // generic "wait a minute" is exactly the wrong advice for a window that frees
   // up days from now. The refusal names which allowance and when, so say that.

@@ -65,7 +65,7 @@ import {
   type EmailGesture,
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
-import { describeChatFailure, describeFallbackReply, describeImageFailure } from '@/lib/chat-error-text'
+import { describeChatFailure, describeFallbackReply, describeImageFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
@@ -2344,7 +2344,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // bounds the whole ladder rather than the attempt.
   const handshakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // The conversation read a restore is running, so a newer socket, a tab
-  // switch or the popup going away can call it off (TASK-1158).
+  // switch or the popup unmounting can call it off (TASK-1158). Not closing
+  // it: the popup stays mounted, socket and all, behind the desktop, and no
+  // hello comes to run the read again when it is reopened.
   const restoreAbortRef = useRef<AbortController | null>(null)
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -5088,9 +5090,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // and has carried an absolute device path and a session UUID into the
       // customer's transcript (TASK-440). Both harnesses funnel through here
       // now, so this is the only gate left.
+      //
+      // `unacknowledged`: this chat's own request timer ran out on the send —
+      // the gateway never took the turn (TASK-1158). Asked of the timer's exact
+      // sentence, not of the `timeout` code alone, which the adapter also puts
+      // on any gateway refusal that merely mentions a timeout.
+      const unacknowledged = err instanceof HarnessError && err.code === 'timeout' && isUnacknowledgedTurn(err)
       const failure = err instanceof HarnessError && err.code === 'aborted'
         ? undefined
-        : describeChatFailure(err instanceof Error ? err.message : undefined, undefined, failureWordsRef.current)
+        : unacknowledged
+          ? UNACKNOWLEDGED_TURN_TEXT
+          : describeChatFailure(err instanceof Error ? err.message : undefined, undefined, failureWordsRef.current)
       settleRun(keyAtSend, failure)
       // It failed in a tab the owner has left: the composer, the caret and
       // the pills on screen belong to the tab they are looking at now, and
@@ -5145,7 +5155,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // real one). The sentence above says so; the same two choices a failed
       // restore offers go under it, so "start a new chat" is a button, not an
       // instruction to go and find one.
-      if (err instanceof HarnessError && err.code === 'timeout') {
+      if (unacknowledged) {
         setRestoreState({ key: keyAtSend, phase: 'failed', kind: 'busy' })
       }
       return
