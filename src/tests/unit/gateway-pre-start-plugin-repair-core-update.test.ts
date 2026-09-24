@@ -368,6 +368,26 @@ d("gateway-pre-start.sh — the store's lock, shared with the server (TASK-1088)
     expect(existsSync(lockPath())).toBe(false);
   });
 
+  it("gives the lock back at once when its token cannot be written, rather than waiting on its own", () => {
+    // A full `data/`: the empty lock file fits, the token does not. `printf`
+    // failing AFTER its redirection has created the file is exactly that shape.
+    const started = Date.now();
+    const r = run(
+      [
+        repairHelpers(),
+        "printf() { return 1; }",
+        'if clawbox_plugin_repair_locked true; then rc=0; else rc=$?; fi',
+        "unset -f printf",
+        'echo "rc=$rc"',
+      ].join("\n"),
+      {},
+    );
+
+    expect(r.stdout).toContain("rc=1");
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(existsSync(lockPath())).toBe(false);
+  });
+
   it("takes over a lock a killed writer left, and clears under it", () => {
     writeMarker({ codex: { ...CODEX_ROW_FROM_2026_9_3, disabled: false } });
     writeFileSync(lockPath(), "a-writer-that-was-killed\n");

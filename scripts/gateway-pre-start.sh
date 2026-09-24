@@ -4279,7 +4279,7 @@ clawbox_plugin_repair_locked() {
   local lock="$CLAWBOX_PLUGIN_REPAIR_FILE.lock" guard="$CLAWBOX_PLUGIN_REPAIR_FILE.lock.reclaim"
   local token="$$.$RANDOM$RANDOM" tries=0 seen guard_mtime rc=0
   mkdir -p "$(dirname "$lock")" 2>/dev/null || true
-  until ( set -o noclobber; printf '%s\n' "$token" >"$lock" ) 2>/dev/null; do
+  until ( set -o noclobber; : >"$lock" ) 2>/dev/null; do
     seen="$(stat -c '%d:%i:%Y' "$lock" 2>/dev/null || true)"
     if [ -z "$seen" ]; then
       # Released between the two looks — or a directory nothing can write,
@@ -4303,6 +4303,13 @@ clawbox_plugin_repair_locked() {
     [ "$tries" -lt 300 ] || return 1
     sleep 0.05
   done
+  # Created, and ours — but the token goes in a write of its own. On a full
+  # `data/` an empty file still fits where the token may not, and a lock left
+  # behind without one is waited out by every writer, this one included.
+  if ! printf '%s\n' "$token" >|"$lock" 2>/dev/null; then
+    rm -f "$lock" 2>/dev/null || true
+    return 1
+  fi
   "$@" || rc=$?
   if [ "$(cat "$lock" 2>/dev/null || true)" = "$token" ]; then
     rm -f "$lock" 2>/dev/null || true
