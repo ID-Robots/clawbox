@@ -260,7 +260,9 @@ export async function register() {
     // that leaves a box reporting one thing and doing another. It is one
     // config read on a box that is up to date, which is every boot but one.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { runBootMigrations, dropRemovedConsentMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration } = require('./lib/boot-migrations')
+    const { runBootMigrations, dropRemovedConsentMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration, legacyWebappStorageMigration } = require('./lib/boot-migrations')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { migrateLegacyWebappStorage } = require('./lib/webapp-legacy-storage-migration')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { DATA_DIR, get, set } = require('./lib/config-store')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -307,6 +309,9 @@ export async function register() {
         // nothing but an owner opening Settings would ever move it.
         openclawWallpaperDefaultMigration({ get, set, harness }),
         hermesWallpaperDefaultMigration({ get, set, harness }),
+        // Before any webapp is served: the record it writes is what lets the
+        // webapps route put the legacy-storage layer in front of an old app.
+        legacyWebappStorageMigration({ migrate: () => migrateLegacyWebappStorage() }),
       ],
       { get, set },
     )

@@ -171,6 +171,35 @@ export function dropRemovedConsentMigration(deps: {
 }
 
 /**
+ * Bring the data of every webapp built before v4.0 back within its reach
+ * (TASK-1150; src/lib/webapp-legacy-storage-migration.ts).
+ *
+ * v4.0 boxed webapps into an opaque origin and moved none of the data they
+ * had saved on the ClawBox origin, so every such app opened empty. This copies
+ * each app's old KV keys into its own namespace and records what it found —
+ * the record is what switches the compatibility layer on, so no app is served
+ * with the layer before its data has been moved. HERE because this register
+ * is awaited before the server answers its first request.
+ *
+ * The migration is idempotent on its own record and deletes nothing; a run
+ * that could not read the store, or whose copies did not read back, throws
+ * and leaves no record, which is this register's "ask again at the next boot".
+ */
+export function legacyWebappStorageMigration(deps: {
+  migrate: () => { ran: boolean; apps: number; copied: number };
+}): BootMigration {
+  return {
+    id: "webapp-legacy-storage",
+    label: "copied the data of webapps built before v4.0 into each app's own storage namespace",
+    run: async () => {
+      const result = deps.migrate();
+      if (result.ran) console.log(`[boot-migrations] webapp storage: ${result.apps} app(s) checked, ${result.copied} old key(s) copied`);
+      return result.ran && result.copied > 0;
+    },
+  };
+}
+
+/**
  * The box-wide wallpaper selection, spelled the way the STORE holds it.
  *
  * `wp_id` is a preference, and a preference wears the `pref:` prefix that

@@ -91,6 +91,26 @@ describe("serveWebappKvRequest", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("sends a pre-v4.0 app's two legacy ops to the storage route, for the app it was given", async () => {
+    const calls = stubKv({ status: 200, body: { key: "todo:items", value: "[1]" } });
+    expect(
+      await serveWebappKvRequest("todo-list", {
+        id: "a",
+        op: "legacyKv",
+        // Anything the message says about WHICH app is not forwarded.
+        value: { method: "GET", search: "?key=todo:items", body: "", app: "notes" },
+      }),
+    ).toEqual({ id: "a", ok: true, value: { status: 200, body: { key: "todo:items", value: "[1]" } } });
+    expect(calls[0]).toMatchObject({
+      url: "/setup-api/webapps/storage",
+      method: "POST",
+      body: { app: "todo-list", op: "kv", request: { method: "GET", search: "?key=todo:items", body: "" } },
+    });
+
+    await serveWebappKvRequest("pomodoro", { id: "b", op: "legacyLocalStorage", value: { clear: true, set: { a: "1" }, remove: ["b"] } });
+    expect(calls[1].body).toEqual({ app: "pomodoro", op: "localStorage", write: { clear: true, set: { a: "1" }, remove: ["b"] } });
+  });
+
   it("answers a failed call with the route's error instead of throwing", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 413, json: async () => ({ error: "Value too large" }) })));
     expect(await serveWebappKvRequest("notes", { id: "a", op: "set", key: "items", value: "x" })).toEqual({ id: "a", ok: false, error: "Value too large" });
@@ -127,6 +147,19 @@ describe("attachWebappKvBridge", () => {
       await vi.waitFor(() => expect(replies).toHaveLength(2));
       expect(replies[1]).toEqual({ clawboxKvResult: { id: "r2", ok: false, error: "key outside app namespace" } });
       expect(calls).toHaveLength(1);
+    } finally {
+      detach();
+    }
+  });
+
+  it("serves a legacy op for the frame's own app, whatever the message claims", async () => {
+    const calls = stubKv({ status: 200, body: {} });
+    const { guest, replies } = mountFrame("todo-list");
+    const detach = attachWebappKvBridge();
+    try {
+      post(guest, { id: "r1", op: "legacyKv", value: { method: "GET", search: "", app: "notes" } });
+      await vi.waitFor(() => expect(replies).toHaveLength(1));
+      expect(calls[0].body).toMatchObject({ app: "todo-list", op: "kv" });
     } finally {
       detach();
     }
