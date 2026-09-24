@@ -226,6 +226,23 @@ describe("a phone in fullscreen chat", () => {
     fireEvent.pointerUp(strip, { pointerType: "touch", clientY: 4 });
     expect(header).toHaveAttribute("hidden");
 
+    // That swipe ended on the strip, not the toggle, so no click trailed it:
+    // the next real tap on the toggle must still count.
+    fireEvent.pointerDown(toggle, { pointerType: "touch", clientY: 10 });
+    fireEvent.pointerUp(toggle, { pointerType: "touch", clientY: 10 });
+    fireEvent.click(toggle);
+    expect(header).not.toHaveAttribute("hidden");
+
+    // So must Enter on it, which arrives with no press at all.
+    fireEvent.pointerDown(strip, { pointerType: "touch", clientY: 60 });
+    fireEvent.pointerUp(strip, { pointerType: "touch", clientY: 4 });
+    expect(header).toHaveAttribute("hidden");
+    fireEvent.keyDown(toggle, { key: "Enter" });
+    fireEvent.click(toggle);
+    expect(header).not.toHaveAttribute("hidden");
+    fireEvent.click(toggle);
+    expect(header).toHaveAttribute("hidden");
+
     // A mouse drag is not a swipe at all.
     fireEvent.pointerDown(strip, { pointerType: "mouse", clientY: 4 });
     fireEvent.pointerUp(strip, { pointerType: "mouse", clientY: 90 });
@@ -338,13 +355,23 @@ describe("the phone chat's text size", () => {
     expect(open).toHaveAttribute("aria-controls", bar.id);
     const value = within(bar).getByTestId("chat-text-size-value");
     expect(value).toHaveTextContent("100%");
-    expect(value).toHaveAttribute("aria-live", "polite");
+    // A button's content is presentational, so the value a screen reader
+    // hears lives in the reset button's name and in a status region outside
+    // every button.
+    const reset = within(bar).getByTestId("chat-text-size-reset");
+    expect(reset).toHaveAccessibleName("Reset text size (100%)");
+    const status = within(bar).getByRole("status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveTextContent("Text size 100%");
+    expect(status.closest("button")).toBeNull();
 
     const larger = within(bar).getByRole("button", { name: "Larger text" });
     const smaller = within(bar).getByRole("button", { name: "Smaller text" });
     fireEvent.click(larger);
     fireEvent.click(larger);
     expect(value).toHaveTextContent("130%");
+    expect(status).toHaveTextContent("Text size 130%");
+    expect(reset).toHaveAccessibleName("Reset text size (130%)");
     expect(transcript).toHaveAttribute("data-chat-text-scale", "1.3");
     expect(transcript.style.getPropertyValue("--chat-text-scale")).toBe("1.3");
     expect(window.localStorage.getItem(CHAT_TEXT_SCALE_STORAGE_KEY)).toBe("1.3");
@@ -354,7 +381,7 @@ describe("the phone chat's text size", () => {
     fireEvent.click(larger);
     expect(value).toHaveTextContent("150%");
     expect(larger).toBeDisabled();
-    fireEvent.click(within(bar).getByRole("button", { name: "Reset text size" }));
+    fireEvent.click(within(bar).getByRole("button", { name: "Reset text size (150%)" }));
     expect(value).toHaveTextContent("100%");
     expect(transcript).not.toHaveAttribute("data-chat-text-scale");
     fireEvent.click(smaller);
