@@ -4,7 +4,8 @@ import path from "path";
 import { act, render, renderHook, screen } from "@/tests/helpers/test-utils";
 import CodingAgentActivityPill from "@/components/CodingAgentActivityPill";
 import type { CodingRunStatus } from "@/lib/coding-agent-status";
-import { CODING_RUN_AUTO_HIDE_MS, useCodingRunAutoHide } from "@/lib/use-coding-run-auto-hide";
+import type { PrPhase } from "@/lib/coding-pr-state";
+import { CODING_RUN_AUTO_HIDE_MS, finishedCleanly, useCodingRunAutoHide } from "@/lib/use-coding-run-auto-hide";
 import { translations } from "@/lib/translations";
 
 /**
@@ -16,17 +17,20 @@ import { translations } from "@/lib/translations";
  * `completed` loses its clock, comes back if it had gone, and gets a fresh
  * five seconds if it finishes again; each card has its own clock; unmounting
  * or losing the run clears the clock; `restore()` brings the cards back for
- * good. And the card's fade is timed to end at the same five seconds, with
- * no motion at all under reduced motion.
+ * good. A completed run whose pull request is still in flight, blocked or
+ * failed is not finished cleanly — only one with no pull request or a merged
+ * one is. And the card's fade is timed to end at the same five seconds,
+ * folds the transcript's gap away with it, with no motion at all under
+ * reduced motion.
  */
 
-type Run = { id: string; status: CodingRunStatus };
+type Run = { id: string; status: CodingRunStatus; prPhase?: PrPhase | null };
 
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
 
-function mount(runs: Run[]) {
-  const view = renderHook(({ runs }: { runs: Run[] }) => useCodingRunAutoHide(runs), { initialProps: { runs } });
+function mount(runs: Run[], onHide?: (id: string) => void) {
+  const view = renderHook(({ runs }: { runs: Run[] }) => useCodingRunAutoHide(runs, onHide), { initialProps: { runs } });
   // Every poll hands the chat a NEW array, as the activity hook does.
   const push = (next: Run[]) => act(() => { view.rerender({ runs: [...next] }); });
   const advance = (ms: number) => act(() => { vi.advanceTimersByTime(ms); });
@@ -213,6 +217,66 @@ describe("useCodingRunAutoHide", () => {
     expect(screen.getByTestId("finishing").textContent).toBe("");
   });
 
+  it("keeps a completed run while its pull request is opened, checked and reviewed, and counts down once it merges", () => {
+    const h = mount([{ id: "a", status: "running", prPhase: "opening" }]);
+    // The record settles `completed` before the pull request is even opened.
+    h.push([{ id: "a", status: "completed", prPhase: "opening" }]);
+    h.push([{ id: "a", status: "completed", prPhase: "waiting" }]);
+    h.push([{ id: "a", status: "completed", prPhase: "review" }]);
+    h.advance(60_000);
+    expect(h.finishing()).toEqual([]);
+    expect(h.hidden()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+
+    h.push([{ id: "a", status: "completed", prPhase: "merged" }]);
+    expect(h.finishing()).toEqual(["a"]);
+    h.advance(4_999);
+    expect(h.hidden()).toEqual([]);
+    h.advance(1);
+    expect(h.hidden()).toEqual(["a"]);
+  });
+
+  it("counts down a run first seen with its pull request in review, once that merges", () => {
+    // The chat opened after the run finished, while GitHub still had it.
+    const h = mount([{ id: "a", status: "completed", prPhase: "review" }]);
+    h.push([{ id: "a", status: "completed", prPhase: "merged" }]);
+    h.advance(5_000);
+    expect(h.hidden()).toEqual(["a"]);
+  });
+
+  it.each<PrPhase>(["blocked", "failed"])(
+    "never counts down a completed run whose pull request is %s — that one is the owner's",
+    (phase) => {
+      const h = mount([{ id: "a", status: "running", prPhase: "opening" }]);
+      h.push([{ id: "a", status: "completed", prPhase: "review" }]);
+      h.push([{ id: "a", status: "completed", prPhase: phase }]);
+      h.advance(60_000);
+      expect(h.finishing()).toEqual([]);
+      expect(h.hidden()).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("counts down a completed run that never had a pull request", () => {
+    const h = mount([{ id: "a", status: "running", prPhase: null }]);
+    h.push([{ id: "a", status: "completed", prPhase: null }]);
+    h.advance(5_000);
+    expect(h.hidden()).toEqual(["a"]);
+  });
+
+  it("calls onHide once, as the clock runs out and not before", () => {
+    const onHide = vi.fn();
+    const h = mount([{ id: "a", status: "running" }, { id: "b", status: "running" }], onHide);
+    h.push([{ id: "a", status: "completed" }, { id: "b", status: "running" }]);
+    h.advance(4_999);
+    expect(onHide).not.toHaveBeenCalled();
+    h.advance(1);
+    expect(onHide).toHaveBeenCalledTimes(1);
+    expect(onHide).toHaveBeenCalledWith("a");
+    h.advance(60_000);
+    expect(onHide).toHaveBeenCalledTimes(1);
+  });
+
   it("restore() brings back every card that went on its own, and they stay", () => {
     const h = mount([{ id: "a", status: "running" }, { id: "b", status: "running" }]);
     h.push([{ id: "a", status: "completed" }, { id: "b", status: "completed" }]);
@@ -223,6 +287,20 @@ describe("useCodingRunAutoHide", () => {
     h.push([{ id: "a", status: "completed" }, { id: "b", status: "completed" }]);
     h.advance(60_000);
     expect(h.hidden()).toEqual([]);
+  });
+});
+
+describe("finishedCleanly", () => {
+  it("is a completed run with no pull request or a merged one, and nothing else", () => {
+    expect(finishedCleanly({ id: "a", status: "completed" })).toBe(true);
+    expect(finishedCleanly({ id: "a", status: "completed", prPhase: null })).toBe(true);
+    expect(finishedCleanly({ id: "a", status: "completed", prPhase: "merged" })).toBe(true);
+    for (const prPhase of ["opening", "waiting", "review", "blocked", "failed"] as const) {
+      expect(finishedCleanly({ id: "a", status: "completed", prPhase }), prPhase).toBe(false);
+    }
+    for (const status of ["running", "paused", "failed", "stopped", "gave_up", "draft"] as const) {
+      expect(finishedCleanly({ id: "a", status, prPhase: "merged" }), status).toBe(false);
+    }
   });
 });
 
@@ -265,6 +343,20 @@ describe("the fade in globals.css", () => {
     expect(duration).toBeGreaterThan(0);
     expect(duration).toBeLessThanOrEqual(400);
     expect(duration + delay).toBe(CODING_RUN_AUTO_HIDE_MS);
+  });
+
+  it("folds the transcript's gap away with the card, so the removal does not jump", () => {
+    const popup = fs.readFileSync(path.join(process.cwd(), "src", "components", "ChatPopup.tsx"), "utf8");
+    const transcript = popup.slice(popup.indexOf('data-testid="chat-transcript"'));
+    const gap = /display: 'flex', flexDirection: 'column', gap: (\d+)/.exec(transcript.slice(0, 600));
+    expect(gap).not.toBeNull();
+    const keyframes = /@keyframes coding-agent-autohide\s*\{[\s\S]*?\bto\s*\{([^}]*)\}/.exec(css);
+    expect(keyframes).not.toBeNull();
+    expect(keyframes![1]).toMatch(new RegExp(`margin-bottom:\\s*-${gap![1]}px;`));
+    // A border width animating to 0 is held at 1px by the browser's snapping
+    // until the very end; only its style takes it out within the fold.
+    expect(keyframes![1]).toMatch(/border-top-style:\s*none;/);
+    expect(keyframes![1]).toMatch(/border-bottom-style:\s*none;/);
   });
 
   it("is switched off under reduced motion", () => {

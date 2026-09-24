@@ -155,6 +155,20 @@ describe("useCodingAgentActivity", () => {
     expect(result.current.runs[0]).toMatchObject({ progress: [], screenshots: [], thinkingTokens: 0, numTurns: 0, todos: [] });
   });
 
+  it("carries where the run's pull request stands — the phase only — and null when there is none it can read", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => runsResponse([
+      { ...RUNNING, id: "run-pr", status: "completed", pr: { phase: "review", number: 7, url: "https://example.test/pr/7" } },
+      { ...RUNNING, id: "run-none", pr: null },
+      { ...RUNNING, id: "run-odd", pr: { phase: "sideways" } },
+      { ...RUNNING, id: "run-old" },
+    ])));
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(result.current.runs).toHaveLength(4));
+    const phases = Object.fromEntries(result.current.runs.map((r) => [r.id, r.prPhase]));
+    expect(phases).toEqual({ "run-pr": "review", "run-none": null, "run-odd": null, "run-old": null });
+    expect(result.current.runs[0]).not.toHaveProperty("pr");
+  });
+
   it("carries the run's plan, and only the items it can draw", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => runsResponse([{
       ...RUNNING,
