@@ -1,6 +1,7 @@
 import { runOpenclawConfigSet } from "@/lib/openclaw-config";
 import {
   canonicalPluginId,
+  claimPluginRepair,
   clearPluginRepairUnlessRefiled,
   pluginRepairInProgress,
   readPluginRepairs,
@@ -144,15 +145,23 @@ export async function retryPluginRepairsAfterCoreUpdate(
     log("could not read the installed OpenClaw release; plugins switched off for repair are left to the Retry in Settings");
     return nothing;
   }
-  const due = pluginRepairsDueAfterCoreUpdate(repairs, release, nowMs);
-  if (due.length === 0) return { ...nothing, release };
-  log(`retrying the ${due.map((row) => row.id).join(", ")} plugin repair after the OpenClaw ${release} update`);
+  const eligible = pluginRepairsDueAfterCoreUpdate(repairs, release, nowMs);
+  if (eligible.length === 0) return { ...nothing, release };
 
   // SPENT BEFORE IT RUNS, and said on the row so the panel reads "Repairing…"
-  // rather than offering a Retry that would race this one.
-  for (const row of due) {
-    await setPluginRepairInProgress(row.id, true, { retriedCore: release }).catch(() => false);
+  // rather than offering a Retry that would race this one — CLAIMED, not just
+  // stamped: the check that no Retry got there first and the stamp are one
+  // locked write, and a row an owner's Retry holds is left to that Retry. A
+  // store that cannot be written is no reason to skip the retry this core owes.
+  const due: PluginRepairEntry[] = [];
+  for (const row of eligible) {
+    const claim = await claimPluginRepair(row.id, { retriedCore: release }).catch(() => null);
+    if (claim === "busy") log(`the ${row.id} plugin is already being repaired; leaving it to that repair`);
+    if (claim === "busy" || claim === "absent") continue;
+    due.push(row);
   }
+  if (due.length === 0) return { ...nothing, release };
+  log(`retrying the ${due.map((row) => row.id).join(", ")} plugin repair after the OpenClaw ${release} update`);
 
   const refile = async (row: PluginRepairEntry, stage: PluginRepairEntry["stage"], spec: string, reason: string) => {
     try {
@@ -231,26 +240,31 @@ export async function retryPluginRepairsAfterCoreUpdate(
       }
     };
     try {
-      await hooks.quiesce(switchOffAll);
-    } catch (quiesceErr) {
-      // A gateway restart-looping over the plugin it just loaded is exactly
-      // the one the quiesce can fail to wait out. The entries still come off
-      // — `config set` needs no gateway — and the rows below still say why;
-      // leaving either behind would hand `ensureGatewayHealthy` a box that
-      // reads "Repairing…" over a config it is about to recover.
-      const why = quiesceErr instanceof Error ? quiesceErr.message : String(quiesceErr);
-      log(`could not quiesce the gateway to switch the repaired plugins off (${why}); switching them off anyway`);
-      await switchOffAll();
-    }
-    for (const { row, stage, spec } of repairedOnDisk) {
-      failed.push(canonicalPluginId(row.id));
-      await refile(
-        row,
-        stage,
-        spec,
-        `${pluginLabel(row.id)} was repaired after the OpenClaw ${release} update, but the gateway did not `
-          + "report ready with it switched on, so it was switched off again.",
-      );
+      try {
+        await hooks.quiesce(switchOffAll);
+      } catch (quiesceErr) {
+        // A gateway restart-looping over the plugin it just loaded is exactly
+        // the one the quiesce can fail to wait out. The entries still come off
+        // — `config set` needs no gateway — and the rows below still say why;
+        // leaving either behind would hand `ensureGatewayHealthy` a box that
+        // reads "Repairing…" over a config it is about to recover.
+        const why = quiesceErr instanceof Error ? quiesceErr.message : String(quiesceErr);
+        log(`could not quiesce the gateway to switch the repaired plugins off (${why}); switching them off anyway`);
+        await switchOffAll();
+      }
+    } finally {
+      // EVERY ROW IS RE-FILED whatever the switch-off did: a row left behind here
+      // says "Repairing…" over a plugin nothing is repairing.
+      for (const { row, stage, spec } of repairedOnDisk) {
+        failed.push(canonicalPluginId(row.id));
+        await refile(
+          row,
+          stage,
+          spec,
+          `${pluginLabel(row.id)} was repaired after the OpenClaw ${release} update, but the gateway did not `
+            + "report ready with it switched on, so it was switched off again.",
+        );
+      }
     }
     await hooks.restartAndVerify();
     return { release, repaired: [], failed };

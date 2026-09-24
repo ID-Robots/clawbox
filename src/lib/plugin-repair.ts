@@ -258,12 +258,12 @@ export type PluginRepairRecord = Omit<PluginRepairEntry, "atMs">;
  * the core reports an entry as never installed on a core the update has just
  * put on the box (TASK-738). One record, one reader, one Retry.
  *
- * THREE WRITERS, no lock, and only one pair can overlap. The boot script's is
- * excluded by construction — the updater writes inside `withGatewayQuiesced`,
- * after the pre-start has been waited out. What is left is an owner pressing
- * Retry (`clearPluginRepair`) while an update is in its gateway-verify step:
- * last writer wins and one row can be lost. It costs a badge, not a repair, and
- * an `O_EXCL` lock file is where to start if it ever matters.
+ * EVERY WRITER HOLDS THE STORE'S LOCK (`withPluginRepairLock`) for its whole
+ * read-modify-write — the boot script, the updater, the owner's Retry, and the
+ * two routes that clear a row after a repair of their own. "Only one pair can
+ * overlap" was the old argument for going without, and TASK-1088 made it false:
+ * the Retry and the after-update retry both stamp a row the gateway's own
+ * pre-start may be re-filing in the same second, and last writer wins lost rows.
  *
  * A file that EXISTS and cannot be read is a THROW, not an empty map — the
  * distinction `readPluginRepairs` deliberately does not make, because its
@@ -276,6 +276,10 @@ export type PluginRepairRecord = Omit<PluginRepairEntry, "atMs">;
  * inside one process must not stage over each other.
  */
 export async function recordPluginRepair(row: PluginRepairRecord): Promise<void> {
+  await withPluginRepairLock(() => recordPluginRepairLocked(row));
+}
+
+async function recordPluginRepairLocked(row: PluginRepairRecord): Promise<void> {
   const target = pluginRepairPath();
   let rows: Record<string, unknown> = {};
   let raw: string | null = null;
@@ -356,10 +360,10 @@ export async function setPluginRepairInProgress(
   running: boolean,
   options: { retriedCore?: string } = {},
 ): Promise<boolean> {
-  return withStampLock(async () => {
+  return withStampLock(() => withPluginRepairLock(async () => {
     const outcome = await stampRows(id, running, options, { onlyWhenIdle: false });
     return outcome !== "absent";
-  });
+  }));
 }
 
 /**
@@ -368,25 +372,28 @@ export async function setPluginRepairInProgress(
  * in the same server process, and "read the row, see no stamp, write a stamp"
  * as two steps let two presses — or a press under the after-update retry —
  * both pass the check and both run `plugins install --force` over each other.
- * The read-check-write runs under the same in-process turn as every other
- * stamp, so exactly one caller gets `claimed`; the others get `busy` without
+ * The read-check-write runs under the store's CROSS-PROCESS lock, so exactly
+ * one caller gets `claimed` wherever it runs; the others get `busy` without
  * having written anything.
  *
- * In-process only, and deliberately so: the boot script's writer runs inside a
- * gateway start, which both callers here trigger only AFTER their stamp is
- * down, and its own re-file drops the stamp on purpose (see
- * `clearPluginRepairUnlessRefiled`).
+ * Not in-process only: the updater and the web server are separate processes,
+ * and the boot script re-files the same rows from a third — a gateway start
+ * that another press or update may have triggered — so the in-process turn
+ * below only saves same-process callers from polling the lock file.
  */
 export async function claimPluginRepair(
   id: string,
   options: { retriedCore?: string } = {},
 ): Promise<"claimed" | "busy" | "absent"> {
-  return withStampLock(() => stampRows(id, true, options, { onlyWhenIdle: true }));
+  return withStampLock(() => withPluginRepairLock(() => stampRows(id, true, options, { onlyWhenIdle: true })));
 }
 
 let stampTurn: Promise<unknown> = Promise.resolve();
 
-/** One stamp at a time inside this process; a failed one does not poison the next. */
+/**
+ * One stamp at a time inside this process; a failed one does not poison the
+ * next. A supplement to `withPluginRepairLock`, never a replacement for it.
+ */
 function withStampLock<T>(operation: () => Promise<T>): Promise<T> {
   const turn = stampTurn.then(operation, operation);
   stampTurn = turn.catch(() => undefined);
@@ -428,6 +435,105 @@ async function stampRows(
 }
 
 /**
+ * How long a lock on the store is believed. Every holder keeps it for ONE
+ * read-modify-write of a small JSON file — milliseconds — so a lock this old
+ * was left by a writer that died holding it, and is taken over rather than
+ * waited out. `scripts/gateway-pre-start.sh` uses the same age.
+ */
+const PLUGIN_REPAIR_LOCK_STALE_MS = 10_000;
+
+/** How long a writer waits for it: past the stale age, so a dead holder's lock is always reached. */
+const PLUGIN_REPAIR_LOCK_WAIT_MS = 15_000;
+
+/** The store's cross-process lock, beside it. */
+export function pluginRepairLockPath(): string {
+  return `${pluginRepairPath()}.lock`;
+}
+
+/**
+ * Run one read-modify-write of the store under its CROSS-PROCESS lock.
+ *
+ * The web server, the updater and `scripts/gateway-pre-start.sh` are separate
+ * processes writing one file, so a module mutex cannot order them. The lock is
+ * `plugin-repair.json.lock`, created `O_EXCL` with an owner token and removed
+ * only while the token is still ours — the protocol the boot script's
+ * `clawbox_plugin_repair_locked` follows too, so the two exclude each other.
+ * Not reentrant: nothing that holds it calls another writer here.
+ */
+async function withPluginRepairLock<T>(operation: () => Promise<T>): Promise<T> {
+  const lockPath = pluginRepairLockPath();
+  const token = `${process.pid}.${randomUUID()}`;
+  await fs.mkdir(path.dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + PLUGIN_REPAIR_LOCK_WAIT_MS;
+  for (let attempt = 0; ; attempt += 1) {
+    let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+    try {
+      handle = await fs.open(lockPath, "wx", 0o644);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+    }
+    if (handle) {
+      try {
+        await handle.writeFile(`${token}\n`, "utf-8");
+      } catch (err) {
+        // Ours — `O_EXCL` says so — and no use to anyone without its token.
+        await handle.close().catch(() => {});
+        await fs.rm(lockPath, { force: true }).catch(() => {});
+        throw err;
+      }
+      await handle.close().catch(() => {});
+      break;
+    }
+    if (await reclaimStalePluginRepairLock(lockPath) && Date.now() < deadline) continue;
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for the plugin repair lock ${lockPath}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(200, 20 + 10 * attempt)));
+  }
+  try {
+    return await operation();
+  } finally {
+    // Only while it is still OURS: a lock taken over as stale is its new holder's.
+    const held = await fs.readFile(lockPath, "utf-8").catch(() => null);
+    if (held?.trim() === token) await fs.rm(lockPath, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Take over a lock its holder died with, and answer whether the way is clear.
+ *
+ * Re-checked under a `.reclaim` guard directory, so two waiters that both saw
+ * the same dead lock cannot take it over in turn — the second deleting the live
+ * lock the first has just made. The guard is held for a stat and an unlink; one
+ * older than the stale age was left by a waiter that died as well.
+ */
+async function reclaimStalePluginRepairLock(lockPath: string): Promise<boolean> {
+  const observed = await fs.lstat(lockPath).catch(() => null);
+  if (!observed) return true;
+  if (Date.now() - observed.mtimeMs < PLUGIN_REPAIR_LOCK_STALE_MS) return false;
+  const guard = `${lockPath}.reclaim`;
+  try {
+    await fs.mkdir(guard);
+  } catch {
+    const held = await fs.lstat(guard).catch(() => null);
+    if (held && Date.now() - held.mtimeMs >= PLUGIN_REPAIR_LOCK_STALE_MS) {
+      await fs.rmdir(guard).catch(() => {});
+    }
+    return false;
+  }
+  try {
+    const current = await fs.lstat(lockPath).catch(() => null);
+    if (!current) return true;
+    if (current.ino !== observed.ino || current.dev !== observed.dev
+      || Date.now() - current.mtimeMs < PLUGIN_REPAIR_LOCK_STALE_MS) return false;
+    await fs.rm(lockPath, { force: true });
+    return true;
+  } finally {
+    await fs.rmdir(guard).catch(() => {});
+  }
+}
+
+/**
  * Stage the whole file beside itself and rename it into place.
  *
  * Temp file plus rename in the same directory, so no reader ever sees half a
@@ -459,6 +565,15 @@ async function writeRowsAtomically(target: string, rows: unknown): Promise<void>
  * by name, and a delete would race a boot that is writing one.
  */
 export async function clearPluginRepair(id: string): Promise<boolean> {
+  // Every channel enable and provider save calls this, and on a healthy box
+  // there is no row: that answer is a read, not a read-modify-write, and costs
+  // no lock. A row that is there is looked for again under it.
+  const wanted = canonicalPluginId(id);
+  if (!Object.values(await readPluginRepairs()).some((row) => canonicalPluginId(row.id) === wanted)) return false;
+  return withPluginRepairLock(() => clearPluginRepairLocked(id));
+}
+
+async function clearPluginRepairLocked(id: string): Promise<boolean> {
   const current = await readPluginRepairs();
   // MATCHED ON THE CANONICAL ID, not on the literal key. The boot script marks
   // the plugin under the key openclaw.json carries — `@openclaw/discord` when
@@ -494,14 +609,16 @@ export async function clearPluginRepairUnlessRefiled(
   id: string,
   atMs: number,
 ): Promise<"cleared" | "absent" | "refiled"> {
-  const current = await readPluginRepairs();
-  const wanted = canonicalPluginId(id);
-  const keys = Object.keys(current).filter((key) => canonicalPluginId(current[key].id) === wanted);
-  if (keys.length === 0) return "absent";
-  if (keys.some((key) => current[key].atMs !== atMs)) return "refiled";
-  for (const key of keys) delete current[key];
-  await writeRowsAtomically(pluginRepairPath(), current);
-  return "cleared";
+  return withPluginRepairLock(async () => {
+    const current = await readPluginRepairs();
+    const wanted = canonicalPluginId(id);
+    const keys = Object.keys(current).filter((key) => canonicalPluginId(current[key].id) === wanted);
+    if (keys.length === 0) return "absent";
+    if (keys.some((key) => current[key].atMs !== atMs)) return "refiled";
+    for (const key of keys) delete current[key];
+    await writeRowsAtomically(pluginRepairPath(), current);
+    return "cleared";
+  });
 }
 
 /**

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -135,8 +135,8 @@ function calls(): string[] {
   return existsSync(callsLog) ? readFileSync(callsLog, "utf-8").trim().split("\n").filter(Boolean) : [];
 }
 
-function run(program: string, vars: Record<string, string>, env: Record<string, string> = {}) {
-  const script = [
+function bashScript(program: string, vars: Record<string, string>): string {
+  return [
     "set -euo pipefail",
     `CLAWBOX_ROOT=${JSON.stringify(root)}`,
     `OPENCLAW_CONFIG=${JSON.stringify(configPath)}`,
@@ -146,14 +146,21 @@ function run(program: string, vars: Record<string, string>, env: Record<string, 
     ...Object.entries(vars).map(([key, value]) => `${key}=${JSON.stringify(value)}`),
     program,
   ].join("\n");
-  const r = spawnSync("bash", ["-c", script], {
+}
+
+function bashEnv(env: Record<string, string> = {}) {
+  return testEnv({
+    PATH: `${path.dirname(bin)}:/usr/bin:/bin`,
+    OPENCLAW_CONFIG: configPath,
+    OC_CALLS: callsLog,
+    ...env,
+  });
+}
+
+function run(program: string, vars: Record<string, string>, env: Record<string, string> = {}) {
+  const r = spawnSync("bash", ["-c", bashScript(program, vars)], {
     encoding: "utf-8",
-    env: testEnv({
-      PATH: `${path.dirname(bin)}:/usr/bin:/bin`,
-      OPENCLAW_CONFIG: configPath,
-      OC_CALLS: callsLog,
-      ...env,
-    }),
+    env: bashEnv(env),
     timeout: 30_000,
   });
   return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
@@ -334,5 +341,43 @@ d("gateway-pre-start.sh — what a re-filed row keeps (TASK-1088)", () => {
     expect(rows.codex.reason).toBe("still refused");
     // …and the other plugin's row is left exactly as it was.
     expect(rows.deepseek).toEqual(DEEPSEEK_ROW_FROM_2026_9_3);
+  });
+});
+
+d("gateway-pre-start.sh — the store's lock, shared with the server (TASK-1088)", () => {
+  const lockPath = () => `${markerPath}.lock`;
+
+  it("waits while the server holds the lock, and files the row once it is let go", async () => {
+    writeMarker({ deepseek: DEEPSEEK_ROW_FROM_2026_9_3 });
+    // What `withPluginRepairLock` leaves on disk while the server writes.
+    writeFileSync(lockPath(), "4242.server-token\n");
+    const child = spawn(
+      "bash",
+      ["-c", bashScript(`${repairHelpers()}\nclawbox_plugin_repair_mark codex install 1 "refused" ""`, {})],
+      { env: bashEnv(), stdio: "ignore" },
+    );
+    const exited = new Promise<number | null>((resolve) => child.on("exit", resolve));
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(marker().codex).toBeUndefined();
+
+    rmSync(lockPath());
+    expect(await exited).toBe(0);
+    expect(marker().codex.reason).toBe("refused");
+    expect(marker().deepseek).toEqual(DEEPSEEK_ROW_FROM_2026_9_3);
+    expect(existsSync(lockPath())).toBe(false);
+  });
+
+  it("takes over a lock a killed writer left, and clears under it", () => {
+    writeMarker({ codex: { ...CODEX_ROW_FROM_2026_9_3, disabled: false } });
+    writeFileSync(lockPath(), "a-writer-that-was-killed\n");
+    const minuteAgo = new Date(Date.now() - 60_000);
+    utimesSync(lockPath(), minuteAgo, minuteAgo);
+
+    const r = run(`${repairHelpers()}\nclawbox_plugin_repair_clear codex`, {});
+
+    expect(r.status).toBe(0);
+    expect(marker()).toEqual({});
+    expect(existsSync(lockPath())).toBe(false);
   });
 });

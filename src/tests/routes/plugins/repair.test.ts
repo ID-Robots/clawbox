@@ -538,6 +538,7 @@ describe("plugins/repair — a row an older core left (TASK-1088)", () => {
 
   it("refuses a second press while a repair of the row is running", async () => {
     readPluginRepairs.mockResolvedValue(marker({ repairingSinceMs: Date.now() - 1_000 }));
+    claimRepair.mockResolvedValue("busy");
     stubExec(async () => ({ stdout: LOADED }));
 
     const r = await post({ pluginId: "codex" });
@@ -545,6 +546,25 @@ describe("plugins/repair — a row an older core left (TASK-1088)", () => {
     expect(r.status).toBe(409);
     expect(await r.json()).toMatchObject({ ok: false, code: "repair_in_progress" });
     expect(execCalls).toEqual([]);
+  });
+
+  it("answers not_marked for a row cleared between the read and the claim", async () => {
+    claimRepair.mockResolvedValue("absent");
+
+    const r = await post({ pluginId: "codex" });
+
+    expect(r.status).toBe(404);
+    expect(await r.json()).toMatchObject({ ok: false, code: "not_marked" });
+    expect(execCalls).toEqual([]);
+  });
+
+  it("still repairs when the store cannot take the claim, but not over a stamp it read", async () => {
+    claimRepair.mockRejectedValue(new Error("EROFS: read-only file system"));
+    stubExec(async () => ({ stdout: LOADED }));
+    expect((await post({ pluginId: "codex" })).status).toBe(200);
+
+    readPluginRepairs.mockResolvedValue(marker({ repairingSinceMs: Date.now() - 1_000 }));
+    expect((await post({ pluginId: "codex" })).status).toBe(409);
   });
 
   it("does not believe a stamp a killed repair left behind", async () => {

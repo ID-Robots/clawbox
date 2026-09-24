@@ -379,6 +379,27 @@ describe("after a core update — the rows an older core left", () => {
     expect(h.log).toHaveBeenCalledWith(expect.stringContaining("switching them off anyway"));
   });
 
+  it("leaves a row an owner's Retry claimed after the read to that Retry", async () => {
+    writeMarker({ codex: CODEX_ROW, deepseek: DEEPSEEK_ROW });
+    const { retryPluginRepairsAfterCoreUpdate } = await load();
+    const { claimPluginRepair } = await import("@/lib/plugin-repair");
+    const h = hooks();
+    // The press lands while the updater asks the core its release: after the
+    // rows were read idle, before the updater's own claim.
+    h.release = vi.fn(async () => {
+      expect(await claimPluginRepair("codex")).toBe("claimed");
+      return RELEASE;
+    });
+
+    const result = await retryPluginRepairsAfterCoreUpdate(h);
+
+    expect(result).toEqual({ release: RELEASE, repaired: ["deepseek"], failed: [] });
+    expect(box.execCalls.flat()).not.toContain("@openclaw/codex@2026.9.4");
+    // The Retry's stamp stands, and this core's retry was not spent on its row.
+    expect(marker().codex.repairingSinceMs).toEqual(expect.any(Number));
+    expect(marker().codex.retriedCore).toBeUndefined();
+  });
+
   it("leaves a row the restart's own boot script filed again as that boot filed it", async () => {
     writeMarker({ codex: CODEX_ROW });
     const { retryPluginRepairsAfterCoreUpdate } = await load();

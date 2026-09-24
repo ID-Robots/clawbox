@@ -4260,6 +4260,56 @@ OPENCLAW_HOME_DIR="$(dirname "$OPENCLAW_CONFIG")"
 # record of what IT could not do, written by the only process that was there.
 CLAWBOX_PLUGIN_REPAIR_FILE="$CLAWBOX_ROOT/data/plugin-repair.json"
 
+# Run ONE read-modify-write of that file holding its cross-process lock,
+# `plugin-repair.json.lock` — the same lock `src/lib/plugin-repair.ts` takes
+# (TASK-1088). This script is not the file's only writer while it runs: the
+# restart it runs under can belong to the owner's Retry or the updater's
+# after-update retry, both of which stamp and clear the very rows this script
+# re-files, and without the lock the last writer won and a row was lost.
+#
+# THE SAME PROTOCOL as the Node side, or the two would not exclude each other:
+# the lock is created exclusively (`noclobber` opens with `O_EXCL`) holding an
+# owner token and removed only while the token is still ours; one older than
+# 10 s — every holder keeps it for milliseconds — was left by a writer that
+# died, and is taken over under a `.reclaim` guard directory so two waiters
+# cannot take it over in turn. No lock inside about 15 s answers 1, which every
+# caller already reports as a WARN: never fatal, exactly like the write.
+CLAWBOX_PLUGIN_REPAIR_LOCK_STALE_S=10
+clawbox_plugin_repair_locked() {
+  local lock="$CLAWBOX_PLUGIN_REPAIR_FILE.lock" guard="$CLAWBOX_PLUGIN_REPAIR_FILE.lock.reclaim"
+  local token="$$.$RANDOM$RANDOM" tries=0 seen guard_mtime rc=0
+  mkdir -p "$(dirname "$lock")" 2>/dev/null || true
+  until ( set -o noclobber; printf '%s\n' "$token" >"$lock" ) 2>/dev/null; do
+    seen="$(stat -c '%d:%i:%Y' "$lock" 2>/dev/null || true)"
+    if [ -z "$seen" ]; then
+      # Released between the two looks — or a directory nothing can write,
+      # which no amount of waiting fixes.
+      [ -w "$(dirname "$lock")" ] || return 1
+    elif [ $(( $(date +%s) - ${seen##*:} )) -ge "$CLAWBOX_PLUGIN_REPAIR_LOCK_STALE_S" ]; then
+      if mkdir "$guard" 2>/dev/null; then
+        # Still the SAME dead lock — not one a live writer made since the look.
+        if [ "$(stat -c '%d:%i:%Y' "$lock" 2>/dev/null || true)" = "$seen" ]; then
+          rm -f "$lock" 2>/dev/null || true
+        fi
+        rmdir "$guard" 2>/dev/null || true
+      else
+        guard_mtime="$(stat -c %Y "$guard" 2>/dev/null || date +%s)"
+        if [ $(( $(date +%s) - guard_mtime )) -ge "$CLAWBOX_PLUGIN_REPAIR_LOCK_STALE_S" ]; then
+          rmdir "$guard" 2>/dev/null || true
+        fi
+      fi
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -lt 300 ] || return 1
+    sleep 0.05
+  done
+  "$@" || rc=$?
+  if [ "$(cat "$lock" 2>/dev/null || true)" = "$token" ]; then
+    rm -f "$lock" 2>/dev/null || true
+  fi
+  return "$rc"
+}
+
 # `plugins.entries["<id>"].enabled` — bracket notation always, because the ids
 # include `@openclaw/discord`, which dot notation would split.
 clawbox_plugin_enabled_path() {
@@ -4358,7 +4408,7 @@ clawbox_plugin_repair_mark() {
   if ! CLAWBOX_REPAIR_ID="$id" CLAWBOX_REPAIR_STAGE="$stage" \
     CLAWBOX_REPAIR_DISABLED="$disabled" CLAWBOX_REPAIR_REASON="$reason" \
     CLAWBOX_REPAIR_SPEC="$spec" \
-    python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY'
+    clawbox_plugin_repair_locked python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY'
 import json, os, sys, tempfile, time
 
 path = sys.argv[1]
@@ -4487,7 +4537,7 @@ PY
   # SAID, not swallowed. A clear that fails leaves a "Needs repair" badge on a
   # row that is working — a false failure the owner cannot act on, because the
   # Retry it offers will succeed and change nothing he can see.
-  if ! CLAWBOX_REPAIR_ID="$1" python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null
+  if ! CLAWBOX_REPAIR_ID="$1" clawbox_plugin_repair_locked python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null
 import json, os, sys, tempfile
 
 path = sys.argv[1]

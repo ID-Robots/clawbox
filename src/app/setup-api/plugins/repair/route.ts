@@ -127,16 +127,26 @@ export async function POST(req: Request) {
   // that remounted and forgot its own "Repairing…", or the updater's
   // after-update retry already running — would start a second
   // `plugins install --force` over the first and restart the gateway under it.
-  if (pluginRepairInProgress(entry)) {
+  // Said ON THE ROW, not only in this tab, so every surface that draws it says
+  // "Repairing…" until this answers — and CLAIMED, the fresh check and the
+  // stamp as one step under the store's cross-process lock, so two presses that
+  // both read the row above before either wrote cannot both start. The claim is
+  // the only 409: the row read above may already be stale.
+  let claim: Awaited<ReturnType<typeof claimPluginRepair>> | null;
+  try {
+    claim = await claimPluginRepair(entry.id);
+  } catch {
+    // Best effort past that: a row that cannot carry the stamp can still be
+    // repaired — though not over a stamp it was read with a moment ago.
+    claim = pluginRepairInProgress(entry) ? "busy" : null;
+  }
+  if (claim === "busy") {
     return NextResponse.json({ ok: false, code: "repair_in_progress" }, { status: 409 });
   }
-  // Said ON THE ROW, not only in this tab, so every surface that draws it says
-  // "Repairing…" until this answers — and CLAIMED in the same step as the fresh
-  // check, so two presses that both read the row above before either wrote
-  // cannot both start. Best effort past that: a row that cannot carry the stamp
-  // can still be repaired.
-  if ((await claimPluginRepair(entry.id).catch(() => "claimed" as const)) === "busy") {
-    return NextResponse.json({ ok: false, code: "repair_in_progress" }, { status: 409 });
+  if (claim === "absent") {
+    // Cleared since the read above — the boot script's consent loop, or a
+    // repair that finished — so there is nothing left here to repair.
+    return NextResponse.json({ ok: false, code: "not_marked" }, { status: 404 });
   }
   const ended = () => setPluginRepairInProgress(entry.id, false).catch(() => false);
 

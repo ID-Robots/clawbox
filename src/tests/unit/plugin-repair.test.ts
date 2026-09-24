@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -385,5 +385,64 @@ describe("plugin-repair — a repair in flight, and one already spent (TASK-1088
   it("says a row the boot script cleared itself is gone", async () => {
     const { clearPluginRepairUnlessRefiled } = await load();
     expect(await clearPluginRepairUnlessRefiled("codex", 7)).toBe("absent");
+  });
+});
+
+describe("plugin-repair — the store's cross-process lock (TASK-1088)", () => {
+  const codex = {
+    id: "codex", stage: "install", reason: "offline", atMs: 7, disabled: true, spec: "@openclaw/codex@2026.9.3",
+  };
+  const lockPath = () => path.join(dir, "data", "plugin-repair.json.lock");
+
+  it("spends the retry in the claim's own write, keeps the atMs, and lets the loser write nothing", async () => {
+    write({ codex });
+    const { claimPluginRepair, readPluginRepairs } = await load();
+
+    expect(await claimPluginRepair("@openclaw/codex", { retriedCore: "2026.9.4" })).toBe("claimed");
+    const row = (await readPluginRepairs()).codex;
+    expect(row.retriedCore).toBe("2026.9.4");
+    expect(row.atMs).toBe(7);
+
+    expect(await claimPluginRepair("codex")).toBe("busy");
+    expect((await readPluginRepairs()).codex.repairingSinceMs).toBe(row.repairingSinceMs);
+    expect(existsSync(lockPath())).toBe(false);
+  });
+
+  it("loses no row to writers that overlap", async () => {
+    const { recordPluginRepair, readPluginRepairs } = await load();
+    const ids = ["codex", "deepseek", "discord", "telegram", "slack"];
+    await Promise.all(ids.map((id) => recordPluginRepair({ id, stage: "install", reason: "r", disabled: true, spec: "" })));
+    expect(Object.keys(await readPluginRepairs()).sort()).toEqual([...ids].sort());
+    expect(existsSync(lockPath())).toBe(false);
+  });
+
+  it("waits for a lock another process holds, and writes once it is let go", async () => {
+    // What the boot script's `clawbox_plugin_repair_locked` leaves on disk
+    // while it writes: no module mutex in this process can see it.
+    write({ codex });
+    writeFileSync(lockPath(), "the-boot-script\n");
+    const { claimPluginRepair, readPluginRepairs } = await load();
+
+    let settled = false;
+    const pending = claimPluginRepair("codex").finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(settled).toBe(false);
+    expect((await readPluginRepairs()).codex.repairingSinceMs).toBeUndefined();
+
+    rmSync(lockPath());
+    expect(await pending).toBe("claimed");
+    expect((await readPluginRepairs()).codex.repairingSinceMs).toEqual(expect.any(Number));
+  });
+
+  it("takes over a lock its holder died with", async () => {
+    write({ codex });
+    writeFileSync(lockPath(), "a-writer-that-was-killed\n");
+    const minuteAgo = new Date(Date.now() - 60_000);
+    utimesSync(lockPath(), minuteAgo, minuteAgo);
+    const { clearPluginRepair, readPluginRepairs } = await load();
+
+    expect(await clearPluginRepair("codex")).toBe(true);
+    expect(await readPluginRepairs()).toEqual({});
+    expect(readdirSync(path.join(dir, "data"))).toEqual(["plugin-repair.json"]);
   });
 });
