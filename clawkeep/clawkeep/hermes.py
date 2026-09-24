@@ -341,6 +341,12 @@ def _add_file_snapshot(
         if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
             raise OSError(f"{path} is no longer a regular file")
         info = tf.gettarinfo(arcname=arcname, fileobj=fh)
+        # Every name of a hard-linked file travels as its own regular member,
+        # as OpenClaw's archiver does: `gettarinfo` answers a second name with
+        # a data-less LNKTYPE header, and the bytes written after it here
+        # would misalign the rest of the archive.
+        info.type = tarfile.REGTYPE
+        info.linkname = ""
         with tempfile.SpooledTemporaryFile(
             max_size=_SNAPSHOT_SPOOL_BYTES, dir=str(spool_dir),
         ) as spool:

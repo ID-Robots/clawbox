@@ -528,3 +528,19 @@ def test_create_refuses_a_duplicate_member_but_restore_still_reads_one(tmp_path:
     hermes.verify_archive(archive)  # a snapshot already in the cloud stays restorable
     with pytest.raises(hermes.HermesError, match="duplicate entry path"):
         hermes.verify_archive(archive, unique_members=True)
+
+
+def test_a_hard_linked_file_travels_whole_under_every_name(box: Path, tmp_path: Path) -> None:
+    """A second name of one inode is written as a regular member with its own
+    bytes, never as a data-less hard link followed by data."""
+    first = box / ".hermes" / "skills" / "email" / "a.md"
+    first.write_text("same inode\n", encoding="utf-8")
+    os.link(first, first.with_name("b.md"))
+    made = hermes.create_archive(output_dir=tmp_path / "out")
+    with tarfile.open(made.path, "r:gz") as tf:
+        members = {m.name.rsplit("/", 1)[-1]: m for m in tf.getmembers() if m.name.endswith(".md")}
+        for name in ("a.md", "b.md"):
+            assert members[name].isreg()
+            assert tf.extractfile(members[name]).read() == b"same inode\n"
+        # Everything after them still reads: the stream is aligned.
+        assert any(m.name.endswith("/manifest.json") for m in tf.getmembers())

@@ -111,6 +111,8 @@ MAX_SQLITE_REPAIRS = 5
 LEGACY_RUNTIME_DEPS_DIRNAME = "plugin-runtime-deps"
 #: `skipped[].reason` values whose trees the archiver does not walk.
 _UNWALKED_REASONS = frozenset({"regenerable", "private"})
+#: Links named one by one in a log line; the rest are counted.
+_LOGGED_LINKS = 20
 
 
 def _inside(path: str, root: str) -> bool:
@@ -242,7 +244,10 @@ def find_refused_links(plan: BackupPlan) -> list[RefusedLink]:
     return [found[p] for p in sorted(found)]
 
 
-def _journal_entries(journal: Path) -> list[dict[str, str]]:
+def _journal_entries(journal: Path) -> list[dict[str, str]] | None:
+    """The journal's usable entries; `None` when the file exists but cannot be
+    read — then it is left exactly where it is, and nothing new is detached
+    on top of a record nobody can read."""
     try:
         raw = json.loads(journal.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -251,7 +256,7 @@ def _journal_entries(journal: Path) -> list[dict[str, str]]:
         log.warning(
             "detached-link journal %s is unreadable, leaving it for a person: %s", journal, e,
         )
-        return []
+        return None
     entries = raw.get("links") if isinstance(raw, dict) else None
     good: list[dict[str, str]] = []
     for entry in entries if isinstance(entries, list) else []:
@@ -293,6 +298,8 @@ def detach_links(links: list[RefusedLink], journal: Path) -> list[RefusedLink]:
     if not managed:
         return []
     pending = _journal_entries(journal)
+    if pending is None:
+        return []
     known = {entry["path"] for entry in pending}
     fresh = [link for link in managed if link.path not in known]
 
@@ -315,9 +322,13 @@ def detach_links(links: list[RefusedLink], journal: Path) -> list[RefusedLink]:
     _write_journal(journal, entries(detached))
     if detached:
         log.info(
-            "omitting %d managed link(s) from this archive; they are put back when it is built: %s",
+            "omitting %d managed link(s) from this archive; they are put back when it is built: "
+            "%s%s",
             len(detached),
-            ", ".join(f"{link.path} -> {link.target} ({link.rule})" for link in detached),
+            ", ".join(
+                f"{link.path} -> {link.target} ({link.rule})" for link in detached[:_LOGGED_LINKS]
+            ),
+            f" … and {len(detached) - _LOGGED_LINKS} more" if len(detached) > _LOGGED_LINKS else "",
         )
     return detached
 
@@ -327,6 +338,8 @@ def reattach_links(journal: Path) -> list[str]:
     recreated meanwhile is left as it is; one whose directory is gone is
     dropped from the journal with a warning. Returns the paths restored."""
     entries = _journal_entries(journal)
+    if entries is None:
+        return []
     if not entries:
         journal.unlink(missing_ok=True)
         return []
@@ -336,8 +349,12 @@ def reattach_links(journal: Path) -> list[str]:
         path, target = entry["path"], entry["target"]
         if os.path.lexists(path):
             continue
-        if not os.path.isdir(os.path.dirname(path)):
-            log.warning("not restoring link %s -> %s: its directory is gone", path, target)
+        parent = os.path.dirname(path)
+        if not os.path.isdir(parent) or os.path.islink(parent):
+            log.warning(
+                "not restoring link %s -> %s: its directory is gone or is now a link",
+                path, target,
+            )
             continue
         try:
             os.symlink(target, path)
@@ -543,13 +560,15 @@ def _create_archive(cfg: Config, *, output_dir: Path) -> Archive:
     if plan is not None:
         assert_no_duplicate_paths(plan)
     links = find_refused_links(plan) if plan is not None else []
-    for link in links:
-        if not link.managed:
-            log.warning(
-                "the archiver will refuse the symbolic link %s -> %s: it points outside the "
-                "backup and is not a package-manager link ClawKeep may omit",
-                link.path, link.target,
-            )
+    foreign = [link for link in links if not link.managed]
+    if foreign:
+        log.warning(
+            "the archiver will refuse %d symbolic link(s) that point outside the backup and that "
+            "no omission rule covers; ClawKeep leaves them alone: %s%s",
+            len(foreign),
+            ", ".join(f"{link.path} -> {link.target}" for link in foreign[:_LOGGED_LINKS]),
+            f" … and {len(foreign) - _LOGGED_LINKS} more" if len(foreign) > _LOGGED_LINKS else "",
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     detach_links(links, journal)
@@ -559,8 +578,20 @@ def _create_archive(cfg: Config, *, output_dir: Path) -> Archive:
         reattach_links(journal)
 
 
-def _create_with_sqlite_recovery(cfg: Config, output_dir: Path, plan: BackupPlan | None) -> Archive:
-    attempted: set[str] = set()
+#: Why a database the core refused AGAIN, after ClawKeep's look, is left alone.
+_REFUSED_AGAIN = {
+    sqlite_recovery.RECOVERY_REPAIRED: "it still failed after its indexes were rebuilt",
+    sqlite_recovery.RECOVERY_HEALTHY: (
+        "ClawKeep's own full integrity check found nothing it may repair, and the archiver "
+        "refused it again"
+    ),
+}
+
+
+def _create_with_sqlite_recovery(
+    cfg: Config, output_dir: Path, plan: BackupPlan | None,
+) -> Archive:
+    attempted: dict[str, str] = {}
     while True:
         before = _listing(output_dir)
         try:
@@ -577,14 +608,21 @@ def _create_with_sqlite_recovery(cfg: Config, output_dir: Path, plan: BackupPlan
             if failure.kind != FAILURE_SQLITE or not failure.paths:
                 raise _refine(exc, plan) from exc
             database = failure.paths[0]
-            if database in attempted or len(attempted) >= MAX_SQLITE_REPAIRS:
-                raise _damaged(exc, database, None) from exc
-            attempted.add(database)
+            if database in attempted:
+                raise _damaged(exc, database, sqlite_recovery.Recovery(
+                    sqlite_recovery.RECOVERY_REFUSED, reason=_REFUSED_AGAIN[attempted[database]],
+                )) from exc
+            if len(attempted) >= MAX_SQLITE_REPAIRS:
+                raise _damaged(exc, database, sqlite_recovery.Recovery(
+                    sqlite_recovery.RECOVERY_REFUSED,
+                    reason=f"{len(attempted)} databases were already repaired in this run",
+                )) from exc
             outcome = sqlite_recovery.recover(
                 Path(database),
                 allowed_roots=_sqlite_roots(plan),
                 recovery_dir=token.data_dir() / SQLITE_RECOVERY_DIRNAME,
             )
+            attempted[database] = outcome.status
             if outcome.status == sqlite_recovery.RECOVERY_REFUSED:
                 log.error("not repairing %s: %s (%s)", database, outcome.reason,
                           "; ".join(outcome.problems))

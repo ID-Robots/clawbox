@@ -568,7 +568,43 @@ def test_a_database_repaired_once_is_not_repaired_again_in_the_same_run(
     with pytest.raises(OpenclawError) as info:
         backup_guard.create_archive(_cfg(box["cli"]), output_dir=box["out"])
     assert openclaw.failure_of(info.value).kind == FAILURE_SQLITE
+    assert "still failed after its indexes were rebuilt" in str(info.value)
     assert _creates(box["calls"]) == 2
+
+
+def test_a_database_the_core_refuses_though_it_checks_healthy_is_named_as_such(
+    box: dict[str, Path],
+) -> None:
+    """The core also refuses on grounds ClawKeep's check cannot see (a newer
+    SQLite, its own schema checks): one second look, then a plain answer."""
+    db = box["state"] / "state" / "openclaw.sqlite"
+    db.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE t(x)")
+    conn.commit()
+    conn.close()
+    digest = _sha(db)
+    refusal = SQLITE.replace("/home/clawbox/.openclaw/logs/logs.sqlite", str(db))
+    box["failures"].write_text(f"{refusal}\n" * 2)
+    with pytest.raises(OpenclawError) as info:
+        backup_guard.create_archive(_cfg(box["cli"]), output_dir=box["out"])
+    assert "found nothing it may repair, and the archiver refused it again" in str(info.value)
+    assert _sha(db) == digest
+    assert _creates(box["calls"]) == 2
+
+
+def test_an_unreadable_journal_is_kept_and_nothing_new_is_detached(tmp_path: Path) -> None:
+    journal = tmp_path / "detached-links.json"
+    journal.write_text("{not json")
+    link = tmp_path / "node_modules" / "openclaw"
+    link.parent.mkdir()
+    link.symlink_to("/opt/openclaw")
+    found = backup_guard.RefusedLink(str(link), "/opt/openclaw", backup_guard.RULE_PACKAGES)
+
+    assert backup_guard.reattach_links(journal) == []
+    assert backup_guard.detach_links([found], journal) == []
+    assert journal.read_text() == "{not json"
+    assert os.readlink(link) == "/opt/openclaw"
 
 
 def test_a_second_build_waits_for_the_first_to_put_its_links_back(box: dict[str, Path]) -> None:
