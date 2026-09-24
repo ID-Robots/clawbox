@@ -245,6 +245,35 @@ const BACKUP_RULES: ErrorRule[] = [
     next: "Do not start another one. Call backup_status, and tell the user what it reports.",
   },
   {
+    // TASK-1000: the tree kept changing under every bounded rebuild. Nothing
+    // is broken, and starting another run straight away meets the same writes.
+    status: 503,
+    match: /"code"\s*:\s*"archive_busy"/,
+    code: "ENDPOINT_DOWN",
+    message: "Files kept changing while the backup was being built; nothing is broken.",
+    next: "Tell the user it will try again at the next scheduled time. Do not start another one now.",
+  },
+  {
+    // TASK-1000: a database failed OpenClaw's integrity gate and was not an
+    // index-only repair ClawKeep could make; the daemon left it untouched.
+    status: 500,
+    match: /"code"\s*:\s*"database_damaged"/,
+    code: "CONFLICT",
+    message:
+      "A database in the assistant's data failed its integrity check, so the backup stopped without saving or changing it.",
+    next: "Tell the user earlier backups are untouched and ClawBox support has to repair the database. Do not retry.",
+  },
+  {
+    // TASK-1000: two sources claim one archive path, or a link points out of
+    // the backup. The device log names the path.
+    status: 500,
+    match: /"code"\s*:\s*"archive_conflict"/,
+    code: "CONFLICT",
+    message:
+      "Something in the assistant's data cannot be packed safely: a duplicate path, or a link that points outside it.",
+    next: "Tell the user earlier backups are untouched and the device log names the file to fix. Do not retry.",
+  },
+  {
     // 500 is the box's own fault — a corrupt config, a broken openssl, an
     // archiver that failed. Retrying the same backup cannot help, which is what
     // the catch-all in `fromApiError` would otherwise advise.

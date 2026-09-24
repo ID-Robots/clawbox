@@ -395,3 +395,136 @@ def test_every_asset_kind_is_unique_so_restore_can_pin_a_destination_by_it() -> 
     assert set(hermes.ASSETS_BY_KIND) == set(kinds)
     for asset in hermes.ASSETS:
         assert hermes.ASSETS_BY_KIND[asset.kind] is asset
+
+
+# ── TASK-1000: files that vanish, and one path claimed twice ────────────────
+
+def _skipped(archive: Path) -> list[dict]:
+    return _manifest(archive)["skipped"]
+
+
+def test_a_session_folder_pruned_mid_walk_is_recorded_not_fatal(
+    box: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Python 3.10's `rglob` raised FileNotFoundError out of the walk for a
+    directory removed while it was inside it, and the whole backup failed."""
+    home = box / ".hermes"
+    pruned = home / "sessions" / "4f1c"
+    pruned.mkdir()
+    (pruned / "scratch.json").write_text("{}", encoding="utf-8")
+    real_scandir = os.scandir
+
+    def scandir(path=None):  # the agent prunes the folder just as the walk arrives
+        if isinstance(path, (str, os.PathLike)) and Path(path) == pruned:
+            shutil.rmtree(pruned)
+        return real_scandir(path) if path is not None else real_scandir()
+
+    monkeypatch.setattr(hermes.os, "scandir", scandir)
+    made = hermes.create_archive(output_dir=tmp_path / "out")
+
+    assert {"kind": "session-log", "path": "4f1c", "reason": hermes.VANISHED} in _skipped(made.path)
+    assert any(n.endswith("/.hermes/memories/MEMORY.md") for n in _names(made.path))
+
+
+def test_a_file_deleted_between_listing_and_reading_is_recorded_not_fatal(
+    box: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = box / ".hermes"
+    doomed = home / "skills" / "email" / "draft.md"
+    doomed.write_text("draft", encoding="utf-8")
+    real_walk = hermes._walk
+
+    def walk(src, **kw):
+        listed = real_walk(src, **kw)
+        if src == home / "skills":
+            doomed.unlink()
+        return listed
+
+    monkeypatch.setattr(hermes, "_walk", walk)
+    made = hermes.create_archive(output_dir=tmp_path / "out")
+
+    vanished = {"kind": "skills", "path": "email/draft.md", "reason": hermes.VANISHED}
+    assert vanished in _skipped(made.path)
+    assert not any(n.endswith("/draft.md") for n in _names(made.path))
+
+
+def test_a_file_that_shrinks_while_read_cannot_corrupt_the_tarball(
+    box: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`TarFile.add` writes a header for the size it stat'ed, then copies: a
+    file truncated in between left every later member misaligned. The header
+    now follows the bytes actually read."""
+    real = tarfile.TarFile.gettarinfo
+
+    def stale_stat(self, *args, **kwargs):  # stat'ed before the agent truncated it
+        info = real(self, *args, **kwargs)
+        if info.isreg():
+            info.size += 4096
+        return info
+
+    monkeypatch.setattr(tarfile.TarFile, "gettarinfo", stale_stat)
+    made = hermes.create_archive(output_dir=tmp_path / "out")
+
+    with tarfile.open(made.path, "r:gz") as tf:
+        member = next(m for m in tf.getmembers() if m.name.endswith("/.hermes/config.yaml"))
+        assert tf.extractfile(member).read() == b"model: hermes-4\n"
+        assert len(tf.getmembers()) > 5
+
+
+def test_an_asset_that_vanishes_after_the_look_is_recorded_not_fatal(
+    box: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_add_tree = hermes._add_tree
+
+    def add_tree(tf, *, src, kind, **kw):
+        if kind == "pairing":
+            raise FileNotFoundError(src)
+        return real_add_tree(tf, src=src, kind=kind, **kw)
+
+    monkeypatch.setattr(hermes, "_add_tree", add_tree)
+    made = hermes.create_archive(output_dir=tmp_path / "out")
+
+    assert {"kind": "pairing", "reason": hermes.VANISHED} in _skipped(made.path)
+    assert "pairing" not in {a["kind"] for a in _manifest(made.path)["assets"]}
+
+
+def test_two_assets_claiming_one_path_are_refused_before_archiving(
+    box: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = box / ".hermes"
+    # The identity bridge pointed INSIDE an allowlisted Hermes tree.
+    monkeypatch.setenv("CLAWBOX_HOME", str(home / "skills"))
+    (home / "skills" / "agent-identity").mkdir()
+    out = tmp_path / "out"
+
+    with pytest.raises(hermes.HermesError) as info:
+        hermes.create_archive(output_dir=out)
+
+    assert info.value.failure is not None
+    assert info.value.failure.kind == "duplicate"
+    assert set(info.value.failure.paths) == {
+        str(home / "skills"), str(home / "skills" / "agent-identity"),
+    }
+    assert not any(p.name.endswith(".tar.gz") for p in out.iterdir())
+
+
+def test_create_refuses_a_duplicate_member_but_restore_still_reads_one(tmp_path: Path) -> None:
+    archive = tmp_path / "dup.tar.gz"
+    root = "2026-09-24T03-00-00.000Z-x-hermes-backup"
+    manifest = json.dumps({
+        "agent": "hermes", "archiveRoot": root,
+        "assets": [{"kind": "config", "archivePath": f"{root}/payload/posix/h/config.yaml"}],
+    }).encode()
+    with tarfile.open(archive, "w:gz") as tf:
+        for name, blob in (
+            (f"{root}/manifest.json", manifest),
+            (f"{root}/payload/posix/h/config.yaml", b"a"),
+            (f"{root}/payload/posix/h/config.yaml", b"b"),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(blob)
+            tf.addfile(info, __import__("io").BytesIO(blob))
+
+    hermes.verify_archive(archive)  # a snapshot already in the cloud stays restorable
+    with pytest.raises(hermes.HermesError, match="duplicate entry path"):
+        hermes.verify_archive(archive, unique_members=True)
