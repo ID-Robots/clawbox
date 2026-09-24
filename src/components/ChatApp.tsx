@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
+import Link from 'next/link'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
 import { describeChatFailure, describeFallbackReply } from '@/lib/chat-error-text'
@@ -23,6 +24,8 @@ import ChatFileCard from '@/components/ChatFileCard'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
+import { useChatFullscreen, useChatTextScale, usePhoneViewport } from '@/lib/use-chat-phone-layout'
+import { ChatFullscreenButton, ChatHeaderStrip, ChatTextSizeBar, ChatTextSizeButton } from '@/components/ChatPhoneChrome'
 import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 // The card and the viewer come from the mascot chat's own modules: this surface
 // rendered `EMAIL:<uid>` as text because only one of the two chats had learned
@@ -98,10 +101,48 @@ import {
 interface ChatAppProps {
   onThinkingChange?: (thinking: boolean) => void
   hideHeader?: boolean
+  /**
+   * Told whether the page around this chat should fold its own title bar away:
+   * true while a phone shows the chat fullscreen (TASK-1157). A host that
+   * listens gets its "back to the desktop" link drawn in this chat's header
+   * instead, one tap behind the strip; one that does not keeps its bar.
+   */
+  onPhoneChromeHiddenChange?: (hidden: boolean) => void
 }
 
-function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
+// What the phone's fullscreen strip and its text size button open (TASK-1157).
+const HEADER_REGION_ID = 'chatapp-header-region'
+const TEXT_SIZE_BAR_ID = 'chatapp-text-size-bar'
+const COMPOSER_OPTIONS_ID = 'chatapp-composer-options'
+
+function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChange }: ChatAppProps) {
   const { t, locale } = useT()
+  // The phone layout (TASK-1157), the same view settings the mascot chat uses
+  // (lib/chat-phone-layout.ts): fullscreen chat folds the header into a strip
+  // and the composer down to the text box and Send, and the conversation's
+  // text size can be stepped. At or above the desktop breakpoint none of it
+  // applies and this page draws exactly what it always has.
+  const phone = usePhoneViewport()
+  const [fullscreenPref, setFullscreenPref] = useChatFullscreen()
+  const fullscreenChat = phone && fullscreenPref && !hideHeader
+  const [textScalePref, setTextScalePref] = useChatTextScale()
+  const textScale = phone ? textScalePref : 1
+  const [textSizeOpen, setTextSizeOpen] = useState(false)
+  const [headerPeek, setHeaderPeek] = useState(false)
+  const [composerOptionsOpen, setComposerOptionsOpen] = useState(!fullscreenChat)
+  // Switching fullscreen puts both regions where the mode says they belong —
+  // adjusted while rendering, React's pattern for state that follows a value,
+  // so no frame is drawn with the old mode's regions.
+  const [layoutMode, setLayoutMode] = useState(fullscreenChat)
+  if (layoutMode !== fullscreenChat) {
+    setLayoutMode(fullscreenChat)
+    setHeaderPeek(false)
+    setComposerOptionsOpen(!fullscreenChat)
+  }
+  useEffect(() => {
+    onPhoneChromeHiddenChange?.(fullscreenChat)
+  }, [fullscreenChat, onPhoneChromeHiddenChange])
+  const headerHidden = fullscreenChat && !headerPeek
   // The words a failed turn is said in — a ref, for the handlers that
   // outlive the render that created them.
   const failureWordsRef = useRef({ t, locale })
@@ -1188,6 +1229,53 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     }
   }, [sendMessage, slashKeyDown])
 
+  // Attachment buttons — offered only where a staged file can actually
+  // reach the model. A chip on screen says "this went with your message",
+  // and on a box that cannot carry it that chip is a lie the customer
+  // only discovers from an answer that never looked at the picture.
+  const attachControls = caps.canAttachImages ? (
+    <div style={{ display: 'flex', gap: 2, flexShrink: 0, alignItems: 'flex-end' }}>
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        title={t("chat.attachImage")}
+        style={{
+          width: 32, height: 32, borderRadius: 8, border: 'none',
+          background: 'transparent', color: 'rgba(255,255,255,0.35)',
+          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, transition: 'color 0.15s',
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.7)'}
+        onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.35)'}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+          <circle cx="8.5" cy="8.5" r="1.5" />
+          <path d="M21 15l-5-5L5 21" />
+        </svg>
+      </button>
+      <button
+        onClick={() => cameraInputRef.current?.click()}
+        title={t("chat.takePhoto")}
+        style={{
+          width: 32, height: 32, borderRadius: 8, border: 'none',
+          background: 'transparent', color: 'rgba(255,255,255,0.35)',
+          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, transition: 'color 0.15s',
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.7)'}
+        onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.35)'}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
+          <circle cx="12" cy="13" r="4" />
+        </svg>
+      </button>
+    </div>
+  ) : null
+  // A phone folds them behind one control (TASK-1157) — where there is
+  // anything to fold; with nothing to attach the row is already minimal.
+  const tuckable = phone && attachControls !== null
+
   return (
     <div style={{
       width: '100%',
@@ -1197,10 +1285,27 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       background: '#0d1117',
       overflow: 'hidden',
     }}>
+      {/* Fullscreen chat on a phone: the header folds into this strip, whose
+          toggle opens it again underneath — see ChatPhoneChrome. */}
+      {fullscreenChat && (
+        <ChatHeaderStrip
+          headerId={HEADER_REGION_ID}
+          headerOpen={headerPeek}
+          onToggleHeader={setHeaderPeek}
+          label={t("chat.title")}
+        >
+          <ChatTextSizeButton open={textSizeOpen} onToggle={() => setTextSizeOpen(open => !open)} controls={TEXT_SIZE_BAR_ID} size={32} />
+          <ChatFullscreenButton fullscreen onToggle={() => setFullscreenPref(false)} size={32} />
+        </ChatHeaderStrip>
+      )}
       {/* Connection status bar — hidden when parent provides its own header */}
       {!hideHeader && (
-        <div style={{
-          display: 'flex',
+        <div
+          id={HEADER_REGION_ID}
+          data-testid="chatapp-header"
+          hidden={headerHidden || undefined}
+          style={{
+          display: headerHidden ? 'none' : 'flex',
           alignItems: 'center',
           gap: 8,
           padding: '6px 14px',
@@ -1236,13 +1341,42 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               }}
             >{t("chat.reconnect")}</button>
           )}
+          {/* A phone outside fullscreen: the text size and the way in. */}
+          {phone && !fullscreenChat && (
+            <>
+              <ChatTextSizeButton open={textSizeOpen} onToggle={() => setTextSizeOpen(open => !open)} controls={TEXT_SIZE_BAR_ID} size={32} />
+              <ChatFullscreenButton fullscreen={false} onToggle={() => setFullscreenPref(true)} size={32} />
+            </>
+          )}
+          {/* The page's own title bar is folded away in fullscreen, and with it
+              its link back to the desktop — so the link comes along here. */}
+          {fullscreenChat && onPhoneChromeHiddenChange && (
+            <Link
+              href="/"
+              data-testid="chatapp-desktop-link"
+              aria-label={t("chat.showDesktop")}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, minHeight: 32, padding: '0 10px',
+                borderRadius: 10, background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.75)',
+                fontSize: 12.5, textDecoration: 'none', flexShrink: 0,
+              }}
+            >
+              <span aria-hidden="true" className="material-symbols-rounded" style={{ fontSize: 18 }}>apps</span>
+              <span>{t("chat.desktop")}</span>
+            </Link>
+          )}
         </div>
       )}
 
+      {phone && textSizeOpen && (
+        <ChatTextSizeBar id={TEXT_SIZE_BAR_ID} scale={textScalePref} onChange={setTextScalePref} />
+      )}
+
       {/* Messages area */}
-      <div ref={transcriptRef} style={{
+      <div ref={transcriptRef} data-testid="chatapp-transcript" data-chat-text-scale={textScale !== 1 ? textScale : undefined} style={{
         flex: 1, overflowY: 'auto', padding: '12px 14px',
         display: 'flex', flexDirection: 'column', gap: 10,
+        ...(textScale !== 1 ? { '--chat-text-scale': String(textScale) } as React.CSSProperties : {}),
         scrollbarWidth: 'thin',
         scrollbarColor: 'rgba(255,255,255,0.1) transparent',
       }}>
@@ -1544,49 +1678,36 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         borderTop: pendingAttachments.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', gap: 8, alignItems: 'flex-end',
+        // A phone's unfolded attachment buttons take a line of their own.
+        flexWrap: tuckable ? 'wrap' : undefined,
       }}>
-        {/* Attachment buttons — offered only where a staged file can actually
-            reach the model. A chip on screen says "this went with your message",
-            and on a box that cannot carry it that chip is a lie the customer
-            only discovers from an answer that never looked at the picture. */}
-        {caps.canAttachImages && (
-        <div style={{ display: 'flex', gap: 2, flexShrink: 0, alignItems: 'flex-end' }}>
+        {!tuckable && attachControls}
+        {/* A phone: the fold control leads the row, so the button just
+            pressed never moves; the attachment buttons it folds away sit
+            on a line of their own after Send when unfolded (below). */}
+        {tuckable && (
           <button
-            onClick={() => fileInputRef.current?.click()}
-            title={t("chat.attachImage")}
+            type="button"
+            onClick={() => setComposerOptionsOpen(open => !open)}
+            title={t("chat.composer.options")}
+            aria-label={t("chat.composer.options")}
+            aria-expanded={composerOptionsOpen}
+            aria-controls={composerOptionsOpen ? COMPOSER_OPTIONS_ID : undefined}
+            data-testid="chatapp-composer-options-toggle"
             style={{
-              width: 32, height: 32, borderRadius: 8, border: 'none',
-              background: 'transparent', color: 'rgba(255,255,255,0.35)',
+              width: 36, height: 36, borderRadius: 10, border: 'none', flexShrink: 0,
+              background: composerOptionsOpen ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
+              color: composerOptionsOpen ? '#f97316' : 'rgba(255,255,255,0.4)',
               cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, transition: 'color 0.15s',
             }}
-            onMouseEnter={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.7)'}
-            onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.35)'}
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-              <circle cx="8.5" cy="8.5" r="1.5" />
-              <path d="M21 15l-5-5L5 21" />
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
+              <circle cx="16" cy="6" r="2" />
+              <circle cx="10" cy="12" r="2" />
+              <circle cx="16" cy="18" r="2" />
             </svg>
           </button>
-          <button
-            onClick={() => cameraInputRef.current?.click()}
-            title={t("chat.takePhoto")}
-            style={{
-              width: 32, height: 32, borderRadius: 8, border: 'none',
-              background: 'transparent', color: 'rgba(255,255,255,0.35)',
-              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, transition: 'color 0.15s',
-            }}
-            onMouseEnter={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.7)'}
-            onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.35)'}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
-              <circle cx="12" cy="13" r="4" />
-            </svg>
-          </button>
-        </div>
         )}
         <textarea
           ref={inputRef}
@@ -1611,6 +1732,9 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             borderRadius: 12, padding: '8px 12px', color: '#fff', fontSize: 13.5,
             resize: 'none', outline: 'none', maxHeight: 100, lineHeight: 1.4,
             fontFamily: 'inherit',
+            // A phone's row can wrap (see the container), so the field must be
+            // allowed to give ground rather than push Send off the line.
+            ...(tuckable ? { minWidth: 0 } : {}),
           }}
           onInput={(e) => {
             const el = e.currentTarget
@@ -1667,6 +1791,15 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               <path d="M22 2L11 13M22 2l-7 20-4-9-9-4z" />
             </svg>
           </button>
+        )}
+        {tuckable && composerOptionsOpen && (
+          <div
+            id={COMPOSER_OPTIONS_ID}
+            data-testid="chatapp-composer-options"
+            style={{ flexBasis: '100%', display: 'flex', gap: 8, alignItems: 'center' }}
+          >
+            {attachControls}
+          </div>
         )}
       </div>
 

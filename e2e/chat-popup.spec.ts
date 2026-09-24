@@ -326,6 +326,9 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
   // (src/lib/mobile-chat-first.ts) — pressing the crab now would close it.
   await expect(page.getByTestId("chat-popup")).toHaveCSS("pointer-events", "auto");
   await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
+  // A phone opens in fullscreen chat, with the pickers folded behind one
+  // control (TASK-1157) — unfold them first.
+  await page.getByTestId("composer-options-toggle").click();
 
   // Push the popup into the bottom-right corner of a viewport that is barely
   // taller than the popup itself. The provider pill sits in the composer row

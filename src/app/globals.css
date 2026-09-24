@@ -486,9 +486,10 @@ h6 {
   min-width: 0;
 }
 
-/* The control a portrait phone's pickers fold behind, and the line that keeps
- * their answer readable while they are folded (TASK-1003). Both only ever
- * render on a portrait phone; the row is untouched anywhere else. */
+/* The control a phone's composer extras fold behind (TASK-1003, TASK-1157),
+ * leading the input row, and the line that keeps the pickers' answer readable
+ * while they are folded (on the fullscreen chat's strip). Both only ever render
+ * on a phone; the desktop composer is untouched. */
 .chat-composer-options-toggle {
   border: none;
   border-radius: 10px;
@@ -2360,15 +2361,6 @@ input[type="range"].appearance-none::-moz-range-track {
   height: 40px !important;
   border-radius: 12px !important;
 }
-/* The fold control is the one button in this row a thumb hits every session,
- * so it gets the full 44px target the primary row's buttons get rather than
- * the 36x40 the settings row uses. More specific than the rule above, so the
- * !important widths there do not win. */
-[data-chat-mobile] .chat-composer-row > button.chat-composer-options-toggle {
-  width: 44px !important;
-  height: 44px !important;
-  border-radius: 12px !important;
-}
 [data-chat-mobile] .chat-composer-tail { flex: 1 1 0; min-width: 0; }
 [data-chat-mobile] .chat-header-pills { gap: 4px; flex: 1 1 0; }
 [data-chat-mobile] .chat-header-pills .header-dropdown { flex: 1 1 0; }
@@ -2378,6 +2370,16 @@ input[type="range"].appearance-none::-moz-range-track {
   min-height: 40px;
   font-size: 12.5px;
   border-radius: 12px;
+}
+
+/* The phone chat's text size (TASK-1157, src/lib/chat-phone-layout.ts). Set on
+ * the transcript only, and applied to each of its entries rather than to the
+ * scrolling box itself: `zoom` on the box would grow the box, while on its
+ * children the conversation re-flows at the larger size inside the same frame —
+ * text, code, tables and cards alike, the way a terminal's font size does. The
+ * header, the composer and the page's own pinch-zoom are untouched. */
+[data-chat-text-scale] > * {
+  zoom: var(--chat-text-scale, 1);
 }
 
 /* ── Memory Shard's indexing bar (src/components/MemoryShardApp.tsx) ────────
