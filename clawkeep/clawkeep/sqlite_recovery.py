@@ -89,6 +89,9 @@ class Diagnosis:
     indexes: tuple[str, ...] = ()
     #: The first few lines the checks reported, for the log and the sentence.
     problems: tuple[str, ...] = ()
+    #: Why this status, when the sentence the status usually carries would say
+    #: something untrue. Empty means the usual sentence is right.
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -154,8 +157,19 @@ def diagnose(path: Path) -> Diagnosis:
         # off and whatever it did not reach is unknown. A rebuild is only ever
         # started when EVERY line is index bookkeeping, and this report cannot
         # say that — the database is damaged as far as ClawKeep is concerned
-        # and is left exactly as found.
-        return Diagnosis(STATUS_DAMAGED, problems=tuple(integrity[:5]))
+        # and is left exactly as found. It carries its OWN sentence: the usual
+        # one for damage says the data itself is broken, and here nobody knows
+        # that. Telling a customer their data is damaged when the truth is
+        # that the report ran out would be a guess dressed up as a finding.
+        return Diagnosis(
+            STATUS_DAMAGED,
+            problems=tuple(integrity[:5]),
+            reason=(
+                f"its integrity check stopped after {_CHECK_LIMIT} problems, so the rest of it "
+                "was never reported and ClawKeep cannot tell whether the damage is only in its "
+                "indexes"
+            ),
+        )
 
     indexes: set[str] = set()
     for line in integrity:
@@ -298,7 +312,7 @@ def recover(path: Path, *, allowed_roots: Iterable[str], recovery_dir: Path) -> 
     if found.status == STATUS_DAMAGED:
         return Recovery(
             RECOVERY_REFUSED,
-            reason=(
+            reason=found.reason or (
                 "the damage is in its data, not only its indexes, so rebuilding cannot repair it"
             ),
             problems=found.problems,
