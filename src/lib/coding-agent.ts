@@ -2324,19 +2324,45 @@ function isEffort(value: unknown): value is CodingEffort {
 }
 
 /**
+ * The folder Claude Code keeps its state in for a run on this provider,
+ * mirroring scripts/claude-ds exactly. A ClawBox AI run gets
+ * CLAUDE_CONFIG_DIR="${CLAUDE_DS_CONFIG_DIR:-$HOME/.claude-ds}". An Anthropic
+ * run has CLAUDE_CONFIG_DIR UNSET, so Claude Code falls back to its default,
+ * ~/.claude, where the owner's own login lives — and the wrapper sets no
+ * override there for this to honour. buildRunEnv hands the run this same HOME
+ * and this same CLAUDE_DS_CONFIG_DIR, so the two sides cannot disagree.
+ */
+export function harnessStateDir(provider: CodingProvider): string {
+  if (provider === "anthropic") return path.join(homeDir(), ".claude");
+  return process.env.CLAUDE_DS_CONFIG_DIR || path.join(homeDir(), ".claude-ds");
+}
+
+/**
  * Where Claude Code keeps this run's transcript.
  *
  * It encodes the working folder by replacing every non-ASCII-alphanumeric character with a dash, so
  * /home/clawbox/x becomes -home-clawbox-x. Returns null until the run has a
  * session id, which arrives with the first stream event.
  *
+ * The folder is the one the run's OWN provider wrote to — the record's frozen
+ * provider, not today's setting, so an old run still resolves after the owner
+ * switches. When that file is missing and the other provider's folder has it
+ * (a record whose provider was never written, and so reads as the default),
+ * the one that exists wins. When neither exists yet, the run's own path is
+ * returned: the live preview waits on it, and that is where it will appear.
+ *
  * The file exists and grows WHILE the run works, which is what makes a live
  * preview possible rather than only a post-mortem.
  */
-export function transcriptPath(run: Pick<CodingRun, "sessionId" | "directory">): string | null {
+export function transcriptPath(run: Pick<CodingRun, "sessionId" | "directory" | "provider">): string | null {
   if (!run.sessionId) return null;
-  const configDir = process.env.CLAUDE_DS_CONFIG_DIR || path.join(homeDir(), ".claude-ds");
-  return path.join(configDir, "projects", run.directory.replace(/[^a-zA-Z0-9]/g, "-"), `${run.sessionId}.jsonl`);
+  const provider = codingProviderFrom(run.provider);
+  const file = (p: CodingProvider) =>
+    path.join(harnessStateDir(p), "projects", run.directory.replace(/[^a-zA-Z0-9]/g, "-"), `${run.sessionId}.jsonl`);
+  const own = file(provider);
+  if (fs.existsSync(own)) return own;
+  const other = file(provider === "anthropic" ? "clawbox-ai" : "anthropic");
+  return fs.existsSync(other) ? other : own;
 }
 
 /** The owner's effort level. Anything unrecognised reads as the default. */
