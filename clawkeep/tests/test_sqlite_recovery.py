@@ -185,11 +185,35 @@ def test_only_the_newest_copies_of_one_database_are_kept(roots: tuple[Path, Path
     state, recovery = roots
     db = state / "logs.sqlite"
     recovery.mkdir()
+    prefix = sqlite_recovery._copy_prefix(db.resolve())
     for i in range(5):
-        old = recovery / f"logs-2026090{i}T000000Z-1.pre-reindex.sqlite"
+        old = recovery / f"{prefix}-2026090{i}T000000Z-x.pre-reindex.sqlite"
         old.write_bytes(b"old")
         os.utime(old, (1_000_000 + i, 1_000_000 + i))
     _logs_db(db)
     sqlite_recovery.recover(db, allowed_roots=[str(state)], recovery_dir=recovery)
     kept = sorted(recovery.glob("logs-*.pre-reindex.sqlite"))
     assert len(kept) == 3
+
+
+def test_copies_of_one_database_never_prune_another_databases_copy(tmp_path: Path) -> None:
+    """Every agent's database is `openclaw-agent.sqlite`, and a stem glob for
+    `openclaw` also matches `openclaw-agent-…`: pruning by stem deleted the
+    only copy kept of a DIFFERENT database."""
+    state = tmp_path / "state"
+    recovery = tmp_path / "recovery"
+    agent_a = state / "agents" / "a" / "agent" / "openclaw-agent.sqlite"
+    agent_b = state / "agents" / "b" / "agent" / "openclaw-agent.sqlite"
+    global_db = state / "openclaw.sqlite"
+
+    _logs_db(agent_a)
+    first = sqlite_recovery.recover(agent_a, allowed_roots=[str(state)], recovery_dir=recovery)
+    assert first.preserved_copy is not None
+    for db in [agent_b] * 4 + [global_db] * 4:
+        db.unlink(missing_ok=True)
+        _logs_db(db)
+        outcome = sqlite_recovery.recover(db, allowed_roots=[str(state)], recovery_dir=recovery)
+        assert outcome.status == sqlite_recovery.RECOVERY_REPAIRED
+
+    assert first.preserved_copy.exists(), "agent a's only copy was pruned by another database"
+    assert _rows(first.preserved_copy) == _rows(agent_a)

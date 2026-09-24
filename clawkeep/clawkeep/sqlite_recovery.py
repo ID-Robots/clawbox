@@ -34,11 +34,13 @@ The upstream gate then runs again, unchanged, on the next attempt.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
 import shutil
 import sqlite3
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -196,34 +198,48 @@ def _database_bytes(path: Path) -> int:
     return total
 
 
+def _copy_prefix(path: Path) -> str:
+    """What every copy of ONE database is named from: its stem and a hash of
+    its full path. The stem alone is not enough — every agent's database is
+    `openclaw-agent.sqlite`, and `openclaw-*` also matches `openclaw-agent-*`."""
+    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
+    return f"{path.stem}-{digest}"
+
+
 def _preserve(path: Path, recovery_dir: Path) -> Path:
     """Copy the database AS FOUND through the online-backup API."""
     recovery_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(recovery_dir, 0o700)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    copy = recovery_dir / f"{path.stem}-{stamp}-{os.getpid()}.pre-reindex.sqlite"
     source = _connect_read_only(path)
     try:
-        # Created 0600 before a byte of the database lands in it: it holds
-        # whatever the database holds.
-        fd = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        # A name no other copy has (mkstemp: exclusive, random), created 0600
+        # before a byte of the database lands in it — it holds whatever the
+        # database holds.
+        fd, name = tempfile.mkstemp(
+            prefix=f"{_copy_prefix(path)}-{stamp}-", suffix=".pre-reindex.sqlite",
+            dir=str(recovery_dir),
+        )
         os.close(fd)
-        target = sqlite3.connect(copy)
+        copy = Path(name)
         try:
-            source.backup(target)
-        finally:
-            target.close()
-    except BaseException:
-        copy.unlink(missing_ok=True)
-        raise
+            target = sqlite3.connect(copy)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+        except BaseException:
+            # Only ever the file this call created.
+            copy.unlink(missing_ok=True)
+            raise
     finally:
         source.close()
     return copy
 
 
-def _prune_copies(recovery_dir: Path, stem: str) -> None:
+def _prune_copies(recovery_dir: Path, database: Path) -> None:
     copies = sorted(
-        recovery_dir.glob(f"{stem}-*.pre-reindex.sqlite"),
+        recovery_dir.glob(f"{_copy_prefix(database)}-*.pre-reindex.sqlite"),
         key=lambda p: p.stat().st_mtime if p.exists() else 0,
         reverse=True,
     )
@@ -324,7 +340,7 @@ def recover(path: Path, *, allowed_roots: Iterable[str], recovery_dir: Path) -> 
             problems=after.problems or found.problems,
         )
 
-    _prune_copies(recovery_dir, real.stem)
+    _prune_copies(recovery_dir, real)
     log.warning(
         "rebuilt damaged SQLite indexes in %s (%s); the database as found is kept at %s",
         real, ", ".join(found.indexes), copy,
