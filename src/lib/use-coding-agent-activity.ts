@@ -228,8 +228,22 @@ function toActivity(r: RunPayload): CodingAgentActivity {
     transcriptPath: typeof r.transcriptPath === "string" && r.transcriptPath ? r.transcriptPath : null,
     sessionId: typeof r.sessionId === "string" && r.sessionId ? r.sessionId : null,
     directory: typeof r.directory === "string" && r.directory ? r.directory : null,
-    prPhase: r.pr && isPrPhase(r.pr.phase) ? r.pr.phase : null,
+    prPhase: toPrPhase(r.pr),
   };
+}
+
+/**
+ * Where the run's pull request stands — null when there is none. A record
+ * that went `blocked` without ever getting a number is a pull request the box
+ * never opened: the run committed nothing (maybeOpenPullRequest in
+ * coding-agent.ts), so there is nothing on GitHub and nothing for the owner
+ * to decide. Every other `blocked` is written by the watcher of a pull
+ * request that exists.
+ */
+function toPrPhase(pr: PrState | null | undefined): PrPhase | null {
+  if (!pr || !isPrPhase(pr.phase)) return null;
+  if (pr.phase === "blocked" && pr.number == null) return null;
+  return pr.phase;
 }
 
 /** True when the tool the chat just saw is one of the coding-agent family. */
