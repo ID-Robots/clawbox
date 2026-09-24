@@ -254,6 +254,7 @@ export default function AiProviderList() {
                       <PluginRepairNotice
                         repair={row.needsRepair}
                         onRepaired={refresh}
+                        onRecheck={refresh}
                         className="mt-0.5"
                       />
                     )}
@@ -356,7 +357,7 @@ export default function AiProviderList() {
                 <span className="block text-[11px] font-medium text-[var(--text-secondary)] break-words">
                   {repair.pluginId}
                 </span>
-                <PluginRepairNotice repair={repair} onRepaired={refresh} className="mt-0.5" />
+                <PluginRepairNotice repair={repair} onRepaired={refresh} onRecheck={refresh} className="mt-0.5" />
               </li>
             ))}
           </ul>

@@ -557,6 +557,35 @@ describe("providers/status — needs repair", () => {
     for (const row of body.providers) expect(row).not.toHaveProperty("needsRepair");
   });
 
+  it("says a row is being repaired while the device repairs it, and not after (TASK-1088)", async () => {
+    // The 2026.9.4 update retries ChatGPT and ClawBox AI on its own. While it
+    // runs the rows still NEED repair — nothing is proved yet — but the panel
+    // must say "Repairing…" rather than offer a Retry that would race it; and a
+    // stamp a killed repair left behind must not say it for ever.
+    getActiveHarness.mockResolvedValue("openclaw");
+    readConfig.mockResolvedValue({});
+    writeMarker({
+      codex: {
+        id: "codex", stage: "install", reason: "retrying", atMs: 1, disabled: true,
+        spec: "@openclaw/codex@2026.9.3", repairingSinceMs: Date.now() - 5_000, retriedCore: "2026.9.4",
+      },
+      deepseek: {
+        id: "deepseek", stage: "install", reason: "stale", atMs: 2, disabled: true,
+        spec: "", repairingSinceMs: Date.now() - 2 * 60 * 60_000,
+      },
+    });
+
+    const body = await (await GET()).json() as {
+      providers: (Row & { needsRepair?: Record<string, unknown> })[];
+    };
+    expect(body.providers.find((r) => r.id === "openai")?.needsRepair).toMatchObject({
+      pluginId: "codex", reason: "retrying", repairing: true,
+    });
+    expect(body.providers.find((r) => r.id === "clawai")?.needsRepair).not.toHaveProperty("repairing");
+    // Bookkeeping stays on the device.
+    expect(body.providers.find((r) => r.id === "openai")?.needsRepair).not.toHaveProperty("retriedCore");
+  });
+
   it("is inert on Hermes, where nothing writes the marker", async () => {
     getActiveHarness.mockResolvedValue("hermes");
     getModelOptions.mockResolvedValue(hermesPayload());
