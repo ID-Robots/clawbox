@@ -354,6 +354,23 @@ const RATE_LIMIT = "That message did not go through — the AI provider is rate-
  */
 const CREDENTIAL_REJECTED = "That message did not go through — the AI provider is not accepting this box's sign-in any more. Reconnect it in Settings, under Providers, and send it again.";
 
+/**
+ * The gateway never ACKNOWLEDGED the turn — the chat's own request timer ran
+ * out on `chat.send` (TASK-1158).
+ *
+ * It is not "did not go through, send it again": the gateway can hold a turn
+ * in its session queue behind a busy or stale run and still run it later (seen
+ * on a box, 2026-09-24: acknowledged after 40 minutes, then answered). Sending
+ * it again queues a second copy behind the same stall. What helps now is a new
+ * chat, which does not wait behind this conversation.
+ */
+const NOT_ACCEPTED = "The box has not taken this message yet — this conversation is still busy with earlier work. It may still be answered once that work finishes; to carry on now, start a new chat.";
+
+/** The chat's own RPC timer — the exact sentence `wsRequest` rejects with. */
+function isUnacknowledgedTurn(raw: string): boolean {
+  return /^request timeout$/i.test(raw);
+}
+
 /** The conversation changed under the turn; retry may work, New chat always does. */
 const TAKEOVER = "That message did not go through. That can happen when this chat is open in another tab or on Telegram — or when the session gets stuck. Send it again, and if it keeps failing, start a New chat — that clears it.";
 
@@ -423,6 +440,7 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
   if (!evidence) return GENERIC;
   if (isSessionTakeover(text)) return TAKEOVER;
+  if (isUnacknowledgedTurn(text)) return NOT_ACCEPTED;
   // Ahead of the rate limit: a spent allowance also arrives as a 429, and the
   // generic "wait a minute" is exactly the wrong advice for a window that frees
   // up days from now. The refusal names which allowance and when, so say that.

@@ -115,6 +115,18 @@ import {
   parseUnsupportedThinkingLevelError,
   PERSIST_KEY_PREFIX,
 } from '@/lib/chat-reasoning'
+import {
+  GATEWAY_REQUEST_TIMEOUT_MS,
+  HISTORY_ATTEMPT_TIMEOUT_MS,
+  HISTORY_RESTORE_DEADLINE_MS,
+  HISTORY_RETRY_DELAYS_MS,
+  RECONNECT_DEADLINE_MS,
+  RESTORE_HANDSHAKE_TIMEOUT_MS,
+  classifyRestoreFailure,
+  isRestoreAborted,
+  restoreWithRetry,
+  type RestoreFailureKind,
+} from '@/lib/chat-session-restore'
 
 const MAX_RETRIES = 8
 // A measured Jetson cold boot takes ~175 s before its gateway listens.
@@ -2142,7 +2154,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           pendingRef.current.delete(id)
           reject(new Error('Request timeout'))
         }
-      }, 120000)
+      }, GATEWAY_REQUEST_TIMEOUT_MS)
     })
   }, [])
 
@@ -2327,6 +2339,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const connectionAbortRef = useRef<AbortController | null>(null)
   const connectionDeadlineRef = useRef<number | null>(null)
   const connectionDeadlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // One socket attempt's own clock, from `new WebSocket` to the hello — see
+  // RESTORE_HANDSHAKE_TIMEOUT_MS. Separate from the deadline above, which
+  // bounds the whole ladder rather than the attempt.
+  const handshakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The conversation read a restore is running, so a newer socket, a tab
+  // switch or the popup going away can call it off (TASK-1158).
+  const restoreAbortRef = useRef<AbortController | null>(null)
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -2365,9 +2384,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       connectionDeadlineTimerRef.current = null
     }
     clearDeadlineTimer()
-    if (!hasEverConnectedRef.current) {
+    const clearHandshakeTimer = () => {
+      if (handshakeTimerRef.current) clearTimeout(handshakeTimerRef.current)
+      handshakeTimerRef.current = null
+    }
+    clearHandshakeTimer()
+    // A new socket owns the conversation from here; a history read still
+    // retrying for the old one would only report the old one's failure.
+    restoreAbortRef.current?.abort()
+    // EVERY connection gets a deadline, not only the first. A reconnect — the
+    // restore after a gateway restart, with the popup that never unmounts
+    // while the desktop is open — used to have none, so an attempt nobody
+    // answered kept "Restarting chat…" up for as long as the desktop stayed
+    // open (TASK-1158). Same five minutes; a new one per reconnect, kept
+    // across that reconnect's retries.
+    {
       if (retryCountRef.current === 0 || connectionDeadlineRef.current === null) {
-        connectionDeadlineRef.current = Date.now() + INITIAL_CONNECT_TIMEOUT_MS
+        connectionDeadlineRef.current = Date.now() + (hasEverConnectedRef.current ? RECONNECT_DEADLINE_MS : INITIAL_CONNECT_TIMEOUT_MS)
       }
       const expire = () => {
         if (!isCurrent()) return
@@ -2375,6 +2408,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         controller.abort()
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
         retryTimerRef.current = null
+        clearHandshakeTimer()
         const socket = wsRef.current
         wsRef.current = null
         socket?.close()
@@ -2419,7 +2453,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const maxRetries = !hasEverConnectedRef.current
         ? INITIAL_CONNECT_MAX_RETRIES
         : skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
-      if (retryCountRef.current < maxRetries && (hasEverConnectedRef.current || Date.now() + RETRY_DELAY < (connectionDeadlineRef.current ?? 0))) {
+      if (retryCountRef.current < maxRetries && Date.now() + RETRY_DELAY < (connectionDeadlineRef.current ?? Number.POSITIVE_INFINITY)) {
         retryCountRef.current++
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
         retryTimerRef.current = setTimeout(() => { if (isCurrent()) void connect() }, RETRY_DELAY)
@@ -2436,6 +2470,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
     // Define handlers BEFORE creating the WebSocket so no events are missed
     let connectSent = false
+    // The connect frame's request id, so an attempt abandoned by its handshake
+    // clock can take the frame out of the pending map before the socket goes.
+    let connectRequestId: string | null = null
     let ws: WebSocket
 
     const sendConnect = (challenge?: Record<string, unknown>) => {
@@ -2443,10 +2480,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       connectSent = true
 
       const id = uuid()
+      connectRequestId = id
       pendingRef.current.set(id, {
         resolve: (hello: unknown) => {
           if (!isCurrent()) return
           clearDeadlineTimer()
+          clearHandshakeTimer()
+          // This reconnect is over; the next drop starts a deadline of its own.
+          connectionDeadlineRef.current = null
           setStatus('connected')
           // A reconnect follows every restart, and a restart follows some model
           // switches made elsewhere: what the box runs may have changed. The
@@ -2555,7 +2596,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }
             }, 500)
           } else {
-            loadHistory()
+            // The restore itself: bounded, retried only while the gateway
+            // says "not yet", and ended with a choice rather than an empty
+            // conversation when it cannot be done (TASK-1158).
+            void loadHistory({ restore: true })
           }
           // And what the agent is already parked on — asked LAST, after the
           // transcript read is under way. A question outlives this browser tab
@@ -2576,6 +2620,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         reject: (err: Error) => {
           if (!isCurrent()) return
           clearDeadlineTimer()
+          clearHandshakeTimer()
           // A gateway that is still BOOTING accepts the socket and refuses the
           // connect frame with `UNAVAILABLE` / `retryable: true` /
           // `details.reason: "startup-sidecars"` (its channels and sidecars are
@@ -3083,9 +3128,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // schedule a reconnect on top of a healthy connection.
       if (!isCurrent() || wsRef.current !== ws) return
       clearDeadlineTimer()
+      clearHandshakeTimer()
       wsRef.current = null
       // The socket is gone; nothing that was waiting on it can still arrive.
       failPending('Not connected')
+      // …and a conversation read retrying on it would fail against a closed
+      // socket and paint "could not be restored" under the reconnect overlay.
+      // The next hello runs the restore again.
+      restoreAbortRef.current?.abort()
 
       // Auth rejection (gateway closes with 1008 / "unauthorized" / "rate
       // limited" — it rate-limits a client after too many failed auth
@@ -3131,7 +3181,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const maxRetries = !hasEverConnectedRef.current
         ? INITIAL_CONNECT_MAX_RETRIES
         : skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
-      if (retryCountRef.current < maxRetries && (hasEverConnectedRef.current || Date.now() + RETRY_DELAY < (connectionDeadlineRef.current ?? 0))) {
+      // The deadline binds a reconnect's ladder as well as the first one's; a
+      // drop right after a hello has none yet (`null`), and the connect it
+      // schedules starts one.
+      if (retryCountRef.current < maxRetries && Date.now() + RETRY_DELAY < (connectionDeadlineRef.current ?? Number.POSITIVE_INFINITY)) {
         retryCountRef.current++
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
         retryTimerRef.current = setTimeout(() => { if (isCurrent()) void connect() }, RETRY_DELAY)
@@ -3174,6 +3227,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     ws.onmessage = onMessage
     ws.onclose = onClose
     ws.onerror = () => {}
+    // This attempt's own clock. A socket the gateway never answers — never
+    // opens, never sends its challenge, never answers the connect frame — fires
+    // no close event, so without this nothing ever moved: no retry, no error,
+    // "Restarting chat…" for good (TASK-1158). It is treated as the close it
+    // should have been: the frame leaves the pending map first (so it is not
+    // mistaken for a refusal), then the ordinary ladder and deadline decide.
+    handshakeTimerRef.current = setTimeout(() => {
+      handshakeTimerRef.current = null
+      if (!isCurrent() || wsRef.current !== ws) return
+      if (connectRequestId) pendingRef.current.delete(connectRequestId)
+      ws.onclose = null
+      ws.onmessage = null
+      try { ws.close() } catch { /* already closing */ }
+      onClose()
+    }, RESTORE_HANDSHAKE_TIMEOUT_MS)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
   // The adapter opens the socket through this, not by importing it: `connect`
   // is declared after the adapter is built, and this ref is what lets the two
@@ -3231,11 +3299,34 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // when a read lands after the capabilities did. A counter rather than a
   // boolean: the second read of a session that was cleared has to re-trigger it.
   const [transcriptReads, setTranscriptReads] = useState(0)
-  const loadHistory = useCallback(async () => {
+  /**
+   * A conversation being brought back, or one that could not be (TASK-1158).
+   *
+   * `retrying` once the first read has failed with a "not yet" and another is
+   * scheduled; `failed` when the restore ran out of attempts or time — the one
+   * state that puts Try again / Start a new chat on screen. Keyed, so a tab
+   * switched away from cannot leave its failure on the tab switched to.
+   */
+  const [restoreState, setRestoreState] = useState<
+    | { key: string; phase: 'retrying' }
+    | { key: string; phase: 'failed'; kind: RestoreFailureKind }
+    | null
+  >(null)
+  const loadHistory = useCallback(async (opts?: { restore?: boolean }) => {
     // A harness with no durable transcript has nothing to replay. Returning
     // before the bootstrap bookkeeping rather than calling and catching keeps
     // the auto-greet honest: there is no history read here that can be "empty".
     if (!caps.canListHistory) return
+    // A RESTORE — the read after a (re)connect, a tab switch, or Try again —
+    // is bounded and retried; every other read (the ack-only refetch, the
+    // picture poll) stays the single best-effort read it always was.
+    const restore = opts?.restore === true
+    let restoreCtl: AbortController | null = null
+    if (restore) {
+      restoreAbortRef.current?.abort()
+      restoreCtl = new AbortController()
+      restoreAbortRef.current = restoreCtl
+    }
     // Optimistically show the typing bubble if an auto-greet might still run,
     // so the user sees feedback during the history round-trip (and is locked
     // out of typing via the greetingPending gate on the input). Bootstrap is
@@ -3257,10 +3348,26 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // into the adapter unchanged. It encodes about six independent shipped
       // fixes with no unifying rule between them; the one thing this call must
       // never do is re-derive them.
-      const { messages: chatMsgs, imageGenerationFailed } = await adapter.loadHistory({
+      const read = () => adapter.loadHistory({
         limit: 50,
         imageWaitFrom: generatingImageRef.current ? imageWaitFromRef.current : null,
       })
+      // A restore retries only while the gateway says "not yet" (the history
+      // is rebuilding, the gateway is restarting) or does not answer, and never
+      // past its deadline. It used to be this single read with its failure
+      // sent to the console: a conversation the gateway was still rebuilding
+      // simply came back empty, with nothing to press.
+      const { messages: chatMsgs, imageGenerationFailed } = restoreCtl
+        ? await restoreWithRetry(read, {
+          signal: restoreCtl.signal,
+          attemptTimeoutMs: HISTORY_ATTEMPT_TIMEOUT_MS,
+          deadlineMs: HISTORY_RESTORE_DEADLINE_MS,
+          delaysMs: HISTORY_RETRY_DELAYS_MS,
+          onRetry: () => {
+            if (sessionKeyRef.current === keyAtCall) setRestoreState({ key: keyAtCall, phase: 'retrying' })
+          },
+        })
+        : await read()
       // The owner switched tabs while this read was in flight (the request
       // key was captured at call time): the answer belongs to the tab that
       // was left. Painting it would put one conversation inside another —
@@ -3270,6 +3377,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (mightAutoGreet) setIsBootstrappingHistory(false)
         return
       }
+      // Any read of this conversation that answers ends a restore's wait or
+      // failure — including a later ordinary one, once the gateway is free.
+      setRestoreState(prev => (prev && prev.key === keyAtCall ? null : prev))
       if (imageGenerationFailed) imageFailedRef.current = true
       // Preserve any optimistic user turns appended after this load was
       // dispatched but before chat.history responded — they haven't reached
@@ -3329,8 +3439,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // ref React has not refreshed yet.
       return chatMsgs
     } catch (err) {
-      console.error('Failed to load history:', err)
       if (mightAutoGreet) setIsBootstrappingHistory(false)
+      // Called off: a newer socket, a tab switch or Try again owns the
+      // conversation now and runs its own read. Nothing to report.
+      if (restoreCtl && isRestoreAborted(err)) return
+      console.error('Failed to load history:', err)
+      // Only a restore, and only on the conversation still on screen, ends in
+      // the choice: an ordinary refetch failing leaves the transcript that is
+      // already painted, exactly as before.
+      if (restoreCtl && sessionKeyRef.current === keyAtCall) {
+        setRestoreState({ key: keyAtCall, phase: 'failed', kind: classifyRestoreFailure(err) })
+      }
+    } finally {
+      if (restoreCtl && restoreAbortRef.current === restoreCtl) restoreAbortRef.current = null
     }
   }, [adapter, caps, applyStreaming])
 
@@ -3483,6 +3604,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setPreview(null)
     setOpenEmailUid(null)
     setIsBootstrappingHistory(false)
+    // The tab being left takes its restore with it; the one entered runs its own.
+    restoreAbortRef.current?.abort()
+    setRestoreState(null)
     if (oldKey) void wsRequest('sessions.messages.unsubscribe', { key: oldKey }).catch(() => { /* best effort */ })
     // The switch itself. From here the adapter, the three event filters and
     // the sticky-reasoning guard all follow the new key.
@@ -3536,7 +3660,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       next.delete(key)
       return next
     })
-    const loaded = await loadHistory()
+    const loaded = await loadHistory({ restore: true })
     // The owner switched again while that read was in flight. `loadHistory`
     // protects its own paint the same way; without this the tab being left
     // would hand its error to whichever conversation is on screen now — and
@@ -4892,6 +5016,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // owner may be in another tab by the time the reply lands, and painting
     // it there would put one conversation inside another.
     const keyAtSend = sessionKeyRef.current
+    // A new turn is the owner's answer to a restore choice left on screen.
+    setRestoreState(prev => (prev && prev.key === keyAtSend ? null : prev))
     let result: TurnResult
     try {
       result = await adapter.sendTurn({
@@ -5014,6 +5140,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       runIdRef.current = null
       if (!failure) return
       setMessages(prev => [...prev, { role: 'system', text: failure, timestamp: Date.now() }])
+      // The gateway never acknowledged the turn: the conversation is busy
+      // behind something else on the box (TASK-1158 — held for 40 minutes on a
+      // real one). The sentence above says so; the same two choices a failed
+      // restore offers go under it, so "start a new chat" is a button, not an
+      // instruction to go and find one.
+      if (err instanceof HarnessError && err.code === 'timeout') {
+        setRestoreState({ key: keyAtSend, phase: 'failed', kind: 'busy' })
+      }
       return
     }
     // A harness that merely ACKNOWLEDGED the turn answers on its own event
@@ -5740,7 +5874,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (caps.hasLiveConnection || !caps.canListHistory) return
     if (replayedRef.current) return
     replayedRef.current = true
-    void loadHistory()
+    // The same bounded restore the socket runs on its hello.
+    void loadHistory({ restore: true })
   }, [harnessLoaded, isOpen, caps, loadHistory])
 
   // Open the first conversation, once both of its inputs are in.
@@ -5795,6 +5930,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       connectionAbortRef.current?.abort()
       if (connectionDeadlineTimerRef.current) clearTimeout(connectionDeadlineTimerRef.current)
       connectionDeadlineTimerRef.current = null
+      if (handshakeTimerRef.current) clearTimeout(handshakeTimerRef.current)
+      handshakeTimerRef.current = null
+      restoreAbortRef.current?.abort()
       wsRef.current?.close()
       wsRef.current = null
       failPending('Chat closed')
@@ -6812,7 +6950,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </div>
         )}
 
-        {status === 'connected' && !reloadingSkill && messages.length === 0 && !streaming && !sending && !isBootstrappingHistory && (
+        {status === 'connected' && !reloadingSkill && messages.length === 0 && !streaming && !sending && !isBootstrappingHistory && !restoreState && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 8, color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
             <img src="/clawbox-crab.png" alt="" style={{ width: 25, height: 25, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
@@ -7218,6 +7356,58 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               </span>
             )}
           </div>
+        )}
+
+        {/* A conversation being brought back, or one that could not be
+            (TASK-1158). While a "not yet" is being waited out, one quiet line;
+            once the restore has run out of attempts or time, the reason and the
+            two things that help. Try again re-reads this conversation; Start a
+            new chat opens a fresh tab and leaves this one exactly as it is —
+            nothing is reset or deleted, because the gateway may still be
+            holding the owner's last message in it. */}
+        {restoreState && !reloadingSkill && status === 'connected' && (
+          restoreState.phase === 'retrying' ? (
+            <div
+              data-testid="chat-restore-status"
+              role="status"
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 2px', fontSize: 12, color: 'rgba(255,255,255,0.5)' }}
+            >
+              <span aria-hidden="true" style={TURN_SPINNER_STYLE} />
+              <span>{tr('chat.restore.restoring', 'Restoring this conversation…')}</span>
+            </div>
+          ) : (
+            <div
+              data-testid="chat-restore-failed"
+              role="alert"
+              style={{ margin: '8px 0', padding: '12px 14px', borderRadius: 10, background: 'rgba(249,115,22,0.08)', border: '1px solid rgba(249,115,22,0.25)', display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, color: 'rgba(255,255,255,0.85)' }}
+            >
+              <span>
+                {restoreState.kind === 'busy'
+                  ? tr('chat.restore.busy', 'This conversation is still busy on the box — it did not answer in time.')
+                  : restoreState.kind === 'timeout'
+                    ? tr('chat.restore.timeout', 'The box did not answer while this conversation was being restored.')
+                    : tr('chat.restore.failed', 'This conversation could not be restored.')}
+              </span>
+              <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>
+                {tr('chat.restore.hint', 'Try again, or start a new chat to carry on. Nothing in this conversation is deleted.')}
+              </span>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRestoreState({ key: sessionKeyRef.current, phase: 'retrying' })
+                    void loadHistory({ restore: true })
+                  }}
+                  style={{ background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)', color: '#f97316', borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 500 }}
+                >{tr('chat.restore.retry', 'Try again')}</button>
+                <button
+                  type="button"
+                  onClick={newTab}
+                  style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.85)', borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 500 }}
+                >{tr('chat.restore.newChat', 'Start a new chat')}</button>
+              </div>
+            </div>
+          )
         )}
 
         {/* The box is making the sound. Under the newest bubble, where the
