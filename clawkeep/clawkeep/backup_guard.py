@@ -43,6 +43,32 @@ MANAGED LINKS
   refusal stands: ClawKeep never carries or follows a link out of the backup.
   The failure is reported as such, naming the link and where it points.
 
+  DETACHING AND A LIVE TOOL. A path that is gone for the length of a build is
+  a path a running tool can fail to resolve, so what may be detached is kept
+  as narrow as it can be:
+
+    * ONLY a link the archiver would refuse is ever considered — one whose
+      target lies outside every root this backup covers. The ordinary case is
+      therefore untouched: a worktree whose `node_modules` points at a project
+      the backup also covers is carried into the archive as a link, and a
+      coding run working in that worktree never sees the path go missing.
+    * The Coding Agent's own worktrees are not in these roots at all. It
+      builds them at `<clawbox>/data/code-projects/<project>/.clawbox/
+      worktrees/<run>` and links `node_modules` to the project beside them
+      (`src/lib/coding-run-worktree.ts`); the backup covers the OpenClaw state
+      directory, the workspace and the per-agent roots, so that tree is
+      neither walked nor detached.
+    * What is left is a link its own tool regenerates. A process that resolves
+      one of those exact paths during the build does get an ENOENT, and that
+      is the accepted cost: the alternative is not "a slower backup" but no
+      backup at all — the archiver refuses such a link WHILE WRITING, so the
+      whole run fails, every run, on every box that has one. That is the v4.0
+      field failure this module exists for.
+    * The window is bounded and cannot be nested: one build at a time on a box
+      (`archive.lock`), the links go back the moment the build ends however it
+      ends, and a run killed mid-build has them put back before the next run
+      does anything else.
+
 DUPLICATE LOGICAL PATHS
   Two planned assets that would be written to the same archive path — the
   same path, one inside the other, or two names only a case-insensitive
@@ -571,8 +597,12 @@ def _create_archive(cfg: Config, *, output_dir: Path) -> Archive:
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    detach_links(links, journal)
     try:
+        # Inside the `try`: the journal is written before the first unlink, so
+        # a detach that raises part-way (a full disk on the second journal
+        # write) has already taken links out of the tree. The put-back must
+        # run for that run too, not wait for the next one a day later.
+        detach_links(links, journal)
         return _create_with_sqlite_recovery(cfg, output_dir, plan)
     finally:
         reattach_links(journal)

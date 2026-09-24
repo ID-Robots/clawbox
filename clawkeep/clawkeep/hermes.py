@@ -335,8 +335,15 @@ def _add_file_snapshot(
     opened once (without following a link that replaced it), read to its end
     into a spool, and the header is written for exactly the bytes that were
     read. A file gone before the open raises FileNotFoundError for the caller
-    to record as VANISHED."""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    to record as VANISHED.
+
+    `O_NONBLOCK` is there so the open itself can never hang: a FIFO that took
+    the file's place between the classification and this open would otherwise
+    park the whole backup until someone writes to it. With it the open returns
+    at once and the `fstat` below refuses it as no longer a regular file."""
+    fd = os.open(
+        path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+    )
     with os.fdopen(fd, "rb") as fh:
         if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
             raise OSError(f"{path} is no longer a regular file")
@@ -360,10 +367,24 @@ def _add_file_snapshot(
 def _add_member(
     tf: tarfile.TarFile, path: Path, *, arcname: str, spool_dir: Path,
 ) -> int:
-    """A directory or link as its header; a regular file as a snapshot."""
-    if path.is_file() and not path.is_symlink():
+    """A directory or link as its header; a regular file as a snapshot.
+
+    The entry is classified ONCE, by `gettarinfo` — which lstats it and never
+    follows a link. Looking the name up a second time (what `TarFile.add`
+    does) would let a directory or link that has become a regular file in
+    between be copied by name, header first: exactly the misaligned archive
+    `_add_file_snapshot` exists to prevent. A regular file — including the
+    second name of a hard-linked one, which travels whole here — goes to the
+    snapshot, which re-checks the type against its own descriptor. Everything
+    else is written as a header and nothing more, from the entry that was
+    classified; those headers carry no data, so no later member can shift.
+    A type tar has no member for (a socket) is skipped, as `add` skips it."""
+    info = tf.gettarinfo(str(path), arcname=arcname)
+    if info is None:
+        return 0
+    if info.isreg() or info.islnk():
         return _add_file_snapshot(tf, path, arcname=arcname, spool_dir=spool_dir)
-    tf.add(path, arcname=arcname, recursive=False)
+    tf.addfile(info)
     return 0
 
 
