@@ -20,7 +20,7 @@
  * tree route skips `.clawbox` the way it skips `.git`.
  */
 
-import path from "path";
+import path from "./runtime-path";
 import fs from "fs";
 import { runChild, failureDetail, type ChildResult } from "./child-run";
 import { codingGitIdentityArgs } from "./coding-git-identity";

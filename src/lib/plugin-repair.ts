@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import fs from "fs/promises";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 
 import { getActiveHarness, type Harness } from "@/lib/harness";
 import { canonicalPluginId, pluginHasSettingsRow, ROW_PLUGIN_IDS } from "@/lib/plugin-repair-id";
@@ -447,7 +447,7 @@ const PLUGIN_REPAIR_LOCK_WAIT_MS = 15_000;
 
 /** The store's cross-process lock, beside it. */
 export function pluginRepairLockPath(): string {
-  return `${pluginRepairPath()}.lock`;
+  return untraced(`${pluginRepairPath()}.lock`);
 }
 
 /**
@@ -544,7 +544,7 @@ async function reclaimStalePluginRepairLock(lockPath: string): Promise<boolean> 
  * attempt, for ever, on exactly the box that can least afford them.
  */
 async function writeRowsAtomically(target: string, rows: unknown): Promise<void> {
-  const tmp = `${target}.tmp.${process.pid}.${randomUUID()}`;
+  const tmp = untraced(`${target}.tmp.${process.pid}.${randomUUID()}`);
   await fs.mkdir(path.dirname(target), { recursive: true });
   try {
     await fs.writeFile(tmp, `${JSON.stringify(rows, null, 2)}\n`, "utf-8");

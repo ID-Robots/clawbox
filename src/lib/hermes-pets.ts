@@ -40,7 +40,7 @@
 
 import fs from "fs";
 import fsp from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { CONFIG_ROOT, DATA_DIR, get as getConfig, set as setConfig } from "@/lib/config-store";
 import { hasHermesHarness, readEdition } from "@/lib/edition-source";
 import { runHermesCli } from "@/lib/hermes-cli";

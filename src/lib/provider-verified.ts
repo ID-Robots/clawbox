@@ -58,7 +58,7 @@
  * SERVER ONLY.
  */
 import fs from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { get, set } from "@/lib/config-store";
 import { createSerialLock } from "@/lib/serial-lock";
 import { HERMES_AUTO_PROVIDER, isPlausibleHermesProviderId } from "@/lib/hermes-providers";

@@ -1,5 +1,5 @@
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { envPort } from "@/lib/port-probe";
 
 // Server-side helper to call the Hermes dashboard's own API (127.0.0.2:9119)

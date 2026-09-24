@@ -32,7 +32,7 @@
 
 import { readdirSync, statSync } from "node:fs";
 import os from "node:os";
-import path from "node:path";
+import path from "@/lib/runtime-path";
 import { requireNodeSqlite } from "@/lib/openclaw-session-store";
 
 /** The two counts the line reporter carries. */
@@ -204,7 +204,7 @@ export function countIndexChunks(dbPath: string, sinceMs: number, { rebuild = fa
   if (!scratch && rebuild) return null;
   const target = scratch ?? dbPath;
   try {
-    if (!statSync(target).isFile()) return null;
+    if (!statSync(/* turbopackIgnore: true */ target).isFile()) return null;
   } catch {
     return null;
   }

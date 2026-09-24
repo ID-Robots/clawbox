@@ -26,7 +26,7 @@
 import { execFile as execFileCb } from "child_process";
 import { randomUUID } from "crypto";
 import fs, { constants, type FileHandle } from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { promisify } from "util";
 import { readClawaiEntitlementTier } from "@/lib/clawai-plan-tier";
 import {

@@ -45,7 +45,7 @@
 // never lands in a second file.
 
 import fs from "fs";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { createHash, randomBytes } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
 import { CHAT_ID_RE } from "@/lib/email-approval-telegram";
@@ -164,7 +164,7 @@ function readStore(now: number): PromptStore {
 /** Fresh temp at 0600, then atomic rename — the discipline config-store uses. */
 function writeStore(store: PromptStore): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = `${PROMPTS_PATH}.tmp`;
+  const tmp = untraced(`${PROMPTS_PATH}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
   try {
     fs.chmodSync(tmp, 0o600);

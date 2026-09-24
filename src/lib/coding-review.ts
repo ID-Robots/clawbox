@@ -20,7 +20,7 @@
  * fails silently.
  */
 
-import path from "path";
+import path from "./runtime-path";
 import { runChild, type ChildResult, failureDetail } from "./child-run";
 import {
   labelNames,

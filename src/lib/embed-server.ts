@@ -21,7 +21,7 @@
  */
 
 import fs from "fs/promises";
-import path from "path";
+import path from "./runtime-path";
 import { DATA_DIR } from "./config-store";
 import { getLocalAiProxyRootUrl } from "./local-ai-proxy-url";
 import {

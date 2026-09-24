@@ -17,7 +17,7 @@
  * and sometimes skip a page (the hole this closes). The device decides, and the
  * pass is told which files made the decision.
  */
-import path from "path";
+import path from "@/lib/runtime-path";
 import { listArtifacts, artifactsDir } from "@/lib/coding-agent-artifacts";
 import { readShotNotes } from "@/lib/coding-shot-notes";
 

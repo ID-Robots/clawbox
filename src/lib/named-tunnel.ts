@@ -28,7 +28,7 @@
 import crypto from "crypto";
 import fs from "fs";
 import fsp from "fs/promises";
-import path from "path";
+import path, { untraced } from "./runtime-path";
 
 /** The only zone a box hostname may live in: first-level labels of it. */
 export const BOX_TUNNEL_DOMAIN = "clawbox.tech";
@@ -145,7 +145,7 @@ export async function writeNamedTunnelCredential(cred: NamedTunnelCredential): P
   if (!isValidTunnelToken(cred.token)) throw new Error("invalid box tunnel token");
   const file = namedTunnelCredentialPath();
   await fsp.mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp.${crypto.randomBytes(4).toString("hex")}`;
+  const tmp = untraced(`${file}.tmp.${crypto.randomBytes(4).toString("hex")}`);
   try {
     await fsp.writeFile(tmp, `hostname=${cred.hostname}\ntoken=${cred.token}\n`, {
       mode: 0o600,

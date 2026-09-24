@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import fs from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { verifyMcpBearer } from "@/lib/mcp-token";
 import { isPublicGatewayAsset } from "@/lib/gateway-static";
 import { readEdition } from "@/lib/edition-source";

@@ -269,8 +269,9 @@ export async function register() {
     const { getActiveHarnessSource } = require('./lib/harness')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fsp = require('fs').promises
+    // Node's path module through src/lib/runtime-path.ts, never directly: see there.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const nodePath = require('path')
+    const { default: nodePath } = require('./lib/runtime-path')
     const removeDataFile = async (name: string): Promise<boolean> => {
       // `force` would answer "removed" for a file that was never there, and
       // the answer is what decides whether the boot log says anything.

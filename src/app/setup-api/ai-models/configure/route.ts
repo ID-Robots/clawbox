@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import fs from "fs/promises";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { getAll, setMany } from "@/lib/config-store";
 import { readSetupGateFacts } from "@/lib/route-auth";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
@@ -447,7 +447,7 @@ async function readAuthProfiles(): Promise<AuthProfilesFile> {
 
 async function writeAuthProfiles(authProfiles: AuthProfilesFile) {
   await fs.mkdir(path.dirname(AUTH_PROFILES_PATH), { recursive: true });
-  const tmpPath = AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`;
+  const tmpPath = untraced(AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`);
   await fs.writeFile(tmpPath, JSON.stringify(authProfiles, null, 2), {
     mode: 0o600,
   });

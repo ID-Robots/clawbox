@@ -30,7 +30,7 @@
 
 import fs from "node:fs";
 import os from "node:os";
-import path from "node:path";
+import path from "./runtime-path";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { OPENCLAW_HOME_DEFAULT, openSqlite } from "./openclaw-session-store";
 

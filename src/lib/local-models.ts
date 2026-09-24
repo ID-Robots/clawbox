@@ -16,7 +16,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { constants as fsConstants, promises as fs } from "fs";
 import os from "os";
-import path from "path";
+import path from "./runtime-path";
 import { EMBED_MODEL_ALIAS, EMBED_UNIT, isEmbeddingServerArgv } from "./embed-runtime-ids";
 
 const execFileAsync = promisify(execFile);

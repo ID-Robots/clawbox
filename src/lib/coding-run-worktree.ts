@@ -37,7 +37,7 @@
  */
 
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 import { failureDetail, type ChildResult } from "./child-run";
 import { excludeWorktrees, gitIn, withDirLock, WORKTREES_DIR } from "./coding-team-worktree";
 import { codingGitIdentityArgs } from "./coding-git-identity";

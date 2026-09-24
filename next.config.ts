@@ -24,6 +24,13 @@ const APP_VERSION = (() => {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // The build's root is this checkout, always. Left alone, Next infers it from
+  // the lockfiles it finds walking UP from here, and one in a parent directory
+  // makes that parent the root: all of it becomes the project the build can
+  // glob and trace. Measured on 16.3.5 with a checkout nested in another, which
+  // was built with the OUTER one as its root. Next sets outputFileTracingRoot
+  // to the same value.
+  turbopack: { root: __dirname },
   // Next's own trailing-slash redirect (`/x/` → 308 `/x`) is switched off
   // so `/apps/<id>/` — the base path a proxied app is served under, which
   // a Vite dev server insists on with the slash — reaches the proxy as
@@ -39,72 +46,47 @@ const nextConfig: NextConfig = {
   // Nothing imported sharp before, so nothing noticed. The pet thumbnail route
   // does, so name the .so explicitly. Both libc variants are listed because the
   // trace is resolved at build time and a musl image would need the other one.
-  // Keep the runtime data directory out of the ROUTE traces — and know what
-  // that does and does not buy.
+  // Keep the runtime state under the project root out of the build — data/,
+  // coding-run worktrees under .clawbox/, a build parked at .next-old — and
+  // know that nothing on this page is what does it.
   //
-  // data/ holds the owner's live state — config, code projects, built webapps
-  // — and it CHANGES WHILE THE BUILD RUNS. On 2026-08-26 a build died with
-  // ENOENT on data/webapps/3d-shooter/index.html because the webapp was
-  // deleted between the trace and the copy, and the box was left with no
-  // standalone output at all: the site went down until the next build.
+  // data/ holds the owner's live state — config, code projects, built webapps,
+  // the coding agent's evidence folders and stream files — and it CHANGES
+  // WHILE THE BUILD RUNS. The build used to walk it and copy it: every
+  // `path.join` onto a root unknown at build time (CLAWBOX_ROOT, DATA_DIR, a
+  // request's folder) became a glob over the project, and `${file}.tmp` one
+  // over every *.tmp in it. So a webapp deleted mid-build killed the
+  // standalone copy with ENOENT (data/webapps/3d-shooter/index.html,
+  // 2026-08-26), a stream file a live run rotated did the same, and a Python
+  // venv in a run's evidence folder made Turbopack panic on its `bin/python`
+  // link ("points out of the filesystem root", rig boards 2026-09-23,
+  // TASK-1102). The instrumentation trace alone listed 6186 files on a box:
+  // src/, scripts/, .git and, mid-update, the parked `.next-old` (TASK-725).
   //
-  // Nothing needs it there either. Every reader resolves data/ from
-  // CLAWBOX_ROOT (or the absolute /home/clawbox/clawbox default) at runtime,
-  // so a copy inside .next/standalone is a stale duplicate even when the copy
-  // succeeded.
+  // `outputFileTracingExcludes` cannot close that. The walk happens while the
+  // module graph is built, before any exclude is read; and Next applies the
+  // excludes per ROUTE entry, while the middleware and instrumentation traces
+  // are built separately and no key reaches them — measured on 16.3.3
+  // (TASK-670: middleware data 27, instrumentation data 32 and .git 701 with
+  // the key below in place) and again on 16.3.5, where "*" vs "**" vs
+  // "middleware" changes nothing. Those two are also the traces Next copies
+  // with no error handling.
   //
-  // THIS EXCLUDE ONLY REACHES ROUTES, so data/ IS still traced into the
-  // standalone bundle and the postbuild step in package.json is what removes
-  // it. Next applies outputFileTracingExcludes per route entry; the middleware
-  // and instrumentation traces are built separately and NO key reaches them.
-  // Measured on Next 16.3.3 with a minimal app: with the exclude below, a
-  // route's .nft.json is cleaned of data/ while middleware.js.nft.json keeps
-  // its `../../data/config.json` entry and .next/standalone/data is created
-  // anyway — and "*" vs "**" vs "middleware" vs "/middleware" changes nothing.
-  // So do not "fix the glob" here: it already does its job, which is the route
-  // half of the ENOENT hazard above. The middleware and instrumentation halves
-  // are still open — Next copies those two traces with no error handling,
-  // where the page traces are wrapped — and closing them means keeping the
-  // paths out of the trace at the source, not another glob.
+  // So it is closed at the source. Server code imports `path` from
+  // src/lib/runtime-path.ts, which the build cannot see through, and wraps a
+  // path built with a template in its `untraced()`; the few fs calls Turbopack
+  // still flagged carry a `turbopackIgnore` comment. What the traces hold now
+  // is the module graph and node_modules, and nothing read the rest: every
+  // reader resolves data/ and scripts/ from the checkout (CONFIG_ROOT), never
+  // from `.next/standalone`. scripts/check-build-isolation.sh proves it in CI:
+  // it builds over a planted data/ — a venv, a dangling link, files that come
+  // and go — and fails if any trace reaches it.
   //
-  // How wide the instrumentation half is, measured on Next 16.3.3 (TASK-725):
-  // src/instrumentation-node.ts resolves path.join(CONFIG_ROOT, 'scripts',
-  // 'terminal-server.mjs') and CONFIG_ROOT is read from the environment
-  // (src/lib/config-store.ts), so Next's dependency tracer cannot resolve it and emits the
-  // WHOLE project directory as an asset directory. instrumentation.js.nft.json
-  // listed 6186 files — src/, scripts/, bench/, docs-site/, e2e/, .git … and,
-  // during an update, all 4202 files of the previous build parked at
-  // `.next-old`. That is where `.next/standalone/.next-old/standalone/server.js`
-  // comes from, which scripts/postbuild.sh now removes and refuses to mistake
-  // for this build's entry. Narrowing the sweep is a separate change: parts of
-  // it are load-bearing today (`.next/standalone/scripts` comes from it, and
-  // system-profile.ts resolves scripts/ from the process cwd).
+  // The excludes below stay as a second line for the route traces, and
+  // scripts/postbuild.sh still removes data/, .git, .env and a parked build
+  // from the standalone tree should anything put them back.
   //
-  // `.git` is in that 6186-file list too — 88 MB of it on the OpenClaw box,
-  // measured 2026-09-05. TASK-692 read next@16.3.3's own source and concluded
-  // the `.git/**` key below reaches the instrumentation trace
-  // (next-trace-entrypoints-plugin.js keys `entryNameFilesMap` by
-  // `entrypoint.name` for every server-compiler entrypoint, collect-build-
-  // traces.js iterates that map, and `picomatch("*", {dot,contains})` matches
-  // "instrumentation"), while flagging that a real device build with the line
-  // in place was NOT measured.
-  //
-  // It has been measured now (TASK-670), on a box building THIS branch's own
-  // beta head, with the key below already in the checked-out config:
-  //
-  //   every `.next/server/app/**/*.nft.json`   data 0   .git 0
-  //   .next/server/middleware.js.nft.json      data 27  .git 0
-  //   .next/server/instrumentation.js.nft.json data 32  .git 701
-  //
-  // So the key reaches ROUTE entries and nothing else, exactly as the
-  // paragraph above says, and the source reading does not survive contact with
-  // a real build. `.git` is NOT excluded at the source: scripts/postbuild.sh
-  // sweeping it afterwards — and failing the build when a copy survives — is
-  // what actually keeps it out of the artifact, and is load-bearing rather
-  // than belt-and-braces. The key stays because it does its job for the route
-  // traces; do not read it as covering the other two.
-  //
-  // Its companion, the checkout's own `.env`, genuinely has no switch: Next
+  // The checkout's own `.env` is the one copy with no switch at all: Next
   // copies `.env` and `.env.production` ITSELF, AFTER the trace, in
   // writeStandaloneDirectory() (next/dist/build/index.js) — nothing on that
   // path reads this config. On a box that file is 0600 and holds

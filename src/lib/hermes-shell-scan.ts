@@ -61,7 +61,7 @@
 import fs from "fs/promises";
 import type { FileHandle } from "fs/promises";
 import { constants as fsConstants } from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 
 import { hermesConfigPath } from "@/lib/hermes-config-yaml";
 import { hermesHome, readHermesEnv } from "@/lib/hermes-env";

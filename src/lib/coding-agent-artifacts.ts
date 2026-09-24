@@ -15,7 +15,7 @@
  * (listing caps at MAX_ARTIFACTS entries) read on an owner-facing route.
  */
 import fs from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { CODING_AGENT_ARTIFACTS_SUBTREE } from "@/lib/file-guard";
 

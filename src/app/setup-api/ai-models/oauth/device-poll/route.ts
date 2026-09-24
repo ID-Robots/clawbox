@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import fs from "fs/promises";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import {
   HANDOFF_TOKENS_PATH,
@@ -50,7 +50,7 @@ async function persistTokensAndAck(
   tokens: DeviceTokens,
 ): Promise<NextResponse> {
   await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmpPath = `${HANDOFF_TOKENS_PATH}.tmp.${crypto.randomBytes(8).toString("hex")}`;
+  const tmpPath = untraced(`${HANDOFF_TOKENS_PATH}.tmp.${crypto.randomBytes(8).toString("hex")}`);
   await fs.writeFile(
     tmpPath,
     JSON.stringify({ provider, ...tokens, createdAt: Date.now() }),

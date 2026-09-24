@@ -90,6 +90,10 @@ type BuildOutcome =
   | "no-standalone-entry"
   /** Next's unwrapped standalone copy hits a file that vanished; the retry works. */
   | "trace-race-then-succeeds"
+  /** A ROUTE copy hit a vanished file: Next warns and exits 0 short of it; the retry works. */
+  | "copy-warning-then-succeeds"
+  /** The same warning on every attempt, over a build that exits 0 each time. */
+  | "copy-warning-always"
   /** The same ENOENT every time — a file that is gone for good, not a race. */
   | "trace-race-always";
 
@@ -268,6 +272,20 @@ function run(scenario: Scenario = {}): Run {
       "  exit 1",
       "fi",
       'mkdir -p "$1/.next/standalone" && printf "new-build-id\\n" > "$1/.next/BUILD_ID" && printf "// server\\n" > "$1/.next/standalone/server.js" && exit 0',
+    ].join("\n"),
+    // The shape Next prints from inside the `.catch` it wraps the ROUTE copies
+    // in: a warning, the same node message, and exit 0 over a tree short of it.
+    "copy-warning-then-succeeds": [
+      'mkdir -p "$1/.next/standalone" && printf "new-build-id\\n" > "$1/.next/BUILD_ID" && printf "// server\\n" > "$1/.next/standalone/server.js"',
+      'if [ "$ATTEMPT" = "1" ]; then',
+      `  echo " ⚠ Failed to copy traced files for $1/.next/server/app/api/route.js Error: ENOENT: no such file or directory, copyfile '$1/node_modules/a/index.js' -> '$1/.next/standalone/node_modules/a/index.js'" >&2`,
+      "fi",
+      "exit 0",
+    ].join("\n"),
+    "copy-warning-always": [
+      'mkdir -p "$1/.next/standalone" && printf "new-build-id\\n" > "$1/.next/BUILD_ID" && printf "// server\\n" > "$1/.next/standalone/server.js"',
+      `echo " ⚠ Failed to copy traced files for $1/.next/server/app/api/route.js Error: ENOENT: no such file or directory, copyfile '$1/node_modules/a/index.js' -> '$1/.next/standalone/node_modules/a/index.js'" >&2`,
+      "exit 0",
     ].join("\n"),
     "trace-race-always": [
       `echo "Error: ENOENT: no such file or directory, copyfile '$1/data/webapps/demo/index.html' -> '$1/.next/standalone/data/webapps/demo/index.html'" >&2`,
@@ -569,6 +587,27 @@ describe("do_rebuild verifies the build it produced", () => {
     expect(r.status).not.toBe(0);
     expect(r.attempts).toBe(2);
     // The box keeps serving what it was serving.
+    expect(r.buildId).toBe("old-build-id");
+  });
+
+  it("retries a copy Next only warned about, and accepts the build that copied everything (TASK-1102)", () => {
+    // For a ROUTE, Next catches the failed copy, warns and exits 0. The tree
+    // it leaves is short of that file, so it is the same race and gets the
+    // same one rebuild.
+    const r = run({ build: "copy-warning-then-succeeds" });
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(2);
+    expect(r.buildId).toBe("new-build-id");
+    expect(r.hasEntry).toBe(true);
+  });
+
+  it("fails a build that exited 0 but still could not copy a traced file after the retry", () => {
+    // Exit 0 is not the verdict: rc must be non-zero on any build or copy
+    // failure, and the box keeps serving what it was serving.
+    const r = run({ build: "copy-warning-always" });
+    expect(r.status).not.toBe(0);
+    expect(r.attempts).toBe(2);
+    expect(r.stderr).toContain("could not copy every traced file");
     expect(r.buildId).toBe("old-build-id");
   });
 

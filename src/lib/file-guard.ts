@@ -1,4 +1,4 @@
-import path from "path";
+import path from "./runtime-path";
 import fs from "fs";
 import { DATA_DIR } from "./config-store";
 
@@ -371,7 +371,7 @@ export function canonicalPath(abs: string): string | null {
   let hops = 0;
   for (;;) {
     try {
-      const real = fs.realpathSync(dir);
+      const real = fs.realpathSync(/* turbopackIgnore: true */ dir);
       return rest.length ? path.join(real, ...rest) : real;
     } catch {
       const target = danglingLinkTarget(dir);

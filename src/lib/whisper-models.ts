@@ -18,7 +18,7 @@
  */
 import fs from "fs/promises";
 import os from "os";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { dirBytes } from "@/lib/install-disk";
 import { safeWhisperSize, WHISPER_SIZES, type WhisperSize } from "@/lib/local-install";
 import { readUnitState, reloadAndRestartUserEngine, removeUserUnit, SYSTEMD_USER_DIR, WHISPER_UNIT } from "@/lib/local-models";
@@ -168,7 +168,7 @@ export async function setActiveWhisperSize(requested: string): Promise<{ ok: boo
     ? unit.replace(MODEL_LINE, line)
     : unit.replace(/^\[Service\]$/m, `[Service]\n${line}`);
   if (!next.includes(line)) return { ok: false, error: "Could not read the Whisper service file." };
-  const tmp = `${WHISPER_UNIT_PATH}.${process.pid}.${Date.now()}.tmp`;
+  const tmp = untraced(`${WHISPER_UNIT_PATH}.${process.pid}.${Date.now()}.tmp`);
   try {
     await fs.writeFile(tmp, next, { encoding: "utf-8", mode: 0o644 });
     await fs.rename(tmp, WHISPER_UNIT_PATH);

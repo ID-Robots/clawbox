@@ -11,7 +11,7 @@
 
 import crypto from "crypto";
 import fs from "fs/promises";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 
@@ -76,7 +76,7 @@ function isValidSession(value: unknown): value is ClawKeepConnectSession {
 
 export async function writeClawKeepSession(session: ClawKeepConnectSession) {
   await fs.mkdir(CLAWKEEP_DATA_DIR, { recursive: true, mode: 0o700 });
-  const tmpPath = `${STATE_PATH}.tmp.${crypto.randomBytes(4).toString("hex")}`;
+  const tmpPath = untraced(`${STATE_PATH}.tmp.${crypto.randomBytes(4).toString("hex")}`);
   await fs.writeFile(tmpPath, JSON.stringify(session), { mode: 0o600 });
   await fs.rename(tmpPath, STATE_PATH);
 }

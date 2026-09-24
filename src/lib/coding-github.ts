@@ -28,7 +28,7 @@
  * in a file should not have that mistake amplified into a public repo.
  */
 
-import path from "path";
+import path from "@/lib/runtime-path";
 import {
   type ChildResult,
   failureDetail,

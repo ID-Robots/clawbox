@@ -52,7 +52,7 @@
  * `stripBasePath: true` for an app that serves at `/` with relative links.
  */
 import fs from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { runChild } from "@/lib/child-run";
 import { APP_ID_RE, projectPath, webappPath, writeWebappIndex } from "@/lib/code-projects";
 import { get as configGet } from "@/lib/config-store";

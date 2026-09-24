@@ -58,7 +58,7 @@
 import { spawn } from "child_process";
 import { existsSync } from "fs";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { hermesHome } from "@/lib/hermes-env";
 import {
   markWhatsappPaired,

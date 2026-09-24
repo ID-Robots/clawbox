@@ -1,5 +1,5 @@
 import fs from "fs/promises";
-import path from "path";
+import path from "./runtime-path";
 
 /**
  * Finding processes by what they ARE, not by a regex over their command line.

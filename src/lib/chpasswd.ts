@@ -11,7 +11,7 @@
  * both ends must agree on the path, or chpasswd silently no-ops while the
  * route reports success.
  */
-import path from "path";
+import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 
 export const CHPASSWD_INPUT_PATH = path.join(DATA_DIR, ".chpasswd-input");

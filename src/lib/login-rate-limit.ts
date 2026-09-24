@@ -1,5 +1,5 @@
 import fs from "fs/promises";
-import path from "path";
+import path, { untraced } from "./runtime-path";
 import { DATA_DIR } from "./config-store";
 
 const STATE_PATH = path.join(DATA_DIR, ".login-attempts.json");
@@ -64,7 +64,7 @@ async function persist(state: State): Promise<void> {
   writeChain = writeChain.then(async () => {
     try {
       await fs.mkdir(DATA_DIR, { recursive: true });
-      const tmpPath = `${STATE_PATH}.tmp`;
+      const tmpPath = untraced(`${STATE_PATH}.tmp`);
       await fs.writeFile(tmpPath, JSON.stringify(state), { mode: 0o600 });
       await fs.rename(tmpPath, STATE_PATH);
     } catch (err) {

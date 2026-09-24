@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
 

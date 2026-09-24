@@ -20,7 +20,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
-import path from "node:path";
+import path, { untraced } from "@/lib/runtime-path";
 import { StringDecoder } from "node:string_decoder";
 
 import {
@@ -456,7 +456,7 @@ export async function writeSchedule(next: ClawKeepSchedule): Promise<{
   // interleave into one temp file and rename a torn schedule into place —
   // readScheduleSnapshot() would then fall back to DEFAULT_SCHEDULE and silently turn
   // auto-backup off.
-  const tmp = `${SCHEDULE_PATH}.tmp.${process.pid}.${++scheduleWriteSeq}`;
+  const tmp = untraced(`${SCHEDULE_PATH}.tmp.${process.pid}.${++scheduleWriteSeq}`);
   // `armedAtMs` rides alongside the schedule rather than in it: it is not a
   // setting the owner edits, and `sanitiseSchedule` drops it on the way back
   // out so `ClawKeepSchedule` stays exactly what the PUT body may contain.
@@ -529,7 +529,7 @@ async function writeSecret(p: string, contents: string): Promise<void> {
   await ensureDataDir();
   // Atomic-rename a 0600 tmp file so the secret is never world-readable
   // even on a crash mid-write.
-  const tmp = `${p}.tmp`;
+  const tmp = untraced(`${p}.tmp`);
   const handle = await fs.open(tmp, "w", 0o600);
   try {
     await handle.writeFile(contents, "utf8");
@@ -662,7 +662,7 @@ async function writeStateFile(state: StateFile): Promise<void> {
   // Per-call temp name (pid + monotonic counter) so concurrent writers — e.g.
   // a pair-time cloud sync racing a stuck-spinner reset — can't clobber each
   // other's temp file before the atomic rename.
-  const tmp = `${STATE_PATH}.tmp.${process.pid}.${++stateWriteSeq}`;
+  const tmp = untraced(`${STATE_PATH}.tmp.${process.pid}.${++stateWriteSeq}`);
   await fs.writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
   await fs.rename(tmp, STATE_PATH);
 }
@@ -1606,7 +1606,7 @@ export async function runBackup(
     // records it in the manifest after a successful upload.
     const label = opts.label?.trim();
     if (label) args.push("--label", label);
-    const child = spawn(bin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(/* turbopackIgnore: true */ bin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled = false;

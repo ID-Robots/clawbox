@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import {
   APP_ID_RE,
   LEGACY_STUB_MAX_BYTES,

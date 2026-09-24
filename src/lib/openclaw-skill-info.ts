@@ -1,7 +1,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { findOpenclawBin, getSkillsDir, openclawIsAbsent, openclawSkillsAgentArgs } from "@/lib/openclaw-config";
 
 /**

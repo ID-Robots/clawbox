@@ -80,9 +80,9 @@ export interface EditionSource {
  */
 export function readEditionSource(): EditionSource {
   try {
-    const stat = fs.statSync(EDITION_FILE);
+    const stat = fs.statSync(/* turbopackIgnore: true */ EDITION_FILE);
     if (cache && cache.mtimeMs === stat.mtimeMs) return { edition: cache.edition, defaulted: false };
-    const parsed = normalizeEdition(parseEditionEnvFile(fs.readFileSync(EDITION_FILE, "utf-8")));
+    const parsed = normalizeEdition(parseEditionEnvFile(fs.readFileSync(/* turbopackIgnore: true */ EDITION_FILE, "utf-8")));
     if (parsed) {
       cache = { mtimeMs: stat.mtimeMs, edition: parsed };
       return { edition: parsed, defaulted: false };

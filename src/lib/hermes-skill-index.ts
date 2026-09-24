@@ -18,7 +18,7 @@
 // React text nodes only.
 
 import fs from 'fs/promises';
-import path from 'path';
+import path from '@/lib/runtime-path';
 import { runHermesCli } from '@/lib/hermes-cli';
 import { runSkillsCli } from '@/lib/hermes-skills-cli';
 import {

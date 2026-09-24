@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import fsp from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { Readable } from "stream";
 import { chatMediaRoot } from "@/lib/harness/media-root";
 import { getActiveHarness } from "@/lib/harness";

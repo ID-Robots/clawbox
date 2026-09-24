@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { APP_ID_RE } from "@/lib/code-projects";
 import { setSkillEnabled } from "@/lib/openclaw-config";
 import { refreshSkillsCache } from "@/lib/openclaw-skill-info";

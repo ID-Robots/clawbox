@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import os from "os";
-import path from "path";
+import path from "@/lib/runtime-path";
 
 // Bridges the host browser's clipboard with the guest X CLIPBOARD via
 // `xclip`. Avoids the RFB ClientCutText Latin-1 limitation that mangles

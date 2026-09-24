@@ -27,7 +27,7 @@
  *    every log line on the box carries it.
  */
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { hasHermesHarness } from "@/lib/edition-source";
 import { openclawIsAbsent, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { patchHermesConfig } from "@/lib/hermes-config-yaml";

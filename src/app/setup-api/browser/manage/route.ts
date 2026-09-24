@@ -5,7 +5,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { constants as fsConstants } from "fs";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import type { OpenClawConfig } from "@/lib/openclaw-config";
 import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { CONFIG_ROOT } from "@/lib/config-store";

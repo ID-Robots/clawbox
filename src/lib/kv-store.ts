@@ -1,4 +1,4 @@
-import path from "path";
+import path, { untraced } from "./runtime-path";
 import fs from "fs";
 import { assertStorableKey, DATA_DIR } from "./config-store";
 
@@ -34,7 +34,7 @@ function readKV(): Record<string, string> {
 
 function writeKV(data: Record<string, string>): void {
   ensureDir();
-  const tmp = KV_PATH + ".tmp";
+  const tmp = untraced(KV_PATH + ".tmp");
   // 0o600: kv is an untyped string store (callers may stash anything), so it
   // should not default to world-readable. Written on the tmp file before the
   // atomic rename so the final file is never briefly 0644. chmod the tmp too:

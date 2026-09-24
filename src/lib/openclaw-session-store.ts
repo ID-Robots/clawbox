@@ -38,7 +38,7 @@
  */
 
 import fs from "node:fs";
-import path from "node:path";
+import path from "./runtime-path";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 
 type NodeSqlite = { DatabaseSync: typeof DatabaseSyncType };

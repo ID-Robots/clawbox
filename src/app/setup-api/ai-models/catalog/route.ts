@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { coreRetiredModels } from "@/lib/core-model-lifecycle";
 import { spawn } from "child_process";
 import { promises as fsp } from "fs";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { DATA_DIR } from "@/lib/config-store";
 import { isCodexSupportedModelId } from "@/lib/subscription-surface";
@@ -375,7 +375,7 @@ async function writeDiskCache(provider: string, payload: CatalogResponse): Promi
   try {
     await fsp.mkdir(CACHE_DIR, { recursive: true });
     const file = path.join(CACHE_DIR, `${provider}.json`);
-    const tmp = `${file}.tmp`;
+    const tmp = untraced(`${file}.tmp`);
     // Write-then-rename so a crash mid-write can't leave a half-JSON
     // file that breaks the next read.
     await fsp.writeFile(tmp, JSON.stringify(payload), "utf8");

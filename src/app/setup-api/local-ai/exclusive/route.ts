@@ -8,7 +8,7 @@ import {
   sessionModelRef,
   type SessionPatchTarget,
 } from "@/lib/openclaw-session-model";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import { get, set, setMany } from "@/lib/config-store";
 import {
@@ -126,7 +126,7 @@ async function listSessionsFiles(): Promise<string[]> {
  * OpenClaw would refuse to resume the session.
  */
 async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
-  const tmp = `${filePath}.tmp`;
+  const tmp = untraced(`${filePath}.tmp`);
   await fs.writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
   await fs.rename(tmp, filePath);
 }

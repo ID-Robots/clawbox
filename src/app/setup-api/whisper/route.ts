@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { spawn } from "child_process";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { CONFIG_ROOT } from "@/lib/config-store";

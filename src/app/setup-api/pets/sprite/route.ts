@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import { loadPet, safePetSlug } from "@/lib/hermes-pets";
 

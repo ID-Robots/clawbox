@@ -1,5 +1,5 @@
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 import crypto from "crypto";
 
 /**

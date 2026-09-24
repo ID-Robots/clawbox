@@ -18,7 +18,7 @@
  */
 
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 import { BOX_NOTE_PREFIX } from "./coding-run-messages";
 import { WORKTREES_DIR } from "./coding-team-worktree";
 

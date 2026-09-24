@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import { type HermesCliResult, runHermesCli } from "@/lib/hermes-cli";
 import { checkInstallIdentifier, cliInstallIdentifier, isValidMeta, isValidSkillName, CLI_FAILURE_SENTENCES, cliFailureCode } from "@/lib/hermes-skills";

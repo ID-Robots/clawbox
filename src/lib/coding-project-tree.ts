@@ -21,7 +21,7 @@
 import crypto from "crypto";
 import fs from "fs";
 import fsp from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { isProtectedFilePath } from "@/lib/file-guard";
 import { safeProjectRelativePath } from "@/lib/coding-git";
 

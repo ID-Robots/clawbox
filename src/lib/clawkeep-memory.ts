@@ -24,7 +24,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { accessSync, constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
-import path from "node:path";
+import path, { untraced } from "@/lib/runtime-path";
 import { getMemoryShardEnabled, getMemoryShardSetupComplete } from "@/lib/memory-shard";
 import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
 import { readPlanGate } from "@/lib/paid-plan-gate-server";
@@ -328,7 +328,7 @@ async function ensureDataDir(): Promise<void> {
 
 async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
   await ensureDataDir();
-  const tmp = `${file}.tmp.${process.pid}.${++writeSeq}`;
+  const tmp = untraced(`${file}.tmp.${process.pid}.${++writeSeq}`);
   await fs.writeFile(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
   await fs.rename(tmp, file);
 }
@@ -1454,7 +1454,7 @@ function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgress
   // non-terminal stdin reacts to EOF, and the pass must not depend on how a
   // given util-linux release does.
   const child = host
-    ? spawn(host, ptyHostArgs(indexer), {
+    ? spawn(/* turbopackIgnore: true */ host, ptyHostArgs(indexer), {
       env: { ...openclawEnv(), SHELL: "/bin/sh" },
       stdio: ["pipe", "pipe", "pipe"],
     })

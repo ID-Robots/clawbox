@@ -41,8 +41,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build
-        run: bun run build
+      # The build, run over a planted data/ like the one on a box: a coding
+      # run's venv whose bin/python link leaves the filesystem root, a dangling
+      # link, and files that appear and vanish while it runs. It fails if the
+      # build panics on them, if any trace Next copies into .next/standalone
+      # reaches data/, .clawbox/, .git or a parked build, or if Turbopack
+      # traced a path across the whole project (TASK-1102). The fixture is
+      # removed afterwards, so the steps below see the build alone.
+      - name: Build (and prove it stays out of the runtime state)
+        run: bash scripts/check-build-isolation.sh
 
       # A builtin loaded in a shape Turbopack cannot externalise (F-05:
       # `createRequire(import.meta.url)("node:sqlite")`) builds fine and passes

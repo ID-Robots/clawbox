@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
 import { setPreferences } from "@/lib/preference-store";
 import { clearSkillEntry, OpenclawConfigUnreadableError, openclawSkillRoot } from "@/lib/openclaw-config";

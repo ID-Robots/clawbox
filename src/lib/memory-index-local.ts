@@ -34,7 +34,7 @@
 import crypto from "crypto";
 import fs from "fs/promises";
 import { constants as fsConstants } from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { openSqlite } from "@/lib/openclaw-session-store";

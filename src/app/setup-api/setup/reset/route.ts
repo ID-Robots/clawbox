@@ -18,7 +18,7 @@ import { startOllamaService } from "@/lib/local-ai-runtime";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import crypto from "crypto";
 import { startRootStep } from "@/lib/root-step-runner";
 

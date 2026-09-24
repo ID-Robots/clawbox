@@ -58,7 +58,7 @@
 
 import crypto from "crypto";
 import fs from "fs/promises";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import { getOrCreateSecret } from "@/lib/auth";
 import {
@@ -341,7 +341,7 @@ async function readStore(): Promise<StoredSecret[]> {
 async function writeStore(entries: StoredSecret[]): Promise<void> {
   // A unique temp name, like the timezone route's: two saves that overlapped on
   // one fixed `.tmp` would each write half a file for the other to rename.
-  const tmp = `${SECRETS_PATH}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+  const tmp = untraced(`${SECRETS_PATH}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
   try {
     await fs.mkdir(DATA_DIR, { recursive: true });
     await fs.writeFile(tmp, JSON.stringify(entries, null, 2), { mode: 0o600 });

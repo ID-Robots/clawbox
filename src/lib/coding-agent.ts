@@ -68,7 +68,7 @@ import { spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 import fs from "fs";
 import os from "os";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet, setMany as configSetMany } from "@/lib/config-store";
 import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, pruneArtifacts, removeArtifacts, writeRunReport, type PrunedArtifact } from "@/lib/coding-agent-artifacts";
@@ -3911,7 +3911,7 @@ function writeAll(list: CodingRun[]): void {
   // a healthy box is never — see keepSettledRecords.
   if (store.signature !== null && fileSignature() !== store.signature) keepSettledRecords(list);
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = `${RUNS_PATH}.tmp`;
+  const tmp = untraced(`${RUNS_PATH}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(list, null, 2), { mode: 0o600 });
   try {
     fs.chmodSync(tmp, 0o600);

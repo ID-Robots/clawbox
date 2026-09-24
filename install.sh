@@ -2631,7 +2631,10 @@ restore_previous_build() {
 # same measurement is what proves it, and it is why next.config.ts's own
 # `.git/**` key is inoperative for the instrumentation trace. Next exposes no
 # other tracing knob: `outputFileTracingRoot`, `-Excludes` and `-Includes` are
-# the whole surface in its config schema.
+# the whole surface in its config schema. TASK-1102 closed it at the source
+# instead: the traces no longer reach data/, .git or a parked build
+# (src/lib/runtime-path.ts, proven in CI by scripts/check-build-isolation.sh),
+# so the race is rare now. The retry stays for whatever is left.
 #
 # WHY A RETRY IS THE RIGHT ANSWER. The failure is transient by construction: the
 # next trace cannot list a file that is gone. One retry, gated on the ENOENT the
@@ -2639,6 +2642,12 @@ restore_previous_build() {
 # first attempt and is reported as such rather than hidden behind a second
 # five-minute build. `REBUILD_TAKEOVER_TIMEOUT_MS` in src/lib/updater.ts carries
 # the budget for that second build.
+#
+# AND A COPY THAT FAILED IS A FAILED BUILD. For a route, Next catches the copy
+# error, prints `Failed to copy traced files for …` and exits 0, and the build
+# it leaves is short of that file. That shape gets the same one retry, and if
+# it is still there afterwards this returns non-zero whatever the exit status
+# said, so the caller keeps the previous build.
 #
 # The log copy exists ONLY so the gate can read what was printed, and it is
 # best-effort: a `/tmp` that is full or unwritable — a Jetson tmpfs under the
@@ -2676,13 +2685,16 @@ run_next_build() {
     if [ -n "$log" ]; then
       if as_clawbox_login "cd $PROJECT_DIR && $BUN run build" 2>&1 | tee "$log"; then
         rc=0
+      else
+        # The BUILD's status, full stop. `pipefail` makes the pipeline non-zero
+        # for a tee that could not write too, and a log this function could not
+        # keep must never be the reason an update is reported failed.
+        rc=${PIPESTATUS[0]}
+      fi
+      # Done, unless Next reported a traced file it could not copy (below).
+      if [ "$rc" -eq 0 ] && ! awk '/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log"; then
         break
       fi
-      # The BUILD's status, full stop. `pipefail` makes the pipeline non-zero
-      # for a tee that could not write too, and a log this function could not
-      # keep must never be the reason an update is reported failed.
-      rc=${PIPESTATUS[0]}
-      if [ "$rc" -eq 0 ]; then break; fi
     else
       if as_clawbox_login "cd $PROJECT_DIR && $BUN run build"; then
         rc=0
@@ -2692,16 +2704,27 @@ run_next_build() {
       break
     fi
     if [ "$attempt" -eq 2 ]; then break; fi
-    # The FATAL shape only. Next prints the identical `ENOENT … copyfile` node
-    # message inside the `.catch` it wraps the page and app-page copies in,
-    # prefixed with `Failed to copy traced files for` — a warning over a build
-    # that carried on, and no reason to spend a second build. ONE awk rather
-    # than two greps in a pipe: `grep -q` exits on its first match and can
-    # SIGPIPE the producer, which under `pipefail` reads as "no match" and
+    # Both shapes of the race: the fatal one, and the one Next prints from
+    # inside the `.catch` it wraps the page and app-page copies in (`Failed to
+    # copy traced files for …` and then the same node message, over a build
+    # that exits 0 short of that file). A rebuild repairs either one. ONE awk
+    # rather than two greps in a pipe: `grep -q` exits on its first match and
+    # can SIGPIPE the producer, which under `pipefail` reads as "no match" and
     # would silently drop the retry this whole function exists for.
-    awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log" || break
+    awk '/ENOENT.*copyfile/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log" || break
     echo "  A file this build was tracing changed while it ran (ENOENT during the standalone copy) — building once more"
   done
+  # Exit 0 is not the whole verdict. A route whose traced files Next could not
+  # copy is missing them in `.next/standalone`, and Next only warns about it.
+  # Before TASK-1102 that was data/ churning under the build. Traces no longer
+  # reach data/ (src/lib/runtime-path.ts), so a copy that still fails is a real
+  # hole in the build. It is refused, and the caller keeps the previous build.
+  # One awk, for the reason given above.
+  if [ "$rc" -eq 0 ] && [ -n "$log" ] \
+     && awk '/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log"; then
+    echo "  Error: the build exited 0, but Next could not copy every traced file into .next/standalone (see \"Failed to copy traced files\" above)" >&2
+    rc=1
+  fi
   if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
   return "$rc"
 }

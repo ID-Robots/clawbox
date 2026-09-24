@@ -24,10 +24,23 @@ import nextConfig from "../../../next.config";
  * under data/ (2026-09-23): every ROUTE trace had 0 data/ entries, while
  * middleware.js.nft.json and instrumentation.js.nft.json each listed all of
  * them, stream files included — the limit next.config.ts already documents.
- * This pins the half the key does reach; it is no proof that data/ is out of
- * the standalone copy.
+ * This pins the half the key does reach, which is only a second line now:
+ * TASK-1102 keeps data/ out of every trace at the source
+ * (src/lib/runtime-path.ts, guarded by runtime-path-imports.test.ts), and the
+ * proof that it holds is scripts/check-build-isolation.sh, run by CI on a real
+ * build over a planted data/.
  */
 const REPO = process.cwd();
+
+describe("next.config pins the build's root to the checkout", () => {
+  it("sets turbopack.root to this directory, so no lockfile above it can widen the project", () => {
+    // Unset, Next walks UP for lockfiles and roots the build at the topmost
+    // directory with one: a checkout nested inside another was built with the
+    // OUTER one as its root (measured on 16.3.5 while proving TASK-1102), and a
+    // home directory holding a lockfile would do the same to a box.
+    expect(nextConfig.turbopack?.root).toBe(path.resolve(__dirname, "../../.."));
+  });
+});
 
 describe("next.config keeps data/ out of every route's trace", () => {
   const excludes = nextConfig.outputFileTracingExcludes ?? {};

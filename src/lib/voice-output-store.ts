@@ -15,7 +15,7 @@
  */
 import { promises as fs } from "fs";
 import os from "os";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import crypto from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
 import { isLocalVoice, isVoiceLanguage } from "@/lib/voice-catalog";
@@ -106,7 +106,7 @@ export async function writeVoiceState(state: VoiceOutputState): Promise<void> {
  * after the reboot. Both writers here go through this one function.
  */
 async function writeFileAtomically(target: string, contents: string): Promise<void> {
-  const tmp = `${target}.tmp.${crypto.randomBytes(4).toString("hex")}`;
+  const tmp = untraced(`${target}.tmp.${crypto.randomBytes(4).toString("hex")}`);
   try {
     const handle = await fs.open(tmp, "w", 0o600);
     try {
