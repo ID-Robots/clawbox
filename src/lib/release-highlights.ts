@@ -64,23 +64,40 @@ export function capText(text: string, max: number): string {
 }
 
 /**
+ * Every HTML tag removed, repeated until a pass removes nothing — so no
+ * removal can leave a tag spliced together from the text around the one it
+ * took out (`<scr<b>ipt>`). The input is bounded by `MAX_ITEM_SOURCE_CHARS`
+ * and every pass that changes it shortens it, so the loop ends.
+ */
+export function stripTags(text: string): string {
+  let previous: string;
+  do {
+    previous = text;
+    text = text.replace(/<[^>]*>/g, "");
+  } while (text !== previous);
+  return text;
+}
+
+/**
  * Markdown inline syntax reduced to the words it wraps.
  *
  * Not a Markdown renderer: it removes what the release notes actually use —
  * bold, italics, code spans, links, images, HTML tags and a few entities — so
  * the panel never shows a literal `**` or a raw URL, and nothing in the body
  * can become markup. A code span's content is kept VERBATIM: the 4.0 notes
- * name `<boxHandle>.clawbox.tech`, which is not an HTML tag.
+ * name `<boxHandle>.clawbox.tech`, which is not an HTML tag. Entities are
+ * decoded last, after the tags are gone, to the characters they name — the
+ * result is text for a text node (`&lt;ok&gt;` reads `<ok>`), never HTML.
  */
 export function plainInline(markdown: string): string {
   const spans: string[] = [];
   const stashed = markdown
     .replace(/\u0000/g, "")
     .replace(/`([^`]*)`/g, (_match, code: string) => `\u0000${spans.push(code) - 1}\u0000`);
-  return stashed
+  const linked = stashed
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/<[^>]*>/g, "")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+  return stripTags(linked)
     .replace(/(\*\*|__)(.+?)\1/g, "$2")
     .replace(/(^|[\s(])[*_]([^*_\s][^*_]*?)[*_](?=[\s).,;:!?]|$)/g, "$1$2")
     .replace(/&nbsp;/g, " ")

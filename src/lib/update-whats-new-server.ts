@@ -33,7 +33,7 @@
 
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { mkdir, readFile, rename, stat, writeFile } from "fs/promises";
+import { mkdir, open, readFile, rename, writeFile, type FileHandle } from "fs/promises";
 import path from "@/lib/runtime-path";
 import { resolveConfigRoot } from "@/lib/config-store";
 import { isSafeBranch } from "@/lib/update-branch";
@@ -105,13 +105,31 @@ async function gitShow(ref: string, file: string): Promise<string | null> {
   }
 }
 
+/**
+ * Read through ONE open handle — the size is checked on the handle, never on a
+ * separate stat the updater's reset could swap the file under — and never past
+ * the cap, however the file grows while it is read.
+ */
 async function readCheckout(file: string): Promise<string | null> {
   const target = path.join(resolveConfigRoot(), file);
+  let handle: FileHandle | null = null;
   try {
-    if ((await stat(target)).size > MAX_NOTES_BYTES) return null;
-    return await readFile(target, "utf-8");
+    handle = await open(target, "r");
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.size > MAX_NOTES_BYTES) return null;
+    const buffer = Buffer.alloc(MAX_NOTES_BYTES + 1);
+    let got = 0;
+    while (got < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, got, buffer.length - got, got);
+      if (bytesRead === 0) break;
+      got += bytesRead;
+    }
+    if (got > MAX_NOTES_BYTES) return null;
+    return buffer.subarray(0, got).toString("utf-8");
   } catch {
     return null;
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 

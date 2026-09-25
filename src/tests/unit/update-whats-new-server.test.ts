@@ -331,12 +331,16 @@ describe("the real sources", () => {
     expect(DEFAULT_SOURCES.checkoutSynced()).toBe(false);
   });
 
-  it("readCheckout reads a file under the root, and refuses a missing or oversized one", async () => {
+  it("readCheckout reads a file under the root, and refuses a missing, oversized or non-file one", async () => {
     fs.writeFileSync(path.join(root, "RELEASE-NOTES-4.2.0.md"), NOTES_42);
     expect(await DEFAULT_SOURCES.readCheckout("RELEASE-NOTES-4.2.0.md")).toBe(NOTES_42);
     expect(await DEFAULT_SOURCES.readCheckout("RELEASE-NOTES-9.9.9.md")).toBeNull();
     fs.writeFileSync(path.join(root, "huge.md"), "x".repeat(600 * 1024));
     expect(await DEFAULT_SOURCES.readCheckout("huge.md")).toBeNull();
+    fs.writeFileSync(path.join(root, "limit.md"), "x".repeat(512 * 1024));
+    expect(await DEFAULT_SOURCES.readCheckout("limit.md")).toHaveLength(512 * 1024);
+    fs.mkdirSync(path.join(root, "RELEASE-NOTES-5.0.0.md"));
+    expect(await DEFAULT_SOURCES.readCheckout("RELEASE-NOTES-5.0.0.md")).toBeNull();
   });
 
   it("gitShow reads a file at a ref with git, and answers null for what is not there", async () => {

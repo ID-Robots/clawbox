@@ -9,6 +9,7 @@
  *  - the 3.9 shape (`**Title** — body`) splits the same way;
  *  - notes with no Highlights section — the older "What's Changed" PR lists —
  *    give NOTHING, so the panel shows its fallback rather than PR titles;
+ *  - HTML is removed until none is left, so no removal splices a new tag;
  *  - the output is capped, and whatever the input, the parser never throws.
  */
 import { describe, expect, it } from "vitest";
@@ -22,6 +23,7 @@ import {
   parseReleaseHighlights,
   plainInline,
   splitHighlight,
+  stripTags,
 } from "@/lib/release-highlights";
 
 const notes = (version: string) =>
@@ -147,6 +149,13 @@ describe("the helpers", () => {
     expect(capText("short", 10)).toBe("short");
     expect(capText("alpha beta gamma delta", 12)).toBe("alpha beta…");
     expect(capText("abcdefghijklmnop", 8)).toBe("abcdefg…");
+  });
+
+  it("stripTags leaves no tag behind, not even one spliced from the text around a removed one", () => {
+    expect(stripTags("Read <b>this</b> now")).toBe("Read this now");
+    expect(stripTags("<scr<b>ipt>alert(1)</script>")).toBe("ipt>alert(1)");
+    expect(stripTags("<<b>script>alert(1)<</b>/script>")).not.toMatch(/<[a-z/!]/i);
+    expect(plainInline("Hi <scr<i>ipt>alert(1)</scr</i>ipt> there")).not.toMatch(/<\/?script/i);
   });
 
   it("plainInline keeps a lone asterisk or underscore that is not emphasis", () => {
