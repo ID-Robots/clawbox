@@ -434,6 +434,23 @@ describe("profiles that are not stale, or not this script's to judge", () => {
     expect(calls()).toEqual([]);
   });
 
+  it("judges nothing through a substitute when the state database cannot be read", () => {
+    // Which store core inherits from is recorded IN that database, so an
+    // unreadable one leaves the question open — main's own table is not an
+    // answer for another agent, and a paste on its account would be a guess.
+    writeConfig({ ...localProviders({ llamacpp: TOKEN }), agents: { list: [{ id: "pro-agent" }] } });
+    seedAgentStore({ "llamacpp:default": apiKeyProfile("llamacpp", STALE) }, "main");
+    mkdirSync(path.join(home, "state"), { recursive: true });
+    writeFileSync(path.join(home, "state", "openclaw.sqlite"), "not a database");
+
+    const out = run();
+
+    expect(calls()).toEqual([]);
+    expect(out.stderr).toContain("could not read");
+    expect(out.stderr).toContain(path.join("state", "openclaw.sqlite"));
+    expectNoCredentialIn(out);
+  });
+
   it("creates no profile where there is none", () => {
     writeConfig(localProviders({ llamacpp: TOKEN }));
 

@@ -232,7 +232,11 @@ function readSharedProfiles(agentsRoot) {
         db.close();
       }
     } catch {
+      // Which store every agent inherits from is recorded IN this database, so
+      // one that cannot be read leaves that open: main's table below would be
+      // a guess, and a paste on a guess is what the unreadable rule forbids.
       unreadable.add(dbPath);
+      return null;
     }
     if (rows) {
       const byKey = new Map(rows.map((row) => [row.state_key, row.value_json]));
