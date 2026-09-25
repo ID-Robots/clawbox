@@ -4172,6 +4172,32 @@ PY
   fi
 fi
 
+# Reconciliation, second half: the `llamacpp:default` / `ollama:default` AUTH
+# PROFILES vs data/.local-ai-token (TASK-1196). The Python pass above re-points
+# `models.providers.<provider>.apiKey`; setup also stores the same token as the
+# provider's `<provider>:default` profile in core's credential store, and core
+# tries that profile FIRST. Nothing re-pointed it, so an updated box whose store
+# still held an older key opened every local-model turn with a 401 from the
+# proxy and a failover to another profile. scripts/sync-local-ai-auth-profiles.js
+# compares fingerprints read-only and re-saves only a stale profile, through the
+# same `models auth paste-api-key` setup uses (token on stdin, never printed) —
+# so a box already in sync pays one sqlite read and no CLI start. Here rather
+# than inside the Python pass because it needs the config that pass wrote and
+# the store the OpenClaw 2 legacy auth-profile migration above has settled.
+# Never fatal: the script exits 0, and the ceiling covers two pastes with room
+# to spare.
+LOCAL_AI_AUTH_SYNC="$SCRIPT_DIR/sync-local-ai-auth-profiles.js"
+if [ -f "$LOCAL_AI_AUTH_SYNC" ]; then
+  _lai_node="$(clawbox_node_bin || true)"
+  if [ -n "$_lai_node" ]; then
+    CLAWBOX_ROOT="$CLAWBOX_ROOT" CLAWBOX_OPENCLAW_V2="$CLAWBOX_OPENCLAW_V2" \
+      timeout -k 5 180 "$_lai_node" "$LOCAL_AI_AUTH_SYNC" "$(dirname "$OPENCLAW_CONFIG")" "$OPENCLAW_BIN" </dev/null \
+      || echo "  WARN: the local-AI auth profile check did not finish; the gateway starts on the profiles as they are" >&2
+  else
+    echo "  NOTE: no node beside $OPENCLAW_BIN and none on PATH, so the local-AI auth profiles were not checked against data/.local-ai-token" >&2
+  fi
+fi
+
 # One-time config migration for devices updating from OpenClaw <=2026.5.x:
 # the ChatGPT-subscription provider id was renamed `openai-codex` -> `codex`
 # in 2026.6.x, so a device configured on the old version still has
