@@ -444,6 +444,9 @@ describe("the schedule never rebuilds ClawBox's own index", () => {
       expect(run.errorCode).toBe("full_reindex_required");
       expect(run.error).toMatch(/full reindex/i);
       expect(run.error).not.toContain("Check that the embedding model");
+      // What happened to the pass, not the banner's instruction a second time:
+      // the amber banner beside this line already says "Run a full reindex".
+      expect(run.error).not.toMatch(/Run a full reindex/);
     } finally {
       warn.mockRestore();
       vi.doUnmock("@/lib/memory-index-local");

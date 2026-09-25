@@ -1357,9 +1357,13 @@ const INDEX_FAILED_FAILURE = {
  * A scheduled pass stopped short of rebuilding an index (TASK-1197): the
  * vectors on disk answer to another embedder, and throwing them away is the
  * owner's call, not the schedule's. Nothing was deleted.
+ *
+ * Says what happened to the pass and stops there, for the reason
+ * PROVIDER_MISMATCH_FAILURE gives: the amber banner beside it already carries
+ * "Run a full reindex", and the card must not print that instruction twice.
  */
 const FULL_REINDEX_REQUIRED_FAILURE = {
-  error: "The scheduled run left the index as it was: it needs a full reindex, which only you can start. Run a full reindex.",
+  error: "Scheduled run stopped: this index needs a full reindex, which only you can start.",
   errorCode: "full_reindex_required" as const,
 };
 /**
