@@ -327,6 +327,16 @@ describe("the owner's Clear", () => {
     expect(history.readArchivedRun(live[1])!.entry.reason).toBe("cleared");
   });
 
+  it("shows what it freed at once, not after the usage cache expires", async () => {
+    seedLive(0, 2);
+    const before = await lib.runHistorySummary();
+    expect(before.usage!.evidence).toBeGreaterThan(0);
+    expect(lib.clearFinishedRuns(await lib.getHistoryPolicy())).toBe(3);
+    const after = await lib.runHistorySummary();
+    expect(after.usage!.evidence).toBe(0);
+    expect(after.counts.live).toBe(0);
+  });
+
   it("deletes them, older runs included, under the other modes", async () => {
     writeConfig({ coding_agent_history_retention: "everything" });
     const live = seedLive(0, 2);

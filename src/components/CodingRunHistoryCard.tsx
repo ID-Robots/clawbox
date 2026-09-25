@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { formatBytes } from "@/lib/format-bytes";
+import { onCodingAgentChanged } from "@/lib/ui-events";
 import type { HistoryRetentionMode } from "@/lib/coding-run-history";
 import HelpTip from "./HelpTip";
 import StatusMessage from "./StatusMessage";
@@ -128,6 +129,9 @@ export default function CodingRunHistoryCard({
   // Again after every save: the transcript period and the warning both follow
   // the setting the server now holds.
   useEffect(() => { void refresh(); }, [refresh, mode, limit]);
+  // And whenever the coding agent says it changed — the app's Clear history
+  // (on the same page) deletes or archives runs this card counts.
+  useEffect(() => onCodingAgentChanged(() => { void refresh(); }), [refresh]);
 
   const clearArchive = async () => {
     setClearing(true);

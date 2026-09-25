@@ -7,6 +7,7 @@ import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingRunHistoryCard, { olderRunsOverLimit, type RunHistorySummaryWire } from "@/components/CodingRunHistoryCard";
 import CodingRunHistoryPage from "@/components/CodingRunHistoryPage";
+import { CODING_AGENT_CHANGED_EVENT } from "@/lib/ui-events";
 
 const t = (key: string, params?: Record<string, string | number>) => {
   let str = translations.en[key] ?? key;
@@ -121,6 +122,19 @@ describe("CodingRunHistoryCard", () => {
     const alert = screen.getByTestId("coding-agent-history-low-disk");
     expect(alert.getAttribute("role")).toBe("alert");
     expect(alert.textContent).toContain("Less than 2.0 GB is free on this box.");
+  });
+
+  it("re-reads its figures when the coding agent says it changed — the app's Clear history on the same page", async () => {
+    let archived = 0;
+    stubFetch((url) => (url === "/setup-api/coding-agent/history" ? json(summary({ mode: "archive", counts: { live: 30, older: 0, archived } })) : undefined));
+    render(<CodingRunHistoryCard mode="archive" limit={100} limits={[100, 300, 1000]} liveKept={30} saving={false} onSave={vi.fn(async () => ({}))} error={null} />);
+    await waitFor(() => expect(screen.getByTestId("coding-agent-history-usage").textContent).toContain("0 archived"));
+    expect((screen.getByTestId("coding-agent-history-clear-archive") as HTMLButtonElement).disabled).toBe(true);
+    // The owner's Clear history just moved 12 runs into the archive.
+    archived = 12;
+    window.dispatchEvent(new Event(CODING_AGENT_CHANGED_EVENT));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-history-usage").textContent).toContain("12 archived"));
+    expect((screen.getByTestId("coding-agent-history-clear-archive") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("clears the archive on the second tap only, and says how many went", async () => {

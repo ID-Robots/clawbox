@@ -1018,6 +1018,11 @@ export default function CodingAgentApp() {
       const res = await fetch("/setup-api/coding-agent/runs", { method: "DELETE" });
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.clearFailed")));
       setOpenRunId(null);
+      // Said aloud, not just re-read here: the Run history card on this very
+      // page counts the runs this Clear just deleted or archived, and it
+      // re-reads on this event — without it the card kept "0 archived" and a
+      // disabled Clear archive over an archive the Clear had just filled.
+      notifyCodingAgentChanged();
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.clearFailed"));

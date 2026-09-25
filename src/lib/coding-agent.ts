@@ -107,6 +107,7 @@ import {
   historyExportSources,
   historyPolicyFrom,
   historyUsage,
+  invalidateUsage,
   isDiskLow,
   type DiskSpace,
   type HarnessTranscriptState,
@@ -4848,6 +4849,9 @@ export function clearFinishedRuns(policy: HistoryPolicy = store.historyPolicy ??
   list.length = 0;
   list.push(...keep);
   persist(true);
+  // The owner is looking at the figures this changes: a deleted evidence
+  // folder must not be counted for another half-minute out of the cache.
+  invalidateUsage();
   console.error(`[coding-agent] cleared ${removed} finished run(s) at the owner's request${policy.mode === "archive" && !low ? " into the archive" : ""}`);
   return removed;
 }
