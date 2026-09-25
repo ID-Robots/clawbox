@@ -760,7 +760,7 @@ function sizeOf(file: string): number | null {
 
 export function readArchivedRun(runId: string): ArchivedRunDetail | null {
   const dir = archiveDir(runId);
-  if (!dir || !fs.existsSync(dir)) return null;
+  if (!dir || !fs.existsSync(/* turbopackIgnore: true */ dir)) return null;
   const id = path.basename(dir);
   const entry = archiveIndex().find((e) => e.id === id) ?? archiveEntryFromBundle(dir, id);
   const record = readJson(path.join(dir, RUN_FILE));
@@ -813,7 +813,7 @@ export function clearArchive(): number {
 /** The files of one archived run, named `<runId>/…`, for its .zip. Null when it is not archived. */
 export function archivedRunZipSources(runId: string): ZipSource[] | null {
   const dir = archiveDir(runId);
-  if (!dir || !fs.existsSync(dir)) return null;
+  if (!dir || !fs.existsSync(/* turbopackIgnore: true */ dir)) return null;
   const id = path.basename(dir);
   return [...walkFilesSync(dir)].map((f) => ({ name: `${id}/${f.rel}`, file: f.abs, size: f.size, mtimeMs: f.mtimeMs }));
 }
