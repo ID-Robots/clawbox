@@ -2232,8 +2232,13 @@ pause_gateway_if_build_needs_room() {
     return 0
   fi
   echo "  NOTE: pausing clawbox-gateway.service for the build — ${avail} MB available is less than the ${BUILD_GATEWAY_ROOM_MB} MB a build beside the assistant needs on this box. Chat turns in flight, channels and assistant coding turns stop now and come back when the build ends."
-  GATEWAY_PAUSED_FOR_BUILD_AT=$(date +%s 2>/dev/null || echo "")
   pause_engine_unit clawbox-gateway.service
+  # Timed only once it is really down: a stop that failed has already said so
+  # (pause_engine_unit's warning), and the report must not then claim a pause
+  # that never happened.
+  if ! systemctl is-active --quiet clawbox-gateway.service 2>/dev/null; then
+    GATEWAY_PAUSED_FOR_BUILD_AT=$(date +%s 2>/dev/null || echo "")
+  fi
   return 0
 }
 

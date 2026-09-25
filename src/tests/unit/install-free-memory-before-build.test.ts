@@ -567,6 +567,7 @@ describe("free_memory_for_build gives back what it took", () => {
         "    done",
         "    exit 1 ;;",
         '  *" stop "*)',
+        '    [ -n "${STOP_FAILS:-}" ] && exit 1',
         '    printf inactive > "$state"',
         "    exit 0 ;;",
         '  *" start "*)',
@@ -766,7 +767,8 @@ describe("free_memory_for_build gives back what it took", () => {
     availKb = 3_000_000 as number | null,
     activeUnits = "ollama.service clawbox-gateway.service",
     room,
-  }: { ramKb?: number; availKb?: number | null; activeUnits?: string; room?: string } = {}) {
+    stopFails = "",
+  }: { ramKb?: number; availKb?: number | null; activeUnits?: string; room?: string; stopFails?: string } = {}) {
     const log = path.join(tmp, "systemctl.log");
     const state = path.join(tmp, "state");
     fs.writeFileSync(log, "");
@@ -793,6 +795,7 @@ describe("free_memory_for_build gives back what it took", () => {
       EXISTING_UNITS: "ollama.service clawbox-gateway.service",
       ACTIVE_UNITS: activeUnits,
       START_FAILS: "",
+      STOP_FAILS: stopFails,
     };
     if (room === undefined) delete env.CLAWBOX_BUILD_GATEWAY_ROOM_MB;
     else env.CLAWBOX_BUILD_GATEWAY_ROOM_MB = room;
@@ -846,6 +849,14 @@ describe("free_memory_for_build gives back what it took", () => {
     const r = judgeRoom({ availKb: null });
     expect(r.calls).toContain("stop clawbox-gateway.service");
     expect(r.out).toMatch(/— 0 MB available is less than/);
+  });
+
+  it("does not report a pause that never happened when the stop fails", () => {
+    // pause_engine_unit warns and carries on; the gateway is still up, so the
+    // length-of-pause line would be a false account of the build.
+    const r = judgeRoom({ availKb: 3_000_000, stopFails: "1" });
+    expect(r.out).toMatch(/Warning: could not stop clawbox-gateway\.service/);
+    expect(r.out).not.toMatch(/was paused for/);
   });
 
   it("takes an operator's threshold, and falls back from one that is not a number", () => {

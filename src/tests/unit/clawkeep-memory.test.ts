@@ -1117,7 +1117,7 @@ describe("what a scheduled slot runs against a disowned index (TASK-1197)", () =
     payload[0].status.chunks = 512;
     payload[0].status.files = 7;
     const script = process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN!;
-    const body = (await fs.readFile(script, "utf8")).replace(/cat <<'JSON'\n.*\nJSON/s, `cat <<'JSON'\n${JSON.stringify(payload)}\nJSON`);
+    const body = (await fs.readFile(script, "utf8")).replace(/cat <<'JSON'\n[\s\S]*?\nJSON/, `cat <<'JSON'\n${JSON.stringify(payload)}\nJSON`);
     await fs.writeFile(script, body, { mode: 0o755 });
 
     expect(await resolveIndexMode("incremental", "manual")).toBe("full");
