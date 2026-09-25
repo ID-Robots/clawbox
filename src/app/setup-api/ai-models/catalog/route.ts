@@ -13,6 +13,7 @@ import {
   CATALOG_PROVIDERS,
   getProviderCatalog,
   isCatalogProvider,
+  isLocalOnlyProvider,
   isNonChatModelId,
   subscriptionSurfaceProvider,
 } from "@/lib/provider-models";
@@ -1667,6 +1668,23 @@ export async function GET(req: NextRequest) {
   const provider = req.nextUrl.searchParams.get("provider")?.trim().toLowerCase() ?? "";
   if (!provider) {
     return fail("'provider' query parameter is required", 400);
+  }
+  // The box's own llama.cpp / Ollama: a known provider with no remote catalogue,
+  // so a deliberate, successful EMPTY answer rather than "Unknown provider"
+  // (TASK-1196). The chat header asked for it on every open of a local-model
+  // chat and drew a 400 each time; the client no longer asks, and this keeps a
+  // tab still running the previous bundle from doing it either. No `source`,
+  // so nothing reads it as the box's enumeration; no `warming`, so nothing
+  // polls it; and ahead of `bootWarmup()` because it starts no enumeration.
+  if (isLocalOnlyProvider(provider)) {
+    const empty: CatalogResponse = {
+      provider,
+      models: [],
+      defaultModelId: "",
+      allowCustom: false,
+      fetchedAt: Date.now(),
+    };
+    return NextResponse.json(empty, { headers: noStore() });
   }
   if (!isCatalogProvider(provider)) {
     return fail(`Unknown provider: ${provider}. Supported: ${CATALOG_PROVIDERS.join(", ")}`, 400);

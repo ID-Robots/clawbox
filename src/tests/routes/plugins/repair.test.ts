@@ -522,6 +522,59 @@ describe("plugins/repair — a row an older core left (TASK-1088)", () => {
     expect(setInProgress.mock.calls).toEqual([["codex", false]]);
   });
 
+  // TASK-1198. The stamp is what makes the NEXT press a 409, so a press that
+  // leaves one behind locks the Retry for `PLUGIN_REPAIR_IN_PROGRESS_MS`. A
+  // repair that THREW used to do exactly that: every branch ended the stamp
+  // except the one nobody wrote.
+  it("ends the stamp when the repair throws, and answers a failure rather than a 500", async () => {
+    readPluginRepairs.mockResolvedValue({
+      deepseek: { id: "deepseek", stage: "install", reason: "r", atMs: 1, disabled: true, spec: "x" },
+    });
+    installDeepseek.mockRejectedValue(new Error("ENOSPC: no space left on device"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const r = await post({ pluginId: "deepseek" });
+
+    expect(r.status).toBe(502);
+    expect(await r.json()).toEqual({ ok: false, code: "repair_failed" });
+    expect(setInProgress.mock.calls).toEqual([["deepseek", false]]);
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(clearUnlessRefiled).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("ends the stamp when the restart throws after a verified repair", async () => {
+    stubExec(async () => ({ stdout: LOADED }));
+    restartGateway.mockRejectedValue(new Error("Unit is masked"));
+
+    const r = await post({ pluginId: "codex" });
+
+    expect(await r.json()).toMatchObject({ ok: true, restarted: false, markerCleared: false });
+    expect(setInProgress.mock.calls).toEqual([["codex", false]]);
+  });
+
+  it("ends the stamp when the clear itself throws", async () => {
+    stubExec(async () => ({ stdout: LOADED }));
+    clearUnlessRefiled.mockRejectedValue(new Error("EROFS"));
+
+    const r = await post({ pluginId: "codex" });
+
+    expect(await r.json()).toMatchObject({ ok: true, markerCleared: false });
+    expect(setInProgress.mock.calls).toEqual([["codex", false]]);
+  });
+
+  it.each(["cleared", "absent", "refiled"])(
+    "leaves the stamp alone once the row itself is %s — it may be another press's by then",
+    async (outcome) => {
+      stubExec(async () => ({ stdout: LOADED }));
+      clearUnlessRefiled.mockResolvedValue(outcome);
+
+      await post({ pluginId: "codex" });
+
+      expect(setInProgress).not.toHaveBeenCalled();
+    },
+  );
+
   it("refuses the press that lost the claim, even though the row read idle a moment earlier", async () => {
     // Two presses both read the row before either stamped it: the check and
     // the stamp are one step in the store, so exactly one of them starts.

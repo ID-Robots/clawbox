@@ -62,6 +62,12 @@ export async function POST(request: Request) {
     );
   }
 
+  // Read BEFORE the write below replaces it. The wizard's Security step posts
+  // the device name on every save, renamed or not, and so does every Settings
+  // save that touches it — so "a POST arrived" is not "the name changed".
+  const previous = await previousHostname();
+  const changed = previous !== name;
+
   await set("hostname", name);
   await fs.mkdir(path.dirname(HOSTNAME_ENV_PATH), { recursive: true });
   await fs.writeFile(HOSTNAME_ENV_PATH, `HOSTNAME=${name}\n`, { mode: 0o600 });
@@ -90,17 +96,23 @@ export async function POST(request: Request) {
   // restarted for a failed origins write. `null` means nothing is outstanding:
   // both halves worked, or this edition has no gateway to have a leg at all.
   let gatewayGap: "origins" | "restart" | null = null;
+  let gatewayRestarted = false;
   if (!gatewayIsAbsent()) {
+    let originsChanged = false;
     try {
-      await setControlUiAllowedOrigins(name);
+      originsChanged = (await setControlUiAllowedOrigins(name)) === true;
     } catch (err) {
       console.warn("[hostname] Failed to update OpenClaw allowed origins:", err);
       gatewayGap = "origins";
     }
     // Only when there is a new origin list to pick up. Bouncing the gateway
     // onto the same config it already has would cost the owner a restart and
-    // tell them nothing.
-    if (!gatewayGap) {
+    // tell them nothing — and that is EVERY save of an unchanged name
+    // (TASK-1198): the Security step re-posts the name it read, and each of
+    // those used to take the assistant down mid-setup for a restart that loaded
+    // nothing. A list the write DID change is still restarted for, renamed or
+    // not: it is one the running gateway has never seen.
+    if (!gatewayGap && (changed || originsChanged)) {
       try {
         // `awaitReady: false`: the caller's next act on a success is to REBOOT
         // the box (SettingsApp posts /setup-api/system/power, and the wizard
@@ -110,6 +122,7 @@ export async function POST(request: Request) {
         // learn something nothing consumes. A restart that is REFUSED is still
         // reported; only "has it finished coming back" is not asked.
         await restartGateway({ awaitReady: false });
+        gatewayRestarted = true;
       } catch (err) {
         console.warn("[hostname] Failed to restart the OpenClaw gateway:", err);
         gatewayGap = "restart";
@@ -163,5 +176,25 @@ export async function POST(request: Request) {
     success: true,
     hostname: name,
     fqdn: `${name}.local`,
+    // Said, so a caller can tell "saved, nothing to restart" from a rename.
+    changed,
+    gatewayRestarted,
   });
+}
+
+/**
+ * The name the box answered to before this request: the one on record, else
+ * the system's own. Null when neither is a name this route could have set —
+ * an unreadable store, or a system hostname outside the `.local` grammar —
+ * which reads as "changed", the answer that restarts exactly as before.
+ */
+async function previousHostname(): Promise<string | null> {
+  let configured: unknown;
+  try {
+    configured = await get("hostname");
+  } catch {
+    return null;
+  }
+  if (typeof configured === "string" && configured.trim()) return normalize(configured);
+  return normalize(os.hostname());
 }

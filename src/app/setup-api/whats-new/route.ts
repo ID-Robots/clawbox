@@ -1,37 +1,46 @@
 import { NextResponse } from "next/server";
 import { readJsonObject } from "@/lib/bounded-json";
 import { isSameOriginRequest } from "@/lib/same-origin";
-import { WHATS_NEW_RELEASE } from "@/lib/whats-new";
+import { unavailableWhatsNewState, WHATS_NEW_RELEASE } from "@/lib/whats-new";
 import { dismissWhatsNew, readWhatsNewState } from "@/lib/whats-new-server";
 
 export const dynamic = "force-dynamic";
 
-/** `{"release":"4.0"}` is 17 bytes. Anything near this size is not a dismissal. */
+/** `{"release":"4.1"}` is 17 bytes. Anything near this size is not a dismissal. */
 const MAX_BODY_BYTES = 1024;
 
 const NO_STORE = { "Cache-Control": "no-store" };
 
 /**
- * GET: should the desktop show the "What's new in 4.0" card, and what should
+ * GET: should the desktop show the "What's new in 4.1" card, and what should
  * its plan section offer? See `WhatsNewState` in `@/lib/whats-new`.
+ *
+ * NEVER A 500 (TASK-1198). The card is an announcement, and a read it depends
+ * on failing — the plan on record, the dismissal, the edition lock — is an
+ * answer the desktop already knows how to draw: no card. So a failure here is
+ * a hidden card marked `unavailable`, with the reason in the server log rather
+ * than in a response body nothing renders.
  */
 export async function GET() {
   try {
     return NextResponse.json(await readWhatsNewState(), { headers: NO_STORE });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to read the What's new card" },
-      { status: 500, headers: NO_STORE },
+    console.warn(
+      "[whats-new] could not read the card's state; answering hidden:",
+      err instanceof Error ? err.message : String(err),
     );
+    return NextResponse.json(unavailableWhatsNewState(), { headers: NO_STORE });
   }
 }
 
 /**
- * POST `{ release: "4.0" }`: the owner dismissed the card. Recorded in the
+ * POST `{ release: "4.1" }`: the owner dismissed the card. Recorded in the
  * box's config store, so the card stays gone on every browser.
  *
  * `release` must name the card being shown. A tab from another build that
- * dismisses a different card must not dismiss this one.
+ * dismisses a different card must not dismiss this one: a tab still showing
+ * the 4.0 card, left open across the update, is refused rather than allowed to
+ * dismiss 4.1 unseen.
  *
  * Same-origin only, like every other state-changing route a browser reaches.
  * A page on another site must not be able to spend the owner's one look at the

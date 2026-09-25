@@ -511,4 +511,41 @@ describe("after a core update — the rows an older core left", () => {
     expect(marker().codex.repairingSinceMs).toBeUndefined();
     expect(box.execCalls).toEqual([]);
   });
+
+  // TASK-1198. The stamp is what turns the owner's Retry into a 409, and a
+  // stamp nothing ends holds that 409 for 20 minutes. These are the throws
+  // that used to carry a stamp out with them: the rows had been ATTEMPTED, so
+  // the "never attempted" clean-up passed them by, and nothing after it ran.
+  it("stops saying 'Repairing…' on rows it attempted when the quiesce throws on the way out", async () => {
+    writeMarker({ codex: CODEX_ROW, deepseek: DEEPSEEK_ROW });
+    const { retryPluginRepairsAfterCoreUpdate } = await load();
+    const h = hooks();
+    const inner = h.quiesce;
+    h.quiesce = async (operation) => {
+      await inner(operation);
+      throw new Error("could not lift the gateway mask");
+    };
+
+    await expect(retryPluginRepairsAfterCoreUpdate(h)).rejects.toThrow("could not lift the gateway mask");
+    // Both were installed before the throw…
+    expect(box.execCalls).toContainEqual(["deepseek-installer", "--force"]);
+    // …and neither row is left "Repairing…" for the Retry to refuse over. The
+    // after-update retry stays spent: this core does not get to run it twice.
+    for (const row of [marker().codex, marker().deepseek]) {
+      expect(row.repairingSinceMs).toBeUndefined();
+      expect(row.retriedCore).toBe(RELEASE);
+    }
+    const { claimPluginRepair } = await import("@/lib/plugin-repair");
+    expect(await claimPluginRepair("codex")).toBe("claimed");
+  });
+
+  it("stops saying 'Repairing…' on every row when an installer throws mid-loop", async () => {
+    writeMarker({ codex: CODEX_ROW, deepseek: DEEPSEEK_ROW });
+    const { retryPluginRepairsAfterCoreUpdate } = await load();
+    installDeepseek.mockRejectedValue(new Error("ENOSPC: no space left on device"));
+
+    await expect(retryPluginRepairsAfterCoreUpdate(hooks())).rejects.toThrow("ENOSPC");
+    expect(marker().codex.repairingSinceMs).toBeUndefined();
+    expect(marker().deepseek.repairingSinceMs).toBeUndefined();
+  });
 });

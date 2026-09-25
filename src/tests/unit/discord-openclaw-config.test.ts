@@ -696,4 +696,42 @@ describe("config containers that arrive as something other than a plain object",
     const written = writtenJsonConfig() as { gateway?: { port?: number } };
     expect(written.gateway?.port).toBe(18789);
   });
+
+  // TASK-1198: the hostname route restarts the gateway only for a list the
+  // running gateway has not loaded, and this answer is how it knows.
+  const FULL_LIST = [
+    "http://localhost",
+    "http://clawbox-test.local",
+    "http://127.0.0.1",
+    "http://10.42.0.1",
+    "http://10.43.0.1",
+  ];
+
+  it("writes nothing, and answers false, when the list already holds the name", async () => {
+    mockFs.readFile.mockResolvedValue(JSON.stringify({ gateway: { controlUi: { allowedOrigins: FULL_LIST } } }));
+
+    await expect(openclawConfig.setControlUiAllowedOrigins("clawbox-test")).resolves.toBe(false);
+    const writes = mockFs.writeFile.mock.calls as unknown as WriteCall[];
+    expect(writes.some((c) => String(c[0]).endsWith("openclaw.json.tmp"))).toBe(false);
+  });
+
+  it("answers true, and writes, for a list the new name is missing from", async () => {
+    const renamedFrom = FULL_LIST.map((origin) => origin.replace("clawbox-test", "old-name"));
+    mockFs.readFile.mockResolvedValue(JSON.stringify({ gateway: { controlUi: { allowedOrigins: renamedFrom } } }));
+
+    await expect(openclawConfig.setControlUiAllowedOrigins("clawbox-test")).resolves.toBe(true);
+    const written = writtenJsonConfig() as { gateway?: { controlUi?: { allowedOrigins?: string[] } } };
+    // Kept, not replaced: the old name still reaches the chat until the reboot.
+    expect(written.gateway?.controlUi?.allowedOrigins).toEqual([...renamedFrom, "http://clawbox-test.local"]);
+  });
+
+  it("answers true for a list it had to clean, so the gateway loads the clean one", async () => {
+    mockFs.readFile.mockResolvedValue(
+      JSON.stringify({ gateway: { controlUi: { allowedOrigins: [...FULL_LIST, 42] } } }),
+    );
+
+    await expect(openclawConfig.setControlUiAllowedOrigins("clawbox-test")).resolves.toBe(true);
+    const written = writtenJsonConfig() as { gateway?: { controlUi?: { allowedOrigins?: unknown[] } } };
+    expect(written.gateway?.controlUi?.allowedOrigins).toEqual(FULL_LIST);
+  });
 });

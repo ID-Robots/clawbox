@@ -178,6 +178,9 @@ export const SECRET_NAME_RE =
  */
 const OPENCLAW_MENTION_RE = /(?:^|[^\w.-])\.openclaw(?![\w-])([^\s'"`;&|<>()]*)/gi;
 
+/** Does the command name `.openclaw` anywhere? The rule above without the `g` and its `lastIndex`. */
+const OPENCLAW_MENTIONED_RE = new RegExp(OPENCLAW_MENTION_RE.source, "i");
+
 /**
  * The word-shaped pieces of a command line, on the characters a shell ends a
  * word at. Shared so the two passes below cannot disagree about what a token is.
@@ -210,7 +213,10 @@ function shellTokens(command: string): string[] {
  */
 export function openclawDeniedInCommand(command: string): boolean {
   for (const [, tail] of command.matchAll(OPENCLAW_MENTION_RE)) {
-    if (!tail.startsWith("/")) return true;
+    // `~/.openclaw/`, `~/.openclaw//`, `~/.openclaw/.` are the folder itself
+    // too (TASK-1198) — the listable one, which a shell must not stand in or
+    // list — and the rule below reads a bare trailing slash as "nothing named".
+    if (!tail.startsWith("/") || /^[/.]*$/.test(tail)) return true;
     // The literal is the one the regex above already matched; this rebuilds the
     // path that mention names, with no home in front of it — the rule is about
     // the segments after `.openclaw` and nothing before it.
@@ -239,15 +245,25 @@ export function openclawDeniedInCommand(command: string): boolean {
  *     no mention in the command for it to match. Tokens that spell a path
  *     absolutely are left alone — the text rule and the resolving pass in
  *     `commandPathRefusal` already judge those, against the real home.
+ *
+ * "The working directory" is EVERY one the command can stand in, not only the
+ * one the tool was handed (TASK-1198): `cd ~/.openclaw/workspace && cat
+ * ../openclaw.json` moves into the workspace on its first word, and both arms
+ * apply there exactly as they would to a `cwd` naming it (`workingDirsOf`).
  */
 function openclawDeniedCwd(command: string, cwd: string): boolean {
+  const { dirs, unresolved } = workingDirsOf(command, cwd);
+  // Each relative word both ways: split on quotes (the tokens every other pass
+  // reads) AND joined the way the shell joins it — `"."./openclaw.json` is
+  // `../openclaw.json` to the shell and two harmless tokens to the split.
+  const words = [...new Set([...shellTokens(command), ...segmentWords(command).flat()])];
   // BOTH SPELLINGS, for the reason `isAllowedPath` judges both: `~/notes -> ~/
   // .openclaw` is a working directory with no `.openclaw` anywhere in its text,
   // and a shell handed it is standing in the state directory all the same.
-  for (const dir of new Set([cwd, canonicalPath(cwd) ?? cwd])) {
+  for (const dir of dirs) {
     if (!isOpenclawStatePath(dir)) continue;
     if (openclawStateOutsideWorkspace(dir)) return true;
-    for (const raw of shellTokens(command)) {
+    for (const raw of words) {
       if (raw.startsWith("/") || raw.startsWith("~")) continue;
       // `join` normalises, which is what this arm wants: the question is where
       // the token LANDS, and `..` is how it leaves. A token that is not a path
@@ -255,7 +271,159 @@ function openclawDeniedCwd(command: string, cwd: string): boolean {
       if (openclawStateOutsideWorkspace(join(dir, raw))) return true;
     }
   }
-  return false;
+  // A directory change this cannot spell out (`cd "$D"`, `cd $(…)`) in a
+  // command that names `~/.openclaw` at all: where the shell stands is unknown,
+  // and the workspace it names is the likeliest answer. A relative token that
+  // CLIMBS is then refused, because out of a workspace one `..` is the state
+  // directory. One that does not climb (`cat MEMORY.md`) is still allowed.
+  if (!unresolved || !OPENCLAW_MENTIONED_RE.test(command)) return false;
+  return words.some(
+    (raw) => !raw.startsWith("/") && !raw.startsWith("~") && raw.split("/").includes(".."),
+  );
+}
+
+/**
+ * Words after which the next word is a directory the rest of the line runs in.
+ * `cd` and `pushd` for the shell itself; `-C` / `--directory` / `--chdir` for
+ * the tools that take one (`git -C`, `tar -C`, `make -C`, `env -C`).
+ */
+const CHDIR_WORDS = new Set(["cd", "pushd"]);
+const CHDIR_FLAGS = new Set(["-C", "--directory", "--chdir"]);
+const CHDIR_FLAG_ASSIGN_RE = /^--(?:directory|chdir)=(.*)$/;
+
+/** More than this many candidate directories and the command is no ordinary one. */
+const MAX_WORKING_DIRS = 32;
+
+/**
+ * The words of one simple command AS THE SHELL JOINS THEM: quoted pieces and
+ * backslash-escaped characters are part of the word they touch, and only
+ * unquoted whitespace (or a redirection) ends one. `cd "$HOME"/.openclaw/
+ * workspace` is ONE directory, and splitting it on the quote handed the guard
+ * `$HOME` and threw the workspace away (TASK-1198 review). Quote characters
+ * are dropped; `$`, backticks and parentheses are kept, so a substitution still
+ * reaches `spellDirectory` as one.
+ */
+function shellWords(text: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let started = false;
+  let quote: "'" | "\"" | null = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      else if (ch === "\\" && quote === "\"" && i + 1 < text.length) word += text[++i];
+      else word += ch;
+      continue;
+    }
+    if (ch === "'" || ch === "\"") {
+      quote = ch;
+      started = true;
+    } else if (ch === "\\" && i + 1 < text.length) {
+      word += text[++i];
+      started = true;
+    } else if (/[\s<>]/.test(ch)) {
+      if (started) words.push(word);
+      word = "";
+      started = false;
+    } else {
+      word += ch;
+      started = true;
+    }
+  }
+  if (started) words.push(word);
+  return words;
+}
+
+/**
+ * The command's simple commands, each as its shell-joined words. Split on the
+ * control operators first, so a bare `cd` (home) is not read as moving into
+ * whatever word the NEXT command starts with. NOT on `(`, `)` or a backtick,
+ * and the words keep them: `cd $(…)` and `` cd `…` `` must reach
+ * `spellDirectory` as the substitution they are, not as a bare `cd` followed
+ * by whatever the substitution runs. A subshell's own `(cd x` just loses its
+ * parenthesis.
+ */
+function segmentWords(command: string): string[][] {
+  return command.split(/&&|\|\||[;&|\n]/).map((segment) =>
+    shellWords(segment)
+      .map((word) => word.replace(/^[({]+/, "").replace(/\)+$/, ""))
+      .filter(Boolean),
+  );
+}
+
+/**
+ * `~`, `$HOME` and `${HOME}` in front of a word, spelled out against the same
+ * home `resolveUserPath` expands; null for a word naming a directory only the
+ * shell could compute (any other `$`, a command substitution, a glob).
+ */
+function spellDirectory(word: string): string | null {
+  for (const home of ["~", "$HOME", "${HOME}"]) {
+    if (word === home) return HOME;
+    if (word.startsWith(`${home}/`)) return join(HOME, word.slice(home.length + 1));
+  }
+  if (/[$`*?[\]{}]/.test(word)) return null;
+  return word;
+}
+
+/**
+ * Every directory a relative word in this command could be resolved against
+ * (TASK-1198): the working directory it was handed, its canonical form, and
+ * each directory the command itself moves into.
+ *
+ * THE HOLE THIS CLOSES. `cd ~/.openclaw/workspace && cat ../openclaw.json` —
+ * the text rule saw one `.openclaw` mention, the workspace, and allowed it;
+ * `../openclaw.json` is relative and names no `.openclaw` of its own; and the
+ * working-directory arm only ever looked at the directory the TOOL was handed,
+ * never at the one the command `cd`'d into on its first word. So the
+ * credential file two words later was read with nothing on the line refusing
+ * it. `cd ~/.openclaw/ && cat openclaw.json` was the same hole with a trailing
+ * slash, which the text rule reads as the listable folder itself.
+ *
+ * Lexical and deliberately generous: a `cd` anywhere on the line counts,
+ * whatever separator or quoting sits around it, and each one is resolved
+ * against every directory already collected rather than the one the shell
+ * would actually be in — control flow (`||`, a loop, a subshell) is not
+ * modelled, so every place the shell COULD stand is judged. A workspace-only
+ * command gains nothing from that: every directory it collects is a workspace.
+ */
+function workingDirsOf(command: string, cwd: string): { dirs: string[]; unresolved: boolean } {
+  const dirs = new Set<string>([cwd, canonicalPath(cwd) ?? cwd]);
+  let unresolved = false;
+  for (const words of segmentWords(command)) {
+    for (let i = 0; i < words.length; i += 1) {
+      const word = words[i];
+      let target: string | undefined;
+      const assigned = CHDIR_FLAG_ASSIGN_RE.exec(word);
+      if (assigned) {
+        target = assigned[1];
+      } else if (CHDIR_WORDS.has(word) || CHDIR_FLAGS.has(word)) {
+        // `cd -P dir`, `cd -- dir`: the options come first. `cd -` returns to a
+        // directory already collected, so it adds nothing.
+        let j = i + 1;
+        while (CHDIR_WORDS.has(word) && j < words.length && words[j].startsWith("-") && words[j] !== "-") j += 1;
+        target = words[j] ?? (CHDIR_WORDS.has(word) ? "~" : undefined);
+        if (target === "-") continue;
+      }
+      if (target === undefined || target === "") continue;
+      const spelled = spellDirectory(target);
+      if (spelled === null) {
+        unresolved = true;
+        continue;
+      }
+      const next = isAbsolute(spelled) ? [normalize(spelled)] : [...dirs].map((dir) => join(dir, spelled));
+      for (const dir of next) {
+        if (dirs.size >= MAX_WORKING_DIRS) {
+          unresolved = true;
+          break;
+        }
+        dirs.add(dir);
+        const real = canonicalPath(dir);
+        if (real && dirs.size < MAX_WORKING_DIRS) dirs.add(real);
+      }
+    }
+  }
+  return { dirs: [...dirs], unresolved };
 }
 
 /**
@@ -441,7 +609,8 @@ export interface CommandPathRefusal {
  *      credential answer here would send the agent away from a workspace file
  *      it could still open with the harness's own tools;
  *   2. the same rule on the WORKING DIRECTORY, which is half of every relative
- *      path in the command and spells a `.openclaw` the text rule cannot see;
+ *      path in the command and spells a `.openclaw` the text rule cannot see —
+ *      the one the tool was handed and every one the command `cd`s into;
  *   3. tokens that look like paths, resolved and checked against the guard;
  *   4. TASK-605's command rule, with the working directory;
  *   5. the whole command scanned for a credential-store NAME anywhere in it, so
@@ -454,7 +623,9 @@ export interface CommandPathRefusal {
  */
 export function commandPathRefusal(command: string, cwd?: string): CommandPathRefusal | null {
   if (openclawDeniedInCommand(command)) return { kind: "openclaw" };
-  if (cwd && openclawDeniedCwd(command, cwd)) return { kind: "openclaw" };
+  // With or without a cwd: the command's own `cd` is a working directory too,
+  // and `bash` runs in the home folder when it is handed none.
+  if (openclawDeniedCwd(command, cwd ?? HOME)) return { kind: "openclaw" };
   for (const raw of shellTokens(command)) {
     if (!raw.startsWith("/") && !raw.startsWith("~") && !raw.startsWith("./")) continue;
     try {

@@ -232,12 +232,83 @@ describe("plugin-repair — recording a row from the server side", () => {
       .toBe("clawhub:@openclaw/deepseek-provider@2026.8.1");
   });
 
-  it("starts over on a file it cannot parse, exactly as the boot script does", async () => {
+  it("files its row over a file with nothing left to recover, and keeps the damaged one", async () => {
     mkdirSync(path.join(dir, "data"), { recursive: true });
     writeFileSync(path.join(dir, "data", "plugin-repair.json"), "{ not json", "utf-8");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { recordPluginRepair, readPluginRepairs } = await load();
     await recordPluginRepair(strandedRow);
     expect(Object.keys(await readPluginRepairs())).toEqual(["byteplus"]);
+    expect(readFileSync(path.join(dir, "data", "plugin-repair.json.corrupt"), "utf-8")).toBe("{ not json");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("is damaged; recovered 0 row(s)"));
+    warn.mockRestore();
+  });
+
+  // TASK-1198. A torn write — the realistic damage, a file cut off part-way —
+  // used to be read as an EMPTY store, and the row being filed was written
+  // over it alone: every other plugin ClawBox had switched off lost the only
+  // record that it was ClawBox, not the owner, that did it.
+  it("keeps every row before the damage when a write was cut off, and the damaged file beside them", async () => {
+    const whole = JSON.stringify({
+      codex: { id: "codex", stage: "install", reason: "offline", atMs: 1, disabled: true, spec: "@openclaw/codex@2026.8.1" },
+      discord: { id: "@openclaw/discord", stage: "consent", reason: "refused {braces} and \"quotes\"", atMs: 2, disabled: true, spec: "" },
+      deepseek: { id: "deepseek", stage: "install", reason: "offline", atMs: 3, disabled: true, spec: "clawhub:x" },
+    }, null, 2);
+    const torn = whole.slice(0, whole.indexOf("\"deepseek\"") + 30);
+    mkdirSync(path.join(dir, "data"), { recursive: true });
+    writeFileSync(path.join(dir, "data", "plugin-repair.json"), torn, "utf-8");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { recordPluginRepair, readPluginRepairs } = await load();
+
+    await recordPluginRepair(strandedRow);
+
+    const rows = await readPluginRepairs();
+    expect(Object.keys(rows)).toEqual(["codex", "discord", "byteplus"]);
+    expect(rows.codex.spec).toBe("@openclaw/codex@2026.8.1");
+    expect(rows.discord.reason).toBe("refused {braces} and \"quotes\"");
+    expect(readFileSync(path.join(dir, "data", "plugin-repair.json.corrupt"), "utf-8")).toBe(torn);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("recovered 2 row(s)"));
+    warn.mockRestore();
+  });
+
+  it("keeps the other rows when a stamp lands on a damaged file", async () => {
+    const torn = `${JSON.stringify({
+      codex: { id: "codex", stage: "install", reason: "offline", atMs: 1, disabled: true, spec: "s" },
+      deepseek: { id: "deepseek", stage: "install", reason: "offline", atMs: 2, disabled: true, spec: "t" },
+    }).slice(0, -1)},"discord":{"id":"disc`;
+    mkdirSync(path.join(dir, "data"), { recursive: true });
+    writeFileSync(path.join(dir, "data", "plugin-repair.json"), torn, "utf-8");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { claimPluginRepair, readPluginRepairs } = await load();
+
+    expect(await claimPluginRepair("codex")).toBe("claimed");
+
+    const rows = await readPluginRepairs();
+    expect(Object.keys(rows)).toEqual(["codex", "deepseek"]);
+    expect(rows.codex.repairingSinceMs).toEqual(expect.any(Number));
+    warn.mockRestore();
+  });
+
+  it("writes every OTHER row back exactly as it was when it clears one", async () => {
+    // A row this build cannot parse — a stage a newer boot script files — and
+    // a field it does not know are not this clear's to drop.
+    write({
+      codex: { id: "codex", stage: "install", reason: "offline", atMs: 1, disabled: true, spec: "s" },
+      future: { id: "future", stage: "quarantined", reason: "a newer build's row", atMs: 2 },
+      deepseek: { id: "deepseek", stage: "install", reason: "r", atMs: 3, disabled: true, spec: "t", note: "kept" },
+    });
+    const { clearPluginRepair, clearPluginRepairUnlessRefiled } = await load();
+
+    expect(await clearPluginRepair("codex")).toBe(true);
+    expect(JSON.parse(readFileSync(path.join(dir, "data", "plugin-repair.json"), "utf-8"))).toEqual({
+      future: { id: "future", stage: "quarantined", reason: "a newer build's row", atMs: 2 },
+      deepseek: { id: "deepseek", stage: "install", reason: "r", atMs: 3, disabled: true, spec: "t", note: "kept" },
+    });
+
+    expect(await clearPluginRepairUnlessRefiled("deepseek", 3)).toBe("cleared");
+    expect(JSON.parse(readFileSync(path.join(dir, "data", "plugin-repair.json"), "utf-8"))).toEqual({
+      future: { id: "future", stage: "quarantined", reason: "a newer build's row", atMs: 2 },
+    });
   });
 
   it("leaves no temp file behind", async () => {
@@ -290,6 +361,33 @@ describe("plugin-repair — recording a row from the server side", () => {
 
 // TASK-1088: the two fields the after-update retry and the "Repairing…" state
 // add, and the clear that no longer deletes a failure filed while it ran.
+describe("plugin-repair — what a damaged store still holds (TASK-1198)", () => {
+  it.each([
+    ["an empty file", "", {}],
+    ["no object at all", "[{\"id\":\"codex\"}]", {}],
+    ["a cut-off key", "{\"codex\":{\"id\":\"codex\"},\"deep", { codex: { id: "codex" } }],
+    ["a cut-off value", "{\"codex\":{\"id\":\"codex\"},\"deepseek\":{\"id\":\"deeps", { codex: { id: "codex" } }],
+    ["garbage mid-file, which ends the walk", "{\"a\":{\"x\":1},\"b\":nonsense,\"c\":{\"x\":3}}", { a: { x: 1 } }],
+    ["a byte-order mark", "\uFEFF{\"codex\":{\"id\":\"codex\"}", { codex: { id: "codex" } }],
+    ["a value that is not a row", "{\"a\":1,\"b\":{\"x\":2},\"c\":[1]", { b: { x: 2 } }],
+    ["braces and escapes inside strings", "{\"a\":{\"r\":\"} \\\" {\"},\"b\"", { a: { r: "} \" {" } }],
+  ])("recovers the prefix of %s", async (_label, raw, expected) => {
+    const { salvagePluginRepairRows } = await load();
+    expect(salvagePluginRepairRows(raw)).toEqual(expected);
+  });
+
+  it("keeps a `__proto__` key as a row of its own, as JSON.parse and the boot script do", async () => {
+    // An assignment would set the map's PROTOTYPE instead: the key vanishes
+    // from every walk of the rows, and a lookup of another id could read
+    // through to it.
+    const { salvagePluginRepairRows } = await load();
+    const rows = salvagePluginRepairRows("{\"__proto__\":{\"spec\":\"x\"},\"codex\":{\"id\":\"codex\"},\"tor");
+    expect(Object.getPrototypeOf(rows)).toBe(Object.prototype);
+    expect(Object.keys(rows)).toEqual(["__proto__", "codex"]);
+    expect((rows as Record<string, { spec?: unknown }>).deepseek?.spec).toBeUndefined();
+  });
+});
+
 describe("plugin-repair — a repair in flight, and one already spent (TASK-1088)", () => {
   const codex = {
     id: "codex", stage: "install", reason: "offline", atMs: 7, disabled: true, spec: "@openclaw/codex@2026.9.3",

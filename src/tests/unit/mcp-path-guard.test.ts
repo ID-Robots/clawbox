@@ -809,6 +809,77 @@ describe("mcp path guard — the agent's own ~/.openclaw workspace (TASK-1072)",
     expect(preflightRefuses(command, WS)).toBe(false);
   });
 
+  // ── The directory the COMMAND moves into (TASK-1198) ─────────────────────
+  //
+  // The working-directory arm above only ever saw the cwd the TOOL was handed.
+  // A command that `cd`s into the workspace on its first word and climbs out
+  // two words later named no refused path anywhere: the only `.openclaw`
+  // mention was the workspace, which is allowed, and `../openclaw.json` is
+  // relative, with no `.openclaw` of its own for the text rule to match.
+  it.each([
+    "cd ~/.openclaw/workspace && cat ../openclaw.json",
+    "cd ~/.openclaw/workspace; cat ../credentials/anthropic.json",
+    "cd $HOME/.openclaw/workspace && cat ../openclaw.json",
+    `cd "\${HOME}/.openclaw/workspace" && cat ../openclaw.json`,
+    `cd ${WS} && cat ../openclaw.json`,
+    `cd ${WS}/memory && cat ../../openclaw.json`,
+    `cd ${WS} && ls ..`,
+    `cd ${WS} && cd .. && cat openclaw.json`,
+    "(cd ~/.openclaw/workspace; cat ../openclaw.json)",
+    // A shell joins quoted pieces into ONE word; the guard must too, or the
+    // directory it judges is only the first piece (`$HOME`, `~/`).
+    "cd \"$HOME\"/.openclaw/workspace && cat ../openclaw.json",
+    "cd ~/\".openclaw/workspace\" && cat ../openclaw.json",
+    `cd "${WS}/a b/c" && cat ../../../openclaw.json`,
+    `cd ${WS}/a\\ b/c && cat ../../../openclaw.json`,
+    // …and the RELATIVE word it runs is joined the same way: `"."./x` is `../x`.
+    `cd ${WS} && cat "."./openclaw.json`,
+    `cd ${WS} && cat ."./"openclaw.json`,
+    `pushd ${WS} >/dev/null && cat ../.mcp-token`,
+    `cd -P -- ${WS} && tail ../logs/gateway.log`,
+    `tar -C ${WS} -cf - ../credentials`,
+    `git --no-pager -C ${WS} diff --no-index ../openclaw.json MEMORY.md`,
+    `env --chdir=${WS} cat ../openclaw.json`,
+    // `~/.openclaw/` with its trailing slash is the listable folder itself —
+    // the text rule used to read that slash as "a path after it".
+    "cd ~/.openclaw/ && cat openclaw.json",
+    "ls ~/.openclaw/",
+    "ls ~/.openclaw//",
+  ])("refuses `%s`, which steps out of the workspace it moved into", (command) => {
+    expect(commandPathRefusal(command)).toEqual({ kind: "openclaw" });
+    // …whatever cwd the tool itself was handed.
+    expect(preflightRefuses(command, HOME)).toBe(true);
+  });
+
+  it.each([
+    "D=~/.openclaw/workspace; cd \"$D\" && cat ../openclaw.json",
+    "cd $(echo ~/.openclaw/workspace) && cat ../openclaw.json",
+    "cd `echo ~/.openclaw/workspace` && cat ../openclaw.json",
+  ])("refuses `%s`, where the directory it moves into cannot be spelled out", (command) => {
+    // Where the shell stands is unknown, and the workspace the command names is
+    // the likeliest answer — so a relative word that CLIMBS is not run.
+    expect(preflightRefuses(command, HOME)).toBe(true);
+  });
+
+  it.each([
+    `cd ${WS} && cat MEMORY.md`,
+    "cd ~/.openclaw/workspace && cat MEMORY.md && ls memory/",
+    `cd ${WS}/memory && cat ../MEMORY.md`,
+    `cd ${WS}/skills/hello && cat ../../AGENTS.md`,
+    `cd ${WS} && grep -rn beta memory/ ../workspace-main/`,
+    `cd ${WS} && mkdir -p skills/hello && cd skills/hello && cat SKILL.md`,
+    `git -C ${WS} log --oneline -5`,
+    "D=~/.openclaw/workspace; cd \"$D\" && cat MEMORY.md",
+    `cd ${HOME}/projects && cat ../notes.txt`,
+    "cd && ls",
+    "grep -C 3 beta notes.txt",
+  ])("still runs `%s`, which stays in the workspace or never enters ~/.openclaw", (command) => {
+    // The point of the carve-out (TASK-1072): a workspace-only command gains
+    // nothing from the directories the command moves into — every one it
+    // collects is a workspace.
+    expect(preflightRefuses(command, HOME)).toBe(false);
+  });
+
   it("leaves a cwd outside ~/.openclaw judged by the rules that already judged it", () => {
     expect(preflightRefuses("ls", HOME)).toBe(false);
     expect(preflightRefuses("cat notes.txt", `${HOME}/projects`)).toBe(false);

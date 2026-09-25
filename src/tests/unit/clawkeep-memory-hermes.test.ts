@@ -375,6 +375,106 @@ describe("which arm runs the pass", () => {
 });
 
 /**
+ * TASK-1197 on the arm ClawBox indexes itself. `runLocalIndexPass` rebuilds on
+ * its own when the embedder changed, so the schedule is held back twice: by the
+ * plan, on the status it reads, and by the pass, on the store as it is when the
+ * pass opens it — the plan's reading can be minutes old.
+ */
+describe("the schedule never rebuilds ClawBox's own index", () => {
+  async function disownIndex(): Promise<void> {
+    await buildIndex({ notes: NOTES });
+    const { LOCAL_INDEX_PATH } = await import("@/lib/memory-index-local");
+    const { openSqlite } = await import("@/lib/openclaw-session-store");
+    const db = openSqlite(LOCAL_INDEX_PATH, false);
+    db.prepare("UPDATE meta SET value = ? WHERE key = 'identity'").run("another-embedder");
+    db.close();
+  }
+
+  it("declines a slot over an index built for another embedder, and leaves every row where it was", async () => {
+    await disownIndex();
+    const embeds = vi.mocked(fetch);
+    embeds.mockClear();
+    const { startMemoryIndex, getMemoryStatus, invalidateMemoryStatusCache } = await lib();
+
+    const started = await startMemoryIndex("incremental", "schedule");
+    expect(started.accepted).toBe(false);
+    expect(started.declined).toBe("full_reindex_required");
+    // Not one embedding — not even the readiness probe a rebuild starts with.
+    expect(embeds).not.toHaveBeenCalled();
+
+    invalidateMemoryStatusCache();
+    const status = await getMemoryStatus();
+    expect(status.chunks).toBeGreaterThan(0);
+    expect(status.indexIdentity).toBe("mismatched");
+    expect(status.errorCode).toBe("index_identity_mismatched");
+  });
+
+  it("rebuilds the same index when the OWNER asks, which is the recovery the banner names", async () => {
+    await disownIndex();
+    const { startMemoryIndex, getMemoryStatus, invalidateMemoryStatusCache } = await lib();
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    const run = await settledMemoryRun(clawkeepDir);
+    expect(run.status).toBe("succeeded");
+    expect(run.mode).toBe("full");
+    invalidateMemoryStatusCache();
+    expect((await getMemoryStatus()).indexIdentity).toBe("valid");
+  });
+
+  it("hands the pass the schedule's rule, and words the pass that found the store stale itself", async () => {
+    // The race the pass-level check exists for: the plan read a valid index,
+    // the embedder moved before the pass opened the store. The pass throws
+    // before touching a row; the run line sends the owner to the button, not
+    // to a model that is fine.
+    await buildIndex({ notes: NOTES });
+    const local = await import("@/lib/memory-index-local");
+    const runLocalIndexPass = vi.fn(async () => { throw new local.IndexRebuildRequiredError(); });
+    vi.doMock("@/lib/memory-index-local", () => ({ ...local, runLocalIndexPass }));
+    // The real module is already in the graph (buildIndex loaded it); only a
+    // fresh graph resolves the import through the mock.
+    vi.resetModules();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { startMemoryIndex } = await lib();
+      expect((await startMemoryIndex("incremental", "schedule")).accepted).toBe(true);
+      const run = await settledMemoryRun(clawkeepDir);
+      expect(runLocalIndexPass).toHaveBeenCalledWith(
+        "incremental", expect.anything(), expect.any(Function), { mayDiscard: false },
+      );
+      expect(run.status).toBe("failed");
+      expect(run.errorCode).toBe("full_reindex_required");
+      expect(run.error).toMatch(/full reindex/i);
+      expect(run.error).not.toContain("Check that the embedding model");
+      // What happened to the pass, not the banner's instruction a second time:
+      // the amber banner beside this line already says "Run a full reindex".
+      expect(run.error).not.toMatch(/Run a full reindex/);
+    } finally {
+      warn.mockRestore();
+      vi.doUnmock("@/lib/memory-index-local");
+    }
+  });
+
+  it("lets every run the owner starts discard, as it always could", async () => {
+    await buildIndex({ notes: NOTES });
+    const local = await import("@/lib/memory-index-local");
+    const runLocalIndexPass = vi.fn(async () => ({ mode: "full" as const, files: 1, chunks: 1, failures: 0, capped: false }));
+    vi.doMock("@/lib/memory-index-local", () => ({ ...local, runLocalIndexPass }));
+    // The real module is already in the graph (buildIndex loaded it); only a
+    // fresh graph resolves the import through the mock.
+    vi.resetModules();
+    try {
+      const { startMemoryIndex } = await lib();
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      await settledMemoryRun(clawkeepDir);
+      expect(runLocalIndexPass).toHaveBeenCalledWith(
+        "full", expect.anything(), expect.any(Function), { mayDiscard: true },
+      );
+    } finally {
+      vi.doUnmock("@/lib/memory-index-local");
+    }
+  });
+});
+
+/**
  * The bar, at the seam.
  *
  * Progress rides on the run-state FILE, because that file is the only thing

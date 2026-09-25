@@ -12,9 +12,9 @@ import {
 import { LANGUAGES, type Locale } from "@/lib/i18n";
 
 /**
- * TASK-1059: the desktop's "What's new in 4.0" card.
+ * TASK-1059, TASK-1195: the desktop's "What's new in 4.1" card.
  *
- * The card names the 4.0 highlights, links the docs page, and offers the plan
+ * The card names the 4.1 highlights, links the docs page, and offers the plan
  * only for what the box's plan does not cover yet. The Hermes edition is told
  * about switching back to OpenClaw.
  */
@@ -40,8 +40,8 @@ const en = translations.en;
 function stateWith(cta: WhatsNewPlanCta, overrides: Partial<WhatsNewState> = {}): WhatsNewState {
   return {
     show: true,
-    release: "4.0",
-    version: "4.0.0",
+    release: "4.1",
+    version: "4.1.0",
     edition: "openclaw",
     cta,
     freeMonthCode: null,
@@ -59,26 +59,33 @@ beforeEach(() => {
 });
 
 describe("WhatsNewCard", () => {
-  it("names the four 4.0 highlights from the release notes", () => {
+  it("names the four 4.1 highlights from the release notes", () => {
     render(<WhatsNewCard state={MAX} onDismiss={() => {}} />);
-    const card = screen.getByRole("region", { name: en["whatsNew.title"] });
-    expect(within(card).getByText("This box now runs ClawBox 4.0.0.")).toBeInTheDocument();
-    const list = within(card).getByRole("list", { name: en["whatsNew.highlightsLabel"] });
+    const card = screen.getByRole("region", { name: "What's new in 4.1" });
+    expect(within(card).getByText("This box now runs ClawBox 4.1.0.")).toBeInTheDocument();
+    const list = within(card).getByRole("list", { name: "Highlights of ClawBox 4.1" });
     const items = within(list).getAllByRole("listitem");
     // The words, without the icon's ligature name (the glyph is aria-hidden).
     const words = (li: HTMLElement) =>
       Array.from(li.children).filter((el) => el.getAttribute("aria-hidden") !== "true").map((el) => el.textContent).join("");
     expect(items.map(words)).toEqual([
-      en["whatsNew.codingAgentTitle"] + en["whatsNew.codingAgentBody"],
-      en["whatsNew.hostnameTitle"] + en["whatsNew.hostnameBody"],
-      en["whatsNew.phoneChatTitle"] + en["whatsNew.phoneChatBody"],
-      en["whatsNew.modelPillsTitle"] + en["whatsNew.modelPillsBody"],
+      en["whatsNew.phoneFullscreenTitle"] + en["whatsNew.phoneFullscreenBody"],
+      en["whatsNew.chatRestoreTitle"] + en["whatsNew.chatRestoreBody"],
+      en["whatsNew.webappDataTitle"] + en["whatsNew.webappDataBody"],
+      en["whatsNew.autoMergeTitle"] + en["whatsNew.autoMergeBody"],
     ]);
   });
 
+  it("no longer carries the 4.0 card's highlights", () => {
+    for (const key of ["codingAgent", "hostname", "phoneChat", "modelPills"]) {
+      expect(en[`whatsNew.${key}Title`]).toBeUndefined();
+      expect(en[`whatsNew.${key}Body`]).toBeUndefined();
+    }
+  });
+
   it("prints a tag-style version without its v", () => {
-    render(<WhatsNewCard state={{ ...MAX, version: "v4.0.1" }} onDismiss={() => {}} />);
-    expect(screen.getByText("This box now runs ClawBox 4.0.1.")).toBeInTheDocument();
+    render(<WhatsNewCard state={{ ...MAX, version: "v4.1.1" }} onDismiss={() => {}} />);
+    expect(screen.getByText("This box now runs ClawBox 4.1.1.")).toBeInTheDocument();
   });
 
   it("drops the version line rather than print a blank version", () => {
@@ -104,7 +111,7 @@ describe("WhatsNewCard", () => {
 
     const cta = screen.getByRole("link", { name: new RegExp(en["whatsNew.seePlans"]) });
     expect(cta).toHaveAttribute("href", WHATS_NEW_PLANS_URL);
-    expect(cta.getAttribute("href")).toContain("utm_source=box&utm_medium=update_card&utm_campaign=v4");
+    expect(cta.getAttribute("href")).toContain("utm_source=box&utm_medium=update_card&utm_campaign=v4.1#");
     expect(cta).toHaveAttribute("target", "_blank");
   });
 
@@ -170,7 +177,10 @@ describe("WhatsNewCard", () => {
       expect(table["whatsNew.title"]).not.toBe(en["whatsNew.title"]);
       expect(screen.getByText(table["whatsNew.planSwitchToOpenclaw"])).toBeInTheDocument();
       expect(container.textContent).not.toMatch(/whatsNew\./);
-      expect(container.textContent).toContain("4.0.0");
+      expect(container.textContent).toContain("4.1.0");
+      for (const key of ["codingAgentTitle", "hostnameTitle", "phoneChatTitle", "modelPillsTitle"]) {
+        expect(table[`whatsNew.${key}`], `${code} still carries the 4.0 card's ${key}`).toBeUndefined();
+      }
     });
   });
 });
@@ -215,7 +225,7 @@ describe("useWhatsNew", () => {
   it("does not show it when the route says no", async () => {
     fetchMock.mockImplementation(() => jsonResponse({ ...FREE_OPENCLAW, show: false }));
     render(<Harness />);
-    await waitFor(() => expect(screen.getByTestId("release")).toHaveTextContent("4.0"));
+    await waitFor(() => expect(screen.getByTestId("release")).toHaveTextContent("4.1"));
     expect(screen.getByTestId("visible")).toHaveTextContent("false");
   });
 
@@ -241,7 +251,7 @@ describe("useWhatsNew", () => {
     const posts = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === "POST");
     expect(posts).toHaveLength(1);
     expect(posts[0][0]).toBe("/setup-api/whats-new");
-    expect(JSON.parse(String((posts[0][1] as RequestInit).body))).toEqual({ release: "4.0" });
+    expect(JSON.parse(String((posts[0][1] as RequestInit).body))).toEqual({ release: "4.1" });
   });
 
   it("an answer still in flight when the owner dismissed cannot bring the card back", async () => {

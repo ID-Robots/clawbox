@@ -1,7 +1,7 @@
 /**
- * English copy for the desktop's "What's new in 4.0" card (TASK-1059).
+ * English copy for the desktop's "What's new in 4.1" card (TASK-1059, TASK-1195).
  *
- * The highlights are taken from RELEASE-NOTES-4.0.0.md, trimmed to fit a
+ * The highlights are taken from RELEASE-NOTES-4.1.0.md, trimmed to fit a
  * 320 px card. They name only what the release shipped. When the release notes
  * change, change this too.
  *
@@ -11,24 +11,24 @@
  * picks between them. The catalogue never branches on the edition.
  */
 export const whatsNewEn: Record<string, string> = {
-  "whatsNew.title": "What's new in 4.0",
+  "whatsNew.title": "What's new in 4.1",
   "whatsNew.subtitle": "This box now runs ClawBox {version}.",
-  "whatsNew.highlightsLabel": "Highlights of ClawBox 4.0",
+  "whatsNew.highlightsLabel": "Highlights of ClawBox 4.1",
 
-  "whatsNew.codingAgentTitle": "Coding Agent",
-  "whatsNew.codingAgentBody":
-    "Delegate a whole task to a headless Claude Code run. It works in a copy of your project, opens a pull request, and reviews its own diff before it calls itself done.",
-  "whatsNew.hostnameTitle": "A hostname that stays",
-  "whatsNew.hostnameBody":
-    "A provisioned box answers on its own address under clawbox.tech, through a named Cloudflare tunnel, instead of a fresh random URL after every restart.",
-  "whatsNew.phoneChatTitle": "Chat that fits a phone",
-  "whatsNew.phoneChatBody":
-    "A phone opens straight into the chat, with a thumb-sized microphone and the pickers folded behind one control.",
-  "whatsNew.modelPillsTitle": "Change model without restarting anything",
-  "whatsNew.modelPillsBody":
-    "Provider, model and reasoning effort are pills under the message box and apply to the running agent.",
+  "whatsNew.phoneFullscreenTitle": "More of the phone for the chat",
+  "whatsNew.phoneFullscreenBody":
+    "On a phone the chat opens full screen, its header and the message box's options fold away, and the text can be set from 85% to 150%. Both choices are remembered on that phone.",
+  "whatsNew.chatRestoreTitle": "A conversation that cannot reopen says why",
+  "whatsNew.chatRestoreBody":
+    "Reopening a conversation no longer waits without end. When the box cannot bring it back, the chat says why and offers Try again.",
+  "whatsNew.webappDataTitle": "Web apps from before 4.0 find their data",
+  "whatsNew.webappDataBody":
+    "An app you built on an earlier release opens with what it had saved. The box copies that data into the app's own storage and deletes nothing.",
+  "whatsNew.autoMergeTitle": "Coding Agent pull requests merge when green",
+  "whatsNew.autoMergeBody":
+    "With merging switched on, a run hands its pull request to GitHub's auto-merge, so it lands as soon as its required checks pass. A pull request labelled hold, or one into main, is never merged.",
 
-  "whatsNew.readMore": "Read what's new in 4.0",
+  "whatsNew.readMore": "Read what's new in 4.1",
 
   // The plan section: only the lines the box's plan does not cover yet.
   "whatsNew.planTitle": "Unlock with a ClawBox AI plan",
@@ -39,5 +39,5 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.seePlans": "See plans",
 
   "whatsNew.gotIt": "Got it",
-  "whatsNew.dismiss": "Dismiss What's new in 4.0",
+  "whatsNew.dismiss": "Dismiss What's new in 4.1",
 };

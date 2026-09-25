@@ -485,6 +485,21 @@ export function isCatalogProvider(provider: string | null | undefined): provider
   return (CATALOG_PROVIDERS as readonly string[]).includes(provider);
 }
 
+/**
+ * The providers that run ON THIS BOX (llama.cpp, Ollama) — nothing remote to
+ * enumerate, and no curated list either: their model rows come from the box's
+ * own config through /setup-api/chat/model. The catalog route answers them with
+ * a deliberate, successful empty catalogue rather than the "Unknown provider"
+ * 400 every other id gets, and `useProviderCatalog` does not ask at all.
+ */
+export const LOCAL_ONLY_PROVIDERS = ["llamacpp", "ollama"] as const;
+export type LocalOnlyProvider = typeof LOCAL_ONLY_PROVIDERS[number];
+
+export function isLocalOnlyProvider(provider: string | null | undefined): provider is LocalOnlyProvider {
+  if (!provider) return false;
+  return (LOCAL_ONLY_PROVIDERS as readonly string[]).includes(provider);
+}
+
 export const PROVIDER_CATALOGS = Object.freeze({
   clawai: {
     provider: "clawai",

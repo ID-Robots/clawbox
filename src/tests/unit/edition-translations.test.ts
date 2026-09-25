@@ -69,10 +69,10 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // owner who cannot read "Limited until 14:30" cannot tell a waiting run from
   // a broken one.
   { name: "Anthropic accounts card", matches: (k) => k.startsWith("settings.anthropicAccounts.") },
-  // The desktop's "What's new in 4.0" card (TASK-1059): the release's
-  // highlights and the plan it takes to use them. The first thing an updated
-  // box says about itself, so it is not left in English on any locale.
-  { name: "What's new in 4.0 card", matches: (k) => k.startsWith("whatsNew.") },
+  // The desktop's "What's new in 4.1" card (TASK-1059, TASK-1195): the
+  // release's highlights and the plan it takes to use them. The first thing an
+  // updated box says about itself, so it is not left in English on any locale.
+  { name: "What's new in 4.1 card", matches: (k) => k.startsWith("whatsNew.") },
 ];
 
 /**
