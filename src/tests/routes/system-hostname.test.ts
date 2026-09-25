@@ -220,6 +220,92 @@ describe("/setup-api/system/hostname POST", () => {
     expect(restartGatewayMock).toHaveBeenCalledWith({ awaitReady: false });
   });
 
+  // TASK-1198. The Security step posts the device name on every save, renamed
+  // or not, and every one of those used to restart the gateway — taking the
+  // assistant down mid-setup to load a config it already had.
+  describe("restarts the gateway only for a real change", () => {
+    beforeEach(() => {
+      execFileMock.mockReturnValue({ stdout: "" });
+    });
+
+    it("leaves the gateway alone when the name on record is the name posted", async () => {
+      getMock.mockResolvedValue("livingroom");
+      setControlUiAllowedOriginsMock.mockResolvedValue(false);
+      const mod = await import("@/app/setup-api/system/hostname/route");
+
+      const res = await mod.POST(makeRequest({ hostname: "LivingRoom.local" }));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ success: true, changed: false, gatewayRestarted: false });
+      expect(restartGatewayMock).not.toHaveBeenCalled();
+      // The rest of the save is untouched: the name is still applied.
+      expect(setMock).toHaveBeenCalledWith("hostname", "livingroom");
+      expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("set_hostname");
+    });
+
+    it("reads a box with no name on record as the name the system has", async () => {
+      getMock.mockResolvedValue(undefined);
+      setControlUiAllowedOriginsMock.mockResolvedValue(false);
+      const hostname = vi.spyOn(os, "hostname").mockReturnValue("clawbox");
+      try {
+        const mod = await import("@/app/setup-api/system/hostname/route");
+        const body = await (await mod.POST(makeRequest({ hostname: "clawbox" }))).json();
+
+        expect(body).toMatchObject({ changed: false, gatewayRestarted: false });
+        expect(restartGatewayMock).not.toHaveBeenCalled();
+      } finally {
+        hostname.mockRestore();
+      }
+    });
+
+    it("restarts it for a rename", async () => {
+      getMock.mockResolvedValue("livingroom");
+      setControlUiAllowedOriginsMock.mockResolvedValue(true);
+      const mod = await import("@/app/setup-api/system/hostname/route");
+
+      const body = await (await mod.POST(makeRequest({ hostname: "kitchen" }))).json();
+
+      expect(body).toMatchObject({ success: true, changed: true, gatewayRestarted: true });
+      expect(restartGatewayMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("restarts it for a rename even when the origin list already had the name", async () => {
+      // Renamed back to an earlier name: the list keeps old names, so the write
+      // changed nothing — but the name did, and the restart is the old behaviour.
+      getMock.mockResolvedValue("livingroom");
+      setControlUiAllowedOriginsMock.mockResolvedValue(false);
+      const mod = await import("@/app/setup-api/system/hostname/route");
+
+      await mod.POST(makeRequest({ hostname: "kitchen" }));
+
+      expect(restartGatewayMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("restarts it for an origin list the write changed, on an unchanged name", async () => {
+      // A list an earlier save failed to write: the running gateway has never
+      // loaded it, whatever the name says.
+      getMock.mockResolvedValue("livingroom");
+      setControlUiAllowedOriginsMock.mockResolvedValue(true);
+      const mod = await import("@/app/setup-api/system/hostname/route");
+
+      const body = await (await mod.POST(makeRequest({ hostname: "livingroom" }))).json();
+
+      expect(body).toMatchObject({ changed: false, gatewayRestarted: true });
+      expect(restartGatewayMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("restarts it as before when the name on record cannot be read", async () => {
+      getMock.mockRejectedValue(new Error("EIO"));
+      setControlUiAllowedOriginsMock.mockResolvedValue(false);
+      const mod = await import("@/app/setup-api/system/hostname/route");
+
+      const body = await (await mod.POST(makeRequest({ hostname: "livingroom" }))).json();
+
+      expect(body).toMatchObject({ changed: true, gatewayRestarted: true });
+      expect(restartGatewayMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("does not manufacture ~/.openclaw on an edition that has no gateway", async () => {
     // `setControlUiAllowedOrigins` ends in `writeConfig`, which MKDIRs
     // `~/.openclaw` and writes an allowedOrigins block — on the one SKU whose

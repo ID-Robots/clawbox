@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readJsonObject } from "@/lib/bounded-json";
 import { isSameOriginRequest } from "@/lib/same-origin";
-import { WHATS_NEW_RELEASE } from "@/lib/whats-new";
+import { unavailableWhatsNewState, WHATS_NEW_RELEASE } from "@/lib/whats-new";
 import { dismissWhatsNew, readWhatsNewState } from "@/lib/whats-new-server";
 
 export const dynamic = "force-dynamic";
@@ -14,15 +14,22 @@ const NO_STORE = { "Cache-Control": "no-store" };
 /**
  * GET: should the desktop show the "What's new in 4.0" card, and what should
  * its plan section offer? See `WhatsNewState` in `@/lib/whats-new`.
+ *
+ * NEVER A 500 (TASK-1198). The card is an announcement, and a read it depends
+ * on failing — the plan on record, the dismissal, the edition lock — is an
+ * answer the desktop already knows how to draw: no card. So a failure here is
+ * a hidden card marked `unavailable`, with the reason in the server log rather
+ * than in a response body nothing renders.
  */
 export async function GET() {
   try {
     return NextResponse.json(await readWhatsNewState(), { headers: NO_STORE });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to read the What's new card" },
-      { status: 500, headers: NO_STORE },
+    console.warn(
+      "[whats-new] could not read the card's state; answering hidden:",
+      err instanceof Error ? err.message : String(err),
     );
+    return NextResponse.json(unavailableWhatsNewState(), { headers: NO_STORE });
   }
 }
 

@@ -188,6 +188,36 @@ describe("GET /setup-api/whats-new: the plan section", () => {
   });
 });
 
+// TASK-1198. A read the card depends on failing used to answer 500, which the
+// desktop could only treat as "no card, and something is wrong". The route now
+// answers a hidden card instead. The reads that fail PART of the state — the
+// plan, the dismissal — are pinned in src/tests/unit/whats-new-server.test.ts,
+// where they can be made to fail without a real store behind them.
+describe("GET /setup-api/whats-new: when a read fails", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it("answers a hidden card with 200, never a 500, when the state cannot be read at all", async () => {
+    const source = await import("@/lib/edition-source");
+    vi.mocked(source.readEditionSource).mockImplementation(() => {
+      throw new Error("edition lock unreadable");
+    });
+
+    const body = await state();
+
+    expect(body).toMatchObject({ show: false, unavailable: true, release: "4.0" });
+    // …in the shape every build's card reads, so an open tab simply draws nothing.
+    const { isWhatsNewState } = await import("@/lib/whats-new");
+    expect(isWhatsNewState(body)).toBe(true);
+    expect(body).not.toHaveProperty("error");
+  });
+});
+
 describe("POST /setup-api/whats-new: dismissal", () => {
   it("records the dismissal in the box's config store, for every browser", async () => {
     writeConfig({ keep: "me" });

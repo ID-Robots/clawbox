@@ -51,8 +51,9 @@ function fsError(code: string): NodeJS.ErrnoException {
 
 type Lib = typeof import("@/lib/openclaw-config");
 
-// name, writer — one row per read-modify-write the finding names.
-const WRITERS: ReadonlyArray<[string, (lib: Lib) => Promise<void>]> = [
+// name, writer — one row per read-modify-write the finding names. `unknown`:
+// the origins writer answers whether its list changed (TASK-1198).
+const WRITERS: ReadonlyArray<[string, (lib: Lib) => Promise<unknown>]> = [
   ["setTelegramToken", (lib) => lib.setTelegramToken(TOKEN)],
   ["setDiscordToken", (lib) => lib.setDiscordToken(TOKEN)],
   ["setTelegramProgressStreaming", (lib) => lib.setTelegramProgressStreaming(false)],

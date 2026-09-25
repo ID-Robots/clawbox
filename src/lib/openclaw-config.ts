@@ -2224,7 +2224,14 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
  * mDNS hostname. Always preserves the standard local origins so the device
  * remains reachable via IP and the AP captive portal even after a rename.
  */
-export async function setControlUiAllowedOrigins(hostname: string): Promise<void> {
+/**
+ * Make sure the gateway's control UI accepts `http://<hostname>.local` (and the
+ * box's fixed local origins). Answers whether the list CHANGED — and writes
+ * nothing when it did not (TASK-1198): the hostname route restarts the gateway
+ * only for a list the running gateway has not already loaded, and an unchanged
+ * config file is the proof that it has nothing new to load.
+ */
+export async function setControlUiAllowedOrigins(hostname: string): Promise<boolean> {
   const config = await readConfigForWrite();
   const gateway = ensurePlainObject(asBag(config), "gateway");
   const controlUi = ensurePlainObject(gateway, "controlUi");
@@ -2239,8 +2246,21 @@ export async function setControlUiAllowedOrigins(hostname: string): Promise<void
     "http://10.42.0.1",
     "http://10.43.0.1", // alt subnet when home network collides with 10.42.0.0/24
   ]);
-  controlUi.allowedOrigins = Array.from(origins);
+  const next = Array.from(origins);
+  // Compared against the RAW value, not the string-filtered one, so a list the
+  // filter would clean (a non-string entry) still counts as a change and is
+  // written back clean.
+  const raw = controlUi.allowedOrigins;
+  if (
+    Array.isArray(raw)
+    && raw.length === next.length
+    && raw.every((value, index) => value === next[index])
+  ) {
+    return false;
+  }
+  controlUi.allowedOrigins = next;
   await writeConfig(config);
+  return true;
 }
 
 /** OpenClaw's id for the Telegram channel — the config key's, and the plugin's. */
