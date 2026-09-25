@@ -549,3 +549,68 @@ describe("after a core update — the rows an older core left", () => {
     expect(marker().deepseek.repairingSinceMs).toBeUndefined();
   });
 });
+
+// TASK-1206. The update's final step is `gateway_verify`: the health check, then
+// this retry. On a 2026.9.4 box ClawHub has no build of the DeepSeek provider,
+// and the restart this update has just done ran the gateway pre-start, which
+// asked and recorded that answer. Retrying it here asked again — and a retry
+// is not an install alone: it stops the gateway, installs, restarts it and
+// waits for ready, a minute and more on the update's last step for an answer
+// already on disk.
+describe("after a core update — a DeepSeek build the registry does not have for this core (TASK-1206)", () => {
+  function writeUnavailable(core = RELEASE, atMs = Date.now()) {
+    mkdirSync(path.join(dir, "data"), { recursive: true });
+    writeFileSync(path.join(dir, "data", "plugin-install-unavailable.json"), JSON.stringify({
+      deepseek: {
+        core,
+        atMs,
+        specs: [`clawhub:@openclaw/deepseek-provider@${core}`, "clawhub:@openclaw/deepseek-provider"],
+        cause: `openclaw plugins install exited 1: Version not found on ClawHub: @openclaw/deepseek-provider@${core}.`,
+      },
+    }));
+  }
+
+  it("leaves the final health step to pass without it: no stop, no install, no restart", async () => {
+    writeMarker({ deepseek: DEEPSEEK_ROW });
+    writeUnavailable();
+    const { retryPluginRepairsAfterCoreUpdate } = await load();
+    const h = hooks();
+
+    const result = await retryPluginRepairsAfterCoreUpdate(h);
+
+    expect(result).toEqual({ release: RELEASE, repaired: [], failed: [] });
+    expect(box.events).toEqual([]);
+    expect(h.restartAndVerify).not.toHaveBeenCalled();
+    expect(box.execCalls).toEqual([]);
+    expect(installDeepseek).not.toHaveBeenCalled();
+    expect(box.gatewayUp).toBe(true);
+    // Not claimed: no `retriedCore` spent on a retry that did not run, and no
+    // "Repairing…" on the row.
+    expect(marker().deepseek).toEqual(DEEPSEEK_ROW);
+    expect(h.log).toHaveBeenCalledWith(expect.stringContaining("not retrying the deepseek plugin"));
+  });
+
+  it("still retries ChatGPT beside it", async () => {
+    writeMarker({ codex: CODEX_ROW, deepseek: DEEPSEEK_ROW });
+    writeUnavailable();
+    const { retryPluginRepairsAfterCoreUpdate } = await load();
+
+    const result = await retryPluginRepairsAfterCoreUpdate(hooks());
+
+    expect(result).toEqual({ release: RELEASE, repaired: ["codex"], failed: [] });
+    expect(installDeepseek).not.toHaveBeenCalled();
+    expect(box.entries.deepseek).toBe(false);
+    expect(marker().deepseek).toEqual(DEEPSEEK_ROW);
+  });
+
+  it("retries it exactly as before when the answer on record is another core's", async () => {
+    writeMarker({ deepseek: DEEPSEEK_ROW });
+    writeUnavailable("2026.9.3");
+    const { retryPluginRepairsAfterCoreUpdate } = await load();
+
+    const result = await retryPluginRepairsAfterCoreUpdate(hooks());
+
+    expect(result).toEqual({ release: RELEASE, repaired: ["deepseek"], failed: [] });
+    expect(box.execCalls).toContainEqual(["deepseek-installer", "--force"]);
+  });
+});

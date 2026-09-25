@@ -28,10 +28,13 @@ import {
 import { getModelOptions, probeStillOwed } from "@/lib/hermes-model-options";
 import { runHermesCli } from "@/lib/hermes-cli";
 import {
+  canonicalPluginId,
   pluginHasSettingsRow,
   pluginRepairInProgress,
   readPluginRepairs,
   repairFor,
+  ROW_PLUGIN_IDS,
+  type PluginRepairs,
   type PluginRepairStage,
 } from "@/lib/plugin-repair";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
@@ -548,6 +551,37 @@ export function providerRowRunnable(
 }
 
 /**
+ * The repair rows Settings should show, given the rows it is about to paint.
+ *
+ * ONE ROW DROPS, and only while ClawBox AI is connected (TASK-1206): the
+ * DeepSeek provider plugin's. ClawBox AI's turns do not go through that plugin
+ * — the configure route writes `models.providers.deepseek` as a complete
+ * `api: "openai-completions"` definition, and the core's own OpenAI-compatible
+ * transport carries it whether the plugin is installed or switched off. On a
+ * 4.1.0 box the plugin had no build for its core on ClawHub, the boot script
+ * switched it off, and the ClawBox AI row read "Needs repair" over a chat that
+ * was answering — a false failure, with a Retry that could only fail the same
+ * way. The device keeps trying on its own: every OpenClaw update, and the boot
+ * script once the "no build" answer it recorded has aged out.
+ *
+ * `connected` is the usable answer and nothing weaker: a credential this box
+ * holds and the portal has not refused. `needs-reauth` and `disconnected` keep
+ * the badge, because then the owner is looking at a broken ClawBox AI and every
+ * reason on screen is worth having.
+ */
+function withoutRepairsClawaiRunsWithout(
+  repairs: PluginRepairs,
+  rows: readonly { id: string; state: ProviderConnectionState }[],
+): PluginRepairs {
+  const clawaiUsable = rows.some((row) => row.id === CLAWAI_PROVIDER && row.state === "connected");
+  const transportPlugin = ROW_PLUGIN_IDS[CLAWAI_PROVIDER];
+  if (!clawaiUsable || !transportPlugin) return repairs;
+  return Object.fromEntries(
+    Object.entries(repairs).filter(([, row]) => canonicalPluginId(row.id) !== transportPlugin),
+  );
+}
+
+/**
  * The aggregate, for whichever harness this box runs.
  *
  * Never throws: a box that cannot answer reports `degraded` with no rows,
@@ -568,7 +602,7 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
     // one fact about the box, and stamping it here keeps the two harness
     // readers from having to know about it at all. On Hermes the file never
     // exists and this is an empty map, so the badge is absent by construction.
-    const repairs = await readPluginRepairs();
+    const repairs = withoutRepairsClawaiRunsWithout(await readPluginRepairs(), summary.providers);
     // TASK-668, the owner's ruling: a provider this box can run NO model from
     // is not offered at all. The verdict is read from what the enumeration the
     // catalog route already performs recorded — no probe, no fork — and a

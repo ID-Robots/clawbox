@@ -225,6 +225,13 @@ export interface RunPluginRepairOptions {
    * never leave an unresolved plugin enabled.
    */
   switchOffWhenUnverified?: boolean;
+  /**
+   * Ask the registry again even when this core's DeepSeek build is on record
+   * as not existing (TASK-1206). The owner's Retry does — a person pressed a
+   * button to ask exactly that — while the updater believes the record, which
+   * is why it does not reach this function for such a row at all.
+   */
+  recheckUnavailable?: boolean;
 }
 
 /**
@@ -291,7 +298,10 @@ export async function runPluginRepair(
       // to the core that is on the box NOW, so it needs no rebase. `--force`,
       // because after a core bump the old payload is usually still on disk and
       // the CLI refuses to install over it otherwise.
-      const result = await installDeepseekProviderPlugin({ force: true });
+      const result = await installDeepseekProviderPlugin({
+        force: true,
+        ...(options.recheckUnavailable ? { recheckUnavailable: true } : {}),
+      });
       if (!result.installed) {
         return fail("repair_failed", "install", causeLine(
           "openclaw plugins install failed",

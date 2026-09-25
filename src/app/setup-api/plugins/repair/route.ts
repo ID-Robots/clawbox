@@ -180,8 +180,13 @@ export async function POST(req: Request) {
  */
 async function repairClaimedRow(entry: PluginRepairEntry, settle: () => void): Promise<NextResponse> {
   // The core that is on the box NOW, so a row written against an older one
-  // installs the package built for this one (`rebaseCorePinnedSpec`).
-  const verdict = await runPluginRepair(entry, { release: await currentCoreRelease() });
+  // installs the package built for this one (`rebaseCorePinnedSpec`). A press
+  // is a person asking the registry again, so a "no build for this core" on
+  // record is re-checked rather than believed (TASK-1206).
+  const verdict = await runPluginRepair(entry, {
+    release: await currentCoreRelease(),
+    recheckUnavailable: true,
+  });
   if (!verdict.ok) {
     // Deliberately not returned as the reason: the CLI's stderr on this path
     // carries registry URLs and package specs, and the owner's next move is the

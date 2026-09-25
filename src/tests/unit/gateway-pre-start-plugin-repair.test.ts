@@ -359,6 +359,12 @@ d("gateway-pre-start.sh — a plugin a PREVIOUS boot switched off", () => {
   /** The 2026-09-06 discord row off the OpenClaw box, verbatim. */
   const seedStaleConsentRow = () => seedRow("discord");
 
+  /** The DeepSeek plugin's payload, where the ClawHub install puts it: `$OPENCLAW_HOME_DIR`, the config's own directory. */
+  const seedDeepseekPayload = () => {
+    mkdirSync(path.join(path.dirname(configPath), "extensions", "deepseek"), { recursive: true });
+    writeFileSync(path.join(path.dirname(configPath), "extensions", "deepseek", "openclaw.plugin.json"), "{}");
+  };
+
   /** Both halves of a real box: the verb writes the config, the report reads it. */
   const stubRealCli = () => stubOpenclaw(`${INSPECT_STUB}${CONFIG_SET_STUB}`);
 
@@ -453,6 +459,9 @@ ${CONFIG_SET_STUB}`);
       stage: "install",
       spec: "clawhub:@openclaw/deepseek-provider@2026.8.1",
     });
+    // A payload that IS on disk and will not load — the one DeepSeek row this
+    // re-attempt still visits (TASK-1206; the next test is the other kind).
+    seedDeepseekPayload();
     stubOpenclaw(`
 if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
   echo "Error: cannot find module '@openclaw/deepseek-provider/dist/index.js'" >&2
@@ -472,6 +481,34 @@ ${CONFIG_SET_STUB}`);
     expect(row.reason).toContain("could not be made loadable");
     expect(row.reason).not.toContain("The plugin is installed but");
     expect(row.reason).toContain("cannot find module");
+  });
+
+  it("leaves a DeepSeek row with no payload on disk to the install block — no switch-on-and-off (TASK-1206)", () => {
+    // `plugins enable` writes `enabled: true` and only then finds there is no
+    // plugin to load; on the 4.1.0 box every start switched ClawBox AI's plugin
+    // on, watched it fail, and switched it off again. The deepseek install
+    // block owns a missing payload — and knows when the registry has none.
+    seedRow("deepseek", {
+      stage: "install",
+      spec: "clawhub:@openclaw/deepseek-provider@2026.9.4",
+    });
+    const before = readFileSync(markerPath, "utf-8");
+    stubOpenclaw(`
+if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
+  "$0" config set "plugins.entries[\\"$3\\"].enabled" true >/dev/null 2>&1 || true
+  echo "Plugin not found: $3. Run 'openclaw plugins list' to see installed plugins." >&2
+  exit 1
+fi
+${CONFIG_SET_STUB}`);
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.9.4" });
+    expect(r.status).toBe(0);
+    const callsLog = path.join(dir, "calls.log");
+    const calls = existsSync(callsLog) ? readFileSync(callsLog, "utf-8") : "";
+    expect(calls).not.toContain("plugins enable deepseek");
+    expect(calls).not.toContain("config set");
+    expect(config().plugins?.entries?.deepseek?.enabled).toBe(false);
+    expect(readFileSync(markerPath, "utf-8")).toBe(before);
+    expect(r.stdout).not.toContain("Re-attempting the deepseek plugin");
   });
 
   it("keeps an install row's wording an install row's, when the consent cannot be confirmed", () => {

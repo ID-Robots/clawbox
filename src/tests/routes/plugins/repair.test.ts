@@ -171,6 +171,18 @@ describe("plugins/repair — the Retry", () => {
     expect(execCalls.some((args) => args[1] === "install")).toBe(false);
   });
 
+  it("asks the registry again on a press, even when this core's build is on record as missing (TASK-1206)", async () => {
+    // Every other path believes the recorded "no build for this core"; a person
+    // pressing Retry is asking exactly that question again.
+    readPluginRepairs.mockResolvedValue({
+      deepseek: { id: "deepseek", stage: "install", reason: "r", atMs: 1, disabled: true, spec: "x" },
+    });
+    installDeepseek.mockResolvedValue({ installed: "clawhub:@openclaw/deepseek-provider@2026.8.1", failures: [], unavailable: false });
+    stubExec(async () => ({ stdout: JSON.stringify({ plugin: { status: "loaded", activated: true } }) }));
+    expect((await post({ pluginId: "deepseek" })).status).toBe(200);
+    expect(installDeepseek).toHaveBeenCalledWith({ force: true, recheckUnavailable: true });
+  });
+
   it("refuses rather than guessing a spec for a marker written before the field existed", async () => {
     readPluginRepairs.mockResolvedValue(marker({ spec: "" }));
     stubExec(async () => ({ stdout: LOADED }));
