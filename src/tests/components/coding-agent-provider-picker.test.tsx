@@ -40,7 +40,7 @@ interface AnthropicAnswer {
   models: string[];
   defaultModel: string;
 }
-const NOTHING: AnthropicAnswer = { connected: false, hasKey: false, hasLogin: false, source: null, models: ["claude-opus-5", "claude-sonnet-5"], defaultModel: "claude-opus-5" };
+const NOTHING: AnthropicAnswer = { connected: false, hasKey: false, hasLogin: false, source: null, models: ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"], defaultModel: "claude-opus-5-5" };
 const VIA_KEY: AnthropicAnswer = { ...NOTHING, connected: true, hasKey: true, source: "key" };
 const VIA_LOGIN: AnthropicAnswer = { ...NOTHING, connected: true, hasLogin: true, source: "login" };
 

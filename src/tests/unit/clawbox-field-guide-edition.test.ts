@@ -38,9 +38,19 @@ vi.mock("../../../mcp/lib/api", () => ({
 }));
 
 import type { McpContext } from "../../../mcp/lib/context";
+import { saveEnv } from "../helpers/env";
 import { captureRegistrar } from "../helpers/mcp-registrar";
-import { BROWSER_GUIDE, WEBAPP_STORAGE_GUIDE, fieldGuideForEdition, registerOrientationTools } from "../../../mcp/tools/orientation";
+import {
+  BROWSER_GUIDE,
+  FIELD_GUIDE_MAX_CHARS,
+  WEBAPP_STORAGE_GUIDE,
+  fieldGuideForEdition,
+  registerOrientationTools,
+} from "../../../mcp/tools/orientation";
 import { registerSystemTools } from "../../../mcp/tools/system";
+import { registerHermesPluginTools } from "../../../mcp/tools/hermes-plugins";
+import { registerLocalAiTools } from "../../../mcp/tools/local-ai";
+import { registerMemoryTools } from "../../../mcp/tools/memory";
 import { registerDesktopTools } from "../../../mcp/tools/desktop";
 import { registerSkillTools } from "../../../mcp/tools/skills";
 import { registerAiTools } from "../../../mcp/tools/ai";
@@ -87,10 +97,59 @@ function toolNames(edition: Ed): Set<string> {
   return new Set(h.names());
 }
 
+/**
+ * The server with the most to say: every family registered, the coding family
+ * switched on too, so `clawbox_context` serves the longest tool notes any box
+ * can be handed.
+ */
+function widestServer(edition: Ed, install: Install) {
+  const h = captureRegistrar(edition);
+  const c = ctx(edition, install);
+  const restore = saveEnv("CLAWBOX_MCP_CODING_TOOLS");
+  process.env.CLAWBOX_MCP_CODING_TOOLS = "1";
+  try {
+    registerOrientationTools(h.reg, c);
+    registerSkillTools(h.reg);
+    registerHermesPluginTools(h.reg);
+    registerMemoryTools(h.reg);
+    registerAiTools(h.reg, c);
+    registerLocalAiTools(h.reg);
+    registerSystemTools(h.reg, c);
+    registerDesktopTools(h.reg, c);
+    registerBrowserTools(h.reg);
+    registerEmailTools(h.reg, c);
+    registerCodingTools(h.reg);
+    registerCodingAgentTools(h.reg, c);
+    registerCodingTeamTools(h.reg, c);
+  } finally {
+    restore();
+  }
+  return h;
+}
+
 const onlyOn = (a: Ed, b: Ed): string[] => {
   const other = toolNames(b);
   return [...toolNames(a)].filter((n) => !other.has(n)).sort();
 };
+
+/**
+ * The coding tools TASK-1079 put behind `CLAWBOX_MCP_CODING_TOOLS=1`.
+ *
+ * Computed from the real registrar in both postures rather than listed, for the
+ * same reason `onlyOn` is: a tool that changes side takes the assertion with
+ * it. The guide is filtered by EDITION only — there is no fence for an env var
+ * — so whatever this returns is text no box may be handed by default.
+ */
+function envGatedCodingTools(): string[] {
+  const withoutOverride = toolNames("openclaw");
+  const restore = saveEnv("CLAWBOX_MCP_CODING_TOOLS");
+  process.env.CLAWBOX_MCP_CODING_TOOLS = "1";
+  try {
+    return [...toolNames("openclaw")].filter((n) => !withoutOverride.has(n)).sort();
+  } finally {
+    restore();
+  }
+}
 
 /** `name(` or `name)` or bare — anywhere it is offered as a symbol to call. */
 const offers = (text: string, tool: string) =>
@@ -142,16 +201,23 @@ describe("the field guide is fenced, and the fences are well formed", () => {
     }
   });
 
-  it("stays inside the tool's own output cap on every box", () => {
-    // The real budget: clawbox_context declares maxChars 24_000 and joins this
-    // text with WEBAPP_STORAGE_GUIDE and BROWSER_GUIDE, each after a
-    // "\n\n---\n\n" separator. capText truncates the TAIL, so an overrun eats
-    // the browser guide first — the part that says whose screen is driven.
-    const separator = "\n\n---\n\n".length;
+  it("stays inside the tool's own output cap on every box", async () => {
+    // The real budget: what the handler returns BEFORE the cap — this text, the
+    // tool notes (TASK-1080) for every tool the widest server registers, then
+    // WEBAPP_STORAGE_GUIDE and BROWSER_GUIDE, each after a "\n\n---\n\n"
+    // separator. capText truncates the TAIL, so an overrun eats the browser
+    // guide first — the part that says whose screen is driven.
     for (const [edition, install] of BOXES) {
-      expect(
-        served(edition, install).length + separator + WEBAPP_STORAGE_GUIDE.length + separator + BROWSER_GUIDE.length,
-      ).toBeLessThan(24_000);
+      const tool = widestServer(edition, install).get("clawbox_context");
+      expect(tool.opts.maxChars).toBe(FIELD_GUIDE_MAX_CHARS);
+      const result = await tool.handler({});
+      const whole = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+      // Guards the guard: every part is in the measured text, the notes too.
+      expect(whole.startsWith(served(edition, install))).toBe(true);
+      expect(whole).toContain("## Tool notes");
+      expect(whole).toContain(WEBAPP_STORAGE_GUIDE);
+      expect(whole.endsWith(BROWSER_GUIDE)).toBe(true);
+      expect(whole.length, `${edition} (install ${install})`).toBeLessThan(FIELD_GUIDE_MAX_CHARS);
     }
   });
 });
@@ -216,9 +282,13 @@ describe("the Hermes guide describes a Hermes box", () => {
   it("offers no tool the MCP server does not register on Hermes", () => {
     const openclawOnly = onlyOn("openclaw", "hermes");
     // Guards the guard: if this ever empties, the assertion below is vacuous.
-    expect(openclawOnly).toContain("bash");
-    expect(openclawOnly).toContain("write_file");
-    expect(openclawOnly).toContain("web_search");
+    // These three are the guarded read-only trio, which is what stayed
+    // OpenClaw-only after TASK-1079 moved the shell, file and web tools behind
+    // CLAWBOX_MCP_CODING_TOOLS (where they belong to no edition by default, so
+    // they are not "OpenClaw only" and cannot serve as this guard).
+    expect(openclawOnly).toContain("list_directory");
+    expect(openclawOnly).toContain("glob");
+    expect(openclawOnly).toContain("app_search");
 
     for (const install of ["hermes", "dual"] as const) {
       const leaked = openclawOnly.filter((tool) => offers(served("hermes", install), tool));
@@ -286,11 +356,25 @@ describe("the OpenClaw guide keeps everything it had", () => {
     expect(guide).toContain("App Store");
   });
 
-  it("still offers the whole coding family", () => {
+  it("still offers the guarded read-only trio", () => {
     const guide = served("openclaw");
-    for (const tool of ["bash", "read_file", "write_file", "edit_file", "glob", "grep", "web_search", "web_fetch", "notebook_edit"]) {
-      expect(offers(guide, tool)).toBe(true);
+    for (const tool of ["list_directory", "glob", "grep"]) {
+      expect(offers(guide, tool), `the guide stopped offering ${tool}`).toBe(true);
     }
+  });
+
+  it("offers nothing that only CLAWBOX_MCP_CODING_TOOLS=1 registers", () => {
+    // TASK-1079, and the same defect as TASK-540 one edition over: an
+    // orientation document that hands the agent symbols the server does not
+    // register. The nine shell/file/web tools belong to no edition until an
+    // owner sets the override, so the guide must steer to the harness's own
+    // tools instead — it is read on every box, and there is no fence for an env.
+    const guide = served("openclaw");
+    const gated = envGatedCodingTools();
+    // Guards the guard: an empty list would make the filter below vacuous.
+    expect(gated).toContain("bash");
+    expect(gated).toContain("write_file");
+    expect(gated.filter((tool) => offers(guide, tool))).toEqual([]);
   });
 
   it("is not handed a tool that exists only on Hermes", () => {

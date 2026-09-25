@@ -17,14 +17,21 @@
 
 import { spawn } from "child_process";
 import { statSync } from "fs";
-import { resolve, isAbsolute, normalize, join } from "path";
-import { canonicalPath, isProtectedResolvedPath } from "../../src/lib/file-guard";
+import { basename, resolve, isAbsolute, normalize, join } from "path";
+import {
+  canonicalPath,
+  isDeniedOpenclawPath,
+  isOpenclawStatePath,
+  isOpenclawWorkspacePath,
+  isProtectedResolvedPath,
+} from "../../src/lib/file-guard";
 // TASK-605's protected-path rule, from the module the OpenClaw hook plugin
 // carries into ~/.openclaw/extensions. It lives there because a plugin copied
 // out of the checkout has to take its rule with it; it is imported HERE
 // because ClawBox's own `bash`, `write_file`, `edit_file` and `notebook_edit`
-// reach the same files the harness's tools do, and a deny the agent can walk
-// around through this server is not a deny. Its whole import graph is node
+// reach the same files the harness's tools do wherever an owner has switched
+// them on (CLAWBOX_MCP_CODING_TOOLS=1), and a deny the agent can walk around
+// through this server is not a deny. Its whole import graph is node
 // builtins, so it satisfies the rule at the top of this file.
 import {
   commandDenyReason,
@@ -95,9 +102,31 @@ export function resolveUserPath(input: string): string {
   return normalize(isAbsolute(p) ? p : resolve(DEFAULT_CWD, p));
 }
 
+/**
+ * A credential-shaped BASENAME inside the `~/.openclaw` workspace carve-out.
+ *
+ * Scoped to the carve-out on purpose. That carve-out is a new hole in a
+ * credential store (src/lib/file-guard.ts, TASK-1072), and the folder behind it
+ * is written by an agent rather than by a person — so a file the agent named
+ * `.mcp-token` in its own workspace is refused here exactly as the real one is
+ * two directories up, and the `bash` pre-flight, which sees only a string and
+ * matches the same names, cannot end up stricter than the file tools.
+ *
+ * `SECRET_NAME_RE` wants a boundary in front of the name, which a bare basename
+ * does not have; the leading `/` is that boundary and is not a path.
+ */
+function isOpenclawSecretName(abs: string): boolean {
+  return isOpenclawWorkspacePath(abs) && SECRET_NAME_RE.test(`/${basename(abs)}`);
+}
+
 /** The whole read-side denylist, applied to ONE spelling of a path. */
 function deniedAsSpelled(abs: string): boolean {
-  return isDevicePath(abs) || isDotenvPath(abs) || isProtectedResolvedPath(abs);
+  return (
+    isDevicePath(abs)
+    || isDotenvPath(abs)
+    || isOpenclawSecretName(abs)
+    || isProtectedResolvedPath(abs)
+  );
 }
 
 /**
@@ -129,9 +158,273 @@ export function isAllowedPath(abs: string, real: string | null = canonicalPath(a
 /**
  * Basenames that mean "a credential store" wherever they appear in a string.
  * Used by the `bash` pre-flight, which sees a shell string rather than a path.
+ *
+ * `.openclaw` IS NOT HERE, and it is the only name in the home directory that
+ * is deliberately absent: part of that folder is the agent's own workspace and
+ * part of it is the device's keys, so one substring cannot answer for it.
+ * `openclawDeniedInCommand` below judges each mention of it by what follows —
+ * and `.mcp-token`, `.session-secret` and the rest of this list still fire on
+ * the files inside it, whichever folder they turn up in.
  */
 export const SECRET_NAME_RE =
-  /(^|[^\w.-])\.(ssh|hermes|openclaw|clawkeep|codex|gnupg|aws|kube|env|envrc|netrc|npmrc|pypirc|pgpass|git-credentials|session-secret|mcp-token|local-ai-token|hermes-dashboard-pw)(?![\w-])|(^|[^\w-])id_(rsa|ecdsa|ed25519)(?![\w-])/i;
+  /(^|[^\w.-])\.(ssh|hermes|clawkeep|codex|gnupg|aws|kube|env|envrc|netrc|npmrc|pypirc|pgpass|git-credentials|session-secret|mcp-token|local-ai-token|hermes-dashboard-pw)(?![\w-])|(^|[^\w-])id_(rsa|ecdsa|ed25519)(?![\w-])/i;
+
+/**
+ * Every `.openclaw` mention in a shell string, with whatever path follows it.
+ *
+ * The tail stops at the characters that end a word in a command line, so
+ * `cat "~/.openclaw/workspace/MEMORY.md" && …` yields `/workspace/MEMORY.md`
+ * and nothing after the quote.
+ */
+const OPENCLAW_MENTION_RE = /(?:^|[^\w.-])\.openclaw(?![\w-])([^\s'"`;&|<>()]*)/gi;
+
+/** Does the command name `.openclaw` anywhere? The rule above without the `g` and its `lastIndex`. */
+const OPENCLAW_MENTIONED_RE = new RegExp(OPENCLAW_MENTION_RE.source, "i");
+
+/**
+ * The word-shaped pieces of a command line, on the characters a shell ends a
+ * word at. Shared so the two passes below cannot disagree about what a token is.
+ */
+function shellTokens(command: string): string[] {
+  return command.split(/[\s;|&<>()'"`]+/).filter(Boolean);
+}
+
+/**
+ * Does this command name something under `~/.openclaw` that is NOT one of the
+ * agent's own workspaces?
+ *
+ * The path-shaped half of the pre-flight already resolves the tokens it can
+ * recognise; this is for the ones it cannot — `$HOME/.openclaw/credentials/x`
+ * starts with a `$`, so nothing resolves it and only the text is left. Three
+ * refusals, all on the spelling:
+ *
+ *   - a mention with no path after it (`ls ~/.openclaw`, `.openclaw.json`).
+ *     `bash` output is NOT filtered the way `list_directory` is, so a listing
+ *     there prints the credential names this guard exists to keep out of one;
+ *   - a path the file tools would refuse, judged by THEIR rule on the tail.
+ *
+ * The tail is handed to `isDeniedOpenclawPath` whole rather than picked apart
+ * here, and that is the fix for the hole a first-segment test left: `$HOME/
+ * .openclaw/workspace/.openclaw/credentials/x` and `…/workspace/../credentials/
+ * x` both start with an allowed segment and end in the credential store, and
+ * with a `$HOME` spelling the token pass above cannot resolve the token, so
+ * this rule is the only one left to see it. One rule for the shell and the file
+ * tools, so a spelling the tools refuse cannot be run by the shell instead.
+ */
+export function openclawDeniedInCommand(command: string): boolean {
+  for (const [, tail] of command.matchAll(OPENCLAW_MENTION_RE)) {
+    // `~/.openclaw/`, `~/.openclaw//`, `~/.openclaw/.` are the folder itself
+    // too (TASK-1198) — the listable one, which a shell must not stand in or
+    // list — and the rule below reads a bare trailing slash as "nothing named".
+    if (!tail.startsWith("/") || /^[/.]*$/.test(tail)) return true;
+    // The literal is the one the regex above already matched; this rebuilds the
+    // path that mention names, with no home in front of it — the rule is about
+    // the segments after `.openclaw` and nothing before it.
+    if (isDeniedOpenclawPath(`/.openclaw${tail}`)) return true;
+  }
+  return false;
+}
+
+/**
+ * The same rule, for the `.openclaw` the WORKING DIRECTORY spells rather than
+ * the command.
+ *
+ * `bash` takes a cwd, and a cwd is half of every relative path in the command.
+ * `assertPathAllowed(cwd)` is not enough on its own here, because the carve-out
+ * deliberately lets `~/.openclaw` itself be opened so the workspaces inside it
+ * can be found — and a `list_directory` there filters its entries one by one,
+ * while `cd ~/.openclaw && cat credentials/anthropic.json` does not name a
+ * single refused path anywhere in the command string. Two arms:
+ *
+ *   - the shell is SITTING in protected state (`~/.openclaw`, `…/credentials`):
+ *     refused whatever it runs, because every relative path it names is one and
+ *     `bash` output is not filtered the way a listing is;
+ *   - the shell is in a workspace, which is allowed, and a relative token walks
+ *     back OUT of it (`cat ../credentials/x`, `ls ..`). The text rule above
+ *     cannot see those: the `.openclaw` segment came from the cwd, so there is
+ *     no mention in the command for it to match. Tokens that spell a path
+ *     absolutely are left alone — the text rule and the resolving pass in
+ *     `commandPathRefusal` already judge those, against the real home.
+ *
+ * "The working directory" is EVERY one the command can stand in, not only the
+ * one the tool was handed (TASK-1198): `cd ~/.openclaw/workspace && cat
+ * ../openclaw.json` moves into the workspace on its first word, and both arms
+ * apply there exactly as they would to a `cwd` naming it (`workingDirsOf`).
+ */
+function openclawDeniedCwd(command: string, cwd: string): boolean {
+  const { dirs, unresolved } = workingDirsOf(command, cwd);
+  // Each relative word both ways: split on quotes (the tokens every other pass
+  // reads) AND joined the way the shell joins it — `"."./openclaw.json` is
+  // `../openclaw.json` to the shell and two harmless tokens to the split.
+  const words = [...new Set([...shellTokens(command), ...segmentWords(command).flat()])];
+  // BOTH SPELLINGS, for the reason `isAllowedPath` judges both: `~/notes -> ~/
+  // .openclaw` is a working directory with no `.openclaw` anywhere in its text,
+  // and a shell handed it is standing in the state directory all the same.
+  for (const dir of dirs) {
+    if (!isOpenclawStatePath(dir)) continue;
+    if (openclawStateOutsideWorkspace(dir)) return true;
+    for (const raw of words) {
+      if (raw.startsWith("/") || raw.startsWith("~")) continue;
+      // `join` normalises, which is what this arm wants: the question is where
+      // the token LANDS, and `..` is how it leaves. A token that is not a path
+      // at all (`cat`, `-r`) lands inside the workspace and is allowed.
+      if (openclawStateOutsideWorkspace(join(dir, raw))) return true;
+    }
+  }
+  // A directory change this cannot spell out (`cd "$D"`, `cd $(…)`) in a
+  // command that names `~/.openclaw` at all: where the shell stands is unknown,
+  // and the workspace it names is the likeliest answer. A relative token that
+  // CLIMBS is then refused, because out of a workspace one `..` is the state
+  // directory. One that does not climb (`cat MEMORY.md`) is still allowed.
+  if (!unresolved || !OPENCLAW_MENTIONED_RE.test(command)) return false;
+  return words.some(
+    (raw) => !raw.startsWith("/") && !raw.startsWith("~") && raw.split("/").includes(".."),
+  );
+}
+
+/**
+ * Words after which the next word is a directory the rest of the line runs in.
+ * `cd` and `pushd` for the shell itself; `-C` / `--directory` / `--chdir` for
+ * the tools that take one (`git -C`, `tar -C`, `make -C`, `env -C`).
+ */
+const CHDIR_WORDS = new Set(["cd", "pushd"]);
+const CHDIR_FLAGS = new Set(["-C", "--directory", "--chdir"]);
+const CHDIR_FLAG_ASSIGN_RE = /^--(?:directory|chdir)=(.*)$/;
+
+/** More than this many candidate directories and the command is no ordinary one. */
+const MAX_WORKING_DIRS = 32;
+
+/**
+ * The words of one simple command AS THE SHELL JOINS THEM: quoted pieces and
+ * backslash-escaped characters are part of the word they touch, and only
+ * unquoted whitespace (or a redirection) ends one. `cd "$HOME"/.openclaw/
+ * workspace` is ONE directory, and splitting it on the quote handed the guard
+ * `$HOME` and threw the workspace away (TASK-1198 review). Quote characters
+ * are dropped; `$`, backticks and parentheses are kept, so a substitution still
+ * reaches `spellDirectory` as one.
+ */
+function shellWords(text: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let started = false;
+  let quote: "'" | "\"" | null = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      else if (ch === "\\" && quote === "\"" && i + 1 < text.length) word += text[++i];
+      else word += ch;
+      continue;
+    }
+    if (ch === "'" || ch === "\"") {
+      quote = ch;
+      started = true;
+    } else if (ch === "\\" && i + 1 < text.length) {
+      word += text[++i];
+      started = true;
+    } else if (/[\s<>]/.test(ch)) {
+      if (started) words.push(word);
+      word = "";
+      started = false;
+    } else {
+      word += ch;
+      started = true;
+    }
+  }
+  if (started) words.push(word);
+  return words;
+}
+
+/**
+ * The command's simple commands, each as its shell-joined words. Split on the
+ * control operators first, so a bare `cd` (home) is not read as moving into
+ * whatever word the NEXT command starts with. NOT on `(`, `)` or a backtick,
+ * and the words keep them: `cd $(…)` and `` cd `…` `` must reach
+ * `spellDirectory` as the substitution they are, not as a bare `cd` followed
+ * by whatever the substitution runs. A subshell's own `(cd x` just loses its
+ * parenthesis.
+ */
+function segmentWords(command: string): string[][] {
+  return command.split(/&&|\|\||[;&|\n]/).map((segment) =>
+    shellWords(segment)
+      .map((word) => word.replace(/^[({]+/, "").replace(/\)+$/, ""))
+      .filter(Boolean),
+  );
+}
+
+/**
+ * `~`, `$HOME` and `${HOME}` in front of a word, spelled out against the same
+ * home `resolveUserPath` expands; null for a word naming a directory only the
+ * shell could compute (any other `$`, a command substitution, a glob).
+ */
+function spellDirectory(word: string): string | null {
+  for (const home of ["~", "$HOME", "${HOME}"]) {
+    if (word === home) return HOME;
+    if (word.startsWith(`${home}/`)) return join(HOME, word.slice(home.length + 1));
+  }
+  if (/[$`*?[\]{}]/.test(word)) return null;
+  return word;
+}
+
+/**
+ * Every directory a relative word in this command could be resolved against
+ * (TASK-1198): the working directory it was handed, its canonical form, and
+ * each directory the command itself moves into.
+ *
+ * THE HOLE THIS CLOSES. `cd ~/.openclaw/workspace && cat ../openclaw.json` —
+ * the text rule saw one `.openclaw` mention, the workspace, and allowed it;
+ * `../openclaw.json` is relative and names no `.openclaw` of its own; and the
+ * working-directory arm only ever looked at the directory the TOOL was handed,
+ * never at the one the command `cd`'d into on its first word. So the
+ * credential file two words later was read with nothing on the line refusing
+ * it. `cd ~/.openclaw/ && cat openclaw.json` was the same hole with a trailing
+ * slash, which the text rule reads as the listable folder itself.
+ *
+ * Lexical and deliberately generous: a `cd` anywhere on the line counts,
+ * whatever separator or quoting sits around it, and each one is resolved
+ * against every directory already collected rather than the one the shell
+ * would actually be in — control flow (`||`, a loop, a subshell) is not
+ * modelled, so every place the shell COULD stand is judged. A workspace-only
+ * command gains nothing from that: every directory it collects is a workspace.
+ */
+function workingDirsOf(command: string, cwd: string): { dirs: string[]; unresolved: boolean } {
+  const dirs = new Set<string>([cwd, canonicalPath(cwd) ?? cwd]);
+  let unresolved = false;
+  for (const words of segmentWords(command)) {
+    for (let i = 0; i < words.length; i += 1) {
+      const word = words[i];
+      let target: string | undefined;
+      const assigned = CHDIR_FLAG_ASSIGN_RE.exec(word);
+      if (assigned) {
+        target = assigned[1];
+      } else if (CHDIR_WORDS.has(word) || CHDIR_FLAGS.has(word)) {
+        // `cd -P dir`, `cd -- dir`: the options come first. `cd -` returns to a
+        // directory already collected, so it adds nothing.
+        let j = i + 1;
+        while (CHDIR_WORDS.has(word) && j < words.length && words[j].startsWith("-") && words[j] !== "-") j += 1;
+        target = words[j] ?? (CHDIR_WORDS.has(word) ? "~" : undefined);
+        if (target === "-") continue;
+      }
+      if (target === undefined || target === "") continue;
+      const spelled = spellDirectory(target);
+      if (spelled === null) {
+        unresolved = true;
+        continue;
+      }
+      const next = isAbsolute(spelled) ? [normalize(spelled)] : [...dirs].map((dir) => join(dir, spelled));
+      for (const dir of next) {
+        if (dirs.size >= MAX_WORKING_DIRS) {
+          unresolved = true;
+          break;
+        }
+        dirs.add(dir);
+        const real = canonicalPath(dir);
+        if (real && dirs.size < MAX_WORKING_DIRS) dirs.add(real);
+      }
+    }
+  }
+  return { dirs: [...dirs], unresolved };
+}
 
 /**
  * Throw a BLOCKED_PATH the agent can act on. The message deliberately names no
@@ -144,8 +437,35 @@ export function assertPathAllowed(abs: string, real: string | null = canonicalPa
   throw new ToolError(
     "BLOCKED_PATH",
     "That path holds device credentials or a device node and is not accessible to tools.",
-    "Do not try variations of it. Tell the user the file is protected and continue with the rest of the task.",
+    blockedPathNext(abs, real),
   );
+}
+
+/**
+ * What to do about a refusal — and for `~/.openclaw` that is NOT "give up".
+ *
+ * The default hint says "do not try variations of it", which is right for a
+ * path only this server can reach. It was wrong for the agent's own state
+ * directory: THE HARNESS'S OWN `read`, `write` and `edit` ARE NOT BOUND BY THIS
+ * GUARD — the `clawbox-path-guard` hook only covers the roots in
+ * config/protected-paths.json — so a request this server refused could still be
+ * finished with the tools the model already has. Told to stop instead, an agent
+ * that happened to pick an MCP tool failed the whole request (TASK-1072).
+ *
+ * What it may SAY is split the same way the carve-out is. A workspace file may
+ * be named to the user: it is the user's own memory or skill file and naming it
+ * is how they learn which one did not open. Anything else under `~/.openclaw`
+ * may not be named at all, because the rest of that folder is a map of where
+ * the device's keys are — the same silence the message above keeps.
+ */
+function blockedPathNext(abs: string, real: string | null): string {
+  if (!isOpenclawStatePath(abs) && !(real !== null && isOpenclawStatePath(real))) {
+    return "Do not try variations of it. Tell the user the file is protected and continue with the rest of the task.";
+  }
+  if (isOpenclawWorkspacePath(abs)) {
+    return "Do not try another spelling here, but do not give up either: your own file tools are not bound by this guard, so open that path with one of those. Tell the user which workspace file this tool would not open.";
+  }
+  return "Do not try another spelling here: openclaw.json and the credential stores stay protected on this device, because they carry the provider keys and the MCP bearer. Your own file tools are not bound by this guard and may still reach the path if the user asked for it by name — but never name this path back to them.";
 }
 
 /**
@@ -165,6 +485,18 @@ export function assertPathAllowed(abs: string, real: string | null = canonicalPa
  */
 export function assertWritePathAllowed(abs: string, real: string | null = canonicalPath(abs)): void {
   assertPathAllowed(abs, real);
+  // A WRITE inside `~/.openclaw` has to land in one of the agent's own
+  // workspaces. The read side lets the FOLDER ITSELF be opened so a listing can
+  // show them at all (src/lib/file-guard.ts), which is the same split DATA_DIR
+  // gets — and for DATA_DIR the TASK-605 rule below happens to close the write
+  // side. Nothing covers `~/.openclaw`, so it is said here, on both spellings.
+  if (openclawStateOutsideWorkspace(abs) || (real !== null && openclawStateOutsideWorkspace(real))) {
+    throw new ToolError(
+      "BLOCKED_PATH",
+      "That path holds device credentials or a device node and is not accessible to tools.",
+      blockedPathNext(abs, real),
+    );
+  }
   // THE CANONICAL PATH AS WELL AS THE PATH AS TYPED. `resolveUserPath`
   // normalises `..` and `~` but does not follow links, so a symlink the agent
   // planted earlier — `~/notes/models -> ~/clawbox/data/llamacpp/models` — would
@@ -203,6 +535,19 @@ export function resolveGuardedPath(abs: string, mode: "read" | "write"): string 
   return real ?? abs;
 }
 
+/**
+ * Inside the agent's state directory, but not inside a workspace it owns.
+ *
+ * Stricter than `isDeniedOpenclawPath` in exactly one place, and deliberately:
+ * this says NO to `~/.openclaw` ITSELF, which the read rule allows so that a
+ * `list_directory` — which filters its entries one by one — can show the
+ * workspaces at all. A write there has no entry filter behind it, and neither
+ * does `bash` output, so both surfaces want this predicate rather than that one.
+ */
+function openclawStateOutsideWorkspace(p: string): boolean {
+  return isOpenclawStatePath(p) && !isOpenclawWorkspacePath(p);
+}
+
 function protectedWriteError(): ToolError {
   return new ToolError(
     "BLOCKED_PATH",
@@ -231,6 +576,74 @@ export function commandDeniedByPathGuard(command: string, cwd?: string): string 
   if (!cwd || !isProtectedDirectory(cwd, HOME)) return null;
   const token = destructiveToken(command, HOME);
   return token ? `\`${token}\` run from inside ${cwd}` : null;
+}
+
+/** Why the `bash` pre-flight refuses a command line. */
+export interface CommandPathRefusal {
+  /**
+   * `credential` — it names a credential store, and the refusal says nothing
+   * else; `openclaw` — it names something in the agent's own state directory
+   * that is not one of its workspaces; `rule` — TASK-605, and `reason` names it.
+   */
+  kind: "credential" | "openclaw" | "rule";
+  reason?: string;
+}
+
+/**
+ * Best-effort pre-flight for `bash`. DEFENCE IN DEPTH, NOT A BOUNDARY.
+ *
+ * State the guarantee precisely, because it is easy to read a list of blocked
+ * cases as containment. `bash` evaluates an arbitrary shell string, and a shell
+ * can name the same file in many ways; this pre-flight recognises the direct
+ * spellings, not all of them. It is a guard rail against a mistake, not a
+ * sandbox, and nothing here should be relied on as one.
+ *
+ * What actually bounds that tool: it is registered on no shipped device — only
+ * where an owner set CLAWBOX_MCP_CODING_TOOLS=1 — every other tool is
+ * argv-driven and goes through the real path guard, and its own description
+ * tells the agent never to run a command that came from content it read. Assume
+ * `bash` can reach anything the device user can.
+ *
+ * Five passes, all cheap, in the order that gives the most useful refusal:
+ *   1. the `.openclaw` text rule, first so its own `next` hint survives — a
+ *      credential answer here would send the agent away from a workspace file
+ *      it could still open with the harness's own tools;
+ *   2. the same rule on the WORKING DIRECTORY, which is half of every relative
+ *      path in the command and spells a `.openclaw` the text rule cannot see —
+ *      the one the tool was handed and every one the command `cd`s into;
+ *   3. tokens that look like paths, resolved and checked against the guard;
+ *   4. TASK-605's command rule, with the working directory;
+ *   5. the whole command scanned for a credential-store NAME anywhere in it, so
+ *      a path assembled indirectly is still recognised.
+ *
+ * It lives HERE rather than in mcp/tools/coding.ts so the tests can ask the
+ * same question the tool asks. A pre-flight composed inside the tool and
+ * re-composed inside a test is two rules again, and the weaker one is the one
+ * nobody notices is weaker.
+ */
+export function commandPathRefusal(command: string, cwd?: string): CommandPathRefusal | null {
+  if (openclawDeniedInCommand(command)) return { kind: "openclaw" };
+  // With or without a cwd: the command's own `cd` is a working directory too,
+  // and `bash` runs in the home folder when it is handed none.
+  if (openclawDeniedCwd(command, cwd ?? HOME)) return { kind: "openclaw" };
+  for (const raw of shellTokens(command)) {
+    if (!raw.startsWith("/") && !raw.startsWith("~") && !raw.startsWith("./")) continue;
+    try {
+      if (!isAllowedPath(resolveUserPath(raw))) return { kind: "credential" };
+    } catch { /* not a resolvable path */ }
+  }
+  // TASK-605: the same rule the two harnesses enforce on their own shells.
+  // Wherever this tool is switched on, the harness's own shell is already
+  // covered by the before_tool_call hook — and this is a SECOND shell, reached
+  // by a different tool id, so without this the deny would have a door in it.
+  //
+  // The WORKING DIRECTORY goes with the command. It is the reason the hook
+  // reads `workdir` at all: `cd <protected> && rm x` reaches a text matcher as
+  // two tokens it cannot relate, and this tool is handed the directory as an
+  // argument, so the same hole was open here in a simpler form.
+  const guarded = commandDeniedByPathGuard(command, cwd);
+  if (guarded) return { kind: "rule", reason: guarded };
+  return SECRET_NAME_RE.test(command) ? { kind: "credential" } : null;
 }
 
 /** Drop every protected path from a result list (entries, glob hits, matches). */

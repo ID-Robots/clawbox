@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import fs from "fs/promises";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 
 import { getActiveHarness, type Harness } from "@/lib/harness";
 import { canonicalPluginId, pluginHasSettingsRow, ROW_PLUGIN_IDS } from "@/lib/plugin-repair-id";
@@ -133,9 +133,51 @@ export interface PluginRepairEntry {
    * is what refuses a build that does not fit.
    */
   spec: string;
+  /**
+   * The core release the automatic after-update retry has been spent on
+   * (TASK-1088), absent until one has run.
+   *
+   * THE BOUND on that retry. A core update strands exactly these rows — the
+   * 2026.9.3 → 2026.9.4 box showed both ChatGPT and ClawBox AI as "Needs repair"
+   * over failures recorded against the older core — so the updater retries each
+   * row ClawBox switched off once per core it installs, and this is the record
+   * that it did. A second run on the same core (a resumed update, a re-run)
+   * finds it and does nothing; the next core bump retries again. Every writer
+   * that re-files a row keeps it, like `spec`: a boot that fails the same row
+   * again has not given it the after-update retry.
+   */
+  retriedCore?: string;
+  /**
+   * Set while a repair of this row is RUNNING — the owner's Retry or the
+   * updater's after-update retry — and gone when it ends, epoch ms.
+   *
+   * So the panel can tell the truth in between: "Repairing…" rather than a
+   * Retry that would start a second install over the first. Read through
+   * `pluginRepairInProgress`, which ignores a stamp older than
+   * `PLUGIN_REPAIR_IN_PROGRESS_MS`: a web server killed mid-repair must not
+   * leave a row saying "Repairing…" for ever. Every re-file drops it, because a
+   * re-file is the end of an attempt.
+   */
+  repairingSinceMs?: number;
 }
 
 export type PluginRepairs = Record<string, PluginRepairEntry>;
+
+/**
+ * How long a `repairingSinceMs` stamp is believed.
+ *
+ * Longer than the slowest repair either writer runs — an install (180 s), a
+ * runtime inspect (120 s), an enable and a gateway restart, twice over for the
+ * two plugins the updater may retry together — and short enough that a stamp
+ * left behind by a killed process gives the Retry back within the same sitting.
+ */
+export const PLUGIN_REPAIR_IN_PROGRESS_MS = 20 * 60_000;
+
+/** Is a repair of this row running right now, by its own stamp? */
+export function pluginRepairInProgress(entry: PluginRepairEntry, nowMs: number = Date.now()): boolean {
+  const since = entry.repairingSinceMs;
+  return typeof since === "number" && since <= nowMs && nowMs - since < PLUGIN_REPAIR_IN_PROGRESS_MS;
+}
 
 function parseEntry(key: string, raw: unknown): PluginRepairEntry | null {
   if (!raw || typeof raw !== "object") return null;
@@ -155,7 +197,14 @@ function parseEntry(key: string, raw: unknown): PluginRepairEntry | null {
   // resolve. The key is the fallback for a row written before the field.
   const id = typeof r.id === "string" && r.id.trim() ? r.id.trim() : key;
   const spec = typeof r.spec === "string" ? r.spec.trim() : "";
-  return { id, stage, reason, atMs, disabled: r.disabled === true, spec };
+  const entry: PluginRepairEntry = { id, stage, reason, atMs, disabled: r.disabled === true, spec };
+  // Both optional, and only carried when they are what they say: a row written
+  // before TASK-1088 has neither, and reads exactly as it always did.
+  if (typeof r.retriedCore === "string" && r.retriedCore.trim()) entry.retriedCore = r.retriedCore.trim();
+  if (typeof r.repairingSinceMs === "number" && Number.isFinite(r.repairingSinceMs)) {
+    entry.repairingSinceMs = r.repairingSinceMs;
+  }
+  return entry;
 }
 
 /**
@@ -209,54 +258,397 @@ export type PluginRepairRecord = Omit<PluginRepairEntry, "atMs">;
  * the core reports an entry as never installed on a core the update has just
  * put on the box (TASK-738). One record, one reader, one Retry.
  *
- * THREE WRITERS, no lock, and only one pair can overlap. The boot script's is
- * excluded by construction — the updater writes inside `withGatewayQuiesced`,
- * after the pre-start has been waited out. What is left is an owner pressing
- * Retry (`clearPluginRepair`) while an update is in its gateway-verify step:
- * last writer wins and one row can be lost. It costs a badge, not a repair, and
- * an `O_EXCL` lock file is where to start if it ever matters.
+ * EVERY WRITER HOLDS THE STORE'S LOCK (`withPluginRepairLock`) for its whole
+ * read-modify-write — the boot script, the updater, the owner's Retry, and the
+ * two routes that clear a row after a repair of their own. "Only one pair can
+ * overlap" was the old argument for going without, and TASK-1088 made it false:
+ * the Retry and the after-update retry both stamp a row the gateway's own
+ * pre-start may be re-filing in the same second, and last writer wins lost rows.
  *
  * A file that EXISTS and cannot be read is a THROW, not an empty map — the
  * distinction `readPluginRepairs` deliberately does not make, because its
  * wrong answer costs a missing badge while this one would rewrite the file and
- * discard every other plugin's row. A file that is absent or unparseable is an
- * empty map, exactly as the boot script treats it.
+ * discard every other plugin's row. A file that is absent is an empty map; one
+ * that is damaged keeps every row that can still be read, and is itself kept
+ * beside the store (`readRowsForUpdate`) — exactly as the boot script treats it.
  *
  * Temp file plus rename in the same directory, so no reader ever sees half a
  * file, and the same `pid + uuid` name as the clear: two writes in flight
  * inside one process must not stage over each other.
  */
 export async function recordPluginRepair(row: PluginRepairRecord): Promise<void> {
+  await withPluginRepairLock(() => recordPluginRepairLocked(row));
+}
+
+async function recordPluginRepairLocked(row: PluginRepairRecord): Promise<void> {
   const target = pluginRepairPath();
-  let rows: Record<string, unknown> = {};
-  let raw: string | null = null;
-  try {
-    raw = await fs.readFile(target, "utf-8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
-  }
-  if (raw !== null) {
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        rows = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Same as the boot script: an unparseable file is started over.
-    }
-  }
+  // Salvaged, not started over, when the file is damaged (TASK-1198) — see
+  // `readRowsForUpdate`. Starting over was the boot script's rule too, and it
+  // turned one torn write into a store holding only the row being filed.
+  const rows = await readRowsForUpdate(target);
   // AN EMPTY SPEC NEVER ERASES ONE THE ROW ALREADY CARRIES, the same rule
   // `clawbox_plugin_repair_mark` follows in the boot script (TASK-785). Each id
   // had one writer while this was safe; the boot re-attempt made a second, and
   // a caller that cannot build the spec would otherwise wipe the string the
   // Retry needs. A re-file changes the stage, never which package it is.
   const previous = rows[row.id];
-  const previousSpec = previous && typeof previous === "object" && !Array.isArray(previous)
-    ? (previous as { spec?: unknown }).spec
-    : undefined;
-  const spec = row.spec || (typeof previousSpec === "string" ? previousSpec : "");
-  rows[row.id] = { ...row, spec, atMs: Date.now() };
+  const previousRow = previous && typeof previous === "object" && !Array.isArray(previous)
+    ? previous as { spec?: unknown; retriedCore?: unknown }
+    : {};
+  const spec = row.spec || (typeof previousRow.spec === "string" ? previousRow.spec : "");
+  // THE AFTER-UPDATE RETRY IS KEPT the same way (TASK-1088): a re-file by
+  // another writer has not given this row that retry, and dropping the record
+  // would buy it a second one on the same core. The in-progress stamp is the
+  // opposite — a re-file is the END of an attempt — so it is never carried.
+  const retriedCore = row.retriedCore
+    || (typeof previousRow.retriedCore === "string" ? previousRow.retriedCore : undefined);
+  const next: Record<string, unknown> = { ...row, spec, atMs: Date.now() };
+  delete next.repairingSinceMs;
+  if (retriedCore) next.retriedCore = retriedCore;
+  else delete next.retriedCore;
+  rows[row.id] = next;
   await writeRowsAtomically(target, rows);
+}
+
+/**
+ * Read the file for a write that must not lose other rows — every writer here
+ * reads through this. A file that EXISTS and cannot be read throws; an absent
+ * one is an empty map; a DAMAGED one is recovered as far as it can be.
+ *
+ * DAMAGED IS NOT EMPTY (TASK-1198). Every writer used to read an unparseable
+ * file as `{}` and write its one row over it, so a single torn write — a
+ * power cut between the boot script's write and the disk, a full `data/` —
+ * silently became a store that knew about one plugin, and every other plugin
+ * ClawBox had switched off lost its "Needs repair" row and with it the only
+ * record that it was ClawBox, not the owner, that turned it off. Now:
+ *
+ *  - the rows before the damage are kept (`salvagePluginRepairRows`), which is
+ *    all of them for the torn-write case, where the damage is a cut-off end;
+ *  - the damaged file is kept beside the store as `plugin-repair.json.corrupt`
+ *    before anything is written over it, so what could not be salvaged is still
+ *    on the box for whoever looks into it; one file, overwritten, so a box
+ *    that keeps tearing it does not fill `data/`;
+ *  - and it is SAID, in the server log.
+ *
+ * The boot script's writer (`clawbox_plugin_repair_mark`) follows the same
+ * rule, so neither writer can undo the other's recovery.
+ */
+async function readRowsForUpdate(target: string): Promise<Record<string, unknown>> {
+  let bytes: Buffer;
+  try {
+    bytes = await fs.readFile(target);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+    throw err;
+  }
+  // A byte that is not UTF-8 becomes U+FFFD, exactly as the boot script's
+  // `decode("utf-8", errors="replace")` reads it.
+  const raw = bytes.toString("utf-8");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = undefined;
+  }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  const rows = salvagePluginRepairRows(raw);
+  const kept = pluginRepairCorruptPath();
+  let keptNote = `the damaged file is kept as ${kept}`;
+  try {
+    // Byte for byte: this copy is for whoever looks into the damage.
+    await fs.writeFile(kept, bytes, { mode: 0o600 });
+  } catch (err) {
+    keptNote = `the damaged file could not be kept (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`;
+  }
+  console.warn(
+    `[plugin-repair] ${target} is damaged; recovered ${Object.keys(rows).length} row(s) from it and ${keptNote}`,
+  );
+  return rows;
+}
+
+/** Where a damaged store is kept before a writer replaces it. */
+export function pluginRepairCorruptPath(): string {
+  return untraced(`${pluginRepairPath()}.corrupt`);
+}
+
+/**
+ * The rows a damaged `plugin-repair.json` still holds: every top-level member,
+ * in order, up to the first one that does not parse, keeping those whose value
+ * is an object. `{}` for anything that does not even open as an object.
+ *
+ * A PREFIX, deliberately, and the same prefix the boot script's
+ * `json.JSONDecoder.raw_decode` walk recovers. The realistic damage is a
+ * truncated file, where the prefix is everything that was written; guessing
+ * where a row resumes after garbage in the middle could only invent rows, and
+ * an invented row here is a Retry that installs something.
+ */
+export function salvagePluginRepairRows(raw: string): Record<string, unknown> {
+  const rows: Record<string, unknown> = {};
+  let i = skipJsonSpace(raw, 0);
+  if (raw.charCodeAt(i) === 0xfeff) i = skipJsonSpace(raw, i + 1);
+  if (raw[i] !== "{") return rows;
+  i += 1;
+  for (;;) {
+    i = skipJsonSpace(raw, i);
+    if (raw[i] === ",") i = skipJsonSpace(raw, i + 1);
+    // The closing brace, the end of a cut-off file, or damage: all end the walk.
+    if (raw[i] !== "\"") return rows;
+    const keyEnd = jsonValueEnd(raw, i);
+    if (keyEnd < 0) return rows;
+    let key: unknown;
+    try {
+      key = JSON.parse(raw.slice(i, keyEnd));
+    } catch {
+      return rows;
+    }
+    i = skipJsonSpace(raw, keyEnd);
+    if (raw[i] !== ":") return rows;
+    i = skipJsonSpace(raw, i + 1);
+    const valueEnd = jsonValueEnd(raw, i);
+    if (valueEnd < 0) return rows;
+    let value: unknown;
+    try {
+      value = JSON.parse(raw.slice(i, valueEnd));
+    } catch {
+      return rows;
+    }
+    if (typeof key === "string" && value && typeof value === "object" && !Array.isArray(value)) {
+      // DEFINED, not assigned: `rows["__proto__"] = …` would set the map's
+      // prototype instead of keeping a row, which `JSON.parse` and the boot
+      // script's dict both keep as an ordinary key.
+      Object.defineProperty(rows, key, { value, enumerable: true, writable: true, configurable: true });
+    }
+    i = valueEnd;
+  }
+}
+
+function skipJsonSpace(text: string, from: number): number {
+  let i = from;
+  while (i < text.length && (text[i] === " " || text[i] === "\n" || text[i] === "\r" || text[i] === "\t")) i += 1;
+  return i;
+}
+
+/**
+ * Where the JSON value starting at `start` ends — exclusive — or -1 when the
+ * text runs out first. Only finds the extent; `JSON.parse` on the slice is
+ * what decides whether it is a value.
+ */
+function jsonValueEnd(text: string, start: number): number {
+  const first = text[start];
+  if (first === undefined) return -1;
+  if (first !== "\"" && first !== "{" && first !== "[") {
+    let i = start;
+    while (i < text.length && !",}] \n\r\t".includes(text[i])) i += 1;
+    return i;
+  }
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i += 1;
+      else if (ch === "\"") {
+        inString = false;
+        if (depth === 0) return i + 1;
+      }
+      continue;
+    }
+    if (ch === "\"") inString = true;
+    else if (ch === "{" || ch === "[") depth += 1;
+    else if (ch === "}" || ch === "]") {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Say that a repair of this row has started (`true`) or ended (`false`),
+ * without touching anything else on it — `atMs` above all, which is what
+ * `clearPluginRepairUnlessRefiled` compares against. Answers whether a row was
+ * there to stamp. Matched on the canonical id, like every reader.
+ *
+ * `retriedCore` spends the after-update retry in the SAME write that starts it
+ * (TASK-1088): a process killed mid-repair has still had its one attempt on
+ * that core, which is what keeps the retry bounded rather than once per crash.
+ */
+export async function setPluginRepairInProgress(
+  id: string,
+  running: boolean,
+  options: { retriedCore?: string } = {},
+): Promise<boolean> {
+  return withStampLock(() => withPluginRepairLock(async () => {
+    const outcome = await stampRows(id, running, options, { onlyWhenIdle: false });
+    return outcome !== "absent";
+  }));
+}
+
+/**
+ * Check that no repair of this row is running AND stamp it as running, as ONE
+ * step (TASK-1088). The Retry route and the updater's after-update retry live
+ * in the same server process, and "read the row, see no stamp, write a stamp"
+ * as two steps let two presses — or a press under the after-update retry —
+ * both pass the check and both run `plugins install --force` over each other.
+ * The read-check-write runs under the store's CROSS-PROCESS lock, so exactly
+ * one caller gets `claimed` wherever it runs; the others get `busy` without
+ * having written anything.
+ *
+ * Not in-process only: the updater and the web server are separate processes,
+ * and the boot script re-files the same rows from a third — a gateway start
+ * that another press or update may have triggered — so the in-process turn
+ * below only saves same-process callers from polling the lock file.
+ */
+export async function claimPluginRepair(
+  id: string,
+  options: { retriedCore?: string } = {},
+): Promise<"claimed" | "busy" | "absent"> {
+  return withStampLock(() => withPluginRepairLock(() => stampRows(id, true, options, { onlyWhenIdle: true })));
+}
+
+let stampTurn: Promise<unknown> = Promise.resolve();
+
+/**
+ * One stamp at a time inside this process; a failed one does not poison the
+ * next. A supplement to `withPluginRepairLock`, never a replacement for it.
+ */
+function withStampLock<T>(operation: () => Promise<T>): Promise<T> {
+  const turn = stampTurn.then(operation, operation);
+  stampTurn = turn.catch(() => undefined);
+  return turn;
+}
+
+async function stampRows(
+  id: string,
+  running: boolean,
+  options: { retriedCore?: string },
+  guard: { onlyWhenIdle: boolean },
+): Promise<"claimed" | "busy" | "absent"> {
+  const target = pluginRepairPath();
+  const rows = await readRowsForUpdate(target);
+  const wanted = canonicalPluginId(id);
+  let touched = false;
+  for (const [key, value] of Object.entries(rows)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const row = value as Record<string, unknown>;
+    const rowId = typeof row.id === "string" && row.id.trim() ? row.id.trim() : key;
+    if (canonicalPluginId(rowId) !== wanted) continue;
+    if (running) {
+      if (guard.onlyWhenIdle) {
+        const parsed = parseEntry(key, row);
+        if (parsed && pluginRepairInProgress(parsed)) return "busy";
+      }
+      row.repairingSinceMs = Date.now();
+      if (options.retriedCore) row.retriedCore = options.retriedCore;
+    } else if ("repairingSinceMs" in row) {
+      delete row.repairingSinceMs;
+    } else {
+      continue;
+    }
+    touched = true;
+  }
+  if (!touched) return "absent";
+  await writeRowsAtomically(target, rows);
+  return "claimed";
+}
+
+/**
+ * How long a lock on the store is believed. Every holder keeps it for ONE
+ * read-modify-write of a small JSON file — milliseconds — so a lock this old
+ * was left by a writer that died holding it, and is taken over rather than
+ * waited out. `scripts/gateway-pre-start.sh` uses the same age.
+ */
+const PLUGIN_REPAIR_LOCK_STALE_MS = 10_000;
+
+/** How long a writer waits for it: past the stale age, so a dead holder's lock is always reached. */
+const PLUGIN_REPAIR_LOCK_WAIT_MS = 15_000;
+
+/** The store's cross-process lock, beside it. */
+export function pluginRepairLockPath(): string {
+  return untraced(`${pluginRepairPath()}.lock`);
+}
+
+/**
+ * Run one read-modify-write of the store under its CROSS-PROCESS lock.
+ *
+ * The web server, the updater and `scripts/gateway-pre-start.sh` are separate
+ * processes writing one file, so a module mutex cannot order them. The lock is
+ * `plugin-repair.json.lock`, created `O_EXCL` with an owner token and removed
+ * only while the token is still ours — the protocol the boot script's
+ * `clawbox_plugin_repair_locked` follows too, so the two exclude each other.
+ * Not reentrant: nothing that holds it calls another writer here.
+ */
+async function withPluginRepairLock<T>(operation: () => Promise<T>): Promise<T> {
+  const lockPath = pluginRepairLockPath();
+  const token = `${process.pid}.${randomUUID()}`;
+  await fs.mkdir(path.dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + PLUGIN_REPAIR_LOCK_WAIT_MS;
+  for (let attempt = 0; ; attempt += 1) {
+    let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+    try {
+      handle = await fs.open(lockPath, "wx", 0o644);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+    }
+    if (handle) {
+      try {
+        await handle.writeFile(`${token}\n`, "utf-8");
+      } catch (err) {
+        // Ours — `O_EXCL` says so — and no use to anyone without its token.
+        await handle.close().catch(() => {});
+        await fs.rm(lockPath, { force: true }).catch(() => {});
+        throw err;
+      }
+      await handle.close().catch(() => {});
+      break;
+    }
+    if (await reclaimStalePluginRepairLock(lockPath) && Date.now() < deadline) continue;
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for the plugin repair lock ${lockPath}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(200, 20 + 10 * attempt)));
+  }
+  try {
+    return await operation();
+  } finally {
+    // Only while it is still OURS: a lock taken over as stale is its new holder's.
+    const held = await fs.readFile(lockPath, "utf-8").catch(() => null);
+    if (held?.trim() === token) await fs.rm(lockPath, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Take over a lock its holder died with, and answer whether the way is clear.
+ *
+ * Re-checked under a `.reclaim` guard directory, so two waiters that both saw
+ * the same dead lock cannot take it over in turn — the second deleting the live
+ * lock the first has just made. The guard is held for a stat and an unlink; one
+ * older than the stale age was left by a waiter that died as well.
+ */
+async function reclaimStalePluginRepairLock(lockPath: string): Promise<boolean> {
+  const observed = await fs.lstat(lockPath).catch(() => null);
+  if (!observed) return true;
+  if (Date.now() - observed.mtimeMs < PLUGIN_REPAIR_LOCK_STALE_MS) return false;
+  const guard = `${lockPath}.reclaim`;
+  try {
+    await fs.mkdir(guard);
+  } catch {
+    const held = await fs.lstat(guard).catch(() => null);
+    if (held && Date.now() - held.mtimeMs >= PLUGIN_REPAIR_LOCK_STALE_MS) {
+      await fs.rmdir(guard).catch(() => {});
+    }
+    return false;
+  }
+  try {
+    const current = await fs.lstat(lockPath).catch(() => null);
+    if (!current) return true;
+    if (current.ino !== observed.ino || current.dev !== observed.dev
+      || Date.now() - current.mtimeMs < PLUGIN_REPAIR_LOCK_STALE_MS) return false;
+    await fs.rm(lockPath, { force: true });
+    return true;
+  } finally {
+    await fs.rmdir(guard).catch(() => {});
+  }
 }
 
 /**
@@ -270,7 +662,7 @@ export async function recordPluginRepair(row: PluginRepairRecord): Promise<void>
  * attempt, for ever, on exactly the box that can least afford them.
  */
 async function writeRowsAtomically(target: string, rows: unknown): Promise<void> {
-  const tmp = `${target}.tmp.${process.pid}.${randomUUID()}`;
+  const tmp = untraced(`${target}.tmp.${process.pid}.${randomUUID()}`);
   await fs.mkdir(path.dirname(target), { recursive: true });
   try {
     await fs.writeFile(tmp, `${JSON.stringify(rows, null, 2)}\n`, "utf-8");
@@ -291,7 +683,18 @@ async function writeRowsAtomically(target: string, rows: unknown): Promise<void>
  * by name, and a delete would race a boot that is writing one.
  */
 export async function clearPluginRepair(id: string): Promise<boolean> {
-  const current = await readPluginRepairs();
+  // Every channel enable and provider save calls this, and on a healthy box
+  // there is no row: that answer is a read, not a read-modify-write, and costs
+  // no lock. A row that is there is looked for again under it.
+  const wanted = canonicalPluginId(id);
+  if (!Object.values(await readPluginRepairs()).some((row) => canonicalPluginId(row.id) === wanted)) return false;
+  return withPluginRepairLock(() => clearPluginRepairLocked(id));
+}
+
+async function clearPluginRepairLocked(id: string): Promise<boolean> {
+  if (await hermesIsActive()) return false;
+  const target = pluginRepairPath();
+  const rows = await readRowsForUpdate(target);
   // MATCHED ON THE CANONICAL ID, not on the literal key. The boot script marks
   // the plugin under the key openclaw.json carries — `@openclaw/discord` when
   // `ensureChannelPlugin` enabled that spelling, `@openclaw/deepseek-provider`
@@ -299,12 +702,63 @@ export async function clearPluginRepair(id: string): Promise<boolean> {
   // exact lookup answered `false` and left the "Needs repair" badge up on
   // exactly the row it describes. `repairFor` above already reads it this way;
   // the two now agree.
-  const wanted = canonicalPluginId(id);
-  const keys = Object.keys(current).filter((key) => canonicalPluginId(current[key].id) === wanted);
+  const keys = rowsFor(rows, id).map(({ key }) => key);
   if (keys.length === 0) return false;
-  for (const key of keys) delete current[key];
-  await writeRowsAtomically(pluginRepairPath(), current);
+  // Only the matched keys go, and every OTHER row is written back exactly as
+  // it was read (TASK-1198) — not as the reader's filtered copy, which dropped
+  // a row this build cannot parse (a stage a newer boot script files) and
+  // every field it does not know.
+  for (const key of keys) delete rows[key];
+  await writeRowsAtomically(target, rows);
   return true;
+}
+
+/** Hermes is the running harness: nothing here describes it (`readPluginRepairs`). */
+async function hermesIsActive(): Promise<boolean> {
+  return (await getActiveHarness().catch(() => "openclaw" as Harness)) === "hermes";
+}
+
+/** The rows the READER would show for this plugin, with the keys they sit under in the raw store. */
+function rowsFor(rows: Record<string, unknown>, id: string): { key: string; entry: PluginRepairEntry }[] {
+  const wanted = canonicalPluginId(id);
+  const out: { key: string; entry: PluginRepairEntry }[] = [];
+  for (const [key, value] of Object.entries(rows)) {
+    const entry = parseEntry(key, value);
+    if (entry && canonicalPluginId(entry.id) === wanted) out.push({ key, entry });
+  }
+  return out;
+}
+
+/**
+ * `clearPluginRepair`, unless somebody FILED THE ROW AGAIN while the repair ran.
+ *
+ * TASK-1088. Both repairs end in a gateway restart, and the restart runs
+ * `scripts/gateway-pre-start.sh`, which asks the core about this very plugin
+ * and — when the answer is still no — switches it off again and re-files the
+ * row with a fresh `atMs` and the cause. A clear by id after that deleted the
+ * failure the boot script had just recorded: the badge went, the plugin stayed
+ * off, and the Providers page said "connected" over a provider that could not
+ * run. So the caller passes the `atMs` of the row it set out to repair, and a
+ * row whose `atMs` has moved is left exactly as it is.
+ *
+ * `"absent"` is a success too: the boot script's own consent loop clears the
+ * row itself when the restarted core confirms the plugin.
+ */
+export async function clearPluginRepairUnlessRefiled(
+  id: string,
+  atMs: number,
+): Promise<"cleared" | "absent" | "refiled"> {
+  return withPluginRepairLock(async () => {
+    if (await hermesIsActive()) return "absent";
+    const target = pluginRepairPath();
+    const rows = await readRowsForUpdate(target);
+    const matches = rowsFor(rows, id);
+    if (matches.length === 0) return "absent";
+    if (matches.some(({ entry }) => entry.atMs !== atMs)) return "refiled";
+    for (const { key } of matches) delete rows[key];
+    await writeRowsAtomically(target, rows);
+    return "cleared";
+  });
 }
 
 /**

@@ -23,7 +23,7 @@
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 import { verifyMcpBearer } from "./mcp-token";
 import { hasOwnerPassword } from "./system-password";
 

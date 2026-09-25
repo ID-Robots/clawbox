@@ -8,7 +8,7 @@
  */
 
 import { readFile } from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { get as configGet, set as configSet } from "@/lib/config-store";
 import {
   findOpenclawBin,

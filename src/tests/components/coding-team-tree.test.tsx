@@ -13,6 +13,25 @@ const t = (key: string) => translations.en[key] ?? key;
 vi.mock("@/lib/i18n", () => ({ useT: () => ({ locale: "en", t }) }));
 
 describe("CodingTeamTree", () => {
+  it("draws no lead unless the team had lead turns, then one under the planner with its count, live while it decides", () => {
+    const { unmount } = render(<CodingTeamTree />);
+    expect(screen.getByTestId("coding-team-tree")).toHaveAttribute("data-leads", "0");
+    expect(screen.queryByTestId("coding-team-tree-lead")).toBeNull();
+    unmount();
+    render(<CodingTeamTree workers={2} reviewers={1} leads={2} leadActive />);
+    const svg = screen.getByTestId("coding-team-tree");
+    expect(svg).toHaveAttribute("data-leads", "2");
+    const lead = within(svg).getByTestId("coding-team-tree-lead");
+    expect(lead).toHaveAttribute("data-live", "true");
+    expect(lead.textContent).toBe(`${t("codingAgent.team.artLead")} · 2`);
+  });
+
+  it("never draws a lead in the one-run shape", () => {
+    render(<CodingTeamTree shape="run" workers={2} leads={3} />);
+    expect(screen.getByTestId("coding-team-tree")).toHaveAttribute("data-leads", "0");
+    expect(screen.queryByTestId("coding-team-tree-lead")).toBeNull();
+  });
+
   it("draws the planner, three workers and one reviewer by default, captioned with counts, hidden from assistive tech", () => {
     render(<CodingTeamTree />);
     const svg = screen.getByTestId("coding-team-tree");

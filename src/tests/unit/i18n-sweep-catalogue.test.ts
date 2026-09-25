@@ -91,6 +91,9 @@ const CHAT_KEYS = [
   "chat.effort.off", "chat.effort.minimal", "chat.effort.low", "chat.effort.medium",
   "chat.effort.high", "chat.effort.xhigh", "chat.effort.max", "chat.effort.adaptive",
   "mascot.openChat", "mascot.menuSleep", "mascot.menuHide",
+  // The phone chat's fullscreen strip and text size bar (TASK-1157).
+  "chat.view.showHeader", "chat.view.hideHeader", "chat.view.fullscreen", "chat.view.exitFullscreen",
+  "chat.view.textSize", "chat.view.textSmaller", "chat.view.textLarger", "chat.view.textReset",
 ];
 
 /**
@@ -100,15 +103,19 @@ const CHAT_KEYS = [
  * camel forms, one per code `clawkeep-memory.ts` can actually send.
  */
 const MEMORY_KEYS = [
+  "clawkeep.memory.error.indexRebuildRequired",
   "clawkeep.memory.error.indexIdentityMismatched",
   "clawkeep.memory.error.indexIdentityMissing",
+  "clawkeep.memory.error.providerMismatch",
   "clawkeep.memory.error.providerDegraded",
   "clawkeep.memory.error.statusUnavailable",
   "clawkeep.memory.runError.timedOut",
   "clawkeep.memory.runError.interrupted",
   "clawkeep.memory.runError.migrationBusy",
   "clawkeep.memory.runError.openclawMissing",
+  "clawkeep.memory.runError.providerMismatch",
   "clawkeep.memory.runError.indexFailed",
+  "clawkeep.memory.runError.fullReindexRequired",
 ];
 
 const SURFACES: [string, string[]][] = [

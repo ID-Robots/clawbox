@@ -38,6 +38,7 @@ const review = vi.hoisted(() => ({
   readReviewSnapshot: vi.fn(),
   readFailedCheckLogs: vi.fn(),
   pushBranch: vi.fn(),
+  requestCodeRabbitReview: vi.fn(),
 }));
 vi.mock("@/lib/coding-review", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-review")>()),
@@ -48,6 +49,12 @@ const github = vi.hoisted(() => ({
   openPullRequest: vi.fn(),
   readPullRequest: vi.fn(),
   mergePullRequest: vi.fn(),
+  markPullRequestReady: vi.fn(),
+  // Defaults, restored by mockReset: auto-merge unread, so every test that is
+  // not about it sees the loop exactly as it was before it existed.
+  readAutoMergeFacts: vi.fn(async (): Promise<unknown> => ({ error: "not read in this test" })),
+  enableAutoMerge: vi.fn(async (): Promise<unknown> => ({ ok: true })),
+  disableAutoMerge: vi.fn(async (): Promise<unknown> => ({ ok: true })),
 }));
 vi.mock("@/lib/coding-pr", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-pr")>()),
@@ -158,7 +165,9 @@ describe("the review loop's watcher", () => {
     process.env.CLAWBOX_ROOT = root;
     review.pushBranch.mockResolvedValue({ ok: true });
     review.readFailedCheckLogs.mockResolvedValue([]);
+    review.requestCodeRabbitReview.mockResolvedValue({ ok: true });
     github.mergePullRequest.mockResolvedValue({ ok: true });
+    github.markPullRequestReady.mockResolvedValue({ ok: true });
   });
 
   afterEach(async () => {
@@ -334,6 +343,52 @@ describe("the review loop's watcher", () => {
     expect(lib.getRun(RUN_ID)?.review?.round).toBe(1);
   });
 
+  it("readies its draft once the checks are green, and keeps watching for the review", async () => {
+    // Readying is what starts CodeRabbit's one review, so it is neither a merge
+    // nor an ending: the loop goes on polling, and the record says when.
+    review.readReviewSnapshot.mockResolvedValue(snap({
+      isDraft: true,
+      headSha: "ea30e3b47b8ea9d4e7c12e59c7d5c91690d81ab8",
+      checks: [{ name: "tests", state: "pass", url: null }, { name: "CodeRabbit", state: "pass", url: null }],
+      codeRabbit: { present: true, reviewedEarlier: false },
+    }));
+    await boot({ coding_agent_auto_merge: true });
+    writeRecord();
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.readyAt).toEqual(expect.any(Number)); });
+
+    expect(github.markPullRequestReady).toHaveBeenCalledWith(home, PR_NUMBER);
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+    const loop = lib.getRun(RUN_ID)?.review;
+    expect(loop?.state).toBe("polling");
+    // The round's clock restarts with the review it started.
+    expect(loop?.roundStartedAt).toBe(loop?.readyAt);
+    expect(loop?.round).toBe(0);
+    expect(isPrPending(lib.getRun(RUN_ID)?.pr)).toBe(true);
+  });
+
+  it("asks CodeRabbit once about a head it gave no status, instead of merging into a required check", async () => {
+    const head = "ea30e3b47b8ea9d4e7c12e59c7d5c91690d81ab8";
+    review.readReviewSnapshot.mockResolvedValue(snap({
+      headSha: head,
+      checks: [{ name: "tests", state: "pass", url: null }],
+      codeRabbit: { present: true, reviewedEarlier: true },
+    }));
+    await boot({ coding_agent_auto_merge: true });
+    // Past the grace: the status is not coming by itself.
+    writeRecord({ round: 1, roundStartedAt: Date.now() - 5 * 60_000 });
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.codeRabbitAskedFor).toBe(head); });
+
+    expect(review.requestCodeRabbitReview).toHaveBeenCalledTimes(1);
+    expect(review.requestCodeRabbitReview).toHaveBeenCalledWith(home, PR_NUMBER);
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+    expect(lib.getRun(RUN_ID)?.review?.state).toBe("polling");
+    expect(lib.getRun(RUN_ID)?.review?.round).toBe(1);
+  });
+
   it("leaves a pull request the OLD checks-only watcher owns alone", async () => {
     // A box with the loop switched off keeps `pr.phase: "waiting"`, and that
     // watcher is a different one with a different ending.
@@ -352,6 +407,227 @@ describe("the review loop's watcher", () => {
     expect(review.readReviewSnapshot).not.toHaveBeenCalled();
     expect(lib.getRun(RUN_ID)?.pr?.phase).toBe("waiting");
     expect(lib.getRun(RUN_ID)?.review).toBeNull();
+  });
+
+  // ── GitHub's auto-merge (reconcileAutoMerge) ────────────────────────────
+  //
+  // Measured: green pull requests sat open for ten to sixteen hours because
+  // the last step waited for a poll, or for a watcher that had given up. The
+  // loop now hands that step to GitHub while it would merge itself, and takes
+  // it back where it would not.
+
+  /** What REST says about the pull request, as readAutoMergeFacts answers it. */
+  const facts = (over: Record<string, unknown> = {}) => ({
+    state: "OPEN", draft: false, base: "beta", labels: [] as string[], mergeState: "BLOCKED", enabled: false, ...over,
+  });
+  /** A round that has watched past the grace a fresh head's checks get. */
+  const pastGrace = () => ({ roundStartedAt: Date.now() - 5 * 60_000 });
+  const suiteRunning = () => snap({
+    checks: [{ name: "e2e-install", state: "pending", url: null }, { name: "CodeRabbit", state: "pass", url: null }],
+  });
+  const progressOf = () => lib.getRun(RUN_ID)?.progress.join("\n") ?? "";
+  /** Let a poll that has already read GitHub finish what it does next. */
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+
+  it("turns GitHub's auto-merge on while the suite runs, once the owner has switched merging on", async () => {
+    review.readReviewSnapshot.mockResolvedValue(suiteRunning());
+    github.readAutoMergeFacts.mockResolvedValue(facts());
+    await boot({ coding_agent_auto_merge: true });
+    writeRecord(pastGrace());
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.pr?.autoMergeAt).toEqual(expect.any(Number)); });
+
+    expect(github.enableAutoMerge).toHaveBeenCalledWith(home, PR_NUMBER);
+    expect(progressOf()).toContain(`Turned on GitHub's auto-merge for pull request #${PR_NUMBER}`);
+    // A hand-off of the last step, not an ending: the loop goes on watching.
+    expect(lib.getRun(RUN_ID)?.review?.state).toBe("polling");
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+    // On disk, so a watcher rebuilt after a restart knows the box turned it on.
+    const onDisk = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-agent-runs.json"), "utf-8"));
+    expect(typeof onDisk[0].pr.autoMergeAt).toBe("number");
+  });
+
+  it("leaves auto-merge alone when the owner has NOT switched merging on", async () => {
+    review.readReviewSnapshot.mockResolvedValue(suiteRunning());
+    github.readAutoMergeFacts.mockResolvedValue(facts());
+    await boot();
+    writeRecord(pastGrace());
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(github.readAutoMergeFacts).toHaveBeenCalled(); });
+    await settle();
+
+    expect(github.enableAutoMerge).not.toHaveBeenCalled();
+    expect(github.disableAutoMerge).not.toHaveBeenCalled();
+  });
+
+  it("waits out a fresh head's grace before turning it on — its reviewer's status may not be there yet", async () => {
+    review.readReviewSnapshot.mockResolvedValue(suiteRunning());
+    github.readAutoMergeFacts.mockResolvedValue(facts());
+    await boot({ coding_agent_auto_merge: true });
+    // The round started a minute ago: inside REVIEW_NO_CHECKS_GRACE_MS.
+    writeRecord();
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(github.readAutoMergeFacts).toHaveBeenCalled(); });
+    await settle();
+
+    expect(github.enableAutoMerge).not.toHaveBeenCalled();
+  });
+
+  it("never turns it on while CodeRabbit is still reviewing: its findings land with its green status", async () => {
+    review.readReviewSnapshot.mockResolvedValue(snap({
+      checks: [{ name: "test", state: "pass", url: null }, { name: "CodeRabbit", state: "pending", url: null }],
+    }));
+    github.readAutoMergeFacts.mockResolvedValue(facts());
+    await boot({ coding_agent_auto_merge: true });
+    writeRecord(pastGrace());
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(github.readAutoMergeFacts).toHaveBeenCalled(); });
+    await settle();
+
+    expect(github.enableAutoMerge).not.toHaveBeenCalled();
+  });
+
+  it("never turns it on for a pull request into main", async () => {
+    review.readReviewSnapshot.mockResolvedValue(suiteRunning());
+    github.readAutoMergeFacts.mockResolvedValue(facts({ base: "main" }));
+    await boot({ coding_agent_auto_merge: true });
+    writeRecord(pastGrace());
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(github.readAutoMergeFacts).toHaveBeenCalled(); });
+    await settle();
+
+    expect(github.enableAutoMerge).not.toHaveBeenCalled();
+  });
+
+  it("turns it OFF over a hold label whoever turned it on, and never merges over the label", async () => {
+    // Green: without the label this poll would merge.
+    review.readReviewSnapshot.mockResolvedValue(snap({ labels: ["hold"] }));
+    github.readAutoMergeFacts.mockResolvedValue(facts({ labels: ["hold"], enabled: true }));
+    await boot({ coding_agent_auto_merge: true });
+    writeRecord(pastGrace());
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("needs_owner"); });
+
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+    expect(github.disableAutoMerge).toHaveBeenCalledWith(home, PR_NUMBER);
+    expect(progressOf()).toContain("Turned off GitHub's auto-merge: the pull request carries a hold label");
+    expect(lib.getRun(RUN_ID)?.review?.detail).toContain("hold label");
+    expect(lib.getRun(RUN_ID)?.review?.detail).not.toContain("merges by itself");
+  });
+
+  it("says so when it could not turn auto-merge off over a hold label, instead of promising a merge", async () => {
+    // The loop ends on this poll and never looks again, so a refusal here is
+    // the owner's to act on: the held pull request can still merge by itself.
+    review.readReviewSnapshot.mockResolvedValue(snap({ labels: ["hold"] }));
+    github.readAutoMergeFacts.mockResolvedValue(facts({ labels: ["hold"], enabled: true }));
+    github.disableAutoMerge.mockResolvedValue({ ok: false, detail: "HTTP 502: Bad Gateway" });
+    await boot({ coding_agent_auto_merge: true });
+    writeRecord(pastGrace());
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("needs_owner"); });
+
+    const detail = lib.getRun(RUN_ID)?.review?.detail ?? "";
+    expect(detail).toContain("hold label");
+    expect(detail).not.toContain("merges by itself the moment");
+    expect(detail).toContain("could not turn GitHub's auto-merge off");
+    expect(detail).toContain("HTTP 502");
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("pauses the auto-merge a run turned on while a review comment is unanswered", async () => {
+    review.readReviewSnapshot.mockResolvedValue(snap({
+      checks: [{ name: "e2e-install", state: "pending", url: null }],
+      threads: [{ path: "a.ts", line: 1, author: "coderabbitai", body: "this leaks", url: null }],
+    }));
+    github.readAutoMergeFacts.mockResolvedValue(facts({ enabled: true }));
+    await boot({ coding_agent_auto_merge: true });
+    writeRecord(pastGrace());
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => {
+      expect(progressOf()).toContain("Turned off GitHub's auto-merge: a review comment is unanswered; it goes back on once that is cleared");
+    });
+    expect(github.disableAutoMerge).toHaveBeenCalledWith(home, PR_NUMBER);
+    expect(github.enableAutoMerge).not.toHaveBeenCalled();
+  });
+
+  it("takes back its OWN auto-merge when the owner switches merging off", async () => {
+    review.readReviewSnapshot.mockResolvedValue(suiteRunning());
+    github.readAutoMergeFacts.mockResolvedValue(facts({ enabled: true }));
+    await boot();
+    const rec = record(pastGrace());
+    (rec.pr as Record<string, unknown>).autoMergeAt = Date.now() - 10 * 60_000;
+    fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify([rec]));
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.pr?.autoMergeAt).toBeNull(); });
+
+    expect(github.disableAutoMerge).toHaveBeenCalledWith(home, PR_NUMBER);
+    expect(progressOf()).toContain("Turned off GitHub's auto-merge: merging by itself is switched off");
+  });
+
+  it("leaves a RUN's auto-merge on when merging is off — the task asked for it — and says it will merge", async () => {
+    // Green except for a requirement GitHub still holds it for.
+    review.readReviewSnapshot.mockResolvedValue(snap());
+    github.readAutoMergeFacts.mockResolvedValue(facts({ enabled: true }));
+    await boot();
+    writeRecord(pastGrace());
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("clean"); });
+
+    expect(github.disableAutoMerge).not.toHaveBeenCalled();
+    expect(lib.getRun(RUN_ID)?.review?.detail).toContain("GitHub's auto-merge is on for it, so it merges by itself");
+  });
+
+  it("leaves auto-merge on when the loop gives up waiting, so the pull request still merges by itself", async () => {
+    review.readReviewSnapshot.mockResolvedValue(suiteRunning());
+    github.readAutoMergeFacts.mockResolvedValue(facts({ enabled: true }));
+    await boot({ coding_agent_auto_merge: true });
+    const rec = record({ roundStartedAt: Date.now() - 61 * 60_000 });
+    (rec.pr as Record<string, unknown>).autoMergeAt = Date.now() - 50 * 60_000;
+    fs.writeFileSync(path.join(root, "data", "coding-agent-runs.json"), JSON.stringify([rec]));
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("needs_owner"); });
+
+    expect(github.disableAutoMerge).not.toHaveBeenCalled();
+    const detail = lib.getRun(RUN_ID)?.review?.detail ?? "";
+    expect(detail).toContain("Gave up waiting for GitHub");
+    expect(detail).toContain("merges by itself the moment its required checks pass");
+  });
+
+  it("remembers GitHub's refusal instead of asking again on every poll", async () => {
+    review.readReviewSnapshot.mockResolvedValue(suiteRunning());
+    github.readAutoMergeFacts.mockResolvedValue(facts());
+    github.enableAutoMerge.mockResolvedValue({ ok: false, detail: "Pull request Auto merge is not allowed for this repository" });
+    await boot({ coding_agent_auto_merge: true });
+    writeRecord(pastGrace());
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.pr?.autoMergeFailedAt).toEqual(expect.any(Number)); });
+
+    expect(lib.getRun(RUN_ID)?.pr?.autoMergeAt ?? null).toBeNull();
+    expect(progressOf()).not.toContain("Turned on GitHub's auto-merge");
+  });
+
+  it("counts a merge GitHub's auto-merge landed first as a merge, not a failure", async () => {
+    review.readReviewSnapshot.mockResolvedValue(snap());
+    github.mergePullRequest.mockResolvedValue({ ok: false, detail: "Pull request #12 was already merged" });
+    github.readAutoMergeFacts.mockResolvedValue(facts({ state: "MERGED" }));
+    await boot({ coding_agent_auto_merge: true });
+    writeRecord();
+
+    lib.resumePullRequestWatches();
+    await vi.waitFor(() => { expect(lib.getRun(RUN_ID)?.review?.state).toBe("merged"); });
+    expect(lib.getRun(RUN_ID)?.pr?.phase).toBe("merged");
   });
 });
 

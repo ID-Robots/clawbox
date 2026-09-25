@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { spawn } from "child_process";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import { POST as disableLocalAi } from "@/app/setup-api/local-ai/route";
 import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";

@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useMemo, useRef, useCallback, memo } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, memo } from 'react'
 import { createPortal } from 'react-dom'
 
 // ── Gateway WebSocket chat widget ──
@@ -12,6 +12,7 @@ import {
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { useCodingAgentActivity, isCodingAgentTool, type CodingAgentActivity } from '@/lib/use-coding-agent-activity'
+import { useCodingRunAutoHide } from '@/lib/use-coding-run-auto-hide'
 import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
@@ -64,7 +65,7 @@ import {
   type EmailGesture,
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
-import { describeChatFailure, describeFallbackReply, describeImageFailure } from '@/lib/chat-error-text'
+import { describeChatFailure, describeFallbackReply, describeImageFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
@@ -114,6 +115,18 @@ import {
   parseUnsupportedThinkingLevelError,
   PERSIST_KEY_PREFIX,
 } from '@/lib/chat-reasoning'
+import {
+  GATEWAY_REQUEST_TIMEOUT_MS,
+  HISTORY_ATTEMPT_TIMEOUT_MS,
+  HISTORY_RESTORE_DEADLINE_MS,
+  HISTORY_RETRY_DELAYS_MS,
+  RECONNECT_DEADLINE_MS,
+  RESTORE_HANDSHAKE_TIMEOUT_MS,
+  classifyRestoreFailure,
+  isRestoreAborted,
+  restoreWithRetry,
+  type RestoreFailureKind,
+} from '@/lib/chat-session-restore'
 
 const MAX_RETRIES = 8
 // A measured Jetson cold boot takes ~175 s before its gateway listens.
@@ -415,6 +428,8 @@ import {
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 import { usePortrait } from '@/lib/use-portrait'
+import { useChatFullscreen, useChatTextScale } from '@/lib/use-chat-phone-layout'
+import { ChatFullscreenButton, ChatHeaderStrip, ChatTextSizeBar, ChatTextSizeButton } from '@/components/ChatPhoneChrome'
 import { isConfigBusyPayload } from '@/lib/config-conflict'
 import { useT } from '@/lib/i18n'
 import { useTr } from '@/lib/i18n-floor'
@@ -708,6 +723,9 @@ const TAB_LABEL_MAX = 24
 
 /** The transcript, as the tab strip's one panel. */
 const TRANSCRIPT_PANEL_ID = 'chat-transcript-panel'
+// What the phone's fullscreen strip and its text size button open (TASK-1157).
+const HEADER_REGION_ID = 'chat-header-region'
+const TEXT_SIZE_BAR_ID = 'chat-text-size-bar'
 /**
  * A tab's DOM id, derived from its session key so the panel can name the
  * selected tab as its label without either side holding an index. `null` is the
@@ -908,20 +926,46 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // hands it back as `initialPanelWidth`), so widening the window docks the
   // chat again instead of losing the owner's layout.
   const panelMode = panelWidth !== null && !mobile
-  // A phone held upright gets its own composer: attach, text, microphone and
-  // Send share one row, and the pickers below them fold behind a single
-  // control (TASK-1003). Landscape and desktop keep the one-row composer with
-  // everything on show.
+  // A phone held upright gets its own input row: text, microphone and Send side
+  // by side (TASK-1003); landscape shares one slot between the microphone and
+  // Send. Either way up, the rest of the composer folds behind one control
+  // (TASK-1157, below); the desktop keeps the one-row composer with everything
+  // on show.
   const portraitComposer = usePortrait(mobile) && mobile
-  // Folded by default: on a 390px screen three pickers and Create pushed the
-  // conversation up by a whole row for a choice that changes once a week.
-  const [composerOptionsOpen, setComposerOptionsOpen] = useState(false)
-  // Closing the chat, or rotating out of portrait, puts the pickers back where
-  // they belong — otherwise the row would come back open on the next visit,
-  // which is not what "folded by default" means.
-  useEffect(() => {
-    if (!isOpen || !portraitComposer) setComposerOptionsOpen(false)
-  }, [isOpen, portraitComposer])
+  // Fullscreen chat (TASK-1157): on a phone the header folds into a slim strip
+  // and the composer keeps only the text box and its send action, so the
+  // conversation gets the screen. On until the owner leaves it, and remembered
+  // either way (lib/chat-phone-layout.ts). A phone only — the desktop never
+  // reads it.
+  const [fullscreenPref, setFullscreenPref] = useChatFullscreen()
+  const fullscreenChat = mobile && fullscreenPref
+  // The conversation's text size, on a phone only; the desktop stays at 100%.
+  const [textScalePref, setTextScalePref] = useChatTextScale()
+  const textScale = mobile ? textScalePref : 1
+  const [textSizeOpen, setTextSizeOpen] = useState(false)
+  // The full header, opened from the strip for a moment while in fullscreen.
+  const [headerPeek, setHeaderPeek] = useState(false)
+  // The composer's pickers, attachment and Create, behind one control on a
+  // phone: folded in fullscreen chat, on show otherwise, and either way the
+  // owner can flip them — on a 390px screen three pickers and Create pushed
+  // the conversation up by a whole row for a choice that changes once a week.
+  const [composerOptionsOpen, setComposerOptionsOpen] = useState(!fullscreenChat)
+  // Closing the chat, or switching fullscreen, puts both back where the mode
+  // says they belong — otherwise a peek would come back open on the next
+  // visit, which is not what "folded by default" means. Adjusted while
+  // rendering (React's pattern for state that follows a value), so no frame is
+  // drawn with the previous mode's regions.
+  const layoutKey = !isOpen ? 'closed' : fullscreenChat ? 'fullscreen' : 'standard'
+  const [layoutFor, setLayoutFor] = useState(layoutKey)
+  if (layoutFor !== layoutKey) {
+    setLayoutFor(layoutKey)
+    setHeaderPeek(false)
+    setComposerOptionsOpen(!fullscreenChat)
+    if (!isOpen) setTextSizeOpen(false)
+  }
+  const toggleFullscreenChat = useCallback(() => {
+    setFullscreenPref(!fullscreenPref)
+  }, [fullscreenPref, setFullscreenPref])
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Gateway is canonical; render an empty list until chat.history arrives.
@@ -1086,12 +1130,51 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const dismissCodingRun = useCallback((id: string) => {
     setDismissedCodingRuns(prev => { const next = new Set(prev); next.add(id); return next })
   }, [])
-  const restoreCodingRuns = useCallback(() => setDismissedCodingRuns(new Set()), [])
+  // A card whose run the chat saw finish CLEANLY also goes on its own, five
+  // seconds after it turned green — nothing is left for anyone to do about
+  // it. Anything still going, or needing the owner — a pull request still in
+  // review or left for the owner included — stays. The same 🤖 chip brings
+  // these back too. See src/lib/use-coding-run-auto-hide.ts.
+  //
+  // The owner did not ask for this one to go, so it must not take the
+  // keyboard with it: a card that holds the focus (Tab onto its View, say)
+  // hands it to the 🤖 chip, which appears in the same render and is the way
+  // back to the card. Checked as the clock runs out, while the card is still
+  // in the document; moved once the chip is.
+  const restoreChipRef = useRef<HTMLButtonElement>(null)
+  const focusRestoreChipRef = useRef(false)
+  const {
+    finishing: finishingCodingRuns,
+    hidden: autoHiddenCodingRuns,
+    restore: restoreAutoHiddenCodingRuns,
+  } = useCodingRunAutoHide(codingRuns, (id) => {
+    const focused = document.activeElement?.closest('[data-testid="coding-agent-activity"]')
+    if (focused?.getAttribute('data-run-id') === id) focusRestoreChipRef.current = true
+  })
+  useLayoutEffect(() => {
+    if (!focusRestoreChipRef.current) return
+    focusRestoreChipRef.current = false
+    restoreChipRef.current?.focus()
+  }, [autoHiddenCodingRuns])
+  const restoreCodingRuns = useCallback(() => {
+    setDismissedCodingRuns(new Set())
+    restoreAutoHiddenCodingRuns()
+  }, [restoreAutoHiddenCodingRuns])
   // The cards on screen, and whether the restore chip has anything to restore
   // — measured against the runs the hook still holds, so a stale id from a
   // run the hook let go cannot leave a chip that restores nothing.
-  const shownCodingRuns = codingRuns.filter(run => !dismissedCodingRuns.has(run.id))
+  const shownCodingRuns = codingRuns.filter(run => !dismissedCodingRuns.has(run.id) && !autoHiddenCodingRuns.has(run.id))
   const hiddenCodingRunCount = codingRuns.length - shownCodingRuns.length
+  // Every chat control that opens an app window goes through here. On a phone
+  // the chat is full screen ABOVE the one window the phone draws, so the
+  // window would open out of sight and the press would look dead. Get out of
+  // its way; on a desktop the chat stays beside the window. One rule for all
+  // of them, not a patch per button: View on a run card was the one that
+  // missed it (TASK-1065).
+  const openFromChat = useCallback((open: () => void) => {
+    open()
+    if (mobile) onClose()
+  }, [mobile, onClose])
   const codingAgentCard = (run: CodingAgentActivity) => (
     <CodingAgentActivityPill
       key={run.id}
@@ -1148,7 +1231,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // placed to full screen on every press; a window already up keeps its
       // size and place now, and the chat is in the corner for a reason.
       openLabel={t("codingAgent.liveView")}
-      onOpen={() => dispatchOpenCodingRun(run.id)}
+      onOpen={() => openFromChat(() => dispatchOpenCodingRun(run.id))}
       // A run's screenshot opens in the SAME full-size preview the generated
       // and attached images use (the portal at the end of this component),
       // not a second lightbox of the card's own.
@@ -1156,6 +1239,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Put the card away; the 🤖 chip at the end of the transcript brings
       // it back. See `dismissedCodingRuns` above.
       onDismiss={() => dismissCodingRun(run.id)}
+      // Counting down to leaving on its own: the card fades out at the end.
+      autoHiding={finishingCodingRuns.has(run.id)}
     />
   )
   // The questions the agent is currently parked on, newest last.
@@ -1401,17 +1486,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     void readCodingAgentStatus().then(status => {
       newAppGateRef.current = false
       if (status && (status.setupComplete === false || status.enabled === false)) {
-        dispatchOpenApp('coding')
-        // On a phone the chat is full screen ABOVE the one window the phone
-        // draws, so the Coding Agent would open out of sight and the press
-        // would look dead. Get out of its way; on a desktop the chat stays
-        // beside the plain window.
-        if (mobile) onClose()
+        // A plain window — and on a phone the chat gets out of its way.
+        openFromChat(() => dispatchOpenApp('coding'))
         return
       }
       setShowNewApp(true)
     })
-  }, [showNewApp, closeNewApp, readCodingAgentStatus, mobile, onClose])
+  }, [showNewApp, closeNewApp, readCodingAgentStatus, openFromChat])
 
   // The Coding Agent hands "Create app" over to here: the card composes one
   // message for the assistant, so it belongs in the conversation that will
@@ -2073,7 +2154,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           pendingRef.current.delete(id)
           reject(new Error('Request timeout'))
         }
-      }, 120000)
+      }, GATEWAY_REQUEST_TIMEOUT_MS)
     })
   }, [])
 
@@ -2258,6 +2339,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const connectionAbortRef = useRef<AbortController | null>(null)
   const connectionDeadlineRef = useRef<number | null>(null)
   const connectionDeadlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // One socket attempt's own clock, from `new WebSocket` to the hello — see
+  // RESTORE_HANDSHAKE_TIMEOUT_MS. Separate from the deadline above, which
+  // bounds the whole ladder rather than the attempt.
+  const handshakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The conversation read a restore is running, so a newer socket, a tab
+  // switch or the popup unmounting can call it off (TASK-1158). Not closing
+  // it: the popup stays mounted, socket and all, behind the desktop, and no
+  // hello comes to run the read again when it is reopened.
+  const restoreAbortRef = useRef<AbortController | null>(null)
+  // A restore that was started and has neither answered nor given up — one a
+  // dropped socket called off. The hello after a gateway restart keeps the
+  // painted transcript and reads nothing, so without this an interrupted
+  // restore never ran again: an empty conversation under "Restoring this
+  // conversation…" with nothing behind the line.
+  const restoreOwedRef = useRef(false)
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -2296,9 +2392,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       connectionDeadlineTimerRef.current = null
     }
     clearDeadlineTimer()
-    if (!hasEverConnectedRef.current) {
+    const clearHandshakeTimer = () => {
+      if (handshakeTimerRef.current) clearTimeout(handshakeTimerRef.current)
+      handshakeTimerRef.current = null
+    }
+    clearHandshakeTimer()
+    // A new socket owns the conversation from here; a history read still
+    // retrying for the old one would only report the old one's failure.
+    restoreAbortRef.current?.abort()
+    // EVERY connection gets a deadline, not only the first. A reconnect — the
+    // restore after a gateway restart, with the popup that never unmounts
+    // while the desktop is open — used to have none, so an attempt nobody
+    // answered kept "Restarting chat…" up for as long as the desktop stayed
+    // open (TASK-1158). Same five minutes; a new one per reconnect, kept
+    // across that reconnect's retries.
+    {
       if (retryCountRef.current === 0 || connectionDeadlineRef.current === null) {
-        connectionDeadlineRef.current = Date.now() + INITIAL_CONNECT_TIMEOUT_MS
+        connectionDeadlineRef.current = Date.now() + (hasEverConnectedRef.current ? RECONNECT_DEADLINE_MS : INITIAL_CONNECT_TIMEOUT_MS)
       }
       const expire = () => {
         if (!isCurrent()) return
@@ -2306,6 +2416,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         controller.abort()
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
         retryTimerRef.current = null
+        clearHandshakeTimer()
         const socket = wsRef.current
         wsRef.current = null
         socket?.close()
@@ -2350,7 +2461,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const maxRetries = !hasEverConnectedRef.current
         ? INITIAL_CONNECT_MAX_RETRIES
         : skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
-      if (retryCountRef.current < maxRetries && (hasEverConnectedRef.current || Date.now() + RETRY_DELAY < (connectionDeadlineRef.current ?? 0))) {
+      if (retryCountRef.current < maxRetries && Date.now() + RETRY_DELAY < (connectionDeadlineRef.current ?? Number.POSITIVE_INFINITY)) {
         retryCountRef.current++
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
         retryTimerRef.current = setTimeout(() => { if (isCurrent()) void connect() }, RETRY_DELAY)
@@ -2367,6 +2478,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
     // Define handlers BEFORE creating the WebSocket so no events are missed
     let connectSent = false
+    // The connect frame's request id, so an attempt abandoned by its handshake
+    // clock can take the frame out of the pending map before the socket goes.
+    let connectRequestId: string | null = null
     let ws: WebSocket
 
     const sendConnect = (challenge?: Record<string, unknown>) => {
@@ -2374,10 +2488,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       connectSent = true
 
       const id = uuid()
+      connectRequestId = id
       pendingRef.current.set(id, {
         resolve: (hello: unknown) => {
           if (!isCurrent()) return
           clearDeadlineTimer()
+          clearHandshakeTimer()
+          // This reconnect is over; the next drop starts a deadline of its own.
+          connectionDeadlineRef.current = null
           setStatus('connected')
           // A reconnect follows every restart, and a restart follows some model
           // switches made elsewhere: what the box runs may have changed. The
@@ -2440,7 +2558,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             const wasProviderChange = reloadReasonRef.current === 'provider'
             // Alias normalization may finish before the first connection.
             // Load the existing transcript just as a normal first hello does.
-            if (wasProviderChange && pendingModelSwitchResetRef.current?.automatic) loadHistory()
+            // …and a restore the restart cut off is still owed: run it again,
+            // bounded, so it ends in the conversation or in the panel.
+            if (restoreOwedRef.current) void loadHistory({ restore: true })
+            else if (wasProviderChange && pendingModelSwitchResetRef.current?.automatic) loadHistory()
             skillInstalledRef.current = false
             reloadReasonRef.current = 'skill' // reset for next reload
             skillEventRef.current = null
@@ -2486,7 +2607,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }
             }, 500)
           } else {
-            loadHistory()
+            // The restore itself: bounded, retried only while the gateway
+            // says "not yet", and ended with a choice rather than an empty
+            // conversation when it cannot be done (TASK-1158).
+            void loadHistory({ restore: true })
           }
           // And what the agent is already parked on — asked LAST, after the
           // transcript read is under way. A question outlives this browser tab
@@ -2507,6 +2631,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         reject: (err: Error) => {
           if (!isCurrent()) return
           clearDeadlineTimer()
+          clearHandshakeTimer()
           // A gateway that is still BOOTING accepts the socket and refuses the
           // connect frame with `UNAVAILABLE` / `retryable: true` /
           // `details.reason: "startup-sidecars"` (its channels and sidecars are
@@ -3014,9 +3139,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // schedule a reconnect on top of a healthy connection.
       if (!isCurrent() || wsRef.current !== ws) return
       clearDeadlineTimer()
+      clearHandshakeTimer()
       wsRef.current = null
       // The socket is gone; nothing that was waiting on it can still arrive.
       failPending('Not connected')
+      // …and a conversation read retrying on it would fail against a closed
+      // socket and paint "could not be restored" under the reconnect overlay.
+      // The next hello runs the restore again.
+      restoreAbortRef.current?.abort()
 
       // Auth rejection (gateway closes with 1008 / "unauthorized" / "rate
       // limited" — it rate-limits a client after too many failed auth
@@ -3062,7 +3192,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const maxRetries = !hasEverConnectedRef.current
         ? INITIAL_CONNECT_MAX_RETRIES
         : skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
-      if (retryCountRef.current < maxRetries && (hasEverConnectedRef.current || Date.now() + RETRY_DELAY < (connectionDeadlineRef.current ?? 0))) {
+      // The deadline binds a reconnect's ladder as well as the first one's; a
+      // drop right after a hello has none yet (`null`), and the connect it
+      // schedules starts one.
+      if (retryCountRef.current < maxRetries && Date.now() + RETRY_DELAY < (connectionDeadlineRef.current ?? Number.POSITIVE_INFINITY)) {
         retryCountRef.current++
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
         retryTimerRef.current = setTimeout(() => { if (isCurrent()) void connect() }, RETRY_DELAY)
@@ -3105,6 +3238,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     ws.onmessage = onMessage
     ws.onclose = onClose
     ws.onerror = () => {}
+    // This attempt's own clock. A socket the gateway never answers — never
+    // opens, never sends its challenge, never answers the connect frame — fires
+    // no close event, so without this nothing ever moved: no retry, no error,
+    // "Restarting chat…" for good (TASK-1158). It is treated as the close it
+    // should have been: the frame leaves the pending map first (so it is not
+    // mistaken for a refusal), then the ordinary ladder and deadline decide.
+    handshakeTimerRef.current = setTimeout(() => {
+      handshakeTimerRef.current = null
+      if (!isCurrent() || wsRef.current !== ws) return
+      if (connectRequestId) pendingRef.current.delete(connectRequestId)
+      ws.onclose = null
+      ws.onmessage = null
+      try { ws.close() } catch { /* already closing */ }
+      onClose()
+    }, RESTORE_HANDSHAKE_TIMEOUT_MS)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
   // The adapter opens the socket through this, not by importing it: `connect`
   // is declared after the adapter is built, and this ref is what lets the two
@@ -3162,11 +3310,40 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // when a read lands after the capabilities did. A counter rather than a
   // boolean: the second read of a session that was cleared has to re-trigger it.
   const [transcriptReads, setTranscriptReads] = useState(0)
-  const loadHistory = useCallback(async () => {
+  /**
+   * A conversation being brought back, or one that could not be (TASK-1158).
+   *
+   * `retrying` once the first read has failed with a "not yet" and another is
+   * scheduled; `failed` when the restore ran out of attempts or time — the one
+   * state that puts Try again / Start a new chat on screen. Keyed, so a tab
+   * switched away from cannot leave its failure on the tab switched to.
+   */
+  const [restoreState, setRestoreState] = useState<
+    | { key: string; phase: 'retrying' }
+    | { key: string; phase: 'failed'; kind: RestoreFailureKind }
+    | null
+  >(null)
+  const loadHistory = useCallback(async (opts?: { restore?: boolean }) => {
     // A harness with no durable transcript has nothing to replay. Returning
     // before the bootstrap bookkeeping rather than calling and catching keeps
     // the auto-greet honest: there is no history read here that can be "empty".
     if (!caps.canListHistory) return
+    // A RESTORE — the read after a (re)connect, a tab switch, or Try again —
+    // is bounded and retried; every other read (the ack-only refetch, the
+    // picture poll) stays the single best-effort read it always was.
+    const restore = opts?.restore === true
+    let restoreCtl: AbortController | null = null
+    if (restore) {
+      restoreAbortRef.current?.abort()
+      restoreCtl = new AbortController()
+      restoreAbortRef.current = restoreCtl
+      restoreOwedRef.current = true
+    }
+    // Settled — answered, or given up with the panel — rather than called off;
+    // asked of the controller so a stale read cannot settle a newer one's debt.
+    const settleRestore = () => {
+      if (restoreCtl && restoreAbortRef.current === restoreCtl) restoreOwedRef.current = false
+    }
     // Optimistically show the typing bubble if an auto-greet might still run,
     // so the user sees feedback during the history round-trip (and is locked
     // out of typing via the greetingPending gate on the input). Bootstrap is
@@ -3188,10 +3365,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // into the adapter unchanged. It encodes about six independent shipped
       // fixes with no unifying rule between them; the one thing this call must
       // never do is re-derive them.
-      const { messages: chatMsgs, imageGenerationFailed } = await adapter.loadHistory({
+      const read = () => adapter.loadHistory({
         limit: 50,
         imageWaitFrom: generatingImageRef.current ? imageWaitFromRef.current : null,
       })
+      // A restore retries only while the gateway says "not yet" (the history
+      // is rebuilding, the gateway is restarting) or does not answer, and never
+      // past its deadline. It used to be this single read with its failure
+      // sent to the console: a conversation the gateway was still rebuilding
+      // simply came back empty, with nothing to press.
+      const { messages: chatMsgs, imageGenerationFailed } = restoreCtl
+        ? await restoreWithRetry(read, {
+          signal: restoreCtl.signal,
+          attemptTimeoutMs: HISTORY_ATTEMPT_TIMEOUT_MS,
+          deadlineMs: HISTORY_RESTORE_DEADLINE_MS,
+          delaysMs: HISTORY_RETRY_DELAYS_MS,
+          onRetry: () => {
+            if (sessionKeyRef.current === keyAtCall) setRestoreState({ key: keyAtCall, phase: 'retrying' })
+          },
+        })
+        : await read()
+      settleRestore()
       // The owner switched tabs while this read was in flight (the request
       // key was captured at call time): the answer belongs to the tab that
       // was left. Painting it would put one conversation inside another —
@@ -3201,6 +3395,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (mightAutoGreet) setIsBootstrappingHistory(false)
         return
       }
+      // Any read of this conversation that answers ends a restore's wait or
+      // failure — including a later ordinary one, once the gateway is free.
+      setRestoreState(prev => (prev && prev.key === keyAtCall ? null : prev))
       if (imageGenerationFailed) imageFailedRef.current = true
       // Preserve any optimistic user turns appended after this load was
       // dispatched but before chat.history responded — they haven't reached
@@ -3260,8 +3457,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // ref React has not refreshed yet.
       return chatMsgs
     } catch (err) {
-      console.error('Failed to load history:', err)
       if (mightAutoGreet) setIsBootstrappingHistory(false)
+      // Called off: a newer socket, a tab switch or Try again owns the
+      // conversation now and runs its own read. Nothing to report.
+      if (restoreCtl && isRestoreAborted(err)) return
+      settleRestore()
+      console.error('Failed to load history:', err)
+      // Only a restore, and only on the conversation still on screen, ends in
+      // the choice: an ordinary refetch failing leaves the transcript that is
+      // already painted, exactly as before.
+      if (restoreCtl && sessionKeyRef.current === keyAtCall) {
+        setRestoreState({ key: keyAtCall, phase: 'failed', kind: classifyRestoreFailure(err) })
+      }
+    } finally {
+      if (restoreCtl && restoreAbortRef.current === restoreCtl) restoreAbortRef.current = null
     }
   }, [adapter, caps, applyStreaming])
 
@@ -3414,6 +3623,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setPreview(null)
     setOpenEmailUid(null)
     setIsBootstrappingHistory(false)
+    // The tab being left takes its restore with it; the one entered runs its own.
+    restoreAbortRef.current?.abort()
+    setRestoreState(null)
     if (oldKey) void wsRequest('sessions.messages.unsubscribe', { key: oldKey }).catch(() => { /* best effort */ })
     // The switch itself. From here the adapter, the three event filters and
     // the sticky-reasoning guard all follow the new key.
@@ -3467,7 +3679,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       next.delete(key)
       return next
     })
-    const loaded = await loadHistory()
+    const loaded = await loadHistory({ restore: true })
     // The owner switched again while that read was in flight. `loadHistory`
     // protects its own paint the same way; without this the tab being left
     // would hand its error to whichever conversation is on screen now — and
@@ -4823,6 +5035,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // owner may be in another tab by the time the reply lands, and painting
     // it there would put one conversation inside another.
     const keyAtSend = sessionKeyRef.current
+    // A new turn is the owner's answer to a restore choice left on screen.
+    setRestoreState(prev => (prev && prev.key === keyAtSend ? null : prev))
     let result: TurnResult
     try {
       result = await adapter.sendTurn({
@@ -4893,9 +5107,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // and has carried an absolute device path and a session UUID into the
       // customer's transcript (TASK-440). Both harnesses funnel through here
       // now, so this is the only gate left.
+      //
+      // `unacknowledged`: this chat's own request timer ran out on the send —
+      // the gateway never took the turn (TASK-1158). Asked of the timer's exact
+      // sentence, not of the `timeout` code alone, which the adapter also puts
+      // on any gateway refusal that merely mentions a timeout.
+      const unacknowledged = err instanceof HarnessError && err.code === 'timeout' && isUnacknowledgedTurn(err)
       const failure = err instanceof HarnessError && err.code === 'aborted'
         ? undefined
-        : describeChatFailure(err instanceof Error ? err.message : undefined, undefined, failureWordsRef.current)
+        : unacknowledged
+          ? UNACKNOWLEDGED_TURN_TEXT
+          : describeChatFailure(err instanceof Error ? err.message : undefined, undefined, failureWordsRef.current)
       settleRun(keyAtSend, failure)
       // It failed in a tab the owner has left: the composer, the caret and
       // the pills on screen belong to the tab they are looking at now, and
@@ -4945,6 +5167,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       runIdRef.current = null
       if (!failure) return
       setMessages(prev => [...prev, { role: 'system', text: failure, timestamp: Date.now() }])
+      // The gateway never acknowledged the turn: the conversation is busy
+      // behind something else on the box (TASK-1158 — held for 40 minutes on a
+      // real one). The sentence above says so; the same two choices a failed
+      // restore offers go under it, so "start a new chat" is a button, not an
+      // instruction to go and find one.
+      if (unacknowledged) {
+        setRestoreState({ key: keyAtSend, phase: 'failed', kind: 'busy' })
+      }
       return
     }
     // A harness that merely ACKNOWLEDGED the turn answers on its own event
@@ -5419,7 +5649,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (!target) return
 
     if (!target.available || !target.model) {
-      onOpenSettingsSection?.(target.settingsSection)
+      // Settings is an app window like any other: on a phone it would open
+      // under the full-screen chat. The note below is still there when the
+      // owner comes back to the conversation.
+      if (onOpenSettingsSection) openFromChat(() => onOpenSettingsSection(target.settingsSection))
       setMessages(prev => [...prev, {
         role: 'system',
         // A stale sign-in is not an absent one. The credential is on the box;
@@ -5434,7 +5667,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
 
     await switchChatModel({ model: target.model, label: target.label, provider: target.provider })
-  }, [chatModelState, onOpenSettingsSection, switchChatModel])
+  }, [chatModelState, onOpenSettingsSection, openFromChat, switchChatModel])
 
   // Seed (or RE-seed) the Hermes header: which providers this device can
   // actually talk to, what it is configured to use, and its effort level. The
@@ -5668,7 +5901,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (caps.hasLiveConnection || !caps.canListHistory) return
     if (replayedRef.current) return
     replayedRef.current = true
-    void loadHistory()
+    // The same bounded restore the socket runs on its hello.
+    void loadHistory({ restore: true })
   }, [harnessLoaded, isOpen, caps, loadHistory])
 
   // Open the first conversation, once both of its inputs are in.
@@ -5723,6 +5957,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       connectionAbortRef.current?.abort()
       if (connectionDeadlineTimerRef.current) clearTimeout(connectionDeadlineTimerRef.current)
       connectionDeadlineTimerRef.current = null
+      if (handshakeTimerRef.current) clearTimeout(handshakeTimerRef.current)
+      handshakeTimerRef.current = null
+      restoreAbortRef.current?.abort()
       wsRef.current?.close()
       wsRef.current = null
       failPending('Chat closed')
@@ -6102,9 +6339,58 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
     return parts.filter(Boolean).join(' · ')
   })()
-  // Everything in the settings row except the fold control itself. Folded on a
-  // portrait phone until asked for; always on show anywhere else.
-  const composerExtrasShown = !portraitComposer || composerOptionsOpen
+  // The whole settings row — attachment, Create, the pickers. Behind the fold
+  // control on a phone (folded in fullscreen chat until asked for); always on
+  // show on a big screen.
+  const composerExtrasShown = !mobile || composerOptionsOpen
+  // The phone's fold control. It leads the input row in BOTH states, so the
+  // button a thumb (or the keyboard focus) just pressed never moves: folding
+  // takes the row under it away and nothing else.
+  const renderComposerToggle = () => {
+    const label = tr('chat.composer.options', 'Chat options')
+    return (
+      <button
+        type="button"
+        onClick={() => setComposerOptionsOpen(open => !open)}
+        // The folded pickers' answer rides along as the description, so the
+        // choice is still said while the pills are out of sight.
+        title={!composerOptionsOpen && pillSummary ? `${label} · ${pillSummary}` : label}
+        aria-label={label}
+        aria-expanded={composerOptionsOpen}
+        aria-controls={composerOptionsOpen ? 'chat-composer-options' : undefined}
+        data-testid="composer-options-toggle"
+        className="chat-composer-options-toggle"
+        style={{
+          background: composerOptionsOpen ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
+          color: composerOptionsOpen ? '#f97316' : 'rgba(255,255,255,0.4)',
+        }}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+          <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
+          <circle cx="16" cy="6" r="2" />
+          <circle cx="10" cy="12" r="2" />
+          <circle cx="16" cy="18" r="2" />
+        </svg>
+      </button>
+    )
+  }
+  // What the fullscreen strip says in place of the header: the conversation on
+  // screen, and whether another one is answering or holds an unread reply —
+  // the per-tab dots it would otherwise hide.
+  const activeTabLabel = activeTabKey === null
+    ? 'ClawBox'
+    : (tabs.find(tb => tb.key === activeTabKey)?.label ?? 'ClawBox')
+  const shownSessionKey = activeTabKey ?? mainSessionKey
+  const stripActivity: 'busy' | 'unread' | null = [...busyKeys].some(k => !!k && k !== shownSessionKey)
+    ? 'busy'
+    : [...unreadKeys].some(k => !!k && k !== shownSessionKey) ? 'unread' : null
+  const headerHidden = fullscreenChat && !headerPeek
+  const renderViewControls = (size: number) => (
+    <>
+      <ChatTextSizeButton open={textSizeOpen} onToggle={() => setTextSizeOpen(open => !open)} controls={TEXT_SIZE_BAR_ID} size={size} />
+      <ChatFullscreenButton fullscreen={fullscreenChat} onToggle={toggleFullscreenChat} size={size} />
+    </>
+  )
   // Compact desktop mic; 44px in-flow phone target with shared recording feedback.
   const renderVoiceButton = (large: boolean) => {
     if (voice.state === 'recording') {
@@ -6300,15 +6586,36 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           transcript symmetrically. Still no backdrop blur — a per-frame
           filter on the Jetson iGPU is the frame drop the burst animation's
           note warns about, and a solid bar needs none. */}
+      {/* Fullscreen chat on a phone: all that stays of the header is this slim
+          strip. Its toggle opens the header UNDER it — the strip never moves,
+          so neither does the control that was just pressed. */}
+      {fullscreenChat && (
+        <ChatHeaderStrip
+          headerId={HEADER_REGION_ID}
+          headerOpen={headerPeek}
+          onToggleHeader={setHeaderPeek}
+          label={activeTabLabel}
+          activity={stripActivity}
+          summary={!composerOptionsOpen ? pillSummary : undefined}
+        >
+          {renderViewControls(32)}
+        </ChatHeaderStrip>
+      )}
       <div
         data-testid="chat-header"
+        id={HEADER_REGION_ID}
+        // Out of the layout AND the accessibility tree while folded, never just
+        // transparent; the strip's toggle is how both get it back.
+        hidden={headerHidden || undefined}
         onPointerDown={mobile || panelMode ? undefined : onDragStart}
         style={{
           flexShrink: 0,
           minHeight: 40,
-          display: 'flex',
+          display: headerHidden ? 'none' : 'flex',
           alignItems: 'center',
-          gap: 8,
+          // The phone header carries two more controls outside fullscreen; a
+          // tighter gap keeps the tab its room on a 360px screen.
+          gap: mobile && !fullscreenChat ? 4 : 8,
           padding: '0 8px 0 14px',
           background: 'rgba(0,0,0,0.2)',
           borderBottom: '1px solid rgba(255,255,255,0.06)',
@@ -6535,6 +6842,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </svg>
           </button>
         )}
+        {/* A phone outside fullscreen: the text size and the way into
+            fullscreen chat. In fullscreen both live on the strip instead. */}
+        {mobile && !fullscreenChat && renderViewControls(40)}
         {mobile ? (
           // On a phone the chat is where the page LANDS (src/lib/mobile-chat-first.ts),
           // so closing it is not dismissing a popup but going to the desktop
@@ -6576,6 +6886,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         )}
       </div>
 
+      {mobile && textSizeOpen && (
+        <ChatTextSizeBar id={TEXT_SIZE_BAR_ID} scale={textScalePref} onChange={setTextScalePref} />
+      )}
+
       {/* Messages area — sits under the header bar in the flow, so it needs
           no clearance beyond its own breathing room.
 
@@ -6592,12 +6906,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         aria-labelledby={tabDomId(activeTabKey)}
         tabIndex={0}
         data-testid="chat-transcript"
+        // The phone's text size, applied to each entry of the conversation
+        // (globals.css, `[data-chat-text-scale]`) and to nothing around it.
+        data-chat-text-scale={textScale !== 1 ? textScale : undefined}
         style={{
           flex: 1, overflowY: 'auto', padding: '12px 14px 12px',
           display: 'flex', flexDirection: 'column', gap: 10,
           userSelect: 'text',
           scrollbarWidth: 'thin',
           scrollbarColor: 'rgba(255,255,255,0.1) transparent',
+          ...(textScale !== 1 ? { '--chat-text-scale': String(textScale) } as React.CSSProperties : {}),
         }}
       >
         {(status === 'connecting' || reloadingSkill) && (reloadingSkill || messages.length === 0) && (
@@ -6659,7 +6977,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </div>
         )}
 
-        {status === 'connected' && !reloadingSkill && messages.length === 0 && !streaming && !sending && !isBootstrappingHistory && (
+        {status === 'connected' && !reloadingSkill && messages.length === 0 && !streaming && !sending && !isBootstrappingHistory && !restoreState && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 8, color: 'rgba(255,255,255,0.3)', fontSize: 13 }}>
             <img src="/clawbox-crab.png" alt="" style={{ width: 25, height: 25, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
@@ -6933,9 +7251,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             report the outcome — a badge that vanished with the run was gone
             before the owner had read the message above it, since runs here
             take 9-15 seconds. See src/lib/use-coding-agent-activity.ts.
-            The one way a card leaves before the chat closes is the owner's
-            own × on it — `dismissedCodingRuns` — and the 🤖 chip at the end
-            of the transcript brings it back where it was. */}
+            A card leaves before the chat closes two ways: the owner's own ×
+            on it — `dismissedCodingRuns` — or five seconds after the chat
+            saw its run finish cleanly — `autoHiddenCodingRuns`. The 🤖 chip
+            at the end of the transcript brings it back where it was. */}
         {/* MAIN TAB ONLY. A run record carries no session key — the hook adopts
             runs by START TIME, not by conversation — so a card drawn in every
             tab claimed the run belonged to whichever chat happened to be open,
@@ -7066,6 +7385,58 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </div>
         )}
 
+        {/* A conversation being brought back, or one that could not be
+            (TASK-1158). While a "not yet" is being waited out, one quiet line;
+            once the restore has run out of attempts or time, the reason and the
+            two things that help. Try again re-reads this conversation; Start a
+            new chat opens a fresh tab and leaves this one exactly as it is —
+            nothing is reset or deleted, because the gateway may still be
+            holding the owner's last message in it. */}
+        {restoreState && !reloadingSkill && status === 'connected' && (
+          restoreState.phase === 'retrying' ? (
+            <div
+              data-testid="chat-restore-status"
+              role="status"
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 2px', fontSize: 12, color: 'rgba(255,255,255,0.5)' }}
+            >
+              <span aria-hidden="true" style={TURN_SPINNER_STYLE} />
+              <span>{tr('chat.restore.restoring', 'Restoring this conversation…')}</span>
+            </div>
+          ) : (
+            <div
+              data-testid="chat-restore-failed"
+              role="alert"
+              style={{ margin: '8px 0', padding: '12px 14px', borderRadius: 10, background: 'rgba(249,115,22,0.08)', border: '1px solid rgba(249,115,22,0.25)', display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, color: 'rgba(255,255,255,0.85)' }}
+            >
+              <span>
+                {restoreState.kind === 'busy'
+                  ? tr('chat.restore.busy', 'This conversation is still busy on the box — it did not answer in time.')
+                  : restoreState.kind === 'timeout'
+                    ? tr('chat.restore.timeout', 'The box did not answer while this conversation was being restored.')
+                    : tr('chat.restore.failed', 'This conversation could not be restored.')}
+              </span>
+              <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>
+                {tr('chat.restore.hint', 'Try again, or start a new chat to carry on. Nothing in this conversation is deleted.')}
+              </span>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRestoreState({ key: sessionKeyRef.current, phase: 'retrying' })
+                    void loadHistory({ restore: true })
+                  }}
+                  style={{ background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)', color: '#f97316', borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 500 }}
+                >{tr('chat.restore.retry', 'Try again')}</button>
+                <button
+                  type="button"
+                  onClick={newTab}
+                  style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.85)', borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 500 }}
+                >{tr('chat.restore.newChat', 'Start a new chat')}</button>
+              </div>
+            </div>
+          )
+        )}
+
         {/* The box is making the sound. Under the newest bubble, where the
             reply it belongs to already is: the words land first and the voice
             follows a cold Kokoro 13-19 s later, and with nothing on screen for
@@ -7123,6 +7494,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             style={{ position: 'sticky', bottom: 0, alignSelf: 'flex-end', display: 'flex', justifyContent: 'flex-end', zIndex: 1, pointerEvents: 'none' }}
           >
             <button
+              ref={restoreChipRef}
               type="button"
               data-testid="coding-agent-restore"
               onClick={restoreCodingRuns}
@@ -7347,10 +7719,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', flexDirection: 'column', gap: 8,
       }}>
-        {/* Primary phone row: attachment, text, then send/stop (portrait) or
-            microphone-or-send/stop (landscape). */}
+        {/* Primary phone row: the fold control, text, then microphone and
+            send/stop (portrait) or microphone-or-send/stop (landscape). Folded,
+            this row IS the composer — the text box and its send action. */}
         <div className="chat-composer-primary" data-testid={mobile ? 'chat-composer-primary' : undefined} style={mobile ? { display: 'flex', alignItems: 'flex-end', gap: 8 } : { display: 'contents' }}>
-        {mobile && renderAttachmentButton()}
+        {mobile && renderComposerToggle()}
         <textarea
           ref={inputRef}
           value={input}
@@ -7427,45 +7800,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
         {/* The row's layout lives in globals.css (.chat-composer-row), because
             what the pills need against the 36px buttons beside them is a wrap
-            rule and a flex-basis — see the block there. */}
+            rule and a flex-basis — see the block there.
+
+            On a phone the whole row is what the fold control above opens: the
+            attachment, Create and the pickers come and go together, and are
+            never rebuilt somewhere else — their popovers, handlers and order
+            are exactly the ones every other viewport gets. */}
+        {composerExtrasShown && (
         <div data-testid="chat-composer-row" className="chat-composer-row" id="chat-composer-options">
-        {/* Portrait phone: one control in front of the pickers, and beside it
-            the answer they would have given. Tapping it expands this same row
-            — the pickers are never rebuilt somewhere else, so their popovers,
-            handlers and order are exactly the ones every other viewport gets. */}
-        {portraitComposer && (
-          <>
-            <button
-              onClick={() => setComposerOptionsOpen(open => !open)}
-              title={tr('chat.composer.options', 'Chat options')}
-              aria-label={tr('chat.composer.options', 'Chat options')}
-              aria-expanded={composerOptionsOpen}
-              aria-controls="chat-composer-options"
-              data-testid="composer-options-toggle"
-              className="chat-composer-options-toggle"
-              style={{
-                background: composerOptionsOpen ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
-                color: composerOptionsOpen ? '#f97316' : 'rgba(255,255,255,0.4)',
-              }}
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-                <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
-                <circle cx="16" cy="6" r="2" />
-                <circle cx="10" cy="12" r="2" />
-                <circle cx="16" cy="18" r="2" />
-              </svg>
-            </button>
-            {!composerOptionsOpen && pillSummary && (
-              <span data-testid="chat-pill-summary" className="chat-pill-summary">{pillSummary}</span>
-            )}
-          </>
-        )}
         {/* Shown only where a file staged here can actually reach the model.
             The alternative is worse than a missing button: the picture is drawn
             into the user's own bubble and then dropped, so the customer sees
             their screenshot in the transcript and an answer that never looked
             at it. */}
-        {!mobile && renderAttachmentButton()}
+        {renderAttachmentButton()}
         {/* Voice input. Shown wherever the box has something to transcribe WITH
             — the route itself is edition-neutral, so what actually decides is
             whether this device holds a ClawBox AI credential. Offering the
@@ -7474,7 +7822,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         {/* Create: the Coding Agent's New app wizard, right here. The owner
             asked for it beside the attach and microphone buttons — the chat is
             where the handoff lands, so it is where the request should start. */}
-        {composerExtrasShown && (
         <button
           onClick={toggleNewApp}
           title={t("codingAgent.createNewProject")}
@@ -7494,7 +7841,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         >
           <span className="material-symbols-rounded" style={{ fontSize: 22 }}>add</span>
         </button>
-        )}
         {/* Making a picture, where the AGENT cannot.
             Shown on the trigger and not on `canGenerateImages`, because the two
             answer different questions: the flag says a picture can be made
@@ -7502,7 +7848,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             asks and the agent's own tool draws — a button there would be a
             second way to ask for something the chat already does, and the
             adapter refuses it outright. */}
-        {caps.imageGenerationTrigger === 'composer' && composerExtrasShown && (
+        {caps.imageGenerationTrigger === 'composer' && (
           <button
             onClick={() => { void generatePicture() }}
             // Disabled with nothing typed, because the composer's text IS the
@@ -7538,7 +7884,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               paperclip with the whole width empty beside it. Sharing one basis
               (the pills' plus the gap plus the button) makes the break happen
               in front of both or neither, at 3, 4 or 5 buttons. */}
-          {composerExtrasShown && (
           <div className="chat-composer-tail">
           <div className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
           {harnessId === 'hermes' ? (
@@ -7837,8 +8182,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
         {!mobile && renderSendButton()}
         </div>
-        )}
         </div>
+        )}
       </div>
 
       {/* Where a drop against an edge would land the chat — the same plate the

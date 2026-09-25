@@ -2,7 +2,7 @@ import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile, realpath, rm, writeFile } from "fs/promises";
 import { existsSync } from "fs";
-import path from "path";
+import path from "./runtime-path";
 import { get, getKnown, set, setMany } from "./config-store";
 import {
   findOpenclawBin,
@@ -80,6 +80,7 @@ import {
 } from "./drift-codes";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
+import { readStateSchemaVersion, statePath } from "./openclaw-state-store";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -112,7 +113,58 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // `{target: null, updateAvailable: false}` — "no OpenClaw update available" over a
 // box that has one, the false-success shape — and `reinstallManagedPluginPayload`
 // pinned the channel plugins to `@2026.8.1` on a 2026.9.3 core.
-const OPENCLAW_VERSION_FALLBACK = "2026.9.3";
+const OPENCLAW_VERSION_FALLBACK = "2026.9.4";
+
+/**
+ * The state-DB schema each pinned core supports, read from
+ * `OPENCLAW_STATE_SCHEMA_VERSION` in the published tarball's
+ * `dist/openclaw-state-db-contract-*.js` — not from release notes, which do
+ * not carry the number.
+ *
+ * It exists because OpenClaw NEVER downgrades a state schema. Once a core has
+ * opened `~/.openclaw/state/openclaw.sqlite` it migrates the file forward and
+ * every older core then refuses it outright ("uses newer schema version N;
+ * this build supports M"). A pin that moves BACKWARDS past such a box, or an
+ * update that installs a core older than the file on disk, leaves the device
+ * with an assistant that cannot start — so the pin bump has to carry the
+ * schema it implies, and the updater has to be able to compare the two before
+ * it installs anything.
+ *
+ * Exact-match only, and deliberately so: a pin this table has never seen
+ * answers `null` and the pre-flight below stands down rather than guessing a
+ * number for it. Guessing in either direction is worse than not asking —
+ * too low refuses a healthy box, too high lets the mid-run failure through
+ * that this whole check exists to replace.
+ */
+const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
+  "2026.8.1": 15,
+  "2026.9.3": 16,
+  "2026.9.4": 17,
+};
+
+/** The state schema `version` supports, or null when this pin is not in the table. */
+export function openclawStateSchemaFor(version: string | null | undefined): number | null {
+  if (!version) return null;
+  return OPENCLAW_STATE_SCHEMA_BY_VERSION[version.trim()] ?? null;
+}
+
+/**
+ * The OpenClaw this device is meant to converge on — NOT npm's latest.
+ *
+ * The pin file is canonical; `OPENCLAW_PIN_VERSION` overrides it for QA exactly
+ * as it does in install.sh and gateway-pre-start.sh; the compiled constant is
+ * the last resort for the one moment the file cannot be read.
+ */
+async function readPinnedOpenclawVersion(): Promise<string> {
+  const envPin = process.env.OPENCLAW_PIN_VERSION?.trim();
+  if (envPin) return envPin;
+  try {
+    const raw = await readFile(OPENCLAW_TARGET_FILE, "utf-8");
+    return raw.trim().split(/\s+/)[0] || OPENCLAW_VERSION_FALLBACK;
+  } catch {
+    return OPENCLAW_VERSION_FALLBACK;
+  }
+}
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
@@ -637,6 +689,10 @@ import {
 // string work with no `fs` behind it, and taking it from the reader would tie a
 // pure helper to that module's surface for no reason.
 import { canonicalPluginId } from "./plugin-repair-id";
+// The retry a core update owes the rows an older core left (TASK-1088), and
+// the release it is bounded by.
+import { retryPluginRepairsAfterCoreUpdate } from "./plugin-repair-after-update";
+import { currentCoreRelease } from "./plugin-repair-run";
 // The journal of THIS run of a root step, in one place: `systemctl show -p
 // InvocationID` cannot answer it (systemd has collected the instance by the
 // time anyone asks), and the same read is owed to the follow in
@@ -787,11 +843,60 @@ function getStepFailureLine(logText: string, unit: string): string | null {
     .filter((line) => !line.startsWith(`${unit}:`)
       && !SYSTEMD_LIFECYCLE_LINE.test(line)
       && !SESSION_BOOKKEEPING_LINE.test(line));
-  if (lines.length === 0) return null;
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/^(?:error|fatal)\b/i.test(lines[i])) return lines[i];
   }
+  // Nothing in the step SAID why. Before falling back to whatever the step
+  // happened to print last, ask systemd how the process ended: a shell the OOM
+  // killer took never reaches its own `Error:` branch, so on the box that
+  // matters most there is no sentence to find. Without this, the banner became
+  // an unrelated progress line — "Rebuild failed: Swapfile already active: 4G"
+  // is what an owner was shown for an update killed for memory (TASK-1022).
+  const killed = getKillNote(logText);
+  if (killed) return killed;
+  if (lines.length === 0) return null;
   return lines[lines.length - 1];
+}
+
+/**
+ * systemd's epitaph for the step, which the filter above deliberately drops
+ * from the owner-facing line because it carries the unit name. It is the one
+ * record of a process that was KILLED rather than one that reported a failure:
+ * `…: Main process exited, code=killed, status=9/KILL` when the shell itself
+ * was signalled, and `code=exited, status=137/n/a` when it was a child the
+ * shell then reported as 128+9.
+ */
+const MAIN_PROCESS_EXIT_LINE = /Main process exited, code=(\w+), status=(\d+)/;
+
+/**
+ * systemd's verdict when the cgroup's own OOM event fired — the ONLY thing in
+ * a unit's journal that PROVES memory. `status=9/KILL` is equally the shape of
+ * a stop timeout, `systemctl kill`, a watchdog and an operator, and telling an
+ * owner their device ran out of memory over any of those sends them after a
+ * problem they do not have. An OOM is the likeliest end for the rebuild step
+ * on this hardware; likeliest is not the same as known.
+ */
+const OOM_RESULT_LINE = /Failed with result 'oom-kill'/;
+
+/**
+ * Deliberately says "the step", not "the build": this is the failure line for
+ * EVERY root step — apt_update and the rest — and only one of them is a build.
+ */
+function getKillNote(logText: string): string | null {
+  const match = logText.match(MAIN_PROCESS_EXIT_LINE);
+  if (!match) return null;
+  const status = Number(match[2]);
+  if (!Number.isFinite(status)) return null;
+  const signal = match[1] === "killed"
+    ? status
+    : status > 128 && status < 160 ? status - 128 : null;
+  if (signal === null) return null;
+  if (signal !== 9) {
+    return `Error: the step was killed by signal ${signal} (exit ${128 + signal})`;
+  }
+  return OOM_RESULT_LINE.test(logText)
+    ? "Error: the step was killed by the kernel's OOM killer (exit 137) — the device ran out of memory. Free memory and Retry."
+    : "Error: the step was killed (SIGKILL, exit 137) without reporting a reason — the journal shows no OOM kill, so a stop or a timeout looks the same.";
 }
 
 /**
@@ -3160,6 +3265,45 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
 }
 
 /**
+ * Retry the plugin repairs an OLDER CORE left behind, once the gateway is known
+ * to be healthy (TASK-1088).
+ *
+ * The journal-driven repair above cannot see them: a plugin the boot script
+ * switched off is never refused by the gateway, so a box whose Codex and
+ * DeepSeek installs failed against OpenClaw 2026.9.3 came through the 2026.9.4
+ * update healthy, with both still switched off and both still "Needs repair".
+ * `plugin-repair-after-update.ts` owns the rule — what is retried, once per
+ * core, proved by a gateway that comes back ready — and this supplies the
+ * update's own quiesce and readiness check to it.
+ *
+ * Not on the x64 desktop package, for the reason `ensureGatewayHealthy` gives:
+ * that gateway is the owner's user service, and the appliance's repairs are not
+ * its to inherit.
+ */
+async function retryPluginRepairsLeftByOlderCore(): Promise<void> {
+  if (hasX64DesktopIntegration(PROJECT_DIR)) return;
+  try {
+    await retryPluginRepairsAfterCoreUpdate({
+      release: currentCoreRelease,
+      quiesce: withGatewayQuiesced,
+      restartAndVerify: () => ensureGatewayHealthy({ restartFirst: true }),
+    });
+  } catch (err) {
+    // A repair the update OFFERS, never one it depends on: the gateway was
+    // healthy without these plugins a moment ago, and a retry that went wrong
+    // must not turn that into a failed update. Bring the gateway back to that
+    // state — the retry has already switched anything it enabled back off —
+    // and fail the step only if it will not come back even then, which is a
+    // dead gateway and the update's to report.
+    console.warn(
+      "[Updater] the after-update plugin repair did not complete:",
+      err instanceof Error ? err.message : err,
+    );
+    await ensureGatewayHealthy();
+  }
+}
+
+/**
  * Say WHY the gateway is not there, in the order of what the owner can act on.
  *
  * A configuration the core refuses outranks anything in the journal, because
@@ -3327,7 +3471,13 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     id: "gateway_verify",
     label: "Verifying gateway health",
     timeoutMs: 90_000,
-    customRun: () => ensureGatewayHealthy(),
+    // Health first: the after-update plugin retry (TASK-1088) restarts the
+    // gateway only when it has something to load, and only a healthy gateway
+    // is one it can prove a repair against.
+    customRun: async () => {
+      await ensureGatewayHealthy();
+      await retryPluginRepairsLeftByOlderCore();
+    },
     failFast: true,
     // The gateway is absent by design on this SKU — port 18789 is closed and
     // the unit is masked — so this step could only ever throw. It also
@@ -3567,14 +3717,18 @@ async function readPkgVersion(pkgPath: string): Promise<string | null> {
 /**
  * The installed ClawBox version, read from package.json at runtime.
  *
- * Deliberately NOT `NEXT_PUBLIC_APP_VERSION`: that's baked at build time from
- * `git describe`, so when a device syncs new code + package.json without a
- * clean Next rebuild, the baked value goes stale — the device then mis-reports
+ * Deliberately NOT `NEXT_PUBLIC_APP_VERSION`: that's baked at build time (from
+ * package.json, by next.config.ts), so when a device syncs new code + package.json
+ * without a clean Next rebuild, the baked value goes stale — the device then mis-reports
  * its own version and keeps offering an update it already installed. package.json
  * is rewritten by the git sync, so it always reflects the running release.
  * Falls back to the build-time value, then "unknown", if the file is unreadable.
+ *
+ * Exported so release-identity.test.ts can hold this `clawbox.current` to the
+ * same release as About's fallback and the What's new card, against the
+ * shipped package.json rather than a mocked read.
  */
-async function readClawboxVersion(): Promise<string> {
+export async function readClawboxVersion(): Promise<string> {
   const v = await readPkgVersion(CLAWBOX_PKG);
   if (v) return v.startsWith("v") ? v : `v${v}`;
   return process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
@@ -3690,16 +3844,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     // Read the ClawBox-pinned target — NOT npm's latest. The pin file is
     // the canonical source for which OpenClaw the fleet should converge on.
     // Env override (`OPENCLAW_PIN_VERSION`) mirrors install.sh for QA flows.
-    (async (): Promise<string | null> => {
-      const envPin = process.env.OPENCLAW_PIN_VERSION?.trim();
-      if (envPin) return envPin;
-      try {
-        const raw = await readFile(OPENCLAW_TARGET_FILE, "utf-8");
-        return raw.trim().split(/\s+/)[0] || OPENCLAW_VERSION_FALLBACK;
-      } catch {
-        return OPENCLAW_VERSION_FALLBACK;
-      }
-    })(),
+    readPinnedOpenclawVersion(),
     readClawboxVersion(),
     // Gated on the edition, not on a try/catch: the `openclaw` SKU has no
     // hermes binary, so this must never spawn there.
@@ -4507,7 +4652,11 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
     id: "gateway_restart",
     label: "Restarting OpenClaw gateway",
     timeoutMs: 30_000,
-    customRun: () => ensureGatewayHealthy({ restartFirst: true }),
+    // The core-only update changes the core too, so it owes the same retry.
+    customRun: async () => {
+      await ensureGatewayHealthy({ restartFirst: true });
+      await retryPluginRepairsLeftByOlderCore();
+    },
   },
 ];
 
@@ -4557,6 +4706,139 @@ async function checkInternet(): Promise<boolean> {
     // no HTTPS path either
   }
   return false;
+}
+
+/**
+ * The OpenClaw this update will INSTALL: the pin in the release it is about to
+ * check out, not the one in the checkout it is leaving (TASK-1197).
+ *
+ * The pin file on disk is the CURRENT release's until `bootstrap_updater` syncs
+ * the tree, and the pre-flight used to read exactly that — so it judged every
+ * full update by the core the box already had. Both directions of that are
+ * wrong. A box pinned 2026.9.3 whose store a 2026.9.4 core had migrated (the
+ * TASK-1088 box) was refused the very update that pins 2026.9.4 and would have
+ * repaired it; and an update to a release whose pin moves BACKWARDS was let
+ * through on the newer pin, into the mid-run failure the check exists to stop.
+ *
+ * So the question is asked of the release itself: the branch the sync will
+ * reset to (`resolveUpdateBranch`, the same answer `updateClawBoxAndReboot`
+ * resets to), fetched, and its `config/openclaw-target.txt` read with
+ * `git show` — nothing is checked out, so a refusal still leaves the box
+ * exactly as it was. `OPENCLAW_PIN_VERSION` overrides it here as it does in
+ * install.sh.
+ *
+ * Null whenever that cannot be done without guessing — no branch, a remote
+ * that is not `origin`, a fetch that did not land, a release with no pin file.
+ * ONE attempt: this is a pre-flight, and its failure costs nothing, because the
+ * install step asks again on the synced tree before it touches the core (see
+ * runUpdate). It must not make an offline box wait through retries for the
+ * "No internet connection" it is about to be told.
+ */
+async function readUpdateTargetOpenclawPin(): Promise<string | null> {
+  const envPin = process.env.OPENCLAW_PIN_VERSION?.trim();
+  if (envPin) return envPin;
+  let upstream: string;
+  try {
+    ({ upstream } = await resolveUpdateBranch(PROJECT_DIR));
+  } catch {
+    // Unresolvable: step 0 refuses the run with its own sentence.
+    return null;
+  }
+  if (!upstream.startsWith("origin/")) return null;
+  const branch = upstream.slice("origin/".length);
+  if (!isSafeBranch(branch)) return null;
+  const remote = await reachOrigin(PROJECT_DIR, ["fetch", "--quiet", "origin", branch], {
+    timeout: 20_000,
+    attempts: 1,
+  });
+  if (!remote.reachable) return null;
+  try {
+    const { stdout } = await execGit(PROJECT_DIR, ["show", `${upstream}:config/openclaw-target.txt`], {
+      timeout: 10_000,
+    });
+    // The same first-token read as readPinnedOpenclawVersion and install.sh.
+    return String(stdout ?? "").trim().split(/\s+/)[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * When the pre-flight is asked, which decides what a refusal can truthfully
+ * say about the box.
+ *
+ * `before-update`: ahead of step 1, and nothing has changed. `before-install`:
+ * at the `openclaw_install` boundary, after the repo sync and the package steps
+ * ahead of it have run — but before the core is touched, so the assistant still
+ * has the one it had.
+ */
+type SchemaCheckMoment = "before-update" | "before-install";
+
+/**
+ * "This box's data is newer than the core this update would install" — asked
+ * BEFORE the core is touched, answered in one sentence or not at all.
+ *
+ * WHY IT IS A PRE-FLIGHT AND NOT A FAILURE MESSAGE. OpenClaw migrates
+ * `~/.openclaw/state/openclaw.sqlite` forward and NEVER back. A box whose store
+ * a newer core has opened is on a schema every older core refuses outright, and
+ * the refusal arrives from `npm install -g openclaw@<pin>`'s first CLI call —
+ * i.e. from INSIDE `openclaw_install`, after the step has retired the working
+ * core and written a new one over it. That is how a customer's V4.0 update
+ * stopped dead at "Updating OpenClaw" with "the device pins 2026.9.3, but
+ * ~/.openclaw/state/openclaw.sqlite uses schema 17 and this build supports only
+ * schema 16" (TASK-1088), leaving a box with no assistant and an update it
+ * could only retry into the same wall. The numbers are knowable before anything
+ * is touched, so they are read before anything is touched.
+ *
+ * IT REFUSES ONLY ON PROOF. Four separate unknowns each return null — a target
+ * pin that could not be read, a pin whose schema is not in the table, a device
+ * with no state store, a store that could not be read — because none of them is
+ * evidence of a newer schema, and an update refused over an unknown strands
+ * exactly the box an update repairs. Standing down costs what the box has
+ * today: the mid-run failure.
+ *
+ * `target` is the pin the update will install — see readUpdateTargetOpenclawPin
+ * for why that is not simply the pin file on disk.
+ */
+async function newerStateSchemaRefusal(target: string | null, moment: SchemaCheckMoment): Promise<string | null> {
+  try {
+    if (!target) {
+      console.warn(
+        "[Updater] could not read which OpenClaw this update installs; the state-DB pre-flight stood down"
+        + " until the install step, which asks again on the synced tree",
+      );
+      return null;
+    }
+    const supported = openclawStateSchemaFor(target);
+    if (supported === null) {
+      console.warn(
+        `[Updater] no state schema recorded for the pinned OpenClaw ${target}; the state-DB pre-flight stood down`,
+      );
+      return null;
+    }
+    const dbPath = statePath();
+    if (!dbPath) return null;
+    const onDisk = readStateSchemaVersion();
+    if (onDisk === null || onDisk <= supported) return null;
+    return (
+      `This device's OpenClaw data is newer than the version this update installs. `
+      + `${dbPath} is on state schema ${onDisk}, and the pinned OpenClaw ${target} supports schema ${supported}. `
+      + `OpenClaw never downgrades a state schema, so installing it would leave the assistant unable to open its own data — `
+      + (moment === "before-update"
+        ? `the update was refused before it changed anything. `
+        : `the update stopped before it touched OpenClaw, and the assistant keeps the core it has. `)
+      + `Update ClawBox to a build whose pinned OpenClaw supports state schema ${onDisk} or newer, `
+      + `or restore the backup taken before the core that migrated this device.`
+    );
+  } catch (err) {
+    // A guard may not be the thing that fails an update. Whatever went wrong
+    // here, the box is no worse off than it was before this check existed.
+    console.warn(
+      "[Updater] could not read the OpenClaw state schema before the update:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
 }
 
 /** Execute or resume update steps, recording failure and respecting host maintenance ownership. */
@@ -4653,6 +4935,44 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     }
   }
 
+  // THE STATE-SCHEMA PRE-FLIGHT — its first ask; the second stands at the
+  // `openclaw_install` boundary in the loop.
+  //
+  // After the resume index has been resolved, so the question is asked about
+  // the steps this run will ACTUALLY execute: a continuation or a resume that
+  // is already past `openclaw_install` has its new core on the disk and must
+  // not be stopped by a check it has overtaken — that would strand a half-
+  // updated box. And before the loop, so it is ahead of every step that
+  // changes the device, which is the whole point (see newerStateSchemaRefusal).
+  //
+  // The lock above is already on disk by now, and is released here the way the
+  // internet refusal below releases it: it is a marker saying a run exists, not
+  // a change to the box, and the run it marks is over as of this line.
+  //
+  // ASKED OF THE PIN THIS RUN INSTALLS (TASK-1197). With the repo sync still
+  // ahead, that is the target release's pin, fetched and read without checking
+  // anything out; once the sync is behind the run (the OpenClaw-only flow never
+  // has one, a resume may be past it) the tree on disk IS the target. When the
+  // target could not be read, the `openclaw_install` boundary below asks again
+  // on the synced tree — `schemaCheckedPin` is what it compares against, so a
+  // pin already cleared here is not asked twice.
+  const remainingSteps = steps.slice(startFrom);
+  let schemaCheckedPin: string | null = null;
+  if (remainingSteps.some((s) => s.id === "openclaw_install")) {
+    const syncAhead = remainingSteps.some((s) => s.id === "bootstrap_updater");
+    const target = syncAhead ? await readUpdateTargetOpenclawPin() : await readPinnedOpenclawVersion();
+    const refusal = await newerStateSchemaRefusal(target, "before-update");
+    schemaCheckedPin = target;
+    if (refusal) {
+      console.error(`[Updater] refusing the update before step 1: ${refusal}`);
+      runtime.state.phase = "failed";
+      runtime.state.error = refusal;
+      runtime.state.currentStepIndex = -1;
+      await clearUpdateLock();
+      return;
+    }
+  }
+
   // (A resumed run made this check above, before the record it resumes from
   // was cleared.)
   if (startFrom === 0 && !(await checkInternet())) {
@@ -4697,6 +5017,29 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     // where a dead run stopped and continue from there.
     if (ownsTheDesktop) {
       await setUpdateLock(step.id, runtime.state.steps.filter((s) => s.status === "failed").map((s) => s.id));
+    }
+
+    // THE PRE-FLIGHT'S SECOND ASK, at the one boundary where the pin on disk is
+    // exactly the one install.sh is about to read (TASK-1197): the repo sync is
+    // behind the run and the core has not been touched. Only for a pin the first
+    // ask did not already clear — a target that could not be fetched then, or
+    // a sync that landed somewhere else. Refused HERE, the step is failed with
+    // the sentence and the run stops: the steps before it changed packages and
+    // the checkout, never OpenClaw, so the assistant keeps the core it has
+    // instead of the retired one the install would have left.
+    if (step.id === "openclaw_install") {
+      const installing = await readPinnedOpenclawVersion();
+      const refusal = installing === schemaCheckedPin
+        ? null
+        : await newerStateSchemaRefusal(installing, "before-install");
+      if (refusal) {
+        console.error(`[Updater] refusing to install OpenClaw ${installing}: ${refusal}`);
+        runtime.state.steps[i].status = "failed";
+        runtime.state.steps[i].error = refusal;
+        runtime.state.error = refusal;
+        failed = true;
+        break;
+      }
     }
 
     // The window the warning read below is bounded by. Taken BEFORE the

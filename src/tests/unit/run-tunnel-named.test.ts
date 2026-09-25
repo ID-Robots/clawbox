@@ -17,6 +17,9 @@ import path from "node:path";
  *   - the named run dying inside its first window → the quick tunnel
  *   - Cloudflare refusing the token → credential removed, its fingerprint kept
  *   - the token never reaches stdout, whatever cloudflared prints
+ *   - the length bounds on the token and the hostname label, which used to be
+ *     bounded repeats in a bash regex, still accept and reject the same strings —
+ *     and validating the credential no longer costs the supervisor 260 MB
  */
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -29,6 +32,45 @@ const QUICK_URL = "https://fake-quick-789.trycloudflare.com";
 let root: string;
 let fakeBin: string;
 let callLog: string;
+
+// Every fixture is started `detached: true`, so one signal reaps the whole group:
+// run-tunnel.sh, its pipeline subshell and the fake cloudflared's `while true`
+// loop. That only helps if something always sends it. When it was sent from
+// stop() alone, a test that failed — or a vitest abort — before stop() left the
+// group behind: six of them (18 processes) were once found still running four
+// hours after the suite finished, their temp dirs long deleted. Every start() is
+// recorded here and reaped in afterEach, pass or fail.
+const spawned: ChildProcess[] = [];
+
+function reapSpawned() {
+  let failure: unknown;
+  for (const child of spawned.splice(0)) {
+    if (child.pid == null) continue;
+    try {
+      // A negative pid signals the group. The group outliving the leader is
+      // exactly the leak being closed here, so signal it even once the child
+      // itself has exited.
+      process.kill(-child.pid, "SIGTERM");
+    } catch (err) {
+      // ESRCH: nothing left in the group — the outcome this is here to get.
+      if ((err as NodeJS.ErrnoException).code !== "ESRCH" && !failure) failure = err;
+    }
+  }
+  if (failure) throw failure;
+}
+
+// Belt and braces for the case afterEach cannot cover: vitest tearing the worker
+// down mid-test. Whatever afterEach already reaped is gone from the array. This
+// one swallows: an exception thrown from an `exit` listener is an uncaught
+// exception during shutdown, which would turn a green run red over a signal that
+// could not be delivered.
+process.once("exit", () => {
+  try {
+    reapSpawned();
+  } catch {
+    // Nothing useful left to do at exit.
+  }
+});
 
 const cf = (name: string) => path.join(root, "data", "cloudflared", name);
 
@@ -64,7 +106,15 @@ while true; do sleep 0.2; done
 });
 
 afterEach(() => {
-  rmSync(root, { recursive: true, force: true });
+  // Before the temp dir goes: the leaked groups found on the box were still
+  // running with the CLAWBOX_ROOT they had been started with already deleted.
+  // `finally`, so a signal that could not be delivered is still reported but does
+  // not trade the process leak for a temp-dir one.
+  try {
+    reapSpawned();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function writeCredential(content = `hostname=${HOST}\ntoken=${TOKEN}\n`) {
@@ -84,6 +134,7 @@ function start(env: Record<string, string> = {}): Run {
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  spawned.push(child);
   child.stdout!.on("data", (d) => (out += d));
   child.stderr!.on("data", (d) => (out += d));
   const exited = new Promise<number | null>((resolve) => {
@@ -106,6 +157,17 @@ async function stop(run: Run) {
 }
 
 const calls = () => (existsSync(callLog) ? readFileSync(callLog, "utf-8") : "");
+
+/** One of the Vm* lines of /proc/<pid>/status, in kB. */
+function procVmKb(pid: number, field: "VmPeak" | "VmSize"): number {
+  const status = readFileSync(`/proc/${pid}/status`, "utf-8");
+  const match = new RegExp(`^${field}:\\s+(\\d+) kB$`, "m").exec(status);
+  expect(match, `no ${field} line in /proc/${pid}/status`).not.toBeNull();
+  return Number(match![1]);
+}
+
+/** A token of `length` characters from the alphabet the script accepts. */
+const tokenOf = (length: number) => "a".repeat(length);
 
 describe("run-tunnel.sh — named tunnel", () => {
   it("runs the named tunnel when a credential is on file, and publishes its hostname", async () => {
@@ -192,4 +254,82 @@ describe("run-tunnel.sh — named tunnel", () => {
     // Cleared on exit, like tunnel.url.
     expect(existsSync(cf("tunnel.mode"))).toBe(false);
   });
+
+  it.runIf(process.platform === "linux")(
+    "validates the credential without allocating a bounded-repeat NFA",
+    async () => {
+      writeCredential();
+      const run = start();
+      await waitFor(urlIs(`https://${HOST}`));
+
+      // The supervisor validates the token once and then stays up for the whole
+      // tunnel lifetime, so whatever that match allocates it holds until the
+      // tunnel stops. glibc compiles a bounded repeat by expanding it into one
+      // NFA state per permitted repetition, so `{32,4096}` left this bash at
+      // VmSize 268 MB — on an 8 GB box, 261 MB of swap for a length check.
+      // Measured here against the pre-fix script: VmPeak 279552 kB, VmSize
+      // 268404 kB; against this one, 7800 kB for both. VmPeak is checked as well
+      // as VmSize because it is the one figure glibc cannot hand back — a future
+      // allocator that trimmed the arena after the match would hide the cost
+      // from VmSize while still paying it.
+      const ceilingKb = 32 * 1024;
+      expect(procVmKb(run.child.pid!, "VmPeak")).toBeLessThan(ceilingKb);
+      expect(procVmKb(run.child.pid!, "VmSize")).toBeLessThan(ceilingKb);
+
+      expect(await stop(run)).toBe(0);
+    },
+  );
+
+  // The bounds used to be the `{32,4096}` in the regex itself; they are an
+  // explicit length check now, and the accepted set must not have moved.
+  for (const { length, accepted } of [
+    { length: 31, accepted: false },
+    { length: 32, accepted: true },
+    { length: 4096, accepted: true },
+    { length: 4097, accepted: false },
+  ]) {
+    it(`${accepted ? "accepts" : "rejects"} a ${length}-character token`, async () => {
+      const token = tokenOf(length);
+      writeCredential(`hostname=${HOST}\ntoken=${token}\n`);
+      const run = start();
+
+      if (accepted) {
+        await waitFor(urlIs(`https://${HOST}`));
+        expect(readFileSync(cf("tunnel.mode"), "utf-8").trim()).toBe("named");
+        expect(calls()).toContain("argv:tunnel --no-autoupdate run --url http://localhost:80");
+      } else {
+        // A rejected credential is not an error: the script falls back quietly.
+        await waitFor(urlIs(QUICK_URL));
+        expect(readFileSync(cf("tunnel.mode"), "utf-8").trim()).toBe("quick");
+        expect(calls()).not.toContain(" run ");
+      }
+      expect(run.output()).not.toContain(token);
+
+      await stop(run);
+    });
+  }
+
+  // Same story for the hostname label: `{0,61}` between the first and last
+  // character is a 63-character label, and a length check says so more cheaply.
+  for (const { length, accepted } of [
+    { length: 63, accepted: true },
+    { length: 64, accepted: false },
+  ]) {
+    it(`${accepted ? "accepts" : "rejects"} a ${length}-character hostname label`, async () => {
+      const host = `${"a".repeat(length)}.clawbox.tech`;
+      writeCredential(`hostname=${host}\ntoken=${TOKEN}\n`);
+      const run = start();
+
+      if (accepted) {
+        await waitFor(urlIs(`https://${host}`));
+        expect(readFileSync(cf("tunnel.mode"), "utf-8").trim()).toBe("named");
+      } else {
+        await waitFor(urlIs(QUICK_URL));
+        expect(calls()).not.toContain(" run ");
+        expect(run.output()).not.toContain(TOKEN);
+      }
+
+      await stop(run);
+    });
+  }
 });

@@ -102,13 +102,18 @@ function sourceInstallShellFns(tmp: string): string[] {
     "runtime_wakes_unit",
     "resume_paused_engines",
     "free_memory_for_build",
+    "pause_gateway_if_build_needs_room",
+    "report_gateway_build_pause",
   ];
   return [
     `: > "${tmp}/fns.sh"`,
     // The top-level state the pair keeps between the stop and the start, and
     // the settle the check waits out. Cut from install.sh too, so a test cannot
     // pass by declaring them itself.
-    `grep -E '^(PAUSED_ENGINE_[A-Z_]+|ENGINE_SETTLE_S|RUNTIME_WOKEN_UNITS)=' "$1" >> "${tmp}/fns.sh" || true`,
+    `grep -E '^(PAUSED_ENGINE_[A-Z_]+|ENGINE_SETTLE_S|RUNTIME_WOKEN_UNITS|BUILD_GATEWAY_ROOM_MB|GATEWAY_PAUSED_FOR_BUILD_AT)=' "$1" >> "${tmp}/fns.sh" || true`,
+    // …and the guard that turns a junk threshold back into the default, which
+    // is a `case` line rather than an assignment.
+    `grep -E '^case "[$]BUILD_GATEWAY_ROOM_MB"' "$1" >> "${tmp}/fns.sh" || true`,
     ...fns.map((f) => `sed -n '/^${f}() {/,/^}/p' "$1" >> "${tmp}/fns.sh"`),
     `. "${tmp}/fns.sh"`,
   ];
@@ -316,7 +321,11 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
     }
   };
 
-  function run({ existingUnits = "ollama.service kokoro-server.service" } = {}) {
+  function run({
+    existingUnits = "ollama.service kokoro-server.service",
+    ramKb,
+    args = "",
+  }: { existingUnits?: string; ramKb?: number; args?: string } = {}) {
     const log = path.join(tmp, "systemctl.log");
     fs.writeFileSync(log, "");
     const script = [
@@ -327,7 +336,13 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
       'CLAWBOX_USER="$(id -un)"',
       `export PATH="${tmp}/bin:$PATH"`,
       ...sourceInstallShellFns(tmp),
-      "free_memory_for_build 2>&1",
+      // The gateway branch reads THIS machine's MemTotal, and a runner with
+      // 16 GB would never take it. Only the MemTotal program is answered;
+      // available_mb's own awk over the same file must still be the real one.
+      ...(ramKb === undefined
+        ? []
+        : [`awk() { case "$1" in *MemTotal*) echo ${ramKb} ;; *) command awk "$@" ;; esac; }`]),
+      `free_memory_for_build ${args} 2>&1`,
     ].join(NL);
     let code = 0;
     let out: string;
@@ -355,6 +370,42 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
     const r = run();
     expect(r.calls).toContain("stop ollama.service");
     expect(r.calls.join(NL)).not.toMatch(/\bdisable\b/);
+  });
+
+  it("pauses the gateway up front on the update's reboot path, on a box that cannot spare it (TASK-1022)", () => {
+    // On the 8 GB Jetson the agent was still resident while `next build` was
+    // killed for memory: gateway + local model + desktop against 7.4 GiB. Once
+    // the engines are down the gateway is the largest thing left, and it goes
+    // through the same pause/resume pair, so it comes back afterwards. The
+    // update reboots at the end of this path, so it is the proven shape and
+    // TASK-1197 leaves it exactly as it was.
+    const r = run({
+      ramKb: 7_800_000, existingUnits: "ollama.service clawbox-gateway.service", args: "--reboot-follows",
+    });
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain("stop clawbox-gateway.service");
+  });
+
+  it("keeps the gateway through the engine stops on a rebuild nothing reboots after (TASK-1197)", () => {
+    // `install.sh --step rebuild` used to take the assistant, every channel
+    // and every turn in flight away before bun install, for the whole rebuild.
+    // Here only the model engines go; the gateway is judged just before the
+    // build, on what is left then (pause_gateway_if_build_needs_room).
+    const r = run({ ramKb: 7_800_000, existingUnits: "ollama.service clawbox-gateway.service" });
+    expect(r.code).toBe(0);
+    expect(r.calls).toContain("stop ollama.service");
+    expect(r.calls.some((c) => c.includes("stop clawbox-gateway.service"))).toBe(false);
+    expect(r.out).toMatch(/Keeping clawbox-gateway\.service up for now/);
+  });
+
+  it("leaves the gateway up on a box with memory to spare", () => {
+    // An update must not take the assistant away from the owner for the length
+    // of a build that was never going to run out of memory. 12 GB is the same
+    // line ensure_build_swap draws, for the same reason.
+    const r = run({ ramKb: 16_000_000, existingUnits: "ollama.service clawbox-gateway.service" });
+    expect(r.code).toBe(0);
+    expect(r.calls.some((c) => c.includes("stop clawbox-gateway.service"))).toBe(false);
+    expect(r.out).toMatch(/Leaving clawbox-gateway\.service up/);
   });
 
   it("skips a unit the box does not have", () => {
@@ -516,6 +567,7 @@ describe("free_memory_for_build gives back what it took", () => {
         "    done",
         "    exit 1 ;;",
         '  *" stop "*)',
+        '    [ -n "${STOP_FAILS:-}" ] && exit 1',
         '    printf inactive > "$state"',
         "    exit 0 ;;",
         '  *" start "*)',
@@ -705,6 +757,118 @@ describe("free_memory_for_build gives back what it took", () => {
     expect(r.calls).toContain("start ollama.service");
   });
 
+  /**
+   * TASK-1197: the gateway on a rebuild nothing reboots after, judged just
+   * before `next build` on the memory actually left — then the build, then the
+   * resume and the report, which is the order do_rebuild runs them in.
+   */
+  function judgeRoom({
+    ramKb = 7_800_000,
+    availKb = 3_000_000 as number | null,
+    activeUnits = "ollama.service clawbox-gateway.service",
+    room,
+    stopFails = "",
+  }: { ramKb?: number; availKb?: number | null; activeUnits?: string; room?: string; stopFails?: string } = {}) {
+    const log = path.join(tmp, "systemctl.log");
+    const state = path.join(tmp, "state");
+    fs.writeFileSync(log, "");
+    fs.mkdirSync(state, { recursive: true });
+    // MemTotal and MemAvailable are answered; every other awk is the real one.
+    // A null MemAvailable is a /proc that could not be read.
+    const avail = availKb === null ? "return 0" : `echo ${availKb}`;
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR="${tmp}"`,
+      'CLAWBOX_USER="$(id -un)"',
+      `export PATH="${tmp}/bin:$PATH"`,
+      ...sourceInstallShellFns(tmp),
+      `awk() { case "$1" in *MemTotal*) echo ${ramKb} ;; *MemAvailable*) ${avail} ;; *) command awk "$@" ;; esac; }`,
+      "pause_gateway_if_build_needs_room 2>&1",
+      "echo '--- build happens here ---'",
+      "resume_paused_engines 2>&1",
+      "report_gateway_build_pause 2>&1",
+    ].join(NL);
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      SYSTEMCTL_LOG: log,
+      SYSTEMCTL_STATE: state,
+      EXISTING_UNITS: "ollama.service clawbox-gateway.service",
+      ACTIVE_UNITS: activeUnits,
+      START_FAILS: "",
+      STOP_FAILS: stopFails,
+    };
+    if (room === undefined) delete env.CLAWBOX_BUILD_GATEWAY_ROOM_MB;
+    else env.CLAWBOX_BUILD_GATEWAY_ROOM_MB = room;
+    const out = execFileSync("bash", ["-c", script, "bash", INSTALL_SH_PATH], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
+    });
+    return { out, calls: fs.readFileSync(log, "utf8").split(NL).filter(Boolean) };
+  }
+
+  it("pauses the gateway for the build when the room is not there, and says so with the numbers", () => {
+    // ~2.9 GB left beside the gateway on an 8 GB box: the TASK-1022 shape.
+    const r = judgeRoom({ availKb: 3_000_000 });
+    const stop = r.calls.indexOf("stop clawbox-gateway.service");
+    const start = r.calls.indexOf("start clawbox-gateway.service");
+    expect(stop).toBeGreaterThan(-1);
+    expect(start, "and the assistant comes back when the build ends").toBeGreaterThan(stop);
+    expect(r.out).toMatch(
+      /NOTE: pausing clawbox-gateway\.service for the build — 2929 MB available is less than the 6144 MB/,
+    );
+    expect(r.out).toMatch(/channels and assistant coding turns stop now and come back when the build ends/);
+    expect(r.out).toMatch(/\[ok\][^\n]*clawbox-gateway\.service is back/);
+    expect(r.out).toMatch(/clawbox-gateway\.service was paused for \d+ s for the build/);
+  });
+
+  it("keeps the gateway up through the build when the room IS there", () => {
+    const r = judgeRoom({ availKb: 7_000_000 });
+    expect(r.calls.some((c) => c.includes("stop clawbox-gateway.service"))).toBe(false);
+    expect(r.calls.some((c) => c.includes("start clawbox-gateway.service"))).toBe(false);
+    expect(r.out).toMatch(/Keeping clawbox-gateway\.service up through the build: 6835 MB available/);
+    expect(r.out).not.toMatch(/was paused for/);
+  });
+
+  it("never touches the gateway on a box with memory to spare", () => {
+    const r = judgeRoom({ ramKb: 16_000_000, availKb: 1_000_000 });
+    expect(r.calls.some((c) => c.includes("clawbox-gateway.service"))).toBe(false);
+    expect(r.out).not.toMatch(/NOTE: pausing/);
+  });
+
+  it("has nothing to decide for a gateway that is not running", () => {
+    // A Hermes box has none; the legacy updater hand-over has already stopped
+    // it under its own mask. Neither may be told the assistant is being paused.
+    const r = judgeRoom({ activeUnits: "ollama.service" });
+    expect(r.calls.some((c) => c.includes("stop clawbox-gateway.service"))).toBe(false);
+    expect(r.out).not.toMatch(/NOTE: pausing/);
+    expect(r.out).not.toMatch(/was paused for/);
+  });
+
+  it("pauses when MemAvailable cannot be read — the safe side of an unanswered question", () => {
+    const r = judgeRoom({ availKb: null });
+    expect(r.calls).toContain("stop clawbox-gateway.service");
+    expect(r.out).toMatch(/— 0 MB available is less than/);
+  });
+
+  it("does not report a pause that never happened when the stop fails", () => {
+    // pause_engine_unit warns and carries on; the gateway is still up, so the
+    // length-of-pause line would be a false account of the build.
+    const r = judgeRoom({ availKb: 3_000_000, stopFails: "1" });
+    expect(r.out).toMatch(/Warning: could not stop clawbox-gateway\.service/);
+    expect(r.out).not.toMatch(/was paused for/);
+  });
+
+  it("takes an operator's threshold, and falls back from one that is not a number", () => {
+    const lower = judgeRoom({ availKb: 3_000_000, room: "2048" });
+    expect(lower.calls.some((c) => c.includes("stop clawbox-gateway.service"))).toBe(false);
+    expect(lower.out).toMatch(/at least the 2048 MB/);
+
+    const junk = judgeRoom({ availKb: 3_000_000, room: "lots" });
+    expect(junk.calls).toContain("stop clawbox-gateway.service");
+    expect(junk.out).toMatch(/less than the 6144 MB/);
+  });
+
   it("cannot start an engine twice, so the second pause accounts only for itself", () => {
     // post_update stops ollama a second time and resumes it at its own end. If
     // resume did not clear its record, a later call would start whatever the
@@ -758,6 +922,29 @@ describe("both stops an update performs have a start", () => {
     // After the build in both cases, or it would hand the memory back before
     // it is used.
     expect(DO_REBUILD.indexOf("run_next_build")).toBeLessThan(branchIdx);
+  });
+
+  it("judges the gateway's room after everything that only precedes the build, and only off the reboot path (TASK-1197)", () => {
+    const judge = DO_REBUILD.indexOf("pause_gateway_if_build_needs_room");
+    expect(judge).toBeGreaterThan(-1);
+    for (const before of ["$BUN install", "ensure_node_pty", "set_previous_build_aside"]) {
+      expect(DO_REBUILD.indexOf(before), `${before} runs with the assistant still up`).toBeLessThan(judge);
+    }
+    expect(judge).toBeLessThan(DO_REBUILD.indexOf("run_next_build"));
+    // Guarded by the flag: the reboot path paused it up front already.
+    expect(DO_REBUILD.slice(0, judge)).toMatch(/if \[ "\$reboot_follows" != "1" \]; then\s*$/);
+    // …which is the one arm of free_memory_for_build that still pauses it.
+    expect(FREE_MEMORY).toMatch(/elif \[ "\$reboot_follows" = "1" \]; then\s*\n\s*pause_engine_unit clawbox-gateway\.service/);
+    expect(DO_REBUILD).toContain("free_memory_for_build --reboot-follows");
+  });
+
+  it("reports how long the assistant was paused on both exits, after the resume", () => {
+    const branchIdx = DO_REBUILD.search(/if \[ "\$rc" -ne 0 \]/);
+    const failureArm = DO_REBUILD.slice(branchIdx, DO_REBUILD.indexOf('return "$rc"'));
+    const successArm = DO_REBUILD.slice(DO_REBUILD.indexOf('return "$rc"'));
+    for (const arm of [failureArm, successArm]) {
+      expect(arm.indexOf("report_gateway_build_pause")).toBeGreaterThan(arm.indexOf("resume_paused_engines"));
+    }
   });
 
   it("resumes AFTER the restore on the failure arm, not before it", () => {

@@ -34,19 +34,17 @@
 # offers; every copy is checked (`set -e`); and a step that cannot do its job
 # says so with a non-zero status.
 #
-# Why the parked build is in there at all: `src/instrumentation-node.ts:154`
-# resolves `path.join(CONFIG_ROOT, 'scripts', 'terminal-server.mjs')`, and
-# CONFIG_ROOT is read from the environment (`src/lib/config-store.ts:4`), so
-# Next's dependency tracer cannot resolve it and emits the whole project directory as an
-# asset directory. Reproduced locally on Next 16.3.3: with a build parked
-# beside it, `.next/server/instrumentation.js.nft.json` lists 6186 files of
-# which 4202 are `../../.next-old/**`. `outputFileTracingExcludes` does not
-# reach that trace — Next applies it per route entry, and the middleware and
-# instrumentation traces are built separately (the measurement is recorded in
-# next.config.ts). The sweep is also load-bearing today: `.next/standalone/scripts`
-# comes from it and system-profile.ts resolves scripts/ from the process cwd.
-# Narrowing it is its own change, with its own device proof; until then the
-# parked copy is removed here so the tree that ships is only this build.
+# Why a parked build could be in there at all: every `path.join` onto a root
+# the build could not know (CONFIG_ROOT is read from the environment) made
+# Next's dependency tracer emit the whole project directory as an asset
+# directory. Reproduced on Next 16.3.3: with a build parked beside it,
+# `.next/server/instrumentation.js.nft.json` listed 6186 files, 4202 of them
+# `../../.next-old/**`, and `outputFileTracingExcludes` does not reach that
+# trace (next.config.ts records the measurement). TASK-1102 closed that sweep
+# at the source (src/lib/runtime-path.ts), and scripts/check-build-isolation.sh
+# fails CI if a trace reaches data/, .clawbox/ or a parked build again. The
+# removals below stay as post-conditions: a copy that ever comes back is still
+# taken out, or the build fails naming it.
 set -euo pipefail
 
 STANDALONE=".next/standalone"
@@ -163,14 +161,13 @@ fi
 #     trace: writeStandaloneDirectory() walks `loadedEnvFiles` and copyFile()s
 #     exactly those two names (next/dist/build/index.js), with no config switch.
 #     This sweep is the only thing that removes them.
-#   * `.git` rides in on the instrumentation trace — the same whole-project
-#     asset directory that brings `.next-old` in above. Read off the OpenClaw
-#     box on 2026-09-05: `.next/standalone/.git` was 88 MB. That trace IS
-#     reachable by `outputFileTracingExcludes` (only middleware's is not), so
-#     `.git/**` is excluded there now and this sweep should find nothing —
-#     kept because no real build has been measured with that line in place,
-#     and because a post-condition that fails the build is worth more than an
-#     exclude nobody would notice regressing.
+#   * `.git` rode in on the instrumentation trace — the same whole-project
+#     asset directory that brought `.next-old` in above. Read off the OpenClaw
+#     box on 2026-09-05: `.next/standalone/.git` was 88 MB. No exclude reached
+#     that trace (TASK-670); the sweep itself is gone since TASK-1102, and
+#     scripts/check-build-isolation.sh fails CI if a trace lists `.git` again.
+#     This stays because a post-condition that fails the build is worth more
+#     than a trace nobody would notice regressing.
 #
 # On a box the checkout `.env` is 0600 and holds GOOGLE_OAUTH_CLIENT_SECRET
 # and, where install.sh was given one, CLAWBOX_AI_API_KEY. Nothing reads the

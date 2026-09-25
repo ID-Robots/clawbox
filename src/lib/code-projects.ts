@@ -7,7 +7,7 @@
  */
 
 import fs from "fs/promises";
-import path from "path";
+import path from "./runtime-path";
 import { isProxyablePort } from "./clawbox-manifest";
 import { DATA_DIR } from "./config-store";
 import { registerWebappInPreferences } from "./webapp-registry";

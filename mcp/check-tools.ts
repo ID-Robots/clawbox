@@ -4,13 +4,19 @@
  *
  *   bun run mcp/check-tools.ts
  *
- * It builds the server over FIVE POSTURES per edition, without connecting a
+ * It builds the server over SIX POSTURES per edition, without connecting a
  * transport — what this host can actually probe, every capability on, the same
  * again as the DUAL install (whose device_status description differs), every
- * capability off, and the profile a delegated coding run gets — and:
+ * capability off, the profile a delegated coding run gets, and the same
+ * every-capability-on surface with CLAWBOX_MCP_CODING_TOOLS=1 (the ENV posture:
+ * the coding family is registered on no edition without it, so without this
+ * posture nine shipped tools would be built nowhere and reported nowhere) — and:
  *   1. asserts the tool contract (name regex, description length and banned
- *      phrases, parameter-name regex, readOnly/destructive coherence) over
- *      every distinct tool SHAPE any posture produces;
+ *      phrases, parameter-name regex, parameter-description length,
+ *      readOnly/destructive coherence) over every distinct tool SHAPE any
+ *      posture produces — the length ceilings are MAX_DESCRIPTION_CHARS and
+ *      MAX_PARAM_DESCRIPTION_CHARS in mcp/lib/register.ts, and a longer
+ *      description fails the run;
  *   2. asserts each capability gate against its own posture, in both
  *      directions, and that the set of gated tools is the one this file names
  *      — so a family that loses its gate, or gains one nobody recorded, is a
@@ -21,7 +27,9 @@
  *   4. reports the approximate tools/list schema size. That figure is the
  *      budget that matters on a device running a 4-8B local model, so it is
  *      printed for the posture a real box registers, with the union — a
- *      maximum that no single box ever pays — named as such.
+ *      maximum that no single box ever pays — named as such, and a second line
+ *      for the ENV posture, so the cost of switching the coding family back on
+ *      is a figure rather than an argument.
  *
  * It is a script rather than a vitest file because the vitest projects only
  * include src/tests/**. Its COVERAGE, though, no longer depends on the device
@@ -32,7 +40,7 @@
 process.env.CLAWBOX_MCP_NO_AUTOSTART = "1";
 
 import { z } from "zod";
-import { contractViolations, type RegisteredToolInfo } from "./lib/register";
+import { contractViolations, paramDescriptionViolations, type RegisteredToolInfo } from "./lib/register";
 // The directory the probes actually spawn in — imported, not restated: a third
 // copy of that path is a third thing to keep in step with the other two.
 import { DEFAULT_CWD, defaultSpawnCwd } from "./lib/guard";
@@ -82,7 +90,39 @@ const HERMES_ONLY = ["skill_search", "skill_list", "skill_info", "skill_install"
 // backup_list / backup_now are here because ClawKeep archives the OpenClaw
 // agent through the openclaw CLI: on Hermes the feature reports
 // supportedOnEdition:false and there is nothing to list or write.
-const OPENCLAW_ONLY = ["app_search", "app_install", "bash", "job_status", "job_stop", "read_file", "write_file", "edit_file", "list_directory", "glob", "grep", "notebook_edit", "web_fetch", "web_search", "browser_click", "browser_type", "browser_keypress", "browser_scroll", "backup_list", "backup_now"];
+//
+// The SHIPPED postures only — the env gate below is a separate question, and
+// the nine tools behind it are registered on NO edition until it is set, so
+// naming them here would assert they are missing from OpenClaw AND that they
+// are forbidden on Hermes, which is two wrong halves of one true fact.
+const OPENCLAW_ONLY = ["app_search", "app_install", "list_directory", "glob", "grep", "browser_click", "browser_type", "browser_keypress", "browser_scroll", "backup_list", "backup_now"];
+
+/** The env that widens the coding family, read at REGISTRATION time. */
+const CODING_TOOLS_ENV = "CLAWBOX_MCP_CODING_TOOLS";
+
+/**
+ * The coding family's two groups, and the gate between them.
+ *
+ * `CODING_GATED` is registered on no edition until CLAWBOX_MCP_CODING_TOOLS=1;
+ * `CODING_ALWAYS_OPENCLAW` is the guarded read-only trio, which OpenClaw always
+ * gets and Hermes gets only under the same override. So what APPEARS when the
+ * env is set differs per edition — nine names on OpenClaw, twelve on Hermes —
+ * and that is what `ENV_GATED_CODING` records.
+ *
+ * An EQUALITY, like every other gate in this file: a tool that quietly loses
+ * the gate and a tool that quietly gains one both fail here, in whichever
+ * direction they moved.
+ */
+const CODING_GATED = [
+  "bash", "job_status", "job_stop",
+  "read_file", "write_file", "edit_file", "notebook_edit",
+  "web_fetch", "web_search",
+];
+const CODING_ALWAYS_OPENCLAW = ["list_directory", "glob", "grep"];
+const ENV_GATED_CODING: Record<Ed, readonly string[]> = {
+  openclaw: CODING_GATED,
+  hermes: [...CODING_GATED, ...CODING_ALWAYS_OPENCLAW],
+};
 
 /** The real tools/list payload: what the model actually pays for. */
 function schemaBytes(tools: RegisteredToolInfo[]): number {
@@ -242,8 +282,10 @@ const INVERSE_GATED_TOOLS: Record<Ed, readonly string[]> = {
  * ones most in need of the check, too: their descriptions are the longest in
  * the tree and they only ever run on a customer's device, where the registrar's
  * contract complaint goes to a stdio server's stderr that nobody reads.
+ * `team_message` is gated the same way, on the team half of that environment
+ * (a coding team's run), which RUN_ENV below carries as a worker's.
  */
-const RUN_ONLY_TOOLS = ["browser_view_local", "generate_audio", "generate_image"];
+const RUN_ONLY_TOOLS = ["browser_view_local", "generate_audio", "generate_image", "team_message"];
 
 /**
  * Which probes SPAWN a binary and which ask the device's own HTTP API.
@@ -259,6 +301,12 @@ const RUN_ENV = {
   CLAWBOX_RUN_DIR: "/home/clawbox/projects/example",
   CLAWBOX_RUN_ARTIFACTS_DIR: "/home/clawbox/clawbox/data/coding-agent-artifacts/example",
   CLAWBOX_RUN_MEDIA: "images,audio",
+  // A worker of a coding team, so the team's own tool is built and checked
+  // too (mcp/lib/run-context.ts `teamRunContext`).
+  CLAWBOX_RUN_ID: "run-ab12cd34",
+  CLAWBOX_TEAM_ID: "team-ab12cd34",
+  CLAWBOX_TEAM_ROLE: "worker",
+  CLAWBOX_TEAM_TASK: "t1",
 };
 
 /** Names present in `a` and absent from `b`, sorted. */
@@ -301,6 +349,8 @@ async function check(): Promise<void> {
   const problems: string[] = [];
   const byEdition: Record<string, RegisteredToolInfo[]> = {};
   const byEditionReal: Record<string, RegisteredToolInfo[]> = {};
+  // The ENV posture's list, kept for the size line and the extra matrix rows.
+  const byEditionCodingOn: Record<string, RegisteredToolInfo[]> = {};
   // PER EDITION. A single map overwritten each pass described only the LAST
   // edition's probes, which was harmless only while every probe was
   // edition-independent — and `providers` is not: it is a Hermes-only question
@@ -356,6 +406,27 @@ async function check(): Promise<void> {
     const { reg: bareReg } = await buildServer(edition, "full", edition, NO_CAPABILITIES);
     const disabled = bareReg.list();
 
+    // The ENV posture: `enabled` again, with CLAWBOX_MCP_CODING_TOOLS=1.
+    //
+    // Same shape as the run posture below — the variable is read at
+    // REGISTRATION time (mcp/tools/coding.ts), so it is set around this one
+    // build and put back immediately, and `main()` has already cleared whatever
+    // the invoking shell had so the other five postures cannot see it either.
+    // Without this posture the nine gated tools are built by NO posture at all:
+    // the contract check would print "Tool contract OK" over nine shipped
+    // descriptions and schemas it had never looked at, which is the same
+    // silence RUN_ONLY_TOOLS exists against.
+    const savedGate = { [CODING_TOOLS_ENV]: process.env[CODING_TOOLS_ENV] };
+    process.env[CODING_TOOLS_ENV] = "1";
+    let codingOn: RegisteredToolInfo[];
+    try {
+      const { reg: codingReg } = await buildServer(edition, "full", edition, ALL_CAPABILITIES);
+      codingOn = codingReg.list();
+    } finally {
+      restoreEnv(savedGate);
+    }
+    byEditionCodingOn[edition] = codingOn;
+
     // The posture a delegated coding run gets: the `browser` profile, with the
     // runner's environment around the build. Restored immediately — the
     // variables are read at REGISTRATION time, so nothing outside this call
@@ -397,12 +468,16 @@ async function check(): Promise<void> {
     // `schemaShapeViolations` exists to catch, a name-keyed run still printed
     // "Tool contract OK". One `toJSONSchema` per tool per posture; the whole
     // run is about a second.
-    for (const tool of [...enabled, ...disabled, ...probed, ...inRun, ...dual]) {
+    for (const tool of [...enabled, ...disabled, ...probed, ...inRun, ...dual, ...codingOn]) {
       const emitted = emittedSchema(tool);
       const key = `${tool.name}\u0000${tool.description}\u0000${emitted}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      problems.push(...contractViolations(tool), ...schemaShapeViolations(tool, emitted));
+      problems.push(
+        ...contractViolations(tool),
+        ...paramDescriptionViolations(tool),
+        ...schemaShapeViolations(tool, emitted),
+      );
     }
 
     // The matrix and the edition gating are about what a BOX gets, so they read
@@ -432,6 +507,43 @@ async function check(): Promise<void> {
         `${edition}: tools that exist only where the capability is OFF — ${inverseDelta} — update `
         + `INVERSE_GATED_TOOLS.${edition}`,
       );
+    }
+
+    // The ENV gate, the same way: an equality against its own posture rather
+    // than a checklist. `codingOn` is `enabled` rebuilt with the override, so
+    // the difference between them IS the gate — the nine shell/file/web tools
+    // on OpenClaw, and those nine plus the guarded read-only trio on Hermes,
+    // which never had the trio without the override either.
+    const codingDelta = setDelta(only(codingOn, enabled), ENV_GATED_CODING[edition]);
+    if (codingDelta) {
+      problems.push(
+        `${edition}: tools registered only with ${CODING_TOOLS_ENV}=1 — ${codingDelta} — the coding `
+        + `family's gate moved; check it is deliberate and update ENV_GATED_CODING.${edition}`,
+      );
+    }
+    // The override WIDENS. A tool that disappears when it is set would be a
+    // shipped box losing a tool the moment an owner switched the family on, and
+    // no delta above points that way.
+    const codingLost = only(enabled, codingOn);
+    if (codingLost.length) {
+      problems.push(
+        `${edition}: ${CODING_TOOLS_ENV}=1 REMOVES [${codingLost.join(", ")}] — the override may only `
+        + "widen the surface",
+      );
+    }
+    // …and the half that is NOT behind it. Said out loud because the way this
+    // regresses is one edit sweeping the trio into the gated group: on OpenClaw
+    // they are what filters credential stores out of a listing, a glob and a
+    // grep, which no harness's own search does.
+    if (edition === "openclaw") {
+      const missingTrio = CODING_ALWAYS_OPENCLAW.filter((n) => !enabled.some((t) => t.name === n));
+      if (missingTrio.length) {
+        problems.push(
+          `openclaw: the guarded read-only trio [${missingTrio.join(", ")}] must be registered with `
+          + `${CODING_TOOLS_ENV} unset, and is not — update CODING_ALWAYS_OPENCLAW only if that is `
+          + "deliberate",
+        );
+      }
     }
 
     for (const name of UNGATED_COMMON) {
@@ -493,17 +605,30 @@ async function check(): Promise<void> {
       `\n${edition}: ${real.length} tools, ${(bytes / 1024).toFixed(1)} KB of tools/list payload`
       + ` (union of all postures: ${tools.length} tools, ${(schemaBytes(tools) / 1024).toFixed(1)} KB)`,
     );
+    // The cost of the override, as a figure. The headline above is what a
+    // shipped box pays; this is what it would pay with the coding family
+    // switched back on, and the difference is the whole argument for the gate.
+    const codingOn = byEditionCodingOn[edition];
+    const codingBytes = schemaBytes(codingOn);
+    console.log(
+      `  with ${CODING_TOOLS_ENV}=1: ${codingOn.length} tools, ${(codingBytes / 1024).toFixed(1)} KB`
+      + ` (+${((codingBytes - bytes) / 1024).toFixed(1)} KB, the coding family)`,
+    );
     // The rows are the UNION, while the headline counts what a real box gets, so
     // the two disagree by however many tools exist only in another posture
-    // (`image_generate` today). Marked rather than left for a reader to
-    // rediscover by counting.
+    // (`image_generate` today, and the env-gated family). Marked rather than
+    // left for a reader to rediscover by counting.
     const realNames = new Set(real.map((t) => t.name));
-    for (const t of tools) {
+    const unionNames = new Set(tools.map((t) => t.name));
+    const envOnly = codingOn.filter((t) => !unionNames.has(t.name));
+    for (const t of [...tools, ...envOnly]) {
       const flags = [
         t.opts.readOnly ? "read-only" : "writes",
         t.opts.destructive ? "destructive" : "",
         t.opts.profile === "core" ? "core" : "",
-        realNames.has(t.name) ? "" : "(other posture only)",
+        !unionNames.has(t.name)
+          ? `(${CODING_TOOLS_ENV}=1 only)`
+          : realNames.has(t.name) ? "" : "(other posture only)",
       ].filter(Boolean).join(" ");
       console.log(`  ${t.name.padEnd(22)} ${flags}`);
     }
@@ -513,6 +638,13 @@ async function check(): Promise<void> {
   const onlyHermes = byEdition.hermes.filter((t) => !byEdition.openclaw.some((o) => o.name === t.name)).map((t) => t.name);
   console.log(`\nOpenClaw only: ${onlyOpenclaw.join(", ")}`);
   console.log(`Hermes only:   ${onlyHermes.join(", ")}`);
+  // The third axis, printed beside the other two so the matrix names the gate
+  // rather than leaving the family missing from it. Both lines, because the
+  // override adds a different set per edition.
+  for (const edition of ["openclaw", "hermes"] as const) {
+    const adds = only(byEditionCodingOn[edition], byEditionReal[edition]);
+    console.log(`${CODING_TOOLS_ENV}=1 adds on ${edition.padEnd(8)} ${adds.join(", ") || "(nothing)"}`);
+  }
 
   // Said out loud, every time, PER PROBE and PER EDITION — and split by what a
   // probe actually DOES. `email`, `codingAgent`, `images` and `providers` are
@@ -599,19 +731,28 @@ async function check(): Promise<void> {
 
 async function main(): Promise<void> {
   // The run posture is the ONLY one allowed to see the runner's environment
-  // triple, so the ambient shell's copy of it is cleared for the whole check
-  // and put back afterwards.
+  // triple, and the ENV posture the only one allowed to see
+  // CLAWBOX_MCP_CODING_TOOLS, so the ambient shell's copy of all four is
+  // cleared for the whole check and put back afterwards.
+  //
+  // The gate variable is here for the same reason as the other three, pointing
+  // the other way: a developer debugging the coding family with it exported
+  // would build every posture with the family ON, so the gate equality would
+  // measure an empty delta and this check would pass while reporting that nine
+  // tools are not gated at all — the exact false success the paragraph below is
+  // about.
   //
   // Not tidiness: with CLAWBOX_RUN_DIR and CLAWBOX_RUN_ARTIFACTS_DIR exported in
   // any shell, the three non-run postures registered the run-only tools too and
   // this BLOCKING step exited 1 with `"browser_view_local" is registered outside
   // a coding run` — a false failure blaming the code for the environment it was
   // invoked in, which is exactly the kind of check that gets switched off. It
-  // also removes the hazard in making the eight builds concurrent: the run
+  // also removes the hazard in making the twelve builds concurrent: the run
   // posture's variables are no longer the only thing separating it from the
   // others.
-  const ambient = Object.fromEntries(Object.keys(RUN_ENV).map((k) => [k, process.env[k]]));
-  for (const key of Object.keys(RUN_ENV)) delete process.env[key];
+  const ambientKeys = [...Object.keys(RUN_ENV), CODING_TOOLS_ENV];
+  const ambient = Object.fromEntries(ambientKeys.map((k) => [k, process.env[k]]));
+  for (const key of ambientKeys) delete process.env[key];
   try {
     await check();
   } finally {

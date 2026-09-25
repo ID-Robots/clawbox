@@ -46,9 +46,12 @@ OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
 export OPENCLAW_STATE_DIR
 # Doctor repairs STATE here, never the service: the gateway this script is the
 # ExecStartPre of is ClawBox's own system unit, and systemd is mid-start of it.
-# 2026.9.3's `doctor --fix` refuses maintenance outright unless it can account
-# for the gateway's service itself, which on this box it cannot — see
-# OPENCLAW_SERVICE_REPAIR_POLICY in install.sh for the whole of why. Exported
+# The pinned core's `doctor --fix` refuses maintenance outright unless it can
+# account for the gateway's service itself, which on this box it cannot — see
+# OPENCLAW_SERVICE_REPAIR_POLICY in install.sh for the whole of why. 2026.9.3
+# brought the gate; the published 2026.9.4 tarball still reads the same
+# variable (`dist/doctor-service-repair-policy-*.mjs`), so the escape still
+# exists and is still the one this box needs. Exported
 # rather than placed on the one call below because every `openclaw` this script
 # runs is on the same footing.
 export OPENCLAW_SERVICE_REPAIR_POLICY="external"
@@ -546,9 +549,11 @@ clawbox_core_residual_issues() {
   # BOTH module extensions, because which one a chunk gets is the bundler's
   # decision and it has already changed once. Counted over the whole `dist/`
   # tree: 2026.8.1 is 7,219 `*.js` and 1 `*.mjs`; 2026.9.3 is 1,731 `*.js` and
-  # 5,383 `*.mjs`, with this declaration in no `.js` file at all. Still an
-  # allow-list rather than every file, so a `.d.ts` declaration or a `.map`
-  # carrying the same text as DATA is never a candidate to import.
+  # 5,383 `*.mjs`; the 2026.9.4 pin is 1,784 `*.js` and 5,477 `*.mjs` — and on
+  # both 9.x cores this declaration is in no `*.js` file at all (counted on the
+  # published tarballs, TASK-1088). Still an allow-list rather than every file,
+  # so a `.d.ts` declaration or a `.map` carrying the same text as DATA is never
+  # a candidate to import.
   #
   # A LIST, not a first hit, because the declaration is in TWO files on both
   # cores: the library chunk that exports it, and `dist/worker/worker.mjs` — a
@@ -906,7 +911,13 @@ if [ -f "$HOSTNAME_ENV" ]; then
   _h=$(sed -n 's/^[[:space:]]*HOSTNAME[[:space:]]*=[[:space:]]*//p' "$HOSTNAME_ENV" | head -n1 || true)
   _h="${_h%\"}"; _h="${_h#\"}"
   _h="${_h%\'}"; _h="${_h#\'}"
-  if [[ "$_h" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+  # The 1..63-character bound is an explicit length test, never a bounded repeat
+  # `{0,61}`: `[[ =~ ]]` is glibc regex, which expands one into an NFA state per
+  # permitted repetition. Cheap at 61 (~0.5 MB) next to the 260 MB `{32,4096}`
+  # cost TASK-1066 took out of scripts/run-tunnel.sh, but it is the same
+  # construct, and src/tests/unit/shell-regex-hygiene.test.ts now keeps every
+  # script free of it. Same accepted and rejected names as before.
+  if [ -n "$_h" ] && [ "${#_h}" -le 63 ] && [[ "$_h" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
     CONFIGURED_HOSTNAME="$_h"
   else
     # Not silent: this name feeds gateway.controlUi.allowedOrigins below, so a
@@ -1218,6 +1229,134 @@ if isinstance(primary_model, str) and primary_model.lower() in (
     model_defaults["primary"] = "llamacpp/gemma4-e2b-it-q4_0"
     changed = True
 
+# Migration: a local model id saved with its provider prefix TWICE (TASK-1076).
+# ai-models/configure prepended `llamacpp/` (or `ollama/`) to a `model` field
+# that already carried it — the `<provider>/<id>` form every cloud provider
+# sends there — and one save left
+#
+#   agents.defaults.model.primary           llamacpp/llamacpp/gemma4-e2b-it-q4_0
+#   models.providers.llamacpp.models[].id   llamacpp/gemma4-e2b-it-q4_0
+#
+# OpenClaw strips a self-provider prefix off the ref and its row lookup forgives
+# one on the row, so the model resolves once; the runtime-plan materializer then
+# compares the row it got back with the requested id VERBATIM, and every turn
+# that carries the `llamacpp:default` profile ends "Unable to rematerialize
+# llamacpp/gemma4-e2b-it-q4_0 for its resolved auth profile." (2026.9.3 and
+# 2026.9.4 alike; the ollama plugin declares no catalog-id normaliser either).
+# The route no longer writes it (`bareLocalModelId`); this heals a box that
+# saved it before, so the owner does not have to find the setting and save again.
+#
+# Only each provider's OWN prefix comes off. The core strips it from every ref
+# before looking anything up, so no model id that begins with it was reachable
+# and no working configuration changes; every other id (an Ollama namespace
+# such as `hf.co/org/model:tag`) is left exactly as written. A ref that is
+# nothing BUT prefixes collapses to a bare `llamacpp/`, which the migration below
+# already refuses to register (an empty row id fails the whole config), and a row
+# whose id would come out empty is not touched. Runs first so that migration
+# sees the corrected refs.
+_LOCAL_SELF_PREFIXED = ("llamacpp", "ollama")
+
+
+def _local_bare_model_id(provider, model_id):
+    prefix = provider + "/"
+    bare = model_id.strip()
+    while bare.lower().startswith(prefix):
+        bare = bare[len(prefix):].strip()
+    return bare
+
+
+def _local_collapse_ref(ref):
+    """`llamacpp/llamacpp/x` -> `llamacpp/x`; None when there is nothing to do."""
+    if not isinstance(ref, str) or "/" not in ref:
+        return None
+    provider, _, rest = ref.strip().partition("/")
+    provider = provider.strip().lower()
+    if provider not in _LOCAL_SELF_PREFIXED:
+        return None
+    bare = _local_bare_model_id(provider, rest)
+    if bare == rest.strip():
+        return None
+    return provider + "/" + bare
+
+
+_local_collapsed = []
+_ref = model_defaults.get("primary")
+_collapsed = _local_collapse_ref(_ref)
+if _collapsed:
+    model_defaults["primary"] = _collapsed
+    _local_collapsed.append("agents.defaults.model.primary")
+_refs = model_defaults.get("fallbacks")
+if isinstance(_refs, list):
+    _fixed = []
+    for _ref in _refs:
+        _collapsed = _local_collapse_ref(_ref)
+        if _collapsed:
+            _local_collapsed.append("agents.defaults.model.fallbacks")
+        _fixed.append(_collapsed or _ref)
+    if "agents.defaults.model.fallbacks" in _local_collapsed:
+        # Collapsing can make two entries equal; keep the first of each.
+        _deduped = []
+        for _ref in _fixed:
+            if not (isinstance(_ref, str) and _ref in _deduped):
+                _deduped.append(_ref)
+        model_defaults["fallbacks"] = _deduped
+_allow = agents_defaults.get("models")
+if isinstance(_allow, dict):
+    for _key in list(_allow.keys()):
+        _collapsed = _local_collapse_ref(_key)
+        if not _collapsed:
+            continue
+        _entry = _allow.pop(_key)
+        _kept = _allow.get(_collapsed)
+        if isinstance(_kept, dict) and isinstance(_entry, dict):
+            # The correctly-keyed entry wins; the doubled one only adds.
+            _allow[_collapsed] = {**_entry, **_kept}
+        elif _collapsed not in _allow:
+            _allow[_collapsed] = _entry
+        _local_collapsed.append("agents.defaults.models")
+_models_block = cfg.get("models")
+_providers_block = _models_block.get("providers") if isinstance(_models_block, dict) else None
+for _provider in _LOCAL_SELF_PREFIXED:
+    _entry = _providers_block.get(_provider) if isinstance(_providers_block, dict) else None
+    _rows = _entry.get("models") if isinstance(_entry, dict) else None
+    if not isinstance(_rows, list):
+        continue
+    _bare_ids = {
+        _row["id"].strip()
+        for _row in _rows
+        if isinstance(_row, dict) and isinstance(_row.get("id"), str)
+    }
+    _fixed = []
+    _touched = False
+    for _row in _rows:
+        _row_id = _row.get("id") if isinstance(_row, dict) else None
+        _bare = _local_bare_model_id(_provider, _row_id) if isinstance(_row_id, str) else ""
+        if not _bare or _bare == _row_id.strip():
+            _fixed.append(_row)
+            continue
+        _touched = True
+        if _bare in _bare_ids:
+            # A row already answers to the bare id, and it is the one the core
+            # matches first: this one could only shadow it.
+            continue
+        _row = dict(_row)
+        _row["id"] = _bare
+        _name = _row.get("name")
+        if not isinstance(_name, str) or _local_bare_model_id(_provider, _name) == _bare:
+            _row["name"] = _bare
+        _bare_ids.add(_bare)
+        _fixed.append(_row)
+    if _touched:
+        _entry["models"] = _fixed
+        _local_collapsed.append("models.providers." + _provider + ".models")
+if _local_collapsed:
+    changed = True
+    print(
+        "  Collapsed a doubled local-model provider prefix in "
+        + ", ".join(sorted(set(_local_collapsed)))
+        + " (OpenClaw cannot re-materialize a self-prefixed row id)"
+    )
+
 # Migration: a primary (or fallback) that names `llamacpp/<model>` while
 # `models.providers.llamacpp` is absent. OpenClaw ships an `ollama` plugin but
 # NO llamacpp one, so `llamacpp/*` resolves ONLY through an explicit provider
@@ -1360,11 +1499,17 @@ elif _wants_llamacpp and _llamacpp_gaps:
     # llama-server needs no token from us, and refusing there would leave their
     # config invalid over a credential it never wanted.
     _llamacpp_takes_proxy = "baseUrl" in _llamacpp_gaps
+    # Strict utf-8, and a decode failure is an unreadable file — same reasoning
+    # as the reconciliation further down, which shares this file: without an
+    # explicit encoding a stray byte raises UnicodeDecodeError (not an OSError)
+    # out of the heredoc and ExecStartPre dies under `set -euo pipefail`, and a
+    # token quietly mangled by errors="replace" is one we would go on to write.
+    # Empty falls into the guard below, which refuses the repair and says why.
     _token_path = os.path.join(_clawbox_root, "data", ".local-ai-token")
     try:
-        with open(_token_path) as _tf:
+        with open(_token_path, encoding="utf-8") as _tf:
             _local_ai_token = _tf.read().strip()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         _local_ai_token = ""
 
     if _llamacpp_takes_proxy and len(_local_ai_token) < 16:
@@ -1586,6 +1731,224 @@ elif _wants_llamacpp and _llamacpp_gaps:
                     "  Repaired models.providers.llamacpp for "
                     + ", ".join(_llamacpp_model_ids)
                 )
+
+# Reconciliation: models.providers.{llamacpp,ollama}.apiKey vs data/.local-ai-token.
+#
+# The repair above fires only on a SCHEMA GAP — no `baseUrl`, or a `models` list
+# OpenClaw would reject. An entry that is complete and merely STALE has no gap,
+# so until now nothing re-pointed its bearer, and a rebuilt board came up mute:
+# `data/.local-ai-token` is minted at first boot (same second as `.mcp-token`
+# and `.session-secret`) while the openclaw.json restored beside it still
+# carries the token of the image it was built from. The proxy validates
+# `Authorization` against that file (verifyLocalAiBearer, src/lib/local-ai-token.ts)
+# and answers 401 to everything else, so EVERY agent turn on the local model
+# dies before the model is ever reached and the web chat shows an
+# authentication error. Re-saving the provider through
+# POST /setup-api/ai-models/configure repaired it by hand, because that route
+# writes getLocalAiToken(); nothing did it on boot.
+#
+# This is for the two local providers exactly what the `mcp.servers.clawbox`
+# block near MCP_TOKEN_FILE is for the MCP bearer: a rotated secret cannot be
+# allowed to leave the config pointing at the previous one. Unlike the repair
+# above it runs on EVERY boot and does not care whether the entry is otherwise
+# complete — staleness is the whole failure mode.
+#
+# Bounded tightly on purpose, and only ever narrower than the repair above:
+#
+#   * ONLY an entry already pointing at THIS box's local-AI proxy. That is the
+#     one endpoint for which this file is the credential; an operator's own
+#     llama-server or ollama on loopback keeps the key they gave it. A baseUrl
+#     is never written here — a wrong endpoint is the repair's business.
+#   * NEVER over a missing or too-short token file. Writing "" would turn a key
+#     that might still be working into one that certainly is not.
+#   * NEVER onto an entry carrying a model row on another host: `apiKey` is
+#     PROVIDER-WIDE (OpenClaw resolves a row as `model.baseUrl ?? provider.baseUrl`
+#     and has no per-model credential slot), so such a row would be mailed this
+#     box's token on every turn. Same rule, same reason, as the repair above.
+#
+# Self-contained rather than sharing the repair's helpers: each of these regions
+# is extracted and executed on its own by its regression suite, which is also
+# why the OpenRouter repair further down repeats what it repeats.
+import urllib.parse as _lai_url
+
+_LAI_PROVIDERS = ("llamacpp", "ollama")
+
+
+def _lai_host(_raw):
+    try:
+        return (_lai_url.urlsplit(_raw).hostname or "").lower() or None
+    except ValueError:
+        return None
+
+
+def _lai_proxy_hosts():
+    """Loopback, plus the authority of an explicitly configured proxy root.
+
+    CLAWBOX_LOCAL_AI_PROXY_BASE_URL lives in $CLAWBOX_ROOT/.env, and NEITHER
+    gateway unit loads that file (see the longer note in the repair above), so
+    reading the process environment alone would miss it — and a box with a
+    custom proxy root would go on drifting with nothing said. One key is read,
+    never the whole file into the gateway's environment. The bare except is the
+    same precaution the repair takes: .env is clawbox-writable, and one
+    undecodable byte in it must not fail ExecStartPre under `set -euo pipefail`.
+    """
+    _hosts = {"127.0.0.1", "localhost", "::1"}
+    _root = (os.environ.get("CLAWBOX_LOCAL_AI_PROXY_BASE_URL") or "").strip()
+    if not _root:
+        try:
+            with open(os.path.join(_clawbox_root, ".env"), encoding="utf-8", errors="replace") as _lai_ef:
+                for _lai_line in _lai_ef:
+                    _lai_line = _lai_line.strip()
+                    if _lai_line.startswith("export "):
+                        _lai_line = _lai_line[len("export "):].strip()
+                    _lai_key, _, _lai_value = _lai_line.partition("=")
+                    if _lai_key.strip() != "CLAWBOX_LOCAL_AI_PROXY_BASE_URL":
+                        continue
+                    _lai_value = _lai_value.strip()
+                    if (
+                        len(_lai_value) >= 2
+                        and _lai_value[0] == _lai_value[-1]
+                        and _lai_value[0] in ("'", '"')
+                    ):
+                        _lai_value = _lai_value[1:-1]
+                    _root = _lai_value.strip()
+        except Exception:
+            _root = ""
+    if _root:
+        _root_host = _lai_host(_root)
+        if _root_host:
+            _hosts.add(_root_host)
+    return _hosts
+
+
+def _lai_is_our_proxy(_base_url, _provider_id, _hosts):
+    """OUR proxy for THIS provider — not merely something on loopback.
+
+    getLocalAiProxyBaseUrl() writes `<root>/setup-api/local-ai/<provider>` for
+    ollama and the same with a `/v1` suffix for llamacpp, so the path is what
+    separates our proxy from the operator's own `http://127.0.0.1:8080/v1`. The
+    segment boundary stops `/setup-api/local-ai/ollama-of-theirs` from passing
+    as `ollama`.
+    """
+    if _lai_host(_base_url) not in _hosts:
+        return False
+    try:
+        _path = _lai_url.urlsplit(_base_url).path or ""
+    except ValueError:
+        return False
+    _prefix = "/setup-api/local-ai/" + _provider_id
+    return _path == _prefix or _path.startswith(_prefix + "/")
+
+
+def _lai_row_on_another_host(_entry, _hosts):
+    # A row without an id is skipped: ModelDefinitionSchema requires a non-empty
+    # one, so it can never route a turn and can never receive the bearer. A URL
+    # that will not parse counts as foreign — guessing permissively is the wrong
+    # way to be wrong about a credential.
+    _rows = _entry.get("models")
+    for _lai_row in _rows if isinstance(_rows, list) else []:
+        if not isinstance(_lai_row, dict):
+            continue
+        _lai_rid = _lai_row.get("id")
+        if not (isinstance(_lai_rid, str) and _lai_rid.strip()):
+            continue
+        _lai_rb = _lai_row.get("baseUrl")
+        if not (isinstance(_lai_rb, str) and _lai_rb.strip()):
+            continue
+        if _lai_host(_lai_rb.strip()) not in _hosts:
+            return True
+    return False
+
+
+# Containers are READ, never created: a box with no `models.providers` has no
+# local provider to reconcile, and adding an empty one would be an edit to a
+# config this block was not asked to change.
+_lai_models = cfg.get("models")
+_lai_providers = _lai_models.get("providers") if isinstance(_lai_models, dict) else None
+if isinstance(_lai_providers, dict):
+    # STRICT utf-8, and a decode failure is an unreadable file rather than a
+    # repaired one. `open()` would otherwise decode by the boot locale — LANG is
+    # unset under systemd, so ascii — and one stray byte in a truncated or
+    # half-written token file would raise UnicodeDecodeError, which is NOT an
+    # OSError, straight out of this heredoc: ExecStartPre fails under
+    # `set -euo pipefail` and the box gets no gateway at all over a credential
+    # it could simply have declined to use. errors="replace" is deliberately NOT
+    # the answer here as it is for .env below: a token silently repaired into a
+    # different string is one this block would then WRITE into the config. An
+    # empty value falls into the short-token guard, which refuses and says why.
+    _lai_token_file = os.path.join(_clawbox_root, "data", ".local-ai-token")
+    try:
+        with open(_lai_token_file, encoding="utf-8") as _lai_tf:
+            _lai_token = _lai_tf.read().strip()
+    except (OSError, UnicodeDecodeError):
+        _lai_token = ""
+    _lai_hosts = _lai_proxy_hosts()
+
+    for _lai_provider in _LAI_PROVIDERS:
+        _lai_entry = _lai_providers.get(_lai_provider)
+        if not isinstance(_lai_entry, dict):
+            continue
+        _lai_base = _lai_entry.get("baseUrl")
+        if not (isinstance(_lai_base, str) and _lai_base.strip()):
+            continue
+        if not _lai_is_our_proxy(_lai_base.strip(), _lai_provider, _lai_hosts):
+            continue
+        if _lai_entry.get("apiKey") == _lai_token:
+            continue
+        # A key that RESOLVES ELSEWHERE is not drift, and is not ours to flatten
+        # into a literal. OpenClaw accepts a SecretRef object
+        # ({source, provider, id}) and a `${VAR}` interpolation as credentials —
+        # is_strong_gateway_token() at the top of this file already decides the
+        # same question the same way for the gateway token — and this block can
+        # resolve neither, so it cannot tell a stale one from a current one.
+        #
+        # Overwriting would be worse than an invisible edit to the operator's
+        # file. getLocalAiToken() (src/lib/local-ai-token.ts) prefers
+        # process.env.LOCAL_AI_TOKEN over the token FILE and returns before ever
+        # writing it, so on a box that sets it `${LOCAL_AI_TOKEN}` is the
+        # CORRECT key while data/.local-ai-token may hold a stale one — and
+        # replacing the first with the second would cause the exact 401 this
+        # block exists to remove. Checked BEFORE the token-file guard below so a
+        # correctly-referenced key never draws a warning, and silent: a
+        # resolvable reference is a working configuration, not a fault.
+        _lai_key_now = _lai_entry.get("apiKey")
+        if not (_lai_key_now is None or isinstance(_lai_key_now, str)):
+            continue
+        if (
+            isinstance(_lai_key_now, str)
+            and _lai_key_now.startswith("${")
+            and _lai_key_now.endswith("}")
+            and len(_lai_key_now) > 3
+        ):
+            continue
+        # The token itself is never printed, here or in the warning below: the
+        # journal keeps what it is given, and this is the credential the whole
+        # local-AI path turns on.
+        if len(_lai_token) < 16:
+            print(
+                "  WARN: models.providers." + _lai_provider + " points at this"
+                " box's local-AI proxy but " + _lai_token_file + " is missing or"
+                " too short to be a token this box wrote, so the configured key"
+                " is left as it is — the proxy will answer 401 to every turn of"
+                " the local model until that file is restored."
+            )
+            continue
+        if _lai_row_on_another_host(_lai_entry, _lai_hosts):
+            print(
+                "  Skipped the models.providers." + _lai_provider + ".apiKey"
+                " reconciliation: a model row under it names its own baseUrl on"
+                " another host, and this entry's key is the bearer for every row"
+                " of the entry. Remove that row's baseUrl, or give it one on this"
+                " box, to have the key refreshed on boot."
+            )
+            continue
+        _lai_entry["apiKey"] = _lai_token
+        changed = True
+        print(
+            "  Reconciled models.providers." + _lai_provider + ".apiKey with"
+            " data/.local-ai-token: the entry points at this box's local-AI"
+            " proxy, which accepts only the current bearer."
+        )
 
 # Model migration: legacy ChatGPT-subscription devices can have their active
 # model — or a fallback — stored as `openai/<gpt>` from before the setup UI
@@ -3809,6 +4172,32 @@ PY
   fi
 fi
 
+# Reconciliation, second half: the `llamacpp:default` / `ollama:default` AUTH
+# PROFILES vs data/.local-ai-token (TASK-1196). The Python pass above re-points
+# `models.providers.<provider>.apiKey`; setup also stores the same token as the
+# provider's `<provider>:default` profile in core's credential store, and core
+# tries that profile FIRST. Nothing re-pointed it, so an updated box whose store
+# still held an older key opened every local-model turn with a 401 from the
+# proxy and a failover to another profile. scripts/sync-local-ai-auth-profiles.js
+# compares fingerprints read-only and re-saves only a stale profile, through the
+# same `models auth paste-api-key` setup uses (token on stdin, never printed) —
+# so a box already in sync pays one sqlite read and no CLI start. Here rather
+# than inside the Python pass because it needs the config that pass wrote and
+# the store the OpenClaw 2 legacy auth-profile migration above has settled.
+# Never fatal: the script exits 0, and the ceiling covers two pastes with room
+# to spare.
+LOCAL_AI_AUTH_SYNC="$SCRIPT_DIR/sync-local-ai-auth-profiles.js"
+if [ -f "$LOCAL_AI_AUTH_SYNC" ]; then
+  _lai_node="$(clawbox_node_bin || true)"
+  if [ -n "$_lai_node" ]; then
+    CLAWBOX_ROOT="$CLAWBOX_ROOT" CLAWBOX_OPENCLAW_V2="$CLAWBOX_OPENCLAW_V2" \
+      timeout -k 5 180 "$_lai_node" "$LOCAL_AI_AUTH_SYNC" "$(dirname "$OPENCLAW_CONFIG")" "$OPENCLAW_BIN" </dev/null \
+      || echo "  WARN: the local-AI auth profile check did not finish; the gateway starts on the profiles as they are" >&2
+  else
+    echo "  NOTE: no node beside $OPENCLAW_BIN and none on PATH, so the local-AI auth profiles were not checked against data/.local-ai-token" >&2
+  fi
+fi
+
 # One-time config migration for devices updating from OpenClaw <=2026.5.x:
 # the ChatGPT-subscription provider id was renamed `openai-codex` -> `codex`
 # in 2026.6.x, so a device configured on the old version still has
@@ -3896,6 +4285,63 @@ OPENCLAW_HOME_DIR="$(dirname "$OPENCLAW_CONFIG")"
 # gateway SDK on every run (~8-10 s on an Orin). This file is the boot script's
 # record of what IT could not do, written by the only process that was there.
 CLAWBOX_PLUGIN_REPAIR_FILE="$CLAWBOX_ROOT/data/plugin-repair.json"
+
+# Run ONE read-modify-write of that file holding its cross-process lock,
+# `plugin-repair.json.lock` — the same lock `src/lib/plugin-repair.ts` takes
+# (TASK-1088). This script is not the file's only writer while it runs: the
+# restart it runs under can belong to the owner's Retry or the updater's
+# after-update retry, both of which stamp and clear the very rows this script
+# re-files, and without the lock the last writer won and a row was lost.
+#
+# THE SAME PROTOCOL as the Node side, or the two would not exclude each other:
+# the lock is created exclusively (`noclobber` opens with `O_EXCL`) holding an
+# owner token and removed only while the token is still ours; one older than
+# 10 s — every holder keeps it for milliseconds — was left by a writer that
+# died, and is taken over under a `.reclaim` guard directory so two waiters
+# cannot take it over in turn. No lock inside about 15 s answers 1, which every
+# caller already reports as a WARN: never fatal, exactly like the write.
+CLAWBOX_PLUGIN_REPAIR_LOCK_STALE_S=10
+clawbox_plugin_repair_locked() {
+  local lock="$CLAWBOX_PLUGIN_REPAIR_FILE.lock" guard="$CLAWBOX_PLUGIN_REPAIR_FILE.lock.reclaim"
+  local token="$$.$RANDOM$RANDOM" tries=0 seen guard_mtime rc=0
+  mkdir -p "$(dirname "$lock")" 2>/dev/null || true
+  until ( set -o noclobber; : >"$lock" ) 2>/dev/null; do
+    seen="$(stat -c '%d:%i:%Y' "$lock" 2>/dev/null || true)"
+    if [ -z "$seen" ]; then
+      # Released between the two looks — or a directory nothing can write,
+      # which no amount of waiting fixes.
+      [ -w "$(dirname "$lock")" ] || return 1
+    elif [ $(( $(date +%s) - ${seen##*:} )) -ge "$CLAWBOX_PLUGIN_REPAIR_LOCK_STALE_S" ]; then
+      if mkdir "$guard" 2>/dev/null; then
+        # Still the SAME dead lock — not one a live writer made since the look.
+        if [ "$(stat -c '%d:%i:%Y' "$lock" 2>/dev/null || true)" = "$seen" ]; then
+          rm -f "$lock" 2>/dev/null || true
+        fi
+        rmdir "$guard" 2>/dev/null || true
+      else
+        guard_mtime="$(stat -c %Y "$guard" 2>/dev/null || date +%s)"
+        if [ $(( $(date +%s) - guard_mtime )) -ge "$CLAWBOX_PLUGIN_REPAIR_LOCK_STALE_S" ]; then
+          rmdir "$guard" 2>/dev/null || true
+        fi
+      fi
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -lt 300 ] || return 1
+    sleep 0.05
+  done
+  # Created, and ours — but the token goes in a write of its own. On a full
+  # `data/` an empty file still fits where the token may not, and a lock left
+  # behind without one is waited out by every writer, this one included.
+  if ! printf '%s\n' "$token" >|"$lock" 2>/dev/null; then
+    rm -f "$lock" 2>/dev/null || true
+    return 1
+  fi
+  "$@" || rc=$?
+  if [ "$(cat "$lock" 2>/dev/null || true)" = "$token" ]; then
+    rm -f "$lock" 2>/dev/null || true
+  fi
+  return "$rc"
+}
 
 # `plugins.entries["<id>"].enabled` — bracket notation always, because the ids
 # include `@openclaw/discord`, which dot notation would split.
@@ -3995,23 +4441,93 @@ clawbox_plugin_repair_mark() {
   if ! CLAWBOX_REPAIR_ID="$id" CLAWBOX_REPAIR_STAGE="$stage" \
     CLAWBOX_REPAIR_DISABLED="$disabled" CLAWBOX_REPAIR_REASON="$reason" \
     CLAWBOX_REPAIR_SPEC="$spec" \
-    python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY'
+    clawbox_plugin_repair_locked python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY'
 import json, os, sys, tempfile, time
 
 path = sys.argv[1]
+
+
+def salvage(text):
+    """The rows a DAMAGED store still holds (TASK-1198): every top-level member,
+    in order, up to the first that does not parse, keeping the object-valued
+    ones. The same prefix `salvagePluginRepairRows` in src/lib/plugin-repair.ts
+    recovers, so neither writer undoes the other's recovery. A prefix on
+    purpose: a torn write is a cut-off end, and guessing where a row resumes
+    after garbage could only invent a row, which here is a Retry that installs
+    something."""
+    decoder = json.JSONDecoder()
+    found = {}
+    i = text.find("{")
+    if i < 0 or text[:i].strip("\ufeff \t\r\n"):
+        return found
+    i += 1
+    n = len(text)
+    while True:
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        if i < n and text[i] == ",":
+            i += 1
+            while i < n and text[i] in " \t\r\n":
+                i += 1
+        if i >= n or text[i] != '"':
+            return found
+        try:
+            key, i = decoder.raw_decode(text, i)
+        except ValueError:
+            return found
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        if i >= n or text[i] != ":":
+            return found
+        i += 1
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        try:
+            value, i = decoder.raw_decode(text, i)
+        except ValueError:
+            return found
+        if isinstance(key, str) and isinstance(value, dict):
+            found[key] = value
+
+
 try:
-    with open(path, encoding="utf-8") as fh:
-        rows = json.load(fh)
-    if not isinstance(rows, dict):
-        rows = {}
-except (FileNotFoundError, json.JSONDecodeError):
-    rows = {}
+    with open(path, "rb") as fh:
+        data = fh.read()
+except FileNotFoundError:
+    data = None
 # A file that EXISTS and cannot be read is not an empty file: rewriting it would
 # discard rows for other plugins that are still broken.
 except OSError as err:
     print(f"  WARN: could not read {path} ({err.strerror or type(err).__name__}); "
           "the Settings panel will not explain this failure", file=sys.stderr)
     raise SystemExit(1)
+
+rows = {}
+if data is not None:
+    # Decoded the way the server's writer decodes it — a byte that is not
+    # UTF-8 becomes U+FFFD — so the two recover the same rows from one file.
+    raw = data.decode("utf-8", errors="replace")
+    try:
+        rows = json.loads(raw)
+    except ValueError:
+        rows = None
+    if not isinstance(rows, dict):
+        # DAMAGED IS NOT EMPTY (TASK-1198). This used to start the file over,
+        # so one torn write left a store holding only the row being filed and
+        # every other plugin ClawBox had switched off lost its record. Keep what
+        # still parses, keep the damaged file beside the store — byte for byte —
+        # and say so.
+        rows = salvage(raw)
+        kept = path + ".corrupt"
+        try:
+            with open(kept, "wb") as fh:
+                fh.write(data)
+            os.chmod(kept, 0o600)
+            note = f"the damaged file is kept as {kept}"
+        except OSError as err:
+            note = f"the damaged file could not be kept ({err.strerror or type(err).__name__})"
+        print(f"  WARN: {path} is damaged; recovered {len(rows)} row(s) from it and {note}",
+              file=sys.stderr)
 
 plugin_id = os.environ["CLAWBOX_REPAIR_ID"]
 existing = rows.get(plugin_id)
@@ -4037,6 +4553,14 @@ rows[plugin_id] = {
     # either way: a re-file changes the stage, never which package it is.
     "spec": os.environ.get("CLAWBOX_REPAIR_SPEC") or previous_spec,
 }
+# THE UPDATER'S AFTER-UPDATE RETRY IS KEPT the same way (TASK-1088):
+# `retriedCore` records the core release that retry was already spent on, and a
+# boot that fails the same row again has not given it that retry — dropping the
+# field would buy the row a second one on the same core. The updater's
+# in-progress stamp is the opposite and is NOT carried: a re-file is the end of
+# an attempt, and a row that went on saying "Repairing…" would be a lie.
+if isinstance(existing, dict) and isinstance(existing.get("retriedCore"), str) and existing["retriedCore"]:
+    rows[plugin_id]["retriedCore"] = existing["retriedCore"]
 directory = os.path.dirname(path) or "."
 os.makedirs(directory, exist_ok=True)
 fd, tmp = tempfile.mkstemp(dir=directory, prefix=".plugin-repair.", suffix=".tmp")
@@ -4116,7 +4640,7 @@ PY
   # SAID, not swallowed. A clear that fails leaves a "Needs repair" badge on a
   # row that is working — a false failure the owner cannot act on, because the
   # Retry it offers will succeed and change nothing he can see.
-  if ! CLAWBOX_REPAIR_ID="$1" python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null
+  if ! CLAWBOX_REPAIR_ID="$1" clawbox_plugin_repair_locked python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null
 import json, os, sys, tempfile
 
 path = sys.argv[1]
@@ -4147,8 +4671,45 @@ PY
   fi
 }
 
+# Is this entry OFF because an earlier run of this script switched it off?
+#
+# Answers 1 only when BOTH say so: the entry is explicitly `enabled: false` and
+# the repair row on file for this exact key says `disabled: true`. 0 for
+# anything else, including a config or a record this cannot read.
+clawbox_plugin_still_switched_off_by_us() {
+  CLAWBOX_PLUGIN_ID="$1" python3 - "$OPENCLAW_CONFIG" "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null || echo 0
+import json, os, sys
+plugin_id = os.environ["CLAWBOX_PLUGIN_ID"]
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        entries = (json.load(fh).get("plugins") or {}).get("entries") or {}
+    with open(sys.argv[2], encoding="utf-8") as fh:
+        rows = json.load(fh)
+except (OSError, ValueError, AttributeError):
+    print("0"); raise SystemExit(0)
+entry = entries.get(plugin_id) if isinstance(entries, dict) else None
+row = rows.get(plugin_id) if isinstance(rows, dict) else None
+print("1" if isinstance(entry, dict) and entry.get("enabled") is False
+      and isinstance(row, dict) and row.get("disabled") is True else "0")
+PY
+}
+
 # The whole "boot without it" move: switch the entry off if there is one to
 # switch off, record why, and say it in the boot log.
+#
+# A SWITCH-OFF ON RECORD STAYS OURS (TASK-1088). The codex and DeepSeek install
+# blocks retry on every boot while their payload is missing or skewed, and each
+# failure lands here again — with the entry ALREADY off, because a previous boot
+# switched it off. Reading "is it enabled?" alone then answered no, and the row
+# was re-filed `disabled: false`: "ClawBox changed nothing, the owner turned it
+# off". That one bit is what every repair reads to decide it may put the entry
+# back — `clawbox_plugin_repair_clear` here, `clawboxDisabledEntryId` and the
+# updater's after-update retry — so the first failed retry handed a plugin
+# ClawBox had switched off to the owner for good, and the NEXT successful
+# install took the badge away over an entry that stayed off: ClawBox AI, or
+# ChatGPT, "connected" and not running. `clawbox_plugin_reattempt_failed` below
+# already asserts the same thing for the re-attempt block; this is that rule
+# for every other writer.
 clawbox_plugin_boot_without() {
   local id="$1" stage="$2" reason="$3" spec="${4:-}" disabled=0
   if [ "$(clawbox_plugin_entry_enabled "$id")" = "1" ]; then
@@ -4158,6 +4719,9 @@ clawbox_plugin_boot_without() {
     else
       echo "  WARN: could not switch the $id plugin off — the gateway may refuse readiness until it is repaired" >&2
     fi
+  elif [ "$(clawbox_plugin_still_switched_off_by_us "$id")" = "1" ]; then
+    disabled=1
+    echo "  Leaving the $id plugin switched off; Settings shows it as needing repair"
   fi
   clawbox_plugin_repair_mark "$id" "$stage" "$disabled" "$reason" "$spec"
 }
@@ -5191,15 +5755,26 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   # log a warning and let the gateway start anyway. Codex is one provider;
   # a degraded Codex is far better than a dead box, and the next boot (or a
   # manual `openclaw plugins install`) can still repair it.
-  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force "${CODEX_CAPABILITY_ARGS[@]}" >/dev/null 2>&1; then
+  #
+  # CAPTURED, not discarded (TASK-1088), exactly as the consent arm below has
+  # been since TASK-785. The row this arm files said "the device may be offline"
+  # on a box whose install had in fact been refused by a core that could not
+  # open its own state store — a guess, sitting where the owner reads the cause,
+  # over a failure the core had named. `clawbox_run_openclaw_capture` also adds
+  # the `-k 5` every other timed CLI call here has.
+  CODEX_INSTALL_RC=0
+  clawbox_run_openclaw_capture 120 plugins install "$CODEX_SPEC" --force "${CODEX_CAPABILITY_ARGS[@]}" \
+    || CODEX_INSTALL_RC=$?
+  if [ "$CODEX_INSTALL_RC" = "0" ]; then
     echo "  Codex runtime plugin installed/repaired ($CODEX_SPEC)"
     clawbox_plugin_repair_clear codex
   else
     # NOT "gateway will still start" any more — see the "Booting WITHOUT a
     # plugin" block above for why that sentence was false under OpenClaw 2.
-    echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; booting without Codex"
+    CODEX_INSTALL_CAUSE="$(clawbox_plugin_cli_cause "openclaw plugins install" "$CODEX_INSTALL_RC" "$CLAWBOX_CLI_OUT")"
+    echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; booting without Codex.$CODEX_INSTALL_CAUSE"
     clawbox_plugin_boot_without codex install \
-      "The ChatGPT (Codex) plugin could not be installed. The device may be offline, or the package registry unreachable." \
+      "The ChatGPT (Codex) plugin could not be installed. The device may be offline, or the package registry unreachable.$CODEX_INSTALL_CAUSE" \
       "$CODEX_SPEC"
   fi
 elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
@@ -5395,7 +5970,10 @@ MANAGEDPY
         CLAWBOX_CONSENT_STATES=""
         CLAWBOX_CONSENT_STATES_READY=0
         CLAWBOX_CONSENT_POSTWRITE_READY=0
-        if timeout -k 5 120 "$OPENCLAW_BIN" plugins install "$MANAGED_PLUGIN_SPEC" --force --accept-capabilities </dev/null >/dev/null 2>&1; then
+        MANAGED_REINSTALL_RC=0
+        clawbox_run_openclaw_capture 120 plugins install "$MANAGED_PLUGIN_SPEC" --force --accept-capabilities \
+          || MANAGED_REINSTALL_RC=$?
+        if [ "$MANAGED_REINSTALL_RC" = "0" ]; then
           echo "  $MANAGED_PLUGIN plugin payload reinstalled ($MANAGED_PLUGIN_SPEC)"
           clawbox_plugin_repair_clear "$MANAGED_PLUGIN"
           continue
@@ -5403,10 +5981,11 @@ MANAGEDPY
         # The reinstall was the repair and it did not work, so readiness would
         # stay blocked on this entry. The marker carries the SPEC this script
         # tried, so the Settings Retry re-runs the pinned install rather than
-        # resolving @latest.
+        # resolving @latest — and, since TASK-1088, the install's own refusal,
+        # which was thrown away here while the consent arm below kept its.
         echo "  WARN: could not reinstall the $MANAGED_PLUGIN plugin payload ($MANAGED_PLUGIN_SPEC); booting without it"
         clawbox_plugin_boot_without "$MANAGED_PLUGIN" install \
-          "The plugin payload is missing and could not be reinstalled, so the gateway would refuse to start with it enabled." \
+          "The plugin payload is missing and could not be reinstalled, so the gateway would refuse to start with it enabled.$(clawbox_plugin_cli_cause "openclaw plugins install" "$MANAGED_REINSTALL_RC" "$CLAWBOX_CLI_OUT")" \
           "$MANAGED_PLUGIN_SPEC"
         continue
         ;;
@@ -5487,7 +6066,10 @@ fi
 # different one. No payload reinstall here either — a re-attempt that hits
 # `Plugin not found` re-files the row as the `install` it needs, with the pinned
 # spec, and leaves that 120 s repair to the Retry and the updater, which have
-# the budget for it.
+# the budget for it. (The updater's half is `plugin-repair-after-update.ts`
+# since TASK-1088: once per core it installs, for Codex and the DeepSeek
+# provider — the journal-driven repair never saw a plugin this script had
+# switched off, because the gateway does not refuse one that is off.)
 #
 # WEAKER PROOF THAN THE RETRY'S, on purpose and worth naming: this verifies
 # against the cheap `plugins inspect --all --json` snapshot, while
@@ -6885,14 +7467,31 @@ PY
       DEEPSEEK_PLUGIN_PINNED="${DEEPSEEK_PLUGIN_SPEC}@${CLAWBOX_OPENCLAW_EFFECTIVE}"
     fi
     echo "  Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it; ClawBox AI needs it)..."
-    if [ -n "$DEEPSEEK_PLUGIN_PINNED" ] \
-      && timeout 180 "$OPENCLAW_BIN" plugins install "$DEEPSEEK_PLUGIN_PINNED" --accept-capabilities </dev/null; then
-      echo "  DeepSeek provider plugin installed ($DEEPSEEK_PLUGIN_PINNED)"
-      clawbox_plugin_repair_clear deepseek
-    elif timeout 180 "$OPENCLAW_BIN" plugins install "$DEEPSEEK_PLUGIN_SPEC" --accept-capabilities </dev/null; then
-      echo "  DeepSeek provider plugin installed ($DEEPSEEK_PLUGIN_SPEC)"
+    # CAPTURED (TASK-1088), like the codex install above: the row below used to
+    # say "the device may be offline" whatever the core had actually answered.
+    # The FIRST refusal is the one kept — the pinned spec is the one the row
+    # records and the Retry runs, and the unpinned one is only its fallback.
+    DEEPSEEK_INSTALL_RC=""
+    DEEPSEEK_INSTALL_OUT=""
+    DEEPSEEK_INSTALLED=""
+    for DEEPSEEK_TRY_SPEC in $DEEPSEEK_PLUGIN_PINNED $DEEPSEEK_PLUGIN_SPEC; do
+      DEEPSEEK_TRY_RC=0
+      clawbox_run_openclaw_capture 180 plugins install "$DEEPSEEK_TRY_SPEC" --accept-capabilities \
+        || DEEPSEEK_TRY_RC=$?
+      if [ "$DEEPSEEK_TRY_RC" = "0" ]; then
+        DEEPSEEK_INSTALLED="$DEEPSEEK_TRY_SPEC"
+        break
+      fi
+      if [ -z "$DEEPSEEK_INSTALL_RC" ]; then
+        DEEPSEEK_INSTALL_RC="$DEEPSEEK_TRY_RC"
+        DEEPSEEK_INSTALL_OUT="$CLAWBOX_CLI_OUT"
+      fi
+    done
+    if [ -n "$DEEPSEEK_INSTALLED" ]; then
+      echo "  DeepSeek provider plugin installed ($DEEPSEEK_INSTALLED)"
       clawbox_plugin_repair_clear deepseek
     else
+      DEEPSEEK_INSTALL_CAUSE="$(clawbox_plugin_cli_cause "openclaw plugins install" "${DEEPSEEK_INSTALL_RC:-1}" "$DEEPSEEK_INSTALL_OUT")"
       # STATED PRECISELY, because this one is not fully repairable from here.
       # The readiness refusal for DeepSeek comes from a CONFIGURED PROVIDER with
       # no plugin behind it, not from an enabled plugin entry — so switching an
@@ -6901,9 +7500,9 @@ PY
       # AI off the box without the owner asking. The marker is what makes the
       # difference visible in Settings instead of leaving a boot loop nobody can
       # read.
-      echo "  WARN: could not install @openclaw/deepseek-provider; recording it for repair in Settings"
+      echo "  WARN: could not install @openclaw/deepseek-provider; recording it for repair in Settings.$DEEPSEEK_INSTALL_CAUSE"
       clawbox_plugin_boot_without deepseek install \
-        "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. The device may be offline, or the package registry unreachable." \
+        "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. The device may be offline, or the package registry unreachable.$DEEPSEEK_INSTALL_CAUSE" \
         "${DEEPSEEK_PLUGIN_PINNED:-$DEEPSEEK_PLUGIN_SPEC}"
     fi
   fi
@@ -7793,6 +8392,9 @@ dist, installed = sys.argv[1], sys.argv[2]
 # and `node_modules/@openclaw/ai/dist/host-*.mjs` (double-quoted, the copy the
 # Anthropic extension actually imports). Both are rewritten, or the request
 # still says 2.1.75 while the worker file says otherwise (seen on a box).
+# Unchanged by the 2026.9.4 pin: that tarball still carries the constant in
+# `dist/worker/worker.mjs`, still backtick-quoted and still 2.1.75, so this
+# rewrite has the same two targets and the same reason to run (TASK-1088).
 pattern = re.compile(r"ANTHROPIC_CLAUDE_CODE_VERSION(\s*=\s*)([`\"'])(\d+\.\d+\.\d+)\2")
 
 def tuple_of(v):

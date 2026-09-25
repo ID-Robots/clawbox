@@ -322,6 +322,63 @@ describe("isProtectedFilePath through a dangling link", () => {
   });
 });
 
+// TASK-1072. `.openclaw` is the one entry in PROTECTED_HOME_DIRS whose folder
+// is not all credentials: the agent's own workspace lives inside it, and the
+// whole-folder deny meant the box could not edit its own memory or skills. The
+// carve-out is the same shape DATA_DIR_PUBLIC_SUBTREES has — containment plus
+// an allow-list of top segments — and it is scoped to `.openclaw`: `.hermes`,
+// which has the same folders inside it, keeps its single verdict.
+describe("isProtectedFilePath — the ~/.openclaw carve-out", () => {
+  const oc = "/home/clawbox/.openclaw";
+
+  it.each([
+    `${oc}/workspace`,
+    `${oc}/workspace/MEMORY.md`,
+    `${oc}/workspace/AGENTS.md`,
+    `${oc}/workspace/skills/hello/SKILL.md`,
+    `${oc}/workspace/memory/project_pr_base.md`,
+    `${oc}/workspace-main/MEMORY.md`,
+  ])("opens the agent's own %s", (p) => {
+    expect(guard.isProtectedFilePath(p)).toBe(false);
+  });
+
+  it("keeps ~/.openclaw itself listable, the way the data dir is", () => {
+    // Not a hole: a listing is filtered entry by entry, so keeping the folder
+    // openable is what lets the workspace appear at all — and nothing else
+    // inside it survives the same filter.
+    expect(guard.isProtectedFilePath(oc)).toBe(false);
+    expect(guard.isProtectedFilePath(`${oc}/credentials`)).toBe(true);
+  });
+
+  it.each([
+    `${oc}/openclaw.json`,
+    `${oc}/credentials/anthropic.json`,
+    `${oc}/agents/main/sessions/2026-09-01.jsonl`,
+    `${oc}/extensions/clawbox-path-guard/index.mjs`,
+    `${oc}/logs/gateway.log`,
+    `${oc}/media/generated-1.png`,
+    `${oc}/.mcp-token`,
+    `${oc}/auth-profile.json`,
+    `${oc}/workspaces/x`,
+    `${oc}/workspace.bak/MEMORY.md`,
+    `${oc}/workspace/../credentials/anthropic.json`,
+    `${oc}/workspace/.netrc`,
+    `${oc}/workspace/skills/x/.git-credentials`,
+  ])("still refuses %s", (p) => {
+    expect(guard.isProtectedFilePath(p)).toBe(true);
+  });
+
+  it("gives ~/.hermes no carve-out at all", () => {
+    expect(guard.isProtectedFilePath("/home/clawbox/.hermes/workspace/MEMORY.md")).toBe(true);
+    expect(guard.isProtectedFilePath("/home/clawbox/.hermes")).toBe(true);
+  });
+
+  it("judges a second .openclaw segment as strictly as the first", () => {
+    expect(guard.isProtectedFilePath(`${oc}/workspace/.openclaw/credentials/x`)).toBe(true);
+    expect(guard.isProtectedFilePath(`${oc}/workspace/.openclaw/workspace/notes.md`)).toBe(false);
+  });
+});
+
 describe("isProtectedResolvedPath", () => {
   it("applies the inventory to the path as given, without a resolve", () => {
     expect(guard.isProtectedResolvedPath("/home/clawbox/.ssh/id_rsa")).toBe(true);
@@ -360,6 +417,15 @@ describe("isProtectedContainer", () => {
 
   it("holds for the parent of a two-segment credential store", () => {
     expect(guard.isProtectedContainer(path.join(home, ".config"))).toBe(true);
+  });
+
+  it("holds for ~/.openclaw, which the read carve-out deliberately opens", () => {
+    // The two answers come apart here for the same reason they do for the data
+    // dir: the folder may be listed so the workspace inside it can be reached,
+    // and renaming it would take every credential in it out from under the
+    // containment rule in one move.
+    expect(guard.isProtectedContainer(path.join(home, ".openclaw"))).toBe(true);
+    expect(guard.isProtectedFilePath(path.join(home, ".openclaw"))).toBe(false);
   });
 
   it("does not hold for a sibling or a near-miss", () => {

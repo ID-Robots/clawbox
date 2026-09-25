@@ -28,7 +28,7 @@
 // mail every day does not accumulate a log nobody reads.
 
 import fs from "fs";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 // One direction only: this module knows about the queue, the queue knows
 // nothing about receipts. Reversing that would make a draft's ending a
@@ -132,7 +132,7 @@ function readAll(now: number): EmailOutcome[] {
 /** 0600 via temp+rename, the discipline email-pending.ts and config-store use. */
 function writeAll(entries: EmailOutcome[]): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = `${OUTCOMES_PATH}.tmp`;
+  const tmp = untraced(`${OUTCOMES_PATH}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(entries, null, 2), { mode: 0o600 });
   try {
     fs.chmodSync(tmp, 0o600);

@@ -68,10 +68,10 @@ import { spawn, type ChildProcess } from "child_process";
 import { StringDecoder } from "string_decoder";
 import fs from "fs";
 import os from "os";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet, setMany as configSetMany } from "@/lib/config-store";
-import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts, writeRunReport } from "@/lib/coding-agent-artifacts";
+import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, pruneArtifacts, removeArtifacts, writeRunReport, type PrunedArtifact } from "@/lib/coding-agent-artifacts";
 import {
   type InputRefusalCode,
   type RunInputFile,
@@ -189,18 +189,25 @@ import {
   withEvidenceSection,
 } from "@/lib/coding-review-visual";
 import {
+  AUTO_MERGE_RETRY_MS,
+  decideAutoMerge,
   decideMerge,
+  disableAutoMerge,
   emptyChecks,
+  enableAutoMerge,
   isPrFoundBy,
   isPrPending,
   isPrPhase,
+  markPullRequestReady,
   mergePullRequest,
+  NO_CHECKS_GRACE_MS,
   openPullRequest,
   updatePullRequestBody,
   // Aliased: this module's own MAX_WAIT_MS is the 120-second status-request
   // limit, a different ceiling for a different wait.
   MAX_WAIT_MS as PR_MAX_WAIT_MS,
   POLL_INTERVAL_MS,
+  readAutoMergeFacts,
   readPullRequest,
   runBranchName,
   startRunBranch,
@@ -218,7 +225,9 @@ import {
   sweepRunWorktrees,
   type MergeHomeBlocker,
 } from "@/lib/coding-run-worktree";
+import { worktreeHintFor, worktreeHintText } from "@/lib/coding-worktree-paths";
 import {
+  autoMergeOutstanding,
   buildReviewFeedback,
   clampReviewRounds,
   decideReviewFixPath,
@@ -233,7 +242,9 @@ import {
   pushBranch,
   readFailedCheckLogs,
   readReviewSnapshot,
+  requestCodeRabbitReview,
   REVIEW_MAX_WAIT_MS,
+  REVIEW_NO_CHECKS_GRACE_MS,
   reviewPollIntervalMs,
   reviewProblems,
   type ReviewLoop,
@@ -490,10 +501,15 @@ export const CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY = "coding_agent_review_rounds
  * May the box MERGE a pull request its own review loop has cleared?
  *
  * OFF by default, and the one switch here that is a consent rather than a
- * preference: everything else the loop does is reversible, and a squash-merge
- * into a shared branch is not. A pull request the loop cleared without this
- * switch ends at `review.state === "clean"` — green, no unresolved comments,
- * open, and the owner presses the button.
+ * preference: everything else the loop does is reversible, and a merge into a
+ * shared branch is not. A pull request the loop cleared without this switch
+ * ends at `review.state === "clean"` — green, no unresolved comments, open,
+ * and the owner presses the button.
+ *
+ * The same consent covers GitHub's auto-merge: with it on, the loop turns
+ * auto-merge on while nothing is outstanding, so the pull request merges the
+ * moment its required checks pass rather than on the loop's next poll — or
+ * never, once the loop has given up at its ceiling (reconcileAutoMerge).
  *
  * Note the older `coding_agent_auto_pr` watcher merges on green by itself.
  * That is deliberate and unchanged: it is what a box that switched the review
@@ -597,6 +613,18 @@ export const CODING_AGENT_GEN_AUDIO_CONFIG_KEY = "coding_agent_generate_audio";
 export const CODING_AGENT_REAL_BROWSER_CONFIG_KEY = "coding_agent_real_browser";
 
 /**
+ * May a coding TEAM's lead change the plan while the team runs — add a task
+ * a finished one revealed, retire a pending one the goal no longer needs?
+ *
+ * OFF when absent: every lead turn is one more paid, read-only run after
+ * each worker settles, and a plan that moves under a running team is a
+ * different thing from the one the owner saw posted. Read once when a team
+ * starts and kept on its board (src/lib/coding-team.ts), so flipping it
+ * never changes a team already at work.
+ */
+export const CODING_TEAM_DYNAMIC_CONFIG_KEY = "coding_team_dynamic";
+
+/**
 
 /**
  * The owner's standing answer to "may a run do this?" — the permission rules
@@ -644,6 +672,7 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
+  CODING_TEAM_DYNAMIC_CONFIG_KEY,
   CODING_AGENT_ALLOW_RULES_CONFIG_KEY,
   // The commit identity is a SETTING — the owner chose who the box signs their
   // work as — so "start over" puts it back to the project's own git config and
@@ -1375,6 +1404,15 @@ export interface CodingRun {
    */
   denials: CodingDenial[];
   /**
+   * How many of the refusals (`permissionDenials`, all of them, not the kept
+   * few) were a run in a worktree aiming a file tool at `<project>/<rel>`
+   * while `<worktree>/<rel>` was there — answered with a retry hint at the
+   * worktree path in the run's transcript (coding-worktree-paths.ts), and
+   * marked on its `denials` entry with `worktreePath`. A coding team reads
+   * them as soft: a note, not an alert, and never a rejection on their own.
+   */
+  worktreeHints: number;
+  /**
    * The owner's permission rules as they stood when this run STARTED.
    *
    * Frozen on the record for the same reason `effort`, `maxTurns` and `media`
@@ -1773,6 +1811,14 @@ export interface CodingDenial {
   text: string;
   rule: string | null;
   refusal: AllowRuleRefusal | null;
+  /**
+   * Where the run meant to go, when it works in a worktree and the refused
+   * action aimed at the same path in the project itself (`worktreeHintFor`):
+   * the path in its own folder — the one the retry hint named, where the
+   * harness could take one. Absent for every other refusal, and on a record
+   * from before the hint.
+   */
+  worktreePath?: string;
 }
 
 /** How many finished helpers a run record keeps — the newest; the counts by type keep the total. */
@@ -1904,6 +1950,8 @@ export interface CodingAgentStatus {
   generateAudio: boolean;
   /** Does a run verify its work in the browser on the owner's screen? */
   realBrowser: boolean;
+  /** May a coding team's lead add or retire tasks while the team runs? Off unless the owner said so. */
+  teamDynamic: boolean;
   /** The owner's standing permission rules, in the order they saved them. */
   allowRules: string[];
   /** How many they may keep, so the editor can say so without guessing. */
@@ -2030,7 +2078,8 @@ export interface StartRunInput {
 /** A run's place in a coding team. */
 export interface RunTeam {
   id: string;
-  role: "planner" | "worker" | "reviewer";
+  /** `lead`: the planner back for a moment after a worker settled, deciding whether the plan still fits (read-only, like the planner and the reviewer). */
+  role: "planner" | "worker" | "reviewer" | "lead";
   taskId: string | null;
 }
 
@@ -2042,9 +2091,14 @@ export interface RunTeam {
  */
 export type CodingAgentErrorKind = "disabled" | "not_ready" | "busy" | "invalid" | "not_found" | "limited";
 
-/** Thrown by startRun/stopRun; the routes map `kind` to a status code. */
+/**
+ * Thrown by startRun/stopRun; the routes map `kind` to a status code.
+ * `wait` marks a refusal that clears on its own — a team's run refused for
+ * room (its slot count, the memory guard) — so the team's orchestrator waits
+ * for it rather than giving up on the run.
+ */
 export class CodingAgentError extends Error {
-  constructor(readonly kind: CodingAgentErrorKind, message: string) {
+  constructor(readonly kind: CodingAgentErrorKind, message: string, readonly wait = false) {
     super(message);
     this.name = "CodingAgentError";
   }
@@ -2270,19 +2324,45 @@ function isEffort(value: unknown): value is CodingEffort {
 }
 
 /**
+ * The folder Claude Code keeps its state in for a run on this provider,
+ * mirroring scripts/claude-ds exactly. A ClawBox AI run gets
+ * CLAUDE_CONFIG_DIR="${CLAUDE_DS_CONFIG_DIR:-$HOME/.claude-ds}". An Anthropic
+ * run has CLAUDE_CONFIG_DIR UNSET, so Claude Code falls back to its default,
+ * ~/.claude, where the owner's own login lives — and the wrapper sets no
+ * override there for this to honour. buildRunEnv hands the run this same HOME
+ * and this same CLAUDE_DS_CONFIG_DIR, so the two sides cannot disagree.
+ */
+export function harnessStateDir(provider: CodingProvider): string {
+  if (provider === "anthropic") return path.join(homeDir(), ".claude");
+  return process.env.CLAUDE_DS_CONFIG_DIR || path.join(homeDir(), ".claude-ds");
+}
+
+/**
  * Where Claude Code keeps this run's transcript.
  *
  * It encodes the working folder by replacing every non-ASCII-alphanumeric character with a dash, so
  * /home/clawbox/x becomes -home-clawbox-x. Returns null until the run has a
  * session id, which arrives with the first stream event.
  *
+ * The folder is the one the run's OWN provider wrote to — the record's frozen
+ * provider, not today's setting, so an old run still resolves after the owner
+ * switches. When that file is missing and the other provider's folder has it
+ * (a record whose provider was never written, and so reads as the default),
+ * the one that exists wins. When neither exists yet, the run's own path is
+ * returned: the live preview waits on it, and that is where it will appear.
+ *
  * The file exists and grows WHILE the run works, which is what makes a live
  * preview possible rather than only a post-mortem.
  */
-export function transcriptPath(run: Pick<CodingRun, "sessionId" | "directory">): string | null {
+export function transcriptPath(run: Pick<CodingRun, "sessionId" | "directory" | "provider">): string | null {
   if (!run.sessionId) return null;
-  const configDir = process.env.CLAUDE_DS_CONFIG_DIR || path.join(homeDir(), ".claude-ds");
-  return path.join(configDir, "projects", run.directory.replace(/[^a-zA-Z0-9]/g, "-"), `${run.sessionId}.jsonl`);
+  const provider = codingProviderFrom(run.provider);
+  const file = (p: CodingProvider) =>
+    path.join(harnessStateDir(p), "projects", run.directory.replace(/[^a-zA-Z0-9]/g, "-"), `${run.sessionId}.jsonl`);
+  const own = file(provider);
+  if (fs.existsSync(own)) return own;
+  const other = file(provider === "anthropic" ? "clawbox-ai" : "anthropic");
+  return fs.existsSync(other) ? other : own;
 }
 
 /** The owner's effort level. Anything unrecognised reads as the default. */
@@ -2448,6 +2528,19 @@ export async function setRealBrowser(on: unknown): Promise<boolean> {
     throw new CodingAgentError("invalid", "The browser switch must be true or false.");
   }
   await configSet(CODING_AGENT_REAL_BROWSER_CONFIG_KEY, on);
+  return on;
+}
+
+/** The team lead's switch. OFF unless it is exactly `true` — see its config key. */
+export async function getTeamDynamic(): Promise<boolean> {
+  return (await configGet(CODING_TEAM_DYNAMIC_CONFIG_KEY)) === true;
+}
+
+export async function setTeamDynamic(on: unknown): Promise<boolean> {
+  if (typeof on !== "boolean") {
+    throw new CodingAgentError("invalid", "The team lead switch must be true or false.");
+  }
+  await configSet(CODING_TEAM_DYNAMIC_CONFIG_KEY, on);
   return on;
 }
 
@@ -3348,6 +3441,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
+    teamDynamic: config[CODING_TEAM_DYNAMIC_CONFIG_KEY] === true,
     // The home, so a harness-project rule is still on the list the panels
     // read; the full context's directory walk is not worth it here.
     allowRules: normalizeAllowRules(config[CODING_AGENT_ALLOW_RULES_CONFIG_KEY], allowRuleHomeContext()),
@@ -3435,7 +3529,7 @@ function normalizeTeam(raw: unknown): RunTeam | null {
   // Every role the team has: a reviewer run reloaded without its team would
   // be resumed and settled as a project run — icon, review pass, pull
   // request — in a folder that is the team's.
-  if (t.role !== "planner" && t.role !== "worker" && t.role !== "reviewer") return null;
+  if (t.role !== "planner" && t.role !== "worker" && t.role !== "reviewer" && t.role !== "lead") return null;
   return { id: t.id, role: t.role, taskId: typeof t.taskId === "string" ? t.taskId : null };
 }
 
@@ -3463,6 +3557,9 @@ function normalizePr(raw: unknown): PrState | null {
     // who opened its pull request, and "opened" would be this code claiming
     // credit it has no evidence for.
     foundBy: isPrFoundBy(v.foundBy) ? v.foundBy : null,
+    readyAt: typeof v.readyAt === "number" && Number.isFinite(v.readyAt) ? v.readyAt : null,
+    autoMergeAt: typeof v.autoMergeAt === "number" && Number.isFinite(v.autoMergeAt) ? v.autoMergeAt : null,
+    autoMergeFailedAt: typeof v.autoMergeFailedAt === "number" && Number.isFinite(v.autoMergeFailedAt) ? v.autoMergeFailedAt : null,
   };
 }
 
@@ -3508,8 +3605,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
           // the page words it from a fixed table, and an unknown code would
           // render as nothing beside a refusal that then explains itself twice.
           refusal: isAllowRuleRefusal(d.refusal) ? d.refusal : null,
+          ...(typeof d.worktreePath === "string" && path.isAbsolute(d.worktreePath) ? { worktreePath: d.worktreePath } : {}),
         }))
       : [],
+    worktreeHints: typeof raw.worktreeHints === "number" && Number.isFinite(raw.worktreeHints) && raw.worktreeHints > 0 ? Math.floor(raw.worktreeHints) : 0,
     // Re-validated rather than trusted: this list is what a resume hands to the
     // CLI, and the floor it had to clear when the run started may have risen.
     allowRules: normalizeAllowRules(raw.allowRules, allowRuleHomeContext()),
@@ -3812,7 +3911,7 @@ function writeAll(list: CodingRun[]): void {
   // a healthy box is never — see keepSettledRecords.
   if (store.signature !== null && fileSignature() !== store.signature) keepSettledRecords(list);
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = `${RUNS_PATH}.tmp`;
+  const tmp = untraced(`${RUNS_PATH}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(list, null, 2), { mode: 0o600 });
   try {
     fs.chmodSync(tmp, 0o600);
@@ -3945,6 +4044,14 @@ interface LiveRun {
    * filesTouched now until the tool_result comes back without an error.
    */
   pendingFiles: Map<string, string>;
+  /**
+   * File tools a run in a worktree aimed at the project's own path, by
+   * tool_use id: the tool, and the same path in the worktree
+   * (`worktreeHintFor`). A refusal of one is answered with a retry hint.
+   */
+  worktreeTargets: Map<string, { tool: string; counterpart: string }>;
+  /** Worktree paths this spawn has already hinted: each is said once. */
+  worktreeHinted: Set<string>;
   /**
    * Whether the run ever ASKED to write, confirmed or not.
    *
@@ -4242,6 +4349,8 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     outputBilledInSegment: 0,
     helperBilled: new Map<string, number>(),
     pendingFiles: new Map<string, string>(),
+    worktreeTargets: new Map<string, { tool: string; counterpart: string }>(),
+    worktreeHinted: new Set<string>(),
     sawWriteAttempt: false,
     sawThinking: false,
     thinkingSeen: 0,
@@ -4789,6 +4898,24 @@ export function headlessBrief(opts: { reviewedSeparately: boolean }): string {
   return HEADLESS_BRIEF_TEMPLATE.replace(REVIEWER_CLAUSE_SLOT, opts.reviewedSeparately ? REVIEWER_CLAUSE_SEPARATE : REVIEWER_CLAUSE_HELPER);
 }
 
+/**
+ * What every run that can write is told about a pull request its task wants
+ * merged — one sentence of the headless brief, exported for its test.
+ *
+ * Measured on ClawBox's own repository (2026-09-22): eight pull requests went
+ * green in the afternoon and evening and were merged together at 05:18 the
+ * next morning, ten to sixteen hours later. A run that waits on CI to merge
+ * spends its turns polling and ends before a slow install check does, and a
+ * watcher that merges gives up at its ceiling. Handing the merge to GitHub the
+ * moment the pull request is open is what closes that gap, with the required
+ * checks still the gate. Conditional on the TASK asking for the merge, because
+ * the task is the consent: a run told only to open a pull request is not told
+ * to merge it. The device's own watchers do the same for the pull requests
+ * they watch (reconcileAutoMerge), under the owner's merge switch.
+ */
+export const PR_AUTO_MERGE_BRIEF =
+  "If your task has you open a pull request and wants it merged, hand the merge to GitHub as soon as it is open instead of waiting on CI yourself: `gh pr merge <number> --auto --merge` merges it the moment its required checks pass, and the repository's own setting deletes the branch. Never do that for a pull request into main or one labelled hold or do-not-merge, and not on a draft (turn it on after `gh pr ready`). If a review leaves findings you are going to fix, turn it off first (`gh pr merge <number> --disable-auto`) and on again once the fix is pushed. If GitHub refuses it (auto-merge off for that repository, or nothing required on the branch), merge the way your task says.";
+
 const HEADLESS_BRIEF_TEMPLATE = [
   "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
   "Nobody can answer questions, so make sensible assumptions and keep going. Stay inside this folder; do not install system packages or change device settings.",
@@ -4853,11 +4980,28 @@ const HEADLESS_BRIEF_TEMPLATE = [
   // for; s-02's run (2026-09-05) spent five minutes searching the disk for a
   // file that was not where the task said it would be.
   "Deliver what the task names and nothing beside it: when it lists the files to produce, produce exactly those — no extra assets, pictures, notes or scripts, however nice; anything you make only to check your work goes to the evidence folder. When a file or folder the task relies on is not where the task says, look once where it points, then treat that step as undoable and report it — never search the disk for it.",
+  PR_AUTO_MERGE_BRIEF,
   "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, anything you could not finish, and every assumption you made where the task left a choice open — name the convention or default you picked and why.",
 ].join(" ");
 
 /** The brief of a run with no separate review — the reviewer helper is its review. */
 export const HEADLESS_BRIEF = headlessBrief({ reviewedSeparately: false });
+
+/**
+ * Added for a run whose branch the box will open a pull request from (the
+ * auto-PR switch was on when it started). A run whose task says to open its
+ * own runs `gh pr create`, and the settle adopts that pull request and
+ * watches it (maybeOpenPullRequest). It has to be a draft for the same reason
+ * the box's own are: CodeRabbit reviews a pull request once, when it becomes
+ * ready, and the watcher readies it only after the checks pass. Left out for
+ * every other run, because a draft that nothing watches is never readied.
+ *
+ * It comes AFTER the headless brief's PR_AUTO_MERGE_BRIEF and overrides it by
+ * name: this run's pull request is the device's to arm (reconcileAutoMerge),
+ * after CodeRabbit's one review has been read, never the run's at open time.
+ */
+export const PR_DRAFT_BRIEF =
+  "If your task asks you to open a pull request, open it as a draft (`gh pr create --draft`; without --draft only when GitHub refuses drafts in that repository): this device watches it, marks it ready for review once its checks pass, which is when CodeRabbit gives its one review, and merges it or hands it back as the owner's settings say. Do not mark it ready, ask for a review or merge it yourself — and do not turn on its auto-merge either: the device does that once nothing on it is outstanding.";
 
 /**
  * Added to the brief under ultracode only: what the Workflow tool is for on
@@ -5148,6 +5292,17 @@ export const MCP_MEDIA_TOOLS: Record<keyof RunMedia, string> = {
   audio: "mcp__clawbox__generate_audio",
 };
 
+/**
+ * The one tool a run of a coding TEAM gets beside the rest: `team_message`
+ * (coding-team-messages.ts) — a bounded, logged note to a sibling run, to the
+ * team's lead, or to the box's main agent. Allowed for EVERY team run, the
+ * read-only planner and reviewer included: it writes nothing in the project,
+ * and "the file the task names does not exist" is exactly what a planner
+ * should be able to say. The run's own MCP server registers it only when the
+ * environment below names the team, so no other run is ever offered it.
+ */
+export const MCP_TEAM_TOOL = "mcp__clawbox__team_message";
+
 /** Every MCP tool this run may call: the browser family, plus what it may draw and say. */
 export function runMcpTools(media: RunMedia | undefined): string[] {
   const tools: string[] = [...MCP_BROWSER_TOOLS];
@@ -5173,7 +5328,7 @@ export function runMediaEnv(media: RunMedia | undefined): string {
  * data/.mcp-token itself through its normal file fallback. Exported for the
  * contract test.
  */
-export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia }): string {
+export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null }): string {
   const media = runMediaEnv(run.media);
   return JSON.stringify({
     mcpServers: {
@@ -5192,6 +5347,19 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
           CLAWBOX_RUN_INPUTS_DIR: runInputsDir(run.id),
           CLAWBOX_RUN_DIR: run.directory,
           ...(media ? { CLAWBOX_RUN_MEDIA: media } : {}),
+          // Only for a run of a coding team, and all four or none: the server
+          // registers `team_message` from them (mcp/lib/run-context.ts), and
+          // the tool speaks as THIS run — the route then checks the claim
+          // against the team's board, so a variable is a name, not a pass.
+          // `none` for the planner, whose run has no task of its own.
+          ...(run.team
+            ? {
+                CLAWBOX_RUN_ID: run.id,
+                CLAWBOX_TEAM_ID: run.team.id,
+                CLAWBOX_TEAM_ROLE: run.team.role,
+                CLAWBOX_TEAM_TASK: run.team.taskId ?? "none",
+              }
+            : {}),
         },
       },
     },
@@ -5199,7 +5367,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT.
   const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
@@ -5215,6 +5383,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // it below), so it hears nothing about drawing or speaking.
     ...(opts.run?.media?.images && !opts.readOnly ? [MEDIA_BRIEF_IMAGES] : []),
     ...(opts.run?.media?.audio && !opts.readOnly ? [MEDIA_BRIEF_AUDIO] : []),
+    ...(opts.draftPullRequests && !opts.readOnly ? [PR_DRAFT_BRIEF] : []),
     // A team's role for this run — the planner's "answer with a JSON array",
     // a worker's "this is your task among these" — after the device's own
     // words, never instead of them.
@@ -5292,7 +5461,9 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // circularity — `fileDenyRules` below is built FROM this list — and does
     // not need to be: every deny rule it returns still outranks each allow.
     const allowRules = normalizeAllowRules(opts.allowRules, allowRuleHomeContext());
-    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), TMP_READ_RULE, inputsReadRule(), ...allowRules);
+    // A team run's `team_message` is approved whatever else the run may do —
+    // read-only included (see MCP_TEAM_TOOL) — and only for a team run.
+    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), TMP_READ_RULE, inputsReadRule(), ...allowRules);
     // The file rules, and the one command list that is enforced: nothing a
     // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).
     //
@@ -5619,6 +5790,20 @@ function groupAlive(pgid: number | null): boolean {
 }
 
 /**
+ * Wait, at most `ms`, for a process group to be gone; answers whether it is.
+ * For a group the settle has just signalled: SIGKILL follows STOP_GRACE_MS
+ * after the SIGTERM (killRunGroup), so a little longer than that is enough.
+ */
+async function groupGone(pgid: number | null, ms: number): Promise<boolean> {
+  const until = Date.now() + ms;
+  while (groupAlive(pgid)) {
+    if (Date.now() >= until) return false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return true;
+}
+
+/**
  * Is that ONE process still there? `groupAlive`'s narrower sibling, and the two
  * answer different questions: the group is alive while anything the run forked
  * is, the process is alive only while the HARNESS is.
@@ -5759,6 +5944,17 @@ export function killRunLeftovers(id: string): CodingRun {
   run.unit = null;
   persist(true);
   return cloneRun(run);
+}
+
+/**
+ * The paths a prune removed, as the value of one progress line: a tree with a
+ * trailing slash, a link as it is. The first four by name, then a count — the
+ * feed caps a line, and four is what fits after the sentence.
+ */
+function prunedPaths(pruned: PrunedArtifact[]): string {
+  const names = pruned.map((p) => (p.reason === "interpreter" ? `${p.path}/` : p.path)).sort();
+  const shown = names.slice(0, 4).join(", ");
+  return names.length > 4 ? `${shown} (+${names.length - 4})` : shown;
 }
 
 function pushProgress(run: CodingRun, line: string): void {
@@ -6484,6 +6680,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         pushProgress(run, block.text);
       } else if (block.type === "tool_use" && typeof block.name === "string") {
         const input = (block.input && typeof block.input === "object" ? block.input : {}) as Record<string, unknown>;
+        // A run in a worktree pointing a file tool at the project's own path:
+        // kept until its result says whether it was refused (below).
+        const counterpart = typeof block.id === "string" && block.id ? worktreeHintFor(run.directory, block.name, input) : null;
+        if (counterpart) state.worktreeTargets.set(block.id as string, { tool: block.name, counterpart });
         switch (block.name) {
           case "Bash":
             run.commandsRun += 1;
@@ -6578,6 +6778,13 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         // A refusal comes back as an error result; only a clean one counts.
         if (block.is_error !== true) noteFile(run, pending);
       }
+      // Refused on the project's path from inside a worktree: the retry
+      // hint goes to the run now, while it can still act on it.
+      const aimed = state.worktreeTargets.get(block.tool_use_id);
+      if (aimed) {
+        state.worktreeTargets.delete(block.tool_use_id);
+        if (block.is_error === true) hintWorktree(run, state, aimed.tool, aimed.counterpart);
+      }
     }
     return;
   }
@@ -6626,6 +6833,21 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     }
     if (Array.isArray(event.permission_denials)) {
       const parsed = denialsFrom(event.permission_denials);
+      // The refusals a run in a worktree met on the project's own path, each
+      // marked with where it was pointed instead — and hinted if its
+      // tool_result slipped by: queued, for afterTurn below to deliver as the
+      // next turn. Counted whole, not in the kept few: a team reads every one
+      // of them as a note, never as a rejection.
+      let hinted = 0;
+      event.permission_denials.forEach((entry, i) => {
+        const e = (entry && typeof entry === "object" ? entry : {}) as { tool_name?: unknown; tool_input?: unknown };
+        const counterpart = worktreeHintFor(run.directory, e.tool_name, e.tool_input);
+        if (!counterpart) return;
+        hinted += 1;
+        parsed[i].worktreePath = counterpart;
+        hintWorktree(run, state, e.tool_name as string, counterpart, false);
+      });
+      run.worktreeHints = (continuation ? run.worktreeHints : 0) + hinted;
       const described = parsed.map((d) => d.text);
       run.permissionDenials = (continuation ? run.permissionDenials : 0) + event.permission_denials.length;
       run.deniedActions = (continuation ? [...run.deniedActions, ...described] : described).slice(0, MAX_DENIALS_KEPT);
@@ -7039,6 +7261,9 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
         base: prBase,
         title: firstLineOf(origin.task),
         body: prBody(origin, finished),
+        // A draft until its checks pass: the watcher readies it then, and that
+        // is when CodeRabbit gives the one review it gives a pull request.
+        draft: true,
       });
       if (!created.ok) {
         settlePr(origin, "failed", created.detail);
@@ -7098,6 +7323,7 @@ async function beginPullRequestWatch(origin: CodingRun, input: {
     endedAt: null,
     reviewOk: input.reviewOk,
     foundBy: input.foundBy,
+    readyAt: null,
   };
   pushProgress(origin, input.foundBy === "adopted"
     ? RUNNER_STEP.pullRequestAdopted(input.number, input.base)
@@ -7119,6 +7345,8 @@ async function beginPullRequestWatch(origin: CodingRun, input: {
       fixRunId: null,
       fixMode: null,
       fixDetail: null,
+      readyAt: null,
+      codeRabbitAskedFor: null,
     };
   }
   persist(true);
@@ -7235,6 +7463,114 @@ function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail
 }
 
 /**
+ * A watcher's own merge, and the one race it now has: GitHub's auto-merge
+ * lands the same pull request in the seconds between the poll that saw it
+ * green and this call, and `gh pr merge` then fails on a pull request that is
+ * merged. That is a merge, and it is recorded as one.
+ */
+async function mergeOrFindMerged(dir: string, number: number): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const merged = await mergePullRequest(dir, number);
+  if (merged.ok) return merged;
+  const facts = await readAutoMergeFacts(dir, number);
+  return !("error" in facts) && facts.state === "MERGED" ? { ok: true } : merged;
+}
+
+/** How often the checks-only watcher, which polls every few seconds, looks at
+ *  auto-merge. The review loop looks on every one of its polls. */
+const AUTO_MERGE_LOOK_MS = 60_000;
+
+/** Said after a watcher's last word when GitHub's auto-merge is still on. */
+const AUTO_MERGE_ON_NOTE = "GitHub's auto-merge is on for it, so it merges by itself the moment its required checks pass.";
+
+/** Where reconcileAutoMerge left GitHub's auto-merge. */
+interface AutoMergeReconciled {
+  /** On once it was done, or null when that is not known. */
+  on: boolean | null;
+  /** GitHub's own words when auto-merge had to go OFF and would not, or null. */
+  offFailed: string | null;
+}
+
+/**
+ * A watcher's last word, with what GitHub's auto-merge will still do after it.
+ *
+ * A turn-off that failed is said first and plainly: the watcher is ending, so
+ * nothing here will try again, and over a hold label or a base of main that
+ * is a merge the owner asked for nobody to make.
+ */
+function withAutoMergeNote(detail: string | null, autoMerge: AutoMergeReconciled | null): string | null {
+  const note = autoMerge?.offFailed
+    ? `ClawBox could not turn GitHub's auto-merge off, so it may still merge by itself — turn it off on GitHub. ${autoMerge.offFailed}`
+    : autoMerge?.on === true ? AUTO_MERGE_ON_NOTE : null;
+  if (!note) return detail;
+  return detail ? `${detail} ${note}` : note;
+}
+
+/**
+ * Bring GitHub's auto-merge for a watched pull request in line with what the
+ * box would do itself — see decideAutoMerge.
+ *
+ * WHY. A watcher merges on its next poll, and only for as long as it polls:
+ * the checks-only watcher gives up after half an hour and the review loop
+ * after an hour a round, which a slow install check and a rate-limited
+ * reviewer outlast between them. A pull request that went green after that sat
+ * open until somebody came by, measured at ten to sixteen hours overnight.
+ * Auto-merge hands the last step to GitHub, which merges the moment the
+ * required checks pass whether or not anything here is still looking.
+ *
+ * Best-effort by construction: every `gh` failure is logged and the watcher
+ * goes on exactly as it would have without this. Answers whether auto-merge is
+ * on once it is done (null when that is not known), and GitHub's refusal when
+ * it had to go off and would not — see withAutoMergeNote.
+ */
+async function reconcileAutoMerge(
+  runId: string,
+  input: { refusal: string | null; outstanding: string | null; early: boolean },
+): Promise<AutoMergeReconciled> {
+  const unknown: AutoMergeReconciled = { on: null, offFailed: null };
+  const run = loadRuns().find((r) => r.id === runId);
+  const number = run?.pr?.number;
+  if (!run?.pr || typeof number !== "number") return unknown;
+
+  const facts = await readAutoMergeFacts(run.directory, number);
+  if ("error" in facts) {
+    console.error(`[coding-agent] ${runId} could not read auto-merge for PR #${number}: ${facts.error}`);
+    return unknown;
+  }
+  const failedAt = run.pr.autoMergeFailedAt ?? null;
+  const stance = decideAutoMerge({
+    facts,
+    refusal: input.refusal,
+    outstanding: input.outstanding,
+    early: input.early,
+    mayTry: failedAt === null || Date.now() - failedAt >= AUTO_MERGE_RETRY_MS,
+    armedAt: run.pr.autoMergeAt ?? null,
+  });
+  if (stance.action === "none") return { on: facts.enabled, offFailed: null };
+
+  const turningOn = stance.action === "enable";
+  const done = turningOn ? await enableAutoMerge(run.directory, number) : await disableAutoMerge(run.directory, number);
+  // Re-read: the `gh` calls above are subprocesses, and the owner may have
+  // cleared the run under them.
+  const current = loadRuns().find((r) => r.id === runId);
+  if (!current?.pr || current.pr.number !== number) return unknown;
+  if (!done.ok) {
+    console.error(`[coding-agent] ${runId} could not turn auto-merge ${turningOn ? "on" : "off"} for PR #${number}: ${done.detail}`);
+    if (turningOn) {
+      current.pr = { ...current.pr, autoMergeFailedAt: Date.now() };
+      persist(true);
+    }
+    return { on: facts.enabled, offFailed: turningOn ? null : done.detail };
+  }
+  current.pr = turningOn
+    ? { ...current.pr, autoMergeAt: Date.now(), autoMergeFailedAt: null }
+    : { ...current.pr, autoMergeAt: null };
+  pushProgress(current, stance.action === "enable" ? RUNNER_STEP.autoMergeOn(number) : RUNNER_STEP.autoMergeOff(stance.reason));
+  persist(true);
+  console.error(`[coding-agent] ${runId} turned auto-merge ${turningOn ? "on" : "off"} for PR #${number}`);
+  return { on: turningOn, offFailed: null };
+}
+
+/**
  * One poll of a pull-request, review or deployment watcher, tracked like the
  * settle path it continues.
  *
@@ -7285,6 +7621,9 @@ const prWatchers = store.prWatchers;
 function watchPullRequest(runId: string): void {
   if (prWatchers.has(runId)) return;
   prWatchers.add(runId);
+  // In the watcher's closure rather than on the record: a watcher rebuilt
+  // after a restart looking again at once is what should happen anyway.
+  let autoMergeLookedAt = 0;
 
   const tick = async (): Promise<void> => {
     const run = loadRuns().find((r) => r.id === runId);
@@ -7321,14 +7660,61 @@ function watchPullRequest(runId: string): void {
     run.pr = { ...run.pr, checks: snapshot.checks };
     persist(true);
 
-    const verdict = decideMerge({ snapshot, waitedMs: Date.now() - run.pr.startedAt, reviewOk: run.pr.reviewOk });
+    const readyAt = typeof run.pr.readyAt === "number" ? run.pr.readyAt : null;
+    const verdict = decideMerge({
+      snapshot,
+      // From the moment it was readied, once it was: the review that starts
+      // then gets the whole wait, not what the suite left of it.
+      waitedMs: Date.now() - (readyAt ?? run.pr.startedAt),
+      reviewOk: run.pr.reviewOk,
+      sinceReadyMs: readyAt === null ? null : Date.now() - readyAt,
+    });
+
+    // GitHub's auto-merge follows the verdict: on while this watcher would
+    // merge, off where it would not — see reconcileAutoMerge. Every minute
+    // while waiting, and always on the way out, so a watcher that gave up at
+    // its ceiling leaves it on and one that refused leaves it off. Never
+    // before the merge this watcher is about to make itself.
+    let autoMergeState: AutoMergeReconciled | null = null;
+    if (verdict.action !== "merge" && snapshot.state === "OPEN"
+      && (verdict.action === "block" || Date.now() - autoMergeLookedAt >= AUTO_MERGE_LOOK_MS)) {
+      autoMergeLookedAt = Date.now();
+      autoMergeState = await reconcileAutoMerge(runId, {
+        refusal: run.pr.reviewOk ? null : "the automatic review pass did not finish cleanly",
+        outstanding: snapshot.checks.failed > 0
+          ? "a check failed"
+          : snapshot.mergeable === "CONFLICTING" ? "the branch conflicts with its base" : null,
+        // Opened or readied moments ago: its checks are still arriving.
+        early: Date.now() - (readyAt ?? run.pr.startedAt) < NO_CHECKS_GRACE_MS,
+      });
+    }
+
     if (verdict.action === "wait") { schedule(); return; }
+    if (verdict.action === "ready") {
+      const readied = await markPullRequestReady(run.directory, prNumber);
+      const current = loadRuns().find((r) => r.id === runId);
+      if (!current?.pr || current.pr.phase !== "waiting") { prWatchers.delete(runId); return; }
+      if (readied.ok) {
+        current.pr = { ...current.pr, readyAt: Date.now() };
+        persist(true);
+        console.error(`[coding-agent] ${runId} marked PR #${prNumber} ready for review`);
+      } else if (Date.now() - current.pr.startedAt >= PR_MAX_WAIT_MS) {
+        // Retried on the next poll, under the ceiling every other wait has.
+        settlePr(current, "blocked", readied.detail);
+        prWatchers.delete(runId);
+        return;
+      }
+      schedule();
+      return;
+    }
     if (verdict.action === "block") {
-      settlePr(run, "blocked", verdict.detail);
+      // Re-read: reconcileAutoMerge may have waited on `gh`.
+      const current = loadRuns().find((r) => r.id === runId);
+      if (current?.pr?.phase === "waiting") settlePr(current, "blocked", withAutoMergeNote(verdict.detail, autoMergeState));
       prWatchers.delete(runId);
       return;
     }
-    const merged = await mergePullRequest(run.directory, prNumber);
+    const merged = await mergeOrFindMerged(run.directory, prNumber);
     settlePr(run, merged.ok ? "merged" : "blocked", merged.ok ? null : merged.detail);
     prWatchers.delete(runId);
   };
@@ -7486,15 +7872,16 @@ function watchReviewLoop(runId: string): void {
     };
     persist(true);
 
+    // Read every tick rather than frozen with the rounds: the rounds shape
+    // what the run was promised, but the merge is a consent, and an owner who
+    // switches it off while a loop runs has said no to THIS merge.
+    const autoMerge = await getAutoMerge();
     const verdict = decideReviewRound({
       snapshot,
       round: review.round,
       maxRounds: review.maxRounds,
       waitedMs,
-      // Read every tick rather than frozen with the rounds: the rounds shape
-      // what the run was promised, but the merge is a consent, and an owner
-      // who switches it off while a loop runs has said no to THIS merge.
-      autoMerge: await getAutoMerge(),
+      autoMerge,
       // The automatic review pass's verdict, recorded when the pull request was
       // opened. The checks-only watcher has always gated its merge on it
       // (decideMerge), and the loop has to as well: a green suite over a review
@@ -7504,12 +7891,66 @@ function watchReviewLoop(runId: string): void {
       // rebuilt after a restart decides as the first one did.
       reviewOk: run.pr?.reviewOk !== false,
       base: review.base,
+      sinceReadyMs: typeof review.readyAt === "number" ? Date.now() - review.readyAt : null,
+      codeRabbitAskedFor: review.codeRabbitAskedFor ?? null,
     });
 
+    // GitHub's auto-merge follows the round: on while nothing is outstanding
+    // and the box may merge, off while a round is due or the owner has said
+    // no — see reconcileAutoMerge. Never before the merge this tick is about
+    // to make itself, and not over a pull request that is no longer open.
+    let autoMergeState: AutoMergeReconciled | null = null;
+    if (verdict.action !== "merge" && snapshot.state === "OPEN") {
+      autoMergeState = await reconcileAutoMerge(runId, {
+        refusal: !autoMerge
+          ? "merging by itself is switched off"
+          : run.pr?.reviewOk === false ? "the automatic review pass did not finish cleanly" : null,
+        outstanding: autoMergeOutstanding(snapshot, waitedMs),
+        // A head pushed moments ago has checks still arriving — its CodeRabbit
+        // status among them — so nothing is turned on before the grace is out.
+        early: waitedMs < REVIEW_NO_CHECKS_GRACE_MS,
+      });
+      // Re-read: the owner may have stopped the loop while `gh` was answering.
+      if (loadRuns().find((r) => r.id === runId)?.review?.state !== "polling") { stop(); return; }
+    }
+
     if (verdict.action === "wait") { schedule(); return; }
-    if (verdict.action === "done") { settleReview(run, verdict.state, verdict.detail); stop(); return; }
+    if (verdict.action === "done") {
+      const current = loadRuns().find((r) => r.id === runId) ?? run;
+      const said = verdict.detail ?? (verdict.state === "clean" ? REVIEW_CLEAN_DETAIL : null);
+      settleReview(current, verdict.state, verdict.state === "merged" ? said : withAutoMergeNote(said, autoMergeState));
+      stop();
+      return;
+    }
+    if (verdict.action === "ready" || verdict.action === "ask_coderabbit") {
+      // Neither is a round: nothing goes to the harness. Each starts something
+      // on GitHub (the review, or its status on this head), so the round's
+      // clock restarts with it, and the grace in codeRabbitGate measures "just
+      // asked" rather than "asked an hour ago".
+      const readying = verdict.action === "ready";
+      const done = readying
+        ? await markPullRequestReady(run.directory, review.prNumber)
+        : await requestCodeRabbitReview(run.directory, review.prNumber);
+      const current = loadRuns().find((r) => r.id === runId);
+      if (!current?.review || current.review.state !== "polling") { stop(); return; }
+      if (done.ok) {
+        const now = Date.now();
+        current.review = readying
+          ? { ...current.review, readyAt: now, roundStartedAt: now }
+          : { ...current.review, codeRabbitAskedFor: snapshot.headSha ?? "unknown", roundStartedAt: now };
+        persist(true);
+        console.error(`[coding-agent] ${runId} ${readying ? "marked PR ready for review" : "asked CodeRabbit to review the head"} (#${review.prNumber})`);
+      } else if (waitedMs >= REVIEW_MAX_WAIT_MS) {
+        // Retried on the next poll, under the ceiling every other wait has.
+        settleReview(current, "needs_owner", done.detail);
+        stop();
+        return;
+      }
+      schedule();
+      return;
+    }
     if (verdict.action === "merge") {
-      const merged = await mergePullRequest(run.directory, review.prNumber);
+      const merged = await mergeOrFindMerged(run.directory, review.prNumber);
       settleReview(run, merged.ok ? "merged" : "needs_owner", merged.ok ? null : merged.detail);
       stop();
       return;
@@ -9383,6 +9824,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // …and the Anthropic account it was on, for the same branch and for the
   // account switch below.
   const carriedAccount = runAnthropicCredential.get(run.id);
+  // …and its process group, which the cleanup forgets once it has signalled
+  // it: the prune below waits for that group to be gone.
+  const settledGroup = run.pgid;
   // Timers, the run's browser tab, and the verdict on what it left running.
   // Before the retry branch below, which respawns into a fresh state and a
   // fresh process group: a retry that inherited the first attempt's timers
@@ -9537,8 +9981,22 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // settles, and until it was tracked nothing — not even the module's own
   // reset — could wait for it. See `trackSettleWork`.
   const settled = run.status;
+  // Read now, not after the commit below: the owner's Kill clears it while the
+  // group it named may still be on its way out.
+  const leftRunning = run.leftover;
   trackSettleWork((async () => {
     await recordRunWork(run);
+    // Before "finished", so the owner reads why something left the evidence
+    // folder next to the run that put it there — and before any waiter or
+    // update can find it: see pruneArtifacts. Not while something the run
+    // started is still running: it can still change the folder under the walk.
+    // A run that left something running on purpose is not pruned at all; a
+    // group the cleanup signalled is waited for, up to its SIGKILL and a
+    // margin — something that shrugs off SIGTERM is still there until then.
+    if (!leftRunning && (await groupGone(settledGroup, STOP_GRACE_MS + 1_000))) {
+      const pruned = await pruneArtifacts(run.id);
+      if (pruned.length > 0) pushProgress(run, RUNNER_STEP.evidencePruned(prunedPaths(pruned)));
+    }
     pushProgress(run, settled === "paused" ? RUNNER_STEP.paused : RUNNER_STEP.finished(settled));
     persist(true);
     wakeWaiters(run.id);
@@ -9764,7 +10222,11 @@ function spawnRun(
   // for the life of the run, so a message the owner sends at minute three can
   // be written as the next user turn instead of waiting for a boundary.
   const streamInput = streamInputAvailable();
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media } }));
+  // "opening" is the auto-PR path's promise to open or adopt a pull request
+  // from this run's branch when it settles, and then to watch it — see
+  // PR_DRAFT_BRIEF.
+  const draftPullRequests = run.pr?.phase === "opening";
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -9855,6 +10317,8 @@ function spawnRun(
     outputBilledInSegment: 0,
     helperBilled: new Map<string, number>(),
     pendingFiles: new Map<string, string>(),
+    worktreeTargets: new Map<string, { tool: string; counterpart: string }>(),
+    worktreeHinted: new Set<string>(),
     sawWriteAttempt: false,
     sawThinking: false,
     thinkingSeen: 0,
@@ -9988,6 +10452,41 @@ function noteMessagesDelivered(run: CodingRun, messages: readonly RunMessage[]):
   if (marked > 0) persist();
 }
 
+/** Different paths one spawn is pointed at before the box stops saying it: a run that keeps missing its folder is told a few times, not thirty. */
+const MAX_WORKTREE_HINTS = 3;
+
+/**
+ * Answer a refusal on the project's own path, met by a run working in a
+ * worktree, with where that path is in its folder (coding-worktree-paths.ts):
+ * the box's own note, put on the record and written to the streaming harness
+ * at once — the road the owner's messages take, so it is on the record, in
+ * the feed, and in the run's transcript as its next user turn (framed as the
+ * box's by runMessageTurn). The refusal itself stands; this only says where
+ * to retry. Once per path per spawn, a few paths at most, and only to a
+ * harness that takes it NOW: queued for a later spawn it would sit in the
+ * owner's queue and say where to retry after the work was over.
+ *
+ * `flush` false leaves it queued for the turn's end (a result event): there
+ * `afterTurn` delivers it, and a turn it delivered something to keeps the
+ * pipe open — written here, afterTurn would find the queue empty and close
+ * stdin behind it, and a message sent while the run acted on the hint could
+ * no longer reach it.
+ */
+function hintWorktree(run: CodingRun, state: LiveRun, tool: string, counterpart: string, flush = true): void {
+  if (!state.streamInput || !state.stdinOpen) return;
+  if (state.worktreeHinted.has(counterpart) || state.worktreeHinted.size >= MAX_WORKTREE_HINTS) return;
+  state.worktreeHinted.add(counterpart);
+  try {
+    // Marked as the box's by the runner itself — never by what the text says.
+    run.messages = appendRunMessage(run.messages, normalizeRunMessage(worktreeHintText(tool, run.directory, counterpart)), Date.now(), "box");
+  } catch {
+    // The queue is full, or the path is not plain text: no hint, the refusal stands as it is.
+    return;
+  }
+  persist(true);
+  if (flush) flushRunMessages(run, state);
+}
+
 /**
  * Write every message still queued on this run to a live STREAMING harness, as
  * its next user turn(s), and answer how many went.
@@ -10005,7 +10504,7 @@ function flushRunMessages(run: CodingRun, state: LiveRun): number {
   const sent: RunMessage[] = [];
   for (const message of waiting) {
     try {
-      stdin.write(streamJsonUserTurn(runMessageTurn(message.text)));
+      stdin.write(streamJsonUserTurn(runMessageTurn(message.text, message.from)));
     } catch {
       // The pipe went while we were writing. What is left stays queued, which
       // is the honest record: the harness did not get it.
@@ -10457,7 +10956,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       // branch first; the tree is the only thing that was removed.
       inheritedWorktree = await reopenWorktree(previous);
       directory = await realDirectory(previous.directory);
-      releaseDirectory = assertDirectoryFree(directory);
+      releaseDirectory = assertDirectoryFree(directory, undefined, input.team ?? null, input.readOnly === true);
       projectId = previous.projectId;
       // A session poisoned by an authentication or transport failure REPLAYS
       // that failure on every resume — Claude Code persists it in the session,
@@ -10481,7 +10980,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       inherited = { provider: previous.provider, model: previous.requestedModel };
     } else {
       ({ directory, projectId } = await resolveWorkingDirectory(input));
-      releaseDirectory = assertDirectoryFree(directory);
+      releaseDirectory = assertDirectoryFree(directory, undefined, input.team ?? null, input.readOnly === true);
     }
 
     // Read once, here: a run keeps the settings it started with even if the
@@ -10891,6 +11390,7 @@ function newRunRecord(fields: {
     permissionDenials: 0,
     deniedActions: [],
     denials: [],
+    worktreeHints: 0,
     allowRules: [...fields.settings.allowRules],
     // The folder is known the moment the id is; what lands in it is staged by
     // `stageInputs` a few lines into startRun, once the caller's paths have
@@ -11117,6 +11617,23 @@ export function queueRunMessage(id: string, text: unknown): { run: CodingRun; de
 }
 
 /**
+ * A team message this run SENT, on its own feed (coding-team.ts calls it once
+ * the message is on its way): the receiver's side is already on the record as
+ * a queued message, and the sender's page must show what it said too, or a
+ * reader of one run sees an answer to a question nobody asked.
+ *
+ * Through pushProgress like every other step — scrubbed of the run's secrets
+ * and capped — and silent for a run that is gone: the message was sent either
+ * way, and the board holds the audit copy.
+ */
+export function noteTeamMessageSent(runId: string, line: string): void {
+  const run = loadRuns().find((r) => r.id === runId);
+  if (!run) return;
+  pushProgress(run, line);
+  persist();
+}
+
+/**
  * Ask a running run to PAUSE: the process ends gracefully, the record settles
  * as "paused" with its session intact, and resumeRun() respawns into it.
  * Idempotent the way stopRun is: pausing anything not running returns it.
@@ -11222,7 +11739,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     } catch {
       throw new CodingAgentError("not_found", `The folder this run worked in is gone (${run.directory}), so it cannot be resumed. Start a new run instead.`);
     }
-    releaseDirectory = assertDirectoryFree(run.directory, run.id);
+    releaseDirectory = assertDirectoryFree(run.directory, run.id, run.team ?? null, run.readOnly === true);
     // The one place a run's permission rules are RE-READ rather than kept.
     //
     // Everything else about a run is frozen on its record precisely so the tools
@@ -11354,7 +11871,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     const tools = await requireSpawnTools();
     // The folder must still be there — it was only checked when drafted.
     run.directory = await realDirectory(run.directory);
-    releaseDirectory = assertDirectoryFree(run.directory, run.id);
+    releaseDirectory = assertDirectoryFree(run.directory, run.id, run.team ?? null, run.readOnly === true);
     // The copy of the project is made at START and not when the draft was
     // written: a draft may sit for days, and a worktree made for one that is
     // never started would be a branch and a folder nobody asked for.
@@ -11494,7 +12011,7 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     // what covers the gap there, so `startingRuns` is deliberately not read by
     // it or the two would double-count one worker.
     const slot = await teamSpawnSlot(team);
-    if (!slot.ok) throw new CodingAgentError("busy", slot.reason);
+    if (!slot.ok) throw new CodingAgentError("busy", slot.reason, slot.wait);
     return holdSpawnSlot();
   }
   const limit = await getMaxParallelRuns();
@@ -11534,6 +12051,35 @@ async function anthropicPoolWait(): Promise<number | null | undefined> {
 }
 
 /**
+ * The live run that keeps a run from starting in `directory`, or null.
+ *
+ * A run of a TEAM is not kept out by its own team: the team's runs share the
+ * project on purpose — its reviewers read the project while its workers write
+ * in worktrees beneath it, and several tasks can be in review at once — and
+ * the orchestrator already decides which of them may write where. Counting
+ * them as strangers refused the reviewer of every task that finished while a
+ * sibling's reviewer was still reading, and each refusal was a review skipped
+ * (bench, 2026-09-22). A run of no team, or of another team, is refused as
+ * before — and so are two WRITERS of one team in one folder (the owner
+ * resuming a worker that gave up while its sibling writes in the same
+ * in-place checkout): the exemption needs one of the two to be read-only.
+ */
+export function folderHolder<R extends Pick<CodingRun, "id" | "status" | "directory" | "team" | "readOnly">>(
+  runs: readonly R[],
+  directory: string,
+  team: RunTeam | null = null,
+  exceptRunId?: string,
+  readOnly = false,
+): R | null {
+  return runs.find((r) =>
+    isLive(r.status)
+    && r.id !== exceptRunId
+    && r.directory === directory
+    && !(team && r.team?.id === team.id && (readOnly || r.readOnly === true)),
+  ) ?? null;
+}
+
+/**
  * Refuse a second run in the SAME working folder.
  *
  * The concurrency limit above is about the box's memory; this is the rule it
@@ -11541,9 +12087,10 @@ async function anthropicPoolWait(): Promise<number | null | undefined> {
  * this never fires for it — it fires for the folders that keep the old
  * in-place behaviour (a plain folder with no git history, a code project
  * inside ClawBox's own checkout), where two runs really would edit each
- * other's half-written files and each settle would commit the other's.
+ * other's half-written files and each settle would commit the other's. A
+ * team's own runs do not count against each other — see `folderHolder`.
  */
-function assertDirectoryFree(directory: string, exceptRunId?: string): () => void {
+function assertDirectoryFree(directory: string, exceptRunId?: string, team: RunTeam | null = null, readOnly = false): () => void {
   // A project the owner is REMOVING right now, before the run store is asked.
   //
   // This is the run half of a mutual exclusion, and the removal holds the other
@@ -11557,7 +12104,7 @@ function assertDirectoryFree(directory: string, exceptRunId?: string): () => voi
       "That project folder is being removed right now. Wait for it to finish, or work somewhere else.",
     );
   }
-  const busy = loadRuns().find((r) => isLive(r.status) && r.id !== exceptRunId && r.directory === directory);
+  const busy = folderHolder(loadRuns(), directory, team, exceptRunId, readOnly);
   if (busy) {
     throw new CodingAgentError(
       "busy",

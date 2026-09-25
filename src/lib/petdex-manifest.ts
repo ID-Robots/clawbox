@@ -31,7 +31,7 @@
 // re-serialised; no raw response text is ever written out.
 
 import fsp from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { CURATED_PETS, curatedFallbackSheetUrl } from "@/lib/pet-curated";
 
 const HOME_DIR = process.env.HOME || "/home/clawbox";

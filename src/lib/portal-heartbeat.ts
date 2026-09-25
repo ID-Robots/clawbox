@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import fs from "fs/promises";
-import path from "path";
+import path from "./runtime-path";
 import { CLOUDFLARED_DIR, getTunnelServiceState, startTunnelService } from "./cloudflared";
 import { get as getConfigValue } from "./config-store";
 import {

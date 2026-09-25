@@ -6,7 +6,7 @@
  * Loaded via require() from instrumentation.ts to avoid Edge Runtime warnings.
  */
 import { spawn, type ChildProcess } from 'child_process'
-import path from 'path'
+import path from '@/lib/runtime-path'
 import fs from 'fs'
 import { CONFIG_ROOT } from './lib/config-store'
 import { envPort } from './lib/port-probe'

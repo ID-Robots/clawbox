@@ -5,12 +5,13 @@ import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
-import { isProxiedAppUrl, WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
+import WhatsNewCard from "@/components/WhatsNewCard";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail } from "@/lib/ui-events";
 import { toastDetailForNotice } from "@/lib/notify-action";
 import { useAutoHide } from "@/lib/use-auto-hide";
+import { useWhatsNew } from "@/lib/use-whats-new";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
@@ -32,6 +33,7 @@ import CodingAgentApp from "@/components/CodingAgentApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
+import WebappFrame from "@/components/WebappFrame";
 import ChatPopup, { CHAT_PANEL_GAP, noticeColumnInset, type ChatFloatingRect } from "@/components/ChatPopup";
 
 /** How long a coding run's finish card stays on the desktop before it hides itself. */
@@ -2037,6 +2039,16 @@ function ChromeDesktopInner() {
     openApp("settings");
   }, [openApp]);
 
+  // "What's new in 4.1" (TASK-1059, TASK-1195): shown after the box lands on
+  // 4.1 until the owner dismisses it, which the box records for every browser. Asked again
+  // when the ClawBox AI tier changes, so an upgrade made in the portal drops
+  // the plan section without a reload. Like every card in the column, it leaves
+  // on its own after NOTICE_AUTO_HIDE_MS. That is not recorded, so it is back
+  // on the next load until it is dismissed.
+  const whatsNew = useWhatsNew(clawboxLogin.tier);
+  const whatsNewKeys = useMemo(() => (whatsNew.visible ? ["whats-new"] : []), [whatsNew.visible]);
+  useAutoHide(whatsNewKeys, whatsNew.hide);
+
   // The system update lives in Settings → System Update now; the notice's
   // button lands there rather than on the old standalone window.
   const openUpdateSettings = useCallback(() => {
@@ -2330,21 +2342,10 @@ function ChromeDesktopInner() {
         // Sandboxed to an opaque origin, the same as /app/[id]: the app is HTML
         // the agent wrote, and with allow-same-origin it ran in the desktop's
         // origin with the owner's session. Its persistence goes through the KV
-        // bridge (data-webapp-id is how the bridge knows whose keys to serve).
-        // A project's own server proxied under /apps/<id>/ is the exception
-        // to the ATTRIBUTE: a sandboxed frame's navigation carries no cookie
-        // and that document needs the owner's; the proxy serves it under a
-        // CSP sandbox instead, which boxes it the same way
-        // (src/lib/app-proxy.ts).
-        return (
-          <iframe
-            src={webappSrc}
-            style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
-            sandbox={isProxiedAppUrl(webappSrc) ? undefined : WEBAPP_IFRAME_SANDBOX}
-            data-webapp-id={app.storeApp?.id}
-            title={resolveAppName(app)}
-          />
-        );
+        // bridge (data-webapp-id is how the bridge knows whose keys to serve);
+        // WebappFrame is the one frame both pages draw, the proxied /apps/<id>/
+        // exception and the pre-v4.0 storage import included.
+        return <WebappFrame appId={app.storeApp?.id} src={webappSrc} title={resolveAppName(app)} />;
       }
       case "setup":
         return (
@@ -2498,6 +2499,7 @@ function ChromeDesktopInner() {
   // price to pay while nothing is dodging it).
   const noticesUp = Boolean(
     (updateAvailable && !updateNoticeHidden)
+    || whatsNew.visible
     || showClawAiOfferNotification
     || pairingRequests.length > 0
     || codingNotices.length > 0,
@@ -2623,6 +2625,10 @@ function ChromeDesktopInner() {
               </div>
             );
           })()}
+
+          {whatsNew.visible && whatsNew.state && (
+            <WhatsNewCard state={whatsNew.state} onDismiss={whatsNew.dismiss} />
+          )}
 
           {showClawAiOfferNotification && (
             <div

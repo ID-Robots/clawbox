@@ -9,7 +9,7 @@
 
 import fs from "fs/promises";
 import fsSync from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import * as config from "@/lib/config-store";
 import { getActiveHarness, type Harness } from "@/lib/harness";
 import { isPreferenceLanguage, PREFERENCE_KEY_PREFIX } from "@/lib/preference-schema";

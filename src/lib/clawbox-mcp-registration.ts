@@ -1,5 +1,5 @@
 import { execFile } from "child_process";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { promisify } from "util";
 
 import { resolveConfigRoot } from "@/lib/config-store";

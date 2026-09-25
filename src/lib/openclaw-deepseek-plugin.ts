@@ -52,14 +52,24 @@ export interface DeepseekPluginInstallResult {
   failures: string[];
 }
 
-/** Best effort: never throws — the caller's own write path names a missing plugin loudly. */
-export async function installDeepseekProviderPlugin(): Promise<DeepseekPluginInstallResult> {
+/**
+ * Best effort: never throws — the caller's own write path names a missing plugin loudly.
+ *
+ * `force` is for a REPAIR (TASK-1088): after a core bump the old payload is
+ * usually still on disk, and `plugins install` refuses to write over it
+ * ("plugin already exists") without the flag. The configure route installs
+ * only when the payload is absent, so it has no use for it.
+ */
+export async function installDeepseekProviderPlugin(
+  options: { force?: boolean } = {},
+): Promise<DeepseekPluginInstallResult> {
   const failures: string[] = [];
   for (const spec of deepseekPluginSpecs(await installedOpenclawRelease())) {
     try {
-      await spawnOpenclawCli(["plugins", "install", spec, "--accept-capabilities"], {
-        timeoutMs: INSTALL_TIMEOUT_MS,
-      });
+      await spawnOpenclawCli(
+        ["plugins", "install", spec, ...(options.force ? ["--force"] : []), "--accept-capabilities"],
+        { timeoutMs: INSTALL_TIMEOUT_MS },
+      );
       return { installed: spec, failures };
     } catch (err) {
       failures.push(`${spec}: ${err instanceof Error ? err.message : String(err)}`);

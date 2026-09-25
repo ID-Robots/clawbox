@@ -20,7 +20,7 @@
 // Internal dot-dirs (.hub) and the dotfiles are skipped by the walk.
 
 import fs from 'fs/promises';
-import path from 'path';
+import path from '@/lib/runtime-path';
 import { NextResponse } from 'next/server';
 import { matchRemovableSkill } from '@/lib/hermes-skills';
 import type { InstalledHermesSkill, ScanFinding, SkillOrigin } from '@/lib/hermes-skills';

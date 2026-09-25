@@ -22,6 +22,7 @@ import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
 import { decodeHarnessStdin, readFirstTurn } from "@/tests/helpers/fake-harness";
+import { RUNNER_STEP } from "@/lib/coding-agent-progress";
 
 // Starts real processes through @/lib/coding-agent rather than importing
 // child_process itself, and CI has flaked on it both ways in one day — a
@@ -2110,13 +2111,33 @@ describe("the pull request on disk", () => {
     writeRunWithPr({
       phase: "merged", number: 7, url: "https://github.com/o/r/pull/7", branch: "clawbox/run-prblob01", base: "main",
       checks: { total: 3, passed: 2, failed: 0, pending: 1 }, detail: null, startedAt: 1, endedAt: 2, reviewOk: true,
-      foundBy: "adopted",
+      foundBy: "adopted", readyAt: 3, autoMergeAt: 1_500, autoMergeFailedAt: 1_200,
     });
     expect(lib.listRuns()[0]?.pr).toEqual({
       phase: "merged", number: 7, url: "https://github.com/o/r/pull/7", branch: "clawbox/run-prblob01", base: "main",
       checks: { total: 3, passed: 2, failed: 0, pending: 1 }, detail: null, startedAt: 1, endedAt: 2, reviewOk: true,
-      foundBy: "adopted",
+      foundBy: "adopted", readyAt: 3, autoMergeAt: 1_500, autoMergeFailedAt: 1_200,
     });
+  });
+
+  it("reads a record from before readyAt as a pull request the box never readied", () => {
+    // The watcher leaves a draft that the box already readied to its owner, so
+    // anything but a number the box wrote must read as "never readied".
+    writeRunWithPr({ phase: "waiting", startedAt: 1, number: 7 });
+    expect(lib.listRuns()[0]?.pr?.readyAt).toBeNull();
+    writeRunWithPr({ phase: "waiting", startedAt: 1, number: 7, readyAt: "soon" });
+    expect(lib.listRuns()[0]?.pr?.readyAt).toBeNull();
+  });
+
+  it("says the box never turned auto-merge on for a record that predates the field, or garbles it", () => {
+    // Null, never a guess: `autoMergeAt` is what lets the box take back only
+    // what it turned on itself, so a value it did not write must not count.
+    writeRunWithPr({ phase: "waiting", startedAt: 1, number: 7 });
+    expect(lib.listRuns()[0]?.pr?.autoMergeAt).toBeNull();
+    expect(lib.listRuns()[0]?.pr?.autoMergeFailedAt).toBeNull();
+    writeRunWithPr({ phase: "waiting", startedAt: 1, number: 7, autoMergeAt: "yesterday", autoMergeFailedAt: Number.NaN });
+    expect(lib.listRuns()[0]?.pr?.autoMergeAt).toBeNull();
+    expect(lib.listRuns()[0]?.pr?.autoMergeFailedAt).toBeNull();
   });
 
   it("says NOTHING about who opened a pull request a record predates the question", () => {
@@ -2302,6 +2323,50 @@ describe("the report", () => {
 });
 
 /**
+ * A settled run's evidence folder keeps files, not environments: a Python
+ * environment a run built there left a `venv/bin/python` pointing out of the
+ * box's data/, and the box's own `next build` refused it — every update failed
+ * until someone deleted it by hand.
+ */
+describe("the evidence folder at settle", () => {
+  beforeEach(() => readyDevice());
+
+  const evidenceOf = (id: string) => path.join(root, "data", "coding-agent-artifacts", id);
+
+  it("drops an environment and a dangling link the run left there, and says so in the run's progress", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      'mkdir -p "$CLAWBOX_RUN_ARTIFACTS_DIR/venv-attempt/venv/bin"',
+      'ln -s /nonexistent/python3.12 "$CLAWBOX_RUN_ARTIFACTS_DIR/venv-attempt/venv/bin/python"',
+      'ln -s /nonexistent/worktree/out.txt "$CLAWBOX_RUN_ARTIFACTS_DIR/latest.txt"',
+      'printf "1 passed\\n" > "$CLAWBOX_RUN_ARTIFACTS_DIR/tests.txt"',
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+
+    expect(done.status).toBe("completed");
+    const dir = evidenceOf(run.id);
+    expect(fs.readdirSync(dir).sort()).toEqual(["report.md", "tests.txt", "venv-attempt"]);
+    expect(fs.readdirSync(path.join(dir, "venv-attempt"))).toEqual([]);
+    const line = done.progress.find((l) => l.startsWith("Removed from the evidence folder"));
+    expect(line).toBe(RUNNER_STEP.evidencePruned("latest.txt, venv-attempt/venv/"));
+    // Said before the run is reported finished, beside the run that did it.
+    expect(done.progress.indexOf(line!)).toBeLessThan(done.progress.findIndex((l) => l.startsWith("Finished")));
+  });
+
+  it("says nothing when there was nothing to drop", async () => {
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+
+    expect(done.progress.some((l) => l.startsWith("Removed from the evidence folder"))).toBe(false);
+  });
+});
+
+/**
  * The run's own plan. Claude Code's TodoWrite tool sends the WHOLE list each
  * time; the record keeps the latest one so the chat card can show what the
  * run is on in its own words — the owner's "show summaries of current tasks".
@@ -2418,6 +2483,45 @@ describe("a team run reloaded from disk", () => {
   });
 });
 
+describe("a team run's message tool", () => {
+  const team = { id: "team-k3x9q2ab", role: "worker" as const, taskId: "t2" };
+
+  it("names the run and its team to the run's own MCP server — all four, only for a team run", () => {
+    const env = JSON.parse(lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home, team })).mcpServers.clawbox.env;
+    expect(env).toMatchObject({ CLAWBOX_RUN_ID: "run-ab12cd34", CLAWBOX_TEAM_ID: "team-k3x9q2ab", CLAWBOX_TEAM_ROLE: "worker", CLAWBOX_TEAM_TASK: "t2" });
+    const planner = JSON.parse(lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home, team: { id: "team-k3x9q2ab", role: "planner", taskId: null } })).mcpServers.clawbox.env;
+    expect(planner.CLAWBOX_TEAM_TASK).toBe("none");
+    for (const solo of [lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home }), lib.buildRunMcpConfig({ id: "run-ab12cd34", directory: home, team: null })]) {
+      const soloEnv = JSON.parse(solo).mcpServers.clawbox.env;
+      for (const key of ["CLAWBOX_RUN_ID", "CLAWBOX_TEAM_ID", "CLAWBOX_TEAM_ROLE", "CLAWBOX_TEAM_TASK"]) expect(soloEnv[key]).toBeUndefined();
+    }
+  });
+
+  it("approves team_message for every team run, the read-only planner and reviewer included, and for no other run", () => {
+    const allowed = (argv: string[]) => argv.slice(argv.indexOf("--allowedTools") + 1, argv.indexOf("--disallowedTools"));
+    const readOnly = allowed(lib.buildRunArgs({ readOnly: true, run: { id: "run-ab12cd34", directory: home, team: { ...team, role: "reviewer" } } }));
+    expect(readOnly).toContain(lib.MCP_TEAM_TOOL);
+    // Still nothing else MCP for a read-only run: no browser, no media.
+    expect(readOnly.filter((a) => a.startsWith("mcp__"))).toEqual([lib.MCP_TEAM_TOOL]);
+    const worker = allowed(lib.buildRunArgs({ run: { id: "run-ab12cd34", directory: home, team } }));
+    expect(worker).toContain(lib.MCP_TEAM_TOOL);
+    for (const tool of lib.MCP_BROWSER_TOOLS) expect(worker).toContain(tool);
+    expect(allowed(lib.buildRunArgs({ run: { id: "run-ab12cd34", directory: home } }))).not.toContain(lib.MCP_TEAM_TOOL);
+    expect(allowed(lib.buildRunArgs({ run: { id: "run-ab12cd34", directory: home, team: null } }))).not.toContain(lib.MCP_TEAM_TOOL);
+    expect(lib.MCP_TEAM_TOOL).toBe("mcp__clawbox__team_message");
+  });
+
+  it("puts a message the run sent on its own feed, and ignores a run that is gone", async () => {
+    const base = { task: "t", directory: home, projectId: null, source: "agent", status: "running", startedAt: 1, completedAt: null, sessionId: null, model: null, summary: null, error: null, progress: [], filesTouched: [], commands: [], permissionDenials: [], numTurns: 0, tokensUsed: 0 };
+    fs.writeFileSync(runsFile(), JSON.stringify([{ ...base, id: "run-teamwork2", team: { id: "team-1", role: "worker", taskId: "t1" } }]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    lib.noteTeamMessageSent("run-teamwork2", "Team message to the lead: the task names src/ and there is none");
+    expect(lib.getRun("run-teamwork2")?.progress.at(-1)).toBe("Team message to the lead: the task names src/ and there is none");
+    expect(() => lib.noteTeamMessageSent("run-nosuchrn", "Team message to the lead: hi")).not.toThrow();
+  });
+});
+
 describe("a run's commit", () => {
   it("records why the work could not be committed, on the record, and clears it when it is", async () => {
     writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
@@ -2495,7 +2599,7 @@ describe("the team's spawn slot", () => {
 
 it("encodes dotted, spaced and underscored worktree transcript directories like the CLI", () => {
   const directory = path.join(home, "Projects", "my_app", ".clawbox", "worktrees", "t1 1");
-  const actual = lib.transcriptPath({ sessionId: "sess-123", directory });
+  const actual = lib.transcriptPath({ sessionId: "sess-123", directory, provider: "clawbox-ai" });
   expect(actual).toBe(path.join(home, ".claude-ds", "projects", directory.replace(/[^a-zA-Z0-9]/g, "-"), "sess-123.jsonl"));
 });
 

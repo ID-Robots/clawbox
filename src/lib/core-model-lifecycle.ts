@@ -1,5 +1,5 @@
 import fsSync from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { findOpenclawBin } from "@/lib/openclaw-config";
 
 /**

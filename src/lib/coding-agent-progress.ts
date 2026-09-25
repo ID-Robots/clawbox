@@ -71,6 +71,7 @@ export type ProgressLabelKey =
   | "worktreeMerged"
   | "worktreeRemoved"
   | "worktreeKept"
+  | "evidencePruned"
   | "workingOnBranch"
   | "noPullRequest"
   | "committed"
@@ -82,6 +83,8 @@ export type ProgressLabelKey =
   | "pullRequestAdopted"
   | "merged"
   | "notMerged"
+  | "autoMergeOn"
+  | "autoMergeOff"
   | "onDesktop"
   | "notOnDesktop"
   | "providerSilent"
@@ -108,7 +111,12 @@ export type ProgressLabelKey =
   | "anthropicAccount"
   | "accountSwitched"
   | "accountsWaiting"
-  | "resumedAfterLimit";
+  | "resumedAfterLimit"
+  // A coding team's run speaking (src/lib/coding-team-messages.ts), on the
+  // SENDER's feed; what a run receives is already there as a queued message.
+  | "teamMessageToRun"
+  | "teamMessageToLead"
+  | "teamMessageToAssistant";
 
 export interface ProgressDescription {
   kind: ProgressKind;
@@ -256,6 +264,16 @@ export const RUNNER_STEP = {
   pipelineResumed: "Delivery pipeline: picking up where it left off after a restart",
 
   started: (model: string | null | undefined) => (model ? `Started with ${model}` : "Started"),
+  /**
+   * A team message this run sent. Three sentences rather than one with the
+   * addressee in it, for the pipeline's reason: "the lead" travelling as a
+   * parameter is an English word no locale can translate. The text is the
+   * run's own words and goes last, where the reader can take the rest of the
+   * line for it.
+   */
+  teamMessageToRun: (runId: string, text: string) => `Team message to ${runId}: ${text}`,
+  teamMessageToLead: (text: string) => `Team message to the lead: ${text}`,
+  teamMessageToAssistant: (text: string) => `Team message to the assistant: ${text}`,
   reviewPass: (id: string) => `Automatic review pass of ${id}`,
   /** On the FOLLOW-UP run: whose pull request it was started to fix, and which
    *  round of that loop it is — the round is what makes a fix run readable on
@@ -272,6 +290,12 @@ export const RUNNER_STEP = {
   worktreeRemoved: "The run's copy of the project was removed; it left nothing on its branch",
   /** Why the copy is still on disk: unmerged work, a conflict, a pull request that owns the branch. */
   worktreeKept: (reason: string) => `The run's copy of the project was kept: ${reason}`,
+  /**
+   * What the settle took out of the run's evidence folder (pruneArtifacts in
+   * coding-agent-artifacts.ts): an environment a run built there, or a link
+   * leading out of it. `paths` are relative to the folder — names, not words.
+   */
+  evidencePruned: (paths: string) => `Removed from the evidence folder, where environments and links out of it do not belong: ${paths}`,
   noPullRequest: (reason: string) => `No pull request: ${reason}`,
   committed: (sha: string, newRepository: boolean) => `Committed as ${sha}${newRepository ? " (new repository)" : ""}`,
   committedByRun: (sha: string) => `Committed by the run itself as ${sha}`,
@@ -286,6 +310,10 @@ export const RUNNER_STEP = {
    *  the loop was ever going to watch it — see PrFoundBy. */
   pullRequestAdopted: (num: number, base: string | null) => `Picked up pull request #${num} into ${base}, opened by the run itself`,
   notMerged: (reason: string) => `Not merged: ${reason}`,
+  /** The box handed the merge to GitHub's auto-merge (reconcileAutoMerge). */
+  autoMergeOn: (num: number) => `Turned on GitHub's auto-merge for pull request #${num}: it merges the moment its required checks pass`,
+  /** ...and took it back; `reason` is the box's own words (decideAutoMerge). */
+  autoMergeOff: (reason: string) => `Turned off GitHub's auto-merge: ${reason}`,
   onDesktop: (name: string, id: string, port: number) => `On the desktop as "${name}", served at /apps/${id}/ from port ${port}`,
   notOnDesktop: (port: number, reason: string) => `Not on the desktop yet: clawbox.json names port ${port}, but ${reason}`,
   finished: (status: string) => `Finished: ${status}`,
@@ -409,6 +437,7 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Merged into (.+) and the run's copy of the project removed$/, labelKey: "worktreeMerged", icon: "merge", params: (m) => ({ base: m[1] }) },
   { re: /^The run's copy of the project was removed; it left nothing on its branch$/, labelKey: "worktreeRemoved", icon: "delete_sweep" },
   { re: /^The run's copy of the project was kept: (.+)$/, labelKey: "worktreeKept", icon: "inventory_2", params: (m) => ({ reason: m[1] }) },
+  { re: /^Removed from the evidence folder, where environments and links out of it do not belong: (.+)$/, labelKey: "evidencePruned", icon: "delete_sweep", params: (m) => ({ paths: m[1] }) },
   { re: /^Working on (.+), for a pull request into (.+)$/, labelKey: "workingOnBranch", icon: "call_split", params: (m) => ({ branch: m[1], base: m[2] }) },
   { re: /^No pull request: (.+)$/, labelKey: "noPullRequest", icon: "block", params: (m) => ({ reason: m[1] }) },
   { re: /^Committed as (\S+) \(new repository\)$/, labelKey: "committedNewRepository", icon: "commit", params: (m) => ({ sha: m[1] }) },
@@ -420,6 +449,8 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Picked up pull request #(\d+) into (.+), opened by the run itself$/, labelKey: "pullRequestAdopted", icon: "merge", params: (m) => ({ number: Number(m[1]), base: m[2] }) },
   { re: /^Merged into the base branch$/, labelKey: "merged", icon: "merge" },
   { re: /^Not merged: (.+)$/, labelKey: "notMerged", icon: "error", params: (m) => ({ reason: m[1] }) },
+  { re: /^Turned on GitHub's auto-merge for pull request #(\d+): it merges the moment its required checks pass$/, labelKey: "autoMergeOn", icon: "merge", params: (m) => ({ number: Number(m[1]) }) },
+  { re: /^Turned off GitHub's auto-merge: (.+)$/, labelKey: "autoMergeOff", icon: "pause_circle", params: (m) => ({ reason: m[1] }) },
   { re: /^On the desktop as "(.*)", served at \/apps\/(\S+)\/ from port (\d+)$/, labelKey: "onDesktop", icon: "desktop_windows", params: (m) => ({ name: m[1], id: m[2], port: Number(m[3]) }) },
   { re: /^Not on the desktop yet: clawbox\.json names port (\d+), but (.+)$/, labelKey: "notOnDesktop", icon: "error", params: (m) => ({ port: Number(m[1]), reason: m[2] }) },
   { re: /^The provider did not answer; starting over in a fresh session$/, labelKey: "providerSilent", icon: "sync_problem" },
@@ -448,6 +479,9 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   },
   { re: /^Every Anthropic account is at its usage limit; waiting for the reset at (\d{1,2}:\d{2})$/, labelKey: "accountsWaiting", icon: "hourglass_top", params: (m) => ({ time: m[1] }) },
   { re: /^The usage limit reset; carrying on where it left off$/, labelKey: "resumedAfterLimit", icon: "play_circle" },
+  { re: /^Team message to (run-[a-z0-9]{8}): (.+)$/, labelKey: "teamMessageToRun", icon: "forum", params: (m) => ({ run: m[1], text: m[2] }) },
+  { re: /^Team message to the lead: (.+)$/, labelKey: "teamMessageToLead", icon: "forum", params: (m) => ({ text: m[1] }) },
+  { re: /^Team message to the assistant: (.+)$/, labelKey: "teamMessageToAssistant", icon: "forum", params: (m) => ({ text: m[1] }) },
 ];
 
 export function describeProgressLine(raw: string): ProgressDescription {

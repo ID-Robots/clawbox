@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { coreRetiredModels } from "@/lib/core-model-lifecycle";
 import { spawn } from "child_process";
 import { promises as fsp } from "fs";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { DATA_DIR } from "@/lib/config-store";
 import { isCodexSupportedModelId } from "@/lib/subscription-surface";
@@ -13,6 +13,7 @@ import {
   CATALOG_PROVIDERS,
   getProviderCatalog,
   isCatalogProvider,
+  isLocalOnlyProvider,
   isNonChatModelId,
   subscriptionSurfaceProvider,
 } from "@/lib/provider-models";
@@ -375,7 +376,7 @@ async function writeDiskCache(provider: string, payload: CatalogResponse): Promi
   try {
     await fsp.mkdir(CACHE_DIR, { recursive: true });
     const file = path.join(CACHE_DIR, `${provider}.json`);
-    const tmp = `${file}.tmp`;
+    const tmp = untraced(`${file}.tmp`);
     // Write-then-rename so a crash mid-write can't leave a half-JSON
     // file that breaks the next read.
     await fsp.writeFile(tmp, JSON.stringify(payload), "utf8");
@@ -1667,6 +1668,23 @@ export async function GET(req: NextRequest) {
   const provider = req.nextUrl.searchParams.get("provider")?.trim().toLowerCase() ?? "";
   if (!provider) {
     return fail("'provider' query parameter is required", 400);
+  }
+  // The box's own llama.cpp / Ollama: a known provider with no remote catalogue,
+  // so a deliberate, successful EMPTY answer rather than "Unknown provider"
+  // (TASK-1196). The chat header asked for it on every open of a local-model
+  // chat and drew a 400 each time; the client no longer asks, and this keeps a
+  // tab still running the previous bundle from doing it either. No `source`,
+  // so nothing reads it as the box's enumeration; no `warming`, so nothing
+  // polls it; and ahead of `bootWarmup()` because it starts no enumeration.
+  if (isLocalOnlyProvider(provider)) {
+    const empty: CatalogResponse = {
+      provider,
+      models: [],
+      defaultModelId: "",
+      allowCustom: false,
+      fetchedAt: Date.now(),
+    };
+    return NextResponse.json(empty, { headers: noStore() });
   }
   if (!isCatalogProvider(provider)) {
     return fail(`Unknown provider: ${provider}. Supported: ${CATALOG_PROVIDERS.join(", ")}`, 400);

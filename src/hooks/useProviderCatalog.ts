@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchProviderCatalog,
   getProviderCatalog,
+  isCatalogProvider,
   type ResolvedProviderCatalog,
 } from "@/lib/provider-models";
 import { onProvidersChanged, PROVIDERS_CHANGED_EVENT } from "@/lib/ui-events";
@@ -76,6 +77,13 @@ const WARMING_RETRY_ATTEMPTS = 12;
  * the retry below as its only consumer: a picker could not tell "these are the
  * box's models" from "these are three hard-coded names while we wait", which
  * is the distinction this whole path exists to carry.
+ *
+ * Null, WITHOUT a request, for a provider the route has no catalogue for — the
+ * box's own llama.cpp / Ollama above all (TASK-1196). The chat header passes
+ * whatever provider the active row names, and on a local-model box every chat
+ * open, provider signal and remount asked `?provider=llamacpp` and drew the
+ * route's "Unknown provider" 400, for an answer that could only ever be null:
+ * there is no curated list for such a provider and never a live one.
  */
 export function useProviderCatalog(
   provider: string | null | undefined,
@@ -101,7 +109,7 @@ export function useProviderCatalog(
   const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
-    if (!provider) return;
+    if (!provider || !isCatalogProvider(provider)) return;
     const ctrl = new AbortController();
     let timer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;

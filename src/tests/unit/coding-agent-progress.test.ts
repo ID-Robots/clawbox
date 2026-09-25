@@ -238,6 +238,8 @@ describe("the runner's own sentences are keyed", () => {
     [RUNNER_STEP.faviconCommitted("4f21ab9"), "faviconCommitted"],
     [RUNNER_STEP.pullRequestOpened(12, "beta"), "pullRequestOpened"],
     [RUNNER_STEP.notMerged("checks failed"), "notMerged"],
+    [RUNNER_STEP.autoMergeOn(12), "autoMergeOn"],
+    [RUNNER_STEP.autoMergeOff("the pull request carries a hold label"), "autoMergeOff"],
     [RUNNER_STEP.onDesktop("Angry Pigs", "angry-pigs", 4310), "onDesktop"],
     [RUNNER_STEP.notOnDesktop(4310, "nothing is listening"), "notOnDesktop"],
     [RUNNER_STEP.finished("completed"), "finished"],
@@ -249,6 +251,7 @@ describe("the runner's own sentences are keyed", () => {
     [RUNNER_STEP.helperSettled({ workflow: true, type: "workflow", refused: false }), "workflowFinished"],
     [RUNNER_STEP.helperSettled({ workflow: true, type: "workflow", refused: true }), "workflowRefused"],
     [RUNNER_STEP.dropped(41), "droppedSteps"],
+    [RUNNER_STEP.evidencePruned("venv-attempt/venv/, latest.txt"), "evidencePruned"],
   ])("%s", (line, key) => {
     expect(describeProgressLine(line).labelKey, line).toBe(key);
   });
@@ -263,6 +266,7 @@ describe("the runner's own sentences are keyed", () => {
     expect(describeProgressLine(RUNNER_STEP.workingOnBranch("clawbox/run-1", "main")).params)
       .toEqual({ branch: "clawbox/run-1", base: "main" });
     expect(describeProgressLine(RUNNER_STEP.dropped(41)).params).toEqual({ count: 41 });
+    expect(describeProgressLine(RUNNER_STEP.evidencePruned("venv/, python")).params).toEqual({ paths: "venv/, python" });
   });
 
   it("shows a helper's type and description beside the label, never inside it", () => {
@@ -279,5 +283,51 @@ describe("the runner's own sentences are keyed", () => {
     // these lines have always read as the run talking.
     expect(describeProgressLine(RUNNER_STEP.thinking).kind).toBe("text");
     expect(describeProgressLine(RUNNER_STEP.merged).kind).toBe("text");
+  });
+});
+
+/**
+ * A team message this run SENT (src/lib/coding-team.ts), on its own feed: one
+ * sentence per addressee, keyed so the run page words it, the run's own words
+ * carried through as a value — and still read after the feed's line cap has
+ * cut the end off.
+ */
+/**
+ * What the settle took out of a run's evidence folder. The sentence says why;
+ * the paths are names and ride along as a value. The runner caps a line at
+ * 160 characters, so the sentence has to leave room for them and still be
+ * recognised when the list is what got cut.
+ */
+describe("what the settle removed from the evidence folder", () => {
+  it("leaves room for the paths under the feed's line cap", () => {
+    expect(RUNNER_STEP.evidencePruned("").length).toBeLessThan(100);
+  });
+
+  it("still reads a line the feed cut short", () => {
+    const cut = `${RUNNER_STEP.evidencePruned(Array.from({ length: 20 }, (_, i) => `dir-${i}/venv/`).join(", ")).slice(0, 159)}…`;
+    expect(describeProgressLine(cut).labelKey).toBe("evidencePruned");
+  });
+});
+
+describe("a team message on the sender's feed", () => {
+  it.each([
+    [RUNNER_STEP.teamMessageToRun("run-ab12cd34", "what does total() return?"), "teamMessageToRun", { run: "run-ab12cd34", text: "what does total() return?" }],
+    [RUNNER_STEP.teamMessageToLead("t2's file is missing"), "teamMessageToLead", { text: "t2's file is missing" }],
+    [RUNNER_STEP.teamMessageToAssistant("Stripe or PayPal?"), "teamMessageToAssistant", { text: "Stripe or PayPal?" }],
+  ])("%s", (line, key, params) => {
+    const step = describeProgressLine(line);
+    expect(step.labelKey).toBe(key);
+    expect(step.params).toEqual(params);
+    expect(step.icon).toBe("forum");
+    expect(step.kind).toBe("text");
+  });
+
+  it("still reads a line the feed cut short", () => {
+    const cut = `${RUNNER_STEP.teamMessageToLead("x".repeat(400)).slice(0, 159)}…`;
+    expect(describeProgressLine(cut).labelKey).toBe("teamMessageToLead");
+  });
+
+  it("is not fooled by a run id that is not one", () => {
+    expect(describeProgressLine("Team message to everyone: hi").labelKey).toBeUndefined();
   });
 });

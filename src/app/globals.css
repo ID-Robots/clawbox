@@ -486,9 +486,10 @@ h6 {
   min-width: 0;
 }
 
-/* The control a portrait phone's pickers fold behind, and the line that keeps
- * their answer readable while they are folded (TASK-1003). Both only ever
- * render on a portrait phone; the row is untouched anywhere else. */
+/* The control a phone's composer extras fold behind (TASK-1003, TASK-1157),
+ * leading the input row, and the line that keeps the pickers' answer readable
+ * while they are folded (on the fullscreen chat's strip). Both only ever render
+ * on a phone; the desktop composer is untouched. */
 .chat-composer-options-toggle {
   border: none;
   border-radius: 10px;
@@ -2133,6 +2134,48 @@ input[type="range"].appearance-none::-moz-range-track {
   .coding-agent-working-dot { opacity: 0.6; }
 }
 
+/* A card whose run just finished cleanly leaves the chat on its own after
+   CODING_RUN_AUTO_HIDE_MS (src/lib/use-coding-run-auto-hide.ts). It holds
+   still for most of that and fades and folds away over the last 240ms, so
+   the transcript closes over it instead of jumping: delay + duration = 5s,
+   the moment the chat removes it. The fold interpolates `height: auto`
+   where the browser can (interpolate-size); elsewhere the height snaps at
+   the halfway frame, under a card that is already half faded. The card
+   sits in the transcript's flex column (ChatPopup's `chat-transcript`,
+   `gap: 10`), and a gap is not the card's to fold: a card folded to 0 still
+   left its 10px, and the transcript jumped by it at the removal. The
+   negative margin takes the gap in with the card, so the last frame is the
+   layout the removal leaves. The border goes by its style, not only its
+   width: a browser snaps a width between 0 and 1px UP to 1px, so the card's
+   1px borders held on to the last frame and left a 2px step at the removal;
+   the style flips to none halfway, inside the fold's own motion. Reduced
+   motion: no fade, no fold — the card stays as it is and is simply removed
+   at 5s (the blanket 0.01ms rule would otherwise end it 240ms early). */
+@keyframes coding-agent-autohide {
+  from { opacity: 1; height: auto; overflow: hidden; }
+  to {
+    opacity: 0;
+    height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-top-width: 0;
+    border-bottom-width: 0;
+    border-top-style: none;
+    border-bottom-style: none;
+    margin-bottom: -10px;
+    overflow: hidden;
+  }
+}
+.coding-agent-autohide {
+  interpolate-size: allow-keywords;
+  animation: coding-agent-autohide 240ms var(--ease-exit) 4760ms forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .coding-agent-autohide {
+    animation: none;
+  }
+}
+
 /* ── The code editor (src/components/CodeEditor.tsx) ──────────────────────
    A gutter that sticks to the left while long lines scroll, the coloured
    text, and over it — while editing — a textarea with transparent glyphs
@@ -2318,15 +2361,6 @@ input[type="range"].appearance-none::-moz-range-track {
   height: 40px !important;
   border-radius: 12px !important;
 }
-/* The fold control is the one button in this row a thumb hits every session,
- * so it gets the full 44px target the primary row's buttons get rather than
- * the 36x40 the settings row uses. More specific than the rule above, so the
- * !important widths there do not win. */
-[data-chat-mobile] .chat-composer-row > button.chat-composer-options-toggle {
-  width: 44px !important;
-  height: 44px !important;
-  border-radius: 12px !important;
-}
 [data-chat-mobile] .chat-composer-tail { flex: 1 1 0; min-width: 0; }
 [data-chat-mobile] .chat-header-pills { gap: 4px; flex: 1 1 0; }
 [data-chat-mobile] .chat-header-pills .header-dropdown { flex: 1 1 0; }
@@ -2336,6 +2370,16 @@ input[type="range"].appearance-none::-moz-range-track {
   min-height: 40px;
   font-size: 12.5px;
   border-radius: 12px;
+}
+
+/* The phone chat's text size (TASK-1157, src/lib/chat-phone-layout.ts). Set on
+ * the transcript only, and applied to each of its entries rather than to the
+ * scrolling box itself: `zoom` on the box would grow the box, while on its
+ * children the conversation re-flows at the larger size inside the same frame —
+ * text, code, tables and cards alike, the way a terminal's font size does. The
+ * header, the composer and the page's own pinch-zoom are untouched. */
+[data-chat-text-scale] > * {
+  zoom: var(--chat-text-scale, 1);
 }
 
 /* ── Memory Shard's indexing bar (src/components/MemoryShardApp.tsx) ────────

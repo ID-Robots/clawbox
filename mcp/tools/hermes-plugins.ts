@@ -83,14 +83,9 @@ const RELOAD_TIMEOUT_NOTE = {
 export function registerHermesPluginTools(reg: Registrar): void {
   reg.tool(
     "hermes_plugins_reload",
-    "Restart this device's Hermes agent so it loads plugins installed or enabled since it started. "
-      + "Hermes only scans for plugins when its process starts, so a plugin you add with "
-      + "`hermes plugins install`, `enable`, `disable` or `remove` does NOT reach the chat until this "
-      + "is called — not even in a new chat session. Call it once, right after any of those commands. "
-      + "Never try `sudo systemctl restart` for this; it is refused, and this tool is the supported way. "
-      + "The owner's open chat window closes when the agent restarts, so tell them to open a new chat. "
-      + "Answers which plugins the device now declares and, where it can be established, which ones the "
-      + "restarted agent actually loaded.",
+    "Restart this device's Hermes agent so a plugin added with `hermes plugins install`, `enable`, "
+      + "`disable` or `remove` reaches the chat — not even a new chat session sees it until then. Call it "
+      + "once, right after any of those. The owner's open chat window closes, so tell them to open a new chat.",
     {},
     // HERMES ONLY. On OpenClaw there is no dashboard and no plugin system, and a
     // tool that 404s for ever there trips the per-server circuit breaker that

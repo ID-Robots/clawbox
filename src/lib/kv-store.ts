@@ -1,4 +1,4 @@
-import path from "path";
+import path, { untraced } from "./runtime-path";
 import fs from "fs";
 import { assertStorableKey, DATA_DIR } from "./config-store";
 
@@ -34,7 +34,7 @@ function readKV(): Record<string, string> {
 
 function writeKV(data: Record<string, string>): void {
   ensureDir();
-  const tmp = KV_PATH + ".tmp";
+  const tmp = untraced(KV_PATH + ".tmp");
   // 0o600: kv is an untyped string store (callers may stash anything), so it
   // should not default to world-readable. Written on the tmp file before the
   // atomic rename so the final file is never briefly 0644. chmod the tmp too:
@@ -100,4 +100,37 @@ export function kvSetMany(entries: Record<string, string>): void {
 
 export function kvClear(): void {
   writeKV({});
+}
+
+/**
+ * The whole store, WITHOUT the swallow `readKV` applies.
+ *
+ * `readKV` answers `{}` to an EIO or a half-written file as readily as to a
+ * missing one, and every writer above then writes that `{}` plus its own key
+ * back — which is fine for a mascot position and wrong for a caller moving the
+ * owner's data: "the file could not be read" is not "the store is empty". Only
+ * an ABSENT file reads as empty here; anything else throws.
+ */
+export function kvReadStrict(): Record<string, string> {
+  ensureDir();
+  if (!fs.existsSync(KV_PATH)) return {};
+  const parsed: unknown = JSON.parse(fs.readFileSync(KV_PATH, "utf-8"));
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("data/kv.json does not hold a JSON object");
+  }
+  Reflect.deleteProperty(parsed, "__proto__");
+  return parsed as Record<string, string>;
+}
+
+/**
+ * A read-modify-write on the strict read: `mutate` edits the store in place
+ * and the result is written back atomically, or — when the file could not be
+ * read — nothing is written and the error reaches the caller. Synchronous from
+ * read to rename, so no other write in this process lands in between.
+ */
+export function kvUpdateStrict<T>(mutate: (data: Record<string, string>) => T): T {
+  const data = kvReadStrict();
+  const result = mutate(data);
+  writeKV(data);
+  return result;
 }

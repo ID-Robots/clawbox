@@ -62,3 +62,35 @@ describe("livePreviewCommand root", () => {
     expect(cmd).toBe("cd '/home/nexus0/Projects/x' && claude-ds --resume '61400ab6-0da9-4feb-8ad5-b547239c1367'");
   });
 });
+
+describe("resuming a settled run on its own provider", () => {
+  const settled = { transcriptPath: null, sessionId: "1dd8db8b-5c1e-4f0a-9d2b-3e4f5a6b7c8d", directory: "/home/nexus0/Projects/x", live: false };
+
+  it("tells the wrapper an Anthropic run is one, so it opens ~/.claude where the session is", async () => {
+    const { livePreviewCommand } = await load();
+    expect(livePreviewCommand({ ...settled, provider: "anthropic" }))
+      .toBe("cd '/home/nexus0/Projects/x' && CLAUDE_DS_PROVIDER=anthropic claude-ds --resume '1dd8db8b-5c1e-4f0a-9d2b-3e4f5a6b7c8d'");
+  });
+
+  it("leaves a ClawBox AI run, or one whose record names no provider, on the wrapper's default", async () => {
+    const { livePreviewCommand } = await load();
+    const plain = "cd '/home/nexus0/Projects/x' && claude-ds --resume '1dd8db8b-5c1e-4f0a-9d2b-3e4f5a6b7c8d'";
+    expect(livePreviewCommand({ ...settled, provider: "clawbox-ai" })).toBe(plain);
+    expect(livePreviewCommand({ ...settled, provider: null })).toBe(plain);
+    expect(livePreviewCommand(settled)).toBe(plain);
+  });
+
+  it("never types the provider field itself into the shell", async () => {
+    const { livePreviewCommand } = await load();
+    const cmd = livePreviewCommand({ ...settled, provider: "anthropic; rm -rf ~" });
+    expect(cmd).not.toContain("rm -rf");
+    expect(cmd).not.toContain("CLAUDE_DS_PROVIDER");
+  });
+
+  it("tails a live run's transcript whatever its provider — the path already names the folder", async () => {
+    delete process.env.NEXT_PUBLIC_CLAWBOX_ROOT;
+    const { livePreviewCommand } = await load();
+    expect(livePreviewCommand({ ...settled, transcriptPath: "/home/nexus0/.claude/projects/-x/s.jsonl", live: true, provider: "anthropic" }))
+      .toBe("/home/clawbox/clawbox/scripts/coding-run-preview '/home/nexus0/.claude/projects/-x/s.jsonl'");
+  });
+});

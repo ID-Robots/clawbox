@@ -1,5 +1,5 @@
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 
 const INTEGRATION_FILE = "/etc/clawbox/x64-integration.env";
 

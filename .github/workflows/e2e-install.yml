@@ -11,6 +11,19 @@ name: E2E Install
 #     opt-in `run-full-e2e` label gate was removed so every PR gets full
 #     install + updater coverage before it merges.
 #
+# Shards (TASK-1127; e2e-install/shards.ts is the one definition). One runner
+# ran everything in ~16 min, most of it the in-app upgrade's two rebuilds on a
+# box that had already run every other spec. Each shard is its own runner, its
+# own container and its own real install, side by side:
+#   - `core`: every spec but the upgrade — install.sh, the wizard, every app,
+#     the reboot. Every run, every PR.
+#   - `upgrade`: the wizard, then main → this head through the in-app updater.
+#     Every scheduled and dispatched run, and every PR that touches a path the
+#     upgrade depends on (`UPGRADE_PATHS`) — or whose file list cannot be read.
+# The `plan` job decides, and the `e2e-install` check — the one branch
+# protection requires — is the `verdict` job, green only when every shard the
+# plan asked for passed.
+#
 # Runner choice:
 #   - Prefers `ubuntu-24.04-arm` for ~5-10 min runs (native arm64).
 #   - Falls back to `ubuntu-latest` + qemu-user-static for repos/plans
@@ -43,12 +56,87 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    # Which shards this run needs, as a JSON array for the matrix below.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # The PR's changed-file list comes from the API; nothing is written.
+      pull-requests: read
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      # The same tree the shards check out, so the plan and the Playwright
+      # config read one definition of the shards. Only e2e-install/ is needed.
+      - name: Checkout PR head
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 1
+          sparse-checkout: e2e-install
+          persist-credentials: false
+
+      - name: Checkout repository
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          sparse-checkout: e2e-install
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.10"
+
+      # Every way of not knowing the changed files runs every shard: a
+      # schedule or dispatch has no PR, the API can fail, and it lists at most
+      # 3000 files — so a list shorter than the PR's own `changed_files` is
+      # treated as unknown rather than as complete. A rename counts under both
+      # names: moving a file out of a gated path changes the gated path.
+      - name: Plan the shards
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+          plan() { bun e2e-install/plan-shards.ts "$@"; }
+          if [ "$EVENT" != "pull_request" ]; then
+            shards=$(plan --all)
+          elif ! gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
+              --jq '.[] | [.filename, .previous_filename // empty] | @tsv' > "$RUNNER_TEMP/changed.tsv"; then
+            echo "::warning::could not list this PR's files — running every shard"
+            shards=$(plan --all)
+          elif [ "$(wc -l < "$RUNNER_TEMP/changed.tsv")" -ne "${CHANGED_FILES:--1}" ]; then
+            echo "::warning::the API listed $(wc -l < "$RUNNER_TEMP/changed.tsv") of this PR's $CHANGED_FILES files — running every shard"
+            shards=$(plan --all)
+          else
+            shards=$(tr '\t' '\n' < "$RUNNER_TEMP/changed.tsv" | plan)
+          fi
+          echo "shards=$shards" >> "$GITHUB_OUTPUT"
+          echo "e2e-install shards: \`$shards\`" >> "$GITHUB_STEP_SUMMARY"
+
   e2e-install:
+    name: e2e-install (${{ matrix.shard }})
+    needs: plan
+    strategy:
+      # Every shard runs to the end: each is its own box, and a failure in one
+      # says nothing about the other.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
     # Prefer the native arm64 runner; fall back to x86 when the repo
     # variable `E2E_INSTALL_ARM64_RUNNER` is set to the string `false`.
     runs-on: ${{ vars.E2E_INSTALL_ARM64_RUNNER == 'false' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-    # Budget: native arm64 finishes in 10-15 min; qemu is 30-40 min; give
-    # headroom for docker pulls on cold runners.
+    # Budget: on native arm64 `core` finishes in ~7 min and `upgrade` in ~13;
+    # qemu is several times that; give headroom for docker pulls on cold
+    # runners.
     timeout-minutes: 90
     # Where the secrets live. ONE job on purpose: a scheduled/manual job of
     # its own would repeat the fifteen steps below, and a caller job that
@@ -80,6 +168,8 @@ jobs:
         ${{ inputs.upgrade_target_branch
             || (github.event_name == 'pull_request' && github.head_ref)
             || 'beta' }}
+      # Which specs this box runs (playwright.config.ts → shards.ts).
+      CLAWBOX_E2E_SHARD: ${{ matrix.shard }}
     steps:
       - name: Checkout PR head
         if: ${{ github.event_name == 'pull_request' }}
@@ -174,6 +264,15 @@ jobs:
           cache-from: type=gha,scope=e2e-install-${{ runner.arch }}
           cache-to: type=gha,mode=min,scope=e2e-install-${{ runner.arch }}
 
+      # The install inside the container (~4 min) needs nothing from the host
+      # but the image, so it starts here and runs while the host installs
+      # Playwright below — 40 s to 1 min 45 s of apt, measured, that every
+      # shard otherwise waited through first. global-setup's `compose up -d`
+      # then finds the container running with the same config, leaves it be,
+      # and waits for the install as before.
+      - name: Boot the container
+        run: docker compose -f e2e-install/docker-compose.test.yml up -d
+
       # Only install the host-side bits we need to *drive* the tests: the
       # Playwright runner + its system libs for the chat UI spec. The
       # container inside Docker has its own separate Playwright install.
@@ -198,7 +297,11 @@ jobs:
           set -o pipefail
           args=()
           if [ -n "$GREP_FILTER" ]; then
-            args=(--grep "$GREP_FILTER")
+            # Every shard gets the same grep, and it can leave one of them with
+            # nothing to run (`chat` is only in core). An empty shard is not a
+            # failure — without a grep it still is, since then every shard has
+            # specs by definition.
+            args=(--grep "$GREP_FILTER" --pass-with-no-tests)
           fi
           bunx playwright test --config e2e-install/playwright.config.ts "${args[@]}"
 
@@ -224,7 +327,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-install-report
+          name: e2e-install-report-${{ matrix.shard }}
           path: e2e-install/playwright-report/
           retention-days: 14
 
@@ -232,16 +335,49 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-install-test-results
+          name: e2e-install-test-results-${{ matrix.shard }}
           path: e2e-install/test-results/
           retention-days: 7
+
+  verdict:
+    # THE `e2e-install` check — the name branch protection requires. The
+    # shards report as `e2e-install (<shard>)`, which no rule names, so this is
+    # the one job that has to be green.
+    name: e2e-install
+    needs: [plan, e2e-install]
+    # Never skipped: a skipped job reports success to branch protection, and
+    # without a status function this `if:` would be the implicit `success()`,
+    # which skips it whenever a shard failed — the one run it must go red on.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.verdict.outputs.shards }}
+    steps:
+      - name: Every planned shard passed
+        id: verdict
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          SHARDS: ${{ needs.plan.outputs.shards }}
+          SHARD_RESULT: ${{ needs.e2e-install.result }}
+        run: |
+          echo "shards=$SHARDS" >> "$GITHUB_OUTPUT"
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "::error::the plan job finished '$PLAN_RESULT', so no shard ran"
+            exit 1
+          fi
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "::error::the e2e-install shards $SHARDS finished '$SHARD_RESULT' — see the e2e-install (<shard>) jobs"
+            exit 1
+          fi
+          echo "every planned shard passed: $SHARDS"
 
   comment:
     # Skip for fork PRs — GITHUB_TOKEN is always read-only there, so the
     # comment would 403. Also skip on schedule/workflow_dispatch (no PR to
     # comment on).
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && always() }}
-    needs: e2e-install
+    needs: verdict
     runs-on: ubuntu-latest
     permissions:
       # PR comments go through the issues API, but on PR resources the
@@ -252,7 +388,8 @@ jobs:
     steps:
       - uses: actions/github-script@v7
         env:
-          E2E_INSTALL_RESULT: ${{ needs.e2e-install.result }}
+          E2E_INSTALL_RESULT: ${{ needs.verdict.result }}
+          E2E_INSTALL_SHARDS: ${{ needs.verdict.outputs.shards }}
         with:
           script: |
             const marker = '<!-- clawbox-ci-summary -->';
@@ -268,7 +405,15 @@ jobs:
               : result === 'skipped' ? '⏭️'
               : result === 'failure' ? '❌' : '⏹️';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const section = `${sectionStart}\n## ${icon} E2E Install\n- Result: **${result}**\n- [View run](${runUrl})\n${sectionEnd}`;
+            // Which shards ran, so a green check over `core` alone is not read
+            // as the upgrade having passed. Unknown (the plan never finished)
+            // prints nothing rather than a guess.
+            let shards = [];
+            try { shards = JSON.parse(process.env.E2E_INSTALL_SHARDS || '[]'); } catch {}
+            const ran = Array.isArray(shards) && shards.length
+              ? `\n- Shards: ${shards.map(s => `\`${s}\``).join(', ')}${shards.includes('upgrade') ? '' : ' — the upgrade shard runs when a PR touches a path it depends on (e2e-install/shards.ts)'}`
+              : '';
+            const section = `${sectionStart}\n## ${icon} E2E Install\n- Result: **${result}**${ran}\n- [View run](${runUrl})\n${sectionEnd}`;
 
             const { owner, repo } = context.repo;
             const comments = await github.paginate(github.rest.issues.listComments, {

@@ -17,7 +17,7 @@
  *
  * SERVER ONLY: runs the script and the openclaw CLI.
  */
-import path from "path";
+import path from "@/lib/runtime-path";
 import { promises as fs } from "fs";
 import { runChild } from "@/lib/child-run";
 import { runOpenclawConfigSet } from "@/lib/openclaw-config";

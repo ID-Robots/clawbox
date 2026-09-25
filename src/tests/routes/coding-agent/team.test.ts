@@ -61,6 +61,13 @@ describe("GET", () => {
     expect((await res.json()).kind).toBe("not_found");
   });
 
+  it("answers the board's shape and figures with it — what the bench reads", async () => {
+    const metrics = { plannerRuns: 1, workerRuns: 2, reviewerRuns: 0, leadRuns: 1, tasksPlanned: 3, tasksAdded: 0, tasksRetired: 1, tasksAcceptedFirstTry: 2, tasksRejected: 0, tokensUsed: 42_000, wallMs: 90_000, messagesSent: 3, messagesToLead: 1, messagesToSibling: 2, messagesUndelivered: 0 };
+    team.getTeam.mockReturnValueOnce({ ...BOARD, shape: { parallelism: 1, review: "final", rationale: "One file." }, dynamic: true, metrics });
+    const body = await (await GET(req("team?id=team-abcd1234"))).json();
+    expect(body.team).toMatchObject({ shape: { parallelism: 1, review: "final" }, dynamic: true, metrics });
+  });
+
   it("needs a session", async () => {
     requireSession.mockResolvedValueOnce(new Response("{}", { status: 401 }));
     expect((await GET(req("team"))).status).toBe(401);

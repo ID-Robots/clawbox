@@ -4,7 +4,7 @@ import { listAgentIds, readSessionEntries, sessionStorePath } from "./openclaw-s
 import { isPatchableSession, patchSessionModels, type GatewayRpcCall } from "./openclaw-session-model";
 import { clearPairingState, readPairingAllowEntries, readPairingRequests } from "./openclaw-state-store";
 import fsSync from "fs";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { execFile, spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { isDeepStrictEqual, promisify } from "util";
@@ -377,7 +377,7 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
 
   return new Promise((resolve, reject) => {
     let settled = false;
-    const child = spawn(bin, args, {
+    const child = spawn(/* turbopackIgnore: true */ bin, args, {
       stdio: [stdinData !== undefined ? "pipe" : "ignore", captureStdout ? "pipe" : "ignore", "pipe"],
       cwd,
       ...(uid !== undefined ? { uid } : {}),
@@ -1640,7 +1640,7 @@ function existingChannelBlock(
  * carry it across the rename if the chmod failed.
  */
 async function writeSecretJsonAtomically(file: string, data: unknown): Promise<void> {
-  const tmpPath = `${file}.tmp`;
+  const tmpPath = untraced(`${file}.tmp`);
   await fs.rm(tmpPath, { force: true });
   await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600, encoding: "utf-8" });
   try {
@@ -1802,7 +1802,7 @@ async function inspectReclaimGuard(guardPath: string): Promise<ReclaimGuardState
     if (!Number.isFinite(guardMtimeMs) || Date.now() - guardMtimeMs <= OPENCLAW_CONFIG_LOCK_STALE_MS) {
       return "active";
     }
-    const quarantinePath = `${guardPath}.quarantine-${randomUUID()}`;
+    const quarantinePath = untraced(`${guardPath}.quarantine-${randomUUID()}`);
     try {
       await fs.rename(guardPath, quarantinePath);
     } catch (err) {
@@ -1905,7 +1905,7 @@ async function releaseOwnedLock(lockPath: string, heldStat: FileStat | null, own
  * CLI mutations as well as other setup writers that acquire this lock.
  */
 async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promise<T> {
-  const lockPath = `${CONFIG_PATH}.lock`;
+  const lockPath = untraced(`${CONFIG_PATH}.lock`);
   const reclaimGuardPath = `${lockPath}.reclaim`;
   const deadline = Date.now() + 30_000;
   let attempt = 0;
@@ -2172,7 +2172,31 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
     // migration in `scripts/gateway-pre-start.sh` REPLACES such an entry with a
     // fresh valid one; here we only decline to write into it, because this
     // function repairs a URL and is not the place that rebuilds a provider.)
-    if (!isPlainObject(provider) || provider.baseUrl === proxyUrl) return false;
+    if (!isPlainObject(provider)) return false;
+
+    // An entry ALREADY on the proxy still drifts, and returning early on it was
+    // the whole of TASK-1076 on this side: `data/.local-ai-token` is reminted at
+    // first boot of a rebuilt image (same second as `.mcp-token`) while the
+    // openclaw.json restored beside it keeps the token of the image it was built
+    // from. The proxy validates the bearer against that file and answers 401 to
+    // anything else, so every turn of the local model died before the model ran
+    // while this function reported "already ours, nothing to do". The URL and the
+    // key are therefore two reasons to write, not one — `scripts/gateway-pre-start.sh`
+    // carries the same reconciliation for the boot path.
+    // A key that RESOLVES ELSEWHERE is not drift, and is not ours to flatten
+    // into a literal: OpenClaw accepts a SecretRef object ({source, provider,
+    // id}) and a `${VAR}` interpolation as credentials, and this function can
+    // resolve neither, so it cannot tell a stale one from a current one. Only
+    // the KEY-refresh reason is suppressed — an entry being moved ONTO the
+    // proxy from somewhere else still takes our bearer, because the bearer
+    // travels with the URL and the old credential is wrong whatever its shape.
+    const token = getLocalAiToken();
+    const key = provider.apiKey;
+    const keyResolvesElsewhere = (typeof key === "object" && key !== null)
+      || (typeof key === "string" && /^\$\{.+\}$/.test(key));
+    const movesUrl = provider.baseUrl !== proxyUrl;
+    const refreshesKey = !keyResolvesElsewhere && key !== token;
+    if (!movesUrl && !refreshesKey) return false;
     if (routesToAnotherHost(provider, proxyUrl)) {
       // The URL is deliberately not logged: an owner-configured endpoint can
       // carry user-info or query credentials, and the journal keeps what it is
@@ -2181,7 +2205,7 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
       return false;
     }
     provider.baseUrl = proxyUrl;
-    provider.apiKey = getLocalAiToken();
+    provider.apiKey = token;
     return true;
   };
 
@@ -2200,7 +2224,14 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
  * mDNS hostname. Always preserves the standard local origins so the device
  * remains reachable via IP and the AP captive portal even after a rename.
  */
-export async function setControlUiAllowedOrigins(hostname: string): Promise<void> {
+/**
+ * Make sure the gateway's control UI accepts `http://<hostname>.local` (and the
+ * box's fixed local origins). Answers whether the list CHANGED — and writes
+ * nothing when it did not (TASK-1198): the hostname route restarts the gateway
+ * only for a list the running gateway has not already loaded, and an unchanged
+ * config file is the proof that it has nothing new to load.
+ */
+export async function setControlUiAllowedOrigins(hostname: string): Promise<boolean> {
   const config = await readConfigForWrite();
   const gateway = ensurePlainObject(asBag(config), "gateway");
   const controlUi = ensurePlainObject(gateway, "controlUi");
@@ -2215,8 +2246,21 @@ export async function setControlUiAllowedOrigins(hostname: string): Promise<void
     "http://10.42.0.1",
     "http://10.43.0.1", // alt subnet when home network collides with 10.42.0.0/24
   ]);
-  controlUi.allowedOrigins = Array.from(origins);
+  const next = Array.from(origins);
+  // Compared against the RAW value, not the string-filtered one, so a list the
+  // filter would clean (a non-string entry) still counts as a change and is
+  // written back clean.
+  const raw = controlUi.allowedOrigins;
+  if (
+    Array.isArray(raw)
+    && raw.length === next.length
+    && raw.every((value, index) => value === next[index])
+  ) {
+    return false;
+  }
+  controlUi.allowedOrigins = next;
   await writeConfig(config);
+  return true;
 }
 
 /** OpenClaw's id for the Telegram channel — the config key's, and the plugin's. */
@@ -2445,7 +2489,7 @@ export async function writeDiscordGatewayEnv(botToken: string): Promise<void> {
     throw new Error("Refusing to write an unsafe Discord token to the gateway env file");
   }
   await fs.mkdir(DATA_DIR, { recursive: true });
-  const tmpPath = `${DISCORD_ENV_PATH}.tmp`;
+  const tmpPath = untraced(`${DISCORD_ENV_PATH}.tmp`);
   const body =
     "# Written by ClawBox. Loaded by clawbox-gateway.service (EnvironmentFile).\n" +
     "# Do not edit by hand — the Discord section of Settings rewrites this file.\n" +
@@ -3302,7 +3346,7 @@ export function findOpenclawBin(): string {
     }
   } catch {}
   for (const p of candidates) {
-    if (fsSync.existsSync(p)) return p;
+    if (fsSync.existsSync(/* turbopackIgnore: true */ p)) return p;
   }
   return "openclaw";
 }

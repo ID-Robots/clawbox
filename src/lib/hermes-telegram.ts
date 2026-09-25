@@ -23,7 +23,7 @@
 import { execFile } from "child_process";
 import { randomUUID } from "crypto";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { promisify } from "util";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { readHermesConfigTopLevelScalar } from "@/lib/hermes-config-yaml";

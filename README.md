@@ -69,6 +69,18 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 
 ---
 
+## ✨ New in 4.1
+
+| | |
+|---|---|
+| 📱 **More of the phone for the chat** | On a phone the chat opens full screen, its header and the composer's options fold away, and the transcript text can be set from 85% to 150%. |
+| 💬 **A conversation that cannot reopen says why** | Every step of restoring a conversation has a deadline. When the box cannot bring it back, the chat names the reason and offers **Try again** (and, in the chat panel, **Start a new chat**). |
+| 🗂️ **Web apps from before 4.0 find their data** | A one-time step at boot copies each pre-4.0 web app's saved data into its own sandboxed storage, deleting nothing, and its old storage calls work again. |
+| 🔀 **Coding Agent PRs merge when green** | With merging on, a run hands its pull request to GitHub's auto-merge. A `hold` label or a `main` base is never merged, and CodeRabbit reviews each PR once, on green code. |
+| 🛠️ **Updates and backups hold up** | OpenClaw 2026.9.4 with an up-front refusal for newer-schema data, plugins left **Needs repair** retried after the update, and ClawKeep backups that get past the failures seen after 4.0. A box updated from 4.0 no longer starts every local-model reply with a 401. |
+
+Full detail, and how to upgrade: **[RELEASE-NOTES-4.1.0.md](RELEASE-NOTES-4.1.0.md)**.
+
 ## ✨ New in 4.0
 
 | | |
@@ -83,15 +95,15 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🖥️ **Local AI is one inventory** | **Settings → Local AI** lists every model that can run on the box with Install, Enable and Uninstall on each row. On OpenClaw and dual, **Local-only mode** routes everything to the box and switches every cloud provider off. |
 
 <p align="center">
-  <img src="docs-site/images/4.0/coding-agent-run.png" alt="A Coding Agent run on the ClawBox desktop, showing its progress, changed files and the pull request it opened" width="920" />
+  <img src="docs-site/images/4.0/coding-agent-run-detail.png" alt="A Coding Agent run on the ClawBox desktop, showing its progress, changed files and the pull request it opened" width="920" />
 </p>
 
 <p align="center">
-  <img src="docs-site/images/4.0/remote-access.png" alt="Settings, Remote Control: the box's persistent clawbox.tech hostname and the tunnel state" width="440" />
-  <img src="docs-site/images/4.0/mobile-chat.png" alt="ClawBox chat on a phone, with the thumb-sized microphone beside the text box" width="440" />
+  <img src="docs-site/images/4.0/settings-remote-access.png" alt="Settings, Remote Control: the box's persistent clawbox.tech hostname and the tunnel state" width="440" />
+  <img src="docs-site/images/4.0/chat-mobile-portrait.png" alt="ClawBox chat on a phone, with the thumb-sized microphone beside the text box" width="440" />
 </p>
 
-Full detail, and how to upgrade: **[RELEASE-NOTES-4.0.0.md](RELEASE-NOTES-4.0.0.md)**.
+Full detail: **[RELEASE-NOTES-4.0.0.md](RELEASE-NOTES-4.0.0.md)**.
 
 ---
 

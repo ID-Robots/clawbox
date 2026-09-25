@@ -157,7 +157,7 @@ interface Run {
    *  pull request was opened. Absent on a run recorded before the loop. */
   review?: ReviewLoop | null;
   /** Set on a run a coding team spawned: which team, in which role, for which task. */
-  team?: { id: string; role: "planner" | "worker" | "reviewer"; taskId: string | null } | null;
+  team?: { id: string; role: "planner" | "worker" | "reviewer" | "lead"; taskId: string | null } | null;
   /** The pull request this run's work went into, while the auto-PR switch is
    *  on. Optional: a run recorded before the feature has none. */
   pr?: PrState | null;
@@ -812,6 +812,7 @@ export default function CodingAgentApp() {
       // Resume is the control that brings the copy back.
       directory: run.worktree?.removed ? null : run.directory,
       live: run.status === "running",
+      provider: run.provider ?? null,
     });
     if (!command) return;
     window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command } }));
@@ -1189,7 +1190,9 @@ export default function CodingAgentApp() {
     ? t("codingAgent.team.rolePlanner")
     : team.role === "reviewer"
       ? t("codingAgent.team.roleReviewer", { task: team.taskId ?? "" })
-      : t("codingAgent.team.roleWorker", { task: team.taskId ?? "" });
+      : team.role === "lead"
+        ? t("codingAgent.team.roleLead", { task: team.taskId ?? "" })
+        : t("codingAgent.team.roleWorker", { task: team.taskId ?? "" });
 
   /** Open a run's page — from its row, a review chip, or the desktop. */
   const showRun = (id: string) => {
@@ -2293,11 +2296,7 @@ export default function CodingAgentApp() {
                       title={run.team.id}
                       data-testid="coding-agent-run-team"
                     >
-                      {run.team.role === "planner"
-                        ? t("codingAgent.team.rolePlanner")
-                        : run.team.role === "reviewer"
-                          ? t("codingAgent.team.roleReviewer", { task: run.team.taskId ?? "" })
-                          : t("codingAgent.team.roleWorker", { task: run.team.taskId ?? "" })}
+                      {teamRole(run.team)}
                     </span>
                   )}
                   {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}

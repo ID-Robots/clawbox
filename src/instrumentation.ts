@@ -260,15 +260,18 @@ export async function register() {
     // that leaves a box reporting one thing and doing another. It is one
     // config read on a box that is up to date, which is every boot but one.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { runBootMigrations, dropRemovedConsentMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration } = require('./lib/boot-migrations')
+    const { runBootMigrations, dropRemovedConsentMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration, legacyWebappStorageMigration } = require('./lib/boot-migrations')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { migrateLegacyWebappStorage } = require('./lib/webapp-legacy-storage-migration')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { DATA_DIR, get, set } = require('./lib/config-store')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getActiveHarnessSource } = require('./lib/harness')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fsp = require('fs').promises
+    // Node's path module through src/lib/runtime-path.ts, never directly: see there.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const nodePath = require('path')
+    const { default: nodePath } = require('./lib/runtime-path')
     const removeDataFile = async (name: string): Promise<boolean> => {
       // `force` would answer "removed" for a file that was never there, and
       // the answer is what decides whether the boot log says anything.
@@ -307,6 +310,9 @@ export async function register() {
         // nothing but an owner opening Settings would ever move it.
         openclawWallpaperDefaultMigration({ get, set, harness }),
         hermesWallpaperDefaultMigration({ get, set, harness }),
+        // Before any webapp is served: the record it writes is what lets the
+        // webapps route put the legacy-storage layer in front of an old app.
+        legacyWebappStorageMigration({ migrate: () => migrateLegacyWebappStorage() }),
       ],
       { get, set },
     )

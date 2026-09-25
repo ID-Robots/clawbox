@@ -90,6 +90,8 @@ describe("terminalTabTitle", () => {
     expect(terminalTabTitle({ id: 1, command: "claude-ds --resume abc" }, t)).toBe("claude-ds");
     expect(terminalTabTitle({ id: 2, command: "/home/clawbox/clawbox/scripts/coding-run-preview '/x'" }, t)).toBe("coding-run-preview");
     expect(terminalTabTitle({ id: 3, command: "cd '/p' && claude-ds --resume abc" }, t)).toBe("claude-ds");
+    // An Anthropic run's resume sets the provider for the wrapper: still named after the program.
+    expect(terminalTabTitle({ id: 3, command: "cd '/p' && CLAUDE_DS_PROVIDER=anthropic claude-ds --resume abc" }, t)).toBe("claude-ds");
     expect(terminalTabTitle({ id: 4 }, t)).toBe("terminal.tab4");
   });
 });

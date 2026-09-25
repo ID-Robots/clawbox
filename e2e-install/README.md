@@ -119,6 +119,28 @@ The full suite runs via `.github/workflows/e2e-install.yml`:
   with push rights can open a PR from must not find repository secrets
   beside them.
 
+### Shards
+
+CI runs the suite as shards, each on its own runner against its own fresh
+install (`e2e-install/shards.ts` defines them; `CLAWBOX_E2E_SHARD` selects one
+locally, and unset runs every spec on one box as before):
+
+| Shard | Specs | Runs on |
+| ----- | ----- | ------- |
+| `core` | every spec except the upgrade | every run, every PR (~7 min) |
+| `upgrade` | `10-setup-wizard`, then `90-upgrade-main-to-beta` | the schedule, a dispatch, and every PR that touches a path in `UPGRADE_PATHS`, or whose file list cannot be read (~13 min) |
+
+`UPGRADE_PATHS` is the installer, `scripts/`, `config/`, the lockfiles and
+build config, the updater and its root steps, the setup state it carries
+across, and this harness. The install itself is in `core`, so a change to
+`install.sh` is exercised on every PR either way; the gate only decides
+whether the updater also rebuilds main → the PR head. The nightly run on
+`main` upgrades main → `beta`, so `beta` still gets the upgrade every day.
+
+The `plan` job decides the shards, and the `e2e-install` check that branch
+protection requires is the `verdict` job, which is green only when every
+planned shard passed.
+
 Runner selection:
 - Default: `ubuntu-24.04-arm` (native arm64, ~10-15 min).
 - Fallback: `ubuntu-latest` + qemu-user-static (~30-40 min). Force this by
@@ -138,8 +160,8 @@ No `pull_request` run receives secrets — fork or same-repo; those specs
 skip but the install/setup/files/terminal/webapps/power coverage still
 runs. The in-workflow gate is hygiene rather than the fence (on a
 `pull_request` event the PR head supplies the workflow file too), so the
-secrets live in a GitHub Environment, and the one `e2e-install` job names
-its Environment by event:
+secrets live in a GitHub Environment, and the one `e2e-install` job (the
+shard matrix) names its Environment by event:
 
 - **`e2e-pull-request`** — what a `pull_request` run references. Holds no
   secrets and carries no protection rule; it exists only so that a PR run

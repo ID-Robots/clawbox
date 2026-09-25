@@ -989,7 +989,7 @@ SWAPFILE_PRIORITY=1
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
-OPENCLAW_VERSION="2026.9.3"
+OPENCLAW_VERSION="2026.9.4"
 
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
@@ -2072,10 +2072,42 @@ forget_paused_engines() {
 # Every step is best-effort and this function never fails the update: a box
 # that cannot stop one of its engines should still attempt the build it was
 # asked for, and the log says what happened.
+#
+# `free_memory_for_build [--reboot-follows]`: do_rebuild's own flag, passed
+# through, because it decides when the GATEWAY goes (see below).
 free_memory_for_build() {
-  local before after uid unit pid waited
+  local before after uid unit pid waited ram_kb reboot_follows=0
+  if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
   before=$(available_mb)
   echo "Freeing memory for the build (${before} MB available)..."
+
+  # The agent itself, on a box that cannot spare it. The gateway holds a Node
+  # process plus whatever the assistant was last doing, and on the 8 GB Jetson
+  # of TASK-1022 it was still resident while `next build` was killed for
+  # memory. Paused through the same pair as every engine, so it comes back —
+  # and nothing between here and resume_paused_engines talks to it (the web
+  # server is already down, and bun install / next build never dial :18789).
+  #
+  # Only on a box that needs it: an update must not take the assistant away
+  # from the owner for the length of a build that was never going to run out.
+  # The threshold is ensure_build_swap's, read inline for the same reason that
+  # function reads it inline — each of these is extracted and run on its own.
+  #
+  # And only HERE — before bun install, for the whole rebuild — on the update's
+  # reboot path, which is the proven one and is left exactly as it was: the box
+  # reboots at the end of it, so the assistant is interrupted either way. A
+  # rebuild nothing reboots after (`install.sh --step rebuild`, the legacy
+  # updater hand-over) keeps the gateway through bun install and the node-pty
+  # rebuild, and pause_gateway_if_build_needs_room decides just before
+  # `next build` itself, on the memory actually left then (TASK-1197).
+  ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  if [ "${ram_kb:-0}" -ge 12000000 ]; then
+    echo "  Leaving clawbox-gateway.service up: this box has memory to spare"
+  elif [ "$reboot_follows" = "1" ]; then
+    pause_engine_unit clawbox-gateway.service
+  else
+    echo "  Keeping clawbox-gateway.service up for now: whether the build needs its memory is decided just before next build, on what is left then"
+  fi
 
   pause_engine_unit ollama.service
   # The memory embedder is a system unit of its own (~2 GB on the GPU while
@@ -2138,6 +2170,88 @@ free_memory_for_build() {
 
   after=$(available_mb)
   echo "  Memory available for the build: ${after} MB (was ${before} MB)"
+}
+
+# How much MemAvailable, in MiB, a low-memory box must still have just before
+# `next build` for the build to run BESIDE the assistant rather than instead of
+# it. Tunable, because nobody has measured the build's peak on every board;
+# the default is chosen to be no bolder than what already ships.
+#
+# The >= 12 GB rule above keeps the gateway up on every box that size, and such
+# a box, with its engines stopped and its desktop and gateway resident, is left
+# with roughly 6.5-8 GB. 6 GiB admits a smaller box only when it measures the
+# same kind of room — and a smaller box has the 4 GiB of disk-backed swap
+# ensure_build_swap refuses to build without, which the big box does not. So
+# the one configuration this lets through is at least as safe as one that has
+# shipped all along. The 8 GB Jetson of TASK-1022 never gets near it with its
+# desktop up, and keeps pausing — for the build itself, no longer for the whole
+# rebuild. A value that is not a plain number is not a threshold (a comparison
+# against it would fail under errexit), so it falls back rather than aborts.
+BUILD_GATEWAY_ROOM_MB="${CLAWBOX_BUILD_GATEWAY_ROOM_MB:-6144}"
+case "$BUILD_GATEWAY_ROOM_MB" in ''|*[!0-9]*) BUILD_GATEWAY_ROOM_MB=6144 ;; esac
+# When pause_gateway_if_build_needs_room stopped the gateway, in epoch seconds;
+# empty otherwise. Only ever read by report_gateway_build_pause.
+GATEWAY_PAUSED_FOR_BUILD_AT=""
+
+# On a rebuild nothing reboots after, stop the assistant for `next build` only
+# if the build will not fit beside it (TASK-1197).
+#
+# THE NARROWEST INTERRUPTION, and said out loud. Pausing the gateway ends every
+# chat turn in flight, every channel connection (Telegram, WhatsApp, Discord …)
+# and every assistant-driven coding turn — the claude CLI turns live in the
+# gateway's cgroup — and it used to happen at the top of every low-memory
+# rebuild, before bun install, for the whole of it. Now:
+#
+#   - it happens only after bun install, the node-pty rebuild and the set-aside
+#     have run with the assistant still up, so the pause covers the build and
+#     nothing that merely precedes it;
+#   - only when it has to: the room is MEASURED here, with every model engine
+#     already stopped and the page cache dropped, instead of assumed from the
+#     box's size;
+#   - and the log names it when it does — the numbers, what stops, and (from
+#     report_gateway_build_pause) for how long.
+#
+# What keeping the gateway does NOT give back, also said: the web server is down
+# for every rebuild, so the desktop, local models and memory search (all behind
+# its proxy) are unavailable either way. Cloud-model turns and the channels are
+# what stay up.
+#
+# An unreadable /proc answers 0 from available_mb and therefore pauses — the
+# safe side of a question this function could not ask. Never fails: callers
+# are inside do_rebuild's pause/resume window.
+pause_gateway_if_build_needs_room() {
+  local ram_kb avail
+  ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  [ "${ram_kb:-0}" -lt 12000000 ] || return 0
+  # Nothing to decide for a gateway that is not running: a Hermes box has none,
+  # and the legacy updater hand-over has already stopped it under its own mask.
+  systemctl is-active --quiet clawbox-gateway.service 2>/dev/null || return 0
+  avail=$(available_mb)
+  if [ "$avail" -ge "$BUILD_GATEWAY_ROOM_MB" ]; then
+    echo "  Keeping clawbox-gateway.service up through the build: ${avail} MB available, at least the ${BUILD_GATEWAY_ROOM_MB} MB a build beside the assistant needs"
+    return 0
+  fi
+  echo "  NOTE: pausing clawbox-gateway.service for the build — ${avail} MB available is less than the ${BUILD_GATEWAY_ROOM_MB} MB a build beside the assistant needs on this box. Chat turns in flight, channels and assistant coding turns stop now and come back when the build ends."
+  pause_engine_unit clawbox-gateway.service
+  # Timed only once it is really down: a stop that failed has already said so
+  # (pause_engine_unit's warning), and the report must not then claim a pause
+  # that never happened.
+  if ! systemctl is-active --quiet clawbox-gateway.service 2>/dev/null; then
+    GATEWAY_PAUSED_FOR_BUILD_AT=$(date +%s 2>/dev/null || echo "")
+  fi
+  return 0
+}
+
+# How long the assistant was away, once it is back. After resume_paused_engines,
+# which is what started it again and said whether it came up.
+report_gateway_build_pause() {
+  local at="$GATEWAY_PAUSED_FOR_BUILD_AT" now
+  GATEWAY_PAUSED_FOR_BUILD_AT=""
+  case "$at" in ''|*[!0-9]*) return 0 ;; esac
+  now=$(date +%s 2>/dev/null || echo "")
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  echo "  clawbox-gateway.service was paused for $((now - at)) s for the build"
+  return 0
 }
 
 # Does this build tree carry the entry production-server.js loads?
@@ -2613,7 +2727,10 @@ restore_previous_build() {
 # same measurement is what proves it, and it is why next.config.ts's own
 # `.git/**` key is inoperative for the instrumentation trace. Next exposes no
 # other tracing knob: `outputFileTracingRoot`, `-Excludes` and `-Includes` are
-# the whole surface in its config schema.
+# the whole surface in its config schema. TASK-1102 closed it at the source
+# instead: the traces no longer reach data/, .git or a parked build
+# (src/lib/runtime-path.ts, proven in CI by scripts/check-build-isolation.sh),
+# so the race is rare now. The retry stays for whatever is left.
 #
 # WHY A RETRY IS THE RIGHT ANSWER. The failure is transient by construction: the
 # next trace cannot list a file that is gone. One retry, gated on the ENOENT the
@@ -2621,6 +2738,12 @@ restore_previous_build() {
 # first attempt and is reported as such rather than hidden behind a second
 # five-minute build. `REBUILD_TAKEOVER_TIMEOUT_MS` in src/lib/updater.ts carries
 # the budget for that second build.
+#
+# AND A COPY THAT FAILED IS A FAILED BUILD. For a route, Next catches the copy
+# error, prints `Failed to copy traced files for …` and exits 0, and the build
+# it leaves is short of that file. That shape gets the same one retry, and if
+# it is still there afterwards this returns non-zero whatever the exit status
+# said, so the caller keeps the previous build.
 #
 # The log copy exists ONLY so the gate can read what was printed, and it is
 # best-effort: a `/tmp` that is full or unwritable — a Jetson tmpfs under the
@@ -2658,13 +2781,16 @@ run_next_build() {
     if [ -n "$log" ]; then
       if as_clawbox_login "cd $PROJECT_DIR && $BUN run build" 2>&1 | tee "$log"; then
         rc=0
+      else
+        # The BUILD's status, full stop. `pipefail` makes the pipeline non-zero
+        # for a tee that could not write too, and a log this function could not
+        # keep must never be the reason an update is reported failed.
+        rc=${PIPESTATUS[0]}
+      fi
+      # Done, unless Next reported a traced file it could not copy (below).
+      if [ "$rc" -eq 0 ] && ! awk '/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log"; then
         break
       fi
-      # The BUILD's status, full stop. `pipefail` makes the pipeline non-zero
-      # for a tee that could not write too, and a log this function could not
-      # keep must never be the reason an update is reported failed.
-      rc=${PIPESTATUS[0]}
-      if [ "$rc" -eq 0 ]; then break; fi
     else
       if as_clawbox_login "cd $PROJECT_DIR && $BUN run build"; then
         rc=0
@@ -2674,18 +2800,48 @@ run_next_build() {
       break
     fi
     if [ "$attempt" -eq 2 ]; then break; fi
-    # The FATAL shape only. Next prints the identical `ENOENT … copyfile` node
-    # message inside the `.catch` it wraps the page and app-page copies in,
-    # prefixed with `Failed to copy traced files for` — a warning over a build
-    # that carried on, and no reason to spend a second build. ONE awk rather
-    # than two greps in a pipe: `grep -q` exits on its first match and can
-    # SIGPIPE the producer, which under `pipefail` reads as "no match" and
+    # Both shapes of the race: the fatal one, and the one Next prints from
+    # inside the `.catch` it wraps the page and app-page copies in (`Failed to
+    # copy traced files for …` and then the same node message, over a build
+    # that exits 0 short of that file). A rebuild repairs either one. ONE awk
+    # rather than two greps in a pipe: `grep -q` exits on its first match and
+    # can SIGPIPE the producer, which under `pipefail` reads as "no match" and
     # would silently drop the retry this whole function exists for.
-    awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log" || break
+    awk '/ENOENT.*copyfile/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log" || break
     echo "  A file this build was tracing changed while it ran (ENOENT during the standalone copy) — building once more"
   done
+  # Exit 0 is not the whole verdict. A route whose traced files Next could not
+  # copy is missing them in `.next/standalone`, and Next only warns about it.
+  # Before TASK-1102 that was data/ churning under the build. Traces no longer
+  # reach data/ (src/lib/runtime-path.ts), so a copy that still fails is a real
+  # hole in the build. It is refused, and the caller keeps the previous build.
+  # One awk, for the reason given above.
+  if [ "$rc" -eq 0 ] && [ -n "$log" ] \
+     && awk '/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log"; then
+    echo "  Error: the build exited 0, but Next could not copy every traced file into .next/standalone (see \"Failed to copy traced files\" above)" >&2
+    rc=1
+  fi
   if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
   return "$rc"
+}
+
+# Did the kernel's OOM killer actually take something recently?
+#
+# A SIGKILL on its own does NOT prove it. `systemctl stop`'s timeout,
+# `systemctl kill`, a watchdog and an operator all reach the shell as signal 9
+# — exit 137 — and a sentence that ASSERTS "the device ran out of memory" over
+# any of those sends the owner after a problem they do not have. The kernel
+# says so itself when it was memory, so ask it rather than inferring it.
+#
+# ONE awk, never `grep -q`: grep exits on its FIRST match and SIGPIPEs the
+# producer, and under this script's `pipefail` (line 22) the pipeline then
+# takes the producer's 141 and reads as "no OOM" — precisely when the kill IS
+# in the log and sits early in it, which on a box with a busy kernel log is the
+# normal case. Measured: the grep form loses a match placed ahead of 2,000,000
+# following lines. The same trap run_next_build documents above.
+oom_killer_in_kernel_log() {
+  { journalctl -k --since "-15min" --no-pager 2>/dev/null || dmesg 2>/dev/null; } \
+    | awk 'tolower($0) ~ /out of memory: killed process|oom-kill:/ { hit = 1 } END { exit hit ? 0 : 1 }'
 }
 
 # Stop the setup service, free memory, reinstall, and rebuild — without ever
@@ -2696,7 +2852,7 @@ run_next_build() {
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"
-  local rc=0 built=0 reboot_follows=0
+  local rc=0 built=0 reboot_follows=0 failed_at="the rebuild"
   if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
 
   # Check before stopping the dashboard: zram alone did not prevent TASK-789.
@@ -2721,8 +2877,14 @@ do_rebuild() {
   # all still land in the window, and neither guard costs anything.
   promote_parked_build "$build_dir" "$kept_dir"
 
-  # After the stop, never before it — see free_memory_for_build.
-  free_memory_for_build
+  # After the stop, never before it — see free_memory_for_build. The flag goes
+  # through: it decides whether the gateway is paused now or judged before the
+  # build (pause_gateway_if_build_needs_room below).
+  if [ "$reboot_follows" = "1" ]; then
+    free_memory_for_build --reboot-follows
+  else
+    free_memory_for_build
+  fi
 
   # Everything from here to the restore branch runs with the dashboard DOWN, so
   # no command in the window may leave the function without passing through it —
@@ -2734,8 +2896,10 @@ do_rebuild() {
   echo "Running bun install..."
   if ! as_clawbox_login "cd $PROJECT_DIR && $BUN install"; then
     rc=1
+    failed_at="bun install"
   elif ! ensure_node_pty; then
     rc=1
+    failed_at="the node-pty rebuild"
   # A CONDITION, like its two neighbours above, and for a reason the neighbours
   # did not have: errexit is live in this function (both callers invoke it
   # bare), and set_previous_build_aside's `rm -rf` and `mv` can legitimately
@@ -2746,17 +2910,43 @@ do_rebuild() {
   elif ! set_previous_build_aside "$build_dir" "$kept_dir"; then
     echo "Error: could not set the current build aside" >&2
     rc=1
+    failed_at="setting the previous build aside"
   else
+    # The assistant's room, judged at the last moment it can be: everything
+    # that only precedes the build has run with the gateway up (TASK-1197).
+    # The reboot path paused it in free_memory_for_build already.
+    if [ "$reboot_follows" != "1" ]; then
+      pause_gateway_if_build_needs_room || true
+    fi
     echo "Running bun build..."
     built=1
     run_next_build || rc=$?
-    if [ "$rc" -eq 0 ] && ! verify_build_present "$PROJECT_DIR"; then
+    # An `if`, never `[ … ] && failed_at=…`: errexit is live in this function
+    # and a bare test that is FALSE would end the shell here, between the
+    # engine pause and the resume — the one state this arm exists to avoid.
+    if [ "$rc" -ne 0 ]; then
+      failed_at="bun run build"
+    elif ! verify_build_present "$PROJECT_DIR"; then
       rc=1
+      failed_at="bun run build (it exited 0 but left no .next/BUILD_ID)"
     fi
   fi
 
   if [ "$rc" -ne 0 ]; then
-    echo "Error: rebuild failed (exit $rc)" >&2
+    # Name WHAT failed and, when it was signalled, say so. A shell reports a
+    # signalled child as 128+N, and "exit 137" alone is a number an owner
+    # cannot act on. Memory is named ONLY on the kernel's own evidence: an
+    # OOM is the likeliest end for this step on the hardware ClawBox ships on,
+    # but it is not the only thing that arrives as signal 9 (TASK-1022).
+    local sig=0
+    if [ "$rc" -gt 128 ] && [ "$rc" -lt 160 ]; then sig=$((rc - 128)); fi
+    if [ "$sig" -eq 9 ] && oom_killer_in_kernel_log; then
+      echo "Error: rebuild failed (exit $rc) — $failed_at was killed by the kernel's OOM killer: the device ran out of memory during the build." >&2
+    elif [ "$sig" -ne 0 ]; then
+      echo "Error: rebuild failed (exit $rc) — $failed_at was killed by signal $sig (no OOM kill in the kernel log; a stop, a timeout or an operator looks the same)." >&2
+    else
+      echo "Error: rebuild failed (exit $rc) — $failed_at did not succeed." >&2
+    fi
     restore_previous_build "$build_dir" "$kept_dir" "$built" || true
     # AFTER the restore, not before it: restore_previous_build gives the
     # dashboard a fixed twenty seconds to answer on :80 before it reports the
@@ -2768,17 +2958,14 @@ do_rebuild() {
     # step_rebuild_reboot is BELOW its `do_rebuild`, and errexit ends the step
     # before it.
     resume_paused_engines
+    report_gateway_build_pause
     return "$rc"
   fi
 
-  # `|| echo`, not bare: errexit is live in this function and this is the last
-  # statement between the engine pause and the resume below. An `rm -rf` that
-  # cannot remove the parked tree (EACCES, EBUSY, a mount in the way) would
-  # otherwise kill the shell with every engine stopped and neither the resume
-  # nor the hand-over reached — the exact state this pair exists to remove.
-  # A parked tree left behind is harmless: the next rebuild's
-  # promote_parked_build or set_previous_build_aside deals with it.
-  rm -rf "$kept_dir" || echo "  Warning: could not remove the parked build at $kept_dir" >&2
+  # The engines (and a gateway paused for the build) come back BEFORE the
+  # parked tree is removed, not after: nothing about deleting a whole build on
+  # eMMC needs them stopped, and the assistant should not stay down for the
+  # length of an `rm -rf` (TASK-1197).
   if [ "$reboot_follows" = "1" ]; then
     # The caller reboots in a moment. Starting ollama, the ~2 GB embedder and
     # both voice engines seconds before shutdown restores nothing that survives
@@ -2790,7 +2977,14 @@ do_rebuild() {
     forget_paused_engines
   else
     resume_paused_engines
+    report_gateway_build_pause
   fi
+  # `|| echo`, not bare: errexit is live in this function. An `rm -rf` that
+  # cannot remove the parked tree (EACCES, EBUSY, a mount in the way) must not
+  # turn a finished build into a failed step. A parked tree left behind is
+  # harmless: the next rebuild's promote_parked_build or
+  # set_previous_build_aside deals with it.
+  rm -rf "$kept_dir" || echo "  Warning: could not remove the parked build at $kept_dir" >&2
   echo "  Build complete"
 }
 
@@ -2982,7 +3176,13 @@ step_network_setup() {
 validate_hostname() {
   local name="${1:-}"
   name="${name,,}"
-  if [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+  # 1..63 characters as an explicit length test rather than a bounded repeat
+  # `{0,61}`: `[[ =~ ]]` is glibc regex, which expands one into an NFA state per
+  # permitted repetition. Cheap at 61 (~0.5 MB) next to the 260 MB `{32,4096}`
+  # cost TASK-1066 took out of scripts/run-tunnel.sh, but it is the same
+  # construct, and src/tests/unit/shell-regex-hygiene.test.ts now keeps every
+  # script free of it. Same accepted and rejected labels as before.
+  if [ -z "$name" ] || [ "${#name}" -gt 63 ] || [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
     echo ""
     return 1
   fi
@@ -7238,7 +7438,15 @@ step_swapfile() {
 
   if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$file"; then
     echo "  Swapfile already active: $(swapon --show=NAME,SIZE --noheadings 2>/dev/null | awk -v f="$file" '$1 == f {print $2}')"
-    ensure_swapfile_fstab "$file" || return 1
+    # A failed fstab append is a WARNING here, never the step's failure: the
+    # swap the caller asked for is active NOW, which is everything a build
+    # needs. `|| return 1` made this branch abort the whole in-app update on
+    # any box whose /swapfile was enabled by hand with no fstab line — the
+    # rebuild runs as the unprivileged clawbox user, so the append can only
+    # fail there, and the box already had the 4G it was being failed over.
+    # ensure_swapfile_fstab prints its own reason; the reboot-survival half is
+    # picked up later by step_post_update, which runs this step as root.
+    ensure_swapfile_fstab "$file" || true
     return 0
   fi
 
@@ -7246,7 +7454,8 @@ step_swapfile() {
     # Left from an earlier install or a reboot that has not mounted it yet.
     if swapon --priority "$SWAPFILE_PRIORITY" "$file" 2>/dev/null; then
       echo "  Swapfile re-enabled: $file"
-      ensure_swapfile_fstab "$file" || return 1
+      # Warning only, for the reason spelled out in the already-active branch.
+      ensure_swapfile_fstab "$file" || true
       return 0
     fi
     echo "  Warning: $file exists but could not be enabled; leaving it alone"
@@ -7291,7 +7500,9 @@ step_swapfile() {
     echo "  Warning: swapon failed; leaving the box on zram alone"
     return 0
   fi
-  ensure_swapfile_fstab "$file" || return 1
+  # Warning only, same rule: swapon has already succeeded above, so the swap is
+  # active and the step did its job whether or not /etc/fstab could be written.
+  ensure_swapfile_fstab "$file" || true
   echo "  Swap is now $(free -h | awk '/^Swap:/{print $2}') ($(swapon --show=NAME --noheadings | wc -l) devices)"
 }
 
@@ -7301,12 +7512,32 @@ step_swapfile() {
 ensure_build_swap() {
   is_test_mode && return 0
   in_container && return 0
-  local ram_kb disk_swap_kb
+  local ram_kb disk_swap_kb min_kb
   ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
   [ "${ram_kb:-0}" -ge 12000000 ] && return 0
-  step_swapfile || return 1
+  if ! step_swapfile; then
+    # Say why, or the banner lies. `getStepFailureLine` in src/lib/updater.ts
+    # shows the newest journal line starting with "Error:"/"Fatal", and falls
+    # back to the LAST line only when nothing printed one. A bare `return 1`
+    # here printed no such line, so the banner became whichever of the step's
+    # own two streams landed last — stdout and stderr reach the journal as
+    # independent streams and their relative order is not guaranteed, which is
+    # how an owner was shown "Rebuild failed: Swapfile already active: 4G".
+    echo "Error: could not provision disk-backed swap for the build; see the swapfile step's warnings above." >&2
+    return 1
+  fi
   disk_swap_kb=$(swapon --show=NAME,SIZE --bytes --noheadings | awk '$1 !~ /^\/dev\/zram/ {sum += $2} END {printf "%.0f", sum / 1024}') || return 1
-  if [ "${disk_swap_kb:-0}" -lt 4194304 ]; then
+  # 4 GiB, less one MiB of tolerance for how swap is MEASURED. `swapon
+  # --show=SIZE --bytes` reports the USABLE area — the file minus its one-page
+  # header, rounded down to whole pages — so a genuine 4 GiB /swapfile measures
+  # 4194300 KiB, four KiB UNDER a literal 4194304. Measured 2026-09-21: an
+  # 8589934592-byte /swapfile (8388608 KiB) reads 8388604 KiB in /proc/swaps.
+  # A box with exactly `/swapfile 4G` therefore failed this gate on every Retry
+  # for ever, over a swapfile that was exactly the size being demanded — which
+  # is what kept TASK-1022's box un-updatable after its fstab line was added.
+  # The REQUIREMENT is unchanged at 4 GiB; only the slack in reading it is.
+  min_kb=$((4 * 1024 * 1024 - 1024))
+  if [ "${disk_swap_kb:-0}" -lt "$min_kb" ]; then
     echo "Error: build requires at least 4 GiB active disk-backed swap on this low-memory device; free disk space or repair swap and Retry. Dashboard has not been stopped." >&2
     return 1
   fi
@@ -7317,8 +7548,11 @@ ensure_swapfile_fstab() {
   local file="$1"
   grep -qs "^$file[[:space:]]" /etc/fstab && return 0
   # A read-only or full /etc is the case that matters: the swap is live now and
-  # would vanish at the next boot with nothing said. The append's status is the
-  # step's, and the step's is a warning at the caller — never a failed install.
+  # would vanish at the next boot with nothing said. The status is returned so a
+  # caller CAN react, but every caller treats it as a warning — never a failed
+  # install and never a failed update. The unprivileged rebuild path reaches
+  # this function and can never write /etc/fstab, so a hard failure here would
+  # only ever abort an update over swap the box already had (TASK-1022).
   if ! printf '%s none swap sw,pri=%s 0 0\n' "$file" "$SWAPFILE_PRIORITY" >> /etc/fstab; then
     echo "  Warning: could not record $file in /etc/fstab — the swap is active now but will not survive a reboot" >&2
     return 1

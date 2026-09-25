@@ -16,7 +16,7 @@
 
 import { spawn } from "child_process";
 import fs from "fs/promises";
-import path from "path";
+import path from "./runtime-path";
 import {
   MAX_MISSING_CHARS,
   type Deliverable,

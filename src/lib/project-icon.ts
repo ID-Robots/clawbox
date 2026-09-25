@@ -35,7 +35,7 @@
  *     spend a second picture to get one.
  */
 import fsp from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import {
   ensureIconFile,
   isPng,

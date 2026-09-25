@@ -2,7 +2,7 @@ import { createHash } from "crypto";
 import { readTranscriptRaw } from "./openclaw-session-store";
 import { constants, type BigIntStats } from "fs";
 import fs, { type FileHandle } from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { extractAudioAttachments } from "@/lib/chat-media";
 import { OPENCLAW_HOME } from "@/lib/openclaw-config";
 
@@ -206,7 +206,7 @@ async function resolveTranscript(sessionKey: string, home: string): Promise<File
   if (relativeChild(realSessionsDir, realFile) === null) return null;
   let handle: FileHandle | null = null;
   try {
-    handle = await fs.open(realFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await fs.open(/* turbopackIgnore: true */ realFile, constants.O_RDONLY | constants.O_NOFOLLOW);
     // Re-check containment on what was actually opened, not on the pathname
     // from before open(). This closes the rename/symlink race between realpath
     // and use; the ClawBox runtime is Linux, where procfs exposes the pinned

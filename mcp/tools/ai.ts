@@ -251,7 +251,7 @@ function isoOrNull(at: unknown): string | null {
 export function registerAiTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
     "anthropic_accounts",
-    "Read this box's Anthropic accounts — the Claude subscriptions and API keys the owner connected for coding runs: each one's label, whether it can answer now or is at its usage limit and until when, the order the box uses them in, and how many can answer. A coding run whose account hits its limit moves to the next account by itself; when every account is limited, runs wait and resume by themselves at the first reset. Read this before starting or retrying an Anthropic coding run, and when one is waiting: if none can answer, wait until the time it gives rather than retrying. It changes nothing: the owner adds and orders accounts in Settings → Providers.",
+    "Read which of the owner's Anthropic accounts can answer a coding run now — before starting or retrying an Anthropic coding run, and when one is waiting: if none can answer, wait until the time it gives rather than retrying.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 3_000 },
     async () => {
@@ -290,7 +290,7 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
   // (see the file header) — buying credits or changing the plan is billed.
   reg.tool(
     "clawbox_ai_usage",
-    "Read how much of this box's ClawBox AI allowance is used: the plan, the weekly chat allowance and the 5-hour burst limit (percent used, whether it is used up, when it frees up), the weekly meters for pictures, spoken replies, transcribed audio and memory indexing, and the prepaid credit balance. Use it when the user asks how much they have left, or when chat, a picture or a coding run was refused for a spent allowance. It changes nothing: the plan and credits are the owner's, in Settings → Providers or on clawbox.com.",
+    "Read how much of this box's ClawBox AI allowance is used — plan, chat limits, weekly meters and prepaid credit — when the user asks what they have left, or when chat, a picture or a coding run was refused for a spent allowance.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, openWorld: true, maxChars: 3_000 },
     async () => {

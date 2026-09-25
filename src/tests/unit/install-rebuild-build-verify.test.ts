@@ -90,6 +90,10 @@ type BuildOutcome =
   | "no-standalone-entry"
   /** Next's unwrapped standalone copy hits a file that vanished; the retry works. */
   | "trace-race-then-succeeds"
+  /** A ROUTE copy hit a vanished file: Next warns and exits 0 short of it; the retry works. */
+  | "copy-warning-then-succeeds"
+  /** The same warning on every attempt, over a build that exits 0 each time. */
+  | "copy-warning-always"
   /** The same ENOENT every time — a file that is gone for good, not a race. */
   | "trace-race-always";
 
@@ -128,6 +132,15 @@ interface Scenario {
    */
   diskHeadroom?: "ample" | "tight";
   bunInstall?: "succeeds" | "fails";
+  /**
+   * Does the kernel log actually show an OOM kill?
+   *
+   * A SIGKILL is not evidence of one — a stop timeout, `systemctl kill` and an
+   * operator all arrive as signal 9 — so `oom_killer_in_kernel_log` is what
+   * decides whether the failure sentence may name memory, and it is stubbed
+   * here rather than left to read the machine running the suite.
+   */
+  oomEvidence?: boolean;
   /** Can `run_next_build` open its build log at all? */
   buildLog?: "writable" | "unwritable";
   nodePty?: "succeeds" | "fails";
@@ -193,6 +206,7 @@ function run(scenario: Scenario = {}): Run {
     startWorks = true,
     diskHeadroom = "ample",
     bunInstall = "succeeds",
+    oomEvidence = false,
     nodePty = "succeeds",
     buildLog = "writable",
     entry = "do_rebuild",
@@ -258,6 +272,20 @@ function run(scenario: Scenario = {}): Run {
       "  exit 1",
       "fi",
       'mkdir -p "$1/.next/standalone" && printf "new-build-id\\n" > "$1/.next/BUILD_ID" && printf "// server\\n" > "$1/.next/standalone/server.js" && exit 0',
+    ].join("\n"),
+    // The shape Next prints from inside the `.catch` it wraps the ROUTE copies
+    // in: a warning, the same node message, and exit 0 over a tree short of it.
+    "copy-warning-then-succeeds": [
+      'mkdir -p "$1/.next/standalone" && printf "new-build-id\\n" > "$1/.next/BUILD_ID" && printf "// server\\n" > "$1/.next/standalone/server.js"',
+      'if [ "$ATTEMPT" = "1" ]; then',
+      `  echo " ⚠ Failed to copy traced files for $1/.next/server/app/api/route.js Error: ENOENT: no such file or directory, copyfile '$1/node_modules/a/index.js' -> '$1/.next/standalone/node_modules/a/index.js'" >&2`,
+      "fi",
+      "exit 0",
+    ].join("\n"),
+    "copy-warning-always": [
+      'mkdir -p "$1/.next/standalone" && printf "new-build-id\\n" > "$1/.next/BUILD_ID" && printf "// server\\n" > "$1/.next/standalone/server.js"',
+      `echo " ⚠ Failed to copy traced files for $1/.next/server/app/api/route.js Error: ENOENT: no such file or directory, copyfile '$1/node_modules/a/index.js' -> '$1/.next/standalone/node_modules/a/index.js'" >&2`,
+      "exit 0",
     ].join("\n"),
     "trace-race-always": [
       `echo "Error: ENOENT: no such file or directory, copyfile '$1/data/webapps/demo/index.html' -> '$1/.next/standalone/data/webapps/demo/index.html'" >&2`,
@@ -393,8 +421,22 @@ function run(scenario: Scenario = {}): Run {
     "# unconditionally: an unstubbed one would be a 127 inside the updater's",
     "# own rebuild step with every suite still green.",
     "ensure_build_swap() { return 0; }",
-    "free_memory_for_build() { :; }",
-    'resume_paused_engines() { echo "RESUMED"; }',
+    // Says which arm it was handed: on the reboot path it pauses the gateway
+    // itself; everywhere else the room is judged just before the build.
+    'free_memory_for_build() { echo "FREED:${1:-routine}"; }',
+    // TASK-1197's pair, stubbed for the same reason as the rest: present,
+    // harmless and observable. The judgement echoes whether the build's own
+    // bun install had already run, which is the ordering it exists for.
+    'pause_gateway_if_build_needs_room() { echo "GATEWAY-ROOM-JUDGED"; }',
+    'report_gateway_build_pause() { echo "GATEWAY-PAUSE-REPORTED"; }',
+    // Stubbed unconditionally, like the pair above: unstubbed it would read
+    // the kernel log of whatever machine runs the suite, so a box that really
+    // had OOM-killed something in the last fifteen minutes would flip the
+    // assertion. `return 1` is "no OOM kill in the log".
+    `oom_killer_in_kernel_log() { return ${oomEvidence ? 0 : 1}; }`,
+    // Also says whether the parked build was still on disk when the engines
+    // came back: on success they are handed back BEFORE its `rm -rf`.
+    'resume_paused_engines() { echo "RESUMED"; if [ -d "$PROJECT_DIR/.next-old" ]; then echo "RESUMED-BEFORE-CLEANUP"; fi; }',
     'forget_paused_engines() { echo "FORGOT"; }',
     "",
     shellFunctions(
@@ -557,6 +599,27 @@ describe("do_rebuild verifies the build it produced", () => {
     expect(r.buildId).toBe("old-build-id");
   });
 
+  it("retries a copy Next only warned about, and accepts the build that copied everything (TASK-1102)", () => {
+    // For a ROUTE, Next catches the failed copy, warns and exits 0. The tree
+    // it leaves is short of that file, so it is the same race and gets the
+    // same one rebuild.
+    const r = run({ build: "copy-warning-then-succeeds" });
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(2);
+    expect(r.buildId).toBe("new-build-id");
+    expect(r.hasEntry).toBe(true);
+  });
+
+  it("fails a build that exited 0 but still could not copy a traced file after the retry", () => {
+    // Exit 0 is not the verdict: rc must be non-zero on any build or copy
+    // failure, and the box keeps serving what it was serving.
+    const r = run({ build: "copy-warning-always" });
+    expect(r.status).not.toBe(0);
+    expect(r.attempts).toBe(2);
+    expect(r.stderr).toContain("could not copy every traced file");
+    expect(r.buildId).toBe("old-build-id");
+  });
+
   it("gives the full-install build the same retry", () => {
     // `install.sh --step build` is dispatchable on a live box, so it races the
     // same writers do_rebuild does.
@@ -608,6 +671,59 @@ describe("do_rebuild verifies the build it produced", () => {
   });
 });
 
+/**
+ * The evidence half of the failure sentence, run for real.
+ *
+ * Everywhere else in this file `oom_killer_in_kernel_log` is STUBBED, so the
+ * shipped body had no coverage at all — and it shipped broken: `grep -q` exits
+ * on its first match and SIGPIPEs the producer, which under install.sh's
+ * `pipefail` makes the pipeline non-zero and reads as "no OOM kill". The match
+ * being EARLY in a long log is what triggers it, which is the normal shape of a
+ * kernel log on a box that went on running afterwards.
+ */
+describe("oom_killer_in_kernel_log does not lose an early match", () => {
+  /** Run the shipped body with the kernel log stubbed to `text`. */
+  function ask(text: string): number | null {
+    const script = [
+      // install.sh's own options — pipefail is the whole point of these cases.
+      "set -euo pipefail",
+      `journalctl() { cat ${JSON.stringify(path.join(sandbox, "kernel.log"))}; }`,
+      "dmesg() { return 1; }",
+      shellFunction("oom_killer_in_kernel_log"),
+      "oom_killer_in_kernel_log",
+    ].join("\n");
+    writeFileSync(path.join(sandbox, "kernel.log"), text, "utf-8");
+    return spawnSync("bash", ["-c", script], { encoding: "utf-8" }).status;
+  }
+
+  const MANY_LINES = Array.from({ length: 50_000 }, (_, i) => `kernel: line ${i}`).join("\n");
+
+  it("finds an OOM record that sits EARLY in a long kernel log", () => {
+    // The regression: a match at the top, with plenty of log after it.
+    expect(ask(`oom-kill: constraint=CONSTRAINT_NONE,nodemask=(null)\n${MANY_LINES}\n`)).toBe(0);
+  });
+
+  it("finds the kernel's other wording too, and at the END of the log", () => {
+    expect(ask(`${MANY_LINES}\nOut of memory: Killed process 4242 (next-build)\n`)).toBe(0);
+  });
+
+  it("answers no for a log that records no OOM kill", () => {
+    // The honest negative is what stops the sentence inventing a cause.
+    expect(ask(`${MANY_LINES}\n`)).toBe(1);
+  });
+
+  it("answers no when the kernel log cannot be read at all", () => {
+    const script = [
+      "set -euo pipefail",
+      "journalctl() { return 1; }",
+      "dmesg() { return 1; }",
+      shellFunction("oom_killer_in_kernel_log"),
+      "oom_killer_in_kernel_log",
+    ].join("\n");
+    expect(spawnSync("bash", ["-c", script], { encoding: "utf-8" }).status).not.toBe(0);
+  });
+});
+
 describe("do_rebuild keeps the box serving when the build fails", () => {
   const restarted = (r: Run) =>
     r.systemctl.filter((l) => /^systemctl (start|restart) clawbox-setup\.service$/.test(l));
@@ -623,6 +739,36 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
     const r = run({ build: "oom-killed" });
     expect(restarted(r).length).toBeGreaterThan(0);
     expect(r.stderr).toMatch(/Restored the previous build; the dashboard answers on :80 again/);
+  });
+
+  it("names memory when the kernel log confirms the OOM kill (TASK-1022)", () => {
+    // "Error: rebuild failed (exit 137)" was the whole of what an owner was
+    // told, and a number is not something they can act on. With the kernel's
+    // own evidence the sentence may name WHAT died and WHY.
+    const r = run({ build: "oom-killed", oomEvidence: true });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/Error: rebuild failed \(exit 137\)/);
+    expect(r.stderr).toMatch(/bun run build was killed by the kernel's OOM killer/);
+    expect(r.stderr).toMatch(/ran out of memory/);
+  });
+
+  it("does NOT claim memory for a 137 the kernel log does not attribute", () => {
+    // A stop timeout, `systemctl kill`, a watchdog and an operator all arrive
+    // as signal 9 / exit 137. Asserting an OOM over any of those would send
+    // the owner after a problem they do not have — the kill is still named,
+    // the cause is not invented.
+    const r = run({ build: "oom-killed", oomEvidence: false });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/Error: rebuild failed \(exit 137\)/);
+    expect(r.stderr).toMatch(/bun run build was killed by signal 9/);
+    expect(r.stderr).not.toMatch(/ran out of memory/);
+  });
+
+  it("names bun install when that is what failed, not 'the rebuild'", () => {
+    // The four things that can fail in this window used to collapse into one
+    // sentence, so the banner never said which of them it was.
+    const r = run({ bunInstall: "fails" });
+    expect(r.stderr).toMatch(/Error: rebuild failed \(exit 1\) — bun install did not succeed\./);
   });
 
   // The window the first version of this fix left open: `bun install` and
@@ -682,6 +828,48 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
     const withoutReboot = run({ build: "succeeds" });
     expect(withoutReboot.status).toBe(0);
     expect(withoutReboot.stdout + withoutReboot.stderr).toMatch(/RESUMED/);
+  });
+
+  it("judges the gateway's room just before the build on a routine rebuild, and only there (TASK-1197)", () => {
+    // Not at the top: bun install, the node-pty check and the set-aside all
+    // run with the assistant up, so a pause — when one is needed at all —
+    // covers the build and nothing that merely precedes it.
+    const r = run({ build: "succeeds" });
+    expect(r.status).toBe(0);
+    const out = r.stdout + r.stderr;
+    expect(out).toContain("FREED:routine");
+    const install = out.indexOf("Running bun install...");
+    const judged = out.indexOf("GATEWAY-ROOM-JUDGED");
+    const build = out.indexOf("Running bun build...");
+    expect(install).toBeGreaterThan(-1);
+    expect(judged).toBeGreaterThan(install);
+    expect(build).toBeGreaterThan(judged);
+    // …and says how long it was away, once the resume has brought it back.
+    expect(out.indexOf("GATEWAY-PAUSE-REPORTED")).toBeGreaterThan(out.indexOf("RESUMED"));
+  });
+
+  it("leaves the update's reboot path exactly as it was: paused up front, handed to the reboot", () => {
+    const r = run({ build: "succeeds", rebootFollows: true });
+    expect(r.status).toBe(0);
+    const out = r.stdout + r.stderr;
+    expect(out).toContain("FREED:--reboot-follows");
+    expect(out).not.toContain("GATEWAY-ROOM-JUDGED");
+    expect(out).toContain("FORGOT");
+  });
+
+  it("gives the engines back before it deletes the parked build, not after", () => {
+    const r = run({ build: "succeeds" });
+    expect(r.status).toBe(0);
+    expect(r.stdout + r.stderr).toContain("RESUMED-BEFORE-CLEANUP");
+    // And the parked tree is still removed.
+    expect(r.parked).toBe(false);
+  });
+
+  it("reports the pause on the failure arm too, after the restore and the resume", () => {
+    const r = run({ build: "oom-killed" });
+    expect(r.status).not.toBe(0);
+    const out = r.stdout + r.stderr;
+    expect(out.indexOf("GATEWAY-PAUSE-REPORTED")).toBeGreaterThan(out.indexOf("RESUMED"));
   });
 
   it("starts them back on the failure arm even when a reboot was announced", () => {

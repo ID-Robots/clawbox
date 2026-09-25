@@ -12,7 +12,7 @@
  * so the panel can show the same verdict before it posts.
  */
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
 import { diskVerdict, type DiskVerdict } from "@/lib/local-install";
@@ -94,7 +94,7 @@ export function sumPartsByDevice(
 export async function checkInstallDisks(parts: readonly InstallPart[]): Promise<DiskVerdict> {
   const located = await Promise.all(parts.map(async (part) => {
     const measurable = await existingAncestor(part.dir);
-    const device = measurable === null ? null : await fs.stat(measurable).then((st) => String(st.dev), () => null);
+    const device = measurable === null ? null : await fs.stat(/* turbopackIgnore: true */ measurable).then((st) => String(st.dev), () => null);
     return { dir: measurable ?? part.dir, bytes: part.bytes, device };
   }));
   let first: DiskVerdict | null = null;

@@ -340,7 +340,7 @@ export function registerBrowserTools(reg: Registrar): void {
     ];
     reg.tool(
       "browser_view_local",
-      "Open a page from this run's working folder in the device browser and get a written description of what actually renders. Use it to verify every page you build before reporting done. The reply says whether the page was on the owner's own screen or in an invisible browser. Pass the path of an HTML file inside your folder.",
+      "Open an HTML file from this run's working folder in the device browser and get a written description of what renders — use it to check every page you build before reporting done.",
       { path: zText(512, "HTML file to view, relative to the working folder (e.g. index.html) or absolute inside it.") },
       { editions: ["openclaw", "hermes"], family: "browser", readOnly: false },
       async ({ path: given }: { path: string }) => {
@@ -361,7 +361,7 @@ export function registerBrowserTools(reg: Registrar): void {
   // the circuit breaker for a healthy box.
   reg.tool(
     "describe_image",
-    "Look at a local image file (.png, .jpg, .jpeg, .webp) and get a written description of what it shows, through the device's vision model. Use it to check a screenshot or picture you saved without opening a browser.",
+    "Get a written description of a local image file (.png, .jpg, .jpeg, .webp) from the device's vision model, to check a picture or screenshot you saved.",
     {
       path: zText(512, "Image file to describe. Relative paths resolve against the working folder."),
       prompt: zText(600, "What to look for, in one sentence. Omit for a general description.").optional(),
@@ -399,7 +399,7 @@ export function registerBrowserTools(reg: Registrar): void {
 
   reg.tool(
     "browser_open",
-    "Open the web browser and optionally go to a page. Use this whenever the user asks to open the browser, open a site, or look something up on the web. It drives the real window on the ClawBox desktop when the owner has left that switched on and the window can be used, and an invisible browser otherwise — the reply says which one took the page. It returns a picture of the page.",
+    "Open the web browser, optionally at a page, whenever the user asks to open the browser or a site or to look something up on the web; it returns a picture of the page.",
     { url: zText(2_000, "Page to open, starting with http:// or https://. Omit to just open the browser.").optional() },
     { editions: ["openclaw", "hermes"], family: "browser", readOnly: false, openWorld: true },
     async ({ url }: { url?: string }) => {
@@ -427,7 +427,7 @@ export function registerBrowserTools(reg: Registrar): void {
 
   reg.tool(
     "browser_navigate",
-    "Send the browser that is already open to a different page. Returns a picture of the loaded page. If the browser is not open yet, use browser_open.",
+    "Send the open browser to a different page and get a picture of it; if none is open yet, use browser_open.",
     { url: zText(2_000, "Page to go to, starting with http:// or https://") },
     { editions: ["openclaw", "hermes"], family: "browser", readOnly: false, openWorld: true },
     async ({ url }: { url: string }) => {
@@ -440,7 +440,7 @@ export function registerBrowserTools(reg: Registrar): void {
 
   reg.tool(
     "browser_screenshot",
-    "Take a picture of the page currently loaded in the desktop browser. Use it to see what a page says before acting on it. To photograph the whole desktop instead, use screen_capture.",
+    "Take a picture of the page loaded in the desktop browser, to see what it says before acting on it.",
     {},
     { editions: ["openclaw", "hermes"], family: "browser", readOnly: true },
     async () => pageResult("The page currently in the browser.", await act("screenshot", describeParam())),
@@ -448,7 +448,7 @@ export function registerBrowserTools(reg: Registrar): void {
 
   reg.tool(
     "browser_close",
-    "Stop controlling the desktop browser. The window itself stays open for the user. Call this when you are finished with a browsing task.",
+    "Stop controlling the desktop browser when you are finished with a browsing task.",
     {},
     { editions: ["openclaw", "hermes"], family: "browser", readOnly: false },
     async () => {
@@ -472,7 +472,7 @@ export function registerBrowserTools(reg: Registrar): void {
 
   reg.tool(
     "browser_click",
-    "Click at a point on the page in the desktop browser. Take a browser_screenshot first and read the coordinates off it; 0,0 is the top-left of the page.",
+    "Click at a point on the page, with x and y read off a browser_screenshot (0,0 is the top-left).",
     {
       x: zInt(0, 10_000, 0, "Horizontal position in pixels from the left edge."),
       y: zInt(0, 10_000, 0, "Vertical position in pixels from the top edge."),
@@ -485,7 +485,7 @@ export function registerBrowserTools(reg: Registrar): void {
 
   reg.tool(
     "browser_type",
-    "Type text into the field that is focused in the desktop browser. Click the field with browser_click first. The text itself is never echoed back, because this is the tool that types passwords.",
+    "Type text into the focused field of the desktop browser, after clicking it with browser_click.",
     { text: zText(2_000, "The text to type into the focused field.") },
     { editions: ["openclaw"], family: "browser", readOnly: false },
     async ({ text: value }: { text: string }) => {
@@ -498,7 +498,7 @@ export function registerBrowserTools(reg: Registrar): void {
 
   reg.tool(
     "browser_fill",
-    "Set the value of a form field you can name by CSS selector — focus, clear and type in one call. Use this instead of clicking a field and typing, and instead of Tab-by-Tab navigation: it costs one step per field. The text itself is never echoed back.",
+    "Set a form field named by CSS selector in one call — instead of clicking and typing, or Tab-by-Tab navigation.",
     {
       selector: zText(300, "CSS selector of the input, textarea or contenteditable, e.g. #name or input[name=phone]."),
       text: zText(2_000, "The value to set."),
@@ -512,7 +512,7 @@ export function registerBrowserTools(reg: Registrar): void {
 
   reg.tool(
     "browser_keypress",
-    "Press a single named key in the desktop browser, for example Enter to submit a form or Escape to close a dialog. To type words, use browser_type.",
+    "Press one named key in the desktop browser, e.g. Enter to submit a form or Escape to close a dialog.",
     {
       key: zEnumOf(
         ["Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"],
@@ -525,7 +525,7 @@ export function registerBrowserTools(reg: Registrar): void {
 
   reg.tool(
     "browser_scroll",
-    "Scroll the page in the desktop browser. A positive scroll_y scrolls down the page, a negative one scrolls up.",
+    "Scroll the page in the desktop browser; a positive scroll_y scrolls down, a negative one up.",
     {
       x: zInt(0, 10_000, 0, "Horizontal position on the page to scroll at."),
       y: zInt(0, 10_000, 0, "Vertical position on the page to scroll at."),

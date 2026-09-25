@@ -99,10 +99,14 @@ describe("CI reads the built chunks", () => {
   const script = readFileSync(path.join(ROOT, "scripts", "check-bundled-builtins.sh"), "utf8");
 
   it("runs the bundled-builtins check right after the build", () => {
-    const build = workflow.indexOf("run: bun run build");
+    // The build step runs `bun run build` through the isolation check
+    // (TASK-1102), which builds over a planted data/ and removes it after.
+    const build = workflow.indexOf("run: bash scripts/check-build-isolation.sh");
     const check = workflow.indexOf("scripts/check-bundled-builtins.sh");
     expect(build).toBeGreaterThan(-1);
     expect(check).toBeGreaterThan(build);
+    const isolation = readFileSync(path.join(ROOT, "scripts", "check-build-isolation.sh"), "utf8");
+    expect(isolation).toContain('BUILD_CMD="${*:-bun run build}"');
   });
 
   it("looks for the stub's message, not for one module's name", () => {

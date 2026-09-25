@@ -26,7 +26,7 @@
 // provider from the only screen that can fix it.
 
 import { promises as fsp } from "fs";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 
 /**
@@ -100,7 +100,7 @@ async function mutate(fn: (providers: Record<string, EnumerationRecord>) => void
     if (!file) return;
     const providers = await readRecordFile();
     fn(providers);
-    const tmp = `${file}.${process.pid}.tmp`;
+    const tmp = untraced(`${file}.${process.pid}.tmp`);
     await fsp.mkdir(path.dirname(file), { recursive: true });
     await fsp.writeFile(tmp, JSON.stringify({ providers }), "utf8");
     await fsp.rename(tmp, file);

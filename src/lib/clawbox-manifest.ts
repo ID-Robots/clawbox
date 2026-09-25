@@ -31,7 +31,7 @@
  * read the shape as well.
  */
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 
 export const CLAWBOX_MANIFEST_FILE = "clawbox.json";
 export const MANIFEST_NAME_MAX = 60;

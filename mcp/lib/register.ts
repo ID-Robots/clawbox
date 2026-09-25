@@ -102,7 +102,28 @@ const MAX_IMAGE_BASE64 = 1024 * 1024;
 export const BANNED_DESCRIPTION_RE =
   /ignore (?:previous|prior) instructions|disregard|system prompt|<system>|do not tell|do not reveal|curl https:\/\/|exec\(|eval\(|import subprocess/i;
 
-export const MAX_DESCRIPTION_CHARS = 1000;
+/**
+ * The ceiling on a tool description (TASK-1080).
+ *
+ * Every description is paid for in the `tools/list` payload at the start of
+ * every session, whether the tool is called or not — on a box that may be
+ * running a 4-8B model. So a description says WHEN to call the tool, in about
+ * one sentence, plus the guard sentence a tool that reads untrusted content
+ * carries. What the model needs only once it has decided to call — how to read
+ * the answer, the edge cases, where the owner changes a setting — lives in the
+ * field guide's tool notes (mcp/lib/tool-notes.ts), which `clawbox_context`
+ * serves once per session and only for the tools this server registered.
+ *
+ * It was 1000 until the twelve largest descriptions were moved there; the
+ * checker (mcp/check-tools.ts) fails on anything longer, over every posture.
+ */
+export const MAX_DESCRIPTION_CHARS = 400;
+
+/**
+ * The same ceiling for one parameter's description. Checked by
+ * `paramDescriptionViolations` below, over the EMITTED schema.
+ */
+export const MAX_PARAM_DESCRIPTION_CHARS = 120;
 
 export interface Registrar {
   tool(name: string, description: string, shape: Shape, opts: ToolOpts, handler: ToolHandler): void;
@@ -173,6 +194,32 @@ export function contractViolations(info: RegisteredToolInfo): string[] {
   return out;
 }
 
+/**
+ * Parameter descriptions over MAX_PARAM_DESCRIPTION_CHARS.
+ *
+ * Read off the EMITTED JSON Schema rather than the zod objects: that is the
+ * text a harness shows the model, and a description set on an inner schema
+ * (`zEnumOf(…).optional()`) is only found there. Not part of
+ * `contractViolations`, which runs at every registration on the device — this
+ * costs one `toJSONSchema` per tool, so mcp/check-tools.ts runs it over every
+ * posture instead.
+ */
+export function paramDescriptionViolations(info: RegisteredToolInfo): string[] {
+  const emitted = z.toJSONSchema(z.object(info.shape), { io: "input" }) as {
+    properties?: Record<string, { description?: unknown }>;
+  };
+  const out: string[] = [];
+  for (const [param, prop] of Object.entries(emitted.properties ?? {})) {
+    const described = typeof prop.description === "string" ? prop.description : "";
+    if (described.length > MAX_PARAM_DESCRIPTION_CHARS) {
+      out.push(
+        `${info.name}: parameter "${param}" description is ${described.length} chars (max ${MAX_PARAM_DESCRIPTION_CHARS})`,
+      );
+    }
+  }
+  return out;
+}
+
 // ── Argument validation ──────────────────────────────────────────────────────
 
 /** Unwrap .default()/.optional() until an enum's options are visible. */
@@ -221,6 +268,31 @@ interface CallEntry {
 }
 
 /**
+ * Tool calls dispatched here and not yet settled.
+ *
+ * `armIdleExit` in mcp/clawbox-mcp.ts counts an outstanding REQUEST by the id
+ * the answer will carry, which is enough for every request that gets an answer.
+ * A CANCELLED one gets none — the SDK's `Protocol` aborts and deliberately
+ * sends nothing — so the idle rule releases that id by hand, or one cancelled
+ * call would pin the process open for the life of the harness. But releasing
+ * the id is not the work stopping: the abort the SDK raises is a signal THIS
+ * DISPATCHER DOES NOT HAND TO THE HANDLER, so a cancelled `write_file`,
+ * `web_fetch` or shell runs on afterwards. A process in the middle of one is
+ * not idle, and after the id is gone this counter is the only thing that still
+ * knows it is there.
+ *
+ * Counted around the whole dispatch rather than inside `tool()`'s wrapper,
+ * because the whole tools/call path settles here: an unknown name and a
+ * schema rejection are answers this function owes too.
+ */
+let activeCalls = 0;
+
+/** Is a tools/call still being served? See the note above `activeCalls`. */
+export function hasActiveToolCalls(): boolean {
+  return activeCalls > 0;
+}
+
+/**
  * Own the tools/call path so ARGUMENT validation goes through the envelope too.
  *
  * The SDK validates before it reaches the handler, so a wrapper around the
@@ -232,39 +304,54 @@ interface CallEntry {
  */
 function installCallHandler(server: McpServer, entries: Map<string, CallEntry>): void {
   server.server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
-    const name = request.params.name;
-    const entry = entries.get(name);
-    if (!entry) {
-      // NOT "there is no such tool on this edition", which is what this said
-      // while the list could not change: a WITHDRAWN name lands here too — the
-      // mailbox read tools follow Settings → Email — and that tool does exist on
-      // this edition, it is just not being offered now. The old wording sent a
-      // model looking for an edition problem, and it was the one refusal in this
-      // module's vocabulary that did not say "do not retry", while
-      // `toolErrorResult` stamps `isError: true` — which is exactly the chronic
-      // failure Hermes' per-server circuit breaker counts, and the thing the
-      // whole registration gate exists to avoid.
-      return toolErrorResult(
-        new ToolError(
-          "NOT_FOUND",
-          `This ClawBox is not offering a tool called "${name}".`,
-          "Do not retry this name. Read this server's tool list again and use a name from it:"
-            + " the list depends on which edition this device runs, and a few tools are withdrawn"
-            + " while the owner has switched off what they need.",
-        ),
-        name,
-      );
-    }
-    const parsed = z.object(entry.shape).safeParse(request.params.arguments ?? {});
-    if (!parsed.success) return badArgumentResult(name, entry.shape, parsed.error);
+    activeCalls += 1;
     try {
-      // ToolResult is an interface, so it has no implicit index signature and
-      // does not structurally satisfy CallToolResult without the assertion.
-      return capResult(await entry.handler(parsed.data), entry.maxChars) as CallToolResult;
-    } catch (err) {
-      return toolErrorResult(err, name);
+      return await dispatch(request.params.name, request.params.arguments, entries);
+    } finally {
+      // In `finally`, and around the whole body: a throw that escaped the
+      // envelope below still ended the call, and a count left standing would
+      // keep this process alive for good.
+      activeCalls -= 1;
     }
   });
+}
+
+async function dispatch(
+  name: string,
+  args: unknown,
+  entries: Map<string, CallEntry>,
+): Promise<CallToolResult> {
+  const entry = entries.get(name);
+  if (!entry) {
+    // NOT "there is no such tool on this edition", which is what this said
+    // while the list could not change: a WITHDRAWN name lands here too — the
+    // mailbox read tools follow Settings → Email — and that tool does exist on
+    // this edition, it is just not being offered now. The old wording sent a
+    // model looking for an edition problem, and it was the one refusal in this
+    // module's vocabulary that did not say "do not retry", while
+    // `toolErrorResult` stamps `isError: true` — which is exactly the chronic
+    // failure Hermes' per-server circuit breaker counts, and the thing the
+    // whole registration gate exists to avoid.
+    return toolErrorResult(
+      new ToolError(
+        "NOT_FOUND",
+        `This ClawBox is not offering a tool called "${name}".`,
+        "Do not retry this name. Read this server's tool list again and use a name from it:"
+          + " the list depends on which edition this device runs, and a few tools are withdrawn"
+          + " while the owner has switched off what they need.",
+      ),
+      name,
+    );
+  }
+  const parsed = z.object(entry.shape).safeParse(args ?? {});
+  if (!parsed.success) return badArgumentResult(name, entry.shape, parsed.error);
+  try {
+    // ToolResult is an interface, so it has no implicit index signature and
+    // does not structurally satisfy CallToolResult without the assertion.
+    return capResult(await entry.handler(parsed.data), entry.maxChars) as CallToolResult;
+  } catch (err) {
+    return toolErrorResult(err, name);
+  }
 }
 
 /**

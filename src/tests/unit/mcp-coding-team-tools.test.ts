@@ -170,3 +170,49 @@ describe("coding_team_stop", () => {
     expect(text).toContain("Team team-k3x9q2ab is stopped.");
   });
 });
+
+describe("coding_team_status — shape, lead and figures (TASK-1099)", () => {
+  it("names the planner's shape, whether the lead may change the plan, the figures, a lead's task and the final review", async () => {
+    apiGet.mockResolvedValueOnce({
+      team: {
+        ...TEAM,
+        status: "done",
+        alerts: 0,
+        agents: { planner: 1, workers: 3, reviewers: 1, leads: 2, total: 7 },
+        shape: { parallelism: 2, review: "final", rationale: "Two independent files, one look at the whole." },
+        dynamic: true,
+        finalReview: { verdict: "accepted", notes: "" },
+        tasks: [...TEAM.tasks.map((t) => ({ ...t, status: "complete" })), { task_id: "t3", task_description: "Add a favicon", assigned_to: "run-00000005", status: "complete", result: "done", depends_on: ["t1"], review: { verdict: "accepted", notes: "" }, attempts: 1, origin: "lead" }],
+        metrics: { plannerRuns: 1, workerRuns: 3, reviewerRuns: 1, leadRuns: 2, tasksPlanned: 2, tasksAdded: 1, tasksRetired: 0, tasksAcceptedFirstTry: 3, tasksRejected: 0, tokensUsed: 184_000, wallMs: 754_400, messagesSent: 4, messagesToLead: 1, messagesToSibling: 2, messagesUndelivered: 1 },
+      },
+    });
+    const text = await ok("coding_team_status", { team_id: TEAM.id, log: 0 });
+    expect(text).toContain("Agents: 7 — 1 planner, 3 worker(s), 1 reviewer(s), 2 lead turn(s).");
+    expect(text).toContain("Shape: up to 2 worker(s) side by side, review final — Two independent files, one look at the whole.");
+    expect(text).toContain("Lead: on");
+    expect(text).toContain("Metrics: runs planner 1, worker 3, reviewer 1, lead 2; tasks planned 2, added 1, retired 0, accepted first try 3, rejected 0; tokens 184000; wall 754 s. Messages: 4 sent — 1 to the lead, 2 to a sibling, 1 not delivered.");
+    expect(text).toContain("- t3 [complete, accepted] — Add a favicon — added by the lead — worker run-00000005");
+    expect(text).toContain("Final review: accepted");
+  });
+
+  it("does not count a retired task among a listed team's tasks — it will never be complete", async () => {
+    apiGet.mockResolvedValueOnce({ teams: [{ ...TEAM, status: "done", tasks: [...TEAM.tasks.map((x) => ({ ...x, status: "complete" })), { ...TEAM.tasks[1], task_id: "t3", status: "retired", assigned_to: null }] }] });
+    const listed = JSON.parse(await ok("coding_team_status", { log: 0 }));
+    expect(listed[0]).toMatchObject({ status: "done", tasks: 2, complete: 2 });
+  });
+
+  it("leaves the message counts out when the server's figures have none", async () => {
+    apiGet.mockResolvedValueOnce({
+      team: { ...TEAM, metrics: { plannerRuns: 1, workerRuns: 1, reviewerRuns: 0, leadRuns: 0, tasksPlanned: 1, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 0, tasksRejected: 0, tokensUsed: 0, wallMs: 0 } },
+    });
+    const text = await ok("coding_team_status", { team_id: TEAM.id, log: 0 });
+    expect(text).toContain("Metrics: runs planner 1");
+    expect(text).not.toContain("Messages:");
+  });
+
+  it("says none of it for a board from an older server", async () => {
+    apiGet.mockResolvedValueOnce({ team: TEAM });
+    const text = await ok("coding_team_status", { team_id: TEAM.id, log: 0 });
+    expect(text).not.toMatch(/Shape:|Lead:|Metrics:|Final review:/);
+  });
+});

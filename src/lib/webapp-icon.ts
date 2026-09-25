@@ -1,5 +1,5 @@
 import fsp from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { randomUUID } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
 import { pushPendingAction } from "@/lib/pending-actions";
@@ -408,7 +408,7 @@ export async function ensureIconFile(id: string, hints: WebappIconHints, hooks: 
     try {
       const result = await generateClawaiImage(buildIconPrompt(hints));
       generatedPath = result.path;
-      const bytes = await fsp.readFile(generatedPath);
+      const bytes = await fsp.readFile(/* turbopackIgnore: true */ generatedPath);
       if (!isPng(bytes)) {
         warn(id, "the picture was not a PNG");
         rememberFailure(id);

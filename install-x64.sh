@@ -85,7 +85,7 @@ else
   BUN=""
 fi
 
-OPENCLAW_VERSION="2026.9.3"
+OPENCLAW_VERSION="2026.9.4"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"

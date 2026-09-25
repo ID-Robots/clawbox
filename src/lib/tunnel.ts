@@ -8,7 +8,7 @@
 import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import { readFile, writeFile, unlink, mkdir } from "fs/promises";
-import { join } from "path";
+import { join } from "@/lib/runtime-path";
 import {
   type TunnelUnitState,
   getTunnelServiceState,

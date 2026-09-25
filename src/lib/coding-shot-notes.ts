@@ -19,7 +19,7 @@
  * screenshot into a failed tool call.
  */
 import fs from "fs";
-import path from "path";
+import path from "./runtime-path";
 
 /** Dotfile: never listed as an artifact, never served by the artifacts route. */
 export const SHOT_NOTES_FILE = ".shot-notes.json";

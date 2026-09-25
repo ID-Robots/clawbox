@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
+import Link from 'next/link'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
 import { describeChatFailure, describeFallbackReply } from '@/lib/chat-error-text'
@@ -23,6 +24,8 @@ import ChatFileCard from '@/components/ChatFileCard'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
+import { useChatFullscreen, useChatTextScale, usePhoneViewport } from '@/lib/use-chat-phone-layout'
+import { ChatFullscreenButton, ChatHeaderStrip, ChatTextSizeBar, ChatTextSizeButton } from '@/components/ChatPhoneChrome'
 import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 // The card and the viewer come from the mascot chat's own modules: this surface
 // rendered `EMAIL:<uid>` as text because only one of the two chats had learned
@@ -93,15 +96,68 @@ import {
   STARTING_MAX_RETRIES,
   STARTING_RETRY_DELAY_MS,
 } from '@/lib/chat-gateway-starting'
+// Bringing the conversation back, with an end — the rules the mascot chat runs
+// too, so the two surfaces cannot drift on when a restore gives up (TASK-1158).
+import {
+  GATEWAY_REQUEST_TIMEOUT_MS,
+  HISTORY_ATTEMPT_TIMEOUT_MS,
+  HISTORY_RESTORE_DEADLINE_MS,
+  HISTORY_RETRY_DELAYS_MS,
+  RESTORE_HANDSHAKE_TIMEOUT_MS,
+  classifyRestoreFailure,
+  isRestoreAborted,
+  restoreWithRetry,
+  type RestoreFailureKind,
+} from '@/lib/chat-session-restore'
+import { useTr } from '@/lib/i18n-floor'
 
 
 interface ChatAppProps {
   onThinkingChange?: (thinking: boolean) => void
   hideHeader?: boolean
+  /**
+   * Told whether the page around this chat should fold its own title bar away:
+   * true while a phone shows the chat fullscreen (TASK-1157). A host that
+   * listens gets its "back to the desktop" link drawn in this chat's header
+   * instead, one tap behind the strip; one that does not keeps its bar.
+   */
+  onPhoneChromeHiddenChange?: (hidden: boolean) => void
 }
 
-function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
+// What the phone's fullscreen strip and its text size button open (TASK-1157).
+const HEADER_REGION_ID = 'chatapp-header-region'
+const TEXT_SIZE_BAR_ID = 'chatapp-text-size-bar'
+const COMPOSER_OPTIONS_ID = 'chatapp-composer-options'
+
+function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChange }: ChatAppProps) {
   const { t, locale } = useT()
+  const tr = useTr()
+  // The phone layout (TASK-1157), the same view settings the mascot chat uses
+  // (lib/chat-phone-layout.ts): fullscreen chat folds the header into a strip
+  // and the composer down to the text box and Send, and the conversation's
+  // text size can be stepped. At or above the desktop breakpoint none of it
+  // applies and this page draws exactly what it always has.
+  const phone = usePhoneViewport()
+  const [fullscreenPref, setFullscreenPref] = useChatFullscreen()
+  const fullscreenChat = phone && fullscreenPref && !hideHeader
+  const [textScalePref, setTextScalePref] = useChatTextScale()
+  const textScale = phone ? textScalePref : 1
+  const [textSizeOpen, setTextSizeOpen] = useState(false)
+  const [headerPeek, setHeaderPeek] = useState(false)
+  const [composerOptionsOpen, setComposerOptionsOpen] = useState(!fullscreenChat)
+  // Switching fullscreen puts both regions where the mode says they belong —
+  // adjusted while rendering, React's pattern for state that follows a value,
+  // so no frame is drawn with the old mode's regions.
+  const [layoutMode, setLayoutMode] = useState(fullscreenChat)
+  if (layoutMode !== fullscreenChat) {
+    setLayoutMode(fullscreenChat)
+    setHeaderPeek(false)
+    setComposerOptionsOpen(!fullscreenChat)
+  }
+  useEffect(() => {
+    onPhoneChromeHiddenChange?.(fullscreenChat)
+  }, [fullscreenChat, onPhoneChromeHiddenChange])
+  const headerHidden = fullscreenChat && !headerPeek
   // The words a failed turn is said in — a ref, for the handlers that
   // outlive the render that created them.
   const failureWordsRef = useRef({ t, locale })
@@ -164,6 +220,19 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   const [sending, setSending] = useState(false)
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   const [errorMsg, setErrorMsg] = useState('')
+  /**
+   * The conversation being brought back, or one that could not be (TASK-1158).
+   *
+   * `retrying` once a read has failed with a "not yet" and another is
+   * scheduled; `failed` when the restore ran out of attempts or time — the
+   * state that puts the reason and Try again on screen instead of an empty
+   * conversation that looks like a new one.
+   */
+  const [restoreState, setRestoreState] = useState<
+    | { phase: 'retrying' }
+    | { phase: 'failed'; kind: RestoreFailureKind }
+    | null
+  >(null)
   // Staged ON THE BOX, never held as base64 in the page — see the import note.
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([])
   const [attachmentError, setAttachmentError] = useState<(StagingFailure & { file: string }) | null>(null)
@@ -189,6 +258,14 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   // retried on this ladder; reset once a connect lands.
   const startingRetriesRef = useRef(0)
   const startingRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // One socket attempt's own clock, from `new WebSocket` to the hello
+  // (TASK-1158). A socket the gateway accepts and never answers fires no close
+  // event, so without it this page said "Connecting…" for as long as it stayed
+  // open.
+  const handshakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The conversation read a restore is running, so a newer socket or the page
+  // going away can call it off.
+  const restoreAbortRef = useRef<AbortController | null>(null)
   // Has this component gone? The starting-retry timer is the one deferred piece
   // of work here that OPENS A SOCKET rather than touching state, so a pending
   // one on an unmounted component is up to two minutes of sockets and ws-config
@@ -257,7 +334,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           pendingRef.current.delete(id)
           reject(new Error('Request timeout'))
         }
-      }, 120000)
+      }, GATEWAY_REQUEST_TIMEOUT_MS)
     })
   }, [])
 
@@ -384,11 +461,21 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     })
   }, [])
 
-  const loadHistory = useCallback(async () => {
+  const loadHistory = useCallback(async (opts?: { restore?: boolean }) => {
     const transport = adapterRef.current
     // A harness with no replay has nothing to read, and asking would be a call
     // the adapter's own contract answers `unsupported`.
     if (!transport.capabilities.canListHistory) return
+    // A RESTORE — the read on the hello, the replay, Try again — is bounded and
+    // retried only while the gateway says "not yet" or does not answer; the
+    // ack-only refetch stays the single best-effort read it always was
+    // (TASK-1158; the rules are in lib/chat-session-restore.ts).
+    let restoreCtl: AbortController | null = null
+    if (opts?.restore === true) {
+      restoreAbortRef.current?.abort()
+      restoreCtl = new AbortController()
+      restoreAbortRef.current = restoreCtl
+    }
     try {
       // Through the ADAPTER, which is what makes one call serve both editions:
       // the gateway's `chat.history` plus the durable spoken-reply backstop, or
@@ -399,7 +486,22 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       // spoken reply into the bubble it belongs to — and it also folds
       // `/setup-api/chat/spoken-history`, which this page passed `null` for and
       // therefore lost on any gateway that omits the supplement.
-      const { messages: chatMsgs } = await transport.loadHistory()
+      //
+      // It used to be this single read with its failure sent to the console: a
+      // conversation the gateway was still rebuilding came back empty, looking
+      // exactly like a new one, with nothing to press.
+      const read = () => transport.loadHistory()
+      const { messages: chatMsgs } = restoreCtl
+        ? await restoreWithRetry(read, {
+          signal: restoreCtl.signal,
+          attemptTimeoutMs: HISTORY_ATTEMPT_TIMEOUT_MS,
+          deadlineMs: HISTORY_RESTORE_DEADLINE_MS,
+          delaysMs: HISTORY_RETRY_DELAYS_MS,
+          onRetry: () => setRestoreState({ phase: 'retrying' }),
+        })
+        : await read()
+      // Any read that answers ends a restore's wait or failure.
+      setRestoreState(null)
       // Server is canonical for everything it knows about, but a user turn
       // typed between connect-ack and history-arrival ("optimistic local")
       // hasn't reached the server yet — preserve it by appending any prev
@@ -411,7 +513,15 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         return inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
       })
     } catch (err) {
+      // Called off: a newer socket, Try again or the page going away owns the
+      // conversation now. Nothing to report.
+      if (restoreCtl && isRestoreAborted(err)) return
       console.error('Failed to load history:', err)
+      // Only a restore ends in the panel: an ordinary refetch failing leaves
+      // the transcript that is already painted, exactly as before.
+      if (restoreCtl) setRestoreState({ phase: 'failed', kind: classifyRestoreFailure(err) })
+    } finally {
+      if (restoreCtl && restoreAbortRef.current === restoreCtl) restoreAbortRef.current = null
     }
     // No dependencies on purpose: the socket's hello handler closes over this
     // callback for the life of the connection, so it has to keep one identity
@@ -434,6 +544,13 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     // under the run. Safe for the Retry button, which only renders in the error
     // state, where there is no open socket. Same guard, same place, as ChatPopup.
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return
+    // A new attempt owns the handshake and the conversation from here: the old
+    // attempt's clock must not end this one, and a history read still retrying
+    // for the old socket would only report the old socket's failure.
+    if (handshakeTimerRef.current) clearTimeout(handshakeTimerRef.current)
+    handshakeTimerRef.current = null
+    restoreAbortRef.current?.abort()
+    setRestoreState(null)
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
@@ -467,15 +584,24 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     }
 
     let connectSent = false
+    // The connect frame's request id, so an attempt its handshake clock ends
+    // can take the frame out of the pending map before the socket goes.
+    let connectRequestId: string | null = null
     let ws: WebSocket
+    const clearHandshakeTimer = () => {
+      if (handshakeTimerRef.current) clearTimeout(handshakeTimerRef.current)
+      handshakeTimerRef.current = null
+    }
 
     const sendConnect = (challenge?: Record<string, unknown>) => {
       if (connectSent || !ws || ws.readyState !== WebSocket.OPEN) return
       connectSent = true
 
       const id = uuid()
+      connectRequestId = id
       pendingRef.current.set(id, {
         resolve: (hello: unknown) => {
+          clearHandshakeTimer()
           setStatus('connected')
           connectedOnceRef.current = true
           startingRetriesRef.current = 0
@@ -485,9 +611,12 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
           sessionKeyRef.current = mainSessionKey
           setBoundSessionKey(mainSessionKey)
-          loadHistory()
+          // The restore itself: bounded, and ended with the reason and Try
+          // again rather than an empty conversation when it cannot be done.
+          void loadHistory({ restore: true })
         },
         reject: (err: Error) => {
+          clearHandshakeTimer()
           // A gateway that is still booting refuses the connect frame with the
           // core's own retryable startup-sidecars shape — every restart does,
           // for ten to twenty seconds. Not a refusal to park on: stay in the
@@ -733,6 +862,9 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     }
 
     const onClose = () => {
+      // Its own clock only: a late close from a socket a newer connect has
+      // already replaced must not disarm the newer attempt's.
+      if (wsRef.current === ws) clearHandshakeTimer()
       wsRef.current = null
       // Same reason as the reconnect path: a request still waiting on a socket
       // that has gone away has to be told, or it never settles.
@@ -754,6 +886,23 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     ws.onmessage = onMessage
     ws.onclose = onClose
     ws.onerror = () => {}
+    // This attempt's own clock (TASK-1158). A gateway that is up answers the
+    // connect frame at once — with a hello, or with the retryable boot refusal
+    // handled above — so a handshake still open after this long is a socket
+    // nobody is answering. It ends the way a refused first attempt ends: the
+    // error panel and its Retry, instead of a spinner with no end.
+    handshakeTimerRef.current = setTimeout(() => {
+      handshakeTimerRef.current = null
+      if (unmountedRef.current || wsRef.current !== ws) return
+      if (connectRequestId) pendingRef.current.delete(connectRequestId)
+      ws.onclose = null
+      ws.onmessage = null
+      try { ws.close() } catch { /* already closing */ }
+      wsRef.current = null
+      failPending('Not connected')
+      setStatus('error')
+      setErrorMsg('Could not connect to gateway')
+    }, RESTORE_HANDSHAKE_TIMEOUT_MS)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handed to the transport so `GatewayLink.open()` reaches the CURRENT connect.
@@ -1104,7 +1253,8 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     if (caps.hasLiveConnection || !caps.canListHistory) return
     if (replayedRef.current) return
     replayedRef.current = true
-    void loadHistory()
+    // The same bounded restore the socket runs on its hello.
+    void loadHistory({ restore: true })
   }, [harnessLoaded, caps.hasLiveConnection, caps.canListHistory, loadHistory])
 
   // Tear down on unmount, and only on unmount: `connect` is memoised with no
@@ -1121,6 +1271,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       // turn it was running. The direct close stays beside it because the socket
       // is this component's to own whatever the adapter turns out to be.
       unmountedRef.current = true
+      // Before the disconnect below rejects the read it is waiting on.
+      restoreAbortRef.current?.abort()
+      if (handshakeTimerRef.current) clearTimeout(handshakeTimerRef.current)
+      handshakeTimerRef.current = null
       adapterRef.current.disconnect()
       wsRef.current?.close()
       wsRef.current = null
@@ -1188,6 +1342,53 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     }
   }, [sendMessage, slashKeyDown])
 
+  // Attachment buttons — offered only where a staged file can actually
+  // reach the model. A chip on screen says "this went with your message",
+  // and on a box that cannot carry it that chip is a lie the customer
+  // only discovers from an answer that never looked at the picture.
+  const attachControls = caps.canAttachImages ? (
+    <div style={{ display: 'flex', gap: 2, flexShrink: 0, alignItems: 'flex-end' }}>
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        title={t("chat.attachImage")}
+        style={{
+          width: 32, height: 32, borderRadius: 8, border: 'none',
+          background: 'transparent', color: 'rgba(255,255,255,0.35)',
+          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, transition: 'color 0.15s',
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.7)'}
+        onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.35)'}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+          <circle cx="8.5" cy="8.5" r="1.5" />
+          <path d="M21 15l-5-5L5 21" />
+        </svg>
+      </button>
+      <button
+        onClick={() => cameraInputRef.current?.click()}
+        title={t("chat.takePhoto")}
+        style={{
+          width: 32, height: 32, borderRadius: 8, border: 'none',
+          background: 'transparent', color: 'rgba(255,255,255,0.35)',
+          cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0, transition: 'color 0.15s',
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.7)'}
+        onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.35)'}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
+          <circle cx="12" cy="13" r="4" />
+        </svg>
+      </button>
+    </div>
+  ) : null
+  // A phone folds them behind one control (TASK-1157) — where there is
+  // anything to fold; with nothing to attach the row is already minimal.
+  const tuckable = phone && attachControls !== null
+
   return (
     <div style={{
       width: '100%',
@@ -1197,10 +1398,27 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       background: '#0d1117',
       overflow: 'hidden',
     }}>
+      {/* Fullscreen chat on a phone: the header folds into this strip, whose
+          toggle opens it again underneath — see ChatPhoneChrome. */}
+      {fullscreenChat && (
+        <ChatHeaderStrip
+          headerId={HEADER_REGION_ID}
+          headerOpen={headerPeek}
+          onToggleHeader={setHeaderPeek}
+          label={t("chat.title")}
+        >
+          <ChatTextSizeButton open={textSizeOpen} onToggle={() => setTextSizeOpen(open => !open)} controls={TEXT_SIZE_BAR_ID} size={32} />
+          <ChatFullscreenButton fullscreen onToggle={() => setFullscreenPref(false)} size={32} />
+        </ChatHeaderStrip>
+      )}
       {/* Connection status bar — hidden when parent provides its own header */}
       {!hideHeader && (
-        <div style={{
-          display: 'flex',
+        <div
+          id={HEADER_REGION_ID}
+          data-testid="chatapp-header"
+          hidden={headerHidden || undefined}
+          style={{
+          display: headerHidden ? 'none' : 'flex',
           alignItems: 'center',
           gap: 8,
           padding: '6px 14px',
@@ -1236,13 +1454,42 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               }}
             >{t("chat.reconnect")}</button>
           )}
+          {/* A phone outside fullscreen: the text size and the way in. */}
+          {phone && !fullscreenChat && (
+            <>
+              <ChatTextSizeButton open={textSizeOpen} onToggle={() => setTextSizeOpen(open => !open)} controls={TEXT_SIZE_BAR_ID} size={32} />
+              <ChatFullscreenButton fullscreen={false} onToggle={() => setFullscreenPref(true)} size={32} />
+            </>
+          )}
+          {/* The page's own title bar is folded away in fullscreen, and with it
+              its link back to the desktop — so the link comes along here. */}
+          {fullscreenChat && onPhoneChromeHiddenChange && (
+            <Link
+              href="/"
+              data-testid="chatapp-desktop-link"
+              aria-label={t("chat.showDesktop")}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, minHeight: 32, padding: '0 10px',
+                borderRadius: 10, background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.75)',
+                fontSize: 12.5, textDecoration: 'none', flexShrink: 0,
+              }}
+            >
+              <span aria-hidden="true" className="material-symbols-rounded" style={{ fontSize: 18 }}>apps</span>
+              <span>{t("chat.desktop")}</span>
+            </Link>
+          )}
         </div>
       )}
 
+      {phone && textSizeOpen && (
+        <ChatTextSizeBar id={TEXT_SIZE_BAR_ID} scale={textScalePref} onChange={setTextScalePref} />
+      )}
+
       {/* Messages area */}
-      <div ref={transcriptRef} style={{
+      <div ref={transcriptRef} data-testid="chatapp-transcript" data-chat-text-scale={textScale !== 1 ? textScale : undefined} style={{
         flex: 1, overflowY: 'auto', padding: '12px 14px',
         display: 'flex', flexDirection: 'column', gap: 10,
+        ...(textScale !== 1 ? { '--chat-text-scale': String(textScale) } as React.CSSProperties : {}),
         scrollbarWidth: 'thin',
         scrollbarColor: 'rgba(255,255,255,0.1) transparent',
       }}>
@@ -1277,7 +1524,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           </div>
         )}
 
-        {status === 'connected' && messages.length === 0 && !streaming && (
+        {status === 'connected' && messages.length === 0 && !streaming && !restoreState && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: '0 16px' }}>
             <img src="/clawbox-crab.png" alt="" style={{ width: 25, height: 25, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
@@ -1464,6 +1711,57 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           </div>
         )}
 
+        {/* The conversation being brought back, or one that could not be
+            (TASK-1158). While a "not yet" is being waited out, one quiet line;
+            once the restore has run out of attempts or time, the reason and Try
+            again — which reads the conversation again, or reconnects first when
+            the socket has gone. Nothing is reset or deleted. */}
+        {restoreState && status === 'connected' && (
+          restoreState.phase === 'retrying' ? (
+            <div
+              data-testid="chatapp-restore-status"
+              role="status"
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 2px', fontSize: 12, color: 'rgba(255,255,255,0.5)' }}
+            >
+              <span aria-hidden="true" style={{ width: 10, height: 10, border: '2px solid rgba(249,115,22,0.3)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'chatapp-spin 0.8s linear infinite', flexShrink: 0 }} />
+              <span>{tr('chat.restore.restoring', 'Restoring this conversation…')}</span>
+            </div>
+          ) : (
+            <div
+              data-testid="chatapp-restore-failed"
+              role="alert"
+              style={{ margin: '8px 0', padding: '12px 14px', borderRadius: 10, background: 'rgba(249,115,22,0.08)', border: '1px solid rgba(249,115,22,0.25)', display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, color: 'rgba(255,255,255,0.85)' }}
+            >
+              <span>
+                {restoreState.kind === 'busy'
+                  ? tr('chat.restore.busy', 'This conversation is still busy on the box — it did not answer in time.')
+                  : restoreState.kind === 'timeout'
+                    ? tr('chat.restore.timeout', 'The box did not answer while this conversation was being restored.')
+                    : tr('chat.restore.failed', 'This conversation could not be restored.')}
+              </span>
+              <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>
+                {tr('chat.restore.hintRetry', 'Try again in a moment. Nothing in this conversation is deleted.')}
+              </span>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    // A socket that went away under a connected page is not
+                    // reopened by anything else here; the hello restores.
+                    if (caps.hasLiveConnection && wsRef.current?.readyState !== WebSocket.OPEN) {
+                      void connect()
+                      return
+                    }
+                    setRestoreState({ phase: 'retrying' })
+                    void loadHistory({ restore: true })
+                  }}
+                  style={{ background: 'rgba(249,115,22,0.2)', border: '1px solid rgba(249,115,22,0.3)', color: '#f97316', borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 500 }}
+                >{tr('chat.restore.retry', 'Try again')}</button>
+              </div>
+            </div>
+          )
+        )}
+
         <div ref={messagesEndRef} />
       </div>
 
@@ -1544,49 +1842,36 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         borderTop: pendingAttachments.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', gap: 8, alignItems: 'flex-end',
+        // A phone's unfolded attachment buttons take a line of their own.
+        flexWrap: tuckable ? 'wrap' : undefined,
       }}>
-        {/* Attachment buttons — offered only where a staged file can actually
-            reach the model. A chip on screen says "this went with your message",
-            and on a box that cannot carry it that chip is a lie the customer
-            only discovers from an answer that never looked at the picture. */}
-        {caps.canAttachImages && (
-        <div style={{ display: 'flex', gap: 2, flexShrink: 0, alignItems: 'flex-end' }}>
+        {!tuckable && attachControls}
+        {/* A phone: the fold control leads the row, so the button just
+            pressed never moves; the attachment buttons it folds away sit
+            on a line of their own after Send when unfolded (below). */}
+        {tuckable && (
           <button
-            onClick={() => fileInputRef.current?.click()}
-            title={t("chat.attachImage")}
+            type="button"
+            onClick={() => setComposerOptionsOpen(open => !open)}
+            title={t("chat.composer.options")}
+            aria-label={t("chat.composer.options")}
+            aria-expanded={composerOptionsOpen}
+            aria-controls={composerOptionsOpen ? COMPOSER_OPTIONS_ID : undefined}
+            data-testid="chatapp-composer-options-toggle"
             style={{
-              width: 32, height: 32, borderRadius: 8, border: 'none',
-              background: 'transparent', color: 'rgba(255,255,255,0.35)',
+              width: 36, height: 36, borderRadius: 10, border: 'none', flexShrink: 0,
+              background: composerOptionsOpen ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
+              color: composerOptionsOpen ? '#f97316' : 'rgba(255,255,255,0.4)',
               cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, transition: 'color 0.15s',
             }}
-            onMouseEnter={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.7)'}
-            onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.35)'}
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-              <circle cx="8.5" cy="8.5" r="1.5" />
-              <path d="M21 15l-5-5L5 21" />
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
+              <circle cx="16" cy="6" r="2" />
+              <circle cx="10" cy="12" r="2" />
+              <circle cx="16" cy="18" r="2" />
             </svg>
           </button>
-          <button
-            onClick={() => cameraInputRef.current?.click()}
-            title={t("chat.takePhoto")}
-            style={{
-              width: 32, height: 32, borderRadius: 8, border: 'none',
-              background: 'transparent', color: 'rgba(255,255,255,0.35)',
-              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, transition: 'color 0.15s',
-            }}
-            onMouseEnter={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.7)'}
-            onMouseLeave={(e) => e.currentTarget.style.color = 'rgba(255,255,255,0.35)'}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
-              <circle cx="12" cy="13" r="4" />
-            </svg>
-          </button>
-        </div>
         )}
         <textarea
           ref={inputRef}
@@ -1611,6 +1896,9 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             borderRadius: 12, padding: '8px 12px', color: '#fff', fontSize: 13.5,
             resize: 'none', outline: 'none', maxHeight: 100, lineHeight: 1.4,
             fontFamily: 'inherit',
+            // A phone's row can wrap (see the container), so the field must be
+            // allowed to give ground rather than push Send off the line.
+            ...(tuckable ? { minWidth: 0 } : {}),
           }}
           onInput={(e) => {
             const el = e.currentTarget
@@ -1667,6 +1955,15 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               <path d="M22 2L11 13M22 2l-7 20-4-9-9-4z" />
             </svg>
           </button>
+        )}
+        {tuckable && composerOptionsOpen && (
+          <div
+            id={COMPOSER_OPTIONS_ID}
+            data-testid="chatapp-composer-options"
+            style={{ flexBasis: '100%', display: 'flex', gap: 8, alignItems: 'center' }}
+          >
+            {attachControls}
+          </div>
         )}
       </div>
 

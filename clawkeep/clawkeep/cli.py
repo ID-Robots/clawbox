@@ -142,7 +142,14 @@ def _snapshots_main(argv: list[str]) -> int:
         "ok": True,
         "snapshots": [asdict(s) for s in snapshots],
         "quotaBytes": creds.quotaBytes,
-        "cloudBytes": creds.cloudBytes,
+        # Usage is what the objects we just listed add up to — NOT
+        # `creds.cloudBytes`, which is the portal's running counter. The
+        # counter is written by heartbeats and drifts from the bucket the
+        # moment anything deletes an object behind the daemon's back; quoting
+        # it here is what let the panel report 9.8 GB over a prefix holding two
+        # small snapshots while the portal's own page said the account was
+        # empty. The list is in hand and it is free to be right.
+        "cloudBytes": s3.stats_from_snapshots(snapshots).cloud_bytes,
     }))
     return 0
 

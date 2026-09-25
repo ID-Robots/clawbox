@@ -42,7 +42,7 @@
 
 import crypto from "crypto";
 import fs from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import { anthropicLoginEmail, hasAnthropicLogin } from "@/lib/claude-login";
 import { ANTHROPIC_API_KEY_CONFIG_KEY } from "@/lib/coding-provider";

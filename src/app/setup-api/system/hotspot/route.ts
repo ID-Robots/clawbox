@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { get, setMany, getAll } from "@/lib/config-store";

@@ -10,6 +10,8 @@ reviews:
   fail_commit_status: true
   auto_review:
     enabled: true
+    # One review per PR: re-reviewing every push burns the per-seat review limit.
+    auto_incremental_review: false
     drafts: false
     base_branches:
       - main

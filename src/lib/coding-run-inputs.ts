@@ -44,7 +44,7 @@
  */
 import fs from "fs";
 import fsp from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { CODING_AGENT_INPUTS_SUBTREE } from "@/lib/file-guard";
 

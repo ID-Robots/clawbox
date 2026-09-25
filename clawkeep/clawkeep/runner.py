@@ -40,6 +40,11 @@ EXIT_OPENCLAW = 7   # building the archive failed (either edition's backend)
 EXIT_UPLOAD = 8     # S3 PUT failed
 EXIT_NEED_PASSPHRASE = 9  # encryption is mandatory but no passphrase set on device
 EXIT_ENCRYPTION_FAILED = 10  # openssl enc returned non-zero (corrupt openssl, disk full, …)
+# Three archive failures with a remedy of their own, split out of EXIT_OPENCLAW
+# (`openclaw.Failure.kind`) so the bridge can say which one it was.
+EXIT_ARCHIVE_BUSY = 11        # files kept changing through every bounded rebuild
+EXIT_ARCHIVE_DB_DAMAGED = 12  # a database failed the integrity gate; left untouched
+EXIT_ARCHIVE_CONFLICT = 13    # two sources claim one archive path, or a link out of it
 EXIT_UNKNOWN = 99
 
 # Backup phase identifiers — kept in lockstep with `STEP_LABELS` in
@@ -51,32 +56,36 @@ STEP_ENCRYPTING = "encrypting"
 STEP_UPLOADING = "uploading"
 STEP_CHECKING_STATS = "checking-stats"
 
-ARCHIVE_RACE_ATTEMPTS = 3
-ARCHIVE_RACE_DELAYS = (1.0, 3.0)
+ARCHIVE_RACE_ATTEMPTS = 4
+ARCHIVE_RACE_DELAYS = (1.0, 5.0, 15.0)
 
 
 def _create_archive_with_race_retry(cfg: Config, staging: Path) -> openclaw.Archive:
-    """Retry OpenClaw's transient session-file race without hiding real errors.
+    """Rebuild the archive when the tree changed under the walk — bounded.
 
-    Active sessions rotate ``.jsonl``/``.trajectory.jsonl`` files while the
-    backup tar walk is running. OpenClaw currently reports that as ENOENT.
-    A fresh walk is safe; configuration, permission, disk and timeout errors
-    must still fail immediately.
+    A live agent keeps writing while the archiver reads: sessions rotate and
+    prune their transcripts, lock files come and go, a database is replaced
+    between discovery and snapshot. The archiver reports that as ENOENT on a
+    path it had just listed, or with its own "retry backup" sentences
+    (`openclaw.Failure.transient`), and a fresh walk is safe. Any path, not a
+    list of suffixes: the box that failed every night was failing on a file no
+    suffix list had named yet. Configuration, permission, disk, integrity and
+    timeout errors still fail at once, and a race that outlasts every attempt
+    ends the run as EXIT_ARCHIVE_BUSY — it is the next slot's to try again, not
+    a fault anyone has to fix.
     """
     for attempt in range(ARCHIVE_RACE_ATTEMPTS):
         try:
             return agent.create_archive(cfg, output_dir=staging)
         except agent.ARCHIVE_ERRORS as exc:
-            message = str(exc).lower()
-            transient = "enoent" in message and (
-                ".jsonl" in message or ".jsonl.lock" in message
-            )
-            if not transient or attempt + 1 >= ARCHIVE_RACE_ATTEMPTS:
+            failure = openclaw.failure_of(exc)
+            if not failure.transient or attempt + 1 >= ARCHIVE_RACE_ATTEMPTS:
                 raise
             delay = ARCHIVE_RACE_DELAYS[attempt]
             log.warning(
-                "session file changed during archive walk; retrying archive "
+                "the tree changed while the archive was being built (%s); rebuilding it "
                 "(%d/%d) in %.0fs: %s",
+                ", ".join(failure.paths) or "a file the archiver had listed",
                 attempt + 1,
                 ARCHIVE_RACE_ATTEMPTS,
                 delay,
@@ -85,6 +94,18 @@ def _create_archive_with_race_retry(cfg: Config, staging: Path) -> openclaw.Arch
             time.sleep(delay)
 
     raise AssertionError("archive retry loop exhausted")
+
+
+def _archive_exit_code(exc: BaseException) -> int:
+    """The exit code for an archive build that failed for good."""
+    failure = openclaw.failure_of(exc)
+    if failure.transient:
+        return EXIT_ARCHIVE_BUSY
+    if failure.kind == openclaw.FAILURE_SQLITE:
+        return EXIT_ARCHIVE_DB_DAMAGED
+    if failure.kind in (openclaw.FAILURE_SYMLINK, openclaw.FAILURE_DUPLICATE):
+        return EXIT_ARCHIVE_CONFLICT
+    return EXIT_OPENCLAW
 
 
 def _heartbeat_safe(server: str, token: str, **kwargs: object) -> bool:
@@ -122,6 +143,32 @@ def _retry_credentials(server: str, token: str, attempts: int = 3) -> api.Creden
             log.warning("credentials attempt %d/%d failed (%s): %s", i + 1, attempts, e.kind, e)
     assert last is not None
     raise last
+
+
+def _recompute_usage(st: state.State, creds: api.Credentials) -> s3.CloudStats | None:
+    """Re-derive cloud usage from the objects in R2 and record it on `st`.
+
+    The portal's `cloudBytes` is an accumulator, not a measurement: it is
+    whatever the last heartbeat told it, so it is wrong from the moment
+    anything removes an object the daemon didn't remove itself (a support
+    cleanup, a lifecycle rule, a second box on the same account). A box that
+    believed that number sat at "full" over an empty prefix — and because the
+    portal answers 402 to `POST /credentials` while the counter is over quota,
+    a counter that was too high blocked the very run that would have corrected
+    it. So every heartbeat that *can* count the objects, counts them.
+
+    Best-effort by design: a failed LIST leaves `st` and the caller's payload
+    untouched, so a transient network error can't clobber the portal's
+    last-known usage with a zero. Callers persist `st` themselves.
+    """
+    try:
+        cloud = s3.stats(creds)
+    except s3.S3Error as e:
+        log.warning("cloud usage recompute failed (continuing): %s", e)
+        return None
+    st.last_cloud_bytes = cloud.cloud_bytes
+    st.last_snapshot_count = cloud.snapshot_count
+    return cloud
 
 
 def _stamp_heartbeat(
@@ -284,7 +331,19 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
             return EXIT_SERVER
         return EXIT_NETWORK if e.kind == "network" else EXIT_UNKNOWN
 
-    running_ok = _heartbeat_safe(cfg.server, token, status="running")
+    # Count what is in the prefix *before* this run adds to it, and send that
+    # with the run's first heartbeat. Doing it here rather than only at the end
+    # means every run corrects the portal — including the ones that go on to
+    # fail in openclaw, in openssl or in the upload, which is exactly the shape
+    # of run a nearly-full account produces.
+    opening = _recompute_usage(st, creds)
+    running_ok = _heartbeat_safe(
+        cfg.server,
+        token,
+        status="running",
+        cloud_bytes=opening.cloud_bytes if opening is not None else None,
+        snapshot_count=opening.snapshot_count if opening is not None else None,
+    )
     _stamp_heartbeat(st, running_ok, "running")
     _stamp_step(st, STEP_STARTING)
 
@@ -306,7 +365,7 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
             )
             _stamp_heartbeat(st, ok, "error")
             state.save(st)
-            return EXIT_OPENCLAW
+            return _archive_exit_code(e)
 
         # Encrypt the freshly-built tarball before it leaves the device.
         # The encrypted file replaces the plaintext for the upload step;
@@ -441,16 +500,12 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         except s3.S3Error as e:
             log.warning("retention prune failed (continuing): %s", e)
 
-        # Best-effort stats — leave the per-run fields *unsent* on failure
-        # so a transient ListBucket doesn't clobber the portal's last-known
-        # cloudBytes/snapshotCount.
+        # The closing recount: same call as the opening one, now including the
+        # snapshot this run just uploaded and minus whatever retention pruned.
+        # Best-effort — see _recompute_usage: a failed LIST leaves the per-run
+        # fields unsent rather than clobbering the portal with a zero.
         _stamp_step(st, STEP_CHECKING_STATS)
-        cloud: s3.CloudStats | None
-        try:
-            cloud = s3.stats(creds)
-        except s3.S3Error as e:
-            log.warning("s3 stats failed (continuing): %s", e)
-            cloud = None
+        cloud = _recompute_usage(st, creds)
 
         now = api.now_ms()
 
@@ -464,13 +519,11 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         )
 
         # Backup succeeded regardless of heartbeat outcome → always record
-        # last_backup_at_ms. cloudBytes/snapshotCount only update when stats
-        # are real, so a failed list-objects can't show "0 B" in the UI.
+        # last_backup_at_ms. cloudBytes/snapshotCount are already on `st` when
+        # the recount succeeded, and untouched when it didn't — so a failed
+        # list-objects can't show "0 B" in the UI.
         _stamp_heartbeat(st, heartbeat_ok, "ok", now_override=now)
         st.last_backup_at_ms = now
-        if cloud is not None:
-            st.last_cloud_bytes = cloud.cloud_bytes
-            st.last_snapshot_count = cloud.snapshot_count
         state.save(st)
 
         log.info(
@@ -514,7 +567,14 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
 
 def run_idle(cfg: Config, token: str) -> int:
     """Send an `idle` heartbeat if the last heartbeat is older than
-    cfg.heartbeat.idle_interval_hours. Used by clawkeep-idle.timer."""
+    cfg.heartbeat.idle_interval_hours. Used by clawkeep-idle.timer.
+
+    The idle tick is the only thing that runs on a box which isn't backing up,
+    so it is also where a usage number that has drifted gets put right: it
+    recounts the prefix and carries the answer, and the box's own panel — which
+    reads `last_cloud_bytes` out of state.json — stops showing the size of a
+    snapshot set the account no longer has.
+    """
     st = state.load()
     interval_ms = cfg.heartbeat.idle_interval_hours * 3600 * 1000
     now = api.now_ms()
@@ -522,10 +582,32 @@ def run_idle(cfg: Config, token: str) -> int:
         log.info("recent heartbeat (%d ms ago), skipping idle", now - st.last_heartbeat_at_ms)
         return EXIT_OK
 
+    # Both halves are best-effort: if the portal won't mint credentials (over
+    # quota, offline, revoked) we still owe it a "last seen", so an unanswerable
+    # recount degrades to the bare heartbeat this function has always sent
+    # rather than costing the device its heartbeat too.
+    cloud: s3.CloudStats | None = None
     try:
-        api.heartbeat(cfg.server, token, status="idle")
+        creds = api.mint_credentials(cfg.server, token)
+    except ApiError as e:
+        log.warning("idle usage recount skipped — no credentials (%s): %s", e.kind, e)
+    else:
+        cloud = _recompute_usage(st, creds)
+
+    try:
+        api.heartbeat(
+            cfg.server,
+            token,
+            status="idle",
+            cloud_bytes=cloud.cloud_bytes if cloud is not None else None,
+            snapshot_count=cloud.snapshot_count if cloud is not None else None,
+        )
     except ApiError as e:
         log.warning("idle heartbeat failed (%s): %s", e.kind, e)
+        # A recount that the portal never heard is still true for this box —
+        # persist it so the panel is right even while the portal isn't.
+        if cloud is not None:
+            state.save(st)
         return EXIT_NETWORK if e.kind == "network" else EXIT_UNKNOWN
 
     st.last_heartbeat_at_ms = now

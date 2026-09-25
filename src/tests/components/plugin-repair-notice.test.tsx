@@ -74,4 +74,59 @@ describe("PluginRepairNotice", () => {
     expect(onRepaired).not.toHaveBeenCalled();
     expect(screen.getByTestId("plugin-repair-codex")).toBeTruthy();
   });
+
+  // TASK-1088: a repair the DEVICE is running — the updater's after-update
+  // retry, or a Retry pressed in another tab.
+  it("says the device is repairing it, and offers no second Retry over the first", () => {
+    render(<PluginRepairNotice repair={{ ...REPAIR, repairing: true }} />);
+    // Still "Needs repair": nothing is repaired until it is proved.
+    expect(screen.getByTestId("plugin-repair-codex").textContent).toContain("settings.providers.needsRepair");
+    expect(screen.getByTestId("plugin-repair-repairing-codex")).toBeTruthy();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("re-reads the panel while the device repairs it, and never claims it repaired", async () => {
+    vi.useFakeTimers();
+    try {
+      const onRepaired = vi.fn();
+      const onRecheck = vi.fn();
+      const { unmount } = render(
+        <PluginRepairNotice repair={{ ...REPAIR, repairing: true }} onRepaired={onRepaired} onRecheck={onRecheck} />,
+      );
+      await act(async () => { vi.advanceTimersByTime(15_000); });
+      expect(onRecheck).toHaveBeenCalledTimes(1);
+      expect(onRepaired).not.toHaveBeenCalled();
+      unmount();
+      await act(async () => { vi.advanceTimersByTime(60_000); });
+      expect(onRecheck).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-reads after a Retry that did not work, so the row shows the cause the device filed", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ ok: false, code: "refused_at_start" }), { status: 502 },
+    )));
+    const onRepaired = vi.fn();
+    const onRecheck = vi.fn();
+    render(<PluginRepairNotice repair={REPAIR} onRepaired={onRepaired} onRecheck={onRecheck} />);
+    fireEvent.click(screen.getByRole("button"));
+    await settle();
+    expect(onRecheck).toHaveBeenCalledTimes(1);
+    expect(onRepaired).not.toHaveBeenCalled();
+    expect(screen.getByText("settings.providers.repairFailed")).toBeTruthy();
+  });
+
+  it("does not call a press that met a repair already running a failure", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ ok: false, code: "repair_in_progress" }), { status: 409 },
+    )));
+    const onRecheck = vi.fn();
+    render(<PluginRepairNotice repair={REPAIR} onRecheck={onRecheck} />);
+    fireEvent.click(screen.getByRole("button"));
+    await settle();
+    expect(onRecheck).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("settings.providers.repairFailed")).toBeNull();
+  });
 });

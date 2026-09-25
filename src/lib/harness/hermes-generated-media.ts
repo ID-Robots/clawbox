@@ -1,6 +1,6 @@
 import fsp from "fs/promises";
 import os from "os";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { randomUUID } from "crypto";
 import {
   chatGeneratedImageDir,
@@ -255,7 +255,7 @@ async function resolveInAdoptionRoot(
     if (candidate) break;
   }
   if (!candidate) return null;
-  const real = await fsp.realpath(candidate);
+  const real = await fsp.realpath(/* turbopackIgnore: true */ candidate);
   for (const root of roots) {
     if (!containedIn(root.real, real)) continue;
     if (root.guarded && isProtectedFilePath(real)) return null;
@@ -332,7 +332,7 @@ async function adoptOne(
     const real = await resolveInAdoptionRoot(source, roots);
     if (!real) return null;
 
-    const stat = await fsp.stat(real);
+    const stat = await fsp.stat(/* turbopackIgnore: true */ real);
     if (!stat.isFile() || stat.size === 0 || stat.size > MAX_IMAGE_BYTES) return null;
 
     const dir = await chatGeneratedImageDir();

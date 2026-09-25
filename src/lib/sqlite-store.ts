@@ -9,7 +9,7 @@
 // callers use the simple get/set/delete API, so the backend swap is
 // invisible to them.
 
-import path from "path";
+import path from "./runtime-path";
 import fs from "fs";
 import { get as configGet, set as configSet } from "./config-store";
 

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { readFile, writeFile, unlink } from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { isSafeBranch } from "@/lib/update-branch";
 
 export const dynamic = "force-dynamic";

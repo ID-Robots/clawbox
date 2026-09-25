@@ -32,7 +32,7 @@
  */
 
 import fsp from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { taskTitle } from "@/lib/task-title";
 import {
   type CodingGitIdentity,

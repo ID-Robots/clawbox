@@ -17,13 +17,13 @@ import {
 import { apps } from "@/lib/desktop-apps";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib/ui-events";
-import { isProxiedAppUrl, WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
 import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import type { InstalledMeta } from "@/lib/store-categories";
 import { HARNESS_ONLY_APP_IDS, hiddenAppIdsForHarness } from "@/lib/desktop-app-editions";
 import type { StoreApp } from "@/components/AppStore";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 import CrabWaitMark from "@/components/CrabWaitMark";
+import WebappFrame from "@/components/WebappFrame";
 
 const TerminalTabs = dynamic(() => import("@/components/TerminalTabs"), { ssr: false });
 const ChatApp = dynamic(() => import("@/components/ChatApp"), { ssr: false });
@@ -358,6 +358,9 @@ export default function StandaloneAppPage() {
   // desktop's copy of this pair.
   const [wallpaperHarness, setWallpaperHarness] = useState<string | null>(null);
   const appearance = useAppearance(id === "settings", wallpaperHarness);
+  // The chat's fullscreen mode on a phone folds this page's title bar away
+  // too; the chat then carries the link back to the desktop (TASK-1157).
+  const [chatChromeHidden, setChatChromeHidden] = useState(false);
 
   useEffect(() => {
     const probe = new AbortController();
@@ -456,17 +459,9 @@ export default function StandaloneAppPage() {
         const u = new URL(meta.webappUrl, window.location.origin);
         if (["http:", "https:"].includes(u.protocol)) src = u.href;
       } catch {}
-      return (
-        <iframe
-          src={src}
-          style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
-          // The one sandbox both pages use; never allow-same-origin — see
-          // src/lib/webapp-sandbox.ts for what the frame would otherwise reach.
-          sandbox={isProxiedAppUrl(src) ? undefined : WEBAPP_IFRAME_SANDBOX}
-          data-webapp-id={appId}
-          title={meta.name}
-        />
-      );
+      // The one frame both pages draw; never allow-same-origin — see
+      // src/lib/webapp-sandbox.ts for what the frame would otherwise reach.
+      return <WebappFrame appId={appId} src={src} title={meta.name} />;
     }
     // A store skill. Its window shells out to the openclaw binary, which a
     // Hermes box does not have — the desktop's isInstalledAppVisible gate.
@@ -502,7 +497,7 @@ export default function StandaloneAppPage() {
     }
     switch (id) {
       case "clawbox":
-        return <ChatApp />;
+        return <ChatApp onPhoneChromeHiddenChange={setChatChromeHidden} />;
       case "clawkeep":
         return <ClawKeepApp />;
       case "system_update":
@@ -578,7 +573,10 @@ export default function StandaloneAppPage() {
     <I18nProvider>
       <div className="h-dvh w-full bg-[var(--ground)] text-white flex flex-col">
         {/* Minimal title bar */}
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-[#111827] border-b border-white/10 shrink-0">
+        <div
+          data-testid="standalone-title-bar"
+          className={`${id === "clawbox" && chatChromeHidden ? "hidden" : "flex"} items-center gap-2 px-3 py-1.5 bg-[#111827] border-b border-white/10 shrink-0`}
+        >
           <Image src="/clawbox-logo.png" alt="" width={20} height={20} className="w-5 h-5 rounded" />
           <StandaloneTitle nameKey={titleKey} literal={titleLiteral} />
           <Link href="/" className="ml-auto text-xs text-white/30 hover:text-white/60 no-underline">

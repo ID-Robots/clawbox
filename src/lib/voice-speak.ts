@@ -23,7 +23,7 @@
 import { NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import os from "os";
-import path from "path";
+import path from "@/lib/runtime-path";
 import crypto from "crypto";
 import { runChild } from "@/lib/child-run";
 import { createSerialLock } from "@/lib/serial-lock";

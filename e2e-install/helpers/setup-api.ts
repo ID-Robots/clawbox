@@ -5,6 +5,14 @@
  */
 import { BASE_URL, dockerExec } from "./container";
 
+/** The server ANSWERED, with a non-2xx status — as opposed to a dropped connection. */
+export class HttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "HttpError";
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
@@ -17,7 +25,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   let body: unknown;
   try { body = text ? JSON.parse(text) : {}; } catch { body = text; }
   if (!res.ok) {
-    throw new Error(`${init.method ?? "GET"} ${path} → ${res.status} ${res.statusText}: ${text}`);
+    throw new HttpError(`${init.method ?? "GET"} ${path} → ${res.status} ${res.statusText}: ${text}`, res.status);
   }
   return body as T;
 }
@@ -177,9 +185,14 @@ export const getSystemStats = () =>
 export const getSystemInfo = () =>
   request<{ hostname: string; os: string; uptime: string }>("/setup-api/system/info");
 
-export const systemPower = (action: "restart" | "shutdown") =>
-  request<{ success: boolean }>("/setup-api/system/power", {
+// `cookie`: the owner's session. Without it the route does not power anything
+// — since #793 it queues an approval for anyone else and answers 202
+// `pendingApproval` — so a spec that means to reboot the box logs in first,
+// exactly as the desktop does.
+export const systemPower = (action: "restart" | "shutdown", cookie?: string) =>
+  request<{ ok?: boolean; action?: string; pendingApproval?: boolean }>("/setup-api/system/power", {
     method: "POST",
+    headers: cookie ? { cookie } : {},
     body: JSON.stringify({ action }),
   });
 

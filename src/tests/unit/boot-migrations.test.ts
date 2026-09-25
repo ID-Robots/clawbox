@@ -13,6 +13,7 @@ import {
   parseRanMigrations,
   dropRemovedConsentMigration,
   hermesWallpaperDefaultMigration,
+  legacyWebappStorageMigration,
   openclawWallpaperDefaultMigration,
   PRE_BRAND_WALLPAPER_ID,
   REMOVED_CONSENT_KEY,
@@ -443,5 +444,34 @@ describe("the wiring into register()", () => {
   it("cannot stop the boot", () => {
     const catchStart = source.indexOf("} catch (err) {", call);
     expect(source.slice(catchStart, catchStart + 200)).toMatch(/Could not run the one-shot migrations/);
+  });
+
+  it("moves the pre-v4.0 webapps' data before the server answers a request", () => {
+    expect(preamble).toContain("require('./lib/webapp-legacy-storage-migration')");
+    expect(block).toContain("legacyWebappStorageMigration({ migrate: () => migrateLegacyWebappStorage() })");
+  });
+});
+
+describe("the pre-v4.0 webapp storage migration", () => {
+  it("is marked done once it ran, whether or not it copied anything", async () => {
+    for (const result of [{ ran: true, apps: 3, copied: 2 }, { ran: true, apps: 1, copied: 0 }, { ran: false, apps: 0, copied: 0 }]) {
+      const s = store();
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const ran = await runBootMigrations([legacyWebappStorageMigration({ migrate: () => result })], s);
+      log.mockRestore();
+      expect(ran).toEqual(["webapp-legacy-storage"]);
+      expect(s.values[BOOT_MIGRATIONS_KEY]).toEqual(["webapp-legacy-storage"]);
+    }
+  });
+
+  it("is left unmarked, and tried again next boot, when it throws", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const s = store();
+    const migrate = vi.fn(() => {
+      throw new Error("kv.json unreadable");
+    });
+    expect(await runBootMigrations([legacyWebappStorageMigration({ migrate })], s)).toEqual([]);
+    expect(s.values[BOOT_MIGRATIONS_KEY]).toBeUndefined();
+    errors.mockRestore();
   });
 });

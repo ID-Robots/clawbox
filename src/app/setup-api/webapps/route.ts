@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import {
   APP_ID_RE,
   LEGACY_STUB_MAX_BYTES,
@@ -16,6 +16,8 @@ import {
 import { listenerOwnedBy, listenerRefusal, projectFolderFor, registerServerApp, serverAppStubHtml } from "@/lib/app-proxy";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { createSerialLock } from "@/lib/serial-lock";
+import { get as configGet } from "@/lib/config-store";
+import { legacyWebappDocument } from "@/lib/webapp-legacy-storage";
 import { isReservedAppId } from "@/lib/webapp-registry";
 import { WEBAPP_DOCUMENT_CSP } from "@/lib/webapp-sandbox";
 
@@ -72,6 +74,23 @@ async function appDisplayName(appId: string): Promise<string> {
     return typeof name === "string" && name.trim() ? name : appId;
   } catch {
     return appId;
+  }
+}
+
+/**
+ * Whether the owner marked this app public — the one case the middleware lets
+ * this route answer WITHOUT a session (src/middleware.ts, step 4b), so the one
+ * case whose page must not carry the app's saved data. Unreadable reads as
+ * public: the cost of being wrong that way is a page that saves nothing.
+ */
+async function isPublicWebapp(appId: string): Promise<boolean> {
+  try {
+    const meta = await configGet("pref:installed_meta");
+    if (!meta || typeof meta !== "object") return false;
+    const entry = Object.hasOwn(meta, appId) ? (meta as Record<string, unknown>)[appId] : null;
+    return !!entry && typeof entry === "object" && (entry as { public?: unknown }).public === true;
+  } catch {
+    return true;
   }
 }
 
@@ -189,6 +208,23 @@ async function serveWebappFile(request: NextRequest): Promise<NextResponse> {
         console.warn(`[webapps] could not check the ${appId} stub: ${err instanceof Error ? err.message : String(err)}`);
       }
       if (answer) return answer;
+    }
+
+    // A webapp built before v4.0 stores its data the way the ClawBox origin
+    // allowed back then; the legacy-storage layer gives that back inside the
+    // sandbox (src/lib/webapp-legacy-storage.ts). Only the app's own document,
+    // and only once the boot migration has moved its data — null otherwise,
+    // and the file is served exactly as it is.
+    if (filePath === path.join(appDir, "index.html")) {
+      const document = await legacyWebappDocument(appId, content.toString("utf-8"), {
+        isPublic: () => isPublicWebapp(appId),
+      });
+      if (document !== null) {
+        // no-store: the page carries the app's saved localStorage.
+        return new NextResponse(document, {
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+        });
+      }
     }
 
     const ext = path.extname(filePath).toLowerCase();

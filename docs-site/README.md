@@ -3,7 +3,8 @@
 Public documentation site for ClawBox, built with [Mintlify](https://mintlify.com) —
 the same docs engine used by [docs.openclaw.ai](https://docs.openclaw.ai).
 
-Content is authored in MDX. Edit a `.mdx` file, push, and the site rebuilds.
+Content is authored in MDX. Changes merge to `beta` first for review and validation;
+the published stable docs follow the normal ClawBox promotion to `main`.
 
 ## Structure
 
@@ -45,20 +46,9 @@ mint broken-links
 
 ## Publishing
 
-The intended public URL is **docs.clawbox.com**.
-
-Two ways to publish:
-
-1. **Mintlify hosting (matches docs.openclaw.ai).** Install the Mintlify GitHub App on
-   the `ID-Robots/clawbox` repo, point it at this `docs-site/` directory, and set the
-   custom domain to `docs.clawbox.com` in the Mintlify dashboard. Pushes to the docs
-   branch auto-deploy. (Custom domain / removing Mintlify branding may require a paid
-   plan — confirm current Mintlify pricing.)
-
-2. **Self-host the static build.** Run `mint build` and deploy the output to the same
-   static host clawbox.com lives on, behind a `docs.clawbox.com` subdomain. No SaaS fee.
-
-> Decision pending: which hosting path. The content/config is identical either way.
+The public site is **https://docs.clawbox.com**. Documentation changes follow the same
+beta-first release flow as the rest of ClawBox: feature branch → pull request to `beta`
+→ validation → promotion to `main`. Never push documentation directly to `main`.
 
 ## Adding a page
 
@@ -68,5 +58,6 @@ Two ways to publish:
 
 ## Brand
 
-- Primary color: `#F26B21` (ClawBox orange)
+- Primary documentation color: `#C44F00` (accessible ClawBox orange on white)
+- Accent orange: `#F26B21`
 - Logo + favicon copied from the device app's `public/` assets.

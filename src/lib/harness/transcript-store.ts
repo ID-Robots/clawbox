@@ -1,5 +1,5 @@
 import fsp from "fs/promises";
-import path from "path";
+import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { DESKTOP_TRANSCRIPT_KEY, safeTranscriptKey, transcriptKeyIsSafe } from "./transcript-key";
 
@@ -370,7 +370,7 @@ async function trimIfOversized(file: string): Promise<void> {
   // Write-then-rename, so a crash mid-trim leaves the previous complete file
   // rather than a half-written one. The temp is created at 0600 and the rename
   // carries those permissions onto the target.
-  const tmp = `${file}.tmp`;
+  const tmp = untraced(`${file}.tmp`);
   await fsp.writeFile(tmp, kept.length ? `${kept.join("\n")}\n` : "", { mode: FILE_MODE });
   await fsp.chmod(tmp, FILE_MODE).catch(() => {});
   await fsp.rename(tmp, file);
@@ -489,7 +489,7 @@ export async function clearTranscript(key: string = DESKTOP_TRANSCRIPT_KEY): Pro
   await fsp.rm(transcriptPath(key), { force: true });
   // The trim's temp file is the one thing that could survive a crash holding a
   // copy of what was just deleted.
-  await fsp.rm(`${transcriptPath(key)}.tmp`, { force: true });
+  await fsp.rm(untraced(`${transcriptPath(key)}.tmp`), { force: true });
   // The file is gone, so the remembered length describes nothing.
   recordCounts.delete(transcriptPath(key));
 }

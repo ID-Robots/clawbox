@@ -48,7 +48,7 @@ import { createHash } from 'crypto';
 import type { Dirent } from 'fs';
 import fs from 'fs/promises';
 import type { FileHandle } from 'fs/promises';
-import path from 'path';
+import path from './runtime-path';
 
 // ── Limits ──────────────────────────────────────────────────────────────────
 // A skill is documentation plus a handful of scripts. These are ceilings for a
@@ -457,7 +457,7 @@ export async function repairFromGithub(
       //
       // Support files are data the agent reads, never something it executes
       // directly, so 0644 regardless of the upstream mode bit.
-      handle = await fs.open(abs, 'wx', 0o644);
+      handle = await fs.open(/* turbopackIgnore: true */ abs, 'wx', 0o644);
       await handle.writeFile(content);
       budget -= content.length;
       repaired.push(rel);

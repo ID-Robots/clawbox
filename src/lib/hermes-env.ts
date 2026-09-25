@@ -40,7 +40,7 @@
 import { constants } from "fs";
 import fs from "fs/promises";
 import type { FileHandle } from "fs/promises";
-import path from "path";
+import path, { untraced } from "./runtime-path";
 
 const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -310,7 +310,7 @@ export async function setHermesEnvValues(values: Record<string, string | null>):
     const base = existing.charCodeAt(0) === 0xfeff ? existing.slice(1) : existing;
 
     const next = applyEnvValues(base, values);
-    const tmp = `${envPath}.clawbox.tmp`;
+    const tmp = untraced(`${envPath}.clawbox.tmp`);
     // writeFile's `mode` is ignored when the path already exists (a stale temp
     // from a crash would keep its old, possibly wider, permissions), so chmod
     // explicitly before the rename rather than trusting the create flag.

@@ -20,7 +20,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
-import path from "node:path";
+import path, { untraced } from "@/lib/runtime-path";
 import { StringDecoder } from "node:string_decoder";
 
 import {
@@ -456,7 +456,7 @@ export async function writeSchedule(next: ClawKeepSchedule): Promise<{
   // interleave into one temp file and rename a torn schedule into place —
   // readScheduleSnapshot() would then fall back to DEFAULT_SCHEDULE and silently turn
   // auto-backup off.
-  const tmp = `${SCHEDULE_PATH}.tmp.${process.pid}.${++scheduleWriteSeq}`;
+  const tmp = untraced(`${SCHEDULE_PATH}.tmp.${process.pid}.${++scheduleWriteSeq}`);
   // `armedAtMs` rides alongside the schedule rather than in it: it is not a
   // setting the owner edits, and `sanitiseSchedule` drops it on the way back
   // out so `ClawKeepSchedule` stays exactly what the PUT body may contain.
@@ -529,7 +529,7 @@ async function writeSecret(p: string, contents: string): Promise<void> {
   await ensureDataDir();
   // Atomic-rename a 0600 tmp file so the secret is never world-readable
   // even on a crash mid-write.
-  const tmp = `${p}.tmp`;
+  const tmp = untraced(`${p}.tmp`);
   const handle = await fs.open(tmp, "w", 0o600);
   try {
     await handle.writeFile(contents, "utf8");
@@ -662,7 +662,7 @@ async function writeStateFile(state: StateFile): Promise<void> {
   // Per-call temp name (pid + monotonic counter) so concurrent writers — e.g.
   // a pair-time cloud sync racing a stuck-spinner reset — can't clobber each
   // other's temp file before the atomic rename.
-  const tmp = `${STATE_PATH}.tmp.${process.pid}.${++stateWriteSeq}`;
+  const tmp = untraced(`${STATE_PATH}.tmp.${process.pid}.${++stateWriteSeq}`);
   await fs.writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
   await fs.rename(tmp, STATE_PATH);
 }
@@ -1105,6 +1105,32 @@ export function backupExitError(exitCode: number): ClawKeepError | null {
       );
     case 10: // EXIT_ENCRYPTION_FAILED
       return new ClawKeepError("The backup could not be encrypted", 500, "encryption_failed");
+    case 11:
+      // EXIT_ARCHIVE_BUSY — files kept changing under every bounded rebuild
+      // (TASK-1000). Nothing is broken; the next slot tries again. 503 so a
+      // client reading only the class sees "not now" rather than "broken".
+      return new ClawKeepError(
+        "Files kept changing while the backup was being built — it will try again at the next scheduled time",
+        503,
+        "archive_busy",
+      );
+    case 12:
+      // EXIT_ARCHIVE_DB_DAMAGED — a database failed OpenClaw's integrity gate
+      // and was not an index-only repair ClawKeep could make. The daemon left
+      // it untouched; the owner needs support, not another click.
+      return new ClawKeepError(
+        "A database in the assistant's data is damaged, so the backup stopped rather than save damaged data — earlier backups are untouched",
+        500,
+        "database_damaged",
+      );
+    case 13:
+      // EXIT_ARCHIVE_CONFLICT — two sources claim one archive path, or a
+      // symbolic link points out of the backup. The daemon's log names them.
+      return new ClawKeepError(
+        "Something in the assistant's data cannot be packed safely (a duplicate path or a link pointing outside it) — earlier backups are untouched",
+        500,
+        "archive_conflict",
+      );
     case 64: // daemon.py, EX_USAGE — a bad config, before the run begins
       return new ClawKeepError("The ClawKeep configuration is unusable", 500, "config_error");
     case 65:
@@ -1168,6 +1194,10 @@ interface SnapshotsResponse {
   kind?: string;
   snapshots?: CloudSnapshot[];
   quotaBytes?: number;
+  /** Part of the daemon's wire contract, deliberately not consumed: usage is
+   * summed from `snapshots` instead, so an older daemon relaying the portal's
+   * stale counter can't put a number in state.json that the bucket disagrees
+   * with. See syncStateFromCloud(). */
   cloudBytes?: number;
 }
 
@@ -1400,9 +1430,14 @@ export async function syncStateFromCloud(): Promise<void> {
   }
   const snapshots = resp.snapshots ?? [];
   const lastBackupAtMs = snapshots.reduce((max, s) => Math.max(max, s.last_modified_ms ?? 0), 0);
-  // Prefer the daemon's authoritative prefix total; fall back to summing the
-  // per-snapshot sizes only if an older daemon doesn't report cloudBytes.
-  const cloudBytes = resp.cloudBytes ?? snapshots.reduce((sum, s) => sum + (s.size_bytes ?? 0), 0);
+  // Sum the snapshots we were just handed, rather than taking `resp.cloudBytes`
+  // on trust. A current daemon derives that field from the same listing, so the
+  // two agree — but an older one passes the portal's `cloudBytes` counter
+  // straight through, and that counter is an accumulator: it keeps the size of
+  // snapshots the account no longer has, and writing it into state.json is what
+  // made the dashboard insist on "9.8 GB used" against a prefix the portal
+  // itself reported as empty. The objects are the only honest answer.
+  const cloudBytes = snapshots.reduce((sum, s) => sum + (s.size_bytes ?? 0), 0);
   await writeStateFile({
     last_backup_at_ms: lastBackupAtMs,
     last_cloud_bytes: cloudBytes,
@@ -1571,7 +1606,7 @@ export async function runBackup(
     // records it in the manifest after a successful upload.
     const label = opts.label?.trim();
     if (label) args.push("--label", label);
-    const child = spawn(bin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(/* turbopackIgnore: true */ bin, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled = false;

@@ -155,6 +155,32 @@ describe("useCodingAgentActivity", () => {
     expect(result.current.runs[0]).toMatchObject({ progress: [], screenshots: [], thinkingTokens: 0, numTurns: 0, todos: [] });
   });
 
+  it("carries where the run's pull request stands — the phase only — and null when there is none it can read", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => runsResponse([
+      { ...RUNNING, id: "run-pr", status: "completed", pr: { phase: "review", number: 7, url: "https://example.test/pr/7" } },
+      { ...RUNNING, id: "run-none", pr: null },
+      { ...RUNNING, id: "run-odd", pr: { phase: "sideways" } },
+      { ...RUNNING, id: "run-old" },
+    ])));
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(result.current.runs).toHaveLength(4));
+    const phases = Object.fromEntries(result.current.runs.map((r) => [r.id, r.prPhase]));
+    expect(phases).toEqual({ "run-pr": "review", "run-none": null, "run-odd": null, "run-old": null });
+    expect(result.current.runs[0]).not.toHaveProperty("pr");
+  });
+
+  it("reads a pull request that was never opened — blocked with no number, nothing committed — as none", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => runsResponse([
+      { ...RUNNING, id: "run-empty", status: "completed", pr: { phase: "blocked", number: null, detail: "Nothing was committed, so there is no pull request to open." } },
+      { ...RUNNING, id: "run-held", status: "completed", pr: { phase: "blocked", number: 42, detail: "A check failed." } },
+    ])));
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(result.current.runs).toHaveLength(2));
+    const phases = Object.fromEntries(result.current.runs.map((r) => [r.id, r.prPhase]));
+    // The first is done with, like a run with auto-PR off; the second is on GitHub, waiting for the owner.
+    expect(phases).toEqual({ "run-empty": null, "run-held": "blocked" });
+  });
+
   it("carries the run's plan, and only the items it can draw", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => runsResponse([{
       ...RUNNING,

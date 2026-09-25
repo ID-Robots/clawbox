@@ -1,5 +1,5 @@
 import fsp from "fs/promises";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { resolveConfigRoot } from "@/lib/config-store";
 import { hermesHome } from "@/lib/hermes-env";
 

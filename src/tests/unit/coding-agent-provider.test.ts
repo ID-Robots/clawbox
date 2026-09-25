@@ -51,6 +51,7 @@ import {
   DEFAULT_ANTHROPIC_MODEL,
   DEFAULT_CODING_PROVIDER,
   codingProviderFrom,
+  defaultModelForProvider,
   modelsForProvider,
   resolveRunProvider,
 } from "@/lib/coding-provider";
@@ -110,6 +111,28 @@ describe("the vocabulary", () => {
     expect([...modelsForProvider("anthropic")]).toEqual([...ANTHROPIC_MODELS]);
     expect(modelsForProvider("clawbox-ai")).toEqual([]);
     expect(ANTHROPIC_MODELS).toContain(DEFAULT_ANTHROPIC_MODEL);
+  });
+
+  it("offers Opus 5.5 first and defaults to it, with the plain id spelled out", () => {
+    // The literal is the point. An unnamed run's model reaches Claude Code as
+    // a string, so a typo here ("claude-opus-5.5", an alias) is not a type
+    // error — it is a run that fails several minutes in, on the owner's bill.
+    expect([...ANTHROPIC_MODELS]).toEqual(["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"]);
+    expect(DEFAULT_ANTHROPIC_MODEL).toBe("claude-opus-5-5");
+    expect(defaultModelForProvider("anthropic")).toBe("claude-opus-5-5");
+    expect(defaultModelForProvider("clawbox-ai")).toBeNull();
+  });
+
+  it("keeps claude-opus-5 selectable behind the new default", () => {
+    // What the list fences is what a caller NAMES — the MCP tool's enum, the
+    // run route, a follow-up that re-states the model of the run it
+    // continues. A resume that names nothing carries the previous
+    // requestedModel past this list entirely, so the entry below is what
+    // keeps the old id askable, not what keeps an existing run alive.
+    expect(ANTHROPIC_MODELS).toContain("claude-opus-5");
+    expect(resolveRunProvider("anthropic", "claude-opus-5", "clawbox-ai")).toEqual({
+      ok: true, provider: "anthropic", model: "claude-opus-5",
+    });
   });
 });
 

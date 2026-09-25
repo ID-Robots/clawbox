@@ -37,6 +37,20 @@ reasoning for each inclusion and exclusion.
 > and the tarball is AES-encrypted before a byte leaves the device. Never move a
 > decrypted archive off the box.
 
+On the OpenClaw edition the CLI stays the archiver and the authority on what is
+safe to archive; `clawkeep/backup_guard.py` is ClawKeep's own boundary around
+it. Before the call it refuses two sources that would share one archive path,
+and it sets aside the symlinks the CLI would refuse that are regenerable tool
+output: package-manager links, OpenClaw's own plugin links, cache links and
+stale browser locks. Those links are journalled first and put back as soon as
+the archive is built. After a failed call it retries a file that vanished
+mid-walk (bounded, `EXIT_ARCHIVE_BUSY`). It rebuilds a SQLite database whose
+only damage is its indexes, keeping a copy first; any other damage stops the
+run as `EXIT_ARCHIVE_DB_DAMAGED` with the database left untouched. Duplicates
+and links out of the backup end as `EXIT_ARCHIVE_CONFLICT`, naming the
+sources. It also wipes a plaintext archive a failed `--verify` left behind.
+The module docstring holds the exact rules.
+
 Restoring across editions is **refused**: one portal account gets one R2 prefix,
 so the snapshot list legitimately holds other devices' backups — including this
 box's own, from before it was converted. `assert_archive_matches_device` fails
@@ -97,6 +111,8 @@ SSH to the device's listener.
 | `/etc/clawkeep/config.toml` | 0644 | root | User-editable config |
 | `/var/lib/clawkeep/token` | 0600 | clawkeep | The `claw_*` portal token |
 | `/var/lib/clawkeep/state.json` | 0600 | clawkeep | Last run result + last cloudBytes |
+| `/var/lib/clawkeep/detached-links.json` | 0600 | clawkeep | Links set aside for an archive build still in progress (or killed mid-build); put back by the next run |
+| `/var/lib/clawkeep/sqlite-recovery/` | 0700 | clawkeep | A database as found before its indexes were rebuilt (the newest 3 per database) |
 
 > **Note on encryption:** archives are encrypted on the device before upload
 > (`clawkeep/crypto.py`), with a passphrase only the owner holds

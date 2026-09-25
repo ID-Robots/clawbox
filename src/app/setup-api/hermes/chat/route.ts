@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { spawn } from "child_process";
-import path from "path";
+import path from "@/lib/runtime-path";
 import { StringDecoder } from "string_decoder";
 import { HERMES_BIN } from "@/lib/harness";
 import {
