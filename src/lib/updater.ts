@@ -3717,9 +3717,9 @@ async function readPkgVersion(pkgPath: string): Promise<string | null> {
 /**
  * The installed ClawBox version, read from package.json at runtime.
  *
- * Deliberately NOT `NEXT_PUBLIC_APP_VERSION`: that's baked at build time from
- * `git describe`, so when a device syncs new code + package.json without a
- * clean Next rebuild, the baked value goes stale — the device then mis-reports
+ * Deliberately NOT `NEXT_PUBLIC_APP_VERSION`: that's baked at build time (from
+ * package.json, by next.config.ts), so when a device syncs new code + package.json
+ * without a clean Next rebuild, the baked value goes stale — the device then mis-reports
  * its own version and keeps offering an update it already installed. package.json
  * is rewritten by the git sync, so it always reflects the running release.
  * Falls back to the build-time value, then "unknown", if the file is unreadable.

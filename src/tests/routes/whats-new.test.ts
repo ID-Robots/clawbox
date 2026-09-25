@@ -230,9 +230,11 @@ describe("GET /setup-api/whats-new: when a read fails", () => {
 
     const body = await state();
 
-    expect(body).toMatchObject({ show: false, unavailable: true, release: "4.0" });
+    // The release the card announces, whichever that is: the fallback is still
+    // this build's card, just hidden.
+    const { isWhatsNewState, WHATS_NEW_RELEASE } = await import("@/lib/whats-new");
+    expect(body).toMatchObject({ show: false, unavailable: true, release: WHATS_NEW_RELEASE });
     // …in the shape every build's card reads, so an open tab simply draws nothing.
-    const { isWhatsNewState } = await import("@/lib/whats-new");
     expect(isWhatsNewState(body)).toBe(true);
     expect(body).not.toHaveProperty("error");
   });

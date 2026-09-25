@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WHATS_NEW_RELEASE } from "@/lib/whats-new";
 
 // TASK-1198: the What's New state when a read it depends on FAILS.
 //
@@ -41,10 +42,18 @@ async function load() {
   return { ...(await import("@/lib/whats-new-server")), store, swap, gate };
 }
 
+/**
+ * A box on the release line the card announces, so the card is shown whenever
+ * nothing hides it. Derived, not a literal: a box on any other line is shown no
+ * card at all, and every case below would pass for the wrong reason.
+ */
+const RUNNING_VERSION = `${WHATS_NEW_RELEASE}.0`;
+
 let warn: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
-  process.env.NEXT_PUBLIC_APP_VERSION = "4.0.0";
+  // CONFIG_ROOT has no package.json, so this is the running version.
+  process.env.NEXT_PUBLIC_APP_VERSION = RUNNING_VERSION;
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
@@ -58,8 +67,8 @@ describe("whats-new-server — a read that fails", () => {
     const { readWhatsNewState } = await load();
     expect(await readWhatsNewState()).toEqual({
       show: true,
-      release: "4.0",
-      version: "4.0.0",
+      release: WHATS_NEW_RELEASE,
+      version: RUNNING_VERSION,
       edition: "openclaw",
       cta: { paidFeatures: true, editionSwitch: "hermes" },
       freeMonthCode: null,
@@ -74,8 +83,8 @@ describe("whats-new-server — a read that fails", () => {
 
     expect(state).toEqual({
       show: true,
-      release: "4.0",
-      version: "4.0.0",
+      release: WHATS_NEW_RELEASE,
+      version: RUNNING_VERSION,
       edition: "openclaw",
       // Nothing sold that the box could not check the owner lacks.
       cta: { paidFeatures: false, editionSwitch: null },
@@ -105,8 +114,8 @@ describe("whats-new-server — a read that fails", () => {
 
     expect(state).toEqual({
       show: false,
-      release: "4.0",
-      version: "4.0.0",
+      release: WHATS_NEW_RELEASE,
+      version: RUNNING_VERSION,
       edition: "openclaw",
       cta: { paidFeatures: false, editionSwitch: null },
       freeMonthCode: null,
