@@ -375,6 +375,17 @@ describe("plugin-repair — what a damaged store still holds (TASK-1198)", () =>
     const { salvagePluginRepairRows } = await load();
     expect(salvagePluginRepairRows(raw)).toEqual(expected);
   });
+
+  it("keeps a `__proto__` key as a row of its own, as JSON.parse and the boot script do", async () => {
+    // An assignment would set the map's PROTOTYPE instead: the key vanishes
+    // from every walk of the rows, and a lookup of another id could read
+    // through to it.
+    const { salvagePluginRepairRows } = await load();
+    const rows = salvagePluginRepairRows("{\"__proto__\":{\"spec\":\"x\"},\"codex\":{\"id\":\"codex\"},\"tor");
+    expect(Object.getPrototypeOf(rows)).toBe(Object.prototype);
+    expect(Object.keys(rows)).toEqual(["__proto__", "codex"]);
+    expect((rows as Record<string, { spec?: unknown }>).deepseek?.spec).toBeUndefined();
+  });
 });
 
 describe("plugin-repair — a repair in flight, and one already spent (TASK-1088)", () => {

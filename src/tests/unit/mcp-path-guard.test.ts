@@ -826,6 +826,15 @@ describe("mcp path guard — the agent's own ~/.openclaw workspace (TASK-1072)",
     `cd ${WS} && ls ..`,
     `cd ${WS} && cd .. && cat openclaw.json`,
     "(cd ~/.openclaw/workspace; cat ../openclaw.json)",
+    // A shell joins quoted pieces into ONE word; the guard must too, or the
+    // directory it judges is only the first piece (`$HOME`, `~/`).
+    "cd \"$HOME\"/.openclaw/workspace && cat ../openclaw.json",
+    "cd ~/\".openclaw/workspace\" && cat ../openclaw.json",
+    `cd "${WS}/a b/c" && cat ../../../openclaw.json`,
+    `cd ${WS}/a\\ b/c && cat ../../../openclaw.json`,
+    // …and the RELATIVE word it runs is joined the same way: `"."./x` is `../x`.
+    `cd ${WS} && cat "."./openclaw.json`,
+    `cd ${WS} && cat ."./"openclaw.json`,
     `pushd ${WS} >/dev/null && cat ../.mcp-token`,
     `cd -P -- ${WS} && tail ../logs/gateway.log`,
     `tar -C ${WS} -cf - ../credentials`,

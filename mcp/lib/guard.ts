@@ -253,13 +253,17 @@ export function openclawDeniedInCommand(command: string): boolean {
  */
 function openclawDeniedCwd(command: string, cwd: string): boolean {
   const { dirs, unresolved } = workingDirsOf(command, cwd);
+  // Each relative word both ways: split on quotes (the tokens every other pass
+  // reads) AND joined the way the shell joins it — `"."./openclaw.json` is
+  // `../openclaw.json` to the shell and two harmless tokens to the split.
+  const words = [...new Set([...shellTokens(command), ...segmentWords(command).flat()])];
   // BOTH SPELLINGS, for the reason `isAllowedPath` judges both: `~/notes -> ~/
   // .openclaw` is a working directory with no `.openclaw` anywhere in its text,
   // and a shell handed it is standing in the state directory all the same.
   for (const dir of dirs) {
     if (!isOpenclawStatePath(dir)) continue;
     if (openclawStateOutsideWorkspace(dir)) return true;
-    for (const raw of shellTokens(command)) {
+    for (const raw of words) {
       if (raw.startsWith("/") || raw.startsWith("~")) continue;
       // `join` normalises, which is what this arm wants: the question is where
       // the token LANDS, and `..` is how it leaves. A token that is not a path
@@ -273,7 +277,7 @@ function openclawDeniedCwd(command: string, cwd: string): boolean {
   // CLIMBS is then refused, because out of a workspace one `..` is the state
   // directory. One that does not climb (`cat MEMORY.md`) is still allowed.
   if (!unresolved || !OPENCLAW_MENTIONED_RE.test(command)) return false;
-  return shellTokens(command).some(
+  return words.some(
     (raw) => !raw.startsWith("/") && !raw.startsWith("~") && raw.split("/").includes(".."),
   );
 }
@@ -289,6 +293,64 @@ const CHDIR_FLAG_ASSIGN_RE = /^--(?:directory|chdir)=(.*)$/;
 
 /** More than this many candidate directories and the command is no ordinary one. */
 const MAX_WORKING_DIRS = 32;
+
+/**
+ * The words of one simple command AS THE SHELL JOINS THEM: quoted pieces and
+ * backslash-escaped characters are part of the word they touch, and only
+ * unquoted whitespace (or a redirection) ends one. `cd "$HOME"/.openclaw/
+ * workspace` is ONE directory, and splitting it on the quote handed the guard
+ * `$HOME` and threw the workspace away (TASK-1198 review). Quote characters
+ * are dropped; `$`, backticks and parentheses are kept, so a substitution still
+ * reaches `spellDirectory` as one.
+ */
+function shellWords(text: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let started = false;
+  let quote: "'" | "\"" | null = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      else if (ch === "\\" && quote === "\"" && i + 1 < text.length) word += text[++i];
+      else word += ch;
+      continue;
+    }
+    if (ch === "'" || ch === "\"") {
+      quote = ch;
+      started = true;
+    } else if (ch === "\\" && i + 1 < text.length) {
+      word += text[++i];
+      started = true;
+    } else if (/[\s<>]/.test(ch)) {
+      if (started) words.push(word);
+      word = "";
+      started = false;
+    } else {
+      word += ch;
+      started = true;
+    }
+  }
+  if (started) words.push(word);
+  return words;
+}
+
+/**
+ * The command's simple commands, each as its shell-joined words. Split on the
+ * control operators first, so a bare `cd` (home) is not read as moving into
+ * whatever word the NEXT command starts with. NOT on `(`, `)` or a backtick,
+ * and the words keep them: `cd $(…)` and `` cd `…` `` must reach
+ * `spellDirectory` as the substitution they are, not as a bare `cd` followed
+ * by whatever the substitution runs. A subshell's own `(cd x` just loses its
+ * parenthesis.
+ */
+function segmentWords(command: string): string[][] {
+  return command.split(/&&|\|\||[;&|\n]/).map((segment) =>
+    shellWords(segment)
+      .map((word) => word.replace(/^[({]+/, "").replace(/\)+$/, ""))
+      .filter(Boolean),
+  );
+}
 
 /**
  * `~`, `$HOME` and `${HOME}` in front of a word, spelled out against the same
@@ -328,17 +390,7 @@ function spellDirectory(word: string): string | null {
 function workingDirsOf(command: string, cwd: string): { dirs: string[]; unresolved: boolean } {
   const dirs = new Set<string>([cwd, canonicalPath(cwd) ?? cwd]);
   let unresolved = false;
-  // Split into simple commands first, so a bare `cd` (home) is not read as
-  // moving into whatever word the NEXT command starts with. NOT on `(`, `)`
-  // or a backtick, and the words keep them: `cd $(…)` and `` cd `…` `` must
-  // reach `spellDirectory` as the substitution they are, not as a bare `cd`
-  // followed by whatever the substitution runs. A subshell's own `(cd x` just
-  // loses its parenthesis.
-  for (const segment of command.split(/&&|\|\||[;&|\n]/)) {
-    const words = segment
-      .split(/[\s'"<>]+/)
-      .map((word) => word.replace(/^[({]+/, "").replace(/\)+$/, ""))
-      .filter(Boolean);
+  for (const words of segmentWords(command)) {
     for (let i = 0; i < words.length; i += 1) {
       const word = words[i];
       let target: string | undefined;

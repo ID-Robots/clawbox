@@ -413,7 +413,10 @@ export function salvagePluginRepairRows(raw: string): Record<string, unknown> {
       return rows;
     }
     if (typeof key === "string" && value && typeof value === "object" && !Array.isArray(value)) {
-      rows[key] = value;
+      // DEFINED, not assigned: `rows["__proto__"] = …` would set the map's
+      // prototype instead of keeping a row, which `JSON.parse` and the boot
+      // script's dict both keep as an ordinary key.
+      Object.defineProperty(rows, key, { value, enumerable: true, writable: true, configurable: true });
     }
     i = valueEnd;
   }
