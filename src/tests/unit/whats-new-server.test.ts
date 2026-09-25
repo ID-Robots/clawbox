@@ -45,7 +45,7 @@ async function load() {
 /**
  * A box on the release line the card announces, so the card is shown whenever
  * nothing hides it. Derived, not a literal: a box on any other line is shown no
- * card at all, and every case below would pass for the wrong reason.
+ * card at all, so these cases would stop being about the read that fails.
  */
 const RUNNING_VERSION = `${WHATS_NEW_RELEASE}.0`;
 
