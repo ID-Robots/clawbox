@@ -34,6 +34,7 @@ import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-c
 import { resolveMemoryEmbedder } from "@/lib/memory-embedder";
 import {
   IndexPassAbortedError,
+  IndexRebuildRequiredError,
   localMemoryStatusJson,
   runLocalIndexPass,
   type LocalIndexProgress,
@@ -78,7 +79,8 @@ export type MemoryRunErrorCode =
   | "migration_busy"
   | "openclaw_missing"
   | "provider_mismatch"
-  | "index_failed";
+  | "index_failed"
+  | "full_reindex_required";
 
 const RUN_ERROR_CODES = new Set<string>([
   "timed_out",
@@ -87,6 +89,7 @@ const RUN_ERROR_CODES = new Set<string>([
   "openclaw_missing",
   "provider_mismatch",
   "index_failed",
+  "full_reindex_required",
 ]);
 
 export interface MemoryIndexSchedule {
@@ -1214,6 +1217,19 @@ function providerFellBack(status: Pick<ClawKeepMemoryStatus, "errorCode">): bool
  * thrown away, so here too the honest pass IS the full one, and the run line
  * says "full" because that is what ran.
  *
+ * …FOR THE OWNER, NEVER FOR THE SCHEDULE (TASK-1197). A full pass over a
+ * disowned index throws away every embedding the box has and spends hours
+ * making them again, and that is a decision somebody makes, not one a timer
+ * makes at 03:00 because a fingerprint went missing. So a scheduled request
+ * against a disowned index answers `null` — no pass at all — and the slot is
+ * declined with `full_reindex_required`; the amber banner the status already
+ * draws ("… Run a full reindex") is what tells the owner, and the button is how
+ * they answer it. Running the incremental pass instead would be no kinder: it
+ * cannot make the index valid, so it would fail every night with a message that
+ * blames the model. The EMPTY index keeps its upgrade on every trigger, the
+ * schedule's included: there is nothing in it to throw away, and a first build
+ * is exactly the work an incremental pass into no index would have done.
+ *
  * Answered from the cached reading when there is one (stale included, and
  * one a run has changed since: the cost of a stale zero is one more pass
  * over an index that was just built, inside the ten seconds before the
@@ -1224,8 +1240,24 @@ function providerFellBack(status: Pick<ClawKeepMemoryStatus, "errorCode">): bool
  * AFTER declining a caller that overlaps a run, so that wait never overlaps
  * one.
  */
-export async function resolveIndexMode(requested: MemoryIndexMode): Promise<MemoryIndexMode> {
-  return (await planIndexPass(requested)).mode;
+export async function resolveIndexMode(
+  requested: MemoryIndexMode,
+  trigger: MemoryIndexTrigger = "manual",
+): Promise<MemoryIndexMode | null> {
+  const plan = await planIndexPass(requested, trigger);
+  return plan.heldBack ? null : plan.mode;
+}
+
+/** What {@link planIndexPass} decided: a pass to run, or none. */
+interface IndexPassPlan {
+  mode: MemoryIndexMode;
+  fellBack: boolean;
+  /**
+   * The index needs the full pass this trigger may not start: a scheduled
+   * request against an index the core has disowned. Nothing runs, and
+   * `startMemoryIndex` declines with `full_reindex_required`.
+   */
+  heldBack: boolean;
 }
 
 /**
@@ -1251,27 +1283,39 @@ export async function resolveIndexMode(requested: MemoryIndexMode): Promise<Memo
  * status to draw the banner that names it, and `warmMemoryStatusCache` pays for
  * the first one at boot. Without one the pass is worded the way it always was.
  */
-async function planIndexPass(requested: MemoryIndexMode): Promise<{ mode: MemoryIndexMode; fellBack: boolean }> {
+async function planIndexPass(requested: MemoryIndexMode, trigger: MemoryIndexTrigger): Promise<IndexPassPlan> {
   if (requested === "full") {
     const seen = cachedStatus;
-    return { mode: "full", fellBack: seen !== null && seen.available && providerFellBack(seen) };
+    return { mode: "full", fellBack: seen !== null && seen.available && providerFellBack(seen), heldBack: false };
   }
   try {
-    const status = await lastMemoryStatus();
+    // The schedule pays for a FRESH reading. Nobody is waiting on a 03:00 slot,
+    // and "empty" is the one verdict that sends `--force` to the core unasked:
+    // a cached zero from before a manual pass filled the index would re-embed
+    // that index on a timer. The owner's click keeps the cached reading, for the
+    // reasons above.
+    const status = await (trigger === "schedule" ? reloadMemoryStatus() : lastMemoryStatus());
     // `available` is load-bearing: a failed CLI probe returns the unavailable
     // status, which also reports zero chunks AND an "unknown" identity. Without
     // this check a probe timeout would silently turn a scheduled incremental
     // pass into a --force re-embed of an index that was perfectly fine.
-    if (!status.available) return { mode: requested, fellBack: false };
-    return {
-      mode: status.chunks === 0 || staleIndexIdentity(status) ? "full" : requested,
-      fellBack: providerFellBack(status),
-    };
+    if (!status.available) return { mode: requested, fellBack: false, heldBack: false };
+    const fellBack = providerFellBack(status);
+    // Nothing indexed: the first build IS the full one, on every trigger.
+    if (status.chunks === 0) return { mode: "full", fellBack, heldBack: false };
+    if (staleIndexIdentity(status)) {
+      // Disowned: the owner's request is upgraded (TASK-1024), the schedule's
+      // is held back (TASK-1197) — see resolveIndexMode.
+      return trigger === "schedule"
+        ? { mode: requested, fellBack, heldBack: true }
+        : { mode: "full", fellBack, heldBack: false };
+    }
+    return { mode: requested, fellBack, heldBack: false };
   } catch {
     // Same rule when the probe throws: run what was asked rather than
     // upgrading on a box we know nothing about — and claim to know nothing
     // about its provider either, so the failure below is worded generically.
-    return { mode: requested, fellBack: false };
+    return { mode: requested, fellBack: false, heldBack: false };
   }
 }
 
@@ -1308,6 +1352,15 @@ const TIMED_OUT_FAILURE = {
 const INDEX_FAILED_FAILURE = {
   error: "Indexing failed. Check that the embedding model is available, then try again.",
   errorCode: "index_failed" as const,
+};
+/**
+ * A scheduled pass stopped short of rebuilding an index (TASK-1197): the
+ * vectors on disk answer to another embedder, and throwing them away is the
+ * owner's call, not the schedule's. Nothing was deleted.
+ */
+const FULL_REINDEX_REQUIRED_FAILURE = {
+  error: "The scheduled run left the index as it was: it needs a full reindex, which only you can start. Run a full reindex.",
+  errorCode: "full_reindex_required" as const,
 };
 /**
  * The one failure this module can name a cause for, and the reason TASK-1024
@@ -1522,14 +1575,21 @@ function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgress
   };
 }
 
-function startLocalPass(mode: MemoryIndexMode, onProgress: LocalIndexProgressReporter): IndexPass {
+function startLocalPass(
+  mode: MemoryIndexMode,
+  onProgress: LocalIndexProgressReporter,
+  mayDiscard: boolean,
+): IndexPass {
   const controller = new AbortController();
   let tail = "";
   // `EMBED_MIGRATION_LOCK` is deliberately not taken here. Its only other
   // holder is `scripts/ensure-local-embeddings.sh`, which writes openclaw.json
   // and never runs on this SKU, so `RUN_LOCK_PATH` is the whole single-flight
   // and a second lock would only be a second thing to leave behind.
-  const ended = runLocalIndexPass(mode, controller.signal, onProgress).then(
+  //
+  // `mayDiscard` is false for the schedule: the plan's reading can be minutes
+  // old, so the pass re-checks the store itself before it empties anything.
+  const ended = runLocalIndexPass(mode, controller.signal, onProgress, { mayDiscard }).then(
     (result): PassOutcome => {
       // The pass's own numbers exist nowhere else — the run record keeps a
       // status and a duration, not a count — so they are said once, here.
@@ -1569,6 +1629,10 @@ function localFailure(error: unknown): { error: string; errorCode: MemoryRunErro
   if (error instanceof IndexPassAbortedError) {
     return { error: INTERRUPTED_MESSAGE, errorCode: "interrupted" };
   }
+  // A scheduled pass that found, on the store itself, an index its plan had
+  // read as valid. Nothing was deleted; what it needs is the owner's rebuild,
+  // and "check the embedding model" would send them to a model that is fine.
+  if (error instanceof IndexRebuildRequiredError) return FULL_REINDEX_REQUIRED_FAILURE;
   // Everything else — the embedder refusing (EmbeddingUnavailableError), an
   // unreadable store, a bug — reads the same to the owner and has the same
   // next step.
@@ -1594,15 +1658,21 @@ function localFailure(error: unknown): { error: string; errorCode: MemoryRunErro
  * flipped inside that window would otherwise start the very pass it forbids.
  * Here the read and the start are on the same side of the lock, so an "off"
  * either prevents a run or lands after one had already begun.
+ *
+ * The third refusal is the schedule's alone: `full_reindex_required`, for an
+ * index the core has disowned, which only the owner rebuilds (see
+ * resolveIndexMode). It starts nothing, so it takes no lock and writes no run
+ * record — the status banner already says what the owner has to do.
  */
 export async function startMemoryIndex(
   requested: MemoryIndexMode,
   trigger: MemoryIndexTrigger = "manual",
-): Promise<{ accepted: boolean; run: MemoryRunState; declined?: "running" | "disabled" }> {
+): Promise<{ accepted: boolean; run: MemoryRunState; declined?: "running" | "disabled" | "full_reindex_required" }> {
   const current = await readMemoryRunState();
   if (current.status === "running") return { accepted: false, declined: "running", run: current };
 
-  const { mode, fellBack } = await planIndexPass(requested);
+  const { mode, fellBack, heldBack } = await planIndexPass(requested, trigger);
+  if (heldBack) return { accepted: false, declined: "full_reindex_required", run: await readMemoryRunState() };
   if (!await acquireRunLock()) {
     return { accepted: false, declined: "running", run: await readMemoryRunState() };
   }
@@ -1666,7 +1736,9 @@ export async function startMemoryIndex(
       .catch(() => { /* the next report tries again */ })
       .finally(() => { reportInFlight = false; });
   };
-  const pass = openclawIsAbsent() ? startLocalPass(mode, publishProgress) : startOpenclawPass(mode, publishProgress);
+  const pass = openclawIsAbsent()
+    ? startLocalPass(mode, publishProgress, trigger !== "schedule")
+    : startOpenclawPass(mode, publishProgress);
   if (pass.pid) settlingPasses().add(pass.pid);
   state = { ...state, childPid: pass.pid };
   try {

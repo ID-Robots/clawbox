@@ -130,6 +130,7 @@ vi.mock("@/lib/openclaw-config", () => ({ readConfig: async () => openclawConfig
 import { writeEmbedderPin } from "@/lib/memory-embedder";
 import {
   EMBED_RETRY_MIN_WAIT_MS,
+  IndexRebuildRequiredError,
   LOCAL_INDEX_PATH,
   _resetLocalMemoryCacheForTests,
   chunkText,
@@ -989,6 +990,51 @@ describe("the index knows what it was built for", () => {
     expect(embedCalls.texts.length).toBeGreaterThan(0);
     const status = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
     expect(status.status.custom.indexIdentity.status).toBe("valid");
+  });
+
+  // TASK-1197: the same mismatch, met by a pass that may not discard — the
+  // unattended schedule. It stops before a single row or embedding is spent.
+  it("does NOT rebuild after a mismatch when the pass may not discard, and leaves every row", async () => {
+    write("notes.md", "The deposit is two months' rent.");
+    const built = await runLocalIndexPass("full");
+    const { openSqlite } = await import("@/lib/openclaw-session-store");
+    const db = openSqlite(LOCAL_INDEX_PATH, false);
+    db.prepare("UPDATE meta SET value = ? WHERE key = 'identity'").run("a-different-embedder");
+    db.close();
+
+    embedCalls.texts = [];
+    await expect(runLocalIndexPass("incremental", undefined, undefined, { mayDiscard: false }))
+      .rejects.toBeInstanceOf(IndexRebuildRequiredError);
+    // A `full` request from the same caller is held to the same rule.
+    await expect(runLocalIndexPass("full", undefined, undefined, { mayDiscard: false }))
+      .rejects.toBeInstanceOf(IndexRebuildRequiredError);
+    // Not even the readiness probe a rebuild opens with.
+    expect(embedCalls.texts).toEqual([]);
+    const status = await localMemoryStatusJson() as {
+      status: { chunks: number; custom: { indexIdentity: { status: string } } };
+    };
+    expect(status.status.chunks).toBe(built.chunks);
+    expect(status.status.custom.indexIdentity.status).toBe("mismatched");
+  });
+
+  it("runs a no-discard pass that was planned as full, over an index that is valid now, incrementally", async () => {
+    // The plan read an empty index; by the time the pass opened the store a
+    // manual pass had filled it. Nothing needs rebuilding any more.
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    embedCalls.texts = [];
+    const result = await runLocalIndexPass("full", undefined, undefined, { mayDiscard: false });
+    expect(result.mode).toBe("incremental");
+    expect(result.files).toBe(1);
+    expect(embedCalls.texts).toEqual([]);
+  });
+
+  it("still builds an index that holds nothing when the pass may not discard — there is nothing to throw away", async () => {
+    write("notes.md", "The deposit is two months' rent.");
+    const result = await runLocalIndexPass("full", undefined, undefined, { mayDiscard: false });
+    expect(result.mode).toBe("full");
+    expect(result.files).toBe(1);
+    expect(result.chunks).toBeGreaterThan(0);
   });
 
   it("does not call a stamped but EMPTY index valid — the wizard's own step", async () => {

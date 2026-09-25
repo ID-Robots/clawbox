@@ -994,6 +994,137 @@ describe("what a disowned index makes Index now run", () => {
   });
 });
 
+describe("what a scheduled slot runs against a disowned index (TASK-1197)", () => {
+  /**
+   * The button upgrades an incremental pass over a disowned index to a full
+   * one (TASK-1024) — the owner asked for it. The schedule must not: a full
+   * pass throws away every embedding the box has and spends hours rebuilding
+   * them, and a fingerprint going missing is not the owner deciding to do that.
+   * Driven through the real spawn-and-parse path, with every CLI call written
+   * down, so "held back" is proved by the index command never being run.
+   */
+  let calls = "";
+
+  afterEach(() => {
+    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
+  });
+
+  async function withRecordingCli(mutate: (status: Record<string, unknown>) => void): Promise<void> {
+    const payload = JSON.parse(JSON.stringify(REAL_STATUS)) as Array<{ status: Record<string, unknown> }>;
+    mutate(payload[0].status);
+    calls = path.join(tmpDir, "cli-calls");
+    const script = path.join(tmpDir, "fake-openclaw");
+    await fs.writeFile(script, [
+      "#!/bin/sh",
+      `echo "$*" >> '${calls}'`,
+      'if [ "$2" = "status" ]; then',
+      "cat <<'JSON'",
+      JSON.stringify(payload),
+      "JSON",
+      "exit 0",
+      "fi",
+      "exit 0",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    vi.resetModules();
+  }
+
+  async function indexCalls(): Promise<string[]> {
+    const text = await fs.readFile(calls, "utf8").catch(() => "");
+    return text.split("\n").filter((line) => /\bmemory index\b/.test(line));
+  }
+
+  const disowned = (status: Record<string, unknown>) => {
+    status.chunks = 512;
+    status.files = 7;
+    (status.custom as Record<string, unknown>).indexIdentity = { status: "stale", code: "chunking_version" };
+  };
+
+  it("holds a scheduled pass back from an index the core has disowned — no --force, no pass at all", async () => {
+    await withRecordingCli(disowned);
+    const { resolveIndexMode, startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect(await resolveIndexMode("incremental", "schedule")).toBeNull();
+
+    const started = await startMemoryIndex("incremental", "schedule");
+    expect(started.accepted).toBe(false);
+    expect(started.declined).toBe("full_reindex_required");
+    expect(await indexCalls()).toEqual([]);
+    // Nothing started, so nothing is locked and no run is on record: the
+    // banner the status already draws is what tells the owner.
+    for (const left of ["memory-index.lock", "memory-index-state.json"]) {
+      expect(await fs.access(path.join(tmpDir, left)).then(() => true, () => false)).toBe(false);
+    }
+  });
+
+  it("holds it back just the same when the fingerprint is missing rather than different", async () => {
+    await withRecordingCli((status) => {
+      status.chunks = 512;
+      status.files = 7;
+      (status.custom as Record<string, unknown>).indexIdentity = { status: "missing" };
+    });
+    const { startMemoryIndex, getMemoryStatus } = await import("@/lib/clawkeep-memory");
+    expect((await getMemoryStatus()).errorCode).toBe("index_identity_missing");
+    expect((await startMemoryIndex("incremental", "schedule")).declined).toBe("full_reindex_required");
+    expect(await indexCalls()).toEqual([]);
+  });
+
+  it("still upgrades the owner's Index now on the same index, which is how it gets rebuilt", async () => {
+    await withRecordingCli(disowned);
+    const { resolveIndexMode, startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect(await resolveIndexMode("incremental", "manual")).toBe("full");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    const run = await settledMemoryRun(tmpDir);
+    expect(run.mode).toBe("full");
+    expect(run.trigger).toBe("manual");
+    const [index] = await indexCalls();
+    expect(index).toContain("--force");
+  });
+
+  it("gives the schedule the first build of an index that holds nothing — there is nothing to throw away", async () => {
+    await withRecordingCli((status) => {
+      status.chunks = 0;
+      status.files = 0;
+      (status.custom as Record<string, unknown>).indexIdentity = { status: "missing" };
+    });
+    const { resolveIndexMode } = await import("@/lib/clawkeep-memory");
+    expect(await resolveIndexMode("incremental", "schedule")).toBe("full");
+  });
+
+  it("leaves a scheduled pass over a valid index incremental", async () => {
+    await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("incremental", "schedule")).accepted).toBe(true);
+    const run = await settledMemoryRun(tmpDir);
+    expect(run.mode).toBe("incremental");
+    const [index] = await indexCalls();
+    expect(index).not.toContain("--force");
+  });
+
+  it("asks a FRESH status for the schedule, so a cached empty reading cannot send --force over a built index", async () => {
+    // The button reads the cache on purpose — a click must not wait on a
+    // process boot — and pays for a stale zero with one extra pass the owner
+    // asked for. The schedule has nobody waiting, and a stale zero there is
+    // a re-embed on a timer.
+    await withRecordingCli((status) => { status.chunks = 0; status.files = 0; });
+    const { resolveIndexMode, getMemoryStatus } = await import("@/lib/clawkeep-memory");
+    expect((await getMemoryStatus()).chunks).toBe(0);
+
+    // A pass fills the index; the cache still holds the empty reading.
+    const payload = JSON.parse(JSON.stringify(REAL_STATUS)) as Array<{ status: Record<string, unknown> }>;
+    payload[0].status.chunks = 512;
+    payload[0].status.files = 7;
+    const script = process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN!;
+    const body = (await fs.readFile(script, "utf8")).replace(/cat <<'JSON'\n.*\nJSON/s, `cat <<'JSON'\n${JSON.stringify(payload)}\nJSON`);
+    await fs.writeFile(script, body, { mode: 0o755 });
+
+    expect(await resolveIndexMode("incremental", "manual")).toBe("full");
+    expect(await resolveIndexMode("incremental", "schedule")).toBe("incremental");
+  });
+});
+
 describe("how far an OpenClaw pass has got", () => {
   afterEach(() => {
     delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;

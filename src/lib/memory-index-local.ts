@@ -272,6 +272,23 @@ export class IndexPassAbortedError extends Error {
   }
 }
 
+/**
+ * The index needs a rebuild, and this pass was not allowed to start one.
+ *
+ * Thrown only by a pass that may not discard embeddings (the unattended
+ * schedule — see `LocalIndexPassOptions.mayDiscard`) when it finds, BEFORE it
+ * has touched a row, that the vectors on disk answer to another embedder or
+ * another table shape. The index is left exactly as it was: throwing away every
+ * embedding the owner has and spending the night re-embedding them is the
+ * owner's decision, made with the Full reindex button, never one a timer makes.
+ */
+export class IndexRebuildRequiredError extends Error {
+  constructor() {
+    super("The index needs a full reindex, which only the owner starts");
+    this.name = "IndexRebuildRequiredError";
+  }
+}
+
 // ─── the owner's folders ─────────────────────────────────────────────────────
 
 /**
@@ -869,6 +886,24 @@ export interface LocalIndexPassResult {
   capped: boolean;
 }
 
+export interface LocalIndexPassOptions {
+  /**
+   * May this pass throw away embeddings the index already holds?
+   *
+   * True — the default — for every run somebody asked for: the Full reindex
+   * button, "Index now", the switch to the cloud embedder. FALSE for the
+   * unattended schedule (TASK-1197). A rebuild empties the store and embeds
+   * every document again, and a timer must never be what decides to do that:
+   * an index that has gone stale under a new embedder is reported, and the
+   * owner rebuilds it. Such a pass rebuilds only an index that holds nothing
+   * — there is nothing to throw away, and an incremental pass into no index
+   * is the same work — and otherwise either runs incrementally (an index that
+   * is still valid) or stops with `IndexRebuildRequiredError` before it has
+   * touched a row (one that is not).
+   */
+  mayDiscard?: boolean;
+}
+
 /**
  * How far this pass has got, for the bar the owner is watching.
  *
@@ -1038,7 +1073,9 @@ interface PendingFile {
  * read, hashed, and left alone. `full` (and an identity that no longer matches)
  * empties the store first, because the vectors then on disk answer to a
  * different model — but only once the embedder has answered one request, so a
- * reindex that cannot run leaves the index it was going to replace.
+ * reindex that cannot run leaves the index it was going to replace. A pass
+ * that may not discard (see `LocalIndexPassOptions.mayDiscard`) never empties
+ * an index that holds chunks.
  *
  * A file that cannot be read is counted and stepped over. The EMBEDDER failing
  * ends the pass — see `EmbeddingUnavailableError`.
@@ -1047,7 +1084,9 @@ export async function runLocalIndexPass(
   mode: MemoryIndexMode,
   signal?: AbortSignal,
   onProgress?: LocalIndexProgressReporter,
+  options: LocalIndexPassOptions = {},
 ): Promise<LocalIndexPassResult> {
+  const mayDiscard = options.mayDiscard ?? true;
   // ONE reading of the embedder for the whole pass. Resolved before the store is
   // opened, so a pass cannot embed its first files with one embedder and its
   // last with another — a switch landing mid-pass would leave an index of two
@@ -1072,7 +1111,20 @@ export async function runLocalIndexPass(
 
     const identity = identityOf(db, sources, identityNow);
     const schema = metaGet(db, "schema_version");
-    const rebuild = mode === "full" || identity === "mismatched" || schema !== SCHEMA_VERSION;
+    const storeDisowned = identity === "mismatched" || schema !== SCHEMA_VERSION;
+    let rebuild = mode === "full" || storeDisowned;
+    // THE SCHEDULE NEVER THROWS AN INDEX AWAY (TASK-1197). Decided here, on the
+    // store as it is now, and not only by the caller's plan: the plan reads a
+    // status up to two minutes old, and an embedder switched inside that window
+    // — or an index a manual pass filled after the reading said "empty" — would
+    // otherwise reach the DELETE below on a timer's say-so.
+    if (rebuild && !mayDiscard && countOf(db, "SELECT COUNT(*) AS n FROM chunks") > 0) {
+      if (storeDisowned) throw new IndexRebuildRequiredError();
+      // A full pass planned for an index that was empty when the plan was made
+      // and is not now. The reason for rebuilding is gone; the rows are valid,
+      // so this is the ordinary incremental pass.
+      rebuild = false;
+    }
     if (rebuild) {
       // THE EMBEDDER ANSWERS BEFORE A WORKING INDEX IS THROWN AWAY.
       //
@@ -1375,7 +1427,7 @@ export async function runLocalIndexPass(
     }
 
     if (wrote) invalidateVectorCache();
-    return { mode: rebuild ? "full" : mode, files, chunks, failures, capped };
+    return { mode: rebuild ? "full" : "incremental", files, chunks, failures, capped };
   } finally {
     db.close();
   }

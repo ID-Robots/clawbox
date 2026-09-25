@@ -23,6 +23,7 @@ export interface SettledMemoryRun {
   errorCode: string;
   childPid: number;
   mode?: string;
+  trigger?: string;
 }
 
 /**
