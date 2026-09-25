@@ -4904,6 +4904,209 @@ CAUSEPY
     || true
 }
 
+# ── A plugin build the registry does not have for THIS core (TASK-1206) ─────
+#
+# The 4.1.0 box: OpenClaw 2026.9.4, and ClawHub has no
+# `@openclaw/deepseek-provider@2026.9.4` (its catalogue goes 2026.9.3 → 2026.9.5;
+# npm has every release, ClawHub skipped this one). The unpinned fallback
+# resolves ClawHub's latest, which declares plugin API `>=2026.9.5`, and the
+# 2026.9.4 runtime refuses it. Both are the registry's own answers and neither
+# changes between two starts of the same core — yet every start asked both
+# again, spent 35–60 s of this ExecStartPre on a Jetson doing it, switched the
+# plugin off and filed "Needs repair" again.
+#
+# So the "no" is KEPT, in `$CLAWBOX_ROOT/data/plugin-install-unavailable.json`
+# — the same file and shape `src/lib/plugin-install-unavailable.ts` reads and
+# writes for the configure route, the Retry and the updater:
+#
+#   PER CORE: a record for another core counts for nothing, so an OpenClaw
+#   update asks again at once — the pinned spec IS the core's version.
+#   BOUNDED: a week at most, then one start asks again, so a registry that
+#   catches up is picked up without anyone pressing anything.
+#   ONLY THE REGISTRY'S OWN ANSWER: a killed install, a DNS failure or a 503
+#   says nothing about the package and is never recorded. Those keep asking at
+#   every start, as before, because the next one may work.
+CLAWBOX_PLUGIN_UNAVAILABLE_FILE="$CLAWBOX_ROOT/data/plugin-install-unavailable.json"
+CLAWBOX_PLUGIN_UNAVAILABLE_TTL_S=604800
+# The registry's and the core's words for "no build this core can load" — the
+# ClawHub installer's 404s, npm's, and the core refusing a build made for a
+# newer one. The same list as NO_INSTALLABLE_BUILD_PATTERN in
+# src/lib/plugin-install-unavailable.ts, which a test holds the two to.
+CLAWBOX_PLUGIN_UNAVAILABLE_PATTERN="Version not found|Package not found|not in this registry|E404|ETARGET|No matching version|notarget|requires plugin API|requires OpenClaw"
+
+# Did an install that failed with this status and output say the build does
+# not exist, or does not fit the core? 0 = yes. A killed one (124 is `timeout`
+# at its ceiling, 137 the SIGKILL `-k 5` sends after it) never did, whatever it
+# printed before it died, and neither did one that timed out on the network —
+# the same exclusions as `saysNoInstallableBuild`.
+clawbox_plugin_says_unavailable() {
+  local rc="$1" out="$2"
+  case "$rc" in
+    124|137) return 1 ;;
+  esac
+  # Here-strings, not `printf | grep -q`: under `pipefail` a grep that stops
+  # at its first match can SIGPIPE the printf and turn a match into a failure.
+  if grep -Eqi -- "timed out after|ETIMEDOUT" <<< "$out"; then
+    return 1
+  fi
+  grep -Eqi -- "$CLAWBOX_PLUGIN_UNAVAILABLE_PATTERN" <<< "$out"
+}
+
+# Is a "no installable build" answer on record for this plugin on this core?
+# Prints one line saying when and why, or nothing.
+#
+# ADOPTS THE ROW A 4.1.0 BOOT LEFT. Those boots filed the refusal as a repair
+# row — `install`, the spec pinned to this core, the core's own words in the
+# reason — and never kept anything else. A box upgrading from there has already
+# been told "no" for this core on every start; asking once more on the upgrade's
+# own boot would be the delay this record exists to remove. So such a row is
+# taken as the record, stamped now. Only for this core and only for that
+# wording: a row that says "offline" or names another core adopts nothing.
+clawbox_plugin_unavailable_recorded() {
+  CLAWBOX_UNAVAILABLE_ID="$1" CLAWBOX_UNAVAILABLE_CORE="$2" \
+    CLAWBOX_UNAVAILABLE_TTL_S="$CLAWBOX_PLUGIN_UNAVAILABLE_TTL_S" \
+    CLAWBOX_UNAVAILABLE_PATTERN="$CLAWBOX_PLUGIN_UNAVAILABLE_PATTERN" \
+    python3 - "$CLAWBOX_PLUGIN_UNAVAILABLE_FILE" "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null || true
+import json, os, re, sys, tempfile, time
+
+path, repair_path = sys.argv[1], sys.argv[2]
+plugin_id = os.environ["CLAWBOX_UNAVAILABLE_ID"]
+core = os.environ["CLAWBOX_UNAVAILABLE_CORE"]
+ttl_ms = int(os.environ["CLAWBOX_UNAVAILABLE_TTL_S"]) * 1000
+pattern = re.compile(os.environ["CLAWBOX_UNAVAILABLE_PATTERN"], re.I)
+now_ms = int(time.time() * 1000)
+
+
+def load(p):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+records = load(path)
+entry = records.get(plugin_id)
+# Stamped more than the bound in the FUTURE is a clock that was wrong when it
+# was written; believing it would hold the record for ever.
+if (isinstance(entry, dict) and entry.get("core") == core
+        and isinstance(entry.get("atMs"), (int, float)) and abs(now_ms - entry["atMs"]) < ttl_ms):
+    hours = max(0, int(now_ms - entry["atMs"]) // 3600000)
+    cause = entry.get("cause") if isinstance(entry.get("cause"), str) else ""
+    print(f"recorded {hours} h ago: {cause or 'no installable build'}")
+    raise SystemExit(0)
+
+row = None
+for key, value in load(repair_path).items():
+    if isinstance(value, dict) and (value.get("id") or key) == plugin_id:
+        row = value
+        break
+if not isinstance(row, dict) or row.get("stage") != "install":
+    raise SystemExit(0)
+spec = row.get("spec") if isinstance(row.get("spec"), str) else ""
+reason = row.get("reason") if isinstance(row.get("reason"), str) else ""
+# `…exited 1: Version not found on ClawHub: …` — the core's words start at the
+# verb the boot script quoted, when it quoted one.
+cause = reason[reason.find("openclaw plugins install"):] if "openclaw plugins install" in reason else reason
+if not spec.endswith("@" + core) or not pattern.search(cause) or re.search(r"killed at its deadline", cause):
+    raise SystemExit(0)
+cause = " ".join(cause.split())
+if len(cause) > 160:
+    cause = cause[:159].rstrip() + "…"
+records[plugin_id] = {"core": core, "atMs": now_ms, "specs": [spec], "cause": cause}
+directory = os.path.dirname(path) or "."
+os.makedirs(directory, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=".plugin-install-unavailable.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(records, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    # Not recorded, but the answer on file is still the answer for THIS start.
+print(f"taken from the repair row an earlier start filed: {cause}")
+PY
+}
+
+# Keep the registry's "no" for this plugin on this core. Never fatal: a box
+# that cannot write it asks again at the next start, which is where it was.
+clawbox_plugin_unavailable_record() {
+  local id="$1" core="$2" cause="$3"
+  shift 3
+  if ! CLAWBOX_UNAVAILABLE_ID="$id" CLAWBOX_UNAVAILABLE_CORE="$core" CLAWBOX_UNAVAILABLE_CAUSE="$cause" \
+    python3 - "$CLAWBOX_PLUGIN_UNAVAILABLE_FILE" "$@" <<'PY' 2>/dev/null
+import json, os, sys, tempfile, time
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as fh:
+        records = json.load(fh)
+except (OSError, ValueError):
+    records = {}
+if not isinstance(records, dict):
+    records = {}
+records[os.environ["CLAWBOX_UNAVAILABLE_ID"]] = {
+    "core": os.environ["CLAWBOX_UNAVAILABLE_CORE"],
+    "atMs": int(time.time() * 1000),
+    "specs": sys.argv[2:],
+    "cause": " ".join(os.environ["CLAWBOX_UNAVAILABLE_CAUSE"].split()),
+}
+directory = os.path.dirname(path) or "."
+os.makedirs(directory, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=".plugin-install-unavailable.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(records, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+PY
+  then
+    echo "  WARN: could not record that $id has no installable build for OpenClaw $core; the next start asks the registry again" >&2
+  fi
+}
+
+# The plugin installed after all: the "no" is history.
+clawbox_plugin_unavailable_forget() {
+  [ -f "$CLAWBOX_PLUGIN_UNAVAILABLE_FILE" ] || return 0
+  CLAWBOX_UNAVAILABLE_ID="$1" python3 - "$CLAWBOX_PLUGIN_UNAVAILABLE_FILE" <<'PY' 2>/dev/null || true
+import json, os, sys, tempfile
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as fh:
+        records = json.load(fh)
+except (OSError, ValueError):
+    raise SystemExit(0)
+if not isinstance(records, dict) or os.environ["CLAWBOX_UNAVAILABLE_ID"] not in records:
+    raise SystemExit(0)
+del records[os.environ["CLAWBOX_UNAVAILABLE_ID"]]
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".plugin-install-unavailable.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(records, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+except Exception:
+    # A stale record for a core whose plugin is now on disk is harmless: the
+    # install block's own on-disk guard stops it being consulted at all.
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+PY
+}
+
 # ── What a capability-consent attempt actually PROVED ───────────────────────
 #
 # TASK-606 follow-up. `timeout -k 5 60 openclaw plugins enable <id>
@@ -6140,6 +6343,19 @@ for key, row in rows.items():
     if not isinstance(plugin_id, str) or canonical(plugin_id) not in REATTEMPTABLE:
         continue
     if canonical(plugin_id) in marked_this_run:
+        continue
+    # A DEEPSEEK ROW WITH NO PAYLOAD ON DISK IS THE INSTALL BLOCK'S (TASK-1206).
+    # `plugins enable` cannot load a plugin that is not there — the core answers
+    # "Plugin not found" every time — and it writes `enabled: true` before it
+    # finds that out, so each boot switched ClawBox AI's plugin on, watched it
+    # fail, and switched it off again, a CLI cold start for nothing. The
+    # deepseek install block further down is what brings the payload back, and
+    # its success clears this row and puts the entry back itself. Same path
+    # that block guards on: `$OPENCLAW_HOME_DIR`, which is the config's own
+    # directory.
+    if canonical(plugin_id) == "deepseek" and not os.path.isfile(os.path.join(
+        os.path.dirname(os.path.abspath(sys.argv[1])), "extensions", "deepseek", "openclaw.plugin.json",
+    )):
         continue
     if row.get("disabled") is not True:
         continue
@@ -7466,44 +7682,88 @@ PY
     if [ -n "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
       DEEPSEEK_PLUGIN_PINNED="${DEEPSEEK_PLUGIN_SPEC}@${CLAWBOX_OPENCLAW_EFFECTIVE}"
     fi
-    echo "  Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it; ClawBox AI needs it)..."
-    # CAPTURED (TASK-1088), like the codex install above: the row below used to
-    # say "the device may be offline" whatever the core had actually answered.
-    # The FIRST refusal is the one kept — the pinned spec is the one the row
-    # records and the Retry runs, and the unpinned one is only its fallback.
-    DEEPSEEK_INSTALL_RC=""
-    DEEPSEEK_INSTALL_OUT=""
-    DEEPSEEK_INSTALLED=""
-    for DEEPSEEK_TRY_SPEC in $DEEPSEEK_PLUGIN_PINNED $DEEPSEEK_PLUGIN_SPEC; do
-      DEEPSEEK_TRY_RC=0
-      clawbox_run_openclaw_capture 180 plugins install "$DEEPSEEK_TRY_SPEC" --accept-capabilities \
-        || DEEPSEEK_TRY_RC=$?
-      if [ "$DEEPSEEK_TRY_RC" = "0" ]; then
-        DEEPSEEK_INSTALLED="$DEEPSEEK_TRY_SPEC"
-        break
+    # NOT ASKED AGAIN WHEN THE ANSWER IS ALREADY KNOWN (TASK-1206). A "no build
+    # for this core" the registry gave within the bound is believed — see
+    # `clawbox_plugin_unavailable_recorded` — and this start spends no registry
+    # call and no CLI cold start on it. ClawBox AI is not waiting on it either:
+    # its turns go out through the `openai-completions` provider definition the
+    # configure route writes, which the core carries with or without this
+    # plugin; what the plugin adds is DeepSeek's native thinking and replay
+    # hooks.
+    DEEPSEEK_UNAVAILABLE=""
+    if [ -n "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
+      DEEPSEEK_UNAVAILABLE="$(clawbox_plugin_unavailable_recorded deepseek "$CLAWBOX_OPENCLAW_EFFECTIVE")"
+    fi
+    DEEPSEEK_UNAVAILABLE_REASON="The DeepSeek provider plugin has no build that OpenClaw ${CLAWBOX_OPENCLAW_EFFECTIVE:-(unknown)} can load on the plugin registry, so it is switched off. ClawBox AI keeps working without it; the device checks again after the next OpenClaw update, or in a week."
+    if [ -n "$DEEPSEEK_UNAVAILABLE" ]; then
+      echo "  DeepSeek provider plugin: no installable build for OpenClaw $CLAWBOX_OPENCLAW_EFFECTIVE ($DEEPSEEK_UNAVAILABLE); not installing it on this start"
+      # NO SWITCH-ON-AND-OFF: the entry is left exactly as the start that got
+      # the answer left it, which is off. Only an entry something has turned
+      # back ON since — a plugin that is not there, enabled — is switched off
+      # again, the same move the refusal itself made.
+      if [ "$(clawbox_plugin_entry_enabled deepseek)" = "1" ]; then
+        clawbox_plugin_boot_without deepseek install "$DEEPSEEK_UNAVAILABLE_REASON" "$DEEPSEEK_PLUGIN_PINNED"
       fi
-      if [ -z "$DEEPSEEK_INSTALL_RC" ]; then
-        DEEPSEEK_INSTALL_RC="$DEEPSEEK_TRY_RC"
-        DEEPSEEK_INSTALL_OUT="$CLAWBOX_CLI_OUT"
-      fi
-    done
-    if [ -n "$DEEPSEEK_INSTALLED" ]; then
-      echo "  DeepSeek provider plugin installed ($DEEPSEEK_INSTALLED)"
-      clawbox_plugin_repair_clear deepseek
     else
-      DEEPSEEK_INSTALL_CAUSE="$(clawbox_plugin_cli_cause "openclaw plugins install" "${DEEPSEEK_INSTALL_RC:-1}" "$DEEPSEEK_INSTALL_OUT")"
-      # STATED PRECISELY, because this one is not fully repairable from here.
-      # The readiness refusal for DeepSeek comes from a CONFIGURED PROVIDER with
-      # no plugin behind it, not from an enabled plugin entry — so switching an
-      # entry off (there may not even be one) does not always clear it, and the
-      # only thing that would is removing the provider, which would take ClawBox
-      # AI off the box without the owner asking. The marker is what makes the
-      # difference visible in Settings instead of leaving a boot loop nobody can
-      # read.
-      echo "  WARN: could not install @openclaw/deepseek-provider; recording it for repair in Settings.$DEEPSEEK_INSTALL_CAUSE"
-      clawbox_plugin_boot_without deepseek install \
-        "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. The device may be offline, or the package registry unreachable.$DEEPSEEK_INSTALL_CAUSE" \
-        "${DEEPSEEK_PLUGIN_PINNED:-$DEEPSEEK_PLUGIN_SPEC}"
+      echo "  Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it; ClawBox AI needs it)..."
+      # CAPTURED (TASK-1088), like the codex install above: the row below used to
+      # say "the device may be offline" whatever the core had actually answered.
+      # The FIRST refusal is the one kept — the pinned spec is the one the row
+      # records and the Retry runs, and the unpinned one is only its fallback.
+      DEEPSEEK_INSTALL_RC=""
+      DEEPSEEK_INSTALL_OUT=""
+      DEEPSEEK_INSTALLED=""
+      DEEPSEEK_TRIED=""
+      # Stays 1 only while EVERY refusal is the registry's "no such build" — one
+      # timeout or network error among them and nothing is recorded.
+      DEEPSEEK_ALL_UNAVAILABLE=1
+      DEEPSEEK_STARTED_AT=$SECONDS
+      for DEEPSEEK_TRY_SPEC in $DEEPSEEK_PLUGIN_PINNED $DEEPSEEK_PLUGIN_SPEC; do
+        DEEPSEEK_TRY_RC=0
+        DEEPSEEK_TRIED="$DEEPSEEK_TRIED $DEEPSEEK_TRY_SPEC"
+        clawbox_run_openclaw_capture 180 plugins install "$DEEPSEEK_TRY_SPEC" --accept-capabilities \
+          || DEEPSEEK_TRY_RC=$?
+        if [ "$DEEPSEEK_TRY_RC" = "0" ]; then
+          DEEPSEEK_INSTALLED="$DEEPSEEK_TRY_SPEC"
+          break
+        fi
+        clawbox_plugin_says_unavailable "$DEEPSEEK_TRY_RC" "$CLAWBOX_CLI_OUT" || DEEPSEEK_ALL_UNAVAILABLE=0
+        if [ -z "$DEEPSEEK_INSTALL_RC" ]; then
+          DEEPSEEK_INSTALL_RC="$DEEPSEEK_TRY_RC"
+          DEEPSEEK_INSTALL_OUT="$CLAWBOX_CLI_OUT"
+        fi
+      done
+      echo "  DeepSeek provider plugin install attempts took $((SECONDS - DEEPSEEK_STARTED_AT)) s"
+      if [ -n "$DEEPSEEK_INSTALLED" ]; then
+        echo "  DeepSeek provider plugin installed ($DEEPSEEK_INSTALLED)"
+        clawbox_plugin_unavailable_forget deepseek
+        clawbox_plugin_repair_clear deepseek
+      elif [ "$DEEPSEEK_ALL_UNAVAILABLE" = "1" ] && [ -n "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
+        # THE REGISTRY SAID NO, in so many words, to every spec — kept, so the
+        # next start does not ask again (`clawbox_plugin_unavailable_recorded`).
+        # Only a PINNED ask is recorded: without the core's release there is
+        # nothing to key the answer to.
+        DEEPSEEK_INSTALL_CAUSE="$(clawbox_plugin_cli_cause "openclaw plugins install" "${DEEPSEEK_INSTALL_RC:-1}" "$DEEPSEEK_INSTALL_OUT")"
+        # shellcheck disable=SC2086 # the tried specs are one word each, split on purpose
+        clawbox_plugin_unavailable_record deepseek "$CLAWBOX_OPENCLAW_EFFECTIVE" "${DEEPSEEK_INSTALL_CAUSE# }" $DEEPSEEK_TRIED
+        echo "  DeepSeek provider plugin: the registry has no build OpenClaw $CLAWBOX_OPENCLAW_EFFECTIVE can load (tried:${DEEPSEEK_TRIED}).$DEEPSEEK_INSTALL_CAUSE Recorded; not asked again until the core changes or a week passes."
+        clawbox_plugin_boot_without deepseek install "$DEEPSEEK_UNAVAILABLE_REASON$DEEPSEEK_INSTALL_CAUSE" \
+          "${DEEPSEEK_PLUGIN_PINNED:-$DEEPSEEK_PLUGIN_SPEC}"
+      else
+        DEEPSEEK_INSTALL_CAUSE="$(clawbox_plugin_cli_cause "openclaw plugins install" "${DEEPSEEK_INSTALL_RC:-1}" "$DEEPSEEK_INSTALL_OUT")"
+        # STATED PRECISELY, because this one is not fully repairable from here.
+        # The readiness refusal for DeepSeek comes from a CONFIGURED PROVIDER with
+        # no plugin behind it, not from an enabled plugin entry — so switching an
+        # entry off (there may not even be one) does not always clear it, and the
+        # only thing that would is removing the provider, which would take ClawBox
+        # AI off the box without the owner asking. The marker is what makes the
+        # difference visible in Settings instead of leaving a boot loop nobody can
+        # read.
+        echo "  WARN: could not install @openclaw/deepseek-provider; recording it for repair in Settings.$DEEPSEEK_INSTALL_CAUSE"
+        clawbox_plugin_boot_without deepseek install \
+          "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. The device may be offline, or the package registry unreachable.$DEEPSEEK_INSTALL_CAUSE" \
+          "${DEEPSEEK_PLUGIN_PINNED:-$DEEPSEEK_PLUGIN_SPEC}"
+      fi
     fi
   fi
 fi

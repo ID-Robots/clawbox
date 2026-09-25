@@ -109,7 +109,11 @@ const {
     spec: string;
   }) => {}),
 }));
-vi.mock("@/lib/plugin-repair", () => ({
+vi.mock("@/lib/plugin-repair", async () => ({
+  // Pure string work, and the one helper the REAL after-update retry needs when
+  // a case below runs it end to end (TASK-1206).
+  canonicalPluginId: (await vi.importActual<typeof import("@/lib/plugin-repair-id")>("@/lib/plugin-repair-id"))
+    .canonicalPluginId,
   clearPluginRepair: mockClearPluginRepair,
   readPluginRepairs: mockReadPluginRepairs,
   clawboxDisabledEntryId: mockClawboxDisabledEntryId,
@@ -2781,6 +2785,79 @@ describe("updater", () => {
 
       expect(mockRetryAfterCoreUpdate).toHaveBeenCalledTimes(1);
       expect(updater.getUpdateState().steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+    });
+
+    it("passes its final health step without the DeepSeek plugin when the core has no build of it (TASK-1206)", async () => {
+      // The 4.1.0 box: OpenClaw 2026.9.4, no DeepSeek provider build for it on
+      // ClawHub, and the pre-start the update's restart ran has recorded that.
+      // The REAL after-update retry runs here, against the record on disk: it
+      // must neither stop the gateway nor restart it — the minute-plus that
+      // held the update's last step on an answer already known.
+      const actual = await vi.importActual<typeof import("@/lib/plugin-repair-after-update")>(
+        "@/lib/plugin-repair-after-update",
+      );
+      mockReadPluginRepairs.mockResolvedValue({
+        deepseek: {
+          id: "deepseek", stage: "install", reason: "no build", atMs: 1, disabled: true,
+          spec: "clawhub:@openclaw/deepseek-provider@2026.9.4",
+        },
+      });
+      const readBoxFile = mockReadFile.getMockImplementation();
+      mockReadFile.mockImplementation((async (file: Parameters<typeof fs.readFile>[0], ...rest: unknown[]) => {
+        if (String(file).endsWith("plugin-install-unavailable.json")) {
+          return JSON.stringify({
+            deepseek: {
+              core: "2026.9.4",
+              atMs: Date.now(),
+              specs: ["clawhub:@openclaw/deepseek-provider@2026.9.4", "clawhub:@openclaw/deepseek-provider"],
+              cause: "openclaw plugins install exited 1: Version not found on ClawHub: @openclaw/deepseek-provider@2026.9.4.",
+            },
+          });
+        }
+        if (!readBoxFile) throw new Error("ENOENT");
+        return (readBoxFile as (...args: unknown[]) => unknown)(file, ...rest);
+      }) as unknown as typeof fs.readFile);
+      const used = { quiesce: 0, restartAndVerify: 0 };
+      let outcome: Awaited<ReturnType<typeof actual.retryPluginRepairsAfterCoreUpdate>> | undefined;
+      let failure: unknown;
+      mockRetryAfterCoreUpdate.mockImplementationOnce(async (hooks) => {
+        try {
+          outcome = await actual.retryPluginRepairsAfterCoreUpdate({
+            release: async () => "2026.9.4",
+            quiesce: (operation) => {
+              used.quiesce += 1;
+              return hooks.quiesce(operation);
+            },
+            restartAndVerify: () => {
+              used.restartAndVerify += 1;
+              return hooks.restartAndVerify();
+            },
+            log: () => {},
+          });
+        } catch (err) {
+          failure = err;
+          throw err;
+        }
+        return outcome;
+      });
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+
+      try {
+        expect(await updater.checkContinuation()).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+        expect(updater.getUpdateState().steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+        // The retry ran to its end — not a throw the step swallowed — and skipped it.
+        expect(mockRetryAfterCoreUpdate).toHaveBeenCalledTimes(1);
+        expect(failure).toBeUndefined();
+        expect(outcome).toEqual({ release: "2026.9.4", repaired: [], failed: [] });
+        expect(used).toEqual({ quiesce: 0, restartAndVerify: 0 });
+        expect(mockRecordPluginRepair).not.toHaveBeenCalled();
+      } finally {
+        // `clearAllMocks` keeps implementations; the next case expects an empty marker.
+        mockReadPluginRepairs.mockResolvedValue({});
+      }
     });
 
     it("never retries plugin repairs on the x64 desktop package, whose gateway is the owner's", async () => {

@@ -11,6 +11,14 @@ import {
   type PluginRepairs,
 } from "@/lib/plugin-repair";
 import { runPluginRepair, type PluginRepairVerdict } from "@/lib/plugin-repair-run";
+import { readPluginInstallUnavailable } from "@/lib/plugin-install-unavailable";
+
+/**
+ * The DeepSeek provider plugin's canonical id. Spelled here rather than taken
+ * from `openclaw-deepseek-plugin`, which the suites of this module replace with
+ * a two-function mock.
+ */
+const DEEPSEEK_PLUGIN_ID = "deepseek";
 
 // The repair a CORE UPDATE owes the rows it stranded (TASK-1088).
 //
@@ -145,7 +153,27 @@ export async function retryPluginRepairsAfterCoreUpdate(
     log("could not read the installed OpenClaw release; plugins switched off for repair are left to the Retry in Settings");
     return nothing;
   }
-  const eligible = pluginRepairsDueAfterCoreUpdate(repairs, release, nowMs);
+  const eligible: PluginRepairEntry[] = [];
+  for (const row of pluginRepairsDueAfterCoreUpdate(repairs, release, nowMs)) {
+    // A BUILD THE REGISTRY DOES NOT HAVE FOR THIS CORE is not retried (TASK-1206).
+    // The restart this update has just done ran the gateway pre-start, which
+    // asked for it and recorded the answer; retrying here would ask again, and
+    // a retry is not an install alone — it stops the gateway, installs, starts
+    // it and waits for ready, a minute and more on the update's final step for
+    // an answer that is already known. Not claimed either: `retriedCore` is for
+    // a retry that ran, and this one did not.
+    if (canonicalPluginId(row.id) === DEEPSEEK_PLUGIN_ID) {
+      const known = await readPluginInstallUnavailable(DEEPSEEK_PLUGIN_ID, release, nowMs).catch(() => null);
+      if (known) {
+        log(
+          `not retrying the ${row.id} plugin: OpenClaw ${release} has no installable build of it on record `
+            + `(${known.cause || "no installable build"}); ClawBox AI runs on its provider transport meanwhile`,
+        );
+        continue;
+      }
+    }
+    eligible.push(row);
+  }
   if (eligible.length === 0) return { ...nothing, release };
 
   // SPENT BEFORE IT RUNS, and said on the row so the panel reads "Repairing…"

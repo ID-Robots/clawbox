@@ -642,6 +642,74 @@ describe("providers/status — needs repair", () => {
     const body = await (await GET()).json() as Record<string, unknown>;
     expect(body).not.toHaveProperty("unattachedRepairs");
   });
+
+  // TASK-1206. The 4.1.0 box: ClawHub had no DeepSeek provider build for
+  // OpenClaw 2026.9.4, the boot script switched the plugin off, and the ClawBox
+  // AI row said "Needs repair" over a chat that was answering — its turns go
+  // out through the `openai-completions` provider definition, not the plugin.
+  describe("while ClawBox AI is usable (TASK-1206)", () => {
+    const DEEPSEEK_UNAVAILABLE_ROW = {
+      id: "deepseek",
+      stage: "install",
+      reason: "The DeepSeek provider plugin has no build that OpenClaw 2026.9.4 can load on the plugin registry, so it is switched off.",
+      atMs: 1_790_000_000_000,
+      disabled: true,
+      spec: "clawhub:@openclaw/deepseek-provider@2026.9.4",
+    };
+
+    /** A box paired to ClawBox AI, exactly as the configure route writes it. */
+    function clawaiBox() {
+      getActiveHarness.mockResolvedValue("openclaw");
+      readConfig.mockResolvedValue({
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+        models: {
+          providers: {
+            deepseek: { baseUrl: "https://clawbox.com/api/ai", api: "openai-completions", apiKey: "claw_test_placeholder" },
+          },
+        },
+      });
+      hasClawaiToken.mockResolvedValue(true);
+    }
+
+    type Body = { providers: (Row & { needsRepair?: { pluginId: string } })[] } & Record<string, unknown>;
+
+    it("does not flag DeepSeek as needing repair on the ClawBox AI row", async () => {
+      clawaiBox();
+      writeMarker({ deepseek: DEEPSEEK_UNAVAILABLE_ROW });
+
+      const body = await (await GET()).json() as Body;
+      const clawai = body.providers.find((r) => r.id === "clawai");
+      expect(clawai?.state).toBe("connected");
+      expect(clawai).not.toHaveProperty("needsRepair");
+      // …and it is not moved to the list of rows with nowhere else to go.
+      expect(body).not.toHaveProperty("unattachedRepairs");
+    });
+
+    it("keeps every other plugin's badge", async () => {
+      clawaiBox();
+      writeMarker({
+        deepseek: DEEPSEEK_UNAVAILABLE_ROW,
+        codex: { id: "codex", stage: "install", reason: "refused", atMs: 1, disabled: true, spec: "@openclaw/codex@2026.9.4" },
+      });
+
+      const body = await (await GET()).json() as Body;
+      expect(body.providers.find((r) => r.id === "openai")?.needsRepair?.pluginId).toBe("codex");
+      expect(body.providers.find((r) => r.id === "clawai")).not.toHaveProperty("needsRepair");
+    });
+
+    it("keeps the DeepSeek badge when ClawBox AI is not usable — the portal refused its token", async () => {
+      // Then the owner is looking at a broken ClawBox AI, and every reason on
+      // screen is worth having.
+      clawaiBox();
+      clawaiTokenRejectedByPortal.mockReturnValue(true);
+      writeMarker({ deepseek: DEEPSEEK_UNAVAILABLE_ROW });
+
+      const body = await (await GET()).json() as Body;
+      const clawai = body.providers.find((r) => r.id === "clawai");
+      expect(clawai?.state).toBe("needs-reauth");
+      expect(clawai?.needsRepair?.pluginId).toBe("deepseek");
+    });
+  });
 });
 
 describe("providers/status — a ClawBox AI token the portal refused", () => {
