@@ -45,12 +45,19 @@ function timeoutSignal(ms: number): AbortSignal | undefined {
  * The /updating screen's "What's new" answer (TASK-1205).
  *
  * Asked once on mount, off the update's own poll — it never delays a status
- * read. An answer read from notes is final. Anything less is asked again on a
- * timer, and a better answer only ever REPLACES a worse one: highlights the
- * screen already has are never swapped for a "could not read them" from a
+ * read. An answer read from notes ends the timer. Anything less is asked again
+ * on a timer, and a better answer only ever REPLACES a worse one: highlights
+ * the screen already has are never swapped for a "could not read them" from a
  * server that came back up without them.
+ *
+ * `refreshKey` asks again whenever it changes — the screen bumps it each time
+ * the box answers again after an outage. The first answer can come before the
+ * updater's own fetch has moved the branch ref, when the ref still names the
+ * release being REPLACED; the server that comes back from the rebuild reads
+ * the synced checkout, so its answer is the one to keep. New highlights
+ * replace old ones; "could not read them" still never does.
  */
-export function useUpdateWhatsNew(): UpdateWhatsNewLoad {
+export function useUpdateWhatsNew(refreshKey: unknown = 0): UpdateWhatsNewLoad {
   const [answer, setAnswer] = useState<UpdateWhatsNew | null>(null);
   const [settled, setSettled] = useState(false);
 
@@ -88,7 +95,7 @@ export function useUpdateWhatsNew(): UpdateWhatsNewLoad {
       stop = true;
       window.clearTimeout(timer);
     };
-  }, []);
+  }, [refreshKey]);
 
   return { answer, settled };
 }

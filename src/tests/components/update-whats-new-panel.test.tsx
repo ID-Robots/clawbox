@@ -91,9 +91,25 @@ describe("UpdateWhatsNewPanel", () => {
     expect(within(panel).queryByTestId("update-whats-new-channel")).toBeNull();
   });
 
-  it("names a channel other than main", () => {
-    render(<UpdateWhatsNewPanel panel={updateWhatsNewPanel({ ...NOTES, channel: "beta" })} />);
+  it("names a channel other than main, and cuts a long one rather than widen the panel", () => {
+    const { unmount } = render(<UpdateWhatsNewPanel panel={updateWhatsNewPanel({ ...NOTES, channel: "beta" })} />);
     expect(screen.getByTestId("update-whats-new-channel")).toHaveTextContent("beta channel");
+    unmount();
+
+    const pin = "qa/a-very-long-branch-name-somebody-pinned-for-testing";
+    render(<UpdateWhatsNewPanel panel={updateWhatsNewPanel({ ...NOTES, channel: pin })} />);
+    const badge = screen.getByTestId("update-whats-new-channel");
+    expect(badge).toHaveClass("truncate");
+    expect(badge).not.toHaveClass("shrink-0");
+    expect(badge).toHaveAttribute("title", pin);
+  });
+
+  it("draws two identical highlights as two items, without a key clash", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const same = { title: "Same", body: "Twice." };
+    render(<UpdateWhatsNewPanel panel={updateWhatsNewPanel({ ...NOTES, highlights: [same, same] })} />);
+    expect(within(screen.getByRole("list")).getAllByRole("listitem")).toHaveLength(2);
+    expect(error.mock.calls.flat().join(" ")).not.toMatch(/same key/i);
   });
 
   it("falls back to this build's own highlights, in the owner's language, for a target on their line", () => {
@@ -217,6 +233,30 @@ describe("useUpdateWhatsNew", () => {
     unmount();
   });
 
+  it("asks again when the refresh key changes, and keeps the newer highlights", async () => {
+    vi.useFakeTimers();
+    const OLD: UpdateWhatsNew = { ...NOTES, version: "4.1.0", releaseUrl: releasePageUrl("4.1.0") };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(respond(OLD))
+      .mockResolvedValueOnce(respond(NOTES))
+      .mockResolvedValueOnce(respond(NONE_OFF_LINE));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result, rerender } = renderHook(({ key }) => useUpdateWhatsNew(key), { initialProps: { key: 0 } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.answer).toEqual(OLD);
+
+    rerender({ key: 1 });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.answer).toEqual(NOTES);
+
+    // A later "could not read them" does not take the highlights away.
+    rerender({ key: 2 });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.answer).toEqual(NOTES);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("stops asking when the screen goes away", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async () => { throw new TypeError("Failed to fetch"); });
@@ -262,6 +302,30 @@ describe("the /updating screen", () => {
     expect(step.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByTestId("reconnect-stage-with-aside")).toContainElement(panel);
   });
+
+  it("re-asks the server that comes back after an outage, and draws its answer", async () => {
+    const OLD: UpdateWhatsNew = { ...NOTES, version: "4.1.0", releaseUrl: releasePageUrl("4.1.0") };
+    let serverUp = true;
+    const whatsNewAnswers = [OLD, NOTES];
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === "/setup-api/update/status") {
+        if (!serverUp) throw new TypeError("Failed to fetch");
+        return respond(RUNNING);
+      }
+      if (url === UPDATE_WHATS_NEW_ENDPOINT) return respond(whatsNewAnswers.shift() ?? NOTES);
+      return respond({}, false);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<UpdatingPage />);
+    await screen.findByRole("region", { name: "What's new in ClawBox 4.1.0" });
+
+    // The rebuild takes the server down for a poll or two, then it answers again.
+    serverUp = false;
+    await screen.findByText(/The device is restarting/, undefined, { timeout: 5_000 });
+    serverUp = true;
+    await screen.findByRole("region", { name: "What's new in ClawBox 4.2.0" }, { timeout: 5_000 });
+    expect(fetchMock.mock.calls.filter(([url]) => url === UPDATE_WHATS_NEW_ENDPOINT)).toHaveLength(2);
+  }, 20_000);
 
   it("still shows the steps and a fallback panel when the What's new route cannot be reached", async () => {
     stubRoutes(async () => { throw new TypeError("Failed to fetch"); });

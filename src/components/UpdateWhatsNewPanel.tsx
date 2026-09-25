@@ -70,7 +70,8 @@ export default function UpdateWhatsNewPanel({ panel }: UpdateWhatsNewPanelProps)
       : tr("update.whatsNewTitleGeneric", "What's new in this update");
 
   const items = panel.kind === "notes"
-    ? panel.highlights.map((item) => ({ key: `${item.title}|${item.body}`, title: item.title, body: item.body }))
+    // Keyed by position too: two identical bullets in the notes are two items.
+    ? panel.highlights.map((item, index) => ({ key: `${index}:${item.title}`, title: item.title, body: item.body }))
     : panel.kind === "bundled"
       ? WHATS_NEW_HIGHLIGHTS.map((item) => ({
           key: item.title,
@@ -101,8 +102,11 @@ export default function UpdateWhatsNewPanel({ panel }: UpdateWhatsNewPanelProps)
           )}
         </div>
         {isNamedChannel(panel.channel) && (
+          // A QA pin can be a long branch name: it is cut, never allowed to
+          // push the header past a phone's width.
           <span
-            className="mt-0.5 shrink-0 rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--text-muted)]"
+            className="mt-0.5 min-w-0 max-w-[40%] truncate rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--text-muted)]"
+            title={panel.channel}
             data-testid="update-whats-new-channel"
           >
             {tr("update.whatsNewChannel", "{channel} channel", { channel: panel.channel })}

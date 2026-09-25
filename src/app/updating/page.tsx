@@ -88,7 +88,11 @@ function UpdatingScreen() {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [offline, setOffline] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const whatsNew = useUpdateWhatsNew();
+  // Bumped each time the box answers again after an outage, so the "What's
+  // new" panel is re-asked of the server that came back (see the hook).
+  const [reconnects, setReconnects] = useState(0);
+  const wasOffline = useRef(false);
+  const whatsNew = useUpdateWhatsNew(reconnects);
   // Not Date.now() arithmetic across a reboot — this clock only ever measures
   // how long THIS page has been open, in one process, on the viewer's device.
   const openedAt = useRef(Date.now());
@@ -106,6 +110,8 @@ function UpdatingScreen() {
         if (!res.ok) throw new Error(String(res.status));
         const data = (await res.json()) as UpdateStatus;
         if (stop) return;
+        if (wasOffline.current) setReconnects((n) => n + 1);
+        wasOffline.current = false;
         setOffline(false);
         setStatus(data);
         // The lock is the middleware's to release. Asking for the desktop again
@@ -115,7 +121,9 @@ function UpdatingScreen() {
       } catch {
         // Expected, and for minutes at a time: the rebuild stops the server.
         // Hold the screen.
-        if (!stop) setOffline(true);
+        if (stop) return;
+        wasOffline.current = true;
+        setOffline(true);
       }
     };
     void poll();

@@ -121,6 +121,17 @@ describe("parseReleaseHighlights on other shapes", () => {
     expect(item.body.endsWith("…")).toBe(true);
   });
 
+  it("reads a pathological bullet in bounded time", () => {
+    // Unclosed bold markers are the worst case for the inline regexes; the
+    // bullet is cut to what a panel could ever show before they run.
+    const body = `## Highlights\n- **x ${"** a ".repeat(100_000)}\n`;
+    const started = Date.now();
+    const [item] = parseReleaseHighlights(body);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(item.title.length).toBeLessThanOrEqual(MAX_TITLE_CHARS);
+    expect(item.body.length).toBeLessThanOrEqual(MAX_BODY_CHARS);
+  });
+
   it("honours a smaller cap and never throws on junk", () => {
     const body = "## Highlights\n- **A.** a\n- **B.** b\n- **C.** c";
     expect(parseReleaseHighlights(body, 2).map((h) => h.title)).toEqual(["A", "B"]);

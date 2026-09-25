@@ -39,6 +39,13 @@ export const MAX_HIGHLIGHTS = 6;
 export const MAX_TITLE_CHARS = 120;
 /** Two or three sentences — the longest 4.1 highlight is about 200. */
 export const MAX_BODY_CHARS = 360;
+/**
+ * How much of one bullet's Markdown is read at all. Well past what the capped
+ * title and body can show, and a bound on the inline regexes (a lazy match
+ * against a back-reference is quadratic in the worst case) for a body that
+ * came off the network.
+ */
+export const MAX_ITEM_SOURCE_CHARS = 4 * (MAX_TITLE_CHARS + MAX_BODY_CHARS);
 
 /** `## Highlights`, `### Highlights`, `## Highlights of 4.1` — any level below the title. */
 const HIGHLIGHTS_HEADING = /^#{2,6}\s+highlights\b/i;
@@ -150,7 +157,8 @@ export function parseReleaseHighlights(markdown: unknown, max: number = MAX_HIGH
   flush();
 
   return items
-    .map(splitHighlight)
+    .slice(0, Math.max(0, max) * 4)
+    .map((text) => splitHighlight(text.slice(0, MAX_ITEM_SOURCE_CHARS)))
     .filter((item) => item.title || item.body)
     .slice(0, Math.max(0, max));
 }
