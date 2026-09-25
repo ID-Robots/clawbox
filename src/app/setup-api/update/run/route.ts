@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { startUpdate, isUpdateCompleted } from "@/lib/updater";
 import { requireSession } from "@/lib/route-auth";
+import { prefetchUpdateWhatsNew } from "@/lib/update-whats-new-server";
 
 export async function POST(request: Request) {
   // The one destructive route the wizard genuinely needs before a password can
@@ -30,6 +31,10 @@ export async function POST(request: Request) {
     }
 
     const result = startUpdate();
+    // The /updating screen's "What's new" panel (TASK-1205), read and cached
+    // while this server is still up to read it — the rebuild stops it for
+    // minutes. Fired, never awaited: the update does not wait for a panel.
+    if (result.started) void prefetchUpdateWhatsNew();
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json(

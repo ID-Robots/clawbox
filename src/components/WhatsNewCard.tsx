@@ -6,6 +6,7 @@ import {
   displayVersion,
   hasPlanCta,
   WHATS_NEW_DOCS_URL,
+  WHATS_NEW_HIGHLIGHTS as HIGHLIGHTS,
   WHATS_NEW_PLANS_URL,
   type WhatsNewState,
 } from "@/lib/whats-new";
@@ -15,18 +16,6 @@ interface WhatsNewCardProps {
   /** The owner closed the card. The caller records the dismissal. */
   onDismiss: () => void;
 }
-
-/**
- * The 4.1 highlights, in the order the release notes list them. The copy is
- * taken from RELEASE-NOTES-4.1.0.md, so this list should only change when the
- * release notes do.
- */
-const HIGHLIGHTS = [
-  { icon: "fullscreen", title: "whatsNew.phoneFullscreenTitle", body: "whatsNew.phoneFullscreenBody" },
-  { icon: "history", title: "whatsNew.chatRestoreTitle", body: "whatsNew.chatRestoreBody" },
-  { icon: "web", title: "whatsNew.webappDataTitle", body: "whatsNew.webappDataBody" },
-  { icon: "merge", title: "whatsNew.autoMergeTitle", body: "whatsNew.autoMergeBody" },
-] as const;
 
 /**
  * "What's new in 4.1": a card in the desktop's top-right notice column, shown
