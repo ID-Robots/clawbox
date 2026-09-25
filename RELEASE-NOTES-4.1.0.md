@@ -141,10 +141,10 @@ boxes where 4.0 had trouble with them.
 - The Codex and ClawBox AI (DeepSeek) plugins that a 4.0 update left **Needs
   repair** are retried once per OpenClaw release after the update, and the
   Providers row says **Repairing…** while that runs.
-- A plugin repair that throws no longer leaves **Retry** answering "already
-  running" (409) for 20 minutes; it says the repair failed. A damaged
-  `plugin-repair.json` is salvaged instead of overwritten: its rows are kept,
-  and the damaged file is kept as `plugin-repair.json.corrupt`.
+- A plugin repair that throws no longer leaves **Retry** refused for 20 minutes
+  as if the repair were still running; it says the repair failed. A damaged
+  `plugin-repair.json` is salvaged instead of overwritten: every row before the
+  damage is kept, and the damaged file is kept as `plugin-repair.json.corrupt`.
 - An already-active swapfile, or a 4 GiB one that measures a page short, no
   longer fails the update.
 - `scripts/force-update.sh` rolls a failed build back and exits non-zero, and
@@ -187,8 +187,9 @@ boxes where 4.0 had trouble with them.
 - After the update the desktop shows **What's new in 4.1**, with a plan section
   that names only what the box's plan does not cover yet. It is keyed to 4.1,
   so a box that dismissed an earlier card is shown this one.
-- A card the box cannot read is hidden instead of answering 500. When only the
-  plan check fails, the card is shown without its plan section.
+- When the box cannot read what the card depends on, the card is hidden
+  instead of answering 500. When only the plan check fails, the card is shown
+  without its plan section.
 - Settings → About, System Update, `/setup-api/update/versions` and the card
   all name 4.1.0. The version the build carries, which About shows until the
   box answers, is now read from `package.json`. It used to be `git describe`,
