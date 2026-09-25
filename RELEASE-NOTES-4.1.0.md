@@ -1,6 +1,6 @@
 # ClawBox 4.1.0
 
-Previous release: v4.0.0, 21 September 2026. About 50 commits.
+Previous release: v4.0.0, 21 September 2026. About 55 commits.
 
 4.1 is the release that follows 4.0 into the field. It gives the chat more of
 a phone, stops a conversation restore from waiting forever, gives web apps
@@ -54,6 +54,19 @@ boxes where 4.0 had trouble with them.
   (`claude-opus-5-5`). `claude-opus-5` stays in the list as the previous
   generation, and a model you picked yourself is never rewritten.
 
+### Local AI
+
+- **Local models answer without a 401 after the update.** At every gateway
+  start the box checks the `llamacpp:default` and `ollama:default` profiles in
+  the credential store against `data/.local-ai-token`, and re-saves a stale one
+  the way setup does. A box updated from 4.0 no longer opens every llama.cpp or
+  Ollama turn with an HTTP 401 and a failover to a second profile. The check
+  leaves a sign-in alone, never creates a profile, never prints a key and never
+  stops the gateway from starting.
+- The chat no longer asks the model catalogue for a local provider (llama.cpp
+  or Ollama), which put a 400 in the browser console every time the chat
+  opened.
+
 ### Coding agent
 
 - **GitHub's auto-merge.** Under the owner's merge switch, the box turns on
@@ -96,14 +109,42 @@ boxes where 4.0 had trouble with them.
   pre-4.0 app's `localStorage` hands it over the first time the app opens
   there. A web app never gets the desktop's origin.
 
+### Setup and Settings
+
+- **Saving the device name restarts the gateway only for a real change.**
+  Saving the Security step, or any Settings save that sends the device name,
+  restarts the gateway only when the name or the control UI's list of allowed
+  origins actually changed. Saving the same values no longer takes the
+  assistant down.
+- The Security step shows a progress line naming each request as it runs, and
+  says a gateway or hotspot restart is happening only when the save really
+  makes one.
+
 ### Updates
 
 - **OpenClaw is pinned to 2026.9.4** (state schema 17). An update now refuses up
   front, before it changes anything, when the device's state database is on a
   schema newer than the core it is about to install.
+- That check judges the OpenClaw release the update is about to install, read
+  from the target branch's `config/openclaw-target.txt` before anything is
+  checked out, not the one already on disk. A box whose database is already on
+  the newer schema is no longer refused the very update that brings the matching
+  core. If that read cannot be made, the check runs again on the updated files,
+  before the working core is replaced.
+- **A rebuild on a smaller box keeps the assistant up for longer.** On a box
+  with less than 12 GB of RAM, a rebuild that no reboot follows keeps the
+  gateway running through `bun install` and pauses it only just before
+  `next build`, and only if the memory measured then is too low: less than
+  6 GiB available by default, tunable with `CLAWBOX_BUILD_GATEWAY_ROOM_MB`.
+  When it does pause, the log says for how long. An update that reboots
+  afterwards pauses it up front, as before.
 - The Codex and ClawBox AI (DeepSeek) plugins that a 4.0 update left **Needs
   repair** are retried once per OpenClaw release after the update, and the
   Providers row says **Repairing…** while that runs.
+- A plugin repair that throws no longer leaves **Retry** refused for 20 minutes
+  as if the repair were still running; it says the repair failed. A damaged
+  `plugin-repair.json` is salvaged instead of overwritten: every row before the
+  damage is kept, and the damaged file is kept as `plugin-repair.json.corrupt`.
 - An already-active swapfile, or a 4 GiB one that measures a page short, no
   longer fails the update.
 - `scripts/force-update.sh` rolls a failed build back and exits non-zero, and
@@ -120,9 +161,14 @@ boxes where 4.0 had trouble with them.
   archive path is refused before archiving with both sources named, and a
   database whose only damage is its indexes is re-indexed after a copy is kept.
   Any other damage stops the backup and leaves the file untouched.
-- A Memory Shard index that the 4.0 update disowned is rebuilt by **Index now**
-  and the schedule, and a box whose memory search fell back to another embedder
-  says so.
+- A Memory Shard index that the 4.0 update disowned is rebuilt by **Index now**,
+  and a box whose memory search fell back to another embedder says so.
+- **The scheduled memory pass never re-embeds everything by itself.** The
+  nightly index pass no longer escalates to a full `--force` re-embed, which
+  threw away every embedding on a timer's say-so. Over a disowned index it
+  stops and says the index needs a full reindex, which only you can start with
+  **Index now**. An index that is still empty is built by the schedule as
+  before.
 - ClawKeep's cloud usage is recomputed from R2 on every heartbeat.
 
 ### Agent tools
@@ -131,12 +177,19 @@ boxes where 4.0 had trouble with them.
   sits behind `CLAWBOX_MCP_CODING_TOOLS`, and the longest tool descriptions
   moved into the field guide.
 - The agent can reach its own workspace inside the `~/.openclaw` file guard.
+- The guard's check on shell commands judges every directory a command moves
+  into (`cd`, `pushd`, `-C`, `--chdir`), so
+  `cd ~/.openclaw/workspace && cat ../openclaw.json` is refused. Commands that
+  stay in the workspace still run.
 
 ### What's new card and version
 
 - After the update the desktop shows **What's new in 4.1**, with a plan section
   that names only what the box's plan does not cover yet. It is keyed to 4.1,
   so a box that dismissed an earlier card is shown this one.
+- When the box cannot read what the card depends on, the card is hidden
+  instead of answering 500. When only the plan check fails, the card is shown
+  without its plan section.
 - Settings → About, System Update, `/setup-api/update/versions` and the card
   all name 4.1.0. The version the build carries, which About shows until the
   box answers, is now read from `package.json`. It used to be `git describe`,
