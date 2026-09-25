@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { clearFinishedRuns, getRun, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
+import { clearFinishedRuns, getHistoryPolicy, getRun, listOlderRuns, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
 import { listArtifacts } from "@/lib/coding-agent-artifacts";
 import { hasOwnerSession } from "@/lib/owner-session";
 
@@ -12,7 +12,15 @@ export const dynamic = "force-dynamic";
  *                            or `wait` elapses (capped), so a caller can
  *                            block instead of polling every few seconds.
  *
- * DELETE                   → forget the finished runs; { cleared: n }.
+ * GET ?history=1[&offset=&limit=&project=]
+ *                          → { runs, total, offset }: the OLDER runs a history
+ *                            mode keeps past the live thirty (their own files,
+ *                            src/lib/coding-run-history.ts), newest first,
+ *                            optionally one project folder's. `?id=` already
+ *                            finds one of them on its own.
+ *
+ * DELETE                   → forget the finished runs; { cleared: n }. Under
+ *                            the archive mode they are archived instead.
  *
  * GET is read-only, and middleware's cookie-or-bearer gate is the whole gate
  * for it. The 404 carries a JSON { error } body on purpose — the MCP
@@ -28,6 +36,9 @@ export const dynamic = "force-dynamic";
  */
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 30;
+/** A page of older runs: records read off one file each, so kept modest. */
+const MAX_HISTORY_LIMIT = 50;
+const MAX_PROJECT_CHARS = 4096;
 
 export async function DELETE(request: Request) {
   if (!(await hasOwnerSession(request))) {
@@ -37,7 +48,7 @@ export async function DELETE(request: Request) {
     );
   }
   try {
-    return NextResponse.json({ cleared: clearFinishedRuns() });
+    return NextResponse.json({ cleared: clearFinishedRuns(await getHistoryPolicy()) });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not clear the coding runs" },
@@ -73,6 +84,16 @@ export async function GET(request: Request) {
         return NextResponse.json({ error: "There is no coding run with that id.", kind: "not_found" }, { status: 404 });
       }
       return NextResponse.json({ run: withDerived(run, withArtifacts) });
+    }
+    if (url.searchParams.get("history") === "1") {
+      const offsetRaw = Number(url.searchParams.get("offset") ?? "0");
+      const offset = Number.isFinite(offsetRaw) ? Math.max(0, Math.floor(offsetRaw)) : 0;
+      const pageRaw = Number(url.searchParams.get("limit") ?? String(DEFAULT_LIMIT));
+      const limit = Number.isFinite(pageRaw) ? Math.max(1, Math.min(Math.floor(pageRaw), MAX_HISTORY_LIMIT)) : DEFAULT_LIMIT;
+      const projectRaw = url.searchParams.get("project");
+      const project = projectRaw && projectRaw.startsWith("/") && projectRaw.length <= MAX_PROJECT_CHARS ? projectRaw : null;
+      const page = listOlderRuns({ offset, limit, project });
+      return NextResponse.json({ runs: page.runs.map((run) => withDerived(run, withArtifacts)), total: page.total, offset });
     }
     const limitRaw = Number(url.searchParams.get("limit") ?? String(DEFAULT_LIMIT));
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(Math.floor(limitRaw), MAX_LIMIT)) : DEFAULT_LIMIT;

@@ -87,6 +87,44 @@ import {
   stageRunInputs,
 } from "@/lib/coding-run-inputs";
 import {
+  type ArchiveReason,
+  type HistoryPolicy,
+  type HistoryRecord,
+  type HistoryRetentionMode,
+  type OlderRunEntry,
+  CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY,
+  CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY,
+  HISTORY_EXTENDED_LIMITS,
+  HISTORY_LIVE_RUNS_KEPT,
+  HISTORY_MIN_FREE_BYTES,
+  HISTORY_RETENTION_MODES,
+  STANDARD_HISTORY_POLICY,
+  archiveIndex,
+  archiveRun,
+  diskSpace,
+  harnessTranscriptState,
+  hasOlderRuns,
+  historyExportSources,
+  historyPolicyFrom,
+  historyUsage,
+  isDiskLow,
+  type DiskSpace,
+  type HarnessTranscriptState,
+  type HistoryUsage,
+  isHistoryExtendedLimit,
+  isHistoryRetentionMode,
+  keepHarnessTranscripts,
+  keepsOlderRuns,
+  olderRunIndex,
+  olderRunsCap,
+  readOlderRunRecord,
+  releaseHarnessTranscripts,
+  removeOlderRun,
+  writeOlderRun,
+  type TranscriptPinResult,
+} from "@/lib/coding-run-history";
+import type { ZipSource } from "@/lib/zip-writer";
+import {
   type CodingPauseMeter,
   type CodingPauseReason,
   type CodingRunStatus,
@@ -669,6 +707,10 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_AUTO_MERGE_CONFIG_KEY,
   CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY,
   CODING_AGENT_MAX_PARALLEL_CONFIG_KEY,
+  // The retention setting goes back to standard; resetCodingAgentSetup also
+  // hands Claude Code's transcript period back to whoever set it before.
+  CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY,
+  CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY,
   CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
@@ -773,8 +815,13 @@ export async function teamSpawnSlot(team: RunTeam, starting = 0): Promise<{ ok: 
 }
 /** Longest a status request may block waiting for a run to finish. */
 export const MAX_WAIT_MS = 120_000;
-/** Runs kept in data/coding-agent-runs.json, newest first. */
-const MAX_RUNS_KEPT = 30;
+/**
+ * Runs kept in data/coding-agent-runs.json, newest first — in EVERY history
+ * mode. A mode that keeps more keeps the rest as older runs, one file each
+ * (src/lib/coding-run-history.ts), because this file is rewritten whole on
+ * every flush.
+ */
+const MAX_RUNS_KEPT = HISTORY_LIVE_RUNS_KEPT;
 /**
  * Progress lines kept per run — and how many of them are the run's FIRST.
  *
@@ -1939,6 +1986,13 @@ export interface CodingAgentStatus {
   /** The range the app offers, so it does not have to guess the bounds. */
   minMaxParallelRuns: number;
   maxMaxParallelRuns: number;
+  /** What the box keeps of finished runs — see src/lib/coding-run-history.ts. */
+  historyRetention: HistoryRetentionMode;
+  /** The extended mode's N, and the choices the app offers for it. */
+  historyLimit: number;
+  historyLimits: number[];
+  /** Runs the live list holds in every mode (the thirty it always held). */
+  historyLiveKept: number;
   /** Attempts a run with a deliverable gets at it, its own first turn included. */
   completionAttempts: number;
   /** The range the app offers, so it does not have to guess the bounds. */
@@ -2443,6 +2497,73 @@ export async function setMaxParallelRuns(runs: unknown): Promise<number> {
   return runs;
 }
 
+export { CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY, CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY, HISTORY_EXTENDED_LIMITS, HISTORY_RETENTION_MODES };
+export type { HistoryPolicy, HistoryRetentionMode };
+
+/**
+ * Remember the owner's history setting where the SYNC paths can see it: the
+ * settle decides whether a run's stream log is kept for the archive, and it
+ * cannot await a config read. Refreshed by every read below and by the status
+ * the app polls; empty only in a process that has read neither, where the
+ * settle does what it always did.
+ */
+function rememberHistoryPolicy(policy: HistoryPolicy): HistoryPolicy {
+  store.historyPolicy = policy;
+  return policy;
+}
+
+/** What the box keeps of finished runs. Absent means standard — see coding-run-history.ts. */
+export async function getHistoryPolicy(): Promise<HistoryPolicy> {
+  const [mode, limit] = await Promise.all([
+    configGet(CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY),
+    configGet(CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY),
+  ]);
+  return rememberHistoryPolicy(historyPolicyFrom(mode, limit));
+}
+
+/**
+ * The Claude Code settings files whose transcripts a run leaves behind: the
+ * box's own harness folder (ClawBox AI runs) and the default one an Anthropic
+ * run uses — harnessStateDir, both ways. One file when both are the same.
+ */
+export function harnessSettingsFiles(): string[] {
+  return [...new Set((["clawbox-ai", "anthropic"] as const).map((p) => path.join(harnessStateDir(p), "settings.json")))];
+}
+
+export interface HistoryRetentionChange {
+  policy: HistoryPolicy;
+  /** What happened to Claude Code's transcript period, file by file. */
+  transcripts: TranscriptPinResult[];
+}
+
+/**
+ * Change what the box keeps. Either half may be given; a value this box does
+ * not offer is refused rather than clamped, like the other counted settings.
+ *
+ * Nothing is deleted HERE: a lower limit is applied the next time a run joins
+ * the list (insertRun), so a mis-tap on the select can be taken back before
+ * it costs anything, and the settings card says what the next run will drop.
+ * Claude Code's transcript period follows the mode now, though: kept while the
+ * owner keeps everything, handed back to what it was as soon as they do not.
+ */
+export async function setHistoryRetention(input: { mode?: unknown; limit?: unknown }): Promise<HistoryRetentionChange> {
+  if (input.mode !== undefined && !isHistoryRetentionMode(input.mode)) {
+    throw new CodingAgentError("invalid", `The run history setting must be one of: ${HISTORY_RETENTION_MODES.join(", ")}.`);
+  }
+  if (input.limit !== undefined && !isHistoryExtendedLimit(input.limit)) {
+    throw new CodingAgentError("invalid", `The number of runs to keep must be one of: ${HISTORY_EXTENDED_LIMITS.join(", ")}.`);
+  }
+  const entries: Record<string, unknown> = {};
+  if (input.mode !== undefined) entries[CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY] = input.mode;
+  if (input.limit !== undefined) entries[CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY] = input.limit;
+  if (Object.keys(entries).length > 0) await configSetMany(entries);
+  const policy = await getHistoryPolicy();
+  const transcripts = policy.mode === "everything"
+    ? await keepHarnessTranscripts(harnessSettingsFiles())
+    : await releaseHarnessTranscripts();
+  return { policy, transcripts };
+}
+
 /** The owner's merge switch. Absent means OFF — see the config key. */
 export async function getAutoMerge(): Promise<boolean> {
   return (await configGet(CODING_AGENT_AUTO_MERGE_CONFIG_KEY)) === true;
@@ -2725,6 +2846,16 @@ export async function resetCodingAgentSetup(): Promise<number> {
   for (const key of CODING_AGENT_RESET_KEYS) {
     await configSet(key, undefined);
   }
+  // The history setting is back to standard, so Claude Code's transcript
+  // period goes back to whatever it was before "keep everything" changed it.
+  // The ARCHIVE is not touched: it is kept data with a Clear of its own, not
+  // a setting — and the owner who archived runs did so to keep them.
+  await releaseHarnessTranscripts().catch((err) => {
+    console.error("[coding-agent] could not hand back Claude Code's transcript period:", err instanceof Error ? err.message : err);
+  });
+  // Standard from here on — the setting was just cleared — so the Clear below
+  // DELETES, as start-over always did, rather than filling the archive.
+  rememberHistoryPolicy(STANDARD_HISTORY_POLICY);
   return clearFinishedRuns();
 }
 
@@ -3438,6 +3569,16 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     maxParallelRuns: maxParallelRunsFrom(config[CODING_AGENT_MAX_PARALLEL_CONFIG_KEY]),
     minMaxParallelRuns: MIN_MAX_PARALLEL_RUNS,
     maxMaxParallelRuns: MAX_MAX_PARALLEL_RUNS,
+    // Absent means standard — what every box did before the setting existed.
+    ...(() => {
+      const history = rememberHistoryPolicy(historyPolicyFrom(config[CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY], config[CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY]));
+      return {
+        historyRetention: history.mode,
+        historyLimit: history.limit,
+        historyLimits: [...HISTORY_EXTENDED_LIMITS],
+        historyLiveKept: MAX_RUNS_KEPT,
+      };
+    })(),
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
@@ -4185,6 +4326,8 @@ interface RunStore {
    * trusting its own snapshot.
    */
   signature: string | null;
+  /** The owner's history setting as last read — see rememberHistoryPolicy. */
+  historyPolicy: HistoryPolicy | null;
 }
 
 const store = processStore<RunStore>(RUNS_PATH, () => ({
@@ -4203,6 +4346,7 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
   pipelineAdvancing: new Map<string, Promise<void>>(),
   startingRuns: 0,
   signature: null,
+  historyPolicy: null,
 }));
 
 const live = store.live;
@@ -4529,11 +4673,127 @@ function cloneRun(run: CodingRun): CodingRun {
 
 export function getRun(id: string): CodingRun | null {
   const run = loadRuns().find((r) => r.id === id);
-  return run ? cloneRun(run) : null;
+  if (run) return cloneRun(run);
+  // An older run a history mode kept past the live thirty: its own file, read
+  // on demand. Settled by construction — nothing held ever leaves the list.
+  const older = readOlderRun(id);
+  return older ? cloneRun(older) : null;
 }
 
 export function listRuns(limit = MAX_RUNS_KEPT): CodingRun[] {
   return loadRuns().slice(0, Math.max(0, limit)).map(cloneRun);
+}
+
+/** An older run's record off its own file, normalised like the runs file's, or null. */
+function readOlderRun(id: string): CodingRun | null {
+  if (!RUN_ID_RE.test(id) || !hasOlderRuns()) return null;
+  const raw = readOlderRunRecord(id);
+  return isCodingRun(raw) && raw.id === id ? normalizeRun(raw) : null;
+}
+
+/**
+ * A page of the runs a history mode keeps past the live thirty, newest first,
+ * and how many there are. `project` narrows it to one project folder (the
+ * folder the owner knows — see projectDirectoryOf). Read from the older runs'
+ * own files, so the runs file this whole module rewrites every second never
+ * holds them.
+ */
+export function listOlderRuns(options: { offset?: number; limit?: number; project?: string | null } = {}): { runs: CodingRun[]; total: number } {
+  if (!hasOlderRuns()) return { runs: [], total: 0 };
+  const project = options.project ? path.resolve(options.project) : null;
+  const index = olderRunIndex().filter((e) => !project || path.resolve(e.project || e.directory) === project || path.resolve(e.directory) === project);
+  const offset = Math.max(0, Math.floor(options.offset ?? 0));
+  const limit = Math.max(0, Math.floor(options.limit ?? MAX_RUNS_KEPT));
+  const runs = index.slice(offset, offset + limit).flatMap((e) => {
+    const run = readOlderRun(e.id);
+    return run ? [cloneRun(run)] : [];
+  });
+  return { runs, total: index.length };
+}
+
+/** Everything the settings card says about the run history, in one read. */
+export interface RunHistorySummary {
+  mode: HistoryRetentionMode;
+  limit: number;
+  limits: number[];
+  /** Runs the live list holds in every mode. */
+  liveKept: number;
+  counts: { live: number; older: number; archived: number };
+  /** Null when the walk failed; the card then says it could not measure. */
+  usage: HistoryUsage | null;
+  disk: DiskSpace & { minFreeBytes: number; low: boolean };
+  /** Claude Code's transcript period, per settings file the box's runs use. */
+  transcripts: HarnessTranscriptState[];
+}
+
+/** The Claude Code folders a run's transcript lands in (both providers'). */
+function harnessTranscriptDirs(): string[] {
+  return [...new Set((["clawbox-ai", "anthropic"] as const).map((p) => path.join(harnessStateDir(p), "projects")))];
+}
+
+export async function runHistorySummary(): Promise<RunHistorySummary> {
+  const policy = await getHistoryPolicy();
+  const usage = await historyUsage({ runsFile: RUNS_PATH, streamsDir: STREAM_DIR, transcriptDirs: harnessTranscriptDirs() }).catch((err) => {
+    console.error("[coding-agent] could not measure the run history:", err instanceof Error ? err.message : err);
+    return null;
+  });
+  const disk = diskSpace();
+  return {
+    mode: policy.mode,
+    limit: policy.limit,
+    limits: [...HISTORY_EXTENDED_LIMITS],
+    liveKept: MAX_RUNS_KEPT,
+    counts: {
+      live: loadRuns().length,
+      older: hasOlderRuns() ? olderRunIndex().length : 0,
+      archived: archiveIndex().length,
+    },
+    usage,
+    disk: { ...disk, minFreeBytes: HISTORY_MIN_FREE_BYTES, low: isDiskLow(disk) },
+    transcripts: harnessTranscriptState(harnessSettingsFiles()),
+  };
+}
+
+/**
+ * Every file of the run history, for "Export all history" — the live list,
+ * the older runs, their evidence, inputs and transcripts, and the archive. See
+ * historyExportSources for the layout inside the zip.
+ */
+export function historyExportAll(): AsyncGenerator<ZipSource> {
+  const runs = loadRuns();
+  const older = hasOlderRuns() ? olderRunIndex() : [];
+  const policy = store.historyPolicy ?? STANDARD_HISTORY_POLICY;
+  const transcripts = [
+    ...runs.map((r) => ({ id: r.id, file: transcriptPath(r) })),
+    ...older.map((e) => {
+      const run = readOlderRun(e.id);
+      return { id: e.id, file: run ? transcriptPath(run) : null };
+    }),
+  ];
+  return historyExportSources({
+    manifest: {
+      kind: "clawbox-run-history",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      retention: policy.mode,
+      ...(policy.mode === "extended" ? { limit: policy.limit } : {}),
+      runs: runs.length,
+      olderRuns: older.length,
+      archivedRuns: archiveIndex().length,
+      layout: {
+        "runs.json": "the runs listed on the box, newest first",
+        "older-runs/<runId>.json": "runs kept past the newest thirty (Extended, Keep everything)",
+        "evidence/<runId>/": "each run's evidence folder",
+        "inputs/<runId>/": "the files each run was given",
+        "transcripts/<runId>.jsonl": "Claude Code's transcript of the run, where it still exists",
+        "archive/<runId>/": "archived runs: run.json, archive.json, evidence/, inputs/, transcript.jsonl, stream logs",
+      },
+    },
+    // A snapshot now: the export streams for minutes, and these records are
+    // the very objects the live runs keep writing to.
+    runs: structuredClone(runs),
+    transcripts,
+  });
 }
 
 /**
@@ -4548,7 +4808,7 @@ export function listRuns(limit = MAX_RUNS_KEPT): CodingRun[] {
  * are the account of what the assistant did with a delegated shell, and the
  * party they describe is not the party who should be able to erase them.
  */
-export function clearFinishedRuns(): number {
+export function clearFinishedRuns(policy: HistoryPolicy = store.historyPolicy ?? STANDARD_HISTORY_POLICY): number {
   const list = loadRuns();
   // Paused runs hold a resumable session and drafts never ran — neither is
   // "finished", so the owner's clear-history sweep leaves them alone. A run
@@ -4574,15 +4834,21 @@ export function clearFinishedRuns(): number {
   const keep: CodingRun[] = [];
   const dropped: CodingRun[] = [];
   for (const r of list) (heldOn(r) || isPrPending(r.pr) ? keep : dropped).push(r);
-  const removed = dropped.length;
+  // The older runs a history mode kept are finished runs of this same list,
+  // so the owner's Clear takes them too. Under archive they are ARCHIVED like
+  // everything else leaving the list, which is what that mode promises.
+  const older = hasOlderRuns() ? olderRunIndex() : [];
+  const removed = dropped.length + older.length;
   if (removed === 0) return 0;
-  for (const r of dropped) { removeArtifacts(r.id); removeRunInputs(r.id); }
+  const low = policy.mode === "archive" && isDiskLow(diskSpace());
+  for (const r of dropped) dropRun(r, policy, "cleared", low);
+  for (const e of older) dropOlderRun(e, policy, "cleared", low);
   // Mutate the array the module hands out rather than replacing the binding,
   // so every existing reader sees the same list.
   list.length = 0;
   list.push(...keep);
   persist(true);
-  console.error(`[coding-agent] cleared ${removed} finished run(s) at the owner's request`);
+  console.error(`[coding-agent] cleared ${removed} finished run(s) at the owner's request${policy.mode === "archive" && !low ? " into the archive" : ""}`);
   return removed;
 }
 
@@ -5112,7 +5378,12 @@ const FILE_TOOLS = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] as 
 // already on this list, and the two are worth nothing apart. A run is HANDED
 // the secrets the owner ticked for it, as environment variables; reading the
 // file would hand it the ones they did not, including another project's.
-const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams", SECRETS_FILE_NAME];
+//
+// coding-agent-history/ and coding-agent-archive/ are every OTHER run's records,
+// inputs and transcripts (src/lib/coding-run-history.ts). Named rather than
+// discovered for the stream logs' reason: the first run to leave the live list
+// creates them, possibly while another run is already working.
+const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams", "coding-agent-history", "coding-agent-archive", SECRETS_FILE_NAME];
 
 /**
  * Entries of the harness's state directories (`HARNESS_STATE_SUBTREES`) that
@@ -5873,8 +6144,10 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   }
   // The box's own plumbing, not evidence: the tail has been read by now, and a
   // log kept past the settle is disk the owner never asked to spend. A retry
-  // (finishRun) opens a fresh pair.
-  removeStreamLogs(run.id);
+  // (finishRun) opens a fresh pair. EXCEPT under the archive mode, where the
+  // owner did ask: the log waits beside the run and goes into the archive with
+  // it (dropRun moves it there, or deletes it with the run's other parts).
+  if (store.historyPolicy?.mode !== "archive") removeStreamLogs(run.id);
   // A credential handoff the wrapper never got to read (it died first, or
   // never started) goes with the process it was written for.
   removeCredentialHandoffs(run.id);
@@ -11138,7 +11411,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Before the record is persisted, so the names and the two progress lines are
     // in the first thing the app reads rather than appearing a poll later.
     await prepareRunSecrets(run);
-    insertRun(loadRuns(), run);
+    // Read before the insert, never between it and the write: the insert and
+    // persist are one synchronous step (see the runs store).
+    const history = await getHistoryPolicy();
+    insertRun(loadRuns(), run, history);
     persist(true);
     console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
     startProjectIcon(run);
@@ -11459,18 +11735,83 @@ function newRunRecord(fields: {
 /**
  * Put a new record at the head of the list, newest first, and make room.
  * Never drops a held run (live, paused, drafted); trims the oldest finished
- * ones. A dropped record takes its evidence folder with it — unreachable
- * artifacts would sit on the flash forever.
+ * ones. What happens to a run that leaves is the owner's history setting
+ * (src/lib/coding-run-history.ts):
+ *
+ *  - standard — deleted with its evidence folder and its inputs, exactly as
+ *    before the setting existed: unreachable artifacts would sit on the flash
+ *    forever.
+ *  - extended / everything — kept as an OLDER run, its record in a file of its
+ *    own and its evidence where it was; the runs file stays at MAX_RUNS_KEPT.
+ *    Extended then trims the older runs to its N, oldest first.
+ *  - archive — moved into the archive, record, evidence, inputs, logs and a
+ *    copy of the transcript together.
+ *
+ * Under the disk guard (below HISTORY_MIN_FREE_BYTES free) a leaving run is
+ * deleted as in standard, whatever the mode, and nothing already kept is
+ * touched: the history stops growing, it is not purged behind the owner's back.
  */
-function insertRun(list: CodingRun[], run: CodingRun): void {
+function insertRun(list: CodingRun[], run: CodingRun, policy: HistoryPolicy = STANDARD_HISTORY_POLICY): void {
   list.unshift(run);
+  retainRuns(list, policy);
+}
+
+function retainRuns(list: CodingRun[], policy: HistoryPolicy): void {
+  // A standard box never asks the disk anything — its trim is the one it
+  // always had.
+  const low = policy.mode !== "standard" && isDiskLow(diskSpace());
   while (list.length > MAX_RUNS_KEPT) {
     const idx = findLastFinished(list);
     if (idx < 0) break;
-    removeArtifacts(list[idx].id);
-    removeRunInputs(list[idx].id);
-    list.splice(idx, 1);
+    const [leaving] = list.splice(idx, 1);
+    if (!low && keepsOlderRuns(policy) && writeOlderRun(leaving as unknown as HistoryRecord)) continue;
+    dropRun(leaving, policy, "trimmed", low);
   }
+  if (low || !hasOlderRuns()) return;
+  // The older runs past what this mode keeps: extended's N, or all of them
+  // under standard and archive (runs kept under a mode the owner has left —
+  // the settings card said the next run would take them).
+  const cap = olderRunsCap(policy, list.length);
+  if (!Number.isFinite(cap)) return;
+  const older = olderRunIndex();
+  for (const entry of older.slice(cap)) dropOlderRun(entry, policy, "trimmed", false);
+}
+
+/**
+ * A run leaving the list for good: archived under the archive mode (unless the
+ * disk is low, or the archive could not take it), deleted otherwise — its
+ * evidence folder, its inputs and any stream log the box still holds for it.
+ */
+function dropRun(run: CodingRun, policy: HistoryPolicy, reason: ArchiveReason, low: boolean): void {
+  if (policy.mode === "archive" && !low) {
+    const archived = archiveRun(run as unknown as HistoryRecord, {
+      evidenceDir: artifactsDir(run.id),
+      inputsDir: runInputsDir(run.id),
+      streamLog: streamLogPath(run.id),
+      stderrLog: stderrLogPath(run.id),
+      transcript: transcriptPath(run),
+    }, reason);
+    if (archived) {
+      console.error(`[coding-agent] ${run.id} moved to the archive`);
+      return;
+    }
+  }
+  removeArtifacts(run.id);
+  removeRunInputs(run.id);
+  removeStreamLogs(run.id);
+}
+
+/** An older run leaving for good — the same two ways as dropRun, and its own file with it. */
+function dropOlderRun(entry: OlderRunEntry, policy: HistoryPolicy, reason: ArchiveReason, low: boolean): void {
+  const run = readOlderRun(entry.id);
+  if (run) dropRun(run, policy, reason, low);
+  else {
+    // A record that no longer parses cannot be archived; what it points at
+    // still goes, so nothing is left on the flash that nothing lists.
+    removeArtifacts(entry.id);
+    removeRunInputs(entry.id);
+  }
+  removeOlderRun(entry.id);
 }
 
 /**
@@ -11841,7 +12182,8 @@ export async function createDraftRun(input: StartRunInput): Promise<CodingRun> {
     deliverable: requireDeliverable(input),
   });
   pushProgress(run, RUNNER_STEP.drafted);
-  insertRun(loadRuns(), run);
+  const history = await getHistoryPolicy();
+  insertRun(loadRuns(), run, history);
   persist(true);
   console.error(`[coding-agent] ${run.id} drafted by ${run.source} for ${run.directory}`);
   return cloneRun(run);
@@ -12215,6 +12557,7 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   store.dirty = false;
   store.runs = null;
   store.signature = null;
+  store.historyPolicy = null;
   // `exitHookInstalled` is deliberately LEFT set: the listener it guards is on
   // `process`, which this cannot take back, and it works against the shared
   // `live` map either way — clearing the flag would add one more listener per

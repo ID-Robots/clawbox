@@ -11,6 +11,7 @@ import { foldReviewChecks, type ReviewLoop } from "@/lib/coding-review-state";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 import CodingAgentSettingsPanel from "./CodingAgentSettingsPanel";
+import CodingRunHistoryPage from "./CodingRunHistoryPage";
 import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
@@ -320,6 +321,8 @@ const SIDEBAR_ITEM = "w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text
 const SIDEBAR_ACTIVE = "bg-white/[0.08] text-[var(--text-primary)]";
 /** How many runs the sidebar lists; the pages list them all. */
 const SIDEBAR_RUNS = 12;
+/** Older runs a window keeps open copies of — the pages it has visited, not the history. */
+const MAX_OLDER_RUNS_HELD = 100;
 /** The window width (px) from which the sidebar is shown beside the page. */
 const SIDEBAR_MIN_WIDTH = 860;
 
@@ -631,7 +634,15 @@ export default function CodingAgentApp() {
   useEffect(() => () => { if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current); }, []);
   // Which face the window shows — see `view` below. The settings page sits
   // over whichever project was open, so Back returns there.
-  const [page, setPage] = useState<"home" | "settings">("home");
+  const [page, setPage] = useState<"home" | "settings" | "history">("home");
+  /**
+   * Older runs this window has opened — from the Run history page, or by id
+   * for a run past the recent thirty. Kept beside `runs` rather than in it:
+   * the poll replaces `runs` wholesale, and these are not on that list.
+   */
+  const [olderRuns, setOlderRuns] = useState<Run[]>([]);
+  /** An archived run to open the Run history page on, when a run page was asked for one. */
+  const [archivedOpenId, setArchivedOpenId] = useState<string | null>(null);
   const [openProjectDir, setOpenProjectDir] = useState<string | null>(null);
   /** The Import panel on the home face: GitHub or a folder on the box. */
   const [importOpen, setImportOpen] = useState(false);
@@ -1096,9 +1107,40 @@ export default function CodingAgentApp() {
   /** The run whose page is open, once the list has it. A run that was cleared
    *  meanwhile simply has no page — the window falls back to where it was. */
   const openRun = useMemo(
-    () => (openRunId ? runs.find((r) => r.id === openRunId) ?? null : null),
-    [runs, openRunId],
+    () => (openRunId ? runs.find((r) => r.id === openRunId) ?? olderRuns.find((r) => r.id === openRunId) ?? null : null),
+    [runs, olderRuns, openRunId],
   );
+  // A run page asked for (a chat card, the desktop, the Run history page) for
+  // a run the recent list does not hold: an OLDER run a history mode kept, or
+  // one that has since moved to the archive. Asked of the box once per id —
+  // the runs route finds an older run by id, and the archive answers for the
+  // rest — rather than falling back to the home page as if it had been cleared.
+  const lookedUp = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (loading || !openRunId || runs.some((r) => r.id === openRunId) || olderRuns.some((r) => r.id === openRunId)) return;
+    if (lookedUp.current.has(openRunId)) return;
+    lookedUp.current.add(openRunId);
+    const id = openRunId;
+    void (async () => {
+      try {
+        const res = await fetch(`/setup-api/coding-agent/runs?id=${encodeURIComponent(id)}&artifacts=1`, { cache: "no-store" });
+        if (res.ok) {
+          const { run } = await res.json() as { run?: Run };
+          // Held and live runs are the recent list's; the next poll has them.
+          if (run && isSettled(run.status)) setOlderRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)].slice(0, MAX_OLDER_RUNS_HELD));
+          return;
+        }
+        const archived = await fetch(`/setup-api/coding-agent/history?view=archive&id=${encodeURIComponent(id)}`, { cache: "no-store" });
+        if (archived.ok) {
+          setOpenRunId((current) => (current === id ? null : current));
+          setArchivedOpenId(id);
+          setPage("history");
+        }
+      } catch {
+        // Nothing to add: the page falls back to where it was, as it always did.
+      }
+    })();
+  }, [loading, openRunId, runs, olderRuns]);
   /** The open project's own runs. Home lists no runs of its own any more:
    *  every run works in a folder inside the project folder, and the projects
    *  route lists that folder, so a run always has a project page to live on
@@ -1129,6 +1171,10 @@ export default function CodingAgentApp() {
    */
   const view = page === "settings"
     ? { face: "settings" as const }
+    // Like Settings, reachable whatever state setup is in: the history on the
+    // flash is the owner's whether or not the agent is configured today.
+    : page === "history"
+      ? { face: "history" as const }
     // Before anything else on this window: a box whose owner has not been
     // through setup has no folder for a run to work in and no consent for one
     // to start, so the home page would be a list of things that cannot happen.
@@ -1148,8 +1194,9 @@ export default function CodingAgentApp() {
   const phoneLayout = usePhoneLayout();
   const runBackProjectDir = openRun ? (projects.find((pr) => runBelongsTo(openRun, pr))?.directory ?? null) : null;
   useMobileBack(phoneLayout && page === "settings", () => { disarmClear(); setPage("home"); });
-  useMobileBack(phoneLayout && page !== "settings" && (openRun !== null || openProject !== null), () => { setOpenRunId(null); setOpenProjectDir(null); });
-  useMobileBack(phoneLayout && page !== "settings" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); });
+  useMobileBack(phoneLayout && page === "history", () => { setArchivedOpenId(null); setPage("home"); });
+  useMobileBack(phoneLayout && page === "home" && (openRun !== null || openProject !== null), () => { setOpenRunId(null); setOpenProjectDir(null); });
+  useMobileBack(phoneLayout && page === "home" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); });
   useMobileBack(phoneLayout && page === "home" && !openRun && !openProject && importOpen, () => setImportOpen(false));
   // Registered last so it sits on top: with the delete dialog open, Back
   // closes the dialog rather than leaving the project underneath it.
@@ -1721,6 +1768,16 @@ export default function CodingAgentApp() {
               <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">settings</span>
               {t("codingAgent.openSettings")}
             </button>
+            <button
+              type="button"
+              onClick={() => { disarmClear(); setArchivedOpenId(null); setPage("history"); }}
+              aria-current={view.face === "history" ? "page" : undefined}
+              data-testid="coding-agent-sidebar-history"
+              className={`${SIDEBAR_ITEM} ${view.face === "history" ? SIDEBAR_ACTIVE : ""}`}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">manage_history</span>
+              {t("codingAgent.history.title")}
+            </button>
           </div>
           {projects.length > 0 && (
             <div className="px-3 pt-3 pb-1">
@@ -1883,7 +1940,7 @@ export default function CodingAgentApp() {
               the bottom edge of the scroll area. Same scale as the run page,
               not a new one. */}
           <div className="mt-3 pb-6" data-testid="coding-agent-embedded-settings">
-            <CodingAgentSettingsPanel />
+            <CodingAgentSettingsPanel onOpenHistory={() => { disarmClear(); setArchivedOpenId(null); setPage("history"); }} />
             {/* Three owner tools, one row, symmetric: equal columns, so the
                 buttons are the same width whatever their labels say, each with
                 its explanation on the question mark beside it. The headings
@@ -1936,6 +1993,32 @@ export default function CodingAgentApp() {
               </div>
             </div>
           </div>
+        </>)}
+
+        {view.face === "history" && (<>
+          <CodingAgentBreadcrumb
+            crumbs={[
+              { label: t("codingAgent.navHome"), onClick: () => { setArchivedOpenId(null); setPage("home"); }, testId: "coding-agent-history-crumb-home" },
+              { label: t("codingAgent.history.title") },
+            ]}
+            onBack={() => { setArchivedOpenId(null); setPage("home"); }}
+            backLabel={t("codingAgent.back")}
+            navLabel={t("codingAgent.breadcrumbLabel")}
+            backTestId="coding-agent-history-back"
+          />
+          <CodingRunHistoryPage
+            // A fresh page per archived run asked for, so it opens on that run.
+            key={archivedOpenId ?? "lists"}
+            initialArchivedId={archivedOpenId}
+            liveKept={status?.historyLiveKept ?? 30}
+            onOpenRun={(row) => {
+              const run = row as unknown as Run;
+              setOlderRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)].slice(0, MAX_OLDER_RUNS_HELD));
+              setOpenProjectDir(null);
+              setOpenRunId(run.id);
+              setPage("home");
+            }}
+          />
         </>)}
 
         {view.face === "wizard" && status && (
@@ -2201,6 +2284,21 @@ export default function CodingAgentApp() {
             </ul>
           )}
         </div>
+        {/* The rail carries Run history in a wide window; a narrow one (the
+            phone) has no rail, so the home page offers it at its foot. */}
+        {!wide && (
+          <div className="mt-4 flex justify-center">
+            <button
+              type="button"
+              onClick={() => { setArchivedOpenId(null); setPage("history"); }}
+              data-testid="coding-agent-home-history"
+              className={BTN_QUIET}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">manage_history</span>
+              {t("codingAgent.history.title")}
+            </button>
+          </div>
+        )}
         </>)}
 
         {/* One run, on its own page. */}
