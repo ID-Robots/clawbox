@@ -6,10 +6,18 @@ vi.mock("@/lib/updater", () => ({
   isUpdateCompleted: vi.fn(),
 }));
 
+// The /updating screen's "What's new" prefetch (TASK-1205): git and GitHub,
+// which this route only ever fires and forgets.
+vi.mock("@/lib/update-whats-new-server", () => ({
+  prefetchUpdateWhatsNew: vi.fn(),
+}));
+
 import { startUpdate, isUpdateCompleted } from "@/lib/updater";
+import { prefetchUpdateWhatsNew } from "@/lib/update-whats-new-server";
 
 const mockStartUpdate = vi.mocked(startUpdate);
 const mockIsUpdateCompleted = vi.mocked(isUpdateCompleted);
+const mockPrefetch = vi.mocked(prefetchUpdateWhatsNew);
 
 describe("POST /setup-api/update/run", () => {
   let updateRunPost: (req: Request) => Promise<Response>;
@@ -37,6 +45,7 @@ describe("POST /setup-api/update/run", () => {
 
     mockStartUpdate.mockReturnValue({ started: true });
     mockIsUpdateCompleted.mockResolvedValue(false);
+    mockPrefetch.mockResolvedValue(undefined);
 
     const mod = await import("@/app/setup-api/update/run/route");
     updateRunPost = mod.POST;
@@ -92,6 +101,25 @@ describe("POST /setup-api/update/run", () => {
     expect(res.status).toBe(200);
     expect(body.started).toBe(true);
     // Invalid JSON is treated as no body, so force=false
+  });
+
+  it("prefetches the What's new panel once the update has started, without waiting for it", async () => {
+    // A prefetch that never settles must not hold the answer.
+    mockPrefetch.mockReturnValue(new Promise(() => {}));
+
+    const res = await updateRunPost(emptyRequest());
+
+    expect((await res.json()).started).toBe(true);
+    expect(mockPrefetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("prefetches nothing when no update started", async () => {
+    mockStartUpdate.mockReturnValue({ started: false, error: "An update is already running" });
+    await updateRunPost(emptyRequest());
+    mockIsUpdateCompleted.mockResolvedValue(true);
+    await updateRunPost(emptyRequest());
+
+    expect(mockPrefetch).not.toHaveBeenCalled();
   });
 
   it("returns 500 when startUpdate throws", async () => {

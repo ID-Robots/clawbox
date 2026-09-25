@@ -47,6 +47,9 @@ const UPDATE_KEYS = [
   // The /updating screen, the one page guaranteed to be open while the box is
   // offline.
   "update.stuckHint", "update.offlineHint",
+  // Its "What's new" panel (TASK-1205).
+  "update.whatsNewTitle", "update.whatsNewTitleGeneric", "update.whatsNewIntro",
+  "update.whatsNewGeneric", "update.whatsNewReleaseNotes", "update.whatsNewChannel",
 ];
 
 /** Settings → Providers and the ClawBox AI device-code card (sweep: settings #1). */
@@ -173,6 +176,8 @@ describe("strings the UI sweep found hard-coded in English", () => {
       ["update.forceConfirmBody", ["{reboot}"]],
       ["update.startFailedHttp", ["{status}"]],
       ["update.updateComponent", ["{name}"]],
+      ["update.whatsNewTitle", ["{version}"]],
+      ["update.whatsNewChannel", ["{channel}"]],
       ["settings.mdnsHint", ["{url}"]],
       ["files.uploadingFile", ["{name}", "{index}", "{total}"]],
       ["files.uploadedCount", ["{ok}", "{total}"]],
