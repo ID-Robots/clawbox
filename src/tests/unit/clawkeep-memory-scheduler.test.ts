@@ -208,6 +208,34 @@ describe("the memory index scheduler", () => {
     log.mockRestore();
   });
 
+  it("says a slot was held back for a full reindex, asks for nothing more, and re-arms (TASK-1197)", async () => {
+    // startMemoryIndex refuses to turn a scheduled pass over a disowned index
+    // into a forced re-embed. The slot must not work around that by asking
+    // for the full pass itself, and the journal has to say why it did nothing.
+    const startMemoryIndex = vi.fn(async () => ({
+      accepted: false, declined: "full_reindex_required" as const, run: { status: "idle" } as never,
+    }));
+    vi.doMock("@/lib/updater", () => ({ updateInFlight: vi.fn(async () => false) }));
+    vi.doMock("@/lib/clawkeep-memory", async () => {
+      const actual = await vi.importActual<typeof import("@/lib/clawkeep-memory")>("@/lib/clawkeep-memory");
+      return { ...actual, startMemoryIndex };
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await writeSchedule({ enabled: true, frequency: "daily", timeOfDay: "06:00", weekday: 0 });
+    const sched = await import("@/lib/clawkeep-memory-scheduler");
+    await sched.start();
+
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+    expect(startMemoryIndex).toHaveBeenCalledTimes(1);
+    expect(startMemoryIndex).toHaveBeenCalledWith("incremental", "schedule");
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("skipped: the index needs a full reindex"));
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining("an index run is in progress"));
+    await vi.waitFor(() => {
+      expect(sched.nextRunAtMs()).toBe(new Date("2026-08-23T06:00:00").getTime());
+    });
+    log.mockRestore();
+  });
+
   it("stands down for the slot while an update is in flight, and re-arms", async () => {
     // post_update repairs the OpenClaw store with the gateway masked so there
     // is one writer; `openclaw memory index` would be a second. A slot that

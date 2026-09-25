@@ -421,13 +421,22 @@ function run(scenario: Scenario = {}): Run {
     "# unconditionally: an unstubbed one would be a 127 inside the updater's",
     "# own rebuild step with every suite still green.",
     "ensure_build_swap() { return 0; }",
-    "free_memory_for_build() { :; }",
+    // Says which arm it was handed: on the reboot path it pauses the gateway
+    // itself; everywhere else the room is judged just before the build.
+    'free_memory_for_build() { echo "FREED:${1:-routine}"; }',
+    // TASK-1197's pair, stubbed for the same reason as the rest: present,
+    // harmless and observable. The judgement echoes whether the build's own
+    // bun install had already run, which is the ordering it exists for.
+    'pause_gateway_if_build_needs_room() { echo "GATEWAY-ROOM-JUDGED"; }',
+    'report_gateway_build_pause() { echo "GATEWAY-PAUSE-REPORTED"; }',
     // Stubbed unconditionally, like the pair above: unstubbed it would read
     // the kernel log of whatever machine runs the suite, so a box that really
     // had OOM-killed something in the last fifteen minutes would flip the
     // assertion. `return 1` is "no OOM kill in the log".
     `oom_killer_in_kernel_log() { return ${oomEvidence ? 0 : 1}; }`,
-    'resume_paused_engines() { echo "RESUMED"; }',
+    // Also says whether the parked build was still on disk when the engines
+    // came back: on success they are handed back BEFORE its `rm -rf`.
+    'resume_paused_engines() { echo "RESUMED"; if [ -d "$PROJECT_DIR/.next-old" ]; then echo "RESUMED-BEFORE-CLEANUP"; fi; }',
     'forget_paused_engines() { echo "FORGOT"; }',
     "",
     shellFunctions(
@@ -819,6 +828,48 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
     const withoutReboot = run({ build: "succeeds" });
     expect(withoutReboot.status).toBe(0);
     expect(withoutReboot.stdout + withoutReboot.stderr).toMatch(/RESUMED/);
+  });
+
+  it("judges the gateway's room just before the build on a routine rebuild, and only there (TASK-1197)", () => {
+    // Not at the top: bun install, the node-pty check and the set-aside all
+    // run with the assistant up, so a pause — when one is needed at all —
+    // covers the build and nothing that merely precedes it.
+    const r = run({ build: "succeeds" });
+    expect(r.status).toBe(0);
+    const out = r.stdout + r.stderr;
+    expect(out).toContain("FREED:routine");
+    const install = out.indexOf("Running bun install...");
+    const judged = out.indexOf("GATEWAY-ROOM-JUDGED");
+    const build = out.indexOf("Running bun build...");
+    expect(install).toBeGreaterThan(-1);
+    expect(judged).toBeGreaterThan(install);
+    expect(build).toBeGreaterThan(judged);
+    // …and says how long it was away, once the resume has brought it back.
+    expect(out.indexOf("GATEWAY-PAUSE-REPORTED")).toBeGreaterThan(out.indexOf("RESUMED"));
+  });
+
+  it("leaves the update's reboot path exactly as it was: paused up front, handed to the reboot", () => {
+    const r = run({ build: "succeeds", rebootFollows: true });
+    expect(r.status).toBe(0);
+    const out = r.stdout + r.stderr;
+    expect(out).toContain("FREED:--reboot-follows");
+    expect(out).not.toContain("GATEWAY-ROOM-JUDGED");
+    expect(out).toContain("FORGOT");
+  });
+
+  it("gives the engines back before it deletes the parked build, not after", () => {
+    const r = run({ build: "succeeds" });
+    expect(r.status).toBe(0);
+    expect(r.stdout + r.stderr).toContain("RESUMED-BEFORE-CLEANUP");
+    // And the parked tree is still removed.
+    expect(r.parked).toBe(false);
+  });
+
+  it("reports the pause on the failure arm too, after the restore and the resume", () => {
+    const r = run({ build: "oom-killed" });
+    expect(r.status).not.toBe(0);
+    const out = r.stdout + r.stderr;
+    expect(out.indexOf("GATEWAY-PAUSE-REPORTED")).toBeGreaterThan(out.indexOf("RESUMED"));
   });
 
   it("starts them back on the failure arm even when a reboot was announced", () => {

@@ -79,8 +79,11 @@ async function runSlot(): Promise<void> {
   }
   // Incremental, never a full reindex: a scheduled run must not spend hours
   // re-embedding everything unattended. The one exception is a box with no
-  // index at all, where an incremental pass cannot succeed — startMemoryIndex
-  // settles that through the same rule as the button, so the two agree. It
+  // index at all, where an incremental pass cannot succeed and there is
+  // nothing to throw away. An index the core has DISOWNED is not that
+  // exception (TASK-1197): the button upgrades it to a full pass, the
+  // schedule declines it with `full_reindex_required` and leaves the rebuild
+  // to the owner, whom the status banner is already telling. startMemoryIndex
   // is single-flight, and declines this slot before it asks anything of the
   // CLI, so a manual run already in progress keeps its record; the one log
   // line is the only trace a declined slot leaves.
@@ -91,9 +94,13 @@ async function runSlot(): Promise<void> {
   // owner had already withdrawn.
   const { accepted, declined } = await startMemoryIndex("incremental", "schedule");
   if (accepted) return;
-  console.log(declined === "disabled"
-    ? "[clawkeep-memory-scheduler] skipped: Memory Shard was switched off before the run started"
-    : "[clawkeep-memory-scheduler] skipped: an index run is in progress");
+  console.log(
+    declined === "disabled"
+      ? "[clawkeep-memory-scheduler] skipped: Memory Shard was switched off before the run started"
+      : declined === "full_reindex_required"
+        ? "[clawkeep-memory-scheduler] skipped: the index needs a full reindex, which a schedule never starts on its own — run Full reindex from Memory Shard"
+        : "[clawkeep-memory-scheduler] skipped: an index run is in progress",
+  );
 }
 
 async function rearm(): Promise<void> {

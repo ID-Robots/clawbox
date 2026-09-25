@@ -2072,8 +2072,12 @@ forget_paused_engines() {
 # Every step is best-effort and this function never fails the update: a box
 # that cannot stop one of its engines should still attempt the build it was
 # asked for, and the log says what happened.
+#
+# `free_memory_for_build [--reboot-follows]`: do_rebuild's own flag, passed
+# through, because it decides when the GATEWAY goes (see below).
 free_memory_for_build() {
-  local before after uid unit pid waited ram_kb
+  local before after uid unit pid waited ram_kb reboot_follows=0
+  if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
   before=$(available_mb)
   echo "Freeing memory for the build (${before} MB available)..."
 
@@ -2088,11 +2092,21 @@ free_memory_for_build() {
   # from the owner for the length of a build that was never going to run out.
   # The threshold is ensure_build_swap's, read inline for the same reason that
   # function reads it inline — each of these is extracted and run on its own.
+  #
+  # And only HERE — before bun install, for the whole rebuild — on the update's
+  # reboot path, which is the proven one and is left exactly as it was: the box
+  # reboots at the end of it, so the assistant is interrupted either way. A
+  # rebuild nothing reboots after (`install.sh --step rebuild`, the legacy
+  # updater hand-over) keeps the gateway through bun install and the node-pty
+  # rebuild, and pause_gateway_if_build_needs_room decides just before
+  # `next build` itself, on the memory actually left then (TASK-1197).
   ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
-  if [ "${ram_kb:-0}" -lt 12000000 ]; then
+  if [ "${ram_kb:-0}" -ge 12000000 ]; then
+    echo "  Leaving clawbox-gateway.service up: this box has memory to spare"
+  elif [ "$reboot_follows" = "1" ]; then
     pause_engine_unit clawbox-gateway.service
   else
-    echo "  Leaving clawbox-gateway.service up: this box has memory to spare"
+    echo "  Keeping clawbox-gateway.service up for now: whether the build needs its memory is decided just before next build, on what is left then"
   fi
 
   pause_engine_unit ollama.service
@@ -2156,6 +2170,88 @@ free_memory_for_build() {
 
   after=$(available_mb)
   echo "  Memory available for the build: ${after} MB (was ${before} MB)"
+}
+
+# How much MemAvailable, in MiB, a low-memory box must still have just before
+# `next build` for the build to run BESIDE the assistant rather than instead of
+# it. Tunable, because nobody has measured the build's peak on every board;
+# the default is chosen to be no bolder than what already ships.
+#
+# The >= 12 GB rule above keeps the gateway up on every box that size, and such
+# a box, with its engines stopped and its desktop and gateway resident, is left
+# with roughly 6.5-8 GB. 6 GiB admits a smaller box only when it measures the
+# same kind of room — and a smaller box has the 4 GiB of disk-backed swap
+# ensure_build_swap refuses to build without, which the big box does not. So
+# the one configuration this lets through is at least as safe as one that has
+# shipped all along. The 8 GB Jetson of TASK-1022 never gets near it with its
+# desktop up, and keeps pausing — for the build itself, no longer for the whole
+# rebuild. A value that is not a plain number is not a threshold (a comparison
+# against it would fail under errexit), so it falls back rather than aborts.
+BUILD_GATEWAY_ROOM_MB="${CLAWBOX_BUILD_GATEWAY_ROOM_MB:-6144}"
+case "$BUILD_GATEWAY_ROOM_MB" in ''|*[!0-9]*) BUILD_GATEWAY_ROOM_MB=6144 ;; esac
+# When pause_gateway_if_build_needs_room stopped the gateway, in epoch seconds;
+# empty otherwise. Only ever read by report_gateway_build_pause.
+GATEWAY_PAUSED_FOR_BUILD_AT=""
+
+# On a rebuild nothing reboots after, stop the assistant for `next build` only
+# if the build will not fit beside it (TASK-1197).
+#
+# THE NARROWEST INTERRUPTION, and said out loud. Pausing the gateway ends every
+# chat turn in flight, every channel connection (Telegram, WhatsApp, Discord …)
+# and every assistant-driven coding turn — the claude CLI turns live in the
+# gateway's cgroup — and it used to happen at the top of every low-memory
+# rebuild, before bun install, for the whole of it. Now:
+#
+#   - it happens only after bun install, the node-pty rebuild and the set-aside
+#     have run with the assistant still up, so the pause covers the build and
+#     nothing that merely precedes it;
+#   - only when it has to: the room is MEASURED here, with every model engine
+#     already stopped and the page cache dropped, instead of assumed from the
+#     box's size;
+#   - and the log names it when it does — the numbers, what stops, and (from
+#     report_gateway_build_pause) for how long.
+#
+# What keeping the gateway does NOT give back, also said: the web server is down
+# for every rebuild, so the desktop, local models and memory search (all behind
+# its proxy) are unavailable either way. Cloud-model turns and the channels are
+# what stay up.
+#
+# An unreadable /proc answers 0 from available_mb and therefore pauses — the
+# safe side of a question this function could not ask. Never fails: callers
+# are inside do_rebuild's pause/resume window.
+pause_gateway_if_build_needs_room() {
+  local ram_kb avail
+  ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  [ "${ram_kb:-0}" -lt 12000000 ] || return 0
+  # Nothing to decide for a gateway that is not running: a Hermes box has none,
+  # and the legacy updater hand-over has already stopped it under its own mask.
+  systemctl is-active --quiet clawbox-gateway.service 2>/dev/null || return 0
+  avail=$(available_mb)
+  if [ "$avail" -ge "$BUILD_GATEWAY_ROOM_MB" ]; then
+    echo "  Keeping clawbox-gateway.service up through the build: ${avail} MB available, at least the ${BUILD_GATEWAY_ROOM_MB} MB a build beside the assistant needs"
+    return 0
+  fi
+  echo "  NOTE: pausing clawbox-gateway.service for the build — ${avail} MB available is less than the ${BUILD_GATEWAY_ROOM_MB} MB a build beside the assistant needs on this box. Chat turns in flight, channels and assistant coding turns stop now and come back when the build ends."
+  pause_engine_unit clawbox-gateway.service
+  # Timed only once it is really down: a stop that failed has already said so
+  # (pause_engine_unit's warning), and the report must not then claim a pause
+  # that never happened.
+  if ! systemctl is-active --quiet clawbox-gateway.service 2>/dev/null; then
+    GATEWAY_PAUSED_FOR_BUILD_AT=$(date +%s 2>/dev/null || echo "")
+  fi
+  return 0
+}
+
+# How long the assistant was away, once it is back. After resume_paused_engines,
+# which is what started it again and said whether it came up.
+report_gateway_build_pause() {
+  local at="$GATEWAY_PAUSED_FOR_BUILD_AT" now
+  GATEWAY_PAUSED_FOR_BUILD_AT=""
+  case "$at" in ''|*[!0-9]*) return 0 ;; esac
+  now=$(date +%s 2>/dev/null || echo "")
+  case "$now" in ''|*[!0-9]*) return 0 ;; esac
+  echo "  clawbox-gateway.service was paused for $((now - at)) s for the build"
+  return 0
 }
 
 # Does this build tree carry the entry production-server.js loads?
@@ -2781,8 +2877,14 @@ do_rebuild() {
   # all still land in the window, and neither guard costs anything.
   promote_parked_build "$build_dir" "$kept_dir"
 
-  # After the stop, never before it — see free_memory_for_build.
-  free_memory_for_build
+  # After the stop, never before it — see free_memory_for_build. The flag goes
+  # through: it decides whether the gateway is paused now or judged before the
+  # build (pause_gateway_if_build_needs_room below).
+  if [ "$reboot_follows" = "1" ]; then
+    free_memory_for_build --reboot-follows
+  else
+    free_memory_for_build
+  fi
 
   # Everything from here to the restore branch runs with the dashboard DOWN, so
   # no command in the window may leave the function without passing through it —
@@ -2810,6 +2912,12 @@ do_rebuild() {
     rc=1
     failed_at="setting the previous build aside"
   else
+    # The assistant's room, judged at the last moment it can be: everything
+    # that only precedes the build has run with the gateway up (TASK-1197).
+    # The reboot path paused it in free_memory_for_build already.
+    if [ "$reboot_follows" != "1" ]; then
+      pause_gateway_if_build_needs_room || true
+    fi
     echo "Running bun build..."
     built=1
     run_next_build || rc=$?
@@ -2850,17 +2958,14 @@ do_rebuild() {
     # step_rebuild_reboot is BELOW its `do_rebuild`, and errexit ends the step
     # before it.
     resume_paused_engines
+    report_gateway_build_pause
     return "$rc"
   fi
 
-  # `|| echo`, not bare: errexit is live in this function and this is the last
-  # statement between the engine pause and the resume below. An `rm -rf` that
-  # cannot remove the parked tree (EACCES, EBUSY, a mount in the way) would
-  # otherwise kill the shell with every engine stopped and neither the resume
-  # nor the hand-over reached — the exact state this pair exists to remove.
-  # A parked tree left behind is harmless: the next rebuild's
-  # promote_parked_build or set_previous_build_aside deals with it.
-  rm -rf "$kept_dir" || echo "  Warning: could not remove the parked build at $kept_dir" >&2
+  # The engines (and a gateway paused for the build) come back BEFORE the
+  # parked tree is removed, not after: nothing about deleting a whole build on
+  # eMMC needs them stopped, and the assistant should not stay down for the
+  # length of an `rm -rf` (TASK-1197).
   if [ "$reboot_follows" = "1" ]; then
     # The caller reboots in a moment. Starting ollama, the ~2 GB embedder and
     # both voice engines seconds before shutdown restores nothing that survives
@@ -2872,7 +2977,14 @@ do_rebuild() {
     forget_paused_engines
   else
     resume_paused_engines
+    report_gateway_build_pause
   fi
+  # `|| echo`, not bare: errexit is live in this function. An `rm -rf` that
+  # cannot remove the parked tree (EACCES, EBUSY, a mount in the way) must not
+  # turn a finished build into a failed step. A parked tree left behind is
+  # harmless: the next rebuild's promote_parked_build or
+  # set_previous_build_aside deals with it.
+  rm -rf "$kept_dir" || echo "  Warning: could not remove the parked build at $kept_dir" >&2
   echo "  Build complete"
 }
 

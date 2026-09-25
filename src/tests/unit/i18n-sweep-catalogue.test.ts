@@ -115,6 +115,7 @@ const MEMORY_KEYS = [
   "clawkeep.memory.runError.openclawMissing",
   "clawkeep.memory.runError.providerMismatch",
   "clawkeep.memory.runError.indexFailed",
+  "clawkeep.memory.runError.fullReindexRequired",
 ];
 
 const SURFACES: [string, string[]][] = [
