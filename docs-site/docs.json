@@ -20,7 +20,7 @@
   "navigation": {
     "tabs": [
       {
-        "tab": "Documentation",
+        "tab": "User Guide",
         "groups": [
           {
             "group": "Get Started",
@@ -58,7 +58,7 @@
             ]
           },
           {
-            "group": "Using ClawBox",
+            "group": "Everyday Use",
             "pages": [
               "guides/chat",
               "guides/clawbox-ai",
@@ -83,7 +83,7 @@
         ]
       },
       {
-        "tab": "Technical Reference",
+        "tab": "Technical",
         "groups": [
           {
             "group": "Overview",
