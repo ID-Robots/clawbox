@@ -77,14 +77,20 @@ const MAX_LABEL_CHARS = 80;
  * The inventory is narrower than "any session key" on purpose: it is what the
  * chat strip SHOWS, so a key the popup could never have minted — `agent:main:main`,
  * a Telegram or cron session, a coding run's — has no business in it, whoever
- * asked. Both shapes are 64 characters at most, the transcript key's own bound.
+ * asked.
+ *
+ * The agent id takes OpenClaw's own bound (up to 64 of `[a-z0-9_-]`): the
+ * adapter mints the tab under whatever agent the gateway names as the default,
+ * and a narrower rule here would refuse every tab on a box whose agent has a
+ * long name — the strip would silently go back to being one browser's. The
+ * Hermes shape stays well inside the transcript key's 64-character filename
+ * bound by construction.
  */
-const OPENCLAW_TAB_KEY_RE = /^agent:[a-z0-9][a-z0-9_-]{0,31}:clawbox-[a-z0-9]{1,24}$/;
+const OPENCLAW_TAB_KEY_RE = /^agent:[a-z0-9][a-z0-9_-]{0,63}:clawbox-[a-z0-9]{1,24}$/;
 const HERMES_TAB_KEY_RE = /^desktop-[a-z0-9]{1,24}$/;
 
 export function isChatTabKey(key: unknown): key is string {
   return typeof key === "string"
-    && key.length <= 64
     && (OPENCLAW_TAB_KEY_RE.test(key) || HERMES_TAB_KEY_RE.test(key));
 }
 

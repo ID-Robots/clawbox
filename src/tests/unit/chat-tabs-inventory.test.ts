@@ -33,6 +33,12 @@ describe("which keys are tabs", () => {
   it("admits the two shapes the transports mint, and nothing else", () => {
     expect(isChatTabKey(PHONE_TAB)).toBe(true);
     expect(isChatTabKey("desktop-0a1b2c3d4e5f")).toBe(true);
+    // The adapter mints under whatever agent the gateway names as default, and
+    // OpenClaw allows an id of up to 64 characters — a narrower rule here would
+    // leave that box's strip device-local again.
+    const longAgent = `a${"b".repeat(63)}`;
+    expect(isChatTabKey(`agent:${longAgent}:clawbox-0a1b2c3d4e5f`)).toBe(true);
+    expect(isChatTabKey(`agent:${longAgent}b:clawbox-0a1b2c3d4e5f`)).toBe(false);
     for (const key of [
       "agent:main:main", // the main conversation is never a tab
       "desktop", // …on either edition
