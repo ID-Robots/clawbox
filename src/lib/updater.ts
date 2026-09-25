@@ -3723,8 +3723,12 @@ async function readPkgVersion(pkgPath: string): Promise<string | null> {
  * its own version and keeps offering an update it already installed. package.json
  * is rewritten by the git sync, so it always reflects the running release.
  * Falls back to the build-time value, then "unknown", if the file is unreadable.
+ *
+ * Exported so release-identity.test.ts can hold this `clawbox.current` to the
+ * same release as About's fallback and the What's new card, against the
+ * shipped package.json rather than a mocked read.
  */
-async function readClawboxVersion(): Promise<string> {
+export async function readClawboxVersion(): Promise<string> {
   const v = await readPkgVersion(CLAWBOX_PKG);
   if (v) return v.startsWith("v") ? v : `v${v}`;
   return process.env.NEXT_PUBLIC_APP_VERSION || "unknown";

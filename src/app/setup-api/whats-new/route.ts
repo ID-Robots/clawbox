@@ -6,13 +6,13 @@ import { dismissWhatsNew, readWhatsNewState } from "@/lib/whats-new-server";
 
 export const dynamic = "force-dynamic";
 
-/** `{"release":"4.0"}` is 17 bytes. Anything near this size is not a dismissal. */
+/** `{"release":"4.1"}` is 17 bytes. Anything near this size is not a dismissal. */
 const MAX_BODY_BYTES = 1024;
 
 const NO_STORE = { "Cache-Control": "no-store" };
 
 /**
- * GET: should the desktop show the "What's new in 4.0" card, and what should
+ * GET: should the desktop show the "What's new in 4.1" card, and what should
  * its plan section offer? See `WhatsNewState` in `@/lib/whats-new`.
  *
  * NEVER A 500 (TASK-1198). The card is an announcement, and a read it depends
@@ -34,11 +34,13 @@ export async function GET() {
 }
 
 /**
- * POST `{ release: "4.0" }`: the owner dismissed the card. Recorded in the
+ * POST `{ release: "4.1" }`: the owner dismissed the card. Recorded in the
  * box's config store, so the card stays gone on every browser.
  *
  * `release` must name the card being shown. A tab from another build that
- * dismisses a different card must not dismiss this one.
+ * dismisses a different card must not dismiss this one: a tab still showing
+ * the 4.0 card, left open across the update, is refused rather than allowed to
+ * dismiss 4.1 unseen.
  *
  * Same-origin only, like every other state-changing route a browser reaches.
  * A page on another site must not be able to spend the owner's one look at the

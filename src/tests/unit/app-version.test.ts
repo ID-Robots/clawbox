@@ -25,11 +25,13 @@ import path from "path";
  * wholesale, which proves the fixture rather than the file. Closing it needs a
  * seam the updater does not have today.
  *
- * `NEXT_PUBLIC_APP_VERSION` is a SEPARATE version surface and is not this
- * number: next.config.ts bakes it from `git describe --tags --always` at build
- * time. It is only a fallback (updater.ts, and SettingsApp when the runtime
- * read is null), and it has already drifted — v3.9.0 is not an ancestor of
- * beta, so a clean clone describes as v3.1.11-<n>-g<sha>. Out of scope here.
+ * `NEXT_PUBLIC_APP_VERSION` is the fallback About shows until that runtime read
+ * answers (and the one updater.ts and the What's new route use when
+ * package.json cannot be read). next.config.ts used to bake it from `git
+ * describe --tags --always`, which names the nearest ANCESTOR tag — beta does
+ * not contain v4.0.0, so a beta build called itself v3.x-<n>-g<sha> beside a
+ * System Update reading v4.x. It is package.json's number now, "v"-prefixed the
+ * way `readClawboxVersion()` prefixes it, and the last test below holds it there.
  */
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
@@ -48,9 +50,10 @@ const REPO_ROOT = path.resolve(__dirname, "../../..");
  * is a deliberate release act, and a stamped expectation is what makes an
  * accidental or half-applied one fail loudly instead of shipping a box that
  * announces the previous release. Bumping the version is therefore two edits:
- * `npm version <x> --no-git-tag-version`, then this constant.
+ * `npm version <x> --no-git-tag-version`, then this constant — and, for a new
+ * minor, the What's new card's release (see release-identity.test.ts).
  */
-const EXPECTED_VERSION = "4.0.0";
+const EXPECTED_VERSION = "4.1.0";
 
 function readJson(rel: string): { version?: string; packages?: Record<string, { version?: string }> } {
   return JSON.parse(fs.readFileSync(path.join(REPO_ROOT, rel), "utf-8"));
@@ -98,5 +101,12 @@ describe("build identity reports the shipped version", () => {
 
     const info = JSON.parse(fs.readFileSync(path.join(dir, ".next", "build-info.json"), "utf-8"));
     expect(info.packageVersion).toBe(EXPECTED_VERSION);
+  });
+});
+
+describe("the build-time fallback names the same release", () => {
+  it("bakes package.json's version, v-prefixed like /setup-api/update/versions, never git describe", async () => {
+    const { default: nextConfig } = await import("../../../next.config");
+    expect(nextConfig.env?.NEXT_PUBLIC_APP_VERSION).toBe(`v${EXPECTED_VERSION}`);
   });
 });
