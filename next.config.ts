@@ -1,5 +1,7 @@
 import type { NextConfig } from "next";
 import { execSync } from "child_process";
+import { readFileSync } from "fs";
+import path from "path";
 // A RELATIVE import, and of a module that imports nothing: this file is loaded
 // by Next's own config loader before any alias or bundler exists, so `@/…`
 // does not resolve here and a dependency of that module would have to load
@@ -13,8 +15,23 @@ const GATEWAY_URL = process.env.GATEWAY_URL || "http://127.0.0.1:18789";
 // shared by connect-src (fetch probes) and img-src (the handoff overlays'
 // <img> probes) so the two CSP directives can't drift apart.
 const LOCAL_LAN_SOURCES = "http://*.local http://*.local:* https://*.local https://*.local:*";
-// Git-based version: "v2.0.0" on tag, "v2.0.0-3-gca62836" after commits
+// The build's own version, "v4.1.0": package.json's number with the "v" that
+// `readClawboxVersion` (updater.ts) puts on it for /setup-api/update/versions.
+// About falls back to this until that route answers, so the two must never
+// name different releases. It used to be `git describe --tags`, which names
+// the nearest tag that is an ANCESTOR of HEAD: beta does not contain v4.0.0,
+// so a beta build called itself v3.x-<n>-g<sha> while System Update said
+// v4.x. `git describe` is kept only for a package.json that cannot be read.
 const APP_VERSION = (() => {
+  try {
+    const { version } = JSON.parse(readFileSync(path.join(__dirname, "package.json"), "utf-8")) as { version?: unknown };
+    if (typeof version === "string" && version.trim()) {
+      const v = version.trim();
+      return v.startsWith("v") ? v : `v${v}`;
+    }
+  } catch {
+    // Unreadable or not JSON: fall through to git.
+  }
   try {
     return execSync("git describe --tags --always", { encoding: "utf-8" }).trim();
   } catch {
