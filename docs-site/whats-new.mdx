@@ -4,8 +4,8 @@ icon: "sparkles"
 summary: "What changed on your ClawBox recently, what it looks like on screen, and where to click."
 ---
 
-Everything below is on the current release. Open **Settings → System Update** to bring
-your box up to date, see [Updating ClawBox](/support/updating).
+This page lists every public ClawBox release, newest first. To update your box, open
+**Settings → System Update**. For help, see [Updating ClawBox](/support/updating).
 
 <Note>
 Some entries are specific to one [edition](/editions/overview). Where that is the case,
@@ -14,13 +14,33 @@ the entry says so.
 
 Entries are grouped by release, newest first.
 
+<Columns cols={3}>
+  <Card title="4.1" href="#clawbox-41" icon="sparkles">
+    Current release candidate and the newest fixes.
+  </Card>
+  <Card title="4.0" href="#clawbox-40" icon="rocket">
+    The major release that introduced Coding Agent and the new mobile experience.
+  </Card>
+  <Card title="Earlier releases" href="#clawbox-39" icon="clock-rotate-left">
+    Version 3.9 back through the original 2.0 release.
+  </Card>
+</Columns>
+
+<Tip>
+Looking for your installed version? Open **Settings → About**. To update, open
+**Settings → System Update**.
+</Tip>
+
 ## ClawBox 4.1
 
-The first release after 4.0 gives the chat more of a phone, makes sure reopening a
-conversation always comes to an end, brings back the saved data of web apps built before
-4.0, and lets the coding agent's pull requests merge by themselves once they are green.
-After the update the desktop shows a **What's new in 4.1** card that links here. Close it
-with **Got it** and it stays closed on every browser.
+<Note>
+**Release status:** 4.1.0 is being validated on beta devices before the stable release.
+</Note>
+
+ClawBox 4.1 makes chat easier on phones, makes conversation recovery more reliable,
+restores saved data for older web apps, and improves automatic coding-agent pull
+requests. After updating, the desktop shows a **What's new in 4.1** card. Choose
+**Got it** to hide it on all your browsers.
 
 ### More of the phone for the chat
 
@@ -39,34 +59,29 @@ opens a fresh tab and deletes nothing.
 
 ### Web apps built before 4.0 find their data
 
-4.0 moved every web app into a sandbox of its own, and apps built on 3.9 lost sight of what
-they had saved. The data was never deleted. The first time a 4.1 box starts, it copies each
-such app's saved data into the app's own storage. It copies only what the app's own code
-names, never touches ClawBox's own settings or another app's data, and deletes nothing, so
-a rollback still finds the originals. A browser that still holds an old app's local data
-hands it over the first time the app opens there.
+ClawBox 4.0 gave every web app its own private storage area. Some apps made on 3.9 could
+therefore no longer see data they had saved before the update. Version 4.1 safely copies
+that data into the app's new storage the first time it starts. The original data remains
+in place, so it is still available if you roll back.
 
 ### Coding agent pull requests merge when green
 
-With **Merge a pull request the review rounds cleared** switched on, a coding run hands its
-pull request to GitHub's auto-merge, so it merges as soon as its required checks pass. The
-box turns auto-merge off again while anything is outstanding (a failing check, a conflict,
-an unanswered comment or change request), for any pull request labelled `hold` or
-`do-not-merge`, and for any pull request into `main`. Automatic pull requests open as
-drafts and are marked ready once their checks are green, so CodeRabbit reviews each one
-once. Runs on your own Anthropic account default to **Claude Opus 5.5**.
+Turn on **Merge a pull request after review rounds clear** and the coding agent can ask
+GitHub to merge its pull request after every required check passes. It will wait if a
+check fails, a conflict exists, or a reviewer still has an unanswered request. Pull
+requests marked `hold` or `do-not-merge`, and pull requests into `main`, are never merged
+automatically. Runs using your own Anthropic account now default to **Claude Opus 5.5**.
 
-### Updates and backups hold up
+### More reliable updates and backups
 
-- OpenClaw is pinned to 2026.9.4. An update refuses before it changes anything when the
-  box's OpenClaw data is newer than the version it would install.
-- The Codex and ClawBox AI plugins that a 4.0 update left **Needs repair** are retried
-  after the update, and the Providers row says **Repairing…** while that runs.
-- An already-active swapfile no longer fails the update.
-- ClawKeep backups get past plugin links, files that vanish mid-backup, duplicate paths
-  and a database whose only damage is its indexes. Any other damage stops the backup and
-  leaves the data as it was.
-- A Memory Shard index the 4.0 update left unusable is rebuilt by **Index now**.
+- Updates now stop safely before making changes if the box contains data created by a
+  newer OpenClaw version.
+- Codex and ClawBox AI plugins left in **Needs repair** are retried automatically. The
+  Providers screen shows **Repairing…** while this happens.
+- An active swap file no longer causes an update to fail.
+- ClawKeep handles common backup interruptions more gracefully and still stops safely
+  when it finds damage that could risk your backup.
+- **Index now** can rebuild a Memory Shard index left unusable by a 4.0 update.
 
 ### Smaller things
 
@@ -78,6 +93,8 @@ once. Runs on your own Anthropic account default to **Claude Opus 5.5**.
   version, 4.1.0.
 
 ## ClawBox 4.0
+
+**Released September 21, 2026**
 
 The fourth release turns the box from an assistant you talk to into one that also does
 the work: it writes code in your repositories and opens pull requests, it keeps one
@@ -380,3 +397,182 @@ the web, gateway and terminal ports. It can leave existing desktop services alon
   DNS-rebinding gap.
 - An update that dies half way through now resumes instead of leaving the box in a state
   nobody can describe.
+
+## ClawBox 3.9
+
+### 3.9.0 — August 21, 2026
+
+- Added the Hermes edition and the ability to keep OpenClaw and Hermes installations
+  safely separated.
+- Made interrupted Hermes repairs reversible, with clear time limits instead of an
+  update that can wait forever.
+- Kept the Hermes agent and its local model through a factory reset, so recovery still
+  works without an internet connection.
+- Tightened validation around edition changes, saved preferences, sign-in handoff data,
+  project names and browser dialogs.
+- Added clearer reasoning controls and more honest status messages when a feature is not
+  available on the current edition.
+
+## ClawBox 3.1
+
+### 3.1.11 — July 28, 2026
+
+- Finalized the previous gateway-recovery fixes for the stable release.
+- Restored Codex chat for boxes signed in with a ChatGPT account and kept that sign-in
+  working when its temporary credentials refresh.
+
+### 3.1.10 — July 22, 2026
+
+- Improved recovery when the OpenClaw gateway does not come back normally after an
+  update or restart.
+
+### 3.1.9 — July 20, 2026
+
+- Fixed chat menus being cut off by their window or panel.
+
+### 3.1.8 — July 20, 2026
+
+- Kept model and provider menus visible near window edges.
+- Restored reliable update detection and gateway recovery after rollout.
+
+### 3.1.7 — July 19, 2026
+
+- Updated OpenClaw and fixed updates on older Node 22 installations.
+- Reset the active chat correctly after a model change.
+- Removed unsupported Codex models and routed ChatGPT subscription models correctly.
+- Prevented chat controls from overlapping on smaller screens.
+- Added clearer update status for boxes following a pinned branch.
+
+### 3.1.6 — July 17, 2026
+
+- Improved AI-provider stability and guided Telegram setup.
+- Expanded the public documentation with technical reference, troubleshooting and
+  recovery guides.
+- Added ClawReview, the repository's automated pull-request reviewer.
+
+### 3.1.5 — July 3, 2026
+
+- Fixed ClawKeep restore for backup names containing a `+` character.
+- Launched the public ClawBox documentation site and added a dedicated update guide.
+
+### 3.1.4 — June 19, 2026
+
+- Added Telegram pairing approval directly in Settings and on the desktop.
+- Made Gemma 4 the single supported on-device assistant model.
+- Added the full-update command and made branch updates replace incomplete local files
+  reliably.
+- Updated provider compatibility and fixed Anthropic, Google and OpenAI sign-in issues.
+- Improved factory installation and local-model memory handling.
+
+### 3.1.3 — June 12, 2026
+
+- Added a true factory reset that removes the previous owner's data and restores the
+  default password.
+- Made the installer refresh itself and report timeouts and overruns honestly.
+
+### 3.1.2 — June 10, 2026
+
+- Fixed the updater reporting success when a rebuild had actually failed.
+
+### 3.1.1 — June 10, 2026
+
+- Fixed Wi-Fi handoff after setup and corrected the installed-version display.
+- Improved restart handling in automated update tests.
+
+### 3.1.0 — June 9, 2026
+
+- Added search plus an in-window viewer and editor to **Files**.
+- Added a richer Skills Store with sorting, official badges and clearer details.
+- Added named, lockable ClawKeep backups with automatic cleanup.
+- Improved first-boot Wi-Fi handoff, hotspot recovery and reconnect screens.
+- Strengthened the ClawBox device tools, gateway limits and per-device authentication.
+- Stopped desktop apps reopening after every refresh and fixed several provider-status
+  and local-model controls.
+
+## ClawBox 3.0
+
+### 3.0.7 — May 29, 2026
+
+- Added a visible reconnect screen while the gateway restarts.
+- Fixed repeated authentication retries and kept the gateway token safe through updates.
+- Improved Wi-Fi scanning before the setup hotspot starts.
+- Added a Telegram switch for live progress messages.
+
+### 3.0.6 — May 28, 2026
+
+- Kept the Codex plugin on the same version as OpenClaw.
+- Improved setup completion and disabled a conflicting user-level gateway service.
+
+### 3.0.5 — May 26, 2026
+
+- Updated the pinned OpenClaw release and made plugin repair automatic.
+- Improved chat reliability, remote-desktop clipboard support and ClawKeep pairing.
+- Kept paid-plan badges stable during short portal outages.
+
+### 3.0.4 — May 19, 2026
+
+- Fixed international text in the Remote Desktop clipboard.
+- Made ClawKeep pairing clearer and fixed several setup and recovery problems.
+
+### 3.0.3 — May 18, 2026
+
+- Updated chat for the current OpenClaw protocol and repaired Codex automatically.
+- Improved x64 installation, post-install checks and provider authentication.
+- Made paid-plan changes appear without requiring a reinstall.
+
+### 3.0.2 — May 5, 2026
+
+- Fixed authentication for on-device AI, a model-list timing issue, ClawKeep access and
+  incomplete updater synchronization.
+
+### 3.0.1 — May 5, 2026
+
+- Redesigned the chat header and loaded the model list from the connected account rather
+  than assuming a fixed plan.
+
+### 3.0.0 — May 4, 2026
+
+- Added ClawKeep backups and Remote Control through a secure tunnel.
+- Added ClawBox AI plans, model selection and reasoning controls.
+- Added queued chat messages, clearer tool activity and faster chat restoration.
+- Added stronger per-device gateway authentication and safer factory reset behavior.
+- Added broader installation and end-to-end checks for real Jetson hardware.
+
+## ClawBox 2.2
+
+### 2.2.2 — March 10, 2026
+
+- Added Ollama as an optional on-device AI provider, with model search, download and
+  removal controls designed for an 8 GB Jetson.
+- Kept the selected update branch through updates and factory recovery.
+- Improved gateway recovery after a reset and ensured Ollama is restored by a full
+  rebuild.
+
+### 2.2.1 — March 5, 2026
+
+- Fixed Wi-Fi status and hotspot behavior when network setup is skipped or completed.
+- Improved MAXN power-mode detection and made OpenClaw updates install the intended
+  current version.
+
+### 2.2.0 — March 4, 2026
+
+- Improved the dashboard and OAuth setup.
+- Kept Wi-Fi settings across updates and corrected OpenRouter model selection.
+- Made normal updates return to the stable release branch.
+
+## ClawBox 2.1
+
+### 2.1.0 — March 3, 2026
+
+- Added sign-in with ChatGPT and Google subscriptions alongside API keys.
+- Showed ClawBox and OpenClaw versions in the update screen.
+- Improved factory-reset cleanup, error messages and automated checks.
+
+## ClawBox 2.0
+
+### 2.0.0 — February 19, 2026
+
+- Introduced the three-step first-boot setup and the redesigned ClawBox dashboard.
+- Added local speech recognition and spoken replies, optimized for Jetson hardware.
+- Added safer system updates, password changes and factory-reset recovery.
+- Improved hotspot setup, Wi-Fi sharing, browser installation and device performance.
