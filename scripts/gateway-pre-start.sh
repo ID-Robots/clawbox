@@ -4445,19 +4445,89 @@ clawbox_plugin_repair_mark() {
 import json, os, sys, tempfile, time
 
 path = sys.argv[1]
+
+
+def salvage(text):
+    """The rows a DAMAGED store still holds (TASK-1198): every top-level member,
+    in order, up to the first that does not parse, keeping the object-valued
+    ones. The same prefix `salvagePluginRepairRows` in src/lib/plugin-repair.ts
+    recovers, so neither writer undoes the other's recovery. A prefix on
+    purpose: a torn write is a cut-off end, and guessing where a row resumes
+    after garbage could only invent a row, which here is a Retry that installs
+    something."""
+    decoder = json.JSONDecoder()
+    found = {}
+    i = text.find("{")
+    if i < 0 or text[:i].strip("\ufeff \t\r\n"):
+        return found
+    i += 1
+    n = len(text)
+    while True:
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        if i < n and text[i] == ",":
+            i += 1
+            while i < n and text[i] in " \t\r\n":
+                i += 1
+        if i >= n or text[i] != '"':
+            return found
+        try:
+            key, i = decoder.raw_decode(text, i)
+        except ValueError:
+            return found
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        if i >= n or text[i] != ":":
+            return found
+        i += 1
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        try:
+            value, i = decoder.raw_decode(text, i)
+        except ValueError:
+            return found
+        if isinstance(key, str) and isinstance(value, dict):
+            found[key] = value
+
+
 try:
-    with open(path, encoding="utf-8") as fh:
-        rows = json.load(fh)
-    if not isinstance(rows, dict):
-        rows = {}
-except (FileNotFoundError, json.JSONDecodeError):
-    rows = {}
+    with open(path, "rb") as fh:
+        data = fh.read()
+except FileNotFoundError:
+    data = None
 # A file that EXISTS and cannot be read is not an empty file: rewriting it would
 # discard rows for other plugins that are still broken.
 except OSError as err:
     print(f"  WARN: could not read {path} ({err.strerror or type(err).__name__}); "
           "the Settings panel will not explain this failure", file=sys.stderr)
     raise SystemExit(1)
+
+rows = {}
+if data is not None:
+    # Decoded the way the server's writer decodes it — a byte that is not
+    # UTF-8 becomes U+FFFD — so the two recover the same rows from one file.
+    raw = data.decode("utf-8", errors="replace")
+    try:
+        rows = json.loads(raw)
+    except ValueError:
+        rows = None
+    if not isinstance(rows, dict):
+        # DAMAGED IS NOT EMPTY (TASK-1198). This used to start the file over,
+        # so one torn write left a store holding only the row being filed and
+        # every other plugin ClawBox had switched off lost its record. Keep what
+        # still parses, keep the damaged file beside the store — byte for byte —
+        # and say so.
+        rows = salvage(raw)
+        kept = path + ".corrupt"
+        try:
+            with open(kept, "wb") as fh:
+                fh.write(data)
+            os.chmod(kept, 0o600)
+            note = f"the damaged file is kept as {kept}"
+        except OSError as err:
+            note = f"the damaged file could not be kept ({err.strerror or type(err).__name__})"
+        print(f"  WARN: {path} is damaged; recovered {len(rows)} row(s) from it and {note}",
+              file=sys.stderr)
 
 plugin_id = os.environ["CLAWBOX_REPAIR_ID"]
 existing = rows.get(plugin_id)

@@ -148,13 +148,41 @@ export async function POST(req: Request) {
     // repair that finished — so there is nothing left here to repair.
     return NextResponse.json({ ok: false, code: "not_marked" }, { status: 404 });
   }
-  const ended = () => setPluginRepairInProgress(entry.id, false).catch(() => false);
+  // THE STAMP ENDS ON EVERY WAY OUT OF THIS PRESS (TASK-1198), a THROW
+  // included. It used to be ended branch by branch, and a repair that threw —
+  // an installer that rejected instead of answering a verdict (the DeepSeek
+  // one does, on a full disk) — left it on the row, where every Retry for the next
+  // `PLUGIN_REPAIR_IN_PROGRESS_MS` (20 minutes) answered 409 over a repair
+  // nothing was running. `settled` is set only where the row itself has
+  // already moved on (cleared, or re-filed by the restart's boot script, which
+  // never carries the stamp), so the finally does not reach for a row that is
+  // somebody else's by then.
+  let settled = false;
+  try {
+    return await repairClaimedRow(entry, () => { settled = true; });
+  } catch (err) {
+    console.warn(
+      `[plugins/repair] the ${entry.id} repair threw:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    // A repair that did not happen, told the way every other one is: the
+    // panel keeps the notice and its Retry, which is free again below.
+    return NextResponse.json({ ok: false, code: "repair_failed" }, { status: 502 });
+  } finally {
+    if (!settled) await setPluginRepairInProgress(entry.id, false).catch(() => false);
+  }
+}
 
+/**
+ * Everything after the claim: the repair, the restart and the badge. May
+ * throw — the caller ends the row's stamp whatever happens here, and
+ * `settle()` tells it the row has already moved on without it.
+ */
+async function repairClaimedRow(entry: PluginRepairEntry, settle: () => void): Promise<NextResponse> {
   // The core that is on the box NOW, so a row written against an older one
   // installs the package built for this one (`rebaseCorePinnedSpec`).
   const verdict = await runPluginRepair(entry, { release: await currentCoreRelease() });
   if (!verdict.ok) {
-    await ended();
     // Deliberately not returned as the reason: the CLI's stderr on this path
     // carries registry URLs and package specs, and the owner's next move is the
     // same whatever it says. The marker stays up.
@@ -199,7 +227,6 @@ export async function POST(req: Request) {
   // separately instead, and the panel keeps the notice while `markerCleared` is
   // false rather than removing it and putting it straight back.
   if (!restarted) {
-    await ended();
     return NextResponse.json({ ok: true, pluginId: entry.id, restarted, markerCleared: false });
   }
   // AND ONLY IF THE RESTART DID NOT FILE IT AGAIN (TASK-1088). The restart runs
@@ -215,9 +242,11 @@ export async function POST(req: Request) {
   } catch {
     cleared = null;
   }
+  // Gone or filed again: either way the row this press stamped is not there to
+  // end. A clear that THREW leaves it, and the caller's finally ends it.
+  if (cleared !== null) settle();
   if (cleared === "refiled") {
     return NextResponse.json({ ok: false, code: "refused_at_start" }, { status: 502 });
   }
-  if (cleared === null) await ended();
   return NextResponse.json({ ok: true, pluginId: entry.id, restarted, markerCleared: cleared !== null });
 }

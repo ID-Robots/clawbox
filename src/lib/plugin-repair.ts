@@ -268,8 +268,9 @@ export type PluginRepairRecord = Omit<PluginRepairEntry, "atMs">;
  * A file that EXISTS and cannot be read is a THROW, not an empty map — the
  * distinction `readPluginRepairs` deliberately does not make, because its
  * wrong answer costs a missing badge while this one would rewrite the file and
- * discard every other plugin's row. A file that is absent or unparseable is an
- * empty map, exactly as the boot script treats it.
+ * discard every other plugin's row. A file that is absent is an empty map; one
+ * that is damaged keeps every row that can still be read, and is itself kept
+ * beside the store (`readRowsForUpdate`) — exactly as the boot script treats it.
  *
  * Temp file plus rename in the same directory, so no reader ever sees half a
  * file, and the same `pid + uuid` name as the clear: two writes in flight
@@ -281,23 +282,10 @@ export async function recordPluginRepair(row: PluginRepairRecord): Promise<void>
 
 async function recordPluginRepairLocked(row: PluginRepairRecord): Promise<void> {
   const target = pluginRepairPath();
-  let rows: Record<string, unknown> = {};
-  let raw: string | null = null;
-  try {
-    raw = await fs.readFile(target, "utf-8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
-  }
-  if (raw !== null) {
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        rows = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Same as the boot script: an unparseable file is started over.
-    }
-  }
+  // Salvaged, not started over, when the file is damaged (TASK-1198) — see
+  // `readRowsForUpdate`. Starting over was the boot script's rule too, and it
+  // turned one torn write into a store holding only the row being filed.
+  const rows = await readRowsForUpdate(target);
   // AN EMPTY SPEC NEVER ERASES ONE THE ROW ALREADY CARRIES, the same rule
   // `clawbox_plugin_repair_mark` follows in the boot script (TASK-785). Each id
   // had one writer while this was safe; the boot re-attempt made a second, and
@@ -323,26 +311,156 @@ async function recordPluginRepairLocked(row: PluginRepairRecord): Promise<void> 
 }
 
 /**
- * Read the file for a write that must not lose other rows: a file that EXISTS
- * and cannot be read throws, an absent or unparseable one is an empty map —
- * `recordPluginRepair`'s rule, for the two writers below that edit one field.
+ * Read the file for a write that must not lose other rows — every writer here
+ * reads through this. A file that EXISTS and cannot be read throws; an absent
+ * one is an empty map; a DAMAGED one is recovered as far as it can be.
+ *
+ * DAMAGED IS NOT EMPTY (TASK-1198). Every writer used to read an unparseable
+ * file as `{}` and write its one row over it, so a single torn write — a
+ * power cut between the boot script's write and the disk, a full `data/` —
+ * silently became a store that knew about one plugin, and every other plugin
+ * ClawBox had switched off lost its "Needs repair" row and with it the only
+ * record that it was ClawBox, not the owner, that turned it off. Now:
+ *
+ *  - the rows before the damage are kept (`salvagePluginRepairRows`), which is
+ *    all of them for the torn-write case, where the damage is a cut-off end;
+ *  - the damaged file is kept beside the store as `plugin-repair.json.corrupt`
+ *    before anything is written over it, so what could not be salvaged is still
+ *    on the box for whoever looks into it; one file, overwritten, so a box
+ *    that keeps tearing it does not fill `data/`;
+ *  - and it is SAID, in the server log.
+ *
+ * The boot script's writer (`clawbox_plugin_repair_mark`) follows the same
+ * rule, so neither writer can undo the other's recovery.
  */
 async function readRowsForUpdate(target: string): Promise<Record<string, unknown>> {
-  let raw: string;
+  let bytes: Buffer;
   try {
-    raw = await fs.readFile(target, "utf-8");
+    bytes = await fs.readFile(target);
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return {};
     throw err;
   }
+  // A byte that is not UTF-8 becomes U+FFFD, exactly as the boot script's
+  // `decode("utf-8", errors="replace")` reads it.
+  const raw = bytes.toString("utf-8");
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(raw);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : {};
+    parsed = JSON.parse(raw);
   } catch {
-    return {};
+    parsed = undefined;
   }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  const rows = salvagePluginRepairRows(raw);
+  const kept = pluginRepairCorruptPath();
+  let keptNote = `the damaged file is kept as ${kept}`;
+  try {
+    // Byte for byte: this copy is for whoever looks into the damage.
+    await fs.writeFile(kept, bytes, { mode: 0o600 });
+  } catch (err) {
+    keptNote = `the damaged file could not be kept (${(err as NodeJS.ErrnoException)?.code ?? String(err)})`;
+  }
+  console.warn(
+    `[plugin-repair] ${target} is damaged; recovered ${Object.keys(rows).length} row(s) from it and ${keptNote}`,
+  );
+  return rows;
+}
+
+/** Where a damaged store is kept before a writer replaces it. */
+export function pluginRepairCorruptPath(): string {
+  return untraced(`${pluginRepairPath()}.corrupt`);
+}
+
+/**
+ * The rows a damaged `plugin-repair.json` still holds: every top-level member,
+ * in order, up to the first one that does not parse, keeping those whose value
+ * is an object. `{}` for anything that does not even open as an object.
+ *
+ * A PREFIX, deliberately, and the same prefix the boot script's
+ * `json.JSONDecoder.raw_decode` walk recovers. The realistic damage is a
+ * truncated file, where the prefix is everything that was written; guessing
+ * where a row resumes after garbage in the middle could only invent rows, and
+ * an invented row here is a Retry that installs something.
+ */
+export function salvagePluginRepairRows(raw: string): Record<string, unknown> {
+  const rows: Record<string, unknown> = {};
+  let i = skipJsonSpace(raw, 0);
+  if (raw.charCodeAt(i) === 0xfeff) i = skipJsonSpace(raw, i + 1);
+  if (raw[i] !== "{") return rows;
+  i += 1;
+  for (;;) {
+    i = skipJsonSpace(raw, i);
+    if (raw[i] === ",") i = skipJsonSpace(raw, i + 1);
+    // The closing brace, the end of a cut-off file, or damage: all end the walk.
+    if (raw[i] !== "\"") return rows;
+    const keyEnd = jsonValueEnd(raw, i);
+    if (keyEnd < 0) return rows;
+    let key: unknown;
+    try {
+      key = JSON.parse(raw.slice(i, keyEnd));
+    } catch {
+      return rows;
+    }
+    i = skipJsonSpace(raw, keyEnd);
+    if (raw[i] !== ":") return rows;
+    i = skipJsonSpace(raw, i + 1);
+    const valueEnd = jsonValueEnd(raw, i);
+    if (valueEnd < 0) return rows;
+    let value: unknown;
+    try {
+      value = JSON.parse(raw.slice(i, valueEnd));
+    } catch {
+      return rows;
+    }
+    if (typeof key === "string" && value && typeof value === "object" && !Array.isArray(value)) {
+      // DEFINED, not assigned: `rows["__proto__"] = …` would set the map's
+      // prototype instead of keeping a row, which `JSON.parse` and the boot
+      // script's dict both keep as an ordinary key.
+      Object.defineProperty(rows, key, { value, enumerable: true, writable: true, configurable: true });
+    }
+    i = valueEnd;
+  }
+}
+
+function skipJsonSpace(text: string, from: number): number {
+  let i = from;
+  while (i < text.length && (text[i] === " " || text[i] === "\n" || text[i] === "\r" || text[i] === "\t")) i += 1;
+  return i;
+}
+
+/**
+ * Where the JSON value starting at `start` ends — exclusive — or -1 when the
+ * text runs out first. Only finds the extent; `JSON.parse` on the slice is
+ * what decides whether it is a value.
+ */
+function jsonValueEnd(text: string, start: number): number {
+  const first = text[start];
+  if (first === undefined) return -1;
+  if (first !== "\"" && first !== "{" && first !== "[") {
+    let i = start;
+    while (i < text.length && !",}] \n\r\t".includes(text[i])) i += 1;
+    return i;
+  }
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i += 1;
+      else if (ch === "\"") {
+        inString = false;
+        if (depth === 0) return i + 1;
+      }
+      continue;
+    }
+    if (ch === "\"") inString = true;
+    else if (ch === "{" || ch === "[") depth += 1;
+    else if (ch === "}" || ch === "]") {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
 }
 
 /**
@@ -574,7 +692,9 @@ export async function clearPluginRepair(id: string): Promise<boolean> {
 }
 
 async function clearPluginRepairLocked(id: string): Promise<boolean> {
-  const current = await readPluginRepairs();
+  if (await hermesIsActive()) return false;
+  const target = pluginRepairPath();
+  const rows = await readRowsForUpdate(target);
   // MATCHED ON THE CANONICAL ID, not on the literal key. The boot script marks
   // the plugin under the key openclaw.json carries — `@openclaw/discord` when
   // `ensureChannelPlugin` enabled that spelling, `@openclaw/deepseek-provider`
@@ -582,12 +702,31 @@ async function clearPluginRepairLocked(id: string): Promise<boolean> {
   // exact lookup answered `false` and left the "Needs repair" badge up on
   // exactly the row it describes. `repairFor` above already reads it this way;
   // the two now agree.
-  const wanted = canonicalPluginId(id);
-  const keys = Object.keys(current).filter((key) => canonicalPluginId(current[key].id) === wanted);
+  const keys = rowsFor(rows, id).map(({ key }) => key);
   if (keys.length === 0) return false;
-  for (const key of keys) delete current[key];
-  await writeRowsAtomically(pluginRepairPath(), current);
+  // Only the matched keys go, and every OTHER row is written back exactly as
+  // it was read (TASK-1198) — not as the reader's filtered copy, which dropped
+  // a row this build cannot parse (a stage a newer boot script files) and
+  // every field it does not know.
+  for (const key of keys) delete rows[key];
+  await writeRowsAtomically(target, rows);
   return true;
+}
+
+/** Hermes is the running harness: nothing here describes it (`readPluginRepairs`). */
+async function hermesIsActive(): Promise<boolean> {
+  return (await getActiveHarness().catch(() => "openclaw" as Harness)) === "hermes";
+}
+
+/** The rows the READER would show for this plugin, with the keys they sit under in the raw store. */
+function rowsFor(rows: Record<string, unknown>, id: string): { key: string; entry: PluginRepairEntry }[] {
+  const wanted = canonicalPluginId(id);
+  const out: { key: string; entry: PluginRepairEntry }[] = [];
+  for (const [key, value] of Object.entries(rows)) {
+    const entry = parseEntry(key, value);
+    if (entry && canonicalPluginId(entry.id) === wanted) out.push({ key, entry });
+  }
+  return out;
 }
 
 /**
@@ -610,13 +749,14 @@ export async function clearPluginRepairUnlessRefiled(
   atMs: number,
 ): Promise<"cleared" | "absent" | "refiled"> {
   return withPluginRepairLock(async () => {
-    const current = await readPluginRepairs();
-    const wanted = canonicalPluginId(id);
-    const keys = Object.keys(current).filter((key) => canonicalPluginId(current[key].id) === wanted);
-    if (keys.length === 0) return "absent";
-    if (keys.some((key) => current[key].atMs !== atMs)) return "refiled";
-    for (const key of keys) delete current[key];
-    await writeRowsAtomically(pluginRepairPath(), current);
+    if (await hermesIsActive()) return "absent";
+    const target = pluginRepairPath();
+    const rows = await readRowsForUpdate(target);
+    const matches = rowsFor(rows, id);
+    if (matches.length === 0) return "absent";
+    if (matches.some(({ entry }) => entry.atMs !== atMs)) return "refiled";
+    for (const { key } of matches) delete rows[key];
+    await writeRowsAtomically(target, rows);
     return "cleared";
   });
 }

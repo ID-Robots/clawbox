@@ -15,6 +15,8 @@ import { readSwapPlan, swapAllowed, swapTargetFor } from "@/lib/harness-swap";
 import { planGateFor } from "@/lib/paid-plan-gate";
 import {
   isWhatsNewVersion,
+  NO_PLAN_CTA,
+  unavailableWhatsNewState,
   WHATS_NEW_RELEASE,
   type WhatsNewPlanCta,
   type WhatsNewState,
@@ -69,24 +71,48 @@ export async function readFreeMonthCode(): Promise<string | null> {
  * the Harness card's own `swapAllowed` (Max).
  */
 async function readPlanCta(source: EditionSource): Promise<WhatsNewPlanCta> {
-  const plan = await readSwapPlan();
-  const target = swapTargetFor(source);
-  return {
-    paidFeatures: !planGateFor(plan.tier).satisfied,
-    editionSwitch: target !== null && !swapAllowed(plan) ? target : null,
-  };
+  // A plan that cannot be read offers NOTHING (TASK-1198). Either read failing
+  // used to fail the whole route with a 500, and the desktop drew no card at
+  // all over a question only its plan section asks. The card still announces
+  // the release; it just sells nothing it cannot check the owner lacks.
+  try {
+    const plan = await readSwapPlan();
+    const target = swapTargetFor(source);
+    return {
+      paidFeatures: !planGateFor(plan.tier).satisfied,
+      editionSwitch: target !== null && !swapAllowed(plan) ? target : null,
+    };
+  } catch (err) {
+    console.warn(
+      "[whats-new] could not read the plan on record; the card offers no plan section:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return { ...NO_PLAN_CTA };
+  }
 }
 
-/** `GET /setup-api/whats-new`. */
+/** A dismissal that could not be read — distinct from "none on record". */
+const DISMISSAL_UNREADABLE = Symbol("dismissal-unreadable");
+
+/** `GET /setup-api/whats-new`. Never throws for a read it depends on; see `unavailableWhatsNewState`. */
 export async function readWhatsNewState(): Promise<WhatsNewState> {
   // Read once, so the wording and the switch on offer describe the same lock.
   const source = readEditionSource();
   const [version, dismissed, cta, freeMonthCode] = await Promise.all([
     readRunningVersion(),
-    get(WHATS_NEW_DISMISSED_KEY),
+    get(WHATS_NEW_DISMISSED_KEY).catch((err: unknown) => {
+      console.warn(
+        "[whats-new] could not read the dismissal on record; the card stays hidden:",
+        err instanceof Error ? err.message : String(err),
+      );
+      return DISMISSAL_UNREADABLE;
+    }),
     readPlanCta(source),
-    readFreeMonthCode(),
+    readFreeMonthCode().catch(() => null),
   ]);
+  // HIDDEN, never shown over a dismissal nobody could read: the owner who
+  // closed this card must not get it back because the store hiccuped.
+  if (dismissed === DISMISSAL_UNREADABLE) return unavailableWhatsNewState(source.edition, version);
   return {
     show: isWhatsNewVersion(version) && dismissed !== WHATS_NEW_RELEASE,
     release: WHATS_NEW_RELEASE,

@@ -161,16 +161,53 @@ export async function retryPluginRepairsAfterCoreUpdate(
     due.push(row);
   }
   if (due.length === 0) return { ...nothing, release };
+
+  // EVERY CLAIMED ROW LEAVES THIS FUNCTION UNSTAMPED, however it leaves
+  // (TASK-1198). The branches below end each row as they settle it, but a throw
+  // between two of them — a quiesce hook that failed after some installs had
+  // run, an installer that rejected mid-loop — used to carry the stamps of the
+  // rows already attempted out with it, and the owner's Retry answered 409 over
+  // them for the next 20 minutes. A row the store has already moved on —
+  // re-filed, which never carries the stamp, or cleared — is left alone: by
+  // then it may be an owner's Retry's to end.
+  const settled = new Set<PluginRepairEntry>();
+  try {
+    return await retryClaimedRows(due, release, log, hooks, settled);
+  } finally {
+    for (const row of due) {
+      if (!settled.has(row)) await setPluginRepairInProgress(row.id, false).catch(() => false);
+    }
+  }
+}
+
+/**
+ * The retry itself, for rows already claimed. Adds each row to `settled` once
+ * its stamp is gone — re-filed, cleared or explicitly ended — and may throw;
+ * the caller ends whatever is left.
+ */
+async function retryClaimedRows(
+  due: PluginRepairEntry[],
+  release: string,
+  log: (line: string) => void,
+  hooks: AfterCoreUpdateRetryHooks,
+  settled: Set<PluginRepairEntry>,
+): Promise<AfterCoreUpdateRetryResult> {
   log(`retrying the ${due.map((row) => row.id).join(", ")} plugin repair after the OpenClaw ${release} update`);
+
+  const endStamp = async (row: PluginRepairEntry) => {
+    await setPluginRepairInProgress(row.id, false).catch(() => false);
+    settled.add(row);
+  };
 
   const refile = async (row: PluginRepairEntry, stage: PluginRepairEntry["stage"], spec: string, reason: string) => {
     try {
       await recordPluginRepair({ id: row.id, stage, reason, disabled: true, spec, retriedCore: release });
+      settled.add(row);
     } catch (err) {
       // The row is still there — only its reason is old — and the stamp above
       // already bounds the retry. Said where an update is looked into.
       log(`could not record why the ${row.id} repair failed: ${err instanceof Error ? err.message : String(err)}`);
-      await setPluginRepairInProgress(row.id, false).catch(() => false);
+      await endStamp(row);
     }
   };
 
@@ -192,9 +229,7 @@ export async function retryPluginRepairsAfterCoreUpdate(
     // Whatever did not get an attempt — a quiesce that failed before running —
     // is no longer being repaired, and must not read as though it were.
     for (const row of due) {
-      if (!attempts.some((attempt) => attempt.row === row)) {
-        await setPluginRepairInProgress(row.id, false).catch(() => false);
-      }
+      if (!attempts.some((attempt) => attempt.row === row)) await endStamp(row);
     }
   }
 
@@ -278,6 +313,7 @@ export async function retryPluginRepairsAfterCoreUpdate(
     } catch {
       outcome = null;
     }
+    if (outcome !== null) settled.add(row);
     if (outcome === "refiled") {
       // The restart's own pre-start asked the core about it, got no, switched
       // it off again and filed the cause. That row is the truth now — and it
@@ -291,7 +327,7 @@ export async function retryPluginRepairsAfterCoreUpdate(
       // consent loop clears the row at the next start, and until then it must
       // at least stop saying "Repairing…".
       log(`the ${row.id} plugin was repaired but its repair record could not be cleared`);
-      await setPluginRepairInProgress(row.id, false).catch(() => false);
+      await endStamp(row);
     }
     repaired.push(canonicalPluginId(row.id));
   }

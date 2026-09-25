@@ -37,6 +37,25 @@ interface CredentialsSubmission {
   hotspotPassword: string;
 }
 
+/**
+ * What to say while the hotspot request runs, judged the way the route decides
+ * (`/setup-api/system/hotspot` POST): an enabled hotspot is restarted unless
+ * the radio is a Wi-Fi CLIENT, which defers it; a disabled one is stopped.
+ * `ap` is the mount-time read — `active` means the radio is hosting the
+ * hotspot right now, `blockedBy` names the network it is a client of instead.
+ * Anything the read could not settle gets the plain line, never a restart
+ * that may not happen.
+ */
+function hotspotProgressKey(
+  enabled: boolean,
+  ap: { active: boolean; blockedBy: string | null } | null,
+): string {
+  if (!enabled) return ap?.active ? "credentials.progressHotspotStop" : "credentials.progressHotspot";
+  if (ap?.active) return "credentials.progressHotspotRestart";
+  if (ap?.blockedBy) return "credentials.progressHotspotDeferred";
+  return "credentials.progressHotspot";
+}
+
 /* ─────────────────────────────────────────────────────────────────────────
    Shared surfaces for this card, expressed in the ladders.
 
@@ -161,6 +180,17 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   } | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveControllerRef = useRef<AbortController | null>(null);
+  // What the save is doing RIGHT NOW, as a translation key, shown beside the
+  // button while it runs (TASK-1198). "Saving..." alone sat there through a
+  // gateway restart and a hotspot restart that took the owner's connection
+  // with it, and through saves that restarted nothing — the same word for
+  // both. So a restart is named, and only for a save that really makes one.
+  const [progressKey, setProgressKey] = useState<string | null>(null);
+  // The device as the mount-time reads found it — what the save's progress
+  // text is judged against. Null until (unless) the read answers: an unknown
+  // starting point never earns a "restarting" line.
+  const deviceNameRef = useRef<string | null>(null);
+  const apStateRef = useRef<{ active: boolean; blockedBy: string | null } | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -170,13 +200,24 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
         if (data && !controller.signal.aborted) {
           if (data.ssid) setHotspotName(data.ssid);
           if (typeof data.enabled === "boolean") setHotspotEnabled(data.enabled);
+          if (typeof data.active === "boolean") {
+            apStateRef.current = {
+              active: data.active,
+              blockedBy: typeof data.blockedBy === "string" && data.blockedBy ? data.blockedBy : null,
+            };
+          }
         }
       })
       .catch(() => {});
     fetch("/setup-api/system/hostname", { signal: controller.signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data?.hostname && !controller.signal.aborted) setHostname(data.hostname);
+        if (data?.hostname && !controller.signal.aborted) {
+          setHostname(data.hostname);
+          if (typeof data.hostname === "string") {
+            deviceNameRef.current = data.hostname.trim().toLowerCase().replace(/\.local$/, "");
+          }
+        }
       })
       .catch(() => {});
     return () => controller.abort();
@@ -290,7 +331,11 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
       newSetupUrl.hostname === newHost &&
       /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.local$/.test(newSetupUrl.hostname);
     try {
-      // Save hostname (applies live; mDNS update is non-fatal on failure)
+      // Save hostname (applies live; mDNS update is non-fatal on failure).
+      // Only a RENAME restarts anything: the route leaves the gateway alone for
+      // the name it already has, and Hermes has no OpenClaw gateway at all.
+      const renaming = deviceNameRef.current !== null && deviceNameRef.current !== normalizedHostname;
+      setProgressKey(renaming && !hermes ? "credentials.progressRenameRestart" : "credentials.progressHostname");
       try {
         await fetch("/setup-api/system/hostname", {
           method: "POST",
@@ -306,6 +351,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
 
       // Save system password if provided
       if (submission.password) {
+        setProgressKey("credentials.progressPassword");
         const res = await fetch("/setup-api/system/credentials", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -324,6 +370,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
       }
 
       // Save hotspot settings
+      setProgressKey(hotspotProgressKey(submission.hotspotEnabled, apStateRef.current));
       const hotspotRes = await fetch("/setup-api/system/hotspot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -426,7 +473,10 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
         message: `Failed: ${err instanceof Error ? err.message : err}`,
       });
     } finally {
-      if (!controller.signal.aborted) setSaving(false);
+      if (!controller.signal.aborted) {
+        setSaving(false);
+        setProgressKey(null);
+      }
     }
   };
 
@@ -935,6 +985,22 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
               }}
             >
               {t(blockedReasonKey)}
+            </p>
+          )}
+          {/* The same slot, which is free while saving: the button cannot be
+              blocked then. Polite, like the reason above — it changes as each
+              request starts, and must not talk over the reconnect overlay. */}
+          {saving && progressKey && (
+            <p
+              role="status"
+              data-testid="credentials-save-progress"
+              className="m-0 text-[var(--text-secondary)]"
+              style={{
+                fontSize: "var(--t-2)",
+                lineHeight: "var(--lh-tight)",
+              }}
+            >
+              {t(progressKey)}
             </p>
           )}
         </div>

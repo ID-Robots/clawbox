@@ -104,6 +104,41 @@ export interface WhatsNewState {
    * the card has no UI for it.
    */
   freeMonthCode: string | null;
+  /**
+   * Present, and true, only when this answer is a FALLBACK (TASK-1198):
+   * something the card depends on could not be read, so the card is hidden
+   * rather than drawn from a guess. Absent on every ordinary answer, so the
+   * shape a working box sends is the one it always sent.
+   */
+  unavailable?: true;
+}
+
+/** What the plan section offers when the plan on record cannot be read: nothing. */
+export const NO_PLAN_CTA: Readonly<WhatsNewPlanCta> = Object.freeze({ paidFeatures: false, editionSwitch: null });
+
+/**
+ * The answer for a box whose What's New state could not be read (TASK-1198).
+ *
+ * HIDDEN, not a 500 and not a guess. The card is an announcement the desktop
+ * can live without, and both wrong answers cost more than none: a card drawn
+ * over an unreadable dismissal comes back for an owner who closed it, and a
+ * plan section drawn over an unreadable plan sells an owner what they may
+ * already pay for. The hook draws nothing for `show: false`, exactly as for a
+ * box on another release.
+ */
+export function unavailableWhatsNewState(
+  edition: WhatsNewState["edition"] = "openclaw",
+  version: string | null = null,
+): WhatsNewState {
+  return {
+    show: false,
+    release: WHATS_NEW_RELEASE,
+    version,
+    edition,
+    cta: { ...NO_PLAN_CTA },
+    freeMonthCode: null,
+    unavailable: true,
+  };
 }
 
 /** Does the plan section have anything to offer? */
