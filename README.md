@@ -77,7 +77,7 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 💬 **A conversation that cannot reopen says why** | Every step of restoring a conversation has a deadline. When the box cannot bring it back, the chat names the reason and offers **Try again** (and, in the chat panel, **Start a new chat**). |
 | 🗂️ **Web apps from before 4.0 find their data** | A one-time step at boot copies each pre-4.0 web app's saved data into its own sandboxed storage, deleting nothing, and its old storage calls work again. |
 | 🔀 **Coding Agent PRs merge when green** | With merging on, a run hands its pull request to GitHub's auto-merge. A `hold` label or a `main` base is never merged, and CodeRabbit reviews each PR once, on green code. |
-| 🛠️ **Updates and backups hold up** | OpenClaw 2026.9.4 with an up-front refusal for newer-schema data, plugins left **Needs repair** retried after the update, and ClawKeep backups that get past the failures seen after 4.0. |
+| 🛠️ **Updates and backups hold up** | OpenClaw 2026.9.4 with an up-front refusal for newer-schema data, plugins left **Needs repair** retried after the update, and ClawKeep backups that get past the failures seen after 4.0. A box updated from 4.0 no longer starts every local-model reply with a 401. |
 
 Full detail, and how to upgrade: **[RELEASE-NOTES-4.1.0.md](RELEASE-NOTES-4.1.0.md)**.
 
