@@ -1,37 +1,41 @@
 /**
- * The "What's new in 4.0" card (TASK-1059) — the pure half.
+ * The "What's new in 4.1" card (TASK-1059, re-keyed for 4.1 by TASK-1195) —
+ * the pure half.
  *
  * Client-safe on purpose: the desktop card, its hook and the route all read
  * this file, so the release the card announces, the two links it carries and
  * the shape of the route's answer are spelled once. Everything that touches the
  * disk or the plan on record is in `@/lib/whats-new-server`.
  *
- * WHEN THE CARD SHOWS. A box whose running version is on the 4.x line, until
- * the owner dismisses it. The dismissal is stored in the box's config store,
- * not the browser, so a card dismissed on the laptop does not come back on the
- * phone. It is keyed by {@link WHATS_NEW_RELEASE}, so a later "What's new" card
- * is a new constant here and shows again on every box.
+ * WHEN THE CARD SHOWS. A box whose running version is on the release line the
+ * card announces (4.1.0, 4.1.3), until the owner dismisses it. The dismissal is
+ * stored in the box's config store, not the browser, so a card dismissed on the
+ * laptop does not come back on the phone. It is keyed by
+ * {@link WHATS_NEW_RELEASE}, so a box that dismissed the 4.0 card is shown this
+ * one, and a later "What's new" card is a new constant here and shows again on
+ * every box.
  */
 
 import { PORTAL_PLANS_URL } from "@/lib/clawai-usage";
 
-/** The release this card announces, and the value a dismissal records. */
-export const WHATS_NEW_RELEASE = "4.0";
-
-/** The major version whose boxes are shown the card: 4.0.0, 4.0.3, 4.1.0 — not 3.9.x and not 5.x. */
-export const WHATS_NEW_MAJOR = 4;
+/**
+ * The release this card announces, and the value a dismissal records. It is
+ * `major.minor` of package.json's version; release-identity.test.ts holds the
+ * two together, so a minor bump without a new card fails there.
+ */
+export const WHATS_NEW_RELEASE = "4.1";
 
 /**
  * The docs page the card links to: `docs-site/whats-new.mdx`, whose newest
- * section is "ClawBox 4.0". ONE constant, so a page that moves is one edit.
+ * section is "ClawBox 4.1". ONE constant, so a page that moves is one edit.
  */
 export const WHATS_NEW_DOCS_URL = "https://docs.clawbox.com/whats-new";
 
-/** Campaign tags on the card's portal link, so the portal can count what the card sends it. */
+/** Campaign tags on the card's portal link, so the portal can count what the card sends it, per release. */
 export const WHATS_NEW_UTM: Readonly<Record<string, string>> = {
   utm_source: "box",
   utm_medium: "update_card",
-  utm_campaign: "v4",
+  utm_campaign: `v${WHATS_NEW_RELEASE}`,
 };
 
 /**
@@ -52,20 +56,32 @@ export function withUtm(url: string, params: Readonly<Record<string, string>>): 
 export const WHATS_NEW_PLANS_URL = withUtm(PORTAL_PLANS_URL, WHATS_NEW_UTM);
 
 /**
- * The major version of a ClawBox version string, or null when there is none.
+ * The release line of a ClawBox version string, `[major, minor]`, or null when
+ * there is none.
  *
- * Takes what the box actually reports: package.json's `4.0.0`, a `v4.0.0` tag,
- * and `git describe` output (`v4.0.0-12-gabc123`).
+ * Takes what the box actually reports: package.json's `4.1.0`, a `v4.1.0` tag,
+ * `git describe` output (`v4.1.0-12-gabc123`), and the card's own `4.1`.
  */
-export function majorVersionOf(version: string | null | undefined): number | null {
+export function releaseLineOf(version: string | null | undefined): readonly [major: number, minor: number] | null {
   if (typeof version !== "string") return null;
-  const match = /^\s*v?(\d+)\.\d+/.exec(version);
-  return match ? Number(match[1]) : null;
+  const match = /^\s*v?(\d+)\.(\d+)/.exec(version);
+  return match ? [Number(match[1]), Number(match[2])] : null;
 }
 
-/** Is this the running version the card is about? */
+/**
+ * Is this the running version the card is about? Only the release line it
+ * announces: 4.1.0 and 4.1.3, not 4.0.x and not 4.2.0.
+ *
+ * Not "anything on 4.x", which it was while the card announced 4.0. The card
+ * says "What's new in 4.1" above "This box now runs ClawBox {version}", so on
+ * any other line those two lines would name different releases. A later release
+ * shows no card until it has one of its own.
+ */
 export function isWhatsNewVersion(version: string | null | undefined): boolean {
-  return majorVersionOf(version) === WHATS_NEW_MAJOR;
+  const running = releaseLineOf(version);
+  const announced = releaseLineOf(WHATS_NEW_RELEASE);
+  return running !== null && announced !== null
+    && running[0] === announced[0] && running[1] === announced[1];
 }
 
 /** The edition a box could switch to (Settings → Harness). */
@@ -111,7 +127,7 @@ export function hasPlanCta(cta: WhatsNewPlanCta): boolean {
   return cta.paidFeatures || cta.editionSwitch !== null;
 }
 
-/** Strip a leading `v` so the card prints `4.0.0`, the way the release notes do. */
+/** Strip a leading `v` so the card prints `4.1.0`, the way the release notes do. */
 export function displayVersion(version: string | null): string | null {
   if (!version) return null;
   return version.trim().replace(/^v/i, "") || null;

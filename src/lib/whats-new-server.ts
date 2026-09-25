@@ -1,5 +1,5 @@
 /**
- * The "What's new in 4.0" card (TASK-1059) — the server half: the running
+ * The "What's new in 4.1" card (TASK-1059, TASK-1195) — the server half: the running
  * version, the dismissal on record, and what the plan on record already covers.
  *
  * SERVER ONLY: it reads package.json, `data/config.json` and the edition lock.
@@ -22,8 +22,9 @@ import {
 
 /**
  * The config-store key holding the release whose card the owner dismissed
- * (`"4.0"`). In the box's store rather than the browser's, so the card does not
- * come back on another browser or device.
+ * (`"4.1"`). In the box's store rather than the browser's, so the card does not
+ * come back on another browser or device. A box that dismissed the 4.0 card
+ * still holds `"4.0"` here, which does not match, so it is shown the 4.1 card.
  */
 export const WHATS_NEW_DISMISSED_KEY = "whats_new_dismissed";
 

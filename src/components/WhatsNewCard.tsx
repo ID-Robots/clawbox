@@ -17,20 +17,20 @@ interface WhatsNewCardProps {
 }
 
 /**
- * The 4.0 highlights, in the order the release notes list them. The copy is
- * taken from RELEASE-NOTES-4.0.0.md, so this list should only change when the
+ * The 4.1 highlights, in the order the release notes list them. The copy is
+ * taken from RELEASE-NOTES-4.1.0.md, so this list should only change when the
  * release notes do.
  */
 const HIGHLIGHTS = [
-  { icon: "code_blocks", title: "whatsNew.codingAgentTitle", body: "whatsNew.codingAgentBody" },
-  { icon: "language", title: "whatsNew.hostnameTitle", body: "whatsNew.hostnameBody" },
-  { icon: "mobile_chat", title: "whatsNew.phoneChatTitle", body: "whatsNew.phoneChatBody" },
-  { icon: "tune", title: "whatsNew.modelPillsTitle", body: "whatsNew.modelPillsBody" },
+  { icon: "fullscreen", title: "whatsNew.phoneFullscreenTitle", body: "whatsNew.phoneFullscreenBody" },
+  { icon: "history", title: "whatsNew.chatRestoreTitle", body: "whatsNew.chatRestoreBody" },
+  { icon: "web", title: "whatsNew.webappDataTitle", body: "whatsNew.webappDataBody" },
+  { icon: "merge", title: "whatsNew.autoMergeTitle", body: "whatsNew.autoMergeBody" },
 ] as const;
 
 /**
- * "What's new in 4.0": a card in the desktop's top-right notice column, shown
- * after a box lands on 4.x until the owner dismisses it (TASK-1059).
+ * "What's new in 4.1": a card in the desktop's top-right notice column, shown
+ * after a box lands on 4.1 until the owner dismisses it (TASK-1059, TASK-1195).
  *
  * It has three parts. First the highlights. Then the docs page. Last, a plan
  * section that names only what the box's plan does not cover yet. A Max box

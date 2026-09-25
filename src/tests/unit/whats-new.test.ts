@@ -5,7 +5,7 @@ import {
   hasPlanCta,
   isWhatsNewState,
   isWhatsNewVersion,
-  majorVersionOf,
+  releaseLineOf,
   WHATS_NEW_DOCS_URL,
   WHATS_NEW_PLANS_URL,
   WHATS_NEW_RELEASE,
@@ -13,28 +13,28 @@ import {
   type WhatsNewState,
 } from "@/lib/whats-new";
 
-/** TASK-1059: the pure half of the "What's new in 4.0" card. */
+/** TASK-1059, TASK-1195: the pure half of the "What's new in 4.1" card. */
 
 const VALID: WhatsNewState = {
   show: true,
-  release: "4.0",
-  version: "4.0.0",
+  release: "4.1",
+  version: "4.1.0",
   edition: "openclaw",
   cta: { paidFeatures: true, editionSwitch: "hermes" },
   freeMonthCode: null,
 };
 
 describe("the card's links", () => {
-  it("tags the portal's plans page with the update card's campaign, before the fragment", () => {
+  it("tags the portal's plans page with this release's campaign, before the fragment", () => {
     expect(WHATS_NEW_PLANS_URL).toBe(
-      "https://clawbox.com/portal/dashboard?utm_source=box&utm_medium=update_card&utm_campaign=v4#subscription",
+      "https://clawbox.com/portal/dashboard?utm_source=box&utm_medium=update_card&utm_campaign=v4.1#subscription",
     );
     const url = new URL(WHATS_NEW_PLANS_URL);
     expect(`${url.origin}${url.pathname}${url.hash}`).toBe(PORTAL_PLANS_URL);
     expect(Object.fromEntries(url.searchParams)).toEqual({
       utm_source: "box",
       utm_medium: "update_card",
-      utm_campaign: "v4",
+      utm_campaign: "v4.1",
     });
   });
 
@@ -50,36 +50,48 @@ describe("the card's links", () => {
 
 describe("which versions the card is about", () => {
   it.each([
-    ["4.0.0", 4],
-    ["v4.0.0", 4],
-    ["4.1.2", 4],
-    ["v4.0.0-12-gabc1234", 4],
-    ["3.9.0", 3],
-    ["10.0.0", 10],
-    [" 4.0.0 ", 4],
-  ])("majorVersionOf(%j) is %d", (version, major) => {
-    expect(majorVersionOf(version)).toBe(major);
+    ["4.1.0", [4, 1]],
+    ["v4.1.0", [4, 1]],
+    ["4.1.2", [4, 1]],
+    ["v4.1.0-12-gabc1234", [4, 1]],
+    ["4.1", [4, 1]],
+    ["3.9.0", [3, 9]],
+    ["4.10.0", [4, 10]],
+    ["10.0.0", [10, 0]],
+    [" 4.1.0 ", [4, 1]],
+  ])("releaseLineOf(%j) is %j", (version, line) => {
+    expect(releaseLineOf(version)).toEqual(line);
   });
 
-  it.each([null, undefined, "", "unknown", "4", "vX.Y"])("majorVersionOf(%j) is null", (version) => {
-    expect(majorVersionOf(version)).toBeNull();
+  it.each([null, undefined, "", "unknown", "4", "vX.Y"])("releaseLineOf(%j) is null", (version) => {
+    expect(releaseLineOf(version)).toBeNull();
   });
 
-  it("is the 4.x line and nothing else", () => {
-    expect(isWhatsNewVersion("4.0.0")).toBe(true);
-    expect(isWhatsNewVersion("4.2.0")).toBe(true);
-    expect(isWhatsNewVersion("3.9.0")).toBe(false);
-    expect(isWhatsNewVersion("5.0.0")).toBe(false);
+  it.each(["4.1.0", "4.1.9", "v4.1.0", "v4.1.0-12-gabc1234"])("is about %j, on the 4.1 line", (version) => {
+    expect(isWhatsNewVersion(version)).toBe(true);
+  });
+
+  // 4.0.x is the release a box that already dismissed the 4.0 card may still
+  // report; 4.10 is not 4.1; a later release waits for a card of its own.
+  it.each(["4.0.0", "4.0.3", "v4.0.0-12-gabc1234", "4.10.0", "4.2.0", "3.9.0", "5.1.0", "unknown"])(
+    "is not about %j",
+    (version) => {
+      expect(isWhatsNewVersion(version)).toBe(false);
+    },
+  );
+
+  it("is about nothing when no version could be read", () => {
     expect(isWhatsNewVersion(null)).toBe(false);
+    expect(isWhatsNewVersion(undefined)).toBe(false);
   });
 
-  it("announces release 4.0", () => {
-    expect(WHATS_NEW_RELEASE).toBe("4.0");
+  it("announces release 4.1, not 4.0", () => {
+    expect(WHATS_NEW_RELEASE).toBe("4.1");
   });
 
   it("prints the version without its tag prefix", () => {
-    expect(displayVersion("v4.0.0")).toBe("4.0.0");
-    expect(displayVersion("4.0.0")).toBe("4.0.0");
+    expect(displayVersion("v4.1.0")).toBe("4.1.0");
+    expect(displayVersion("4.1.0")).toBe("4.1.0");
     expect(displayVersion(null)).toBeNull();
     expect(displayVersion("v")).toBeNull();
   });

@@ -14,6 +14,69 @@ the entry says so.
 
 Entries are grouped by release, newest first.
 
+## ClawBox 4.1
+
+The first release after 4.0 gives the chat more of a phone, makes sure reopening a
+conversation always comes to an end, brings back the saved data of web apps built before
+4.0, and lets the coding agent's pull requests merge by themselves once they are green.
+After the update the desktop shows a **What's new in 4.1** card that links here. Close it
+with **Got it** and it stays closed on every browser.
+
+### More of the phone for the chat
+
+On a phone the chat opens full screen. Its header and the message box's options fold
+away, so the conversation gets the screen, and the text size can be set from 85% to 150%.
+Both choices are remembered in that phone's browser. The desktop chat is unchanged. See
+[Chat](/guides/chat).
+
+### A conversation that cannot reopen says why
+
+Reopening a conversation used to wait with nothing to press when the box did not answer.
+Now every step of it has a deadline. When the box cannot bring the conversation back, the
+chat says why (the conversation is busy, the box did not answer, or it could not be
+restored) and offers **Try again**. The chat panel also offers **Start a new chat**, which
+opens a fresh tab and deletes nothing.
+
+### Web apps built before 4.0 find their data
+
+4.0 moved every web app into a sandbox of its own, and apps built on 3.9 lost sight of what
+they had saved. The data was never deleted. The first time a 4.1 box starts, it copies each
+such app's saved data into the app's own storage. It copies only what the app's own code
+names, never touches ClawBox's own settings or another app's data, and deletes nothing, so
+a rollback still finds the originals. A browser that still holds an old app's local data
+hands it over the first time the app opens there.
+
+### Coding agent pull requests merge when green
+
+With **Merge a pull request the review rounds cleared** switched on, a coding run hands its
+pull request to GitHub's auto-merge, so it merges as soon as its required checks pass. The
+box turns auto-merge off again while anything is outstanding (a failing check, a conflict,
+an unanswered comment or change request), for any pull request labelled `hold` or
+`do-not-merge`, and for any pull request into `main`. Automatic pull requests open as
+drafts and are marked ready once their checks are green, so CodeRabbit reviews each one
+once. Runs on your own Anthropic account default to **Claude Opus 5.5**.
+
+### Updates and backups hold up
+
+- OpenClaw is pinned to 2026.9.4. An update refuses before it changes anything when the
+  box's OpenClaw data is newer than the version it would install.
+- The Codex and ClawBox AI plugins that a 4.0 update left **Needs repair** are retried
+  after the update, and the Providers row says **Repairing…** while that runs.
+- An already-active swapfile no longer fails the update.
+- ClawKeep backups get past plugin links, files that vanish mid-backup, duplicate paths
+  and a database whose only damage is its indexes. Any other damage stops the backup and
+  leaves the data as it was.
+- A Memory Shard index the 4.0 update left unusable is rebuilt by **Index now**.
+
+### Smaller things
+
+- The chat's default Anthropic model is **Claude Opus 5.5** when you have not picked one.
+- On a phone, **View** on a coding-run card brings the run's page up in front of the chat.
+- A coding-run card leaves the chat five seconds after its run finishes cleanly; the 🤖
+  chip brings it back.
+- **Settings → About**, **System Update** and the What's new card all name the same
+  version, 4.1.0.
+
 ## ClawBox 4.0
 
 The fourth release turns the box from an assistant you talk to into one that also does
