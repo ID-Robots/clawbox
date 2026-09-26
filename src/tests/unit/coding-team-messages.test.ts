@@ -271,4 +271,50 @@ describe("the bus", () => {
     expect(board.alerts).toBe(1);
     expect(boardLib.loadBoard(board.id)?.log.at(-1)?.message).toBe(`ALERT: Refused message from worker ${A}: SETTLED: ${B} has finished`);
   });
+
+  it("logs a message to a sibling that had already finished as a NOTE with the same words — refused, counted undelivered, never an alert", () => {
+    const board = teamBoard();
+    const bus = new busLib.TeamBus(board);
+    const heard: string[] = [];
+    bus.subscribe((d) => heard.push(d.message.type));
+    const reason = `SETTLED: ${B} has finished; there is nothing left to tell it.`;
+    expect(() => bus.refuse({ kind: "worker", id: A }, { type: "message", from_run_id: A, to: "sibling", to_run_id: B, text: "total() returns cents" }, reason, "SETTLED")).toThrow(boardLib.BoardAccessError);
+    expect(board.alerts).toBe(0);
+    expect(board.log.filter((e) => e.type === "alert")).toHaveLength(0);
+    expect(board.log.at(-1)).toMatchObject({
+      type: "note",
+      actor: { kind: "system" },
+      message: `Refused message from worker ${A}: ${reason}`,
+      payload: { undelivered: { code: "SETTLED", from: A, role: "worker", to: "sibling", toRunId: B } },
+    });
+    // The words were never read by anybody: not kept, not counted against the sender's caps.
+    expect(JSON.stringify(board.log.at(-1))).not.toContain("total() returns cents");
+    expect(board.runs.find((r) => r.id === A)?.sentAt).toBeUndefined();
+    expect(heard).toEqual([]);
+    // Persisted, and counted again from the file.
+    const loaded = boardLib.loadBoard(board.id)!;
+    expect(loaded.alerts).toBe(0);
+    expect(loaded.metrics).toMatchObject({ messagesSent: 1, messagesToSibling: 1, messagesToLead: 0, messagesUndelivered: 1 });
+    // A note, so not quoted to a teammate as one of the team's alerts.
+    expect(boardLib.boardDigest(loaded, null)).not.toContain("Refused message");
+  });
+
+  it("keeps every other refusal an alert, whatever code it carries — and a malformed message an alert even when the code is SETTLED", () => {
+    const board = teamBoard();
+    const bus = new busLib.TeamBus(board);
+    const refuse = (message: Parameters<typeof bus.refuse>[1], reason: string, code: Parameters<typeof bus.refuse>[3]) => {
+      expect(() => bus.refuse({ kind: "worker", id: A }, message, reason, code)).toThrow(boardLib.BoardAccessError);
+    };
+    refuse({ type: "message", from_run_id: A, to: "sibling", to_run_id: OUTSIDER, text: "hi" }, `NOT_IN_TEAM: ${OUTSIDER} is not a run of this team.`, "NOT_IN_TEAM");
+    refuse({ type: "message", from_run_id: A, to: "sibling", to_run_id: B, text: "hi" }, "QUEUE_FULL: full", "QUEUE_FULL");
+    refuse({ type: "message", from_run_id: A, to: "lead", text: "hi" }, "RATE_LIMITED: later", "RATE_LIMITED");
+    refuse({ type: "message", from_run_id: A, to: "sibling", to_run_id: B, text: "  " }, "SETTLED: gone", "SETTLED");
+    refuse({ type: "message", from_run_id: "nope", to: "sibling", to_run_id: B, text: "hi" }, "SETTLED: gone", "SETTLED");
+    // A worker speaking as another run is the alert it always was, whatever the code.
+    refuse({ type: "message", from_run_id: P, to: "sibling", to_run_id: B, text: "hi" }, "SETTLED: gone", "SETTLED");
+    expect(board.alerts).toBe(6);
+    expect(board.log.filter((e) => e.type === "note")).toHaveLength(0);
+    expect(boardLib.teamMetrics(board)).toMatchObject({ messagesSent: 0, messagesUndelivered: 0 });
+    expect(board.log.at(-6)?.message).toBe(`ALERT: Refused message from worker ${A}: NOT_IN_TEAM: ${OUTSIDER} is not a run of this team.`);
+  });
 });

@@ -790,6 +790,7 @@ export const bg: Record<string, string> = {
   "codingAgent.team.messageToAssistant": "към асистента",
   "codingAgent.team.messageToRun": "към {run}",
   "codingAgent.team.messageUndelivered": "не е доставено",
+  "codingAgent.team.messageReceiverFinished": "{run} вече беше приключил",
   "codingAgent.team.task.retired": "Оттеглена",
   "codingAgent.team.roleLead": "Ръководител на екипа · след {task}",
   "codingAgent.team.agentsWithLead": "{total} агента работиха тук — планиращ {planner} · работници {workers} · рецензенти {reviewers} · ръководител {leads}",

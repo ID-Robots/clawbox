@@ -12,7 +12,9 @@
  *     not (Hermes, no gateway), recorded as undelivered and never an alert;
  *   - every refusal of the SENDER is an alert on the board; the caps answer
  *     RATE_LIMITED with the time the next may go; a sent message never moves
- *     the alert count; the sender's own feed gets the line.
+ *     the alert count; the sender's own feed gets the line;
+ *   - a late answer to a sibling that has already finished (SETTLED) is still
+ *     refused, but logged as a note and counted undelivered, never an alert.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
@@ -285,6 +287,72 @@ describe("whom it may reach, and what", () => {
     const { id, planner } = await startTeam();
     expect((await refusal(team.sendTeamMessage({ teamId: id, fromRunId: planner, role: "planner", to: "lead", text: "  " }))).code).toBe("EMPTY");
     expect((await refusal(team.sendTeamMessage({ teamId: id, fromRunId: planner, role: "planner", to: "lead", text: "x".repeat(1_501) }))).code).toBe("TOO_LONG");
+  });
+});
+
+describe("a late answer to a sibling that has finished (TASK-1239)", () => {
+  const notesOf = (id: string) => team.getTeam(id)!.log.filter((e) => e.type === "note" && e.payload?.undelivered);
+
+  it("is a note with the refusal's words, counted undelivered — the alert count does not move, and the sender still hears SETTLED", async () => {
+    const { id, a, b } = await startWorkers();
+    runs.get(a)!.status = "completed";
+    const before = team.getTeam(id)!;
+    const err = await refusal(team.sendTeamMessage({ teamId: id, fromRunId: b, role: "worker", to: "sibling", toRunId: a, text: "total() returns cents, as an integer." }));
+    // The sender's answer is unchanged: not delivered, and why.
+    expect(err.code).toBe("SETTLED");
+    expect(err.message).toBe(`${a} has finished; there is nothing left to tell it.`);
+    const after = team.getTeam(id)!;
+    expect(after.alerts).toBe(before.alerts);
+    expect(notesOf(id)).toEqual([
+      expect.objectContaining({
+        actor: { kind: "system" },
+        message: `Refused message from worker ${b}: SETTLED: ${a} has finished; there is nothing left to tell it.`,
+        payload: { undelivered: { code: "SETTLED", from: b, role: "worker", to: "sibling", toRunId: a } },
+      }),
+    ]);
+    expect(alertsOf(id).filter((m) => m.includes("Refused message"))).toEqual([]);
+    expect(after.metrics.messagesUndelivered).toBe(before.metrics.messagesUndelivered + 1);
+    expect(after.metrics.messagesSent).toBe(before.metrics.messagesSent + 1);
+    expect(messagesOf(id)).toHaveLength(0);
+    expect(runner.queueRunMessage).not.toHaveBeenCalled();
+    expect(runner.noteTeamMessageSent).not.toHaveBeenCalled();
+  });
+
+  it("is a note too when the sibling finishes between the check and the hand-over", async () => {
+    const { id, a, b } = await startWorkers();
+    const { RunMessageError } = await import("@/lib/coding-run-messages");
+    runner.queueRunMessage.mockImplementationOnce(() => { throw new RunMessageError("settled", "The run has finished."); });
+    const before = team.getTeam(id)!;
+    expect((await refusal(team.sendTeamMessage({ teamId: id, fromRunId: a, role: "worker", to: "sibling", toRunId: b, text: "hi" }))).code).toBe("SETTLED");
+    const after = team.getTeam(id)!;
+    expect(after.alerts).toBe(before.alerts);
+    expect(notesOf(id)).toHaveLength(1);
+    expect(after.metrics.messagesUndelivered).toBe(before.metrics.messagesUndelivered + 1);
+  });
+
+  it("never adds up to MAX_ALERTS: three late answers leave a working team working", async () => {
+    const { id, a, b } = await startWorkers();
+    runs.get(b)!.status = "completed";
+    for (let i = 0; i < team.MAX_ALERTS; i++) {
+      expect((await refusal(team.sendTeamMessage({ teamId: id, fromRunId: a, role: "worker", to: "sibling", toRunId: b, text: `answer ${i}` }))).code).toBe("SETTLED");
+    }
+    await sleep(30);
+    const view = team.getTeam(id)!;
+    expect(notesOf(id)).toHaveLength(team.MAX_ALERTS);
+    expect(alertsOf(id).filter((m) => m.includes("Refused message"))).toEqual([]);
+    expect(view.status).not.toBe("failed");
+    expect(view.metrics.messagesUndelivered).toBe(team.MAX_ALERTS);
+  });
+
+  it("leaves a message to a run the team does not have an alert, as before", async () => {
+    const { id, a } = await startWorkers();
+    const before = team.getTeam(id)!;
+    expect((await refusal(team.sendTeamMessage({ teamId: id, fromRunId: a, role: "worker", to: "sibling", toRunId: "run-zzzzzzzz", text: "hi" }))).code).toBe("NOT_IN_TEAM");
+    const after = team.getTeam(id)!;
+    expect(after.alerts).toBe(before.alerts + 1);
+    expect(alertsOf(id).at(-1)).toMatch(new RegExp(`^ALERT: Refused message from worker ${a}: NOT_IN_TEAM: run-zzzzzzzz is not a run of team ${id}`));
+    expect(notesOf(id)).toHaveLength(0);
+    expect(after.metrics.messagesUndelivered).toBe(before.metrics.messagesUndelivered);
   });
 });
 

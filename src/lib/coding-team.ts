@@ -320,7 +320,9 @@ export interface TeamMessageSent {
  *
  * Every refusal of the SENDER's (the text, the claim, the target, the caps) is
  * logged on the board as an alert through the bus, like any message the bus
- * would not take, and throws a TeamMessageError with its code. A message the
+ * would not take, and throws a TeamMessageError with its code. A sibling that
+ * had already finished (SETTLED — a late answer racing its end) is logged as a
+ * note and counted as undelivered, never an alert, and throws too. A message the
  * BOX could not hand on (no chat session, the Hermes edition, a gateway that
  * refused it) is logged as an undelivered message instead — never an alert —
  * and throws its code too. A delivered message is a `message` entry on the
@@ -361,12 +363,14 @@ export async function sendTeamMessage(input: TeamMessageInput): Promise<TeamMess
     text: typeof input.text === "string" ? input.text : "",
   };
   // The sender's refusals: on the board as an alert — the bus's own words for
-  // a message it would not take — then the code to the caller.
+  // a message it would not take — then the code to the caller. A sibling that
+  // had already finished (SETTLED) is the bus's to log as a note instead: a
+  // late answer is a race, not the sender's fault. The caller hears either way.
   const refused = (code: TeamMessageRefusal, reason: string, nextAllowedAt: number | null = null): TeamMessageError => {
     try {
-      bus.refuse(actor, draft, `${code}: ${reason}`);
+      bus.refuse(actor, draft, `${code}: ${reason}`, code);
     } catch {
-      // refuse() always throws once the alert is logged; the caller gets the code.
+      // refuse() always throws once the entry is logged; the caller gets the code.
     }
     return new TeamMessageError(code, reason, nextAllowedAt);
   };

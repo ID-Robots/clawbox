@@ -803,6 +803,7 @@ export const de: Record<string, string> = {
   "codingAgent.team.messageToAssistant": "an den Assistenten",
   "codingAgent.team.messageToRun": "an {run}",
   "codingAgent.team.messageUndelivered": "nicht zugestellt",
+  "codingAgent.team.messageReceiverFinished": "{run} war bereits fertig",
   "codingAgent.team.task.retired": "Zurückgezogen",
   "codingAgent.team.roleLead": "Teamleitung · nach {task}",
   "codingAgent.team.agentsWithLead": "{total} Agenten haben hier gearbeitet — Planer {planner} · Worker {workers} · Reviewer {reviewers} · Leitung {leads}",
