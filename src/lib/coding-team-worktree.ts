@@ -259,6 +259,70 @@ export function mergeWorkerBranch(dir: string, branch: string, message: string):
   });
 }
 
+/**
+ * What a worker left UNCOMMITTED in its worktree, committed on its branch —
+ * the harvest before the team judges a branch that came home empty. A worker
+ * whose run settled without the runner's commit (team-v0wcl4mj, t1,
+ * 2026-09-26: two files written in the worktree, nothing on the branch, no
+ * commit error) otherwise merged an empty branch, was accepted by rule, and
+ * three more tasks built against files that were never there.
+ *
+ * Generated artifacts and `.clawbox/` stay out, the way `info/exclude` keeps
+ * them out of a worker's own `git add -A` — named here too, because that
+ * exclude is written best effort and a project's own history may track one.
+ * `files` is empty when there was nothing else to commit.
+ */
+export async function harvestWorktree(worktreePath: string, message: string): Promise<{ ok: true; files: string[] } | { ok: false; detail: string }> {
+  const status = await git(worktreePath, ["status", "--porcelain=v2", "--untracked-files=all", "-z"]);
+  if (!ok(status)) return { ok: false, detail: failureDetail(status, "Reading the worker's worktree") };
+  const { files, left } = leftovers(status.stdout);
+  if (files.length === 0) return { ok: true, files: [] };
+  const as = await asBox(worktreePath);
+  if (!as.ok) return { ok: false, detail: as.detail };
+  // Everything, the way the runner's own commit stages it — a rename's old
+  // name and a deletion included, which a list of paths would have to get
+  // exactly right — then what is never a task's output back out of the
+  // index, left where it lies. Literal pathspecs: `*.pyc` names one file.
+  const added = await git(worktreePath, ["add", "-A"]);
+  if (!ok(added)) return { ok: false, detail: failureDetail(added, "Staging the files the worker left uncommitted") };
+  if (left.length) {
+    const unstaged = await git(worktreePath, ["--literal-pathspecs", "reset", "-q", "--", ...left]);
+    if (!ok(unstaged)) return { ok: false, detail: failureDetail(unstaged, "Keeping generated files out of the worker's commit") };
+  }
+  const committed = await git(worktreePath, [...as.args, "commit", "-q", "--no-verify", "-m", message]);
+  if (!ok(committed)) return { ok: false, detail: failureDetail(committed, "Committing the files the worker left uncommitted") };
+  return { ok: true, files };
+}
+
+/**
+ * The paths `git status --porcelain=v2 -z` names: the ones to commit, and the
+ * ones `left` out — generated artifacts and `.clawbox/`. Version 2 because
+ * every entry starts with its type, never a space the child's trimmed output
+ * could eat. Fields are space-separated up to the path, which is the rest of
+ * the entry: 8 fields before it for a change (`1`), 9 for a rename or copy
+ * (`2`, its source in the entry after — the old name is part of the change),
+ * 10 for an unmerged path (`u`), 1 for an untracked one (`?`).
+ */
+const PATH_AFTER: Record<string, number> = { "1": 8, "2": 9, u: 10, "?": 1 };
+
+function leftovers(porcelain: string): { files: string[]; left: string[] } {
+  const entries = porcelain.split("\0");
+  const paths = new Set<string>();
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const skip = PATH_AFTER[entry[0]];
+    if (skip === undefined) continue;
+    const file = entry.split(" ").slice(skip).join(" ");
+    if (file) paths.add(file);
+    if (entry[0] === "2") {
+      const source = entries[++i];
+      if (source) paths.add(source);
+    }
+  }
+  const never = (p: string) => isGeneratedArtifact(p) || /^\.clawbox(\/|$)/.test(p);
+  return { files: [...paths].filter((p) => !never(p)), left: [...paths].filter(never) };
+}
+
 /** The worktree's files go; its branch stays as history. */
 export function removeWorktree(dir: string, worktreePath: string): Promise<void> {
   return withDirLock(dir, async () => {

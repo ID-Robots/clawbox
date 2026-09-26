@@ -27,7 +27,10 @@
  * MAX_ALERTS the team stops (a reviewer that could not start is alerted but
  * not counted; one that waits for room is neither). A failed task fails the
  * team unless other tasks can still run; a task the reviewer rejects is
- * re-posted once.
+ * re-posted once. A worker's branch that comes home empty has what the
+ * worker left uncommitted in its worktree committed first; still empty when
+ * its task was to change files, it is rejected (NO CHANGE) — never accepted
+ * by rule, whatever the review mode.
  *
  * The team's SHAPE is the planner's to choose per goal (TASK-1099): how many
  * workers run side by side (never more than the box's own slots) and how the
@@ -79,7 +82,8 @@ import {
   type TeamMessageTarget,
   type TeamRole,
 } from "@/lib/coding-team-messages";
-import { addWorkerWorktree, changedFiles, ensureTeamBranch, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
+import { buildCommitMessage } from "@/lib/coding-git";
+import { addWorkerWorktree, changedFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
 import { FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, reviewerTask } from "@/lib/coding-team-reviewer";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
@@ -116,6 +120,8 @@ import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan,
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
 export const MAX_ALERTS = 3;
+/** The rejection of a worker whose branch came home empty when its task was to change files. */
+export const NO_CHANGE = "NO CHANGE: the worker's branch has no commit; redo the task and commit your files.";
 /** How long the orchestrator waits on one run per poll; the runner caps a wait anyway. */
 const WAIT_SLICE_MS = 60_000;
 /** How long the loop waits for a slot (memory, the cap) before looking again. */
@@ -133,6 +139,7 @@ export const WORKER_BRIEF = [
   "You are ONE WORKER of a small coding team. The task you were given is one part of a larger goal; other workers do the other parts in their own sessions, before or after you.",
   "Do your task and only your task: do not redo, undo or 'improve' the parts that belong to others, and stay inside the files your task names unless the task cannot be done otherwise — say so in your report if you had to.",
   "Scratch files go in your evidence folder only — never in /tmp, never beside the project. A write anywhere else is refused, and a refused write counts against your task.",
+  "Your files count only once they are committed on your branch: the runner commits what you changed when you finish, and a `git add` and `git commit` of your files in your own folder before your final message is welcome.",
   "Your final message is read by the team's reviewer and quoted to the next worker: state what you changed (file names), how it can be checked, and anything you could not finish.",
   "Message a SIBLING with team_message (to=\"sibling\", its run id is in your task text under 'Teammates at work now') when your task needs a file, a name, a schema or an API shape that a teammate owns and that is not in your folder yet: ask for exactly that, in one message. If a teammate's message asks you for such a thing, answer it once with the exact answer (file name, field names, function signature) — that is the one reply that is not an acknowledgement.",
   "Message the LEAD (to=\"lead\") when a task on the board is wrong for the goal: it is already done, it duplicates yours, or it cannot be done as written.",
@@ -772,15 +779,50 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
     if (mergeRefusal) {
       // Nothing to merge; the worktree goes back below.
     } else if (ok) {
-      // What the branch changed; a worker that committed nothing has no
-      // branch diff, and what it touched uncommitted is still what it touched.
-      const diffed = await changedFiles(board.directory, worktree.branch);
-      if (diffed.length) files = diffed;
-      const merged = await mergeWorkerBranch(board.directory, worktree.branch, `Coding team ${board.id}: ${task.task_id} — ${firstLine(task.task_description, 72)}`);
-      if (!merged.ok) {
-        mergeRefusal = `${merged.conflict ? "MERGE CONFLICT" : "MERGE FAILED"}: ${firstLine(merged.detail, 300)}`;
-        result = `${result}\n\n${mergeRefusal}`;
-        bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `${merged.conflict ? "Merge conflict" : "Merge failed"} for ${task.task_id} (${run.id}): ${firstLine(merged.detail, 200)}` });
+      // What the branch changed. A branch that came home EMPTY is harvested
+      // before it is judged: what the worker left uncommitted in its
+      // worktree goes on its branch, in the runner's own message shape —
+      // the worktree is removed below, and its files with it (team-v0wcl4mj,
+      // 2026-09-26: a worker's two files were never committed, the empty
+      // branch was accepted by rule, and three tasks built against nothing).
+      let diffed = await changedFiles(board.directory, worktree.branch);
+      if (!diffed.length) {
+        const harvested = await harvestWorktree(worktree.path, buildCommitMessage({ runId: run.id, task: settled.task, summary: settled.summary }));
+        if (!harvested.ok) {
+          mergeRefusal = `NOT COMMITTED: ${firstLine(harvested.detail, 300)}`;
+          result = `${result}\n\n${mergeRefusal}`;
+          bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Commit failed for ${task.task_id} (${run.id}): ${firstLine(harvested.detail, 200)}` });
+        } else if (harvested.files.length) {
+          const n = harvested.files.length;
+          bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Committed ${n} uncommitted file(s) the worker left behind (${run.id}): ${harvested.files.slice(0, 5).join(", ")}${n > 5 ? ", …" : ""}` });
+          diffed = await changedFiles(board.directory, worktree.branch);
+        }
+      }
+      if (!mergeRefusal) {
+        // What it touched uncommitted is still what it touched.
+        if (diffed.length) files = diffed;
+        // No change is not a success when the task was to make one: files it
+        // was asked for, or files the worker says it wrote in its worktree.
+        // A task that only checks something (no hint, nothing touched) may
+        // well leave its branch empty, and goes on as it always did.
+        const expected = expectedFiles(task, settled.filesTouched ?? [], worktree.path);
+        if (!diffed.length && expected.length) {
+          mergeRefusal = NO_CHANGE;
+        } else {
+          const merged = await mergeWorkerBranch(board.directory, worktree.branch, `Coding team ${board.id}: ${task.task_id} — ${firstLine(task.task_description, 72)}`);
+          if (!merged.ok) {
+            mergeRefusal = `${merged.conflict ? "MERGE CONFLICT" : "MERGE FAILED"}: ${firstLine(merged.detail, 300)}`;
+            result = `${result}\n\n${mergeRefusal}`;
+            bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `${merged.conflict ? "Merge conflict" : "Merge failed"} for ${task.task_id} (${run.id}): ${firstLine(merged.detail, 200)}` });
+          } else if (!merged.merged && expected.length) {
+            // A diff that git then found nothing to merge for: still nothing came home.
+            mergeRefusal = NO_CHANGE;
+          }
+        }
+        if (mergeRefusal === NO_CHANGE) {
+          result = `${result}\n\n${NO_CHANGE}`;
+          bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No change from ${task.task_id} (${run.id}): its branch has no commit, though ${task.files_hint.length ? "the task names" : "the worker wrote"} ${expected.slice(0, 5).join(", ")}${expected.length > 5 ? ", …" : ""}` });
+        }
       }
     }
     await removeWorktree(board.directory, worktree.path);
@@ -788,7 +830,11 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   bus.send(me, { type: "result", task_id: task.task_id, result, worker_id: run.id });
   bus.send(me, { type: "status_update", task_id: task.task_id, status: ok ? "complete" : "failed", worker_id: run.id });
   if (mergeRefusal) {
-    bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: `${mergeRefusal} The work could not be ${mergeRefusal.startsWith("NOT COMMITTED") ? "committed" : "merged"}; redo the task on the current files.` });
+    // Never accepted by rule, whatever the review mode: nothing of it was merged.
+    const notes = mergeRefusal === NO_CHANGE
+      ? NO_CHANGE
+      : `${mergeRefusal} The work could not be ${mergeRefusal.startsWith("NOT COMMITTED") ? "committed" : "merged"}; redo the task on the current files.`;
+    bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes });
     return true;
   }
 
@@ -1228,6 +1274,24 @@ export function outsideHint(touched: string[], hint: string[]): string[] {
     .map(norm)
     .filter((f) => !isGeneratedArtifact(f))
     .filter((f) => !hints.some((h) => f === h || f.startsWith(`${h}/`)));
+}
+
+/**
+ * The files a worker in `folder` (its worktree) was there to change: the ones
+ * its task's hint names, or — with no hint — the ones it says it wrote in its
+ * worktree (`filesTouched` is relative to the run's folder, absolute outside
+ * it), generated artifacts aside. Empty for a task that only checks something.
+ */
+export function expectedFiles(task: Pick<TeamTask, "files_hint">, touched: string[], folder: string): string[] {
+  if (task.files_hint.length) return task.files_hint;
+  const root = folder.replace(/\/+$/, "");
+  const inside = (f: string): string | null => {
+    const rel = f.startsWith("/") ? (f.startsWith(`${root}/`) ? f.slice(root.length + 1) : null) : f;
+    if (rel === null) return null;
+    const norm = rel.replace(/^(\.\/)+/, "").replace(/\/+$/, "");
+    return norm && norm !== "." && norm !== ".." && !norm.startsWith("../") && !isGeneratedArtifact(norm) ? norm : null;
+  };
+  return [...new Set(touched.map(inside).filter((f): f is string => f !== null))];
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────

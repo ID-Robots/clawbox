@@ -49,6 +49,7 @@ const plumbing = vi.hoisted(() => ({
   mergeWorkerBranch: vi.fn(),
   removeWorktree: vi.fn(),
   changedFiles: vi.fn(),
+  harvestWorktree: vi.fn(),
 }));
 vi.mock("@/lib/coding-team-worktree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-team-worktree")>();
@@ -122,7 +123,10 @@ beforeEach(async () => {
     return { ok: false, conflict: next.conflict === true, detail: next.conflict ? "CONFLICT (content): Merge conflict in index.html" : "Merging failed." };
   });
   plumbing.removeWorktree.mockResolvedValue(undefined);
-  plumbing.changedFiles.mockResolvedValue([]);
+  // The normal path: the runner committed the worker's work on its branch. A
+  // case that stages an empty branch says so.
+  plumbing.changedFiles.mockImplementation(async (_dir: string, branch: string) => committedOn(branch));
+  plumbing.harvestWorktree.mockResolvedValue({ ok: true, files: [] });
   runner.isCodingAgentEnabled.mockResolvedValue(true);
   // The lead's switch: OFF, as on every box that never touched it.
   runner.getTeamDynamic.mockResolvedValue(false);
@@ -167,6 +171,21 @@ beforeEach(async () => {
 afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+/**
+ * What the runner committed on a worker's branch (`clawbox/<team>-<task>-<attempt>`):
+ * the files its run touched, or — a worker that reported none — the files its
+ * task named.
+ */
+function committedOn(branch: string): string[] {
+  const m = /^clawbox\/(team-[a-z0-9]{8})-(t\d+)-(\d+)$/.exec(branch);
+  if (!m) return [];
+  const [, teamId, taskId, attempt] = m;
+  const run = [...runs.values()].find((r) => String(r.directory).endsWith(`/.clawbox/worktrees/${taskId}-${attempt}`));
+  const touched = (run?.filesTouched as string[] | undefined) ?? [];
+  if (touched.length) return touched;
+  return team.getTeam(teamId)?.tasks.find((t) => t.task_id === taskId)?.files_hint ?? [];
+}
 
 const PLAN = JSON.stringify([
   { task_description: "Scaffold index.html", files_hint: ["index.html"] },
@@ -353,6 +372,135 @@ describe("a worker in the project itself whose commit failed", () => {
     expect(done.alerts).toBe(1);
     expect(done.log.some((e) => e.type === "alert" && /Commit failed for t1 \(run-\w+\): fatal: index.lock exists/.test(e.message))).toBe(true);
     expect(plumbing.mergeWorkerBranch).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The bench, 2026-09-26: t1 wrote its two files in its worktree and nothing
+ * reached its branch — no commit, and no commit error either. The empty
+ * branch was merged, the task accepted by rule under review "final", and
+ * three tasks built against a contract that was never there; the team failed
+ * at the final review.
+ */
+describe("a worker whose branch came home empty", () => {
+  const WORKTREE_T1 = "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1";
+  const contractPlan = (review: string, t1Hint: string[] = ["api-contract.md", "items.json"]) => shaped({ parallelism: 2, review, rationale: "Contract first." }, JSON.stringify([
+    { task_description: "Write api-contract.md and items.json", files_hint: t1Hint },
+    { task_description: "Build server.py against the contract", depends_on: ["t1"], files_hint: ["server.py"] },
+  ]));
+  /** t1's first branch has nothing on it; every other branch has what the runner committed. */
+  const emptyFirstBranch = (after: () => string[] = () => []) => plumbing.changedFiles.mockImplementation(async (_dir: string, branch: string) => (/-t1-1$/.test(branch) ? after() : committedOn(branch)));
+  const logged = (done: Awaited<ReturnType<typeof finished>>, type: string) => done.log.filter((e) => e.type === type).map((e) => e.message);
+
+  it("has what the worker left uncommitted committed on its branch, with a note, and the task is merged and accepted", async () => {
+    outcomes = [
+      { summary: contractPlan("final") },
+      // Wrote both files through its shell: the runner saw none of them.
+      { summary: "Done — both files delivered and verified.", filesTouched: [] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    let harvested = false;
+    emptyFirstBranch(() => (harvested ? ["api-contract.md", "items.json"] : []));
+    plumbing.harvestWorktree.mockImplementation(async () => {
+      harvested = true;
+      return { ok: true, files: ["api-contract.md", "items.json"] };
+    });
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // Harvested in the worker's own worktree, in the runner's message shape.
+    expect(plumbing.harvestWorktree).toHaveBeenCalledTimes(1);
+    const [where, message] = plumbing.harvestWorktree.mock.calls[0] as [string, string];
+    expect(where).toBe(WORKTREE_T1);
+    expect(message).toMatch(/^Coding agent: Your task \(t1 of 2\)/);
+    expect(message).toContain("Done — both files delivered and verified.");
+    expect(message).toContain("Run: run-00000002");
+    expect(logged(done, "note")).toContainEqual("Committed 2 uncommitted file(s) the worker left behind (run-00000002): api-contract.md, items.json");
+    // A note, never an alert — and the branch that now has them is merged.
+    expect(done.alerts).toBe(0);
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toContain(`clawbox/${board.id}-t1-1`);
+    expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
+    expect(done.finalReview).toMatchObject({ verdict: "accepted" });
+  });
+
+  it.each(["final", "none", "each"])("is rejected NO CHANGE under review %s when nothing was left to commit either — one alert, offered once more, never accepted by rule", async (review) => {
+    outcomes = [
+      { summary: contractPlan(review) },
+      { summary: "Done — both files delivered and verified.", filesTouched: [] },
+      { summary: "Both files written and committed.", filesTouched: ["api-contract.md", "items.json"] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // The harvest looked first, and found nothing.
+    expect(plumbing.harvestWorktree).toHaveBeenCalledWith(WORKTREE_T1, expect.stringMatching(/^Coding agent: /));
+    const t1Reviews = done.log.filter((e) => e.type === "review").map((e) => e.message);
+    expect(t1Reviews[0]).toMatch(/rejected/);
+    expect(t1Reviews[0]).toContain(team.NO_CHANGE);
+    expect(t1Reviews[0]).not.toMatch(/Accepted by rule/);
+    expect(logged(done, "alert")).toEqual(["ALERT: No change from t1 (run-00000002): its branch has no commit, though the task names api-contract.md, items.json"]);
+    expect(done.alerts).toBe(1);
+    // Never merged, its worktree given back, and offered once more with the reason.
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).not.toContain(`clawbox/${board.id}-t1-1`);
+    expect(plumbing.removeWorktree).toHaveBeenCalledWith("/home/clawbox/Projects/site", WORKTREE_T1);
+    expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 2, rejections: 1 });
+    // The rejected attempt's result says why, in the worker's name.
+    expect(logged(done, "result")[0]).toContain("NO CHANGE");
+    const retry = starts.find((s) => role(s) === "worker" && String(s.task).includes("A previous attempt was rejected"));
+    expect(String(retry?.task)).toContain(`A previous attempt was rejected: ${team.NO_CHANGE}`);
+  });
+
+  it("is rejected NO CHANGE too when the task named no file but the worker says it wrote some in its worktree", async () => {
+    outcomes = [
+      { summary: contractPlan("final", []) },
+      { summary: "Wrote the contract.", filesTouched: ["api-contract.md", "../elsewhere.txt", "__pycache__/x.pyc"] },
+      { summary: "Wrote the contract, committed.", filesTouched: ["api-contract.md"] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(logged(done, "alert")).toEqual(["ALERT: No change from t1 (run-00000002): its branch has no commit, though the worker wrote api-contract.md"]);
+    expect(done.tasks[0]).toMatchObject({ attempts: 2, rejections: 1 });
+  });
+
+  it("keeps today's verdict for a task that only checks something: no hint, nothing touched, no diff — accepted", async () => {
+    outcomes = [
+      { summary: contractPlan("final", []) },
+      { summary: "Checked: the site builds and every page loads.", filesTouched: [] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
+    expect(done.tasks[0].review?.notes).toMatch(/Accepted by rule; the team's final review checks the merged result/);
+    expect(done.alerts).toBe(0);
+    expect(logged(done, "note")).toEqual([]);
+    expect(JSON.stringify(done.log)).not.toContain("NO CHANGE");
+  });
+
+  it("is rejected NOT COMMITTED when the harvest itself could not commit — the files are not lost silently", async () => {
+    outcomes = [
+      { summary: contractPlan("final") },
+      { summary: "Done — both files delivered and verified.", filesTouched: [] },
+      { summary: "Both files written and committed.", filesTouched: ["api-contract.md", "items.json"] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    plumbing.harvestWorktree.mockResolvedValueOnce({ ok: false, detail: "Committing the files the worker left uncommitted failed: fatal: Unable to create index.lock" });
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const t1Reviews = done.log.filter((e) => e.type === "review").map((e) => e.message);
+    expect(t1Reviews[0]).toMatch(/rejected.*NOT COMMITTED: Committing the files the worker left uncommitted failed.*could not be committed/);
+    expect(logged(done, "alert")).toEqual([expect.stringMatching(/^ALERT: Commit failed for t1 \(run-00000002\): Committing the files/)]);
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).not.toContain(`clawbox/${board.id}-t1-1`);
+    expect(done.tasks[0]).toMatchObject({ attempts: 2, rejections: 1 });
   });
 });
 
@@ -1113,6 +1261,16 @@ describe("the words", () => {
   // __pycache__/calc.cpython-310.pyc, written by CPython importing the very
   // file the task named. Three of those hit the alert ceiling and killed runs
   // whose work the reviewer had already accepted.
+  it("says which files a worker was there to change: its hint first, else what it wrote inside its worktree", () => {
+    const wt = "/p/.clawbox/worktrees/t1-1";
+    expect(team.expectedFiles({ files_hint: ["api-contract.md"] }, ["other.md"], wt)).toEqual(["api-contract.md"]);
+    expect(team.expectedFiles({ files_hint: [] }, [
+      "items.json", "./items.json", "docs/", `${wt}/api/contract.md`, `${wt}/`, "/tmp/scratch.txt", "../escape.md", ".", "__pycache__/c.pyc", "node_modules/x/y.js",
+    ], `${wt}/`)).toEqual(["items.json", "docs", "api/contract.md"]);
+    // A check that wrote nothing expected nothing.
+    expect(team.expectedFiles({ files_hint: [] }, [], wt)).toEqual([]);
+  });
+
   it("does not call a generated artifact a stray file", () => {
     expect(team.outsideHint(["calc.py", "__pycache__/calc.cpython-310.pyc"], ["calc.py"])).toEqual([]);
     expect(team.outsideHint(["src/a.py", "src/__pycache__/a.cpython-311.pyc"], ["src/a.py"])).toEqual([]);
@@ -1623,6 +1781,11 @@ describe("the worker's brief: when to use team_message", () => {
     expect(brief.indexOf('to="lead"')).toBeLessThan(brief.indexOf('to="owner_agent"'));
     expect(brief).toContain("Never send a team_message for progress reports");
     expect(brief).toContain("never to acknowledge a message a teammate sent you");
+  });
+
+  it("says the worker's files count only once committed on its branch, and that its own commit is welcome", () => {
+    expect(team.WORKER_BRIEF).toContain("Your files count only once they are committed on your branch");
+    expect(team.WORKER_BRIEF).toContain("a `git add` and `git commit` of your files in your own folder before your final message is welcome");
   });
 
   it("puts scratch files in the evidence folder only — never in /tmp, never beside the project", () => {
