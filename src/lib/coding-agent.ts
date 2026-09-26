@@ -4173,6 +4173,8 @@ interface RunStore {
   reviewWatchers: Set<string>;
   /** Settle chains a test can wait on — see trackSettleWork. */
   settling: Set<Promise<void>>;
+  /** Runs whose record says settled while their commit is still being made — see waitForRun. */
+  unannounced: Set<string>;
   /** One lifecycle change at a time per run — see transitions. */
   transitions: Map<string, Promise<CodingRun>>;
   /** One pipeline advance at a time per run — see advancePipeline. */
@@ -4199,6 +4201,7 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
   prWatchers: new Set<string>(),
   reviewWatchers: new Set<string>(),
   settling: new Set<Promise<void>>(),
+  unannounced: new Set<string>(),
   transitions: new Map<string, Promise<CodingRun>>(),
   pipelineAdvancing: new Map<string, Promise<void>>(),
   startingRuns: 0,
@@ -4612,11 +4615,20 @@ export function activeRunId(): string | null {
 /**
  * Resolve once the run has finished, or after `timeoutMs`, whichever is first.
  * Lets a status request block instead of polling every few seconds.
+ *
+ * "Finished" is the settle path's word, not the status field's: the record
+ * says `completed` the moment the process is gone, but its work is committed
+ * only after that (finishRun), and the waiters are woken once it is. A wait
+ * that BEGAN in between — a team's next 60-second slice, for a worker that
+ * ended right at the end of the last one — answered at once, and the team
+ * merged a branch the commit had not reached yet, then removed the worktree
+ * with the files in it (team-v0wcl4mj, t1, 2026-09-26). Such a wait now waits
+ * for the wake like any other.
  */
 export function waitForRun(id: string, timeoutMs: number): Promise<CodingRun | null> {
   const run = getRun(id);
   if (!run) return Promise.resolve(null);
-  if (run.status !== "running") return Promise.resolve(run);
+  if (run.status !== "running" && !store.unannounced.has(id)) return Promise.resolve(run);
   const ms = Math.max(0, Math.min(timeoutMs, MAX_WAIT_MS));
   if (ms === 0) return Promise.resolve(run);
   return new Promise((resolve) => {
@@ -4640,6 +4652,7 @@ export function waitForRun(id: string, timeoutMs: number): Promise<CodingRun | n
 }
 
 function wakeWaiters(id: string): void {
+  store.unannounced.delete(id);
   const set = waiters.get(id);
   if (!set) return;
   waiters.delete(id);
@@ -9984,22 +9997,30 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // Read now, not after the commit below: the owner's Kill clears it while the
   // group it named may still be on its way out.
   const leftRunning = run.leftover;
+  // Until the wake below, a wait that begins now waits too (waitForRun): the
+  // status already says settled, the branch does not have the work yet.
+  store.unannounced.add(run.id);
   trackSettleWork((async () => {
-    await recordRunWork(run);
-    // Before "finished", so the owner reads why something left the evidence
-    // folder next to the run that put it there — and before any waiter or
-    // update can find it: see pruneArtifacts. Not while something the run
-    // started is still running: it can still change the folder under the walk.
-    // A run that left something running on purpose is not pruned at all; a
-    // group the cleanup signalled is waited for, up to its SIGKILL and a
-    // margin — something that shrugs off SIGTERM is still there until then.
-    if (!leftRunning && (await groupGone(settledGroup, STOP_GRACE_MS + 1_000))) {
-      const pruned = await pruneArtifacts(run.id);
-      if (pruned.length > 0) pushProgress(run, RUNNER_STEP.evidencePruned(prunedPaths(pruned)));
+    try {
+      await recordRunWork(run);
+      // Before "finished", so the owner reads why something left the evidence
+      // folder next to the run that put it there — and before any waiter or
+      // update can find it: see pruneArtifacts. Not while something the run
+      // started is still running: it can still change the folder under the walk.
+      // A run that left something running on purpose is not pruned at all; a
+      // group the cleanup signalled is waited for, up to its SIGKILL and a
+      // margin — something that shrugs off SIGTERM is still there until then.
+      if (!leftRunning && (await groupGone(settledGroup, STOP_GRACE_MS + 1_000))) {
+        const pruned = await pruneArtifacts(run.id);
+        if (pruned.length > 0) pushProgress(run, RUNNER_STEP.evidencePruned(prunedPaths(pruned)));
+      }
+      pushProgress(run, settled === "paused" ? RUNNER_STEP.paused : RUNNER_STEP.finished(settled));
+      persist(true);
+    } finally {
+      // Woken even when the bookkeeping above threw: a run that is over must
+      // not keep every later wait on it for its whole slice.
+      wakeWaiters(run.id);
     }
-    pushProgress(run, settled === "paused" ? RUNNER_STEP.paused : RUNNER_STEP.finished(settled));
-    persist(true);
-    wakeWaiters(run.id);
     console.error(`[coding-agent] ${run.id} ${settled} after ${Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
     // A team's worker or reviewer ends here: its worktree is the
     // orchestrator's to merge and remove the moment it is woken, its
@@ -12257,6 +12278,7 @@ function endEveryLiveRun(): ChildProcess[] {
   }
   live.clear();
   waiters.clear();
+  store.unannounced.clear();
   transitions.clear();
   runSecretEnv.clear();
   // What ends the watchers' loops: a poll already in flight is waited for by
