@@ -964,6 +964,12 @@ export function harnessProjectSlug(dir: string): string {
 const PATH_WORD = /(^|[\s"'=(<>])([^\s"'`;|&()<>=]+)/g;
 /** What looks at a folder's entries without reading them; the folder itself counts as the run's own only for these. */
 const LISTS_ENTRIES: ReadonlySet<string> = new Set(["LS", "Glob", "Read", "ls", "stat", "test", "[", "file", "du", "find", "realpath", "readlink"]);
+/** Where a shell word ends: the text's end, a space, or an operator. */
+const SHELL_WORD_END = /^(?:$|[\s;|&)<>])/;
+/** What a shell expands inside a word — `{..,}`, `$D$D`, `.\.` — any of which can turn a path in the run's corner into `..`. */
+const SHELL_EXPANDS = /[$`\\{}]/;
+/** A dot-glob (`.*`, `.?`, `.[.]`), which the shell may match to `..`. */
+const DOT_GLOB = /^\.[^/]*[*?[]/;
 
 /**
  * True when a refused action named the harness's state ONLY in the run's own
@@ -977,9 +983,10 @@ const LISTS_ENTRIES: ReadonlySet<string> = new Set(["LS", "Glob", "Read", "ls", 
  *
  * Every other mention leaves this false: another project's folder, another
  * session's transcript beside the run's own, a search through the folder, the
- * settings and the credential store, another home, a `..`, a shell that `cd`s
- * in and names the rest by relative paths. So does a text the runner may have
- * cut, which may name more past the cut.
+ * settings and the credential store, another home, a `..` — written, or made
+ * by the shell out of a word (`{..,}`, `.''.`, `$D$D`, `.*`) —, a shell that
+ * `cd`s in and names the rest by relative paths. So does a text the runner may
+ * have cut, which may name more past the cut.
  */
 export function ownHarnessStateDenial(action: string, own: OwnHarnessState): boolean {
   const colon = action.indexOf(": ");
@@ -1001,10 +1008,16 @@ export function ownHarnessStateDenial(action: string, own: OwnHarnessState): boo
     const command = tool === "Bash" ? part.trim().split(/\s+/)[0] : tool;
     // A shell in there names what it reads next by a relative path: left for `harnessStateDenial` to see.
     if (command === "cd" || command === "pushd") return part;
-    return part.replace(PATH_WORD, (word, lead: string, token: string) => {
+    return part.replace(PATH_WORD, (word: string, lead: string, token: string, at: number) => {
+      // Only a whole word: a quote that splices more on (`memory/.''./x`) makes it another path.
+      const next = part.slice(at + word.length);
+      const quoted = lead === "\"" || lead === "'";
+      if (!(quoted ? next.startsWith(lead) && SHELL_WORD_END.test(next.slice(1)) : SHELL_WORD_END.test(next))) return word;
       const named = token.replace(/^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/, home);
       if (!path.posix.isAbsolute(named)) return word;
-      const [slug, entry, ...more] = path.posix.relative(projects, path.posix.normalize(named)).split("/");
+      const segments = path.posix.relative(projects, path.posix.normalize(named)).split("/");
+      if (segments.some((s) => SHELL_EXPANDS.test(s) || DOT_GLOB.test(s))) return word;
+      const [slug, entry, ...more] = segments;
       if (!slugs.has(slug)) return word;
       const corner = entry === undefined || entry === ""
         ? onlyLooks && LISTS_ENTRIES.has(command)

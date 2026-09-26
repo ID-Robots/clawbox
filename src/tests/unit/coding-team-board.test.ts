@@ -777,6 +777,13 @@ describe("ownHarnessStateDenial", () => {
       `Read: ${MINE}/memory/../../-home-clawbox-Projects-other/sess.jsonl`,
       `Bash: cd ${MINE} && cat sess-other.jsonl`,
       `Bash: cd ${MINE}/memory && cat ../sess-other.jsonl`,
+      // A `..` the shell makes out of a word that looks like it stays in the corner.
+      `Bash: cat ${MINE}/memory/{..,}/{..,}/-home-clawbox-Projects-other/sess.jsonl`,
+      `Bash: cat ${MINE}/memory/.''./sess-other.jsonl`,
+      `Bash: cat "${MINE}/memory/."'.'/sess-other.jsonl`,
+      `Bash: D=.; cat ${MINE}/memory/$D$D/sess-other.jsonl`,
+      `Bash: cat ${MINE}/memory/.*/sess-other.jsonl`,
+      `Bash: cat ${MINE}/memory/.\\./sess-other.jsonl`,
       // A write into the folder itself, beside the memory.
       `Write: ${MINE}/notes.md`,
       // Cut at the runner's display length, mid-slug: it may have gone on elsewhere.
