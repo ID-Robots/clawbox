@@ -14,7 +14,7 @@ docs-site/
 ├── index.mdx              # landing page
 ├── quickstart.mdx
 ├── setup/                 # first boot, network, AI provider
-├── hardware/              # ClawBox Connect, ClawBox Workstation
+├── hardware/              # ClawBox, ClawBox Workstation
 ├── guides/                # messaging channels, subscriptions
 ├── support/               # troubleshooting, FAQ
 ├── logo/                  # light.png / dark.png
