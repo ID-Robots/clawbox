@@ -46,10 +46,13 @@
  */
 
 import { randomUUID } from "crypto";
+import fs from "fs";
+import path from "@/lib/runtime-path";
 import {
   CodingAgentError,
   getRun,
   getTeamDynamic,
+  harnessStateDir,
   isCodingAgentEnabled,
   MAX_TASK_CHARS,
   MAX_TEAM_WORKERS,
@@ -95,6 +98,7 @@ import {
   loadBoard,
   MAX_DIGEST_CHARS,
   outsideFolderWriteDenial,
+  ownHarnessStateDenial,
   readOnlyDenial,
   readyTasks,
   saveBoard,
@@ -753,10 +757,16 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   const ok = settled?.status === "completed";
   let result = settled?.summary?.trim() || settled?.error || (ok ? "(no summary)" : `The run ended ${settled?.status ?? "without a record"}.`);
 
+  // What the worker wrote and removed again before it settled — a probe page a
+  // verifier made and deleted (bench, 2026-09-26) — is looked for now, while
+  // its worktree is still there to look in.
+  const vanished = settled ? vanishedFiles(settled.directory, settled.filesTouched) : new Set<string>();
+
   // The worker's commits come home. A merge git cannot do alone is not
   // guessed at: the task is REJECTED with the conflict named and offered
   // once more, and the next attempt starts from the merged state.
   let files: string[] = settled?.filesTouched ?? [];
+  let fromBranch = false;
   let mergeRefusal: string | null = null;
   if (ok && settled?.commitError) {
     // The runner could not commit the worker's work — in a worktree there
@@ -775,7 +785,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
       // What the branch changed; a worker that committed nothing has no
       // branch diff, and what it touched uncommitted is still what it touched.
       const diffed = await changedFiles(board.directory, worktree.branch);
-      if (diffed.length) files = diffed;
+      if (diffed.length) { files = diffed; fromBranch = true; }
       const merged = await mergeWorkerBranch(board.directory, worktree.branch, `Coding team ${board.id}: ${task.task_id} — ${firstLine(task.task_description, 72)}`);
       if (!merged.ok) {
         mergeRefusal = `${merged.conflict ? "MERGE CONFLICT" : "MERGE FAILED"}: ${firstLine(merged.detail, 300)}`;
@@ -804,37 +814,48 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   // with every deliverable on disk): the write stays refused, the worker was
   // told where to retry, and the review judges what it made. A refused write
   // inside the worktree or the project is still an alert, and so is a refused
-  // look into the harness's own state. Only when every refusal is judged: the
-  // run keeps the first few, and one it did not keep may have been a write —
-  // unless the runner counted it among the hinted ones.
+  // look into — or write to — the harness's own state, except the run's OWN
+  // corner of it: its project's memory folder, which the harness itself
+  // points it at (bench, 2026-09-26: a worker's `ls` there rejected correct,
+  // verified work). Every refusal is judged by its whole text where the record
+  // keeps one, so a long read-only probe is not an alert for its length. Only
+  // when every refusal is judged: the run keeps the first few, and one it did
+  // not keep may have been a write — unless the runner counted it among the
+  // hinted ones.
   let refusedWrite = false;
+  // A file it removed again merged nothing: judged by what it left. The
+  // branch's own diff is what merged, a deletion it names included.
+  const leftBehind = fromBranch ? files : files.filter((f) => !vanished.has(f));
+  const strayed = settled ? outsideHint(leftBehind, task.files_hint) : [];
   if (settled) {
     if (settled.permissionDenials > 0) {
       const n = settled.permissionDenials;
       const folders = worktree ? [worktree.path, board.directory] : [board.directory];
       const outsideWrite = (a: string) => outsideFolderWriteDenial(a, folders);
+      const own = { stateDir: harnessStateDir(settled.provider), folders: [settled.directory, ...folders], sessionId: settled.sessionId };
       // Each refusal on the record, with where the runner pointed the worker
       // instead; a record from before the structured list has its strings.
-      const kept: Array<{ text: string; worktreePath?: string }> = settled.denials?.length ? settled.denials : settled.deniedActions.map((text) => ({ text }));
+      const kept: Array<{ text: string; fullText?: string; worktreePath?: string }> = settled.denials?.length ? settled.denials : settled.deniedActions.map((text) => ({ text }));
+      // Judged by all of it; named, below, by the cut the owner reads.
+      const whole = (d: { text: string; fullText?: string }) => d.fullText ?? d.text;
       const hinted = kept.filter((d) => d.worktreePath);
-      const others = kept.filter((d) => !d.worktreePath).map((d) => d.text);
+      const others = kept.filter((d) => !d.worktreePath);
       const hintedCount = Math.max(settled.worktreeHints ?? 0, hinted.length);
       const judged = kept.length + (hintedCount - hinted.length) >= n;
-      const harness = kept.some((d) => readOnlyDenial(d.text) && harnessStateDenial(d.text));
-      if (judged && !harness && others.every((a) => readOnlyDenial(a) || outsideWrite(a))) {
-        const rest = others.length === 0 ? "" : others.every(readOnlyDenial) ? "read-only" : "reads, or writes";
+      const harness = kept.some((d) => harnessStateDenial(whole(d)) && !ownHarnessStateDenial(whole(d), own));
+      if (judged && !harness && others.every((d) => readOnlyDenial(whole(d)) || outsideWrite(whole(d)))) {
+        const rest = others.length === 0 ? "" : others.every((d) => readOnlyDenial(whole(d))) ? "read-only" : "reads, or writes";
         const what = hintedCount > 0
           ? `action(s) that changed nothing — ${hintedCount} aimed at the project instead of its worktree, each answered with a retry hint at the worktree path${rest ? `; the rest ${rest} outside its folder` : ""}`
           : rest === "read-only" ? "read-only action(s) outside its folder" : "action(s) that changed nothing — reads, or writes outside its folder";
-        const named = [...others, ...hinted.map((d) => `${d.text} → ${d.worktreePath}`)].slice(0, 3).join("; ");
+        const named = [...others.map((d) => d.text), ...hinted.map((d) => `${d.text} → ${d.worktreePath}`)].slice(0, 3).join("; ");
         bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} was refused ${n} ${what}: ${named}`, read_only_refusals: n });
       } else {
         refusedWrite = true;
-        const named = [...others, ...hinted.map((d) => d.text)].slice(0, 3).join("; ");
+        const named = [...others.map((d) => d.text), ...hinted.map((d) => d.text)].slice(0, 3).join("; ");
         bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} was refused ${n} action(s): ${named}` });
       }
     }
-    const strayed = outsideHint(files, task.files_hint);
     if (strayed.length) {
       bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} touched files outside its task: ${strayed.slice(0, 5).join(", ")}` });
     }
@@ -847,7 +868,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   // The planner's shape may ask for no reviewer here: `final` has one look
   // at the merged whole at the end, `none` trusts the rule alone.
   if (ok) {
-    const clean = settled && !refusedWrite && outsideHint(files, task.files_hint).length === 0;
+    const clean = settled && !refusedWrite && strayed.length === 0;
     if (!clean) {
       bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: "The worker was refused an action or strayed outside its files; the task is offered once more." });
       return true;
@@ -1223,11 +1244,45 @@ export function outsideHint(touched: string[], hint: string[]): string[] {
   // pointed at — a worker asked to edit calc.py cannot help CPython leaving
   // __pycache__/calc.cpython-310.pyc there. Counting that as straying failed
   // three correct tasks and killed a run on the alert ceiling (team-6rgz8cyx,
-  // team-5oxkp7a9, 2026-09-06). It is noise, not a trespass.
+  // team-5oxkp7a9, 2026-09-06). It is noise, not a trespass. So is a scratch
+  // file a worker made to check its work (`isScratchFile`).
   return touched
     .map(norm)
-    .filter((f) => !isGeneratedArtifact(f))
+    .filter((f) => !isGeneratedArtifact(f) && !isScratchFile(f))
     .filter((f) => !hints.some((h) => f === h || f.startsWith(`${h}/`)));
+}
+
+/**
+ * A name nobody gives a deliverable: `__verify_probe.html`, `check.tmp`,
+ * `.probe-1` — what a worker writes to try something and means to remove
+ * (bench, 2026-09-26: a verifier's probe page counted as straying and cost a
+ * correct task a second attempt). By the file's own name; a dunder name such
+ * as `__init__.py` is source, not scratch.
+ */
+export function isScratchFile(file: string): boolean {
+  const name = file.replace(/\/+$/, "").split("/").pop() ?? "";
+  if (/^__\w+__(?:\.\w+)?$/.test(name)) return false;
+  return name.startsWith("__") || name.endsWith(".tmp") || name.startsWith(".probe");
+}
+
+/**
+ * The files of `touched` (relative to `dir`, as the runner records them) that
+ * are no longer there. None when `dir` itself is not: a folder that is gone
+ * says nothing about what the worker left in it.
+ */
+export function vanishedFiles(dir: string, touched: readonly string[]): Set<string> {
+  const gone = new Set<string>();
+  if (!path.isAbsolute(dir) || !fs.existsSync(dir)) return gone;
+  for (const file of touched) {
+    try {
+      // lstat: a link the worker left is there, wherever it points.
+      fs.lstatSync(path.resolve(dir, file));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") gone.add(file);
+    }
+  }
+  return gone;
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────
