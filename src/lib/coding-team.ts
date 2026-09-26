@@ -320,7 +320,9 @@ export interface TeamMessageSent {
  *
  * Every refusal of the SENDER's (the text, the claim, the target, the caps) is
  * logged on the board as an alert through the bus, like any message the bus
- * would not take, and throws a TeamMessageError with its code. A message the
+ * would not take, and throws a TeamMessageError with its code. A sibling that
+ * had already finished (SETTLED — a late answer racing its end) is logged as a
+ * note and counted as undelivered, never an alert, and throws too. A message the
  * BOX could not hand on (no chat session, the Hermes edition, a gateway that
  * refused it) is logged as an undelivered message instead — never an alert —
  * and throws its code too. A delivered message is a `message` entry on the
@@ -361,12 +363,14 @@ export async function sendTeamMessage(input: TeamMessageInput): Promise<TeamMess
     text: typeof input.text === "string" ? input.text : "",
   };
   // The sender's refusals: on the board as an alert — the bus's own words for
-  // a message it would not take — then the code to the caller.
+  // a message it would not take — then the code to the caller. A sibling that
+  // had already finished (SETTLED) is the bus's to log as a note instead: a
+  // late answer is a race, not the sender's fault. The caller hears either way.
   const refused = (code: TeamMessageRefusal, reason: string, nextAllowedAt: number | null = null): TeamMessageError => {
     try {
-      bus.refuse(actor, draft, `${code}: ${reason}`);
+      bus.refuse(actor, draft, `${code}: ${reason}`, code);
     } catch {
-      // refuse() always throws once the alert is logged; the caller gets the code.
+      // refuse() always throws once the entry is logged; the caller gets the code.
     }
     return new TeamMessageError(code, reason, nextAllowedAt);
   };
@@ -387,15 +391,21 @@ export async function sendTeamMessage(input: TeamMessageInput): Promise<TeamMess
   if (target === "sibling") {
     if (toRunId === fromRunId) throw refused("SELF", "A run does not send a message to itself.");
     if (!board.runs.some((r) => r.id === toRunId)) throw refused("NOT_IN_TEAM", `${toRunId} is not a run of team ${teamId}. ${reachable(board, fromRunId)}`);
-    const receiver = getRun(toRunId!);
-    if (!receiver || isSettled(receiver.status)) throw refused("SETTLED", `${toRunId} has finished; there is nothing left to tell it.`);
   }
+  // The caps before the receiver's state: a message to a sibling that has
+  // finished is a note that counts against them (TeamBus.refuse), so a run
+  // that keeps sending there meets RATE_LIMITED — an alert — instead of
+  // writing notes until the log's oldest entries fall off.
   const now = Date.now();
   const pending = team.pendingMessages.get(fromRunId) ?? 0;
   const allowance = teamMessageAllowance([...(ref.sentAt ?? []), ...Array.from({ length: pending }, () => now)], now);
   if (!allowance.ok) {
     const limited = rateLimitedError(allowance);
     throw refused("RATE_LIMITED", limited.message, limited.nextAllowedAt);
+  }
+  if (target === "sibling") {
+    const receiver = getRun(toRunId!);
+    if (!receiver || isSettled(receiver.status)) throw refused("SETTLED", `${toRunId} has finished; there is nothing left to tell it.`);
   }
 
   // The delivery.

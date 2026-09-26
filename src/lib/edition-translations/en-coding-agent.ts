@@ -358,6 +358,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.team.messageToAssistant": "to the assistant",
   "codingAgent.team.messageToRun": "to {run}",
   "codingAgent.team.messageUndelivered": "not delivered",
+  "codingAgent.team.messageReceiverFinished": "{run} had already finished",
   "codingAgent.team.task.retired": "Retired",
   "codingAgent.team.roleLead": "Team lead · after {task}",
   "codingAgent.team.agentsWithLead": "{total} agents worked here — planner {planner} · workers {workers} · reviewers {reviewers} · lead {leads}",

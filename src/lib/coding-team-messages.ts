@@ -50,12 +50,14 @@ export const TASK_ID_SHAPE = /^t[1-9][0-9]{0,2}$/;
 /**
  * Why a message was refused, beside the English sentence.
  *
- * Two families, and the difference matters to the team: the SENDER's refusals
+ * Three families, and the difference matters to the team: the SENDER's refusals
  * (the text, who it claims to be, whom it names, its caps) are logged on the
  * board as alerts, the way the bus logs every message it would not take; the
  * BOX's (no chat session to post into, an edition with no such path, a gateway
  * that did not take it) are recorded as an undelivered message, never as an
- * alert — three of them would otherwise stop a team over the box's own set-up.
+ * alert — three of them would otherwise stop a team over the box's own set-up;
+ * and the RACE's (`NOTED_REFUSALS`: the receiver finished before the message
+ * reached it) are a note, counted as undelivered, never an alert either.
  */
 export type TeamMessageRefusal =
   | "INVALID"
@@ -75,6 +77,17 @@ export type TeamMessageRefusal =
 
 /** The refusals that are the box's state rather than the sender's doing. */
 export const UNDELIVERED_REFUSALS: readonly TeamMessageRefusal[] = ["NO_SESSION", "UNSUPPORTED", "NOT_DELIVERED"];
+
+/**
+ * The refusals that are a race, not a fault: the sibling it was meant for had
+ * already finished. A worker answering a question a minute after the asker
+ * completed is how a parallel team runs, not something the sender did wrong —
+ * as alerts, two such answers and one real alert failed a team whose every
+ * deliverable verified (bench, 2026-09-26). On the board as a NOTE, in the
+ * figures as undelivered and on the sender's caps, as an undelivered message
+ * is; the sender is still told it was not delivered.
+ */
+export const NOTED_REFUSALS: readonly TeamMessageRefusal[] = ["SETTLED"];
 
 export class TeamMessageError extends Error {
   constructor(

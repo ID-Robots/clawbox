@@ -290,6 +290,28 @@ describe("what the team's runs said", () => {
     fireEvent.click(screen.getByTestId("coding-team-log-toggle"));
     expect(screen.getByTestId("coding-team-log")).toHaveTextContent("worker run-00000003 → the lead: hi");
   });
+
+  it("words a late answer to a sibling that had finished in the reader's language — a quiet note, not an alert, not a message", async () => {
+    stub();
+    const english = "Refused message from worker run-00000003: SETTLED: run-00000002 has finished; there is nothing left to tell it.";
+    const unreached = { ts: 1_700_000_020_000, actor: { kind: "system" }, type: "note", message: english, payload: { undelivered: { code: "SETTLED", from: "run-00000003", role: "worker", to: "sibling", toRunId: "run-00000002" } } };
+    // …and one whose payload does not read back: drawn as its line, like any other note.
+    const unreadable = { ...unreached, ts: 1_700_000_021_000, message: "a note with a broken payload", payload: { undelivered: { code: "SETTLED", from: "<b>x</b>", role: "worker", to: "sibling", toRunId: "run-00000002" } } };
+    teams = [{ ...WORKING, log: [...WORKING.log, unreached, unreadable] }];
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    await screen.findByTestId("coding-team-board");
+    // Not one of the team's messages: nothing was said to anybody.
+    expect(screen.queryByTestId("coding-team-messages")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-team-log-toggle"));
+    const rows = screen.getAllByTestId("coding-team-log-unreached");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent(`worker run-00000003 ${t("codingAgent.team.messageToRun", { run: "run-00000002" })} · ${t("codingAgent.team.messageUndelivered")}: ${t("codingAgent.team.messageReceiverFinished", { run: "run-00000002" })}`);
+    expect(rows[0]).not.toHaveTextContent("Refused message");
+    expect(rows[0].className).not.toContain("text-amber-400");
+    const log = screen.getByTestId("coding-team-log");
+    expect(log).toHaveTextContent("a note with a broken payload");
+    expect(log).not.toHaveTextContent(english);
+  });
 });
 
 describe("the team's shape, its lead and its figures (TASK-1099)", () => {

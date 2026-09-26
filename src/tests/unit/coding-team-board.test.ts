@@ -518,6 +518,34 @@ describe("teamMetrics", () => {
     expect(lib.boardDigest(b, null)).not.toContain("read-only");
   });
 
+  it("counts a message whose sibling had already finished as sent and undelivered — a note, never an alert — and only when its payload reads back", () => {
+    const b = board();
+    const unreached = { code: "SETTLED" as const, from: "run-aaaaaaaa", role: "worker" as const, to: "sibling" as const, toRunId: "run-bbbbbbbb" };
+    lib.postNote(b, SYSTEM, "Refused message from worker run-aaaaaaaa: SETTLED: run-bbbbbbbb has finished; there is nothing left to tell it.", undefined, undefined, unreached);
+    expect(b.alerts).toBe(0);
+    expect(b.log.at(-1)).toMatchObject({ type: "note", payload: { undelivered: unreached } });
+    expect(lib.undeliveredNoteOf(b.log.at(-1)!)).toEqual(unreached);
+    expect(lib.teamMetrics(b)).toMatchObject({ messagesSent: 1, messagesToSibling: 1, messagesToLead: 0, messagesUndelivered: 1, readOnlyRefusals: 0 });
+    // Read back from the file: counted again, from the log.
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)!.metrics).toMatchObject({ messagesSent: 1, messagesUndelivered: 1 });
+    // A payload that is not the shape postNote writes is a line, not a figure.
+    for (const payload of [
+      { undelivered: { ...unreached, from: "someone" } },
+      { undelivered: { ...unreached, role: "owner" } },
+      { undelivered: { ...unreached, to: "everyone" } },
+      { undelivered: { ...unreached, toRunId: 7 } },
+      { undelivered: { ...unreached, code: 1 } },
+      { undelivered: "SETTLED" },
+    ]) {
+      expect(lib.undeliveredNoteOf({ type: "note", payload })).toBeNull();
+    }
+    expect(lib.undeliveredNoteOf({ type: "alert", payload: { undelivered: unreached } })).toBeNull();
+    // Only the system writes one.
+    expect(() => lib.postNote(b, worker("run-aaaaaaaa"), "fine", undefined, undefined, unreached)).toThrow(/Only the system writes a note/);
+    expect(lib.teamMetrics(b).messagesUndelivered).toBe(1);
+  });
+
   it("keeps when the lead's last turn was written, from a new board's 0", () => {
     const b = board();
     expect(b.lastLeadAt).toBe(0);
