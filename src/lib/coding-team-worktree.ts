@@ -295,6 +295,26 @@ export async function harvestWorktree(worktreePath: string, message: string): Pr
 }
 
 /**
+ * Of `files` (relative to the worktree), the ones git could have committed:
+ * still there, and not ignored. A scratch file the worker wrote and deleted,
+ * or a log the project's .gitignore covers, never reaches a branch whatever
+ * the runner does — it is not work that went missing, and a check-only task
+ * that wrote one must not be rejected for an empty branch. A check git could
+ * not make keeps every file that is there.
+ */
+export async function committableFiles(worktreePath: string, files: string[]): Promise<string[]> {
+  const present = files.filter((f) => fs.existsSync(path.join(worktreePath, f)));
+  if (present.length === 0) return [];
+  // 0: some are ignored, one per line; 1: none is; anything else is no
+  // answer. (`-z` needs `--stdin`.) A name git still quotes matches nothing
+  // here and stays counted — the rejection the brief asks for, never a loss.
+  const r = await git(worktreePath, ["-c", "core.quotePath=false", "check-ignore", "--", ...present]);
+  if (r.code !== 0) return present;
+  const ignored = new Set(r.stdout.split("\n").filter(Boolean));
+  return present.filter((f) => !ignored.has(f));
+}
+
+/**
  * The paths `git status --porcelain=v2 -z` names: the ones to commit, and the
  * ones `left` out — generated artifacts and `.clawbox/`. Version 2 because
  * every entry starts with its type, never a space the child's trimmed output

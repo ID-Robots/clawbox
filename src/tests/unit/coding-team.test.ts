@@ -50,6 +50,7 @@ const plumbing = vi.hoisted(() => ({
   removeWorktree: vi.fn(),
   changedFiles: vi.fn(),
   harvestWorktree: vi.fn(),
+  committableFiles: vi.fn(),
 }));
 vi.mock("@/lib/coding-team-worktree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-team-worktree")>();
@@ -127,6 +128,8 @@ beforeEach(async () => {
   // case that stages an empty branch says so.
   plumbing.changedFiles.mockImplementation(async (_dir: string, branch: string) => committedOn(branch));
   plumbing.harvestWorktree.mockResolvedValue({ ok: true, files: [] });
+  // Every file a worker says it wrote is still there and not ignored.
+  plumbing.committableFiles.mockImplementation(async (_wt: string, files: string[]) => files);
   runner.isCodingAgentEnabled.mockResolvedValue(true);
   // The lead's switch: OFF, as on every box that never touched it.
   runner.getTeamDynamic.mockResolvedValue(false);
@@ -463,6 +466,24 @@ describe("a worker whose branch came home empty", () => {
     expect(done.status).toBe("done");
     expect(logged(done, "alert")).toEqual(["ALERT: No change from t1 (run-00000002): its branch has no commit, though the worker wrote api-contract.md"]);
     expect(done.tasks[0]).toMatchObject({ attempts: 2, rejections: 1 });
+    expect(plumbing.committableFiles).toHaveBeenCalledWith(WORKTREE_T1, ["api-contract.md"]);
+  });
+
+  it("accepts a check-only task whose written files git could never have taken — a scratch file it deleted, a log the project ignores", async () => {
+    outcomes = [
+      { summary: contractPlan("final", []) },
+      { summary: "End-to-end check passed.", filesTouched: ["e2e_check.py", "e2e.log"] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    plumbing.committableFiles.mockResolvedValueOnce([]);
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plumbing.committableFiles).toHaveBeenCalledWith(WORKTREE_T1, ["e2e_check.py", "e2e.log"]);
+    expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
+    expect(done.alerts).toBe(0);
+    expect(JSON.stringify(done.log)).not.toContain("NO CHANGE");
   });
 
   it("keeps today's verdict for a task that only checks something: no hint, nothing touched, no diff — accepted", async () => {
@@ -1263,7 +1284,7 @@ describe("the words", () => {
     const wt = "/p/.clawbox/worktrees/t1-1";
     expect(team.expectedFiles({ files_hint: ["api-contract.md"] }, ["other.md"], wt)).toEqual(["api-contract.md"]);
     expect(team.expectedFiles({ files_hint: [] }, [
-      "items.json", "./items.json", "docs/", `${wt}/api/contract.md`, `${wt}/`, "/tmp/scratch.txt", "../escape.md", ".", "__pycache__/c.pyc", "node_modules/x/y.js",
+      "items.json", "./items.json", "docs/", `${wt}/api/contract.md`, `${wt}/`, "/tmp/scratch.txt", "../escape.md", ".", "__pycache__/c.pyc", "node_modules/x/y.js", ".clawbox/state.json",
     ], `${wt}/`)).toEqual(["items.json", "docs", "api/contract.md"]);
     // A check that wrote nothing expected nothing.
     expect(team.expectedFiles({ files_hint: [] }, [], wt)).toEqual([]);

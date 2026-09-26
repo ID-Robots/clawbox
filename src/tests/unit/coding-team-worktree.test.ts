@@ -8,7 +8,7 @@ import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { addWorkerWorktree, changedFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -209,6 +209,23 @@ describe("the harvest of a worker's worktree", () => {
     expect(await harvestWorktree(wt.path, MESSAGE)).toEqual({ ok: true, files: [] });
     expect(git(wt.path, "rev-parse", "HEAD")).toBe(before);
     expect(await changedFiles(dir, wt.branch)).toEqual([]);
+  });
+
+  it("counts only the written files git could have committed: still there, and not ignored", async () => {
+    fs.writeFileSync(path.join(dir, ".gitignore"), "*.log\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "ignore logs");
+    await ensureTeamBranch(dir, "team-h");
+    const wt = await addWorkerWorktree(dir, "team-h", "t1", 1);
+    if (!wt.ok) throw new Error(wt.detail);
+    fs.writeFileSync(path.join(wt.path, "notes.md"), "kept\n");
+    fs.writeFileSync(path.join(wt.path, "e2e.log"), "ignored by the project\n");
+    fs.mkdirSync(path.join(wt.path, ".clawbox"));
+    fs.writeFileSync(path.join(wt.path, ".clawbox", "state.json"), "{}");
+    // e2e_check.py was written and deleted again; index.html is tracked and untouched.
+    expect(await committableFiles(wt.path, ["notes.md", "e2e.log", ".clawbox/state.json", "e2e_check.py", "index.html"])).toEqual(["notes.md", "index.html"]);
+    expect(await committableFiles(wt.path, ["e2e_check.py"])).toEqual([]);
+    expect(await committableFiles(wt.path, ["notes.md"])).toEqual(["notes.md"]);
   });
 
   it("reports a folder git cannot read instead of calling it clean", async () => {

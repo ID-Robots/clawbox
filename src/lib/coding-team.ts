@@ -83,7 +83,7 @@ import {
   type TeamRole,
 } from "@/lib/coding-team-messages";
 import { buildCommitMessage } from "@/lib/coding-git";
-import { addWorkerWorktree, changedFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
 import { FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, reviewerTask } from "@/lib/coding-team-reviewer";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
@@ -805,7 +805,11 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
         // was asked for, or files the worker says it wrote in its worktree.
         // A task that only checks something (no hint, nothing touched) may
         // well leave its branch empty, and goes on as it always did.
-        const expected = expectedFiles(task, settled.filesTouched ?? [], worktree.path);
+        let expected = expectedFiles(task, settled.filesTouched ?? [], worktree.path);
+        // What the worker says it wrote counts only where git could have
+        // taken it: a scratch file it deleted, or a log the project ignores,
+        // went missing from nowhere.
+        if (!diffed.length && expected.length && !task.files_hint.length) expected = await committableFiles(worktree.path, expected);
         if (!diffed.length && expected.length) {
           mergeRefusal = NO_CHANGE;
         } else {
@@ -1280,7 +1284,8 @@ export function outsideHint(touched: string[], hint: string[]): string[] {
  * The files a worker in `folder` (its worktree) was there to change: the ones
  * its task's hint names, or — with no hint — the ones it says it wrote in its
  * worktree (`filesTouched` is relative to the run's folder, absolute outside
- * it), generated artifacts aside. Empty for a task that only checks something.
+ * it), generated artifacts and `.clawbox/` aside — the harvest never commits
+ * those either. Empty for a task that only checks something.
  */
 export function expectedFiles(task: Pick<TeamTask, "files_hint">, touched: string[], folder: string): string[] {
   if (task.files_hint.length) return task.files_hint;
@@ -1289,7 +1294,7 @@ export function expectedFiles(task: Pick<TeamTask, "files_hint">, touched: strin
     const rel = f.startsWith("/") ? (f.startsWith(`${root}/`) ? f.slice(root.length + 1) : null) : f;
     if (rel === null) return null;
     const norm = rel.replace(/^(\.\/)+/, "").replace(/\/+$/, "");
-    return norm && norm !== "." && norm !== ".." && !norm.startsWith("../") && !isGeneratedArtifact(norm) ? norm : null;
+    return norm && norm !== "." && norm !== ".." && !norm.startsWith("../") && !isGeneratedArtifact(norm) && !/^\.clawbox(\/|$)/.test(norm) ? norm : null;
   };
   return [...new Set(touched.map(inside).filter((f): f is string => f !== null))];
 }
