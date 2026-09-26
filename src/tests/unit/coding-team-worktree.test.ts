@@ -8,7 +8,7 @@ import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { addWorkerWorktree, changedFiles, ensureTeamBranch, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, changedFiles, committableFiles, ensureTeamBranch, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -126,6 +126,114 @@ describe("a coding team's git plumbing", () => {
     const plain = fs.mkdtempSync(path.join(os.tmpdir(), "team-wt-plain-"));
     try {
       expect(await ensureTeamBranch(plain, "team-x")).toMatchObject({ ok: false });
+    } finally {
+      fs.rmSync(plain, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * The bench, 2026-09-26: a worker wrote its two files in its worktree and
+ * nothing reached its branch. The team merged the empty branch and removed
+ * the worktree — the files with it. The harvest commits what was left behind
+ * before the team judges the branch.
+ */
+describe("the harvest of a worker's worktree", () => {
+  const MESSAGE = "Coding agent: Your task (t1 of 2): write the contract\n\nDone — both files delivered.\n\nRun: run-abc12345";
+
+  it("commits what the worker left uncommitted on its branch, so the branch has it to merge", async () => {
+    await ensureTeamBranch(dir, "team-h");
+    const wt = await addWorkerWorktree(dir, "team-h", "t1", 1);
+    if (!wt.ok) throw new Error(wt.detail);
+    fs.writeFileSync(path.join(wt.path, "api-contract.md"), "# Contract\n");
+    fs.writeFileSync(path.join(wt.path, "items.json"), "[]\n");
+    fs.writeFileSync(path.join(wt.path, "index.html"), "<h1>changed</h1>\n");
+    // A name git would read as a glob if it were not taken literally.
+    fs.mkdirSync(path.join(wt.path, "docs"));
+    fs.writeFileSync(path.join(wt.path, "docs", "a *b.md"), "not a glob\n");
+    fs.mkdirSync(path.join(wt.path, "__pycache__"));
+    fs.writeFileSync(path.join(wt.path, "__pycache__", "x.cpython-310.pyc"), "bytes");
+    expect(await changedFiles(dir, wt.branch)).toEqual([]);
+
+    const harvested = await harvestWorktree(wt.path, MESSAGE);
+    if (!harvested.ok) throw new Error(harvested.detail);
+    expect([...harvested.files].sort()).toEqual(["api-contract.md", "docs/a *b.md", "index.html", "items.json"]);
+    expect((await changedFiles(dir, wt.branch)).sort()).toEqual(["api-contract.md", "docs/a *b.md", "index.html", "items.json"]);
+    // The runner's own message shape, on the worker's branch, and nothing left behind.
+    expect(git(wt.path, "log", "-1", "--format=%s")).toBe("Coding agent: Your task (t1 of 2): write the contract");
+    expect(git(wt.path, "log", "-1", "--format=%b")).toContain("Run: run-abc12345");
+    expect(git(wt.path, "status", "--porcelain")).toBe("");
+    expect(git(wt.path, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain("__pycache__");
+
+    expect(await mergeWorkerBranch(dir, wt.branch, "t1 home")).toEqual({ ok: true, merged: true });
+    expect(fs.readFileSync(path.join(dir, "api-contract.md"), "utf8")).toBe("# Contract\n");
+    await removeWorktree(dir, wt.path);
+  });
+
+  it("stages a rename's old name with its new one", async () => {
+    await ensureTeamBranch(dir, "team-h");
+    const wt = await addWorkerWorktree(dir, "team-h", "t1", 1);
+    if (!wt.ok) throw new Error(wt.detail);
+    git(wt.path, "mv", "index.html", "home.html");
+    const harvested = await harvestWorktree(wt.path, MESSAGE);
+    expect(harvested.ok && [...harvested.files].sort()).toEqual(["home.html", "index.html"]);
+    const tree = git(wt.path, "ls-tree", "-r", "--name-only", "HEAD").split("\n");
+    expect(tree).toContain("home.html");
+    expect(tree).not.toContain("index.html");
+    expect(git(wt.path, "status", "--porcelain")).toBe("");
+  });
+
+  it("leaves generated artifacts and .clawbox/ out even where git's exclude does not", async () => {
+    await ensureTeamBranch(dir, "team-h");
+    const wt = await addWorkerWorktree(dir, "team-h", "t1", 1);
+    if (!wt.ok) throw new Error(wt.detail);
+    // The exclude is written best effort; here it is not there at all.
+    fs.writeFileSync(path.join(dir, ".git", "info", "exclude"), "");
+    fs.writeFileSync(path.join(wt.path, "note.md"), "kept\n");
+    fs.mkdirSync(path.join(wt.path, "__pycache__"));
+    fs.writeFileSync(path.join(wt.path, "__pycache__", "x.cpython-310.pyc"), "bytes");
+    fs.mkdirSync(path.join(wt.path, ".clawbox"));
+    fs.writeFileSync(path.join(wt.path, ".clawbox", "state.json"), "{}");
+    const harvested = await harvestWorktree(wt.path, MESSAGE);
+    expect(harvested).toEqual({ ok: true, files: ["note.md"] });
+    expect(await changedFiles(dir, wt.branch)).toEqual(["note.md"]);
+    // Left where they were, uncommitted.
+    expect(git(wt.path, "status", "--porcelain", "--untracked-files=all")).toMatch(/__pycache__\/x\.cpython-310\.pyc/);
+  });
+
+  it("commits nothing in a worktree the worker left clean", async () => {
+    await ensureTeamBranch(dir, "team-h");
+    const wt = await addWorkerWorktree(dir, "team-h", "t1", 1);
+    if (!wt.ok) throw new Error(wt.detail);
+    const before = git(wt.path, "rev-parse", "HEAD");
+    expect(await harvestWorktree(wt.path, MESSAGE)).toEqual({ ok: true, files: [] });
+    expect(git(wt.path, "rev-parse", "HEAD")).toBe(before);
+    expect(await changedFiles(dir, wt.branch)).toEqual([]);
+  });
+
+  it("counts only the written files git could have committed: still there, and not ignored", async () => {
+    fs.writeFileSync(path.join(dir, ".gitignore"), "*.log\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "ignore logs");
+    await ensureTeamBranch(dir, "team-h");
+    const wt = await addWorkerWorktree(dir, "team-h", "t1", 1);
+    if (!wt.ok) throw new Error(wt.detail);
+    fs.writeFileSync(path.join(wt.path, "notes.md"), "kept\n");
+    fs.writeFileSync(path.join(wt.path, "e2e.log"), "ignored by the project\n");
+    fs.mkdirSync(path.join(wt.path, ".clawbox"));
+    fs.writeFileSync(path.join(wt.path, ".clawbox", "state.json"), "{}");
+    // e2e_check.py was written and deleted again; index.html is tracked and untouched.
+    expect(await committableFiles(wt.path, ["notes.md", "e2e.log", ".clawbox/state.json", "e2e_check.py", "index.html"])).toEqual(["notes.md", "index.html"]);
+    expect(await committableFiles(wt.path, ["e2e_check.py"])).toEqual([]);
+    expect(await committableFiles(wt.path, ["notes.md"])).toEqual(["notes.md"]);
+  });
+
+  it("reports a folder git cannot read instead of calling it clean", async () => {
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), "team-wt-plain-"));
+    try {
+      const harvested = await harvestWorktree(plain, MESSAGE);
+      expect(harvested).toMatchObject({ ok: false });
+      if (!harvested.ok) expect(harvested.detail).toMatch(/not a git repository/);
     } finally {
       fs.rmSync(plain, { recursive: true, force: true });
     }
