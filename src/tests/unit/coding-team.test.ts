@@ -383,7 +383,11 @@ describe("a worker in the project itself whose commit failed", () => {
  * reached its branch — no commit, and no commit error either. The empty
  * branch was merged, the task accepted by rule under review "final", and
  * three tasks built against a contract that was never there; the team failed
- * at the final review.
+ * at the final review. And the bench again, the same evening: a read-only
+ * final check whose hint named the four files it was to READ wrote nothing,
+ * and was rejected NO CHANGE twice over — the team failed with every
+ * deliverable verified on disk. What the worker's run WROTE decides, never
+ * what its task names.
  */
 describe("a worker whose branch came home empty", () => {
   const WORKTREE_T1 = "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1";
@@ -395,11 +399,15 @@ describe("a worker whose branch came home empty", () => {
   const emptyFirstBranch = (after: () => string[] = () => []) => plumbing.changedFiles.mockImplementation(async (_dir: string, branch: string) => (/-t1-1$/.test(branch) ? after() : committedOn(branch)));
   const logged = (done: Awaited<ReturnType<typeof finished>>, type: string) => done.log.filter((e) => e.type === type).map((e) => e.message);
 
-  it("has what the worker left uncommitted committed on its branch, with a note, and the task is merged and accepted", async () => {
+  it.each([
+    // Wrote both files through its shell: the runner saw none of them.
+    ["through its shell", [] as string[]],
+    // Wrote both with its file tools, and the runner's commit never came.
+    ["with its file tools", ["api-contract.md", "items.json"]],
+  ])("has what the worker left uncommitted (written %s) committed on its branch, with a note, and the task is merged and accepted", async (_how, touched) => {
     outcomes = [
       { summary: contractPlan("final") },
-      // Wrote both files through its shell: the runner saw none of them.
-      { summary: "Done — both files delivered and verified.", filesTouched: [] },
+      { summary: "Done — both files delivered and verified.", filesTouched: touched },
       { summary: "server built", filesTouched: ["server.py"] },
     ];
     let harvested = false;
@@ -419,17 +427,20 @@ describe("a worker whose branch came home empty", () => {
     expect(message).toContain("Done — both files delivered and verified.");
     expect(message).toContain("Run: run-00000002");
     expect(logged(done, "note")).toContainEqual("Committed 2 uncommitted file(s) the worker left behind (run-00000002): api-contract.md, items.json");
-    // A note, never an alert — and the branch that now has them is merged.
+    // A note, never an alert — and the branch that now has them is merged:
+    // a branch with a diff is never asked what the worker wrote.
     expect(done.alerts).toBe(0);
+    expect(plumbing.committableFiles).not.toHaveBeenCalled();
+    expect(JSON.stringify(done.log)).not.toMatch(/NO CHANGE|changed no files/);
     expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toContain(`clawbox/${board.id}-t1-1`);
     expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
     expect(done.finalReview).toMatchObject({ verdict: "accepted" });
   });
 
-  it.each(["final", "none", "each"])("is rejected NO CHANGE under review %s when nothing was left to commit either — one alert, offered once more, never accepted by rule", async (review) => {
+  it.each(["final", "none", "each"])("is rejected NO CHANGE under review %s when its run wrote a file in its worktree, the worktree is clean and the branch empty — one alert, offered once more, never accepted by rule", async (review) => {
     outcomes = [
       { summary: contractPlan(review) },
-      { summary: "Done — both files delivered and verified.", filesTouched: [] },
+      { summary: "Done — the contract is written.", filesTouched: ["api-contract.md"] },
       { summary: "Both files written and committed.", filesTouched: ["api-contract.md", "items.json"] },
       { summary: "server built", filesTouched: ["server.py"] },
     ];
@@ -437,14 +448,16 @@ describe("a worker whose branch came home empty", () => {
     const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
-    // The harvest looked first, and found nothing.
+    // The harvest looked first, and found nothing; what the run wrote is still there for git to take.
     expect(plumbing.harvestWorktree).toHaveBeenCalledWith(WORKTREE_T1, expect.stringMatching(/^Coding agent: /));
+    expect(plumbing.committableFiles).toHaveBeenCalledWith(WORKTREE_T1, ["api-contract.md"]);
     const t1Reviews = done.log.filter((e) => e.type === "review").map((e) => e.message);
     expect(t1Reviews[0]).toMatch(/rejected/);
     expect(t1Reviews[0]).toContain(team.NO_CHANGE);
     expect(t1Reviews[0]).not.toMatch(/Accepted by rule/);
-    expect(logged(done, "alert")).toEqual(["ALERT: No change from t1 (run-00000002): its branch has no commit, though the task names api-contract.md, items.json"]);
+    expect(logged(done, "alert")).toEqual(["ALERT: No change from t1 (run-00000002): its branch has no commit, though the worker wrote api-contract.md"]);
     expect(done.alerts).toBe(1);
+    expect(JSON.stringify(done.log)).not.toContain("changed no files");
     // Never merged, its worktree given back, and offered once more with the reason.
     expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).not.toContain(`clawbox/${board.id}-t1-1`);
     expect(plumbing.removeWorktree).toHaveBeenCalledWith("/home/clawbox/Projects/site", WORKTREE_T1);
@@ -469,6 +482,31 @@ describe("a worker whose branch came home empty", () => {
     expect(plumbing.committableFiles).toHaveBeenCalledWith(WORKTREE_T1, ["api-contract.md"]);
   });
 
+  const NOTHING_CHANGED = "t1 changed no files (run-00000002): its branch is empty and its run wrote nothing git could commit.";
+
+  it.each(["final", "none", "each"])("accepts under review %s a check-only worker whose hint names the files it READS: nothing written, nothing on its branch — a note, no alert, no retry", async (review) => {
+    outcomes = [
+      { summary: contractPlan(review) },
+      { summary: "## Final review: both artifacts PASS. No defects found. No file was rewritten.", filesTouched: [] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks[0].files_hint).toEqual(["api-contract.md", "items.json"]);
+    expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
+    // The harvest still looked; with nothing written there is nothing to ask git about.
+    expect(plumbing.harvestWorktree).toHaveBeenCalledWith(WORKTREE_T1, expect.stringMatching(/^Coding agent: /));
+    expect(plumbing.committableFiles).not.toHaveBeenCalled();
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toContain(`clawbox/${board.id}-t1-1`);
+    expect(done.alerts).toBe(0);
+    expect(logged(done, "alert")).toEqual([]);
+    expect(logged(done, "note")).toContainEqual(NOTHING_CHANGED);
+    expect(JSON.stringify(done.log)).not.toContain("NO CHANGE");
+    expect(starts.filter((s) => role(s) === "worker")).toHaveLength(2);
+  });
+
   it("accepts a check-only task whose written files git could never have taken — a scratch file it deleted, a log the project ignores", async () => {
     outcomes = [
       { summary: contractPlan("final", []) },
@@ -483,10 +521,11 @@ describe("a worker whose branch came home empty", () => {
     expect(plumbing.committableFiles).toHaveBeenCalledWith(WORKTREE_T1, ["e2e_check.py", "e2e.log"]);
     expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
     expect(done.alerts).toBe(0);
+    expect(logged(done, "note")).toContainEqual(NOTHING_CHANGED);
     expect(JSON.stringify(done.log)).not.toContain("NO CHANGE");
   });
 
-  it("keeps today's verdict for a task that only checks something: no hint, nothing touched, no diff — accepted", async () => {
+  it("keeps today's verdict for a task that only checks something: no hint, nothing touched, no diff — accepted, with a note", async () => {
     outcomes = [
       { summary: contractPlan("final", []) },
       { summary: "Checked: the site builds and every page loads.", filesTouched: [] },
@@ -499,7 +538,7 @@ describe("a worker whose branch came home empty", () => {
     expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
     expect(done.tasks[0].review?.notes).toMatch(/Accepted by rule; the team's final review checks the merged result/);
     expect(done.alerts).toBe(0);
-    expect(logged(done, "note")).toEqual([]);
+    expect(logged(done, "note")).toEqual([NOTHING_CHANGED]);
     expect(JSON.stringify(done.log)).not.toContain("NO CHANGE");
   });
 
@@ -1280,14 +1319,14 @@ describe("the words", () => {
   // __pycache__/calc.cpython-310.pyc, written by CPython importing the very
   // file the task named. Three of those hit the alert ceiling and killed runs
   // whose work the reviewer had already accepted.
-  it("says which files a worker was there to change: its hint first, else what it wrote inside its worktree", () => {
+  it("says which files a worker wrote inside its worktree — what its run touched there, never what its task names", () => {
     const wt = "/p/.clawbox/worktrees/t1-1";
-    expect(team.expectedFiles({ files_hint: ["api-contract.md"] }, ["other.md"], wt)).toEqual(["api-contract.md"]);
-    expect(team.expectedFiles({ files_hint: [] }, [
+    expect(team.writtenFiles([
       "items.json", "./items.json", "docs/", `${wt}/api/contract.md`, `${wt}/`, "/tmp/scratch.txt", "../escape.md", ".", "__pycache__/c.pyc", "node_modules/x/y.js", ".clawbox/state.json",
     ], `${wt}/`)).toEqual(["items.json", "docs", "api/contract.md"]);
-    // A check that wrote nothing expected nothing.
-    expect(team.expectedFiles({ files_hint: [] }, [], wt)).toEqual([]);
+    // A check that wrote nothing wrote nothing, whatever files its task named to read.
+    expect(team.writtenFiles([], wt)).toEqual([]);
+    expect(team.writtenFiles(["/p/other/index.html", "/tmp/check.py"], wt)).toEqual([]);
   });
 
   it("does not call a generated artifact a stray file", () => {

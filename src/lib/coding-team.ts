@@ -28,9 +28,11 @@
  * not counted; one that waits for room is neither). A failed task fails the
  * team unless other tasks can still run; a task the reviewer rejects is
  * re-posted once. A worker's branch that comes home empty has what the
- * worker left uncommitted in its worktree committed first; still empty when
- * its task was to change files, it is rejected (NO CHANGE) — never accepted
- * by rule, whatever the review mode.
+ * worker left uncommitted in its worktree committed first; still empty while
+ * its own run's record names files it wrote there, it is rejected (NO
+ * CHANGE) — never accepted by rule, whatever the review mode. One that wrote
+ * nothing — a check, a review, whatever files its task names to read — goes
+ * on as before, with a note.
  *
  * The team's SHAPE is the planner's to choose per goal (TASK-1099): how many
  * workers run side by side (never more than the box's own slots) and how the
@@ -120,7 +122,7 @@ import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan,
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
 export const MAX_ALERTS = 3;
-/** The rejection of a worker whose branch came home empty when its task was to change files. */
+/** The rejection of a worker whose branch came home empty though its run wrote files in its worktree. */
 export const NO_CHANGE = "NO CHANGE: the worker's branch has no commit; redo the task and commit your files.";
 /** How long the orchestrator waits on one run per poll; the runner caps a wait anyway. */
 const WAIT_SLICE_MS = 60_000;
@@ -801,31 +803,30 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
       if (!mergeRefusal) {
         // What it touched uncommitted is still what it touched.
         if (diffed.length) files = diffed;
-        // No change is not a success when the task was to make one: files it
-        // was asked for, or files the worker says it wrote in its worktree.
-        // A task that only checks something (no hint, nothing touched) may
-        // well leave its branch empty, and goes on as it always did.
-        let expected = expectedFiles(task, settled.filesTouched ?? [], worktree.path);
-        // What the worker says it wrote counts only where git could have
-        // taken it: a scratch file it deleted, or a log the project ignores,
-        // went missing from nowhere.
-        if (!diffed.length && expected.length && !task.files_hint.length) expected = await committableFiles(worktree.path, expected);
-        if (!diffed.length && expected.length) {
+        // An empty branch is judged by what the worker's own run says it
+        // wrote in its worktree, never by the files its task names: a task
+        // that only verifies, reviews or confirms names the files it READS,
+        // and was rejected twice for an empty branch with every deliverable
+        // on disk (bench, 2026-09-26, t5). What it wrote counts only where
+        // git could have taken it: a scratch file it deleted, or a log the
+        // project ignores, went missing from nowhere.
+        const written = diffed.length ? [] : writtenFiles(settled.filesTouched ?? [], worktree.path);
+        const missing = written.length ? await committableFiles(worktree.path, written) : [];
+        if (missing.length) {
           mergeRefusal = NO_CHANGE;
+          result = `${result}\n\n${NO_CHANGE}`;
+          bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No change from ${task.task_id} (${run.id}): its branch has no commit, though the worker wrote ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? ", …" : ""}` });
         } else {
           const merged = await mergeWorkerBranch(board.directory, worktree.branch, `Coding team ${board.id}: ${task.task_id} — ${firstLine(task.task_description, 72)}`);
           if (!merged.ok) {
             mergeRefusal = `${merged.conflict ? "MERGE CONFLICT" : "MERGE FAILED"}: ${firstLine(merged.detail, 300)}`;
             result = `${result}\n\n${mergeRefusal}`;
             bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `${merged.conflict ? "Merge conflict" : "Merge failed"} for ${task.task_id} (${run.id}): ${firstLine(merged.detail, 200)}` });
-          } else if (!merged.merged && expected.length) {
-            // A diff that git then found nothing to merge for: still nothing came home.
-            mergeRefusal = NO_CHANGE;
+          } else if (!diffed.length) {
+            // Nothing written, nothing left behind: a legitimate no-change
+            // task, which goes on as it did before the rejection existed.
+            bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `${task.task_id} changed no files (${run.id}): its branch is empty and its run wrote nothing git could commit.` });
           }
-        }
-        if (mergeRefusal === NO_CHANGE) {
-          result = `${result}\n\n${NO_CHANGE}`;
-          bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No change from ${task.task_id} (${run.id}): its branch has no commit, though ${task.files_hint.length ? "the task names" : "the worker wrote"} ${expected.slice(0, 5).join(", ")}${expected.length > 5 ? ", …" : ""}` });
         }
       }
     }
@@ -1281,14 +1282,13 @@ export function outsideHint(touched: string[], hint: string[]): string[] {
 }
 
 /**
- * The files a worker in `folder` (its worktree) was there to change: the ones
- * its task's hint names, or — with no hint — the ones it says it wrote in its
- * worktree (`filesTouched` is relative to the run's folder, absolute outside
- * it), generated artifacts and `.clawbox/` aside — the harvest never commits
- * those either. Empty for a task that only checks something.
+ * The files a worker in `folder` (its worktree) says it wrote there — its
+ * run's `filesTouched`, relative to the run's folder and absolute outside it —
+ * generated artifacts and `.clawbox/` aside: the harvest never commits those
+ * either. Never the files its task's hint names, which a check-only task only
+ * reads. Empty for a worker that wrote nothing in its worktree.
  */
-export function expectedFiles(task: Pick<TeamTask, "files_hint">, touched: string[], folder: string): string[] {
-  if (task.files_hint.length) return task.files_hint;
+export function writtenFiles(touched: string[], folder: string): string[] {
   const root = folder.replace(/\/+$/, "");
   const inside = (f: string): string | null => {
     const rel = f.startsWith("/") ? (f.startsWith(`${root}/`) ? f.slice(root.length + 1) : null) : f;
