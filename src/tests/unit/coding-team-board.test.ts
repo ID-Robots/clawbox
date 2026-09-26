@@ -588,6 +588,47 @@ describe("readOnlyDenial", () => {
       "",
     ]) expect(lib.readOnlyDenial(action), action).toBe(false);
   });
+
+  // Bench, 2026-09-26: the harness points a run at its memory under its
+  // project's state folder; the look there was refused, and was an alert.
+  it("takes a listing of the run's own project-state folder: it only looks", () => {
+    expect(lib.readOnlyDenial(`Bash: ls -la ${os.homedir()}/.claude-ds/projects/-home-clawbox-Projects-site`)).toBe(true);
+  });
+
+  // Bench, 2026-09-26: `M="$CLAWBOX_RUN_ARTIFACTS_DIR/mutation"; P=…` ran past
+  // the runner's display cut, and its length alone made it an alert.
+  it("reads a text longer than the runner's display cut part by part — the whole text a record keeps", () => {
+    const probe = `Bash: M="$CLAWBOX_RUN_ARTIFACTS_DIR/mutation"; P=/home/clawbox/Projects/team-bench/team-api; ls -la "$M" 2>/dev/null; head -40 "$P/index.html" | grep -n app; git -C "$P" status --short; diff "$P/a.txt" "$M/a.txt"; readlink -f "$P" && du -sh "$P"`;
+    expect(probe.length).toBeGreaterThan(lib.DENIAL_TEXT_CUT);
+    expect(lib.readOnlyDenial(probe)).toBe(true);
+    // Its display text, at exactly the cut: anything may follow.
+    expect(lib.readOnlyDenial(probe.slice(0, lib.DENIAL_TEXT_CUT))).toBe(false);
+    // A whole text at its own bound may be cut too.
+    expect(lib.readOnlyDenial(`Bash: ls ${"a".repeat(lib.DENIAL_FULL_TEXT_CUT)}`.slice(0, lib.DENIAL_FULL_TEXT_CUT))).toBe(false);
+    expect(lib.readOnlyDenial(`Bash: ls ${"a".repeat(lib.DENIAL_FULL_TEXT_CUT - 20)}`)).toBe(true);
+  });
+
+  it("still calls a long command a write when one part writes, however long the rest only looks", () => {
+    const looks = `ls -la /home/clawbox/Projects/site; cat /home/clawbox/Projects/site/index.html | head -40; ${"grep -n x a.js; ".repeat(10)}`;
+    expect(looks.length).toBeGreaterThan(lib.DENIAL_TEXT_CUT);
+    for (const action of [
+      `Bash: ${looks}rm -rf /home/clawbox/Projects/site/dist`,
+      `Bash: ${looks}echo done > /home/clawbox/Projects/site/log.txt`,
+      `Bash: ${looks}npm install`,
+      `Bash: ${looks}PATH=/tmp/bin; ls`,
+      `Write: /home/clawbox/Projects/site/${"a".repeat(200)}.html`,
+    ]) expect(lib.readOnlyDenial(action), action).toBe(false);
+  });
+
+  it("takes a bare variable assignment, but none that steers the commands after it", () => {
+    for (const action of ["Bash: M=/tmp/x; ls \"$M\"", "Bash: A=1 B=\"$HOME/x\"; cat \"$B\"", "Bash: dir=out && ls $dir"]) {
+      expect(lib.readOnlyDenial(action), action).toBe(true);
+    }
+    for (const action of [
+      "Bash: PATH=/tmp/bin; ls", "Bash: IFS=/; ls", "Bash: LD_PRELOAD=/tmp/x.so; ls", "Bash: GIT_EXTERNAL_DIFF=/tmp/x; git diff",
+      "Bash: PAGER=/tmp/x; git log", "Bash: path=/tmp; ls", "Bash: M=\"a b\"; ls", "Bash: M=$(rm x); ls", "Bash: FOO=1 ls",
+    ]) expect(lib.readOnlyDenial(action), action).toBe(false);
+  });
 });
 
 describe("outsideFolderWriteDenial", () => {
@@ -676,5 +717,83 @@ describe("harnessStateDenial", () => {
       "no colon /home/clawbox/.claude-ds",
       "",
     ]) expect(lib.harnessStateDenial(action), action).toBe(false);
+  });
+});
+
+describe("ownHarnessStateDenial", () => {
+  const HOME = os.homedir();
+  const STATE = `${HOME}/.claude-ds`;
+  const P = "/home/clawbox/Projects/site";
+  const W = `${P}/.clawbox/worktrees/t1-1`;
+  const OWN = { stateDir: STATE, folders: [W, P], sessionId: "sess-own" };
+  const MINE = `${STATE}/projects/-home-clawbox-Projects-site`;
+  const MINE_WT = `${STATE}/projects/-home-clawbox-Projects-site--clawbox-worktrees-t1-1`;
+
+  it("names the slug the harness gives a folder", () => {
+    expect(lib.harnessProjectSlug(P)).toBe("-home-clawbox-Projects-site");
+    expect(lib.harnessProjectSlug(W)).toBe("-home-clawbox-Projects-site--clawbox-worktrees-t1-1");
+  });
+
+  it("takes a look into the run's own corner: its project's folder listed, its memory, its own transcript — however the home is written", () => {
+    for (const action of [
+      `Bash: ls -la ${MINE}`,
+      `Bash: ls -la ${MINE}/`,
+      `Bash: ls ${MINE_WT}/memory/ 2>/dev/null || echo none`,
+      `LS: ${MINE}`,
+      `Glob: ${MINE_WT}`,
+      `Read: ${MINE}/memory/MEMORY.md`,
+      `Grep: ${MINE}/memory`,
+      "Bash: cat ~/.claude-ds/projects/-home-clawbox-Projects-site/memory/MEMORY.md",
+      "Bash: head \"$HOME/.claude-ds/projects/-home-clawbox-Projects-site/memory/notes.md\"",
+      "Bash: ls ${HOME}/.claude-ds/projects/-home-clawbox-Projects-site",
+      `Read: ${MINE_WT}/sess-own.jsonl`,
+      `Read: ${MINE_WT}/sess-own/subagents/agent-1.jsonl`,
+      `Bash: ls ${MINE}/memory && ls ${MINE_WT}`,
+      // Its own memory, written: the team judges where a write went, and this is its own.
+      `Write: ${MINE}/memory/notes.md`,
+    ]) expect(lib.ownHarnessStateDenial(action, OWN), action).toBe(true);
+  });
+
+  it("is false for anything of anyone else's there, a search through the folder, a way out, or a text that may be cut", () => {
+    for (const action of [
+      // The parent, another project, another session beside its own.
+      `Bash: ls ${STATE}/projects`,
+      `Bash: ls ${STATE}/projects/-home-clawbox-Projects-other/memory`,
+      `Read: ${MINE}/sess-other.jsonl`,
+      `Read: ${MINE}/sess-own.jsonl.bak`,
+      `Bash: cat ${MINE}/*.jsonl`,
+      // A search reads every transcript in the folder; so does a shell that runs one per file.
+      `Grep: ${MINE}`,
+      `Bash: grep -r token ${MINE}`,
+      `Bash: find ${MINE} -exec cat {} +`,
+      // Its own corner beside something that is not.
+      `Bash: ls ${MINE}/memory; cat ${STATE}/.credentials.json`,
+      `Bash: ls ${MINE} ${STATE}/settings.json`,
+      // The settings, the credentials, another config folder, another home.
+      `Read: ${STATE}/settings.json`,
+      `Read: ${HOME}/.claude/projects/-home-clawbox-Projects-site/memory/MEMORY.md`,
+      "Read: /home/someone-else-entirely/.claude-ds/projects/-home-clawbox-Projects-site/memory/MEMORY.md",
+      // Ways out of the corner.
+      `Read: ${MINE}/memory/../../-home-clawbox-Projects-other/sess.jsonl`,
+      `Bash: cd ${MINE} && cat sess-other.jsonl`,
+      `Bash: cd ${MINE}/memory && cat ../sess-other.jsonl`,
+      // A write into the folder itself, beside the memory.
+      `Write: ${MINE}/notes.md`,
+      // Cut at the runner's display length, mid-slug: it may have gone on elsewhere.
+      `Bash: ls -la ${MINE}${"x".repeat(200)}`.slice(0, lib.DENIAL_TEXT_CUT),
+      // Nothing of the harness's at all.
+      `Read: ${P}/index.html`,
+      "Read: (no details)",
+      "",
+    ]) expect(lib.ownHarnessStateDenial(action, OWN), action).toBe(false);
+  });
+
+  it("is false with no folder to name the corner by, a state folder that is not absolute, or a session it does not know", () => {
+    expect(lib.ownHarnessStateDenial(`Read: ${MINE}/memory/MEMORY.md`, { ...OWN, folders: [] })).toBe(false);
+    expect(lib.ownHarnessStateDenial(`Read: ${MINE}/memory/MEMORY.md`, { ...OWN, folders: ["relative/site"] })).toBe(false);
+    expect(lib.ownHarnessStateDenial(`Read: ${MINE}/memory/MEMORY.md`, { ...OWN, stateDir: ".claude-ds" })).toBe(false);
+    expect(lib.ownHarnessStateDenial(`Read: ${MINE_WT}/sess-own.jsonl`, { ...OWN, sessionId: null })).toBe(false);
+    // Another run's corner is not this one's.
+    expect(lib.ownHarnessStateDenial(`Read: ${MINE}/memory/MEMORY.md`, { ...OWN, folders: ["/home/clawbox/Projects/other"] })).toBe(false);
   });
 });

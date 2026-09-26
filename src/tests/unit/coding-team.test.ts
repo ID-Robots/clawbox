@@ -97,7 +97,7 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
  * way. Deliberately not called `then` — an object with a `then` field is a
  * thenable, and the fake runner returns these records from an async function.
  */
-let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; resumesAs: Record<string, unknown> }>>;
+let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; resumesAs: Record<string, unknown> }>>;
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-team-"));
@@ -951,6 +951,133 @@ describe("a team that works", () => {
     });
   });
 
+  // Bench, 2026-09-26: the harness tells a run its memory is under
+  // `<state>/projects/<its folder>/`, the sandbox refuses the look, and the
+  // alert rejected verified work — most of the night's second attempts.
+  describe("a refused look into the run's own corner of the harness's state", () => {
+    const P = "/home/clawbox/Projects/site";
+    // Where a ClawBox AI run's harness keeps its state (harnessStateDir), whatever the host running this says.
+    const STATE = path.join(os.homedir(), ".claude-ds");
+    const slug = (dir: string) => dir.replace(/[^a-zA-Z0-9]/g, "-");
+    beforeEach(() => { vi.stubEnv("CLAUDE_DS_CONFIG_DIR", ""); });
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it("is a note — a listing of its project's folder, a read of its memory, from the project or its worktree — and the task stays clean", async () => {
+      outcomes = [
+        { summary: PLAN },
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 2, deniedActions: [`Bash: ls -la ${STATE}/projects/${slug(P)}`, `Read: ${STATE}/projects/${slug(P)}/memory/MEMORY.md`] },
+        { summary: "app done", filesTouched: ["app.js"], permissionDenials: 1, deniedActions: [`Bash: ls ${STATE}/projects/${slug(`${P}/.clawbox/worktrees/t2-1`)}/memory/ 2>/dev/null || echo none`] },
+      ];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+      const done = await finished(board.id);
+      expect(done.status).toBe("done");
+      expect(done.alerts).toBe(0);
+      expect(done.log.filter((e) => e.type === "note").map((e) => [e.task_id, e.message])).toEqual([
+        ["t1", `Worker run-00000002 was refused 2 read-only action(s) outside its folder: Bash: ls -la ${STATE}/projects/${slug(P)}; Read: ${STATE}/projects/${slug(P)}/memory/MEMORY.md`],
+        ["t2", `Worker run-00000004 was refused 1 read-only action(s) outside its folder: Bash: ls ${STATE}/projects/${slug(`${P}/.clawbox/worktrees/t2-1`)}/memory/ 2>/dev/null || echo none`],
+      ]);
+      expect(starts.map((s) => (s.team as { role: string }).role)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer"]);
+      expect(done.tasks.map((t) => [t.status, t.attempts, t.rejections, t.review?.verdict])).toEqual([["complete", 1, 0, "accepted"], ["complete", 1, 0, "accepted"]]);
+      expect(done.metrics).toMatchObject({ readOnlyRefusals: 3, tasksRejected: 0, tasksAcceptedFirstTry: 2 });
+    });
+
+    it("stays an alert beside another project's state, and for a write to the harness's settings", async () => {
+      outcomes = [
+        { summary: PLAN },
+        // Its own memory, and another project's: the other one decides.
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 2, deniedActions: [`Read: ${STATE}/projects/${slug(P)}/memory/MEMORY.md`, `Bash: ls ${STATE}/projects/-home-clawbox-Projects-other/memory`] },
+        // A write outside every folder — but into the harness's own settings.
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: [`Write: ${STATE}/settings.json`] },
+      ];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+      const done = await finished(board.id);
+      expect(done.status).toBe("failed");
+      expect(done.alerts).toBe(2);
+      expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+        `ALERT: Worker run-00000002 was refused 2 action(s): Read: ${STATE}/projects/${slug(P)}/memory/MEMORY.md; Bash: ls ${STATE}/projects/-home-clawbox-Projects-other/memory`,
+        `ALERT: Worker run-00000003 was refused 1 action(s): Write: ${STATE}/settings.json`,
+      ]);
+      expect(done.log.filter((e) => e.type === "note")).toEqual([]);
+      expect(done.tasks[0]).toMatchObject({ status: "rejected", attempts: 2, rejections: 2 });
+      expect(done.metrics.readOnlyRefusals).toBe(0);
+    });
+
+    it("stays an alert for another session's transcript beside its own", async () => {
+      outcomes = [
+        { summary: PLAN },
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: [`Read: ${STATE}/projects/${slug(P)}/sess-someone-else.jsonl`] },
+        { summary: "index done", filesTouched: ["index.html"] },
+        { summary: "app done", filesTouched: ["app.js"] },
+      ];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+      const done = await finished(board.id);
+      expect(done.alerts).toBe(1);
+      expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+        `ALERT: Worker run-00000002 was refused 1 action(s): Read: ${STATE}/projects/${slug(P)}/sess-someone-else.jsonl`,
+      ]);
+      expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 2, rejections: 1 });
+    });
+  });
+
+  // Bench, 2026-09-26: a read-only probe of several statements ran past the
+  // runner's display cut, and its length alone made it an alert.
+  it("judges a long refused probe by its whole text: all of it only looks, a note — a record with only the cut, an alert as before", async () => {
+    const P = "/home/clawbox/Projects/site";
+    const probe = `Bash: M="$CLAWBOX_RUN_ARTIFACTS_DIR/mutation"; P=${P}; ls -la "$M" 2>/dev/null; head -40 "$P/index.html"; grep -n app.js "$P/index.html"; git -C "$P" status --short; diff "$P/index.html" "$M/index.html"`;
+    const cut = probe.slice(0, 160);
+    expect(probe.length).toBeGreaterThan(160);
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: [cut], denials: [{ text: cut, fullText: probe, rule: null, refusal: null }] },
+      // The same probe on a record that kept only the cut: past it, anything.
+      { summary: "app done", filesTouched: ["app.js"], permissionDenials: 1, deniedActions: [cut] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // Named by the cut the owner reads.
+    expect(done.log.filter((e) => e.type === "note").map((e) => [e.task_id, e.message])).toEqual([
+      ["t1", `Worker run-00000002 was refused 1 read-only action(s) outside its folder: ${cut}`],
+    ]);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([`ALERT: Worker run-00000004 was refused 1 action(s): ${cut}`]);
+    expect(done.tasks.map((t) => [t.task_id, t.attempts, t.rejections, t.review?.verdict])).toEqual([["t1", 1, 0, "accepted"], ["t2", 2, 1, "accepted"]]);
+  });
+
+  // Bench, 2026-09-26: a verifier wrote a page to try something, removed it,
+  // committed nothing — and the file it had removed counted as straying.
+  it("judges what the worker left: a file it removed before it settled is not a stray — one it left, or a deletion its branch carries, still is", async () => {
+    const P = path.join(root, "site");
+    runner.resolveWorkingDirectory.mockResolvedValue({ directory: P, projectId: null });
+    // Each worktree on disk as its worker left it.
+    const left: Record<string, string[]> = { "t1-1": ["index.html"], "t1-2": ["index.html"], "t2-1": ["app.js", "notes.md"], "t2-2": ["app.js"] };
+    plumbing.addWorkerWorktree.mockImplementation(async (dir: string, teamId: string, taskId: string, attempt: number) => {
+      const wt = path.join(dir, ".clawbox", "worktrees", `${taskId}-${attempt}`);
+      fs.mkdirSync(wt, { recursive: true });
+      for (const f of left[`${taskId}-${attempt}`] ?? []) fs.writeFileSync(path.join(wt, f), "x");
+      return { ok: true, path: wt, branch: `clawbox/${teamId}-${taskId}-${attempt}` };
+    });
+    // t1's first branch deleted a stylesheet the task was not given: that merges.
+    plumbing.changedFiles.mockImplementation(async (_dir: string, branch: string) => (branch.endsWith("-t1-1") ? ["index.html", "old.css"] : []));
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      // Committed nothing; its check page is gone from the worktree.
+      { summary: "index done", filesTouched: ["index.html", "check.html"] },
+      // Left its notes behind.
+      { summary: "app done", filesTouched: ["app.js", "notes.md"] },
+      { summary: "app done", filesTouched: ["app.js", "check.html"] },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+      "ALERT: Worker run-00000002 touched files outside its task: old.css",
+      "ALERT: Worker run-00000005 touched files outside its task: notes.md",
+    ]);
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.rejections, t.review?.verdict])).toEqual([["t1", "complete", 2, 1, "accepted"], ["t2", "complete", 2, 1, "accepted"]]);
+  });
+
   it("fails the team when a worker fails and its dependants can never run, naming both", async () => {
     outcomes = [{ summary: PLAN }, { status: "failed", error: "Stopped at the cost ceiling" }];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
@@ -1124,6 +1251,32 @@ describe("the words", () => {
     // dist/ is generated too, but a task can be asked to produce it, so it
     // is deliberately NOT ignorable: dropping it would lose the work.
     expect(team.outsideHint(["dist/bundle.js"], ["src"])).toEqual(["dist/bundle.js"]);
+  });
+
+  // Bench, 2026-09-26: a verifier wrote __verify_probe.html to try the page,
+  // removed it, and the probe alone rejected a correct task.
+  it("does not call an obvious scratch file a stray file — but a dunder source file still is one", () => {
+    expect(team.outsideHint(["index.html", "__verify_probe.html", "tmp/check.tmp", ".probe-1", "src/.probe"], ["index.html"])).toEqual([]);
+    for (const f of ["__verify_probe.html", "__x", "a/b/__scratch.js", "__probe/", "check.tmp", "out/x.tmp", ".probe", ".probe-page.html"]) {
+      expect(team.isScratchFile(f), f).toBe(true);
+    }
+    for (const f of ["__init__.py", "pkg/__main__.py", "__tests__/a.test.ts", "notes.md", "tmp.js", "probe.html", "a.tmp.js"]) {
+      expect(team.isScratchFile(f), f).toBe(false);
+    }
+    expect(team.outsideHint(["calc.py", "pkg/__init__.py"], ["calc.py"])).toEqual(["pkg/__init__.py"]);
+  });
+
+  it("knows which touched files are gone from the folder — and says nothing when the folder itself is", () => {
+    const dir = path.join(root, "wt");
+    fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "index.html"), "x");
+    fs.writeFileSync(path.join(dir, "src", "a.js"), "x");
+    // A link the worker left is there, wherever it points.
+    fs.symlinkSync(path.join(dir, "nowhere"), path.join(dir, "link"));
+    fs.writeFileSync(path.join(dir, "file"), "x");
+    expect([...team.vanishedFiles(dir, ["index.html", "src/a.js", "probe.html", "src/gone.js", "link", "file/under-a-file"])]).toEqual(["probe.html", "src/gone.js", "file/under-a-file"]);
+    expect(team.vanishedFiles(path.join(root, "no-such-folder"), ["index.html"]).size).toBe(0);
+    expect(team.vanishedFiles("relative/dir", ["index.html"]).size).toBe(0);
   });
 });
 

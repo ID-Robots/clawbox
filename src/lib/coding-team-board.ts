@@ -816,27 +816,46 @@ export function isSettledTeamStatus(status: TeamStatus): boolean {
 /** Tools that only look. */
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(["Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch"]);
 /** Shell commands that only look, as the first word of a command (`git` below, by its subcommand). */
-const READ_ONLY_COMMANDS: ReadonlySet<string> = new Set(["ls", "cat", "head", "tail", "grep", "rg", "find", "ps", "pgrep", "wc", "stat", "file", "which", "echo", "pwd", "test", "[", "cd"]);
+const READ_ONLY_COMMANDS: ReadonlySet<string> = new Set([
+  "ls", "cat", "head", "tail", "grep", "rg", "find", "ps", "pgrep", "wc", "stat", "file", "which", "echo", "pwd", "test", "[", "cd",
+  "diff", "cmp", "realpath", "readlink", "basename", "dirname", "du", "true", "false",
+]);
 const READ_ONLY_GIT: ReadonlySet<string> = new Set(["status", "log", "diff", "show"]);
 /** `find` actions that run or write something. */
 const FIND_WRITES = /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/;
-/** The runner cuts a refused action's text at this length (describeDenial, coding-agent.ts): a command that long may hide the rest. */
-const DENIAL_TEXT_CUT = 160;
+/** A bare `NAME=value` word: a shell variable, set for the parts after it. */
+const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/** Variables that steer which program the parts after them run, or how: never set by a command that only looks. */
+const STEERING_VARIABLE = /^(?:PATH|IFS|CDPATH|HOME|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|GLOBIGNORE|PS4|PROMPT_COMMAND|LD_\w*|DYLD_\w*|GIT_\w*|\w*PAGER|LESS\w*|RIPGREP_\w*|GREP_\w*)$/i;
+/** The runner cuts a refused action's display text at this length (MAX_DENIAL_CHARS, coding-agent.ts): a text that long may hide the rest. */
+export const DENIAL_TEXT_CUT = 160;
+/** The runner bounds a refused action's whole text (`CodingDenial.fullText`, MAX_DENIAL_FULL_CHARS in coding-agent.ts) at this length. */
+export const DENIAL_FULL_TEXT_CUT = 2000;
+
+/**
+ * True when a refused action's text may not be all of it: a display text at
+ * exactly the runner's cut, or a whole text at its bound. Between the two, a
+ * text can only be a record's `fullText`, and that is the whole action.
+ */
+function mayBeCut(action: string): boolean {
+  return action.length === DENIAL_TEXT_CUT || action.length >= DENIAL_FULL_TEXT_CUT;
+}
 
 /**
  * True when a refused action, as the runner describes it (`Read: <path>`,
- * `Bash: <command>` — `CodingRun.deniedActions`), only LOOKED: a read-only
- * tool, or a shell command whose every part is a read-only command with no
- * redirection into a file and no substitution. Anything else — a write, an
- * edit, a command this cannot read to the end — is false: the team judges it
- * the way it always did.
+ * `Bash: <command>` — `CodingDenial.fullText` where the record keeps it, else
+ * its `text`), only LOOKED: a read-only tool, or a shell command whose every
+ * part is a read-only command, or a bare variable assignment, with no
+ * redirection into a file and no substitution — however long it is. Anything
+ * else — a write, an edit, a command the runner cut, so this cannot read it to
+ * the end — is false: the team judges it the way it always did.
  */
 export function readOnlyDenial(action: string): boolean {
   const colon = action.indexOf(": ");
   if (colon <= 0) return false;
   const tool = action.slice(0, colon);
   if (READ_ONLY_TOOLS.has(tool)) return true;
-  if (tool !== "Bash" || action.length >= DENIAL_TEXT_CUT) return false;
+  if (tool !== "Bash" || mayBeCut(action)) return false;
   // Output thrown away, or folded into the other stream, writes nothing.
   const command = action.slice(colon + 2).replace(/(?:(?:&>>?|\d?>>?)\s*\/dev\/null|\d?>&\d)(?=[\s;|&]|$)/g, " ");
   // Any other redirection writes a file; a substitution runs a command not seen here.
@@ -844,6 +863,10 @@ export function readOnlyDenial(action: string): boolean {
   const parts = command.split(/\|\|?|&&?|;|\n/).map((p) => p.trim()).filter(Boolean);
   return parts.length > 0 && parts.every((part) => {
     const words = part.split(/\s+/);
+    // `M="$CLAWBOX_RUN_ARTIFACTS_DIR/x"` alone names a place for the parts after
+    // it and runs nothing. In front of a command (`FOO=1 ls`) it is that
+    // command's environment, and below that is not a read-only command.
+    if (words.every((w) => SHELL_ASSIGNMENT.test(w))) return words.every((w) => !STEERING_VARIABLE.test(w.slice(0, w.indexOf("="))));
     const word = words[0];
     let rest = words.slice(1);
     if (word === "git") {
@@ -880,7 +903,7 @@ export function outsideFolderWriteDenial(action: string, folders: readonly strin
   const found = ABSOLUTE_PATH.exec(text);
   if (!roots.length || !found) return false;
   // Cut by the runner mid-path: the rest may have gone on inside a folder.
-  if (action.length >= DENIAL_TEXT_CUT && found.index + found[0].length >= text.length) return false;
+  if (mayBeCut(action) && found.index + found[0].length >= text.length) return false;
   const target = path.posix.resolve(found[1]);
   return roots.every((root) => {
     const rel = path.posix.relative(root, target);
@@ -899,11 +922,11 @@ const HARNESS_STATE = /(?:^|[\s"'=(<>])(?:~|\$HOME|\$\{HOME\}|\/root|\/home\/[^/
 /**
  * True when a refused action, as the runner describes it, named the
  * harness's own state (`~/.claude-ds/projects/…` and the rest of
- * `HARNESS_STATE`) — or the same folders under this server's own home. A
- * refused READ of it is never a note (`readOnlyDenial` alone would make it
- * one): no worker's task is in there, and a look into other sessions'
- * transcripts stays an alert. A write there that was refused changed nothing
- * and is judged by `outsideFolderWriteDenial`, as before.
+ * `HARNESS_STATE`) — or the same folders under this server's own home. No
+ * worker's task is in there: a refusal that named it is an alert, a look or a
+ * write (`readOnlyDenial` and `outsideFolderWriteDenial` alone would make
+ * either a note), unless it named nothing but the run's OWN corner of it
+ * (`ownHarnessStateDenial`).
  */
 export function harnessStateDenial(action: string): boolean {
   const colon = action.indexOf(": ");
@@ -921,6 +944,77 @@ export function harnessStateDenial(action: string): boolean {
     }
   }
   return false;
+}
+
+/** Where the harness keeps one run's own state: its config folder (`harnessStateDir`), the folders it worked in, its session. */
+export interface OwnHarnessState {
+  /** Absolute: `<home>/.claude-ds`, or `<home>/.claude` for a run on an Anthropic account. */
+  stateDir: string;
+  /** The run's working folder, and for a worker in a worktree the project too — the harness files its memory under the repository's root. */
+  folders: readonly string[];
+  sessionId?: string | null;
+}
+
+/** The folder the harness keeps a working folder's state in, under `projects/`: every character but a letter or a digit a `-` (as `transcriptPath`, coding-agent.ts). */
+export function harnessProjectSlug(dir: string): string {
+  return dir.replace(/[^a-zA-Z0-9]/g, "-");
+}
+
+/** A path-like word of a refused action's text, after its start, a space, a quote, `=`, `(`, `<` or `>`. */
+const PATH_WORD = /(^|[\s"'=(<>])([^\s"'`;|&()<>=]+)/g;
+/** What looks at a folder's entries without reading them; the folder itself counts as the run's own only for these. */
+const LISTS_ENTRIES: ReadonlySet<string> = new Set(["LS", "Glob", "Read", "ls", "stat", "test", "[", "file", "du", "find", "realpath", "readlink"]);
+
+/**
+ * True when a refused action named the harness's state ONLY in the run's own
+ * corner of it: under its own config folder, `projects/<slug>` of a folder it
+ * worked in (`harnessProjectSlug`) — that folder's `memory/`, the run's own
+ * session transcript, and the folder itself for a read-only command that only
+ * lists it. The harness tells the run it keeps its memory there and the
+ * sandbox refuses it anyway (bench, 2026-09-26: a worker's `ls` of it cost a
+ * correct task a whole second attempt); a look there saw nothing of anyone
+ * else's.
+ *
+ * Every other mention leaves this false: another project's folder, another
+ * session's transcript beside the run's own, a search through the folder, the
+ * settings and the credential store, another home, a `..`, a shell that `cd`s
+ * in and names the rest by relative paths. So does a text the runner may have
+ * cut, which may name more past the cut.
+ */
+export function ownHarnessStateDenial(action: string, own: OwnHarnessState): boolean {
+  const colon = action.indexOf(": ");
+  if (colon <= 0 || mayBeCut(action) || !path.posix.isAbsolute(own.stateDir)) return false;
+  const home = path.posix.resolve(os.homedir());
+  const projects = path.posix.join(path.posix.resolve(own.stateDir), "projects");
+  const slugs = new Set(own.folders.filter((f) => path.posix.isAbsolute(f)).map((f) => harnessProjectSlug(path.posix.resolve(f))));
+  if (home === "/" || slugs.size === 0) return false;
+  const tool = action.slice(0, colon);
+  const text = action.slice(colon + 2);
+  if (/(?:^|[\s"'=(<>/])\.\.(?=$|[/\s"'`;|&()<>])/.test(text)) return false;
+  const onlyLooks = readOnlyDenial(action);
+  const session = own.sessionId ? [own.sessionId, `${own.sessionId}.jsonl`] : [];
+  let mine = 0;
+  const parts = tool === "Bash" ? text.split(/(\|\|?|&&?|;|\n)/) : [text];
+  const rest = parts.map((part, i) => {
+    // The separators the split kept, as they were.
+    if (i % 2 === 1) return part;
+    const command = tool === "Bash" ? part.trim().split(/\s+/)[0] : tool;
+    // A shell in there names what it reads next by a relative path: left for `harnessStateDenial` to see.
+    if (command === "cd" || command === "pushd") return part;
+    return part.replace(PATH_WORD, (word, lead: string, token: string) => {
+      const named = token.replace(/^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/, home);
+      if (!path.posix.isAbsolute(named)) return word;
+      const [slug, entry, ...more] = path.posix.relative(projects, path.posix.normalize(named)).split("/");
+      if (!slugs.has(slug)) return word;
+      const corner = entry === undefined || entry === ""
+        ? onlyLooks && LISTS_ENTRIES.has(command)
+        : entry === "memory" || (session.includes(entry) && (entry === own.sessionId || more.length === 0));
+      if (!corner) return word;
+      mine += 1;
+      return lead;
+    });
+  }).join("");
+  return mine > 0 && !harnessStateDenial(`${tool}: ${rest}`);
 }
 
 /**
