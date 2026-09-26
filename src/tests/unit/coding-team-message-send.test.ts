@@ -344,6 +344,22 @@ describe("a late answer to a sibling that has finished (TASK-1239)", () => {
     expect(view.metrics.messagesUndelivered).toBe(team.MAX_ALERTS);
   });
 
+  it("is on the sender's caps: a run that keeps sending to a finished sibling meets RATE_LIMITED, an alert, instead of writing notes without end", async () => {
+    const { id, a, b } = await startWorkers();
+    runs.get(b)!.status = "completed";
+    const clock = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const late = () => team.sendTeamMessage({ teamId: id, fromRunId: a, role: "worker", to: "sibling", toRunId: b, text: "late answer" });
+    for (let i = 0; i < 4; i++) expect((await refusal(late())).code).toBe("SETTLED");
+    const limited = await refusal(late());
+    expect(limited).toMatchObject({ code: "RATE_LIMITED", nextAllowedAt: clock + 5 * 60_000 });
+    expect(notesOf(id)).toHaveLength(4);
+    expect(alertsOf(id).filter((m) => m.includes("Refused message"))).toEqual([
+      expect.stringMatching(new RegExp(`^ALERT: Refused message from worker ${a}: RATE_LIMITED`)),
+    ]);
+    expect(team.getTeam(id)!.runs.find((r) => r.id === a)?.sentAt).toHaveLength(4);
+  });
+
   it("leaves a message to a run the team does not have an alert, as before", async () => {
     const { id, a } = await startWorkers();
     const before = team.getTeam(id)!;

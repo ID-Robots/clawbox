@@ -83,8 +83,9 @@ export const UNDELIVERED_REFUSALS: readonly TeamMessageRefusal[] = ["NO_SESSION"
  * already finished. A worker answering a question a minute after the asker
  * completed is how a parallel team runs, not something the sender did wrong —
  * as alerts, two such answers and one real alert failed a team whose every
- * deliverable verified (bench, 2026-09-26). On the board as a NOTE and in the
- * figures as undelivered; the sender is still told it was not delivered.
+ * deliverable verified (bench, 2026-09-26). On the board as a NOTE, in the
+ * figures as undelivered and on the sender's caps, as an undelivered message
+ * is; the sender is still told it was not delivered.
  */
 export const NOTED_REFUSALS: readonly TeamMessageRefusal[] = ["SETTLED"];
 

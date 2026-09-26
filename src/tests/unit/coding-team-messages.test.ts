@@ -287,9 +287,9 @@ describe("the bus", () => {
       message: `Refused message from worker ${A}: ${reason}`,
       payload: { undelivered: { code: "SETTLED", from: A, role: "worker", to: "sibling", toRunId: B } },
     });
-    // The words were never read by anybody: not kept, not counted against the sender's caps.
+    // The words were never read by anybody: not kept. The attempt is on the sender's caps, as an undelivered message is.
     expect(JSON.stringify(board.log.at(-1))).not.toContain("total() returns cents");
-    expect(board.runs.find((r) => r.id === A)?.sentAt).toBeUndefined();
+    expect(board.runs.find((r) => r.id === A)?.sentAt).toEqual([expect.any(Number)]);
     expect(heard).toEqual([]);
     // Persisted, and counted again from the file.
     const loaded = boardLib.loadBoard(board.id)!;

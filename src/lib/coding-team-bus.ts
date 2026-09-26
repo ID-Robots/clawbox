@@ -202,13 +202,21 @@ export class TeamBus {
    * because its receiver had already finished (`NOTED_REFUSALS`) is a race,
    * not the sender's fault: the same line goes on the board as a NOTE with
    * who, to whom and why (`UndeliveredNote`, counted as undelivered), and the
-   * team's alert count is not touched. It is refused all the same.
+   * team's alert count is not touched. It is refused all the same, and it is
+   * on the sender's caps (`TeamRunRef.sentAt`) the way an undelivered message
+   * is: no longer bounded by MAX_ALERTS, a run retrying there would otherwise
+   * write notes without end and push the log's oldest entries out.
    */
   refuse(actor: Actor, message: TeamMessage, reason: string, code?: TeamMessageRefusal): never {
     const line = `Refused ${message.type} from ${actor.kind === "worker" ? `worker ${actor.id}` : actor.kind}: ${reason}`;
     const unreached = unreachedNote(actor, message, code);
-    if (unreached) postNote(this.board, { kind: "system" }, line, undefined, undefined, unreached);
-    else raiseAlert(this.board, { kind: "system" }, line, "task_id" in message ? message.task_id : undefined);
+    if (unreached) {
+      const from = this.board.runs.find((r) => r.id === unreached.from);
+      if (from) from.sentAt = [...(from.sentAt ?? []), Date.now()];
+      postNote(this.board, { kind: "system" }, line, undefined, undefined, unreached);
+    } else {
+      raiseAlert(this.board, { kind: "system" }, line, "task_id" in message ? message.task_id : undefined);
+    }
     saveBoard(this.board);
     throw new BoardAccessError(actor, message.type, reason);
   }
