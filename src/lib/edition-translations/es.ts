@@ -799,6 +799,7 @@ export const es: Record<string, string> = {
   "codingAgent.team.messageToAssistant": "al asistente",
   "codingAgent.team.messageToRun": "a {run}",
   "codingAgent.team.messageUndelivered": "no entregado",
+  "codingAgent.team.messageReceiverFinished": "{run} ya había terminado",
   "codingAgent.team.task.retired": "Retirada",
   "codingAgent.team.roleLead": "Líder del equipo · tras {task}",
   "codingAgent.team.agentsWithLead": "{total} agentes trabajaron aquí — planificador {planner} · trabajadores {workers} · revisores {reviewers} · líder {leads}",
