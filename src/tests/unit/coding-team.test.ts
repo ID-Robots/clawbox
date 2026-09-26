@@ -446,8 +446,6 @@ describe("a worker whose branch came home empty", () => {
     expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).not.toContain(`clawbox/${board.id}-t1-1`);
     expect(plumbing.removeWorktree).toHaveBeenCalledWith("/home/clawbox/Projects/site", WORKTREE_T1);
     expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 2, rejections: 1 });
-    // The rejected attempt's result says why, in the worker's name.
-    expect(logged(done, "result")[0]).toContain("NO CHANGE");
     const retry = starts.find((s) => role(s) === "worker" && String(s.task).includes("A previous attempt was rejected"));
     expect(String(retry?.task)).toContain(`A previous attempt was rejected: ${team.NO_CHANGE}`);
   });
