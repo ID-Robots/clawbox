@@ -137,6 +137,8 @@ describe("translations", () => {
         "shellScan",
         "paidGate",
         "whatsNew",
+        // Settings → Users, multi-user ClawBox OS (TASK-1256).
+        "users",
       ]);
 
       for (const key of Object.keys(translations.en)) {

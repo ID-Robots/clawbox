@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
 import { get, set } from "@/lib/config-store";
-import { verifyPassword, createSessionCookie, getSessionSigningSecret, getSessionGeneration } from "@/lib/auth";
+import {
+  verifyPassword,
+  createSessionCookie,
+  getSessionSigningSecret,
+  getSessionGeneration,
+  getSystemUsername,
+} from "@/lib/auth";
 import { hasOwnerPassword } from "@/lib/system-password";
+import { findUser, verifyUserPassword } from "@/lib/clawbox-users";
 import {
   checkLockout,
   recordFailure,
@@ -55,10 +62,33 @@ function requestIsHttps(req: Request): boolean {
   }
 }
 
+// Multi-user (TASK-1256): a third bucket per ACCOUNT, `user:<name>`, charged
+// alongside the two above. It is what stops a person who holds one valid login
+// from clearing the shared `global` bucket with it (a success clears every
+// bucket it was charged against) and then guessing the owner's password at full
+// speed. It is capped like `global` — anyone can charge it, so the 24h tier
+// would let a stranger on the LAN lock the owner out for a day by typing at the
+// user picker — and it exists only for accounts that exist, so spraying made-up
+// names cannot fill the tracked-key table and lock real users out of it.
+function userBucket(username: string): { key: string; maxLockMs: number } {
+  return { key: `user:${username}`, maxLockMs: SHARED_BUCKET_MAX_LOCK_MS };
+}
+
+/** Who a login is for: the owner when no name (or the owner's name) is given, a registered user, or nobody. */
+async function resolveLoginTarget(requested: string): Promise<
+  { kind: "owner"; username: string } | { kind: "user"; username: string; sv: string } | { kind: "unknown" }
+> {
+  const owner = getSystemUsername();
+  if (!requested || requested === owner) return { kind: "owner", username: owner };
+  const record = await findUser(requested).catch(() => null);
+  return record ? { kind: "user", username: record.username, sv: record.sv } : { kind: "unknown" };
+}
+
 function lockoutResponse(retryAfterSeconds: number): NextResponse {
   return NextResponse.json(
     {
       error: "Too many failed attempts. Try again later.",
+      code: "locked",
       retryAfterSeconds,
     },
     {
@@ -116,7 +146,7 @@ export async function POST(request: Request) {
     }
   }
 
-  let body: { password?: string; duration?: number };
+  let body: { username?: unknown; password?: string; duration?: number };
   try {
     body = await request.json();
   } catch {
@@ -134,8 +164,27 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid session duration" }, { status: 400 });
   }
 
-  const valid = await verifyPassword(password);
-  if (!valid) {
+  // No name, or the owner's name, is the owner — the single-user login every
+  // box had before multi-user, unchanged. A name that is not the owner's must
+  // be a user Settings → Users created; anything else is refused exactly like
+  // a wrong password, so the answer never says which names exist.
+  const requested = typeof body.username === "string" ? body.username.trim() : "";
+  const target = await resolveLoginTarget(requested);
+  if (target.kind !== "unknown") {
+    buckets.push(userBucket(target.username));
+    const lock = await checkLockout(`user:${target.username}`);
+    if (lock.locked) {
+      await padResponseTime(startedAt);
+      return lockoutResponse(lock.retryAfterSeconds);
+    }
+  }
+
+  const valid = target.kind === "owner"
+    ? await verifyPassword(password)
+    : target.kind === "user"
+      ? await verifyUserPassword(target.username, password)
+      : false;
+  if (!valid || target.kind === "unknown") {
     // Record against every bucket, then report the longest lock in force so the
     // client's Retry-After is honest about when it can actually try again.
     let worstRetryAfter = 0;
@@ -147,19 +196,27 @@ export async function POST(request: Request) {
     if (worstRetryAfter > 0) {
       return lockoutResponse(worstRetryAfter);
     }
-    return NextResponse.json({ error: "Incorrect password" }, { status: 401 });
+    return requested
+      ? NextResponse.json({ error: "Incorrect username or password", code: "bad_credentials" }, { status: 401 })
+      : NextResponse.json({ error: "Incorrect password", code: "bad_credentials" }, { status: 401 });
   }
 
-  // A correct password clears both buckets, so the owner who fat-fingers it a
-  // few times and then gets it right is not left sitting behind the shared cap.
+  // A correct password clears every bucket it was charged against, so the owner
+  // who fat-fingers it a few times and then gets it right is not left sitting
+  // behind the shared cap.
   for (const bucket of buckets) await recordSuccess(bucket.key);
 
   const secret = await getSessionSigningSecret();
   const gen = await getSessionGeneration();
-  const cookie = createSessionCookie(duration, secret, gen);
+  // The cookie names who signed in (src/lib/session-identity.ts): `u` always,
+  // and for a user other than the owner the registry's session version, which
+  // removing or re-creating that user changes.
+  const cookie = target.kind === "user"
+    ? createSessionCookie(duration, secret, gen, { u: target.username, sv: target.sv })
+    : createSessionCookie(duration, secret, gen, { u: target.username });
 
   await padResponseTime(startedAt);
-  const res = NextResponse.json({ success: true });
+  const res = NextResponse.json({ success: true, username: target.username });
   res.cookies.set("clawbox_session", cookie, {
     httpOnly: true,
     sameSite: "lax",

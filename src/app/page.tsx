@@ -49,6 +49,8 @@ import type { InstalledMeta } from "@/lib/store-categories";
 import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } from "@/lib/skill-change-message";
 import { apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
+import { useSessionUser } from "@/lib/use-session-user";
+import { NON_OWNER_APP_IDS } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
   brandingHarness,
@@ -477,9 +479,21 @@ function ChromeDesktopInner() {
   // standalone /app/<id> window and the MCP server read too — so a hidden app
   // can never be visible in one surface and hidden in another. Until the
   // harness is known BOTH sets are hidden — fail closed.
+  //
+  // Multi-user ClawBox OS (TASK-1256): a signed-in user who is not the owner is
+  // shown only the apps scoped per user (NON_OWNER_APP_IDS — the Terminal, which
+  // runs as their own Linux account). Folded into this same list so every
+  // surface that already honours it — icons, launcher, shelf, openApp — hides
+  // the owner's apps too. Until /users/me answers the desktop draws as the
+  // owner's, so a single-user box never flickers; the server refuses a
+  // non-owner everything else whatever is drawn.
+  const sessionUser = useSessionUser();
+  const isOwner = sessionUser?.isOwner !== false;
   const harnessHiddenAppIds = useMemo<string[]>(
-    () => hiddenAppIdsForHarness(activeHarness),
-    [activeHarness],
+    () => isOwner
+      ? hiddenAppIdsForHarness(activeHarness)
+      : apps.map((a) => a.id).filter((id) => !NON_OWNER_APP_IDS.includes(id)),
+    [activeHarness, isOwner],
   );
 
   // ─── Desktop shortcuts for built-in apps ───
@@ -497,10 +511,12 @@ function ChromeDesktopInner() {
   // diverge, a hidden app keeps its grid slot and leaves a gap.
   const visibleInstalledAppIds = useMemo(
     () =>
-      installedApps.filter(
-        (id) => !hiddenInstalledApps.includes(id) && isInstalledAppVisible(installedMeta[id], activeHarness),
-      ),
-    [installedApps, hiddenInstalledApps, installedMeta, activeHarness],
+      isOwner
+        ? installedApps.filter(
+          (id) => !hiddenInstalledApps.includes(id) && isInstalledAppVisible(installedMeta[id], activeHarness),
+        )
+        : [],
+    [installedApps, hiddenInstalledApps, installedMeta, activeHarness, isOwner],
   );
   const handleAddToDesktop = useCallback((appId: string) => {
     // The launcher hands over its own ids, which for an installed app carry
@@ -891,6 +907,14 @@ function ChromeDesktopInner() {
   useEffect(() => {
     if (shouldOpenChatFirst(readChatFirstEnvironment(window))) setChatOpen(true);
   }, []);
+
+  // The assistant is the owner's: it runs as their Linux account with the
+  // box's device tools, so it cannot be scoped to another user (TASK-1256).
+  // Whatever opened the chat — the fresh-install greeting, chat-first on a
+  // phone — a non-owner's desktop closes it again.
+  useEffect(() => {
+    if (!isOwner && chatOpen) setChatOpen(false);
+  }, [isOwner, chatOpen]);
 
   // ─── Mascot visibility ───
   const [mascotHidden, setMascotHidden] = useState(false);
@@ -2497,7 +2521,11 @@ function ChromeDesktopInner() {
   // things: whether the column is drawn, and whether the chat is asked to
   // report where it is standing (a rect per pointer move of a drag is not a
   // price to pay while nothing is dodging it).
-  const noticesUp = Boolean(
+  //
+  // Every card in that column is the owner's business — an update to run, the
+  // release notes, a ClawBox AI offer, a Telegram pairing to approve, a coding
+  // run — so a non-owner's desktop (TASK-1256) draws none of them.
+  const noticesUp = isOwner && Boolean(
     (updateAvailable && !updateNoticeHidden)
     || whatsNew.visible
     || showClawAiOfferNotification
@@ -2995,11 +3023,11 @@ function ChromeDesktopInner() {
           frozen mascot's position while the chat is open — that used to nudge
           mascotX for a frame right after opening, flashing the popup to the wrong
           corner before it settled. */}
-      {!isMobile && (
+      {!isMobile && isOwner && (
         <Mascot frozen={chatOpen} rightInset={chatPanelInset} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
       )}
       <ChatPopup
-        isOpen={chatOpen}
+        isOpen={chatOpen && isOwner}
         onClose={() => setChatOpen(false)}
         onOpenSettingsSection={openSettingsSection}
         onPanelModeChange={handleChatPanelModeChange}
@@ -3221,10 +3249,15 @@ function ChromeDesktopInner() {
         }}
         onTrayClick={() => {
           setLauncherOpen(false);
+          if (!isOwner) {
+            // Settings is the owner's; the clock opens the tray instead.
+            setTrayOpen((prev) => !prev);
+            return;
+          }
           setTrayOpen(false);
           openSettingsSection("system");
         }}
-        onClawKeepShieldClick={openClawKeepOrAiProvider}
+        onClawKeepShieldClick={isOwner ? openClawKeepOrAiProvider : undefined}
         clawkeepStatus={{ protection: clawkeepProtection, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring }}
         onPowerClick={() => {
           setLauncherOpen(false);
@@ -3237,9 +3270,10 @@ function ChromeDesktopInner() {
         }}
         onShelfSettings={() => openApp("settings")}
         onChatClick={() => setChatOpen(prev => !prev)}
-        showChatButton={mascotHidden || isMobile}
+        showChatButton={isOwner && (mascotHidden || isMobile)}
         time={time}
         clawAiAuthenticated={clawAiAuthenticated}
+        sessionUser={sessionUser && (sessionUser.multiUser || !sessionUser.isOwner) ? sessionUser : null}
       />
 
 

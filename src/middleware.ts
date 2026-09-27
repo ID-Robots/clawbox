@@ -10,6 +10,10 @@ import { isSetupApiPath } from "@/lib/clawbox-namespaces";
 import { UPDATE_LOCK_HEADER, UPDATE_LOCK_KEY, UPDATING_PAGE } from "@/lib/update-lock";
 import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 import { isAllowedHostHeader, isTunnelRequest, systemHostLabel } from "@/lib/host-allowlist";
+import { USERS_CONFIG_KEY, identityFromClaims, parseUserRegistry, registryVersions } from "@/lib/session-identity";
+import type { SessionIdentity } from "@/lib/session-identity";
+import { ownerUsername } from "@/lib/owner-username";
+import { nonOwnerVerdict } from "@/lib/non-owner-scope";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -36,9 +40,14 @@ interface ConfigSnapshot {
   // Webapp ids whose InstalledMeta says `public: true` — served read-only
   // over GET /setup-api/webapps without a session (see step 5 below).
   publicWebapps: ReadonlySet<string>;
+  // ClawBox users other than the owner (TASK-1256): username → the session
+  // version their cookie must carry. Removing a user drops the entry, which is
+  // what revokes their sessions here.
+  users: ReadonlyMap<string, string>;
 }
 
 const NO_PUBLIC_WEBAPPS: ReadonlySet<string> = new Set();
+const NO_USERS: ReadonlyMap<string, string> = new Map();
 
 function publicWebappIds(installedMeta: unknown): ReadonlySet<string> {
   if (typeof installedMeta !== "object" || installedMeta === null) return NO_PUBLIC_WEBAPPS;
@@ -80,6 +89,7 @@ function readConfigCached(): ConfigSnapshot {
       session_generation?: unknown;
       "pref:installed_meta"?: unknown;
       [UPDATE_LOCK_KEY]?: unknown;
+      [USERS_CONFIG_KEY]?: unknown;
     };
     const sessionGen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
@@ -91,6 +101,7 @@ function readConfigCached(): ConfigSnapshot {
       sessionGen,
       updateInProgress: parsed[UPDATE_LOCK_KEY] === true,
       publicWebapps: publicWebappIds(parsed["pref:installed_meta"]),
+      users: registryVersions(parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername())),
     };
     return configCache;
   } catch (err) {
@@ -114,6 +125,9 @@ function readConfigCached(): ConfigSnapshot {
       // would take away the surfaces the owner needs to fix the box.
       updateInProgress: false,
       publicWebapps: NO_PUBLIC_WEBAPPS,
+      // No non-owner can sign in on a box whose config cannot be read: fail
+      // closed to "only the owner exists".
+      users: NO_USERS,
     };
     return configCache;
   } finally {
@@ -375,16 +389,21 @@ function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** Verify HMAC-SHA256 session cookie using Web Crypto API (available in Node 22+). */
-async function verifySessionCookie(cookie: string, expectedGen: number): Promise<boolean> {
+/**
+ * Verify HMAC-SHA256 session cookie using Web Crypto API (available in Node
+ * 22+) and resolve WHO it speaks for (TASK-1256, src/lib/session-identity.ts):
+ * the owner, another ClawBox user the registry still lists with the same
+ * session version, or — for anything else — nobody.
+ */
+async function verifySessionCookie(cookie: string, expectedGen: number): Promise<SessionIdentity | null> {
   const secret = process.env.SESSION_SECRET;
-  if (!secret) return false;
+  if (!secret) return null;
 
   const dotIdx = cookie.indexOf(".");
-  if (dotIdx < 0) return false;
+  if (dotIdx < 0) return null;
   const payload = cookie.substring(0, dotIdx);
   const sig = cookie.substring(dotIdx + 1);
-  if (!payload || !sig) return false;
+  if (!payload || !sig) return null;
 
   try {
     const key = await crypto.subtle.importKey(
@@ -398,22 +417,23 @@ async function verifySessionCookie(cookie: string, expectedGen: number): Promise
     const expectedHex = bytesToHex(expected);
 
     // Constant-time comparison
-    if (sig.length !== expectedHex.length) return false;
+    if (sig.length !== expectedHex.length) return null;
     let diff = 0;
     for (let i = 0; i < sig.length; i++) {
       diff |= sig.charCodeAt(i) ^ expectedHex.charCodeAt(i);
     }
-    if (diff !== 0) return false;
+    if (diff !== 0) return null;
 
     // Check expiration
     const decoded = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
     const data = JSON.parse(decoded);
-    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return false;
+    if (typeof data !== "object" || data === null) return null;
+    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return null;
     // Reject cookies from before the last password change (session revocation).
-    if ((typeof data.gen === "number" ? data.gen : 0) !== expectedGen) return false;
-    return true;
+    if ((typeof data.gen === "number" ? data.gen : 0) !== expectedGen) return null;
+    return identityFromClaims(data as Record<string, unknown>, ownerUsername(), readConfigCached().users);
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -661,7 +681,8 @@ export async function middleware(request: NextRequest) {
 
   // 4. Check session cookie
   const sessionCookie = request.cookies.get("clawbox_session")?.value;
-  if (sessionCookie && await verifySessionCookie(sessionCookie, currentSessionGeneration())) {
+  const identity = sessionCookie ? await verifySessionCookie(sessionCookie, currentSessionGeneration()) : null;
+  if (identity) {
     // 4a. An update owns the box: send desktop navigations to the updating page.
     //
     // Not decoration. `updateClawBoxAndReboot` runs `git reset --hard` and
@@ -686,6 +707,28 @@ export async function middleware(request: NextRequest) {
     // API answering a navigation redirect with HTML is defect #304), but a
     // HEADER costs nothing and carries the same fact on requests the desktop is
     // already making. src/app/page.tsx turns it into the navigation.
+    // 4a'. A ClawBox user who is not the owner (TASK-1256) reaches only what is
+    // scoped per user — src/lib/non-owner-scope.ts, an allow-list. A 403 rather
+    // than the 401 below: the session is fine, and the desktop reads a 401 as
+    // "signed out" and sends the person back to /login. The RAW path, for the
+    // same reason as step 2.
+    if (!identity.isOwner) {
+      const verdict = nonOwnerVerdict({
+        pathname: request.nextUrl.pathname,
+        method: request.method,
+        searchParams: request.nextUrl.searchParams,
+        isDocument: isDocumentRequest(request.headers),
+      });
+      if (verdict === "redirect-home") {
+        return NextResponse.redirect(new URL("/", request.url));
+      }
+      if (verdict === "deny") {
+        return NextResponse.json(
+          { error: "Only the box owner can open this.", code: "owner_only" },
+          { status: 403, headers: { "cache-control": "no-store" } },
+        );
+      }
+    }
     const res = NextResponse.next();
     if (updateInProgress && isSetupApiPath(pathname)) {
       res.headers.set(UPDATE_LOCK_HEADER, "1");
