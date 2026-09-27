@@ -24,6 +24,16 @@
 /** The desktop apps a non-owner is shown. Every other app is the owner's (see the header above). */
 export const NON_OWNER_APP_IDS: readonly string[] = ["terminal"];
 
+/**
+ * The store-installed apps (skills and web apps) a desktop may offer ANYWHERE —
+ * the icon grid, the launcher, the shelf and every openApp(id) path. They are
+ * all the owner's, so a non-owner's desktop gets none of them. One rule, used
+ * by both of page.tsx's lists, so the grid and the launcher cannot disagree.
+ */
+export function installedAppIdsFor(isOwner: boolean, installed: readonly string[]): readonly string[] {
+  return isOwner ? installed : [];
+}
+
 /** Preference keys a non-owner may READ. Writes stay owner-only: preferences are box-wide. */
 export const NON_OWNER_READABLE_PREF_KEYS: ReadonlySet<string> = new Set([
   "ui_language",

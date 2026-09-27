@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkUsername, RESERVED_USERNAMES, USERNAME_RE } from "@/lib/username-rules";
-import { assertCreatable, userAddRecord, UserAdminError } from "@/lib/clawbox-users";
+import { assertCreatable, rebuildUsername, userAddRecord, UserAdminError } from "@/lib/clawbox-users";
 
 // TASK-1256: every ClawBox user is a real Linux account, so the name reaching
 // useradd must match the strict [a-z_][a-z0-9_-]{0,31} rule and must not be a
@@ -97,5 +97,19 @@ describe("userAddRecord", () => {
     expect(() => userAddRecord("bob", "pass\nroot:pwned")).toThrow();
     expect(() => userAddRecord("bob", "pass\rword")).toThrow();
     expect(() => userAddRecord("bob", "pass\0word")).toThrow();
+  });
+});
+
+describe("rebuildUsername", () => {
+  it("hands back the same name, rebuilt from the alphabet", () => {
+    for (const name of ["alice", "dev_ops", "x-ray", "k9", "a".repeat(32)]) {
+      expect(rebuildUsername(name)).toBe(name);
+    }
+  });
+
+  it("refuses everything the rule refuses", () => {
+    for (const name of ["", "Alice", "root", "al:ice", "alice\n", "ålice", "a".repeat(33), undefined, 7]) {
+      expect(rebuildUsername(name)).toBeNull();
+    }
   });
 });

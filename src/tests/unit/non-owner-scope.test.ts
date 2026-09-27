@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nonOwnerVerdict, NON_OWNER_APP_IDS } from "@/lib/non-owner-scope";
+import { installedAppIdsFor, nonOwnerVerdict, NON_OWNER_APP_IDS } from "@/lib/non-owner-scope";
 
 // TASK-1256: a ClawBox user who is not the owner reaches only what is scoped
 // per user. An allow-list — every other route stays the owner's.
@@ -81,5 +81,10 @@ describe("nonOwnerVerdict", () => {
 
   it("shows a non-owner the Terminal and nothing else", () => {
     expect(NON_OWNER_APP_IDS).toEqual(["terminal"]);
+  });
+
+  it("offers the owner's installed apps to the owner only", () => {
+    expect(installedAppIdsFor(true, ["weather", "notes"])).toEqual(["weather", "notes"]);
+    expect(installedAppIdsFor(false, ["weather", "notes"])).toEqual([]);
   });
 });

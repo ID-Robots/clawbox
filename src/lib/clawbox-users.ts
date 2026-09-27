@@ -128,15 +128,41 @@ export async function linuxNameTaken(name: string): Promise<boolean | null> {
   return false;
 }
 
-/** The record `user_add` reads: `user:password\n`, refusing anything that could forge a second one. */
+const USERNAME_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789_-";
+
+/**
+ * A username REBUILT from the alphabet, character by character, or `null` if
+ * it breaks the rule — the `safeAppId` idiom (src/lib/webapp-icon.ts): what
+ * reaches the root step's input file is this module's own string, never the
+ * caller's that a `.test()` would merely have vouched for.
+ */
+export function rebuildUsername(name: unknown): string | null {
+  if (checkUsername(name) !== "ok") return null;
+  let safe = "";
+  for (const ch of name as string) {
+    const at = USERNAME_ALPHABET.indexOf(ch);
+    if (at < 0) return null;
+    safe += USERNAME_ALPHABET[at];
+  }
+  return safe;
+}
+
+/**
+ * The record `user_add` reads: `user:password\n`, refusing anything that could
+ * forge a second one. The password is the one value that has to reach root as
+ * typed — `chpasswd` sets it — so it travels exactly as the owner's own does
+ * (src/lib/chpasswd.ts): one 0600 file under data/ that step_user_add reads
+ * once, validates and deletes.
+ */
 export function userAddRecord(username: string, password: string): string {
-  if (checkUsername(username) !== "ok") {
+  const safe = rebuildUsername(username);
+  if (safe === null) {
     throw new Error(`Unsafe username for user_add record: ${JSON.stringify(username)}`);
   }
   if (/[\r\n\0]/.test(password)) {
     throw new Error("Unsafe password for user_add record (control characters)");
   }
-  return `${username}:${password}\n`;
+  return `${safe}:${password}\n`;
 }
 
 /** Judge a create request by everything that does not need the OS; throws the refusal. */
@@ -217,13 +243,21 @@ export async function removeUser(username: string, opts: { currentUser: string }
       throw new UserAdminError("not_found", "No such user.");
     }
 
+    // The name root is handed is the REGISTRY's copy (data/config.json, written
+    // by createUser), rebuilt from the alphabet — never the request's string,
+    // which only selected the entry.
+    const removable = rebuildUsername(record.username);
+    if (removable === null) {
+      throw new UserAdminError("not_found", "No such user.");
+    }
+
     // Registry FIRST: dropping the entry is what revokes the user's cookies in
     // middleware, route-auth and the WebSocket proxy, so they are signed out
     // before their account is touched rather than after.
     await writeRegistry(users.filter((u) => u.username !== username));
 
     await fs.mkdir(path.dirname(USER_REMOVE_INPUT_PATH), { recursive: true });
-    await fs.writeFile(USER_REMOVE_INPUT_PATH, `${username}\n`, { mode: 0o600 });
+    await fs.writeFile(USER_REMOVE_INPUT_PATH, `${removable}\n`, { mode: 0o600 });
     try {
       await startRootStep(USER_REMOVE_STEP, { timeoutMs: 60_000 });
     } catch (err) {

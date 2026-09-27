@@ -50,7 +50,7 @@ import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } fr
 import { apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
 import { useSessionUser } from "@/lib/use-session-user";
-import { NON_OWNER_APP_IDS } from "@/lib/non-owner-scope";
+import { NON_OWNER_APP_IDS, installedAppIdsFor } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
   brandingHarness,
@@ -511,11 +511,9 @@ function ChromeDesktopInner() {
   // diverge, a hidden app keeps its grid slot and leaves a gap.
   const visibleInstalledAppIds = useMemo(
     () =>
-      isOwner
-        ? installedApps.filter(
-          (id) => !hiddenInstalledApps.includes(id) && isInstalledAppVisible(installedMeta[id], activeHarness),
-        )
-        : [],
+      installedAppIdsFor(isOwner, installedApps).filter(
+        (id) => !hiddenInstalledApps.includes(id) && isInstalledAppVisible(installedMeta[id], activeHarness),
+      ),
     [installedApps, hiddenInstalledApps, installedMeta, activeHarness, isOwner],
   );
   const handleAddToDesktop = useCallback((appId: string) => {
@@ -1558,7 +1556,9 @@ function ChromeDesktopInner() {
   // Get all apps including installed ones
   const getAllApps = useCallback((): AppDef[] => {
     const installedAppDefs: AppDef[] = [];
-    for (const appId of installedApps) {
+    // The owner's installed apps reach the launcher, the shelf and openApp —
+    // never a non-owner's (TASK-1256), by the same rule as the icon grid.
+    for (const appId of installedAppIdsFor(isOwner, installedApps)) {
       const meta = installedMeta[appId];
       // Store-installed OpenClaw skills are unusable on Hermes (see
       // isInstalledAppVisible) — they must not reach the launcher, the shelf,
@@ -1597,7 +1597,7 @@ function ChromeDesktopInner() {
         defaultHeight: 760,
       },
     ];
-  }, [installedApps, installedMeta, activeHarness, harnessHiddenAppIds]);
+  }, [installedApps, installedMeta, activeHarness, harnessHiddenAppIds, isOwner]);
 
   const getActiveWindowId = useCallback(() => {
     const visibleWindows = openWindows.filter((w) => !w.minimized);
