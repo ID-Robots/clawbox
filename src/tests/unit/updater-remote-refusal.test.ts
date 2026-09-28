@@ -506,7 +506,7 @@ describe("a box with NO recorded update branch still sees its releases (TASK-121
   }
 
   it("offers the release on main by its name when no pin file exists", async () => {
-    // Heiner's box: v4.0.x on main, v4.1.0 published, nothing recorded.
+    // The field case: v4.0.x on main, v4.1.0 published, nothing recorded.
     unpinnedBox({ pin: enoent(), checkout: "main", installed: "4.0.2", tags: ["v4.0.2", "v4.1.0"], originTip: BEHIND });
     const updater = await import("@/lib/updater");
 
