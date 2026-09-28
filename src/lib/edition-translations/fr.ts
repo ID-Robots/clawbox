@@ -1342,7 +1342,7 @@ export const fr: Record<string, string> = {
   // passe d'elle-même au suivant quand l'un atteint sa limite d'utilisation.
   "settings.anthropicAccounts.title": "Comptes Anthropic",
   "settings.anthropicAccounts.intro":
-    "Tout ce qui utilise Claude sur ce boîtier (les exécutions de programmation, le chat et ses tâches planifiées) passe par un seul compte de cette liste. Quand ce compte atteint sa limite d'utilisation ou qu'Anthropic le refuse, tout passe ensemble au compte suivant et reprend là où il en était.",
+    "Les exécutions de programmation démarrent sur un compte de cette liste, tout comme le chat et ses tâches planifiées une fois que le boîtier a dû changer de compte. Quand ce compte atteint sa limite d'utilisation ou qu'Anthropic le refuse, tout ce qui l'utilise passe ensemble au compte suivant et reprend là où il en était.",
   "settings.anthropicAccounts.summaryReady": "{ready} sur {total} prêts",
   "settings.anthropicAccounts.summaryAllLimited": "Tous limités · de retour à {time}",
   "settings.anthropicAccounts.summaryNone": "Non connecté",
@@ -1393,7 +1393,9 @@ export const fr: Record<string, string> = {
   "settings.anthropicAccounts.actionFailed": "Les comptes n'ont pas pu être modifiés.",
   "settings.anthropicAccounts.refusedWrongAccount": "Cette connexion est celle de {signedIn}, pas de {expected}. Connectez-vous en tant que {expected} pour renouveler {label}, ou connectez {signedIn} comme un compte à part.",
   "settings.anthropicAccounts.refusedDuplicate": "Cette connexion est celle de {signedIn}, qui figure déjà dans la liste sous le nom {label}.",
-  "settings.anthropicAccounts.activeNow": "Les exécutions de programmation, le chat et ses tâches planifiées passent par {label}.",
+  "settings.anthropicAccounts.activeNow": "Les nouvelles exécutions de programmation démarrent sur {label}.",
+  "settings.anthropicAccounts.activeChatOn": "Le chat et ses tâches planifiées passent par {label}.",
+  "settings.anthropicAccounts.activeChatOwn": "Le chat suivra dès que le boîtier devra changer de compte pour la première fois, s'il fonctionne avec un abonnement Claude.",
   "settings.anthropicAccounts.allLimitedBanner": "Tous les comptes sont limités, première réinitialisation à {time}. Le travail en attente reprendra alors tout seul.",
   "settings.anthropicAccounts.noneCanAnswer": "Aucun compte ne peut répondre et aucun ne reviendra de lui-même. Authentifiez-en un de nouveau pour continuer.",
   "settings.anthropicAccounts.returnToPrimary": "Revenir au premier compte dès que sa limite est réinitialisée",
@@ -1425,6 +1427,7 @@ export const fr: Record<string, string> = {
   "settings.anthropicAccounts.chatAllLimited": "Tous les comptes Claude de ce boîtier ont atteint leur limite. ClawBox renverra votre message de lui-même à {time}.",
   "settings.anthropicAccounts.chatAllLimitedNoRetry": "Tous les comptes Claude de ce boîtier sont à leur limite jusqu'à {time}.",
   "settings.anthropicAccounts.chatNoAccount": "Aucun compte Claude de ce boîtier ne peut répondre. Authentifiez-en un de nouveau dans Paramètres → Fournisseurs.",
+  "settings.anthropicAccounts.chatThrottled": "Anthropic limite brièvement le débit de ce compte Claude. ClawBox renverra votre message dans une minute.",
   "settings.anthropicAccounts.chatSwitching": "Ce compte Claude n'a pas pu répondre. ClawBox passe au compte suivant et renverra votre message.",
 
   // Une exécution qui attend parce que tous les comptes Anthropic sont limités,

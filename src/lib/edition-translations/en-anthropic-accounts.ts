@@ -11,7 +11,7 @@
 export const anthropicAccountsEn: Record<string, string> = {
   "settings.anthropicAccounts.title": "Anthropic accounts",
   "settings.anthropicAccounts.intro":
-    "Everything on this box that uses Claude — coding runs, the chat and its scheduled tasks — runs on one account from this list. When that account hits its usage limit or Anthropic refuses it, all of them move to the next account together and carry on where they were.",
+    "Coding runs start on one account from this list, and so do the chat and its scheduled tasks once the box has had to switch accounts. When that account hits its usage limit or Anthropic refuses it, everything on it moves to the next account together and carries on where it was.",
   "settings.anthropicAccounts.summaryReady": "{ready} of {total} ready",
   "settings.anthropicAccounts.summaryAllLimited": "All limited · back at {time}",
   "settings.anthropicAccounts.summaryNone": "Not connected",
@@ -63,7 +63,9 @@ export const anthropicAccountsEn: Record<string, string> = {
   "settings.anthropicAccounts.refusedWrongAccount": "That sign-in is {signedIn}, not {expected}. Sign in as {expected} to renew {label}, or connect {signedIn} as an account of its own.",
   "settings.anthropicAccounts.refusedDuplicate": "That sign-in is {signedIn}, which is already on the list as {label}.",
   // TASK-1260: one active account for the whole box, and what a swap did.
-  "settings.anthropicAccounts.activeNow": "Coding runs, the chat and its scheduled tasks run on {label}.",
+  "settings.anthropicAccounts.activeNow": "New coding runs start on {label}.",
+  "settings.anthropicAccounts.activeChatOn": "The chat and its scheduled tasks run on {label}.",
+  "settings.anthropicAccounts.activeChatOwn": "The chat follows once the box first has to switch accounts, when it runs on a Claude subscription.",
   "settings.anthropicAccounts.allLimitedBanner": "All accounts limited, earliest reset {time}. Waiting work carries on by itself then.",
   "settings.anthropicAccounts.noneCanAnswer": "No account can answer, and none comes back by itself. Re-authenticate one to carry on.",
   "settings.anthropicAccounts.returnToPrimary": "Return to the first account once its limit resets",
@@ -96,5 +98,6 @@ export const anthropicAccountsEn: Record<string, string> = {
   "settings.anthropicAccounts.chatAllLimited": "Every Claude account on this box is at its limit. ClawBox sends your message again by itself at {time}.",
   "settings.anthropicAccounts.chatAllLimitedNoRetry": "Every Claude account on this box is at its limit until {time}.",
   "settings.anthropicAccounts.chatNoAccount": "No Claude account on this box can answer. Re-authenticate one in Settings → Providers.",
+  "settings.anthropicAccounts.chatThrottled": "Anthropic is briefly rate-limiting this Claude account. ClawBox sends your message again in a minute.",
   "settings.anthropicAccounts.chatSwitching": "That Claude account could not answer. ClawBox is moving to the next account and will send your message again.",
 };

@@ -20,16 +20,44 @@
 import { classifyAnthropicFailure } from "@/lib/anthropic-limit";
 import type { ChatRunFailureContext } from "@/lib/chat-error-text";
 
+/**
+ * The turns a chat surface has sent, by their idempotency key — the id the
+ * gateway's frames name the run by. A failed turn is sent again only when its
+ * OWN text is known: with queued sends, the last one dispatched is not always
+ * the one that failed. Bounded: only the last few can still fail.
+ */
+export class TurnLedger {
+  private readonly turns = new Map<string, { text: string; hasAttachments: boolean }>();
+
+  constructor(private readonly cap = 8) {}
+
+  remember(key: string, text: string, hasAttachments: boolean): void {
+    this.turns.delete(key);
+    this.turns.set(key, { text, hasAttachments });
+    while (this.turns.size > this.cap) {
+      const oldest = this.turns.keys().next().value;
+      if (oldest === undefined) break;
+      this.turns.delete(oldest);
+    }
+  }
+
+  /** The text to send again for the run a frame names — null when it is not known, is empty, or carried attachments. */
+  resendable(runId: unknown): string | null {
+    const turn = typeof runId === "string" ? this.turns.get(runId) : undefined;
+    return turn && !turn.hasAttachments && turn.text.trim() ? turn.text : null;
+  }
+}
+
 /** The route's answer. */
 export interface ChatSwapAnswer {
   handled: boolean;
   /** The route stopped waiting; the swap and the retry carry on behind it. */
   pending?: boolean;
-  kind?: "limit" | "auth" | null;
+  kind?: "limit" | "auth" | "throttled" | null;
   activeLabel?: string | null;
   allLimited?: boolean;
   nextResetAt?: number | null;
-  retry?: "sent" | "held" | "none";
+  retry?: "sent" | "held" | "later" | "none";
 }
 
 export interface ChatSwapInput {
@@ -103,7 +131,11 @@ export function describeChatSwap(answer: ChatSwapAnswer | null, words: { t: Tran
   if (!answer?.handled) return null;
   const { t, locale } = words;
   let line: string;
-  if (answer.pending) line = t("settings.anthropicAccounts.chatSwitching");
+  if (answer.kind === "throttled") {
+    // Not a swap: the account stays, and the turn goes again in a minute.
+    if (answer.retry !== "later") return null;
+    line = t("settings.anthropicAccounts.chatThrottled");
+  } else if (answer.pending) line = t("settings.anthropicAccounts.chatSwitching");
   else if (answer.allLimited) {
     line = typeof answer.nextResetAt === "number"
       ? t(answer.retry === "held" ? "settings.anthropicAccounts.chatAllLimited" : "settings.anthropicAccounts.chatAllLimitedNoRetry", { time: formatAccountReset(answer.nextResetAt, locale) })

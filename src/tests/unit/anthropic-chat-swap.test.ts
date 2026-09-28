@@ -4,7 +4,7 @@
  * sentence, in the owner's language.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { describeChatSwap, isAnthropicAccountFailure, reportAnthropicChatFailure } from "@/lib/anthropic-chat-swap";
+import { describeChatSwap, isAnthropicAccountFailure, reportAnthropicChatFailure, TurnLedger } from "@/lib/anthropic-chat-swap";
 
 /** A loaded locale pack: the key, marked as translated (a bare key means "not loaded yet"). */
 const t = (key: string, params?: Record<string, string | number>) => `T:${key}${params ? JSON.stringify(params) : ""}`;
@@ -67,5 +67,38 @@ describe("the line the chat adds", () => {
     expect(describeChatSwap(null, words)).toBeNull();
     expect(describeChatSwap({ handled: false }, words)).toBeNull();
     expect(describeChatSwap({ handled: true, pending: true }, { t: (key) => key, locale: "en" })).toBeNull();
+  });
+});
+
+describe("which turn a failure may send again (TASK-1260 review)", () => {
+  it("answers the text of the run the frame names — never the last turn sent", () => {
+    const turns = new TurnLedger();
+    turns.remember("run-early", "the turn that failed", false);
+    turns.remember("run-late", "a later turn, queued behind it", false);
+    expect(turns.resendable("run-early")).toBe("the turn that failed");
+    expect(turns.resendable("run-unknown")).toBeNull();
+    expect(turns.resendable(undefined)).toBeNull();
+  });
+
+  it("never sends again a turn that carried attachments, or no words", () => {
+    const turns = new TurnLedger();
+    turns.remember("a", "look at this", true);
+    turns.remember("b", "   ", false);
+    expect(turns.resendable("a")).toBeNull();
+    expect(turns.resendable("b")).toBeNull();
+  });
+
+  it("keeps only the last few", () => {
+    const turns = new TurnLedger(2);
+    turns.remember("1", "one", false);
+    turns.remember("2", "two", false);
+    turns.remember("3", "three", false);
+    expect(turns.resendable("1")).toBeNull();
+    expect(turns.resendable("3")).toBe("three");
+  });
+
+  it("says a throttled turn goes again in a minute — and nothing when it will not", () => {
+    expect(describeChatSwap({ handled: true, kind: "throttled", retry: "later" }, words)).toBe("T:settings.anthropicAccounts.chatThrottled");
+    expect(describeChatSwap({ handled: true, kind: "throttled", retry: "none" }, words)).toBeNull();
   });
 });

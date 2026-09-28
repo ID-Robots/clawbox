@@ -66,7 +66,7 @@ import {
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeFallbackReply, describeImageFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
-import { describeChatSwap, reportAnthropicChatFailure } from '@/lib/anthropic-chat-swap'
+import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
@@ -2064,8 +2064,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // provider's own refusal rides on the lifecycle frames, never on the `chat`
   // error itself. See lib/chat-run-failure.ts.
   const runFailureRef = useRef(new RunFailureLedger())
-  // The turn in flight, for the Anthropic account swap (TASK-1260) — see ChatApp.
-  const lastTurnRef = useRef<{ text: string; hasAttachments: boolean } | null>(null)
+  // The turns sent, by idempotency key, for the Anthropic account swap (TASK-1260) — see ChatApp.
+  const turnsRef = useRef(new TurnLedger())
   /**
    * `dispatchTurn`, reachable from `loadHistory` above it.
    *
@@ -3068,13 +3068,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               // the customer's transcript (TASK-440).
               setMessages(prev => [...prev, { role: 'system', text: failureText ?? describeChatFailure(payload.errorMessage, undefined, failureWordsRef.current), timestamp: Date.now() }])
               // A Claude account at its limit, or refused (TASK-1260): see ChatApp.
-              const turn = lastTurnRef.current
               const forKey = sessionKeyRef.current
               void reportAnthropicChatFailure({
                 errorMessage: payload.errorMessage,
                 context: failureContext,
                 sessionKey: forKey || null,
-                message: turn && !turn.hasAttachments && turn.text.trim() ? turn.text : null,
+                message: turnsRef.current.resendable(payload.runId),
               }).then((answer) => {
                 const line = describeChatSwap(answer, failureWordsRef.current)
                 if (line && sessionKeyRef.current === forKey) setMessages(prev => [...prev, { role: 'system', text: line, timestamp: Date.now() }])
@@ -5051,7 +5050,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // owner may be in another tab by the time the reply lands, and painting
     // it there would put one conversation inside another.
     const keyAtSend = sessionKeyRef.current
-    lastTurnRef.current = { text, hasAttachments: sendAttachments.length > 0 }
+    turnsRef.current.remember(idempotencyKey, text, sendAttachments.length > 0)
     // A new turn is the owner's answer to a restore choice left on screen.
     setRestoreState(prev => (prev && prev.key === keyAtSend ? null : prev))
     let result: TurnResult

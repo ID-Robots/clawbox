@@ -195,6 +195,58 @@ describe("the swap reaching the gateway", () => {
   });
 });
 
+describe("a restart that failed, and two writers at once", () => {
+  it("records the move as owed until the restart succeeds, and the keeper finishes it", async () => {
+    const gateway = fakeGateway();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    const restart = vi.fn(async (): Promise<void> => { throw new Error("Start request repeated too quickly"); });
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      list: () => [{ store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null }],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 0 }; },
+      restart,
+      call: async () => ({}),
+    });
+    gw.startGatewaySwap();
+    await pool.markLimited(work.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    expect((await pool.describePool()).lastSwap?.consumers.gateway).toMatchObject({ status: "failed", code: "restart_failed" });
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: true });
+
+    restart.mockImplementation(async () => undefined);
+    expect(await gw.keepGatewayMirror()).toBe("resynced");
+    expect(restart).toHaveBeenCalledTimes(2);
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
+    expect(await gw.keepGatewayMirror()).toBe("fresh");
+  });
+
+  it("makes the keeper wait for a swap in progress instead of mistaking its token for the owner's", async () => {
+    const gateway = fakeGateway();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.syncGatewayTo(work.id, { restart: false });
+    let release: () => void = () => {};
+    const restarting = new Promise<void>((resolve) => { release = resolve; });
+    let entered = false;
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      list: () => [{ store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null }],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 0 }; },
+      restart: async () => { entered = true; await restarting; },
+      call: async () => ({}),
+    });
+    gw.startGatewaySwap();
+    await pool.markLimited(work.id, Date.now() + H, "session");
+    await vi.waitFor(() => expect(entered).toBe(true));
+    const keeper = gw.keepGatewayMirror();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    await swap.whenSwapsSettled();
+    expect(await keeper).not.toBe("stood_down");
+    expect((await pool.describePool()).gateway).toMatchObject({ following: true, accountId: personal.id });
+  });
+});
+
 describe("the keeper", () => {
   it("renews the gateway's token through the pool before it ends — no restart — and is quiet while it is fresh", async () => {
     const gateway = fakeGateway();
@@ -256,22 +308,82 @@ describe("failed gateway turns", () => {
     expect(await gw.scanGatewayCrons(now + 1)).toBe(0);
   });
 
-  it("sends a failed chat turn again into its session after the swap", async () => {
+  it("sends a failed chat turn again into its session after a real limit's swap", async () => {
     const gateway = fakeGateway();
     gw.startGatewaySwap();
     const { work } = await twoClaudeAccounts();
     await gw.syncGatewayTo(work.id, { restart: false });
     const outcome = await gw.reportChatFailure({
       errorMessage: "⚠️ API rate limit reached. Please try again later.",
-      detail: "HTTP 429: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+      detail: "HTTP 429: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"You've hit your weekly limit · resets Mon 9am\"}}",
       reason: "rate_limit",
       provider: "anthropic",
       sessionKey: "agent:main:main",
       message: "Summarise my inbox",
     });
-    expect(outcome).toMatchObject({ handled: true, kind: "limit", activeLabel: "Personal Max", retry: "sent" });
+    expect(outcome).toMatchObject({ handled: true, kind: "limit", limitKind: "weekly", activeLabel: "Personal Max", retry: "sent" });
     const sent = gateway.calls.filter((c) => c.method === "chat.send");
     expect(sent).toEqual([{ method: "chat.send", params: expect.objectContaining({ sessionKey: "agent:main:main", message: "Summarise my inbox", deliver: false }) }]);
+    // The retry's key is stable for the turn it repeats.
+    expect((sent[0].params as { idempotencyKey: string }).idempotencyKey).toMatch(/^clawbox-swap-[0-9a-f]{16}$/);
+  });
+
+  it("treats a bare rate limit as a throttle: same account, the turn sent again a minute later — and as the cap only when it comes back", async () => {
+    const gateway = fakeGateway();
+    gw.startGatewaySwap();
+    const { work } = await twoClaudeAccounts();
+    await gw.syncGatewayTo(work.id, { restart: false });
+    const bare = {
+      errorMessage: "⚠️ API rate limit reached. Please try again later.",
+      detail: "HTTP 429: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+      reason: "rate_limit",
+      provider: "anthropic",
+      sessionKey: "agent:main:main",
+      message: "Summarise my inbox",
+    };
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    const first = await gw.reportChatFailure(bare);
+    expect(first).toMatchObject({ handled: true, kind: "throttled", retry: "later", activeLabel: "Work Max" });
+    expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+    expect(gateway.restarts).toBe(0);
+    expect(gateway.calls.filter((c) => c.method === "chat.send")).toEqual([]);
+    vi.advanceTimersByTime(60_000);
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(gateway.calls.filter((c) => c.method === "chat.send")).toHaveLength(1));
+
+    // The retry was throttled too (the chat reports it without a turn of its
+    // own): the account IS capped, and the first turn goes again after the swap.
+    const second = await gw.reportChatFailure({ ...bare, message: undefined });
+    expect(second).toMatchObject({ handled: true, kind: "limit", activeLabel: "Personal Max", retry: "sent" });
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("limited");
+    expect(gateway.token).toBe("sk-ant-oat01-personal");
+    expect(gateway.calls.filter((c) => c.method === "chat.send")).toHaveLength(2);
+  });
+
+  it("puts a renewed token in before retrying when Anthropic refused a token the pool could still renew", async () => {
+    const gateway = fakeGateway();
+    gw.startGatewaySwap();
+    const { work } = await twoClaudeAccounts();
+    await gw.syncGatewayTo(work.id, { restart: true });
+    const lastSwap = (await pool.describePool()).lastSwap;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: "sk-ant-oat01-work-renewed", refresh_token: "r2", expires_in: 28_800 }), { status: 200 })));
+    const outcome = await gw.reportChatFailure({
+      errorMessage: "Authentication failed.",
+      detail: "HTTP 401: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}}",
+      reason: "auth",
+      provider: "anthropic",
+      sessionKey: "agent:main:main",
+      message: "Summarise my inbox",
+    });
+    expect(outcome).toMatchObject({ handled: true, kind: "auth", activeLabel: "Work Max", retry: "sent" });
+    // The gateway got the renewal and was restarted onto it BEFORE the turn went again.
+    expect(gateway.token).toBe("sk-ant-oat01-work-renewed");
+    expect(gateway.restarts).toBe(2);
+    const order = gateway.calls.map((c) => c.method);
+    expect(order).toEqual(["chat.send"]);
+    // Not a swap: nothing new filed, the account still in.
+    expect((await pool.describePool()).lastSwap?.id).toBe(lastSwap?.id);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("ok");
   });
 
   it("ignores another provider's failure", async () => {

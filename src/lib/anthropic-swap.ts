@@ -53,6 +53,7 @@ import {
   recordSwapEvent,
   updateSwapConsumer,
   type ActiveChange,
+  type CredentialProbe,
   type SwapConsumerName,
   type SwapConsumerOutcome,
   type SwapEvent,
@@ -100,6 +101,14 @@ interface SwapRuntime {
   pending: Map<string, RetryRequest & { queuedAt: number }>;
   /** Retries already spent, by key, so a failure is retried once. */
   retried: Map<string, number>;
+  /**
+   * A bare rate limit seen on an account (or the gateway's own sign-in,
+   * `own`): when, and the turn it cut off. A second one inside the window is
+   * the account's cap, not a throttle.
+   */
+  throttles: Map<string, { at: number; retry: RetryRequest | null }>;
+  /** The throttled turns' delayed retries, so a reset can take them back. */
+  timers: Set<ReturnType<typeof setTimeout>>;
 }
 
 function runtime(): SwapRuntime {
@@ -110,6 +119,8 @@ function runtime(): SwapRuntime {
     inFlight: 0,
     pending: new Map(),
     retried: new Map(),
+    throttles: new Map(),
+    timers: new Set(),
   }));
 }
 
@@ -119,6 +130,10 @@ const CONSUMER_TIMEOUT_MS = 4 * 60_000;
 const RETRY_HOLD_MS = 8 * 24 * 60 * 60_000;
 /** How long "already retried" is remembered. */
 const RETRIED_MEMORY_MS = 24 * 60 * 60_000;
+/** How long a throttled turn waits before it is sent again, on the same account. */
+const THROTTLE_RETRY_MS = 60_000;
+/** A second bare rate limit on the same account within this is its cap, not a throttle. */
+const THROTTLE_WINDOW_MS = 10 * 60_000;
 
 // ── wiring ──────────────────────────────────────────────────────────────────
 
@@ -151,10 +166,15 @@ export async function whenSwapsSettled(): Promise<void> {
   }
 }
 
-function enqueue(change: ActiveChange, takeover: boolean, only?: ReadonlySet<string>): Promise<void> {
+/**
+ * Queue a fan-out. `record: false` is not a swap at all — the active account
+ * did not move, a consumer only needs the credential it already follows put in
+ * again (a renewed token) — so it files no event and sends no notice.
+ */
+function enqueue(change: ActiveChange, takeover: boolean, only?: ReadonlySet<string>, record = true): Promise<void> {
   const state = runtime();
   state.inFlight += 1;
-  const next = state.queue.then(() => fanOut(change, takeover, only)).catch((err: unknown) => {
+  const next = state.queue.then(() => fanOut(change, takeover, only, record)).catch((err: unknown) => {
     console.error("[anthropic-swap] a swap could not be carried out:", err instanceof Error ? err.message : err);
   }).finally(() => {
     state.inFlight -= 1;
@@ -222,7 +242,7 @@ function announce(change: ActiveChange): void {
   void announceAnthropicLimit({ kind: "all_limited", resetAt: change.health.nextResetAt, runId: change.runId }).catch(() => {});
 }
 
-async function fanOut(change: ActiveChange, takeover: boolean, only?: ReadonlySet<string>): Promise<void> {
+async function fanOut(change: ActiveChange, takeover: boolean, only?: ReadonlySet<string>, record = true): Promise<void> {
   const state = runtime();
   // A fixed order, whatever order they registered in: the runs first (they are
   // mid-turn and cost the owner most while they wait), then the gateway, whose
@@ -231,11 +251,13 @@ async function fanOut(change: ActiveChange, takeover: boolean, only?: ReadonlySe
     .filter((c) => !only || only.has(c.name))
     .sort((a, b) => SWAP_CONSUMERS.indexOf(a.name) - SWAP_CONSUMERS.indexOf(b.name));
   const event = eventOf(change, consumers.map((c) => c.name));
-  if (!takeover) announce(change);
-  await recordSwapEvent(event).catch((err: unknown) => {
-    console.error("[anthropic-swap] could not record the swap:", err instanceof Error ? err.message : err);
-  });
-  console.error(`[anthropic-swap] ${change.cause}: ${change.fromId ?? "none"} -> ${change.toId ?? "none (no account can answer)"} (${change.source})`);
+  if (record) {
+    if (!takeover) announce(change);
+    await recordSwapEvent(event).catch((err: unknown) => {
+      console.error("[anthropic-swap] could not record the swap:", err instanceof Error ? err.message : err);
+    });
+    console.error(`[anthropic-swap] ${change.cause}: ${change.fromId ?? "none"} -> ${change.toId ?? "none (no account can answer)"} (${change.source})`);
+  }
 
   const done = new Map<string, SwapConsumerOutcome>();
   for (const consumer of consumers) {
@@ -255,9 +277,9 @@ async function fanOut(change: ActiveChange, takeover: boolean, only?: ReadonlySe
       }
     }
     done.set(consumer.name, result);
-    await updateSwapConsumer(event.id, consumer.name, result).catch(() => {});
+    if (record) await updateSwapConsumer(event.id, consumer.name, result).catch(() => {});
   }
-  await drainRetries(event.id, change.toId, done);
+  await drainRetries(record ? event.id : null, change.toId, done);
 }
 
 /**
@@ -322,15 +344,16 @@ export interface FailureReport {
 export interface FailureOutcome {
   /** Was it an Anthropic limit or a refused credential at all? */
   handled: boolean;
-  kind: "limit" | "auth" | null;
+  /** `throttled`: a bare rate limit, sent again on the same account in a minute — not (yet) a limit. */
+  kind: "limit" | "auth" | "throttled" | null;
   limitKind: AnthropicLimitKind | null;
   /** The account every consumer uses now, after the swap. */
   activeId: string | null;
   activeLabel: string | null;
   allLimited: boolean;
   nextResetAt: number | null;
-  /** `sent` — retried already; `held` — waits for a reset; `none` — nothing to retry, or retried before. */
-  retry: "sent" | "held" | "none";
+  /** `sent` — retried already; `held` — waits for a reset; `later` — sent again in a minute (a throttle); `none` — nothing to retry, or retried before. */
+  retry: "sent" | "held" | "later" | "none";
 }
 
 /**
@@ -346,27 +369,75 @@ export interface FailureOutcome {
 export async function reportAnthropicFailure(report: FailureReport): Promise<FailureOutcome> {
   startAnthropicSwap();
   const now = Date.now();
-  const failure = classifyAnthropicFailure(report.text, now, { reason: report.reason });
+  // The gateway does not back off and retry a 429 the way Claude Code does:
+  // a bare one may be a throttle that is over in seconds (`transientRate`).
+  const classified = classifyAnthropicFailure(report.text, now, { reason: report.reason, transientRate: true });
   const empty: FailureOutcome = { handled: false, kind: null, limitKind: null, activeId: null, activeLabel: null, allLimited: false, nextResetAt: null, retry: "none" };
-  if (!failure) return empty;
+  if (!classified) return empty;
   const state = runtime();
+  for (const [who, seen] of state.throttles) {
+    if (now - seen.at > THROTTLE_WINDOW_MS) state.throttles.delete(who);
+  }
+
+  // A THROTTLE: the account stays, nothing moves, and the turn is sent again
+  // once, on the same account, a minute from now. The same account throttled
+  // again inside the window — the retry itself refused, typically — is its
+  // cap after all, and goes the limit's way below, with the first turn.
+  let failure: Exclude<typeof classified, { type: "throttled" }>;
+  let retryRequest = report.retry ?? null;
+  if (classified.type === "throttled") {
+    const who = report.accountId ?? "own";
+    const seen = state.throttles.get(who);
+    if (!seen) {
+      state.throttles.set(who, { at: now, retry: report.retry ?? null });
+      let retry: FailureOutcome["retry"] = "none";
+      if (report.retry) {
+        const key = `${report.retry.key}:throttle`;
+        if (!state.retried.has(key)) {
+          state.retried.set(key, now);
+          const run = report.retry.run;
+          const timer = setTimeout(() => {
+            state.timers.delete(timer);
+            void run().catch(() => false);
+          }, THROTTLE_RETRY_MS);
+          timer.unref?.();
+          state.timers.add(timer);
+          retry = "later";
+        }
+      }
+      const pool = await readPoolState().catch(() => null);
+      const active = pool?.accounts.find((a) => a.id === pool.activeId) ?? null;
+      console.error(`[anthropic-swap] ${report.source}: a bare rate limit on ${report.accountId ?? "the gateway's own sign-in"} — sent again in a minute, not taken out`);
+      return {
+        handled: true, kind: "throttled", limitKind: null,
+        activeId: active?.id ?? null, activeLabel: active?.label ?? null,
+        allLimited: pool?.health.allLimited ?? false, nextResetAt: null, retry,
+      };
+    }
+    state.throttles.delete(who);
+    retryRequest = report.retry ?? seen.retry;
+    failure = { type: "limit", limit: { kind: "rate", resetsAt: null } };
+  } else {
+    failure = classified;
+  }
 
   let retry: FailureOutcome["retry"] = "none";
-  if (report.retry && !state.retried.has(report.retry.key) && !state.pending.has(report.retry.key)) {
-    state.pending.set(report.retry.key, { ...report.retry, queuedAt: now });
+  if (retryRequest && !state.retried.has(retryRequest.key) && !state.pending.has(retryRequest.key)) {
+    state.pending.set(retryRequest.key, { ...retryRequest, queuedAt: now });
     retry = "held";
   }
 
   try {
     const before = await readPoolState();
     const known = report.accountId !== null && before.accounts.some((a) => a.id === report.accountId);
+    let probe: CredentialProbe | null = null;
     if (known && report.accountId) {
       if (failure.type === "limit") {
         await markLimited(report.accountId, limitUntil(failure.limit, now), failure.limit.kind, { source: report.source });
       } else {
         // Confirmed first: a token the pool can still renew was only stale
         // where it was used, and the account stays in.
-        await probeAccountCredential(report.accountId, verifyAnthropicKey, { source: report.source });
+        probe = await probeAccountCredential(report.accountId, verifyAnthropicKey, { source: report.source });
       }
     }
     await whenSwapsSettled();
@@ -398,6 +469,16 @@ export async function reportAnthropicFailure(report: FailureReport): Promise<Fai
         health: after.health,
         at: Date.now(),
       }, true, new Set([consumer]));
+    } else if (probe === "ok" && consumer === "gateway" && after.activeId && state.consumers.has("gateway")) {
+      // Renewed, not refused: the pool now holds a fresh token, the gateway
+      // still holds the one Anthropic just turned away. Put the renewal in
+      // (and restart onto it) BEFORE the retry, or it fails the same way — and
+      // it is not a swap, so nothing is filed or announced.
+      const active = after.accounts.find((a) => a.id === after.activeId) ?? null;
+      await enqueue({
+        fromId: after.activeId, fromLabel: active?.label ?? null, toId: after.activeId, toLabel: active?.label ?? null,
+        cause: "auth", source: report.source, runId: null, limitKind: null, limitedUntil: null, health: after.health, at: Date.now(),
+      }, true, new Set(["gateway"]), false);
     } else if (after.activeId && onActive && state.pending.size > 0) {
       // Nothing to move and the consumer is already on the active account (a
       // swap another report caused has landed): the held retries can go, and
@@ -407,8 +488,8 @@ export async function reportAnthropicFailure(report: FailureReport): Promise<Fai
 
     const final = await readPoolState();
     const active = final.accounts.find((a) => a.id === final.activeId) ?? null;
-    if (report.retry && retry === "held" && state.retried.has(report.retry.key)) retry = "sent";
-    else if (report.retry && retry === "held" && !state.pending.has(report.retry.key)) retry = "none";
+    if (retryRequest && retry === "held" && state.retried.has(retryRequest.key)) retry = "sent";
+    else if (retryRequest && retry === "held" && !state.pending.has(retryRequest.key)) retry = "none";
     return {
       handled: true,
       kind: failure.type,
@@ -434,4 +515,7 @@ export function _resetAnthropicSwapForTests(): void {
   state.inFlight = 0;
   state.pending.clear();
   state.retried.clear();
+  state.throttles.clear();
+  for (const timer of state.timers) clearTimeout(timer);
+  state.timers.clear();
 }

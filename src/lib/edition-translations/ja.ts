@@ -1342,7 +1342,7 @@ export const ja: Record<string, string> = {
   // 達すると、実行は自動で次のアカウントに移ります。
   "settings.anthropicAccounts.title": "Anthropic アカウント",
   "settings.anthropicAccounts.intro":
-    "このボックスで Claude を使うもの（コーディングの実行、チャット、その予定タスク）はすべて、この一覧の 1 つのアカウントで動きます。そのアカウントが使用量の上限に達するか Anthropic に拒否されると、すべてがまとめて次のアカウントに移り、中断したところから続けます。",
+    "コーディングの実行はこの一覧の 1 つのアカウントで始まります。チャットとその予定タスクも、ボックスが一度アカウントを切り替えた後は同じアカウントを使います。そのアカウントが使用量の上限に達するか Anthropic に拒否されると、それを使っているものはすべてまとめて次のアカウントに移り、中断したところから続けます。",
   "settings.anthropicAccounts.summaryReady": "{total} 件中 {ready} 件が利用可能",
   "settings.anthropicAccounts.summaryAllLimited": "すべて上限到達 · {time} に復帰",
   "settings.anthropicAccounts.summaryNone": "未接続",
@@ -1393,7 +1393,9 @@ export const ja: Record<string, string> = {
   "settings.anthropicAccounts.actionFailed": "アカウントを変更できませんでした。",
   "settings.anthropicAccounts.refusedWrongAccount": "このサインインは {signedIn} のもので、{expected} ではありません。{label} を更新するには {expected} でサインインするか、{signedIn} を別のアカウントとして接続してください。",
   "settings.anthropicAccounts.refusedDuplicate": "このサインインは {signedIn} のもので、すでに {label} として一覧にあります。",
-  "settings.anthropicAccounts.activeNow": "コーディングの実行、チャット、その予定タスクは {label} で動いています。",
+  "settings.anthropicAccounts.activeNow": "新しいコーディングの実行は {label} で始まります。",
+  "settings.anthropicAccounts.activeChatOn": "チャットとその予定タスクは {label} で動いています。",
+  "settings.anthropicAccounts.activeChatOwn": "チャットが Claude のサブスクリプションで動いている場合、ボックスが初めてアカウントを切り替えるときからこのアカウントに従います。",
   "settings.anthropicAccounts.allLimitedBanner": "すべてのアカウントが上限に達しています。最も早いリセットは {time} です。待機中の作業はその時点で自動的に再開します。",
   "settings.anthropicAccounts.noneCanAnswer": "応答できるアカウントがなく、自動で復帰するアカウントもありません。続けるにはいずれかを再認証してください。",
   "settings.anthropicAccounts.returnToPrimary": "上限がリセットされたら最初のアカウントに戻る",
@@ -1425,6 +1427,7 @@ export const ja: Record<string, string> = {
   "settings.anthropicAccounts.chatAllLimited": "このボックスの Claude アカウントはすべて上限に達しています。ClawBox が {time} にメッセージを自動で再送信します。",
   "settings.anthropicAccounts.chatAllLimitedNoRetry": "このボックスの Claude アカウントはすべて {time} まで上限に達しています。",
   "settings.anthropicAccounts.chatNoAccount": "このボックスで応答できる Claude アカウントがありません。設定 → プロバイダーでいずれかを再認証してください。",
+  "settings.anthropicAccounts.chatThrottled": "Anthropic がこの Claude アカウントを一時的にレート制限しています。ClawBox が 1 分後にメッセージを再送信します。",
   "settings.anthropicAccounts.chatSwitching": "その Claude アカウントは応答できませんでした。ClawBox が次のアカウントに切り替えて、メッセージを再送信します。",
 
   // すべての Anthropic アカウントが上限に達して待機している実行と、アカウント

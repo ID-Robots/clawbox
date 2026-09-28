@@ -167,6 +167,13 @@ export interface GatewayMirror {
   fingerprint: string;
   expiresAt: number | null;
   at: number;
+  /**
+   * The token is written but the gateway has not been restarted onto it yet
+   * (the restart failed, or is under way). The keeper finishes it: a gateway
+   * whose restart failed would otherwise go on running on the old account's
+   * token in memory while every file says it moved.
+   */
+  pending: boolean;
 }
 
 interface PoolFile {
@@ -300,7 +307,7 @@ function normalizeMirror(raw: unknown): GatewayMirror | null {
   const v = raw as Record<string, unknown>;
   if (typeof v.accountId !== "string" || !ID_RE.test(v.accountId)) return null;
   if (typeof v.fingerprint !== "string" || !/^[0-9a-f]{16}$/.test(v.fingerprint)) return null;
-  return { accountId: v.accountId, fingerprint: v.fingerprint, expiresAt: num(v.expiresAt), at: num(v.at) ?? 0 };
+  return { accountId: v.accountId, fingerprint: v.fingerprint, expiresAt: num(v.expiresAt), at: num(v.at) ?? 0, pending: v.pending === true };
 }
 
 function normalizePool(raw: unknown): PoolFile {

@@ -248,3 +248,24 @@ describe("the active account", () => {
     expect(pickForSpawn(pool, null, NOW_A)?.id).toBe("a");
   });
 });
+
+describe("a bare rate limit from something that does not retry it (TASK-1260 review)", () => {
+  it("is a throttle, not yet a limit, when neither the words nor the reason give a reset time", () => {
+    expect(classifyAnthropicFailure('HTTP 429: {"type":"error","error":{"type":"rate_limit_error"}}', AT_2227_SOFIA, { transientRate: true }))
+      .toEqual({ type: "throttled" });
+    expect(classifyAnthropicFailure("⚠️ API rate limit reached.", AT_2227_SOFIA, { reason: "rate_limit", transientRate: true }))
+      .toEqual({ type: "throttled" });
+  });
+
+  it("stays a limit when the words say it is the account's cap, or give the time it lifts", () => {
+    expect(classifyAnthropicFailure("429 rate_limit_error: You've hit your weekly limit · resets Mon 9am", AT_2227_SOFIA, { timeZone: SOFIA, transientRate: true }))
+      .toMatchObject({ type: "limit", limit: { kind: "weekly" } });
+    expect(classifyAnthropicFailure("rate limited, resets 10:50pm", AT_2227_SOFIA, { timeZone: SOFIA, reason: "rate_limit", transientRate: true }))
+      .toMatchObject({ type: "limit", limit: { kind: "rate", resetsAt: Date.UTC(2026, 8, 18, 19, 50) } });
+  });
+
+  it("is still a limit for Claude Code, which has already backed off and retried it", () => {
+    expect(classifyAnthropicFailure('HTTP 429: {"type":"error","error":{"type":"rate_limit_error"}}', AT_2227_SOFIA))
+      .toEqual({ type: "limit", limit: { kind: "rate", resetsAt: null } });
+  });
+});

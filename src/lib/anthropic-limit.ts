@@ -129,7 +129,13 @@ export function detectAnthropicAuthFailure(text: string | null | undefined): boo
 
 export type AnthropicFailure =
   | { type: "limit"; limit: AnthropicLimit }
-  | { type: "auth" };
+  | { type: "auth" }
+  /**
+   * A bare rate limit — no usage-limit wording, no reset time — from a caller
+   * that did NOT retry it first (`transientRate`). It may be a per-minute
+   * throttle that clears in seconds, so it is not yet an account at its cap.
+   */
+  | { type: "throttled" };
 
 /**
  * A gateway's failover reason can name the class of a failure its words do not
@@ -147,15 +153,27 @@ const OVERLOAD_RE = /\boverload(?:ed)?(?:_error)?\b|\b529\b/i;
 export function classifyAnthropicFailure(
   text: string | null | undefined,
   now: number,
-  opts: { timeZone?: string; reason?: string | null } = {},
+  opts: {
+    timeZone?: string;
+    reason?: string | null;
+    /**
+     * The failure comes from something that does not back off and retry a 429
+     * itself (the gateway's chat and crons), unlike Claude Code: a rate limit
+     * with no reset time is then `throttled`, not yet a limit.
+     */
+    transientRate?: boolean;
+  } = {},
 ): AnthropicFailure | null {
   const limit = detectAnthropicLimit(text, now, opts.timeZone);
+  if (limit && opts.transientRate && limit.kind === "rate" && limit.resetsAt === null) return { type: "throttled" };
   if (limit) return { type: "limit", limit };
   if (detectAnthropicAuthFailure(text)) return { type: "auth" };
   const reason = typeof opts.reason === "string" ? opts.reason.trim().toLowerCase() : "";
   const words = typeof text === "string" ? text.trim().slice(0, HEAD_CHARS) : "";
   if (reason === "rate_limit" && !OVERLOAD_RE.test(words)) {
-    return { type: "limit", limit: { kind: "rate", resetsAt: words ? parseLimitReset(words, now, opts.timeZone) : null } };
+    const resetsAt = words ? parseLimitReset(words, now, opts.timeZone) : null;
+    if (resetsAt === null && opts.transientRate) return { type: "throttled" };
+    return { type: "limit", limit: { kind: "rate", resetsAt } };
   }
   if (reason === "billing") return { type: "limit", limit: { kind: "credit", resetsAt: null } };
   if (reason === "auth" || reason === "auth_permanent") return { type: "auth" };

@@ -1341,7 +1341,7 @@ export const de: Record<string, string> = {
   // von selbst zum nächsten, wenn eines sein Nutzungslimit erreicht.
   "settings.anthropicAccounts.title": "Anthropic-Konten",
   "settings.anthropicAccounts.intro":
-    "Alles auf dieser Box, was Claude nutzt – Läufe des Coding-Agenten, der Chat und seine geplanten Aufgaben –, läuft über ein Konto aus dieser Liste. Erreicht es sein Nutzungslimit oder lehnt Anthropic es ab, wechseln alle gemeinsam zum nächsten Konto und machen dort weiter, wo sie waren.",
+    "Läufe des Coding-Agenten starten auf einem Konto aus dieser Liste, ebenso der Chat und seine geplanten Aufgaben, sobald die Box einmal das Konto wechseln musste. Erreicht dieses Konto sein Nutzungslimit oder lehnt Anthropic es ab, wechselt alles darauf gemeinsam zum nächsten Konto und macht dort weiter, wo es war.",
   "settings.anthropicAccounts.summaryReady": "{ready} von {total} bereit",
   "settings.anthropicAccounts.summaryAllLimited": "Alle limitiert · zurück um {time}",
   "settings.anthropicAccounts.summaryNone": "Nicht verbunden",
@@ -1392,7 +1392,9 @@ export const de: Record<string, string> = {
   "settings.anthropicAccounts.actionFailed": "Die Konten konnten nicht geändert werden.",
   "settings.anthropicAccounts.refusedWrongAccount": "Diese Anmeldung gehört zu {signedIn}, nicht zu {expected}. Melden Sie sich als {expected} an, um {label} zu erneuern, oder verbinden Sie {signedIn} als eigenes Konto.",
   "settings.anthropicAccounts.refusedDuplicate": "Diese Anmeldung gehört zu {signedIn}, das bereits als {label} in der Liste steht.",
-  "settings.anthropicAccounts.activeNow": "Läufe des Coding-Agenten, der Chat und seine geplanten Aufgaben laufen über {label}.",
+  "settings.anthropicAccounts.activeNow": "Neue Läufe des Coding-Agenten starten auf {label}.",
+  "settings.anthropicAccounts.activeChatOn": "Der Chat und seine geplanten Aufgaben laufen über {label}.",
+  "settings.anthropicAccounts.activeChatOwn": "Der Chat folgt, sobald die Box zum ersten Mal das Konto wechseln muss, wenn er über ein Claude-Abo läuft.",
   "settings.anthropicAccounts.allLimitedBanner": "Alle Konten im Limit, frühestes Zurücksetzen um {time}. Wartende Arbeit macht dann von selbst weiter.",
   "settings.anthropicAccounts.noneCanAnswer": "Kein Konto kann antworten, und keines kommt von selbst zurück. Melden Sie eines erneut an, um weiterzumachen.",
   "settings.anthropicAccounts.returnToPrimary": "Zum ersten Konto zurückkehren, sobald sein Limit zurückgesetzt ist",
@@ -1424,6 +1426,7 @@ export const de: Record<string, string> = {
   "settings.anthropicAccounts.chatAllLimited": "Jedes Claude-Konto auf dieser Box ist im Limit. ClawBox sendet Ihre Nachricht um {time} von selbst erneut.",
   "settings.anthropicAccounts.chatAllLimitedNoRetry": "Jedes Claude-Konto auf dieser Box ist bis {time} im Limit.",
   "settings.anthropicAccounts.chatNoAccount": "Kein Claude-Konto auf dieser Box kann antworten. Melden Sie eines unter Einstellungen → Anbieter erneut an.",
+  "settings.anthropicAccounts.chatThrottled": "Anthropic drosselt dieses Claude-Konto kurzzeitig. ClawBox sendet Ihre Nachricht in einer Minute erneut.",
   "settings.anthropicAccounts.chatSwitching": "Dieses Claude-Konto konnte nicht antworten. ClawBox wechselt zum nächsten Konto und sendet Ihre Nachricht erneut.",
 
   // Ein Lauf, der wartet, weil jedes Anthropic-Konto limitiert ist, und die

@@ -83,11 +83,24 @@ afterEach(() => {
 });
 
 describe("the box-wide account on the card", () => {
-  it("names the account everything runs on", async () => {
+  it("names where new coding runs start, and the account the chat is on — apart", async () => {
     render(<AnthropicAccountsCard />);
     const line = await screen.findByTestId("anthropic-accounts-active");
     // (The icon's ligature is text too: "bolt".)
     expect(line.textContent).toContain(GERMAN["settings.anthropicAccounts.activeNow"].replace("{label}", "Personal Max"));
+    expect(screen.getByTestId("anthropic-accounts-chat").textContent).toBe(GERMAN["settings.anthropicAccounts.activeChatOn"].replace("{label}", "Personal Max"));
+  });
+
+  it("does not claim the chat is on the active account before it has ever followed the pool", async () => {
+    current = view({ gateway: { following: false, accountId: null, label: null, since: null } });
+    render(<AnthropicAccountsCard />);
+    expect((await screen.findByTestId("anthropic-accounts-chat")).textContent).toBe(GERMAN["settings.anthropicAccounts.activeChatOwn"]);
+  });
+
+  it("names the account the chat is really on when it has not caught up", async () => {
+    current = view({ gateway: { following: true, accountId: WORK, label: "Work Max", since: NOW } });
+    render(<AnthropicAccountsCard />);
+    expect((await screen.findByTestId("anthropic-accounts-chat")).textContent).toBe(GERMAN["settings.anthropicAccounts.activeChatOn"].replace("{label}", "Work Max"));
   });
 
   it("says every account is limited, and the earliest reset, instead", async () => {

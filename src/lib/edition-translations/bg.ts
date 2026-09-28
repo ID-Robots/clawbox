@@ -1328,7 +1328,7 @@ export const bg: Record<string, string> = {
   // към следващия, когато някой достигне лимита си за използване.
   "settings.anthropicAccounts.title": "Акаунти в Anthropic",
   "settings.anthropicAccounts.intro":
-    "Всичко на тази кутия, което използва Claude – изпълненията по програмиране, чатът и неговите планирани задачи, – работи с един акаунт от този списък. Когато той достигне лимита си за използване или Anthropic го откаже, всички заедно преминават към следващия акаунт и продължават оттам, докъдето са стигнали.",
+    "Изпълненията по програмиране започват с един акаунт от този списък, както и чатът и неговите планирани задачи, след като кутията веднъж е трябвало да смени акаунта. Когато този акаунт достигне лимита си за използване или Anthropic го откаже, всичко на него преминава заедно към следващия акаунт и продължава оттам, докъдето е стигнало.",
   "settings.anthropicAccounts.summaryReady": "{ready} от {total} готови",
   "settings.anthropicAccounts.summaryAllLimited": "Всички са ограничени · обратно в {time}",
   "settings.anthropicAccounts.summaryNone": "Не е свързан",
@@ -1379,7 +1379,9 @@ export const bg: Record<string, string> = {
   "settings.anthropicAccounts.actionFailed": "Акаунтите не можаха да бъдат променени.",
   "settings.anthropicAccounts.refusedWrongAccount": "Това влизане е с {signedIn}, а не с {expected}. Влезте като {expected}, за да подновите {label}, или свържете {signedIn} като отделен акаунт.",
   "settings.anthropicAccounts.refusedDuplicate": "Това влизане е с {signedIn}, който вече е в списъка като {label}.",
-  "settings.anthropicAccounts.activeNow": "Изпълненията по програмиране, чатът и неговите планирани задачи работят с {label}.",
+  "settings.anthropicAccounts.activeNow": "Новите изпълнения по програмиране започват с {label}.",
+  "settings.anthropicAccounts.activeChatOn": "Чатът и неговите планирани задачи работят с {label}.",
+  "settings.anthropicAccounts.activeChatOwn": "Чатът ще последва, щом кутията за първи път трябва да смени акаунта, ако работи с абонамент за Claude.",
   "settings.anthropicAccounts.allLimitedBanner": "Всички акаунти са ограничени, най-ранното нулиране е в {time}. Чакащата работа ще продължи сама тогава.",
   "settings.anthropicAccounts.noneCanAnswer": "Нито един акаунт не може да отговаря и нито един няма да се върне сам. Удостоверете повторно някой от тях, за да продължите.",
   "settings.anthropicAccounts.returnToPrimary": "Връщане към първия акаунт, щом лимитът му се нулира",
@@ -1411,6 +1413,7 @@ export const bg: Record<string, string> = {
   "settings.anthropicAccounts.chatAllLimited": "Всеки акаунт в Claude на тази кутия е достигнал лимита си. ClawBox ще изпрати съобщението Ви отново сам в {time}.",
   "settings.anthropicAccounts.chatAllLimitedNoRetry": "Всеки акаунт в Claude на тази кутия е достигнал лимита си до {time}.",
   "settings.anthropicAccounts.chatNoAccount": "Нито един акаунт в Claude на тази кутия не може да отговаря. Удостоверете повторно някой в Настройки → Доставчици.",
+  "settings.anthropicAccounts.chatThrottled": "Anthropic временно ограничава скоростта на този акаунт в Claude. ClawBox ще изпрати съобщението Ви отново след минута.",
   "settings.anthropicAccounts.chatSwitching": "Този акаунт в Claude не можа да отговори. ClawBox преминава към следващия акаунт и ще изпрати съобщението Ви отново.",
 
   // Изпълнение, което чака, защото всеки акаунт в Anthropic е ограничен, и

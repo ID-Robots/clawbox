@@ -11,10 +11,13 @@ limit resets. That includes a coding queue left running overnight, and the chat'
 scheduled tasks.
 
 Connect more than one Anthropic account and the box carries on. One account is
-**active** at a time, and everything that uses Claude runs on it: coding runs, review
-passes, team workers, the chat, its scheduled tasks and its check-ins. When the active
-account hits its limit, all of them move to the next account together. Interrupted work
-continues where it was.
+**active** at a time. New coding runs, review passes and team workers start on it. The
+chat, its scheduled tasks and its check-ins follow it too once the box has had to switch
+accounts, if the chat runs on a Claude subscription. When the active account hits its
+limit, everything on it moves to the next account together, and interrupted work
+continues where it was. Two things stay where they are until they need to move: a coding
+run already working on an account that can still answer, and a chat still on its own
+sign-in before the first switch.
 
 <Frame caption="Settings → Providers → Anthropic accounts, in the order the box tries them">
   <img src="/images/4.0/settings-anthropic-accounts.png" alt="The Anthropic accounts card badged 2 of 3 ready: a Claude Max account marked In use, a Claude Pro account marked Limited until a time later today, and an API key marked Ready, with a button to connect another account." />
@@ -42,8 +45,10 @@ chat already uses by itself.
     pull request stay the same.
   - the chat's Claude subscription is switched and the gateway restarts on it, for
     every agent and every conversation.
-  - a chat message or scheduled task that failed on the limit is **sent again once**
-    on the new account.
+  - a message you sent in the **desktop chat**, a scheduled task or a check-in that
+    failed on the limit is **sent again once** on the new account. A message that came
+    in on a channel (Telegram and the like) is not sent again: send it once more
+    yourself, and it goes through on the new account.
 - **A refused sign-in moves everything too.** If Anthropic refuses an account (a 401,
   a revoked sign-in or key), the box first checks with Anthropic. If the sign-in really
   is dead, the account is marked **Needs re-authentication** and everything moves on. If
@@ -56,7 +61,7 @@ chat already uses by itself.
   becomes the active one.
 - **When every account is limited, work waits.** The card says **All accounts limited,
   earliest reset 22:50**. A coding run that cannot continue is paused, not failed, and
-  shows *Waiting*. A failed chat message or scheduled task is held. At the first reset
+  shows *Waiting*. A failed desktop-chat message, scheduled task or check-in is held. At the first reset
   the box switches to that account and resumes all of it without you pressing anything.
   Until then, a new coding run is refused with the reset time rather than started and cut
   off.
@@ -64,6 +69,11 @@ chat already uses by itself.
   window, the weekly cap, an API key's rate limit, a prepaid key with no credit left and
   Anthropic refusing the credential. Any other failure is a real failure and is not
   passed from account to account.
+- **A brief rate limit is not a cap.** When the chat or a scheduled task gets a plain
+  "rate limited" from Anthropic, with no reset time and no "usage limit" in it, the box
+  keeps the account and sends the message again a minute later. Only when the same
+  account is rate limited again within ten minutes does the box treat it as capped and
+  switch.
 
 If a limit message gives no reset time, the account is set aside for five hours, the
 length of a session window.
@@ -121,7 +131,7 @@ or **All limited · back at 22:50**.
 
 | State | What it means |
 |---|---|
-| **In use** | The active account: everything that uses Claude runs on it. |
+| **In use** | The active account: new coding runs start on it, and the chat follows it once the box has switched accounts. |
 | **Ready** | Can answer; waiting its turn. |
 | **Limited until 22:50** | At its usage limit. The time is in your clock, with the weekday when it is not today. |
 | **Sign-in expired** | The box could not renew the sign-in. Re-authenticate it, or for the Claude Code sign-in, run `claude` in the Terminal app again. |
@@ -136,7 +146,8 @@ or **All limited · back at 22:50**.
 
 ## What you see when a limit hits
 
-- **On the card:** a line naming the account everything runs on, and a **Last swap**
+- **On the card:** a line naming the account new coding runs start on and the one the
+  chat is on (or that the chat keeps its own sign-in until the first switch), and a **Last swap**
   panel: when it happened, from which account to which, why (*Usage limit, back at
   22:50*, *Anthropic refused the sign-in*, *Your change*…), and what each part of the box
   did: *Coding runs: 2 carried on*, *Chat and scheduled tasks: switched*, *Failed turns:

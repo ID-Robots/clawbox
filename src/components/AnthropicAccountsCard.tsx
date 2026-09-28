@@ -68,6 +68,8 @@ interface PoolView {
   /** TASK-1260 — absent from an older server's answer. */
   returnToPrimary?: boolean;
   lastSwap?: SwapView | null;
+  /** Whether the chat's gateway follows the pool, and which account it holds. */
+  gateway?: { following: boolean; accountId: string | null; label: string | null } | null;
   /** POST only. */
   verified?: boolean;
 }
@@ -392,7 +394,19 @@ export default function AnthropicAccountsCard() {
         ) : activeAccount ? (
           <p className="mb-3 flex items-start gap-2 text-[11px] text-[var(--text-secondary)]" data-testid="anthropic-accounts-active">
             <span className="material-symbols-rounded shrink-0 text-emerald-300" style={{ fontSize: 16 }} aria-hidden="true">bolt</span>
-            <span>{t("settings.anthropicAccounts.activeNow", { label: activeAccount.label })}</span>
+            {/* Where NEW work starts, and — said apart, because it can differ —
+                what the chat is on: it keeps its own sign-in until the box
+                first has to switch, and a run already under way finishes on
+                the account it started on while that one can answer. */}
+            <span>
+              {t("settings.anthropicAccounts.activeNow", { label: activeAccount.label })}
+              {" "}
+              <span data-testid="anthropic-accounts-chat">
+                {view.gateway?.following && view.gateway.label
+                  ? t("settings.anthropicAccounts.activeChatOn", { label: view.gateway.label })
+                  : t("settings.anthropicAccounts.activeChatOwn")}
+              </span>
+            </span>
           </p>
         ) : null
       )}

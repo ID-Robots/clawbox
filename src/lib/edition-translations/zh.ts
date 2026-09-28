@@ -1350,7 +1350,7 @@ export const zh: Record<string, string> = {
   // 换到下一个。
   "settings.anthropicAccounts.title": "Anthropic 账户",
   "settings.anthropicAccounts.intro":
-    "这台设备上所有使用 Claude 的内容（编程运行、聊天及其计划任务）都通过此列表中的一个账户运行。当该账户达到使用上限或被 Anthropic 拒绝时，所有内容会一起切换到下一个账户，并从原处继续。",
+    "编程运行从此列表中的一个账户开始；设备一旦切换过账户，聊天及其计划任务也会使用同一账户。当该账户达到使用上限或被 Anthropic 拒绝时，使用它的所有内容会一起切换到下一个账户，并从原处继续。",
   "settings.anthropicAccounts.summaryReady": "{total} 个中有 {ready} 个可用",
   "settings.anthropicAccounts.summaryAllLimited": "全部受限 · {time} 恢复",
   "settings.anthropicAccounts.summaryNone": "未连接",
@@ -1401,7 +1401,9 @@ export const zh: Record<string, string> = {
   "settings.anthropicAccounts.actionFailed": "无法更改账户。",
   "settings.anthropicAccounts.refusedWrongAccount": "此次登录的是 {signedIn}，而不是 {expected}。请以 {expected} 登录以续期 {label}，或将 {signedIn} 作为单独的账户连接。",
   "settings.anthropicAccounts.refusedDuplicate": "此次登录的是 {signedIn}，它已作为 {label} 在列表中。",
-  "settings.anthropicAccounts.activeNow": "编程运行、聊天及其计划任务正在使用 {label}。",
+  "settings.anthropicAccounts.activeNow": "新的编程运行从 {label} 开始。",
+  "settings.anthropicAccounts.activeChatOn": "聊天及其计划任务正在使用 {label}。",
+  "settings.anthropicAccounts.activeChatOwn": "如果聊天使用 Claude 订阅，它会在设备首次切换账户时跟随该账户。",
   "settings.anthropicAccounts.allLimitedBanner": "所有账户均已受限，最早于 {time} 重置。等待中的工作届时会自动继续。",
   "settings.anthropicAccounts.noneCanAnswer": "没有账户可以响应，也没有账户会自动恢复。请重新验证其中一个以继续。",
   "settings.anthropicAccounts.returnToPrimary": "第一个账户的上限重置后切回该账户",
@@ -1433,6 +1435,7 @@ export const zh: Record<string, string> = {
   "settings.anthropicAccounts.chatAllLimited": "这台设备上的所有 Claude 账户都已达到上限。ClawBox 将在 {time} 自动重新发送你的消息。",
   "settings.anthropicAccounts.chatAllLimitedNoRetry": "这台设备上的所有 Claude 账户在 {time} 之前都处于上限。",
   "settings.anthropicAccounts.chatNoAccount": "这台设备上没有可以响应的 Claude 账户。请在 设置 → 服务商 中重新验证其中一个。",
+  "settings.anthropicAccounts.chatThrottled": "Anthropic 正在短暂限制此 Claude 账户的速率。ClawBox 将在一分钟后重新发送你的消息。",
   "settings.anthropicAccounts.chatSwitching": "该 Claude 账户无法响应。ClawBox 正在切换到下一个账户，并将重新发送你的消息。",
 
   // 因所有 Anthropic 账户都受限而等待的运行，以及切换账户时时间线上的步骤

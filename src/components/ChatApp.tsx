@@ -6,7 +6,7 @@ import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
 import { describeChatFailure, describeFallbackReply } from '@/lib/chat-error-text'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
-import { describeChatSwap, reportAnthropicChatFailure } from '@/lib/anthropic-chat-swap'
+import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
 import {
@@ -255,10 +255,11 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   const connectedOnceRef = useRef(false)
   // The provider's own refusal rides on the lifecycle frames; see lib/chat-run-failure.ts.
   const runFailureRef = useRef(new RunFailureLedger())
-  // The turn in flight, for the Anthropic account swap (TASK-1260): a turn that
-  // died on the Claude account's limit is sent again, as it was, on the next
-  // account — which only works for words, never for attachments.
-  const lastTurnRef = useRef<{ text: string; hasAttachments: boolean } | null>(null)
+  // The turns sent, by idempotency key, for the Anthropic account swap
+  // (TASK-1260): a turn that died on the Claude account's limit is sent again,
+  // as it was, on the next account — only when the failed run IS that turn,
+  // and only for words, never for attachments.
+  const turnsRef = useRef(new TurnLedger())
   // A connect the gateway refused only because it is still booting is
   // retried on this ladder; reset once a connect lands.
   const startingRetriesRef = useRef(0)
@@ -864,13 +865,12 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
               // A Claude account at its limit, or refused (TASK-1260): the box
               // moves every Claude consumer to the next account and sends the
               // turn again; the chat says which of those happened.
-              const turn = lastTurnRef.current
               const forKey = sessionKeyRef.current
               void reportAnthropicChatFailure({
                 errorMessage: payload.errorMessage,
                 context: failureContext,
                 sessionKey: forKey || null,
-                message: turn && !turn.hasAttachments && turn.text.trim() ? turn.text : null,
+                message: turnsRef.current.resendable(payload.runId),
               }).then((answer) => {
                 const line = describeChatSwap(answer, failureWordsRef.current)
                 // Said in the conversation it happened in, or not at all.
@@ -1081,7 +1081,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     idempotencyKey: string,
   ) => {
     const transport = adapterRef.current
-    lastTurnRef.current = { text, hasAttachments: attachments.length > 0 }
+    turnsRef.current.remember(idempotencyKey, text, attachments.length > 0)
     let result: TurnResult
     try {
       result = await transport.sendTurn({

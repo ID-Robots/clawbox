@@ -10039,6 +10039,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     trackSettleWork(continueOnAnotherAccount(run, state, exitCode, why, carriedSecrets, carriedAccount));
     return;
   }
+  // Not carried on: this stretch of the run is over, and its refused-credential
+  // count goes with it rather than staying in the process for ever.
+  store.anthropicAuthRetries?.delete(run.id);
   if (accountDecision === "wait" && accountLimit) {
     void recordAccountLimit(run, accountLimit);
   }
@@ -11900,6 +11903,10 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
   if (run.status !== "paused" && run.status !== "gave_up") {
     throw new CodingAgentError("invalid", "Only a paused run, or one that gave up, can be resumed in place. Start a new run instead.");
   }
+  // The owner's own Resume starts the refused-credential budget afresh
+  // (MAX_AUTH_SWITCHES): refusals from an earlier stretch of the run say
+  // nothing about the accounts the owner may have signed in again since.
+  if (!automatic) store.anthropicAuthRetries?.delete(run.id);
   // The account the session was OPENED on — a resume cannot move to another
   // one, so if that credential is gone the resume is refused rather than
   // quietly re-enacted somewhere else. Handed to the gate rather than checked

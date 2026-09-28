@@ -612,7 +612,7 @@ describe("the gateway's copy of an account", () => {
 
   it("forgets a mirror of an account that is no longer on the list", async () => {
     const max = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: { access: "a", refresh: "r", expires: Date.now() + 3_600_000 } });
-    await pool.setGatewayMirror({ accountId: max.id, fingerprint: "0123456789abcdef", expiresAt: null, at: Date.now() });
+    await pool.setGatewayMirror({ accountId: max.id, fingerprint: "0123456789abcdef", expiresAt: null, at: Date.now(), pending: false });
     expect((await pool.describePool()).gateway).toMatchObject({ following: true, accountId: max.id, label: "Max" });
     await pool.removeAccount(max.id);
     expect((await pool.describePool()).gateway).toMatchObject({ following: false, accountId: null });

@@ -1342,7 +1342,7 @@ export const nl: Record<string, string> = {
   // vanzelf over op het volgende wanneer er een zijn gebruikslimiet bereikt.
   "settings.anthropicAccounts.title": "Anthropic-accounts",
   "settings.anthropicAccounts.intro":
-    "Alles op deze box dat Claude gebruikt (programmeerruns, de chat en zijn geplande taken) draait op één account uit deze lijst. Bereikt dat account zijn gebruikslimiet of weigert Anthropic het, dan gaat alles samen over op het volgende account en gaat verder waar het was.",
+    "Programmeerruns starten op één account uit deze lijst, en de chat en zijn geplande taken ook zodra de box een keer van account heeft moeten wisselen. Bereikt dat account zijn gebruikslimiet of weigert Anthropic het, dan gaat alles wat erop draait samen over op het volgende account en gaat verder waar het was.",
   "settings.anthropicAccounts.summaryReady": "{ready} van {total} klaar",
   "settings.anthropicAccounts.summaryAllLimited": "Alle beperkt · terug om {time}",
   "settings.anthropicAccounts.summaryNone": "Niet verbonden",
@@ -1393,7 +1393,9 @@ export const nl: Record<string, string> = {
   "settings.anthropicAccounts.actionFailed": "De accounts konden niet worden gewijzigd.",
   "settings.anthropicAccounts.refusedWrongAccount": "Deze aanmelding is van {signedIn}, niet van {expected}. Meld je aan als {expected} om {label} te vernieuwen, of verbind {signedIn} als een eigen account.",
   "settings.anthropicAccounts.refusedDuplicate": "Deze aanmelding is van {signedIn}, dat al in de lijst staat als {label}.",
-  "settings.anthropicAccounts.activeNow": "Programmeerruns, de chat en zijn geplande taken draaien op {label}.",
+  "settings.anthropicAccounts.activeNow": "Nieuwe programmeerruns starten op {label}.",
+  "settings.anthropicAccounts.activeChatOn": "De chat en zijn geplande taken draaien op {label}.",
+  "settings.anthropicAccounts.activeChatOwn": "De chat volgt zodra de box voor het eerst van account moet wisselen, als hij op een Claude-abonnement draait.",
   "settings.anthropicAccounts.allLimitedBanner": "Alle accounts beperkt, vroegste reset om {time}. Werk dat wacht gaat dan vanzelf verder.",
   "settings.anthropicAccounts.noneCanAnswer": "Geen enkel account kan antwoorden en geen enkel komt vanzelf terug. Verifieer er een opnieuw om verder te gaan.",
   "settings.anthropicAccounts.returnToPrimary": "Terug naar het eerste account zodra zijn limiet is gereset",
@@ -1425,6 +1427,7 @@ export const nl: Record<string, string> = {
   "settings.anthropicAccounts.chatAllLimited": "Elk Claude-account op deze box zit aan zijn limiet. ClawBox verstuurt je bericht om {time} vanzelf opnieuw.",
   "settings.anthropicAccounts.chatAllLimitedNoRetry": "Elk Claude-account op deze box zit tot {time} aan zijn limiet.",
   "settings.anthropicAccounts.chatNoAccount": "Geen enkel Claude-account op deze box kan antwoorden. Verifieer er een opnieuw via Instellingen → Providers.",
+  "settings.anthropicAccounts.chatThrottled": "Anthropic beperkt dit Claude-account even. ClawBox verstuurt je bericht over een minuut opnieuw.",
   "settings.anthropicAccounts.chatSwitching": "Dat Claude-account kon niet antwoorden. ClawBox gaat over op het volgende account en verstuurt je bericht opnieuw.",
 
   // Een run die wacht omdat elk Anthropic-account beperkt is, en de stappen op

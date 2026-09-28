@@ -1338,7 +1338,7 @@ export const sv: Record<string, string> = {
   // nästa när ett konto når sin användningsgräns.
   "settings.anthropicAccounts.title": "Anthropic-konton",
   "settings.anthropicAccounts.intro":
-    "Allt på den här boxen som använder Claude – kodningskörningar, chatten och dess schemalagda uppgifter – körs på ett konto i den här listan. När kontot når sin användningsgräns eller Anthropic nekar det går allt tillsammans över till nästa konto och fortsätter där det var.",
+    "Kodningskörningar startar på ett konto i den här listan, och det gör även chatten och dess schemalagda uppgifter när boxen väl har behövt byta konto. När kontot når sin användningsgräns eller Anthropic nekar det går allt som använder det tillsammans över till nästa konto och fortsätter där det var.",
   "settings.anthropicAccounts.summaryReady": "{ready} av {total} redo",
   "settings.anthropicAccounts.summaryAllLimited": "Alla begränsade · tillbaka {time}",
   "settings.anthropicAccounts.summaryNone": "Inte anslutet",
@@ -1389,7 +1389,9 @@ export const sv: Record<string, string> = {
   "settings.anthropicAccounts.actionFailed": "Kontona kunde inte ändras.",
   "settings.anthropicAccounts.refusedWrongAccount": "Den här inloggningen gäller {signedIn}, inte {expected}. Logga in som {expected} för att förnya {label}, eller anslut {signedIn} som ett eget konto.",
   "settings.anthropicAccounts.refusedDuplicate": "Den här inloggningen gäller {signedIn}, som redan finns i listan som {label}.",
-  "settings.anthropicAccounts.activeNow": "Kodningskörningar, chatten och dess schemalagda uppgifter körs på {label}.",
+  "settings.anthropicAccounts.activeNow": "Nya kodningskörningar startar på {label}.",
+  "settings.anthropicAccounts.activeChatOn": "Chatten och dess schemalagda uppgifter körs på {label}.",
+  "settings.anthropicAccounts.activeChatOwn": "Chatten följer med första gången boxen måste byta konto, om den körs på en Claude-prenumeration.",
   "settings.anthropicAccounts.allLimitedBanner": "Alla konton är begränsade, tidigaste återställning kl. {time}. Arbete som väntar fortsätter av sig självt då.",
   "settings.anthropicAccounts.noneCanAnswer": "Inget konto kan svara och inget kommer tillbaka av sig självt. Autentisera ett igen för att fortsätta.",
   "settings.anthropicAccounts.returnToPrimary": "Gå tillbaka till det första kontot när dess gräns har återställts",
@@ -1421,6 +1423,7 @@ export const sv: Record<string, string> = {
   "settings.anthropicAccounts.chatAllLimited": "Alla Claude-konton på den här boxen har nått sin gräns. ClawBox skickar ditt meddelande igen av sig självt kl. {time}.",
   "settings.anthropicAccounts.chatAllLimitedNoRetry": "Alla Claude-konton på den här boxen är vid sin gräns till kl. {time}.",
   "settings.anthropicAccounts.chatNoAccount": "Inget Claude-konto på den här boxen kan svara. Autentisera ett igen i Inställningar → Leverantörer.",
+  "settings.anthropicAccounts.chatThrottled": "Anthropic begränsar det här Claude-kontot en kort stund. ClawBox skickar ditt meddelande igen om en minut.",
   "settings.anthropicAccounts.chatSwitching": "Det Claude-kontot kunde inte svara. ClawBox byter till nästa konto och skickar ditt meddelande igen.",
 
   // En körning som väntar för att alla Anthropic-konton är begränsade, och

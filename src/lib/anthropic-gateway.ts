@@ -44,6 +44,7 @@ import { DATA_DIR } from "@/lib/config-store";
 import { gatewayIsAbsent, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
 import { gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 import { processStore } from "@/lib/process-store";
+import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
 import {
   gatewayCredentialFor,
   readPoolState,
@@ -88,6 +89,13 @@ interface GatewayRuntime {
   cronWatermark: number | null;
   /** One keeper / watcher pass at a time. */
   busy: boolean;
+  /**
+   * Every write of the gateway's profile, and every decision made from reading
+   * it, one after the other: the swap queue and the keeper's timer are two
+   * writers, and a keeper that read the mirror before a swap wrote the new
+   * account would take the swap's token for the owner's own sign-in.
+   */
+  lock: SerialLock;
 }
 
 function runtime(): GatewayRuntime {
@@ -98,6 +106,7 @@ function runtime(): GatewayRuntime {
     watcher: null,
     cronWatermark: null,
     busy: false,
+    lock: createSerialLock(),
   }));
 }
 
@@ -122,17 +131,29 @@ export async function applyGatewaySwap(ctx: SwapContext): Promise<SwapConsumerOu
   if (deps().absent()) return outcome("skipped", "no_gateway");
   const { change } = ctx;
   if (!change.toId) return outcome("skipped", "no_account");
-  const pool = await readPoolState();
-  if (pool.gateway === null && !ctx.takeover && !TAKEOVER_CAUSES.has(change.cause)) return outcome("skipped", "not_following");
-  return syncGatewayTo(change.toId, { restart: true });
+  const target = change.toId;
+  return runtime().lock(async () => {
+    const pool = await readPoolState();
+    if (pool.gateway === null && !ctx.takeover && !TAKEOVER_CAUSES.has(change.cause)) return outcome("skipped", "not_following");
+    // Waited behind another writer (a keeper pass, a move that timed out in
+    // the queue but is still restarting the gateway): a target that is no
+    // longer the active account is history.
+    if (pool.activeId !== target) return outcome("skipped", "superseded");
+    return syncLocked(target, { restart: true });
+  });
 }
 
 /**
  * Put the gateway on `accountId`: write, restart, read back. Answers what it
- * did in the swap's fixed words. `restart: false` is the keeper's renewal — the
- * token the gateway holds is still good, and the next read picks the new one.
+ * did in the swap's fixed words. `restart: false` puts the token in for the
+ * gateway's next read and owes no restart.
  */
-export async function syncGatewayTo(accountId: string, opts: { restart: boolean }): Promise<SwapConsumerOutcome> {
+export function syncGatewayTo(accountId: string, opts: { restart: boolean }): Promise<SwapConsumerOutcome> {
+  return runtime().lock(() => syncLocked(accountId, opts));
+}
+
+/** `syncGatewayTo`'s body, under the gateway lock. */
+async function syncLocked(accountId: string, opts: { restart: boolean }): Promise<SwapConsumerOutcome> {
   const d = deps();
   if (d.absent()) return outcome("skipped", "no_gateway");
   const pool = await readPoolState();
@@ -145,14 +166,25 @@ export async function syncGatewayTo(accountId: string, opts: { restart: boolean 
   if (!token) return outcome("failed", "credential_unavailable");
   const fingerprint = tokenFingerprint(token.access);
   const alreadyThere = profiles.every((p) => p.fingerprint === fingerprint);
+  const mirror = pool.gateway;
+  // Done only when the files hold it AND the gateway was restarted onto it: a
+  // write whose restart failed is not a gateway on the new account.
+  const settled = alreadyThere && mirror?.accountId === accountId && mirror.fingerprint === fingerprint && !mirror.pending;
+  if (settled) return outcome("ok", "already", profiles.length);
   let written = alreadyThere ? profiles.length : 0;
   if (!alreadyThere) {
     const result = d.write(token);
     if (result.written === 0) return outcome("failed", "write_failed");
     written = result.written;
   }
-  await setGatewayMirror({ accountId, fingerprint, expiresAt: token.expires, at: Date.now() });
-  if (!opts.restart || alreadyThere) return outcome("ok", alreadyThere ? "already" : "renewed", written);
+  const record = (pending: boolean) => setGatewayMirror({ accountId, fingerprint, expiresAt: token.expires, at: Date.now(), pending });
+  if (!opts.restart) {
+    await record(false);
+    return outcome("ok", "renewed", written);
+  }
+  // Recorded as OWED before the restart and as done only after it: a restart
+  // that fails leaves the keeper something to finish.
+  await record(true);
   try {
     await d.restart();
   } catch (err) {
@@ -169,6 +201,7 @@ export async function syncGatewayTo(accountId: string, opts: { restart: boolean 
     }
     if (d.list().some((p) => p.fingerprint !== fingerprint)) return outcome("failed", "write_lost", written);
   }
+  await record(false);
   console.error(`[anthropic-gateway] the gateway now runs on Anthropic account ${accountId} (${written} profile(s))`);
   return outcome("ok", "switched", written);
 }
@@ -177,18 +210,28 @@ export async function syncGatewayTo(accountId: string, opts: { restart: boolean 
 
 export type KeeperResult = "idle" | "fresh" | "renewed" | "resynced" | "stood_down" | "failed";
 
-/** One keeper pass. Exported for the tests; the timer calls it every ten minutes. */
-export async function keepGatewayMirror(): Promise<KeeperResult> {
+/**
+ * One keeper pass, under the gateway lock: the mirror it reads is the mirror
+ * as the last writer left it. Exported for the tests; the timer calls it every
+ * ten minutes.
+ */
+export function keepGatewayMirror(): Promise<KeeperResult> {
+  return runtime().lock(keepLocked);
+}
+
+async function keepLocked(): Promise<KeeperResult> {
   const d = deps();
   if (d.absent()) return "idle";
   const pool = await readPoolState();
   const mirror = pool.gateway;
   if (!mirror) return "idle";
-  // The active account moved and the swap could not take the gateway with it
-  // (a restart that failed): try again.
-  if (pool.activeId && mirror.accountId !== pool.activeId) {
-    const account = pool.accounts.find((a) => a.id === pool.activeId);
-    if (account?.kind === "oauth") return (await syncGatewayTo(pool.activeId, { restart: true })).status === "ok" ? "resynced" : "failed";
+  // The swap did not finish taking the gateway along — the active account
+  // moved past it, or its restart failed (`pending`): finish it now.
+  const behind = pool.activeId !== null && mirror.accountId !== pool.activeId
+    && pool.accounts.find((a) => a.id === pool.activeId)?.kind === "oauth";
+  if (behind || mirror.pending) {
+    const target = behind && pool.activeId ? pool.activeId : mirror.accountId;
+    return (await syncLocked(target, { restart: true })).status === "ok" ? "resynced" : "failed";
   }
   const profiles = d.list();
   if (profiles.length === 0) {
@@ -206,7 +249,7 @@ export async function keepGatewayMirror(): Promise<KeeperResult> {
   }
   if (fingerprint === mirror.fingerprint && profiles.every((p) => p.fingerprint === fingerprint)) return "fresh";
   if (d.write(token).written === 0) return "failed";
-  await setGatewayMirror({ ...mirror, fingerprint, expiresAt: token.expires });
+  await setGatewayMirror({ ...mirror, fingerprint, expiresAt: token.expires, pending: false });
   return "renewed";
 }
 
@@ -400,4 +443,5 @@ export function _setGatewayDepsForTests(overrides: Partial<GatewayDeps> | null):
   state.registered = false;
   state.cronWatermark = null;
   state.busy = false;
+  state.lock = createSerialLock();
 }

@@ -239,7 +239,7 @@ describe("a failure another consumer reports", () => {
     const { personal } = await twoAccounts();
     const coding = consumer("coding", { status: "ok", code: "moved", count: 1 });
     const gateway = consumer("gateway", async (ctx) => {
-      await pool.setGatewayMirror({ accountId: ctx.change.toId!, fingerprint: "0123456789abcdef", expiresAt: null, at: Date.now() });
+      await pool.setGatewayMirror({ accountId: ctx.change.toId!, fingerprint: "0123456789abcdef", expiresAt: null, at: Date.now(), pending: false });
       return { status: "ok", code: "switched", count: 1 };
     });
     await pool.markLimited((await pool.readAccounts())[0].id, Date.now() + 60_000, "session");
@@ -274,6 +274,57 @@ describe("a failure another consumer reports", () => {
     const outcome = await swap.reportAnthropicFailure({ text: "Invalid API key · Please run /login", source: "chat", accountId: work.id });
     expect(outcome).toMatchObject({ handled: true, kind: "auth", activeId: personal.id });
     expect((await pool.readAccounts())[0].status).toBe("revoked");
+  });
+
+  it("keeps an account on a bare rate limit, sends the turn again a minute later, and swaps only when it comes back", async () => {
+    const { work, personal } = await twoAccounts();
+    consumer("gateway", { status: "ok", code: "switched", count: 1 });
+    const BARE = 'HTTP 429: {"type":"error","error":{"type":"rate_limit_error"}}';
+    const retried = vi.fn(async () => true);
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    const first = await swap.reportAnthropicFailure({ text: BARE, source: "cron", accountId: work.id, retry: { key: "cron:job-9", after: "gateway", run: retried } });
+    expect(first).toMatchObject({ handled: true, kind: "throttled", retry: "later", activeId: work.id });
+    expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+    expect(announceAnthropicLimit).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(60_000);
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(retried).toHaveBeenCalledTimes(1));
+
+    const second = await swap.reportAnthropicFailure({ text: BARE, source: "cron", accountId: work.id, retry: { key: "cron:job-9", after: "gateway", run: retried } });
+    expect(second).toMatchObject({ handled: true, kind: "limit", activeId: personal.id, retry: "sent" });
+    expect(retried).toHaveBeenCalledTimes(2);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)).toMatchObject({ status: "limited", limitKind: "rate" });
+  });
+
+  it("forgets a throttle after ten quiet minutes", async () => {
+    const { work } = await twoAccounts();
+    const BARE = 'HTTP 429: {"type":"error","error":{"type":"rate_limit_error"}}';
+    expect((await swap.reportAnthropicFailure({ text: BARE, source: "chat", accountId: work.id })).kind).toBe("throttled");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 11 * 60_000);
+    expect((await swap.reportAnthropicFailure({ text: BARE, source: "chat", accountId: work.id })).kind).toBe("throttled");
+    expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+
+  it("puts a renewed credential into the gateway, without filing a swap, before the retry", async () => {
+    const { work } = await twoAccounts();
+    const order: string[] = [];
+    const gateway = consumer("gateway", async () => {
+      order.push("gateway");
+      return { status: "ok", code: "switched", count: 1 };
+    });
+    await pool.setGatewayMirror({ accountId: work.id, fingerprint: "0123456789abcdef", expiresAt: null, at: Date.now(), pending: false });
+    const before = (await pool.describePool()).lastSwap;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 200 })));
+    const outcome = await swap.reportAnthropicFailure({
+      text: "Invalid API key · Please run /login", source: "chat", accountId: work.id,
+      retry: { key: "chat:s:9", after: "gateway", run: async () => { order.push("retry"); return true; } },
+    });
+    expect(outcome).toMatchObject({ handled: true, kind: "auth", activeId: work.id, retry: "sent" });
+    expect(order).toEqual(["gateway", "retry"]);
+    expect(gateway[0]).toMatchObject({ takeover: true, change: { toId: work.id } });
+    expect((await pool.describePool()).lastSwap).toEqual(before);
+    expect(announceAnthropicLimit).not.toHaveBeenCalled();
   });
 
   it("does nothing for a failure that is neither a limit nor a refused credential", async () => {
