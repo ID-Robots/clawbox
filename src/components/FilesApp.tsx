@@ -1444,6 +1444,7 @@ function GridView({ files, showLocation, selected, onSelect, onOpen, onContextMe
 }) {
   return (
     <div className="p-4 grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))" }}
+      data-testid="files-grid"
       onClick={() => onSelect(null)}>
       {files.map((entry) => {
         const id = entryId(entry);

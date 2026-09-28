@@ -27,6 +27,8 @@ type FileEntry = {
 
 type FileTree = Record<string, FileEntry[]>;
 
+type ProjectFolderEntry = { path: string; name: string; missing?: boolean };
+
 type StoreCatalogApp = {
   name: string;
   slug: string;
@@ -46,6 +48,13 @@ type MockOptions = {
   kvEntries?: Record<string, string>;
   wifiNetworks?: WifiNetwork[];
   files?: FileTree;
+  /**
+   * The Files app's Projects (`/setup-api/project-folders`): what is pinned
+   * and what the box suggests. Paths are browse-relative, like `files` keys;
+   * a pin is accepted only for a folder `files` holds.
+   */
+  projectFolders?: ProjectFolderEntry[];
+  projectSuggestions?: ProjectFolderEntry[];
   storeApps?: StoreCatalogApp[];
   timeoutCapMs?: number;
   /**
@@ -296,6 +305,8 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
   const storeApps = clone(options.storeApps ?? DEFAULT_STORE_APPS);
   const kvEntries: Record<string, string> = clone(options.kvEntries ?? {});
   const files = clone(options.files ?? DEFAULT_FILES);
+  let projectFolders: ProjectFolderEntry[] = clone(options.projectFolders ?? []);
+  let projectSuggestions: ProjectFolderEntry[] = clone(options.projectSuggestions ?? []);
   let dismissalFingerprint: string | null = null;
   let hotspotConfig = {
     ssid: "ClawBox-Setup",
@@ -1308,6 +1319,38 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       return;
     }
 
+    if (path === "/setup-api/project-folders") {
+      if (method === "GET") {
+        await fulfillJson(route, { folders: clone(projectFolders), suggestions: clone(projectSuggestions), max: 50 });
+        return;
+      }
+      if (method === "POST") {
+        const payload = await readRequestJson<{ path?: string }>(route);
+        const rel = normalizeDir((payload.path ?? "").replace(/^~\/?/, ""));
+        if (!rel) {
+          await fulfillJson(route, { error: "The home folder is already in the sidebar", code: "is_root" }, 400);
+          return;
+        }
+        if (!files[rel]) {
+          await fulfillJson(route, { error: "There is no folder at that path", code: "not_found" }, 404);
+          return;
+        }
+        const folder = { path: rel, name: splitPath(rel).name };
+        const added = !projectFolders.some((f) => f.path === rel);
+        if (added) projectFolders = [...projectFolders, folder];
+        projectSuggestions = projectSuggestions.filter((f) => f.path !== rel);
+        await fulfillJson(route, { ok: true, added, folder, folders: clone(projectFolders) });
+        return;
+      }
+      if (method === "DELETE") {
+        const rel = normalizeDir(url.searchParams.get("path"));
+        const removed = projectFolders.some((f) => f.path === rel);
+        projectFolders = projectFolders.filter((f) => f.path !== rel);
+        await fulfillJson(route, { ok: true, removed, folders: clone(projectFolders) });
+        return;
+      }
+    }
+
     if (path === "/setup-api/files") {
       const dir = normalizeDir(url.searchParams.get("dir"));
 
@@ -1344,6 +1387,31 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       const decodedPath = encodedPath.split("/").map(decodeURIComponent).join("/");
       const { dir, name } = splitPath(decodedPath);
       const entry = (files[dir] ?? []).find((item) => item.name === name);
+
+      // A folder downloads as one ZIP: `?zip=1&check=1` is the count the
+      // Files app asks for first, `?zip=1` the archive itself.
+      if (method === "GET" && entry?.type === "directory" && url.searchParams.get("zip") === "1") {
+        if (url.searchParams.get("check") === "1") {
+          const inside = files[normalizeDir(decodedPath)] ?? [];
+          await fulfillJson(route, {
+            name: `${name}.zip`,
+            entries: inside.length + 1,
+            files: inside.filter((item) => item.type === "file").length,
+            bytes: inside.reduce((sum, item) => sum + (item.size ?? 0), 0),
+            tooMany: false,
+            limit: 100_000,
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/zip",
+          headers: { "Content-Disposition": `attachment; filename="${name}.zip"` },
+          // An empty archive: the end-of-central-directory record alone.
+          body: Buffer.from([0x50, 0x4b, 0x05, 0x06, ...new Array(18).fill(0)]),
+        });
+        return;
+      }
 
       if (method === "GET") {
         await route.fulfill({
