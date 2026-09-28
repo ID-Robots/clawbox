@@ -145,6 +145,23 @@ def _retry_credentials(server: str, token: str, attempts: int = 3) -> api.Creden
     raise last
 
 
+def _note_credentials(st: state.State, refused: str | None) -> None:
+    """Record on `st` whether the portal is refusing credentials for quota.
+
+    `refused` is the `ApiError.kind` of a refused mint, or None when the mint
+    succeeded. Only quota is tracked: a quota refusal is the one that clears on
+    its own (a counter corrected, a snapshot deleted in the portal), and the
+    bridge re-arms a schedule that was switched off during one as soon as this
+    goes back to 0. The first refusal's time is kept across repeats. Any other
+    refusal — network, server, tier — says nothing about quota either way, so
+    it leaves the record alone. Callers persist `st` themselves.
+    """
+    if refused is None:
+        st.quota_full_since_ms = 0
+    elif refused == "quota_full" and not st.quota_full_since_ms:
+        st.quota_full_since_ms = api.now_ms()
+
+
 def _recompute_usage(st: state.State, creds: api.Credentials) -> s3.CloudStats | None:
     """Re-derive cloud usage from the objects in R2 and record it on `st`.
 
@@ -322,6 +339,7 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         log.error("%s: %s", e.kind, e)
         ok = _heartbeat_safe(cfg.server, token, status="error", error=prefixed)
         _stamp_heartbeat(st, ok, "error")
+        _note_credentials(st, e.kind)
         state.save(st)
         if e.kind == "quota_full":
             return EXIT_QUOTA_FULL
@@ -330,6 +348,10 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         if e.kind == "server":
             return EXIT_SERVER
         return EXIT_NETWORK if e.kind == "network" else EXIT_UNKNOWN
+
+    # Credentials minted: whatever quota refusal there was is over. Persisted
+    # with the first `_stamp_step` below.
+    _note_credentials(st, None)
 
     # Count what is in the prefix *before* this run adds to it, and send that
     # with the run's first heartbeat. Doing it here rather than only at the end
@@ -587,11 +609,14 @@ def run_idle(cfg: Config, token: str) -> int:
     # recount degrades to the bare heartbeat this function has always sent
     # rather than costing the device its heartbeat too.
     cloud: s3.CloudStats | None = None
+    quota_before = st.quota_full_since_ms
     try:
         creds = api.mint_credentials(cfg.server, token)
     except ApiError as e:
         log.warning("idle usage recount skipped — no credentials (%s): %s", e.kind, e)
+        _note_credentials(st, e.kind)
     else:
+        _note_credentials(st, None)
         cloud = _recompute_usage(st, creds)
 
     try:
@@ -605,8 +630,10 @@ def run_idle(cfg: Config, token: str) -> int:
     except ApiError as e:
         log.warning("idle heartbeat failed (%s): %s", e.kind, e)
         # A recount that the portal never heard is still true for this box —
-        # persist it so the panel is right even while the portal isn't.
-        if cloud is not None:
+        # persist it so the panel is right even while the portal isn't. The
+        # same for what the mint said about quota: it is the portal's answer
+        # whether or not the heartbeat after it landed.
+        if cloud is not None or st.quota_full_since_ms != quota_before:
             state.save(st)
         return EXIT_NETWORK if e.kind == "network" else EXIT_UNKNOWN
 

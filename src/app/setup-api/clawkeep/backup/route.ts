@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { ClawKeepError, backupExitError, clawKeepErrorBody, runBackup } from "@/lib/clawkeep";
+import { recheckQuotaHold } from "@/lib/clawkeep-scheduler";
 
 export const dynamic = "force-dynamic";
 
@@ -90,6 +91,15 @@ export async function POST(request: NextRequest) {
         { ...clawKeepErrorBody(failure, "Backup failed"), exitCode: result.exitCode },
         { status: failure.status, headers: { "Cache-Control": "no-store" } },
       );
+    }
+    // A real backup that worked is the best evidence there is that the account
+    // issues credentials again: if auto-backup was paused for a full account,
+    // this is when it comes back (TASK-1211). Not awaited — the owner's answer
+    // is this run, not the schedule's.
+    if (!idle) {
+      void recheckQuotaHold().catch((err) => {
+        console.warn("[clawkeep] quota-hold recheck after a backup failed:", err);
+      });
     }
     return NextResponse.json(
       {
