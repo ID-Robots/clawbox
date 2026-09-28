@@ -98,7 +98,7 @@ export async function POST(request: NextRequest) {
     // is this run, not the schedule's.
     if (!idle) {
       void recheckQuotaHold().catch((err) => {
-        console.warn("[clawkeep] quota-hold recheck after a backup failed:", err);
+        console.warn("[clawkeep] could not recheck the quota hold after a successful backup:", err);
       });
     }
     return NextResponse.json(

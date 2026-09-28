@@ -16,6 +16,8 @@ const daemon = vi.hoisted(() => ({
   spawns: [] as { bin: string; args: string[] }[],
   exitCode: 0,
   stdout: "",
+  /** Runs while the fake process is "listing" — for what lands meanwhile. */
+  duringRun: null as null | (() => Promise<void>),
 }));
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -30,7 +32,8 @@ vi.mock("node:child_process", async (importOriginal) => {
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.kill = () => {};
-    setImmediate(() => {
+    setImmediate(async () => {
+      await daemon.duringRun?.();
       if (daemon.stdout) child.stdout.emit("data", Buffer.from(daemon.stdout));
       child.emit("close", daemon.exitCode);
     });
@@ -74,6 +77,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   daemon.spawns.length = 0;
+  daemon.duringRun = null;
   daemon.exitCode = 0;
   daemon.stdout = JSON.stringify({ ok: true, snapshots: [], quotaBytes: 54_760_833_024, cloudBytes: 0 });
   for (const entry of await fs.readdir(DATA_DIR).catch(() => [] as string[])) {
@@ -122,6 +126,18 @@ describe("releaseQuotaHoldIfCredentialsWork", () => {
       quota_full_since_ms: 0,
       last_cloud_bytes: 7,
     });
+  });
+
+  it("keeps a cadence the owner changed while the account was being asked", async () => {
+    // The listing takes seconds. A save landing inside them must not be
+    // written back over by the release — it sends `enabled` and nothing else.
+    await writeJson(SCHEDULE_FILE, PAUSED);
+    daemon.duringRun = () => writeJson(SCHEDULE_FILE, { ...PAUSED, timeOfDay: "04:30" });
+
+    const check = await clawkeep.releaseQuotaHoldIfCredentialsWork();
+
+    expect(check.outcome).toBe("released");
+    expect(await readJson(SCHEDULE_FILE)).toMatchObject({ enabled: true, timeOfDay: "04:30", frequency: "weekly" });
   });
 
   it("takes a backup that succeeded after the pause as the evidence, without asking the account", async () => {

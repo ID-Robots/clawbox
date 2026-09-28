@@ -693,6 +693,7 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     for (const hold of [0, undefined]) {
       apiGet.mockResolvedValue({ ...box, scheduleQuotaHoldSinceMs: hold });
       const plain = await system("openclaw").call("backup_status", {});
+      if (plain.isError) throw new Error("backup_status failed");
       expect((JSON.parse(plain.text).notes as string[]).join("\n")).not.toMatch(/paused, not off/);
     }
   });

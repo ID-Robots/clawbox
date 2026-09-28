@@ -511,7 +511,7 @@ async function nextQuotaHoldSinceMs(
   return quotaFullSinceMs > 0 ? Date.now() : 0;
 }
 
-export async function writeSchedule(update: unknown): Promise<{
+export async function writeSchedule(update: Partial<ClawKeepSchedule>): Promise<{
   schedule: ClawKeepSchedule;
   armedAtMs: number;
   quotaHoldSinceMs: number;
@@ -593,7 +593,9 @@ export async function releaseQuotaHoldIfCredentialsWork(): Promise<QuotaHoldChec
   if (current.unreadable || current.schedule.enabled || current.quotaHoldSinceMs !== held.quotaHoldSinceMs) {
     return { outcome: "none" };
   }
-  const saved = await writeSchedule({ ...current.schedule, enabled: true });
+  // Only `enabled` is sent: a save is an update, so a cadence or retention the
+  // owner changed while the listing ran is kept rather than written back over.
+  const saved = await writeSchedule({ enabled: true });
   return { outcome: "released", schedule: saved.schedule, armedAtMs: saved.armedAtMs };
 }
 
