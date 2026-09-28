@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useId, useRef } from "react";
 import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
@@ -35,6 +35,45 @@ type ContextMenuState = {
   x: number;
   y: number;
 } | null;
+
+/**
+ * A folder the owner pinned to Projects (src/lib/project-folders.ts). `path`
+ * is browse-relative, the same string `load()` takes.
+ */
+interface ProjectFolder {
+  path: string;
+  name: string;
+  missing?: boolean;
+}
+
+/** What the window shows: a folder, or the owner's pinned project folders. */
+type Place = "folder" | "projects";
+
+function isProjectFolder(v: unknown): v is ProjectFolder {
+  return !!v && typeof v === "object"
+    && typeof (v as ProjectFolder).path === "string"
+    && typeof (v as ProjectFolder).name === "string";
+}
+
+/**
+ * The pinned folder `dir` is in (or is), deepest first — `projects` and
+ * `projects/site` both pinned puts `projects/site/src` under the second. A
+ * missing pin is no folder to be in.
+ */
+function projectRootOf(dir: string, folders: ProjectFolder[]): ProjectFolder | null {
+  let best: ProjectFolder | null = null;
+  for (const f of folders) {
+    if (f.missing) continue;
+    if (dir !== f.path && !dir.startsWith(`${f.path}/`)) continue;
+    if (!best || f.path.length > best.path.length) best = f;
+  }
+  return best;
+}
+
+/** `/setup-api/files/<path>`, each segment encoded. */
+function filesUrl(relPath: string): string {
+  return `/setup-api/files/${relPath.split("/").map(encodeURIComponent).join("/")}`;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -137,11 +176,19 @@ function looksBinary(text: string): boolean {
 /**
  * `initialPath` is the browse-relative folder the window opens in — the
  * Coding Agent's "Open in Files" hands a project's folder through the
- * window's record; a plain Files window starts at home.
+ * window's record; a plain Files window starts at home. `initialPlace`
+ * "projects" opens on the owner's pinned project folders instead (the
+ * desktop's Projects icon) — a path, when both are given, wins.
  */
-export default function FilesApp({ initialPath = "" }: { initialPath?: string } = {}) {
+export default function FilesApp({ initialPath = "", initialPlace }: { initialPath?: string; initialPlace?: "projects" } = {}) {
   const { t } = useT();
   const tr = useTr();
+  const startsOnProjects = initialPlace === "projects" && !initialPath;
+  const [place, setPlace] = useState<Place>(startsOnProjects ? "projects" : "folder");
+  const [projects, setProjects] = useState<ProjectFolder[]>([]);
+  const [suggestions, setSuggestions] = useState<ProjectFolder[]>([]);
+  const [projectsState, setProjectsState] = useState<"loading" | "ready" | "error">("loading");
+  const [projectsMax, setProjectsMax] = useState(50);
   const [currentPath, setCurrentPath] = useState("");
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -253,12 +300,18 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
   // On a phone, Back walks up the folder tree one level per press (and closes
   // an open file or the covering sidebar first) instead of closing Files.
   const phoneLayout = usePhoneLayout();
+  // Inside a pinned project the trail — and Back, and Up — start at the
+  // project, not at the home folder it happens to live in: the assistant's
+  // projects are three hidden folders down (`.openclaw/workspace/projects`),
+  // and walking up through those is not the way the owner came in.
+  const projectRoot = place === "folder" ? projectRootOf(currentPath, projects) : null;
   const folderDepth = currentPath.split("/").filter(Boolean).length;
-  useMobileBack(phoneLayout && folderDepth > 0, () => {
-    const parts = currentPath.split("/").filter(Boolean);
-    parts.pop();
-    void load(parts.join("/"));
-  }, folderDepth);
+  const backLevels = place === "projects"
+    ? 0
+    : projectRoot
+      ? folderDepth - projectRoot.path.split("/").length + 1
+      : folderDepth;
+  useMobileBack(phoneLayout && backLevels > 0, () => goUp(), backLevels);
   useMobileBack(phoneLayout && narrow && sidebarOpen, () => setSidebarOpen(false));
   // An open file claims Back inside FileViewer, through its own attemptClose,
   // so unsaved edits get the discard prompt instead of being dropped.
@@ -309,7 +362,89 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
     }
   }, [showStatus]);
 
-  useEffect(() => { load(initialPath); }, [load, initialPath]);
+  // The Projects view lists no folder, so a window that opens on it has none
+  // to fetch until the owner picks one.
+  useEffect(() => { if (!startsOnProjects) void load(initialPath); }, [load, initialPath, startsOnProjects]);
+
+  // ─── Projects ──────────────────────────────────────────────────────────────
+
+  // Read once on mount for the sidebar, and again whenever the Projects view
+  // is opened (the suggestions follow what is on the disk).
+  const loadProjects = useCallback(async () => {
+    try {
+      const res = await fetch("/setup-api/project-folders");
+      const data = await res.json().catch(() => null) as { folders?: unknown; suggestions?: unknown; max?: unknown } | null;
+      if (!res.ok || !data) throw new Error(String(res.status));
+      setProjects(Array.isArray(data.folders) ? data.folders.filter(isProjectFolder) : []);
+      setSuggestions(Array.isArray(data.suggestions) ? data.suggestions.filter(isProjectFolder) : []);
+      if (typeof data.max === "number") setProjectsMax(data.max);
+      setProjectsState("ready");
+    } catch {
+      setProjectsState("error");
+    }
+  }, []);
+  useEffect(() => { void loadProjects(); }, [loadProjects]);
+
+  /** Why a pin was refused, in the owner's words; the route's own text is the last resort. */
+  const pinRefusal = (code: unknown, message: unknown): string => {
+    switch (code) {
+      case "outside_root": return t("files.pinOutsideRoot");
+      case "protected": return t("files.pinProtected");
+      case "not_found": return t("files.pinNotFound");
+      case "not_directory": return t("files.pinNotDirectory");
+      case "is_root": return t("files.pinIsRoot");
+      case "too_many": return t("files.pinTooMany", { max: projectsMax });
+      default: return t("files.errorPrefix", { message: typeof message === "string" && message ? message : t("files.projectsLoadError") });
+    }
+  };
+
+  /** Pin a folder; answers the refusal it showed, or null when it landed. */
+  const pinFolder = async (input: string): Promise<string | null> => {
+    try {
+      const res = await fetch("/setup-api/project-folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: input }),
+      });
+      const data = await res.json().catch(() => ({})) as { folder?: unknown; folders?: unknown; code?: unknown; error?: unknown };
+      if (!res.ok) {
+        const msg = pinRefusal(data.code, data.error);
+        showStatus(msg);
+        return msg;
+      }
+      if (Array.isArray(data.folders)) setProjects(data.folders.filter(isProjectFolder));
+      const folder = isProjectFolder(data.folder) ? data.folder : null;
+      if (folder) setSuggestions((s) => s.filter((x) => x.path !== folder.path));
+      showStatus(t("files.pinned", { name: folder?.name ?? input }), 2500);
+      return null;
+    } catch (e) {
+      const msg = pinRefusal(null, e instanceof Error ? e.message : null);
+      showStatus(msg);
+      return msg;
+    }
+  };
+
+  const unpinFolder = async (folder: ProjectFolder) => {
+    try {
+      const res = await fetch(`/setup-api/project-folders?path=${encodeURIComponent(folder.path)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({})) as { folders?: unknown; error?: unknown };
+      if (!res.ok) { showStatus(t("files.errorPrefix", { message: typeof data.error === "string" ? data.error : res.statusText })); return; }
+      if (Array.isArray(data.folders)) setProjects(data.folders.filter(isProjectFolder));
+      showStatus(t("files.unpinned", { name: folder.name }), 2500);
+      // An unpinned folder may be one the box would suggest again.
+      void loadProjects();
+    } catch (e) {
+      showStatus(t("files.errorPrefix", { message: e instanceof Error ? e.message : String(e) }));
+    }
+  };
+
+  /** The pin for exactly this folder, if it has one. */
+  const pinFor = (relPath: string) => projects.find((f) => f.path === relPath) ?? null;
+  const togglePin = (relPath: string) => {
+    const pin = pinFor(relPath);
+    if (pin) void unpinFolder(pin);
+    else void pinFolder(relPath);
+  };
 
   // POSIX hidden files start with a dot. We filter client-side because the
   // server returns the full directory; this lets the toggle flip instantly
@@ -379,20 +514,65 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
 
   // ─── Breadcrumbs ────────────────────────────────────────────────────────────
 
-  const breadcrumbs = [t("files.home"), ...currentPath.split("/").filter(Boolean)];
+  // `path` null is the Projects view. Inside a pinned project the trail is
+  // Projects › <project> › …, not Home › .openclaw › workspace › projects › …
+  const breadcrumbs: { label: string; path: string | null }[] = (() => {
+    if (place === "projects") return [{ label: t("files.projects"), path: null }];
+    const segs = currentPath.split("/").filter(Boolean);
+    const trail = (from: number, prefix: string[]) => segs.slice(from).map((seg, i) => ({
+      label: seg,
+      path: [...prefix, ...segs.slice(from, from + i + 1)].join("/"),
+    }));
+    if (projectRoot) {
+      const rootSegs = projectRoot.path.split("/");
+      return [
+        { label: t("files.projects"), path: null },
+        { label: projectRoot.name, path: projectRoot.path },
+        ...trail(rootSegs.length, rootSegs),
+      ];
+    }
+    return [{ label: t("files.home"), path: "" }, ...trail(0, [])];
+  })();
   // Which crumbs are drawn: all of them, or — in a window too narrow for the
   // trail — the folder itself with its ancestors folded behind one "…".
   const shownCrumbs = narrow && breadcrumbs.length > 2
     ? [breadcrumbs.length - 2, breadcrumbs.length - 1]
     : breadcrumbs.map((_, i) => i);
 
-  const navigateBreadcrumb = (idx: number) => {
-    if (idx === 0) { load(""); return; }
-    const parts = currentPath.split("/").filter(Boolean).slice(0, idx);
-    load(parts.join("/"));
+  // ─── Navigation ────────────────────────────────────────────────────────────
+
+  const openProjects = () => {
+    if (recursive || searchOpen) closeSearch();
+    setViewer(null);
+    setSelected(null);
+    showStatus(null);
+    setPlace("projects");
+    void loadProjects();
   };
 
-  // ─── Navigation ────────────────────────────────────────────────────────────
+  const openFolder = (dir: string) => {
+    if (recursive || searchOpen) closeSearch();
+    setPlace("folder");
+    void load(dir);
+  };
+
+  const navigateBreadcrumb = (idx: number) => {
+    const crumb = breadcrumbs[idx];
+    if (!crumb) return;
+    if (crumb.path === null) openProjects();
+    else openFolder(crumb.path);
+  };
+
+  // One level up: to the Projects view from a project's own folder, else to
+  // the parent folder; nothing above the home folder or the Projects view.
+  function goUp() {
+    if (place === "projects") return;
+    if (projectRoot && currentPath === projectRoot.path) { openProjects(); return; }
+    if (!currentPath) return;
+    const parts = currentPath.split("/").filter(Boolean);
+    parts.pop();
+    void load(parts.join("/"));
+  }
 
   // Open: directories navigate (search results jump to their real location);
   // files open in the in-window viewer/editor.
@@ -409,8 +589,33 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
   // ─── Download ──────────────────────────────────────────────────────────────
 
   const downloadFile = (entry: FileEntry) => {
-    const url = `/setup-api/files/${entryRelPath(entry).split("/").map(encodeURIComponent).join("/")}`;
-    downloadViaLink(url, entry.name);
+    downloadViaLink(filesUrl(entryRelPath(entry)), entry.name);
+  };
+
+  // A folder goes down as one ZIP. The box is asked first what it would hold,
+  // so "too many files" is said here instead of as a failed download in the
+  // browser's list, and the owner sees how big it is before it starts.
+  const downloadFolderZip = async (relPath: string, name: string) => {
+    const url = `${filesUrl(relPath)}?zip=1`;
+    showStatus(t("files.zipPreparing", { name: `${name}.zip` }));
+    try {
+      const res = await fetch(`${url}&check=1`);
+      const data = await res.json().catch(() => ({})) as { code?: unknown; error?: unknown; limit?: unknown; files?: unknown; bytes?: unknown };
+      if (!res.ok) {
+        showStatus(data.code === "too_many_entries"
+          ? t("files.zipTooMany", { max: typeof data.limit === "number" ? data.limit.toLocaleString() : "" })
+          : t("files.errorPrefix", { message: typeof data.error === "string" ? data.error : res.statusText }));
+        return;
+      }
+      downloadViaLink(url, `${name}.zip`);
+      showStatus(t("files.zipStarted", {
+        name: `${name}.zip`,
+        count: typeof data.files === "number" ? data.files : 0,
+        size: formatSize(typeof data.bytes === "number" ? data.bytes : 0),
+      }), 5000);
+    } catch (e) {
+      showStatus(t("files.errorPrefix", { message: e instanceof Error ? e.message : String(e) }));
+    }
   };
 
   // ─── Upload ────────────────────────────────────────────────────────────────
@@ -597,11 +802,11 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
               {t("files.favorites")}
             </div>
             {FAVORITES.map((fav) => {
-              const active = currentPath === fav.path;
+              const active = place === "folder" && currentPath === fav.path;
               return (
                 <button
                   key={fav.path}
-                  onClick={() => { load(fav.path); if (sidebarOverlay) setSidebarOpen(false); }}
+                  onClick={() => { openFolder(fav.path); if (sidebarOverlay) setSidebarOpen(false); }}
                   className={`flex items-center gap-2.5 px-4 py-2 text-sm transition-colors text-left border-l-2 ${
                     active
                       ? "bg-white/[0.08] text-[var(--text-primary)] border-[var(--coral-bright)]"
@@ -614,10 +819,68 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
               );
             })}
 
+            {/* ── Projects: the folders the owner pinned ── */}
+            <div className="flex items-center justify-between gap-2 px-4 pt-5 pb-2" data-testid="files-sidebar-projects">
+              <button
+                onClick={() => { openProjects(); if (sidebarOverlay) setSidebarOpen(false); }}
+                className={`text-[10px] font-semibold uppercase tracking-widest transition-colors cursor-pointer hover:text-[var(--text-primary)] ${
+                  place === "projects" ? "text-[var(--coral-bright)]" : "text-[var(--text-muted)]"
+                }`}
+                aria-current={place === "projects" ? "page" : undefined}
+                data-testid="files-projects-nav"
+              >
+                {t("files.projects")}
+              </button>
+              <button
+                onClick={() => { openProjects(); if (sidebarOverlay) setSidebarOpen(false); }}
+                className="p-0.5 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer"
+                title={t("files.projectsAdd")}
+                aria-label={t("files.projectsAdd")}
+              >
+                <Icon name="add" size={14} />
+              </button>
+            </div>
+            {projects.map((folder) => {
+              const active = place === "folder" && projectRoot?.path === folder.path;
+              return (
+                <button
+                  key={folder.path}
+                  onClick={() => {
+                    if (folder.missing) { openProjects(); } else { openFolder(folder.path); }
+                    if (sidebarOverlay) setSidebarOpen(false);
+                  }}
+                  title={folder.missing ? t("files.projectMissing") : `~/${folder.path}`}
+                  className={`flex items-center gap-2.5 px-4 py-2 text-sm transition-colors text-left border-l-2 ${
+                    active
+                      ? "bg-white/[0.08] text-[var(--text-primary)] border-[var(--coral-bright)]"
+                      : "text-[var(--text-secondary)] border-transparent hover:bg-white/[0.04] hover:text-[var(--text-primary)]"
+                  } ${folder.missing ? "opacity-50" : ""}`}
+                  data-testid="files-sidebar-project"
+                >
+                  <Icon
+                    name={folder.missing ? "error" : "folder_special"}
+                    size={18}
+                    color={active ? "var(--coral-bright)" : "var(--text-muted)"}
+                  />
+                  <span className="truncate min-w-0">{folder.name}</span>
+                </button>
+              );
+            })}
+            {projects.length === 0 && projectsState !== "loading" && (
+              <button
+                onClick={() => { openProjects(); if (sidebarOverlay) setSidebarOpen(false); }}
+                className="flex items-center gap-2.5 px-4 py-2 text-xs text-left border-l-2 border-transparent text-[var(--text-muted)] hover:bg-white/[0.04] hover:text-[var(--text-primary)] cursor-pointer"
+              >
+                <Icon name="push_pin" size={16} color="var(--text-muted)" />
+                <span>{t("files.projectsAdd")}</span>
+              </button>
+            )}
+
             <div className="mt-auto px-4 pt-4">
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-colors bg-[var(--coral-bright)]/15 text-[var(--coral-bright)] border border-[var(--coral-bright)]/30 hover:bg-[var(--coral-bright)]/25 cursor-pointer"
+                disabled={place === "projects"}
+                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-colors bg-[var(--coral-bright)]/15 text-[var(--coral-bright)] border border-[var(--coral-bright)]/30 hover:bg-[var(--coral-bright)]/25 cursor-pointer disabled:opacity-40 disabled:cursor-default"
               >
                 <Icon name="upload" size={16} />
                 {t("files.upload")}
@@ -644,13 +907,8 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
             </button>
           )}
           <button
-            onClick={() => {
-              if (!currentPath) return;
-              const parts = currentPath.split("/").filter(Boolean);
-              parts.pop();
-              load(parts.join("/"));
-            }}
-            disabled={!currentPath}
+            onClick={goUp}
+            disabled={place === "projects" || !currentPath}
             className="p-1.5 rounded-md transition-colors cursor-pointer disabled:opacity-25 disabled:cursor-default text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06]"
             title={t("files.goUp")}
           >
@@ -670,20 +928,50 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
                   {pos > 0 && <Icon name="chevron_right" size={14} color="var(--text-muted)" />}
                   <button
                     onClick={() => navigateBreadcrumb(idx)}
-                    title={breadcrumbs[idx]}
+                    title={breadcrumbs[idx].label}
                     className={`hover:underline truncate cursor-pointer ${isLast ? "max-w-[180px]" : "max-w-[120px]"} ${
                       isLast ? "text-[var(--text-primary)] font-medium" : "text-[var(--text-muted)]"
                     }`}
                   >
-                    {folded ? "…" : breadcrumbs[idx]}
+                    {folded ? "…" : breadcrumbs[idx].label}
                   </button>
                 </span>
               );
             })}
           </div>
 
-          {/* Actions */}
+          {/* Actions — the folder's own; the Projects view lists no folder, so
+              it keeps Refresh alone. */}
+          {place === "projects" ? (
+            <div className="flex items-center gap-1 shrink-0">
+              <button
+                onClick={() => { showStatus(null); void loadProjects(); }}
+                className="p-1.5 rounded-md transition-colors text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer"
+                title={t("files.refresh")}
+              >
+                <Icon name="refresh" size={18} />
+              </button>
+            </div>
+          ) : (
           <div className="flex items-center gap-1 shrink-0">
+            {currentPath && !error && (() => {
+              const pinned = !!pinFor(currentPath);
+              const label = pinned ? t("files.unpinFolder") : t("files.pinFolder");
+              return (
+                <button
+                  onClick={() => togglePin(currentPath)}
+                  className={`p-1.5 rounded-md transition-colors hover:bg-white/[0.06] cursor-pointer ${
+                    pinned ? "text-[var(--coral-bright)]" : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                  }`}
+                  title={label}
+                  aria-label={label}
+                  aria-pressed={pinned}
+                  data-testid="files-pin-toggle"
+                >
+                  <Icon name={pinned ? "keep_off" : "push_pin"} size={18} />
+                </button>
+              );
+            })()}
             <button
               onClick={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
               className={`p-1.5 rounded-md transition-colors hover:bg-white/[0.06] cursor-pointer ${
@@ -731,6 +1019,7 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
               <Icon name={viewMode === "grid" ? "view_list" : "grid_view"} size={18} />
             </button>
           </div>
+          )}
         </div>
 
         {/* ── Search bar ── */}
@@ -770,6 +1059,21 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
         )}
 
         {/* ── File Area ── */}
+        {place === "projects" ? (
+          <div className="flex-1 overflow-y-auto relative">
+            <ProjectsView
+              folders={projects}
+              suggestions={suggestions}
+              state={projectsState}
+              narrow={narrow}
+              onOpen={(folder) => openFolder(folder.path)}
+              onDownload={(folder) => void downloadFolderZip(folder.path, folder.name)}
+              onRemove={(folder) => void unpinFolder(folder)}
+              onAdd={pinFolder}
+              onRetry={() => void loadProjects()}
+            />
+          </div>
+        ) : (
         <div
           ref={dropZoneRef}
           className={`flex-1 overflow-y-auto relative transition-colors ${dragOver ? "bg-[var(--coral-bright)]/5" : ""}`}
@@ -859,20 +1163,23 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
             />
           )}
         </div>
+        )}
 
         {/* ── Status bar ── */}
         <div className="px-4 py-1.5 text-xs flex items-center justify-between shrink-0 border-t border-[var(--border-subtle)] text-[var(--text-muted)]">
-          <span data-testid="files-status">
-            {statusMsg ?? (searchActive
-              ? tr("files.results", "{count} result(s)", { count: displayFiles.length })
-              : t("files.items", { count: visibleFiles.length }))}
+          <span data-testid="files-status" className="min-w-0 truncate">
+            {statusMsg ?? (place === "projects"
+              ? t("files.projectsCount", { count: projects.length })
+              : searchActive
+                ? tr("files.results", "{count} result(s)", { count: displayFiles.length })
+                : t("files.items", { count: visibleFiles.length }))}
             {/* The count of hidden entries belongs to the COUNT, not to
                 "Folder created · 22 hidden". */}
-            {!statusMsg && !searchActive && !showHidden && files.length > visibleFiles.length && (
+            {place === "folder" && !statusMsg && !searchActive && !showHidden && files.length > visibleFiles.length && (
               <span className="opacity-60"> · {tr("files.hiddenCount", "{count} hidden", { count: files.length - visibleFiles.length })}</span>
             )}
           </span>
-          {currentPath && <span className="opacity-60">~/{currentPath}</span>}
+          {place === "folder" && currentPath && <span className="opacity-60 truncate min-w-0 ml-3">~/{currentPath}</span>}
         </div>
       </div>
 
@@ -892,7 +1199,13 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
           x={contextMenu.x}
           y={contextMenu.y}
           onOpen={() => { closeContextMenu(); navigateTo(contextMenu.entry); }}
-          onDownload={() => { closeContextMenu(); downloadFile(contextMenu.entry); }}
+          onDownload={() => {
+            closeContextMenu();
+            if (contextMenu.entry.type === "directory") void downloadFolderZip(entryRelPath(contextMenu.entry), contextMenu.entry.name);
+            else downloadFile(contextMenu.entry);
+          }}
+          pinned={contextMenu.entry.type === "directory" && !!pinFor(entryRelPath(contextMenu.entry))}
+          onTogglePin={() => { closeContextMenu(); togglePin(entryRelPath(contextMenu.entry)); }}
           onRename={() => { closeContextMenu(); setDialog({ type: "rename", entry: contextMenu.entry, value: contextMenu.entry.name }); }}
           onDelete={() => { closeContextMenu(); setDialog({ type: "delete", entry: contextMenu.entry }); }}
           onClose={closeContextMenu}
@@ -918,6 +1231,201 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
           onSubmit={handleDialogSubmit}
         />
       )}
+    </div>
+  );
+}
+
+// ─── Projects View ────────────────────────────────────────────────────────────
+
+// The owner's pinned folders, what this box already keeps projects in, and a
+// path box for anything else. Every folder opens as an ordinary Files folder;
+// this view only decides which ones are a click away.
+function ProjectsView({ folders, suggestions, state, narrow, onOpen, onDownload, onRemove, onAdd, onRetry }: {
+  folders: ProjectFolder[];
+  suggestions: ProjectFolder[];
+  state: "loading" | "ready" | "error";
+  narrow: boolean;
+  onOpen: (folder: ProjectFolder) => void;
+  onDownload: (folder: ProjectFolder) => void;
+  onRemove: (folder: ProjectFolder) => void;
+  /** Pin by path; answers the refusal it showed, or null once it landed. */
+  onAdd: (path: string) => Promise<string | null>;
+  onRetry: () => void;
+}) {
+  const { t } = useT();
+  const inputId = useId();
+  const [typed, setTyped] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
+  // The folder (or typed path) a pin is on its way for, so a second click
+  // does not send a second one.
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const add = async (value: string, fromForm: boolean) => {
+    const target = value.trim();
+    if (!target || busy) return;
+    setBusy(target);
+    const refusal = await onAdd(target);
+    setBusy(null);
+    if (fromForm) {
+      setAddError(refusal);
+      if (!refusal) setTyped("");
+    }
+  };
+
+  const action = "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-colors cursor-pointer bg-white/[0.06] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-default";
+  const sectionLabel = "flex items-center gap-1.5 mb-2 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]";
+
+  return (
+    <div className="p-4 flex flex-col gap-6 max-w-3xl" data-testid="files-projects">
+      <div className="flex items-start gap-3">
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-[var(--coral-bright)]/15">
+          <Icon name="folder_special" size={24} color="var(--coral-bright)" />
+        </div>
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold text-[var(--text-primary)]">{t("files.projects")}</h2>
+          <p className="text-xs mt-0.5 leading-relaxed text-[var(--text-muted)]">{t("files.projectsIntro")}</p>
+        </div>
+      </div>
+
+      {folders.length === 0 ? (
+        state === "loading" ? (
+          <div className="flex items-center gap-2 text-sm text-[var(--text-muted)]">
+            <Icon name="progress_activity" size={18} className="motion-safe:animate-spin" />
+            {t("files.loading")}
+          </div>
+        ) : state === "error" ? (
+          <div className="flex items-center gap-3 text-sm text-red-400" data-testid="files-projects-error">
+            <Icon name="error" size={18} />
+            <span>{t("files.projectsLoadError")}</span>
+            <button onClick={onRetry} className="text-xs underline text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer">{t("files.retry")}</button>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-dashed border-[var(--border-subtle)] px-4 py-6 text-center" data-testid="files-projects-empty">
+            <Icon name="push_pin" size={32} color="var(--border-subtle)" />
+            <div className="mt-2 text-sm text-[var(--text-secondary)]">{t("files.projectsEmpty")}</div>
+            <div className="mt-1 text-xs text-[var(--text-muted)]">{t("files.projectsEmptyHint")}</div>
+          </div>
+        )
+      ) : (
+        <ul className="flex flex-col gap-2" data-testid="files-projects-list">
+          {folders.map((folder) => (
+            <li
+              key={folder.path}
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] ${folder.missing ? "opacity-60" : ""}`}
+              data-testid="files-project-row"
+            >
+              <button
+                onClick={() => { if (!folder.missing) onOpen(folder); }}
+                disabled={folder.missing}
+                title={`~/${folder.path}`}
+                className="flex items-center gap-3 flex-1 min-w-0 text-left cursor-pointer disabled:cursor-default"
+              >
+                <Icon name={folder.missing ? "error" : "folder_special"} size={28} color={folder.missing ? "#f87171" : "#f97316"} />
+                <span className="flex flex-col min-w-0">
+                  <span className="truncate text-sm font-medium text-[var(--text-primary)]">{folder.name}</span>
+                  <span className="truncate text-[11px] text-[var(--text-muted)]">
+                    {folder.missing ? t("files.projectMissing") : `~/${folder.path}`}
+                  </span>
+                </span>
+              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {!folder.missing && (
+                  <>
+                    <button onClick={() => onOpen(folder)} className={action} title={t("files.open")} aria-label={t("files.open")}>
+                      <Icon name="folder_open" size={15} />
+                      {!narrow && <span>{t("files.open")}</span>}
+                    </button>
+                    <button
+                      onClick={() => onDownload(folder)}
+                      className={action}
+                      title={`${t("files.downloadZip")} — ${t("files.zipLeftOut")}`}
+                      aria-label={t("files.downloadZip")}
+                    >
+                      <Icon name="folder_zip" size={15} />
+                      {!narrow && <span>{t("files.downloadZip")}</span>}
+                    </button>
+                  </>
+                )}
+                <button
+                  onClick={() => onRemove(folder)}
+                  className={action}
+                  title={t("files.unpinFolder")}
+                  aria-label={t("files.unpinFolder")}
+                >
+                  <Icon name="keep_off" size={15} />
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {suggestions.length > 0 && (
+        <section data-testid="files-projects-suggestions">
+          <h3 className={sectionLabel}>
+            <Icon name="lightbulb" size={13} />
+            {t("files.projectsSuggested")}
+          </h3>
+          <ul className="flex flex-col gap-1.5">
+            {suggestions.map((s) => (
+              <li key={s.path} className="flex items-center gap-3 px-3 py-2 rounded-xl bg-white/[0.02] border border-white/[0.04]">
+                <Icon name="folder" size={22} color="var(--text-secondary)" />
+                <span className="flex flex-col min-w-0 flex-1">
+                  <span className="truncate text-sm text-[var(--text-secondary)]">{s.name}</span>
+                  <span className="truncate text-[11px] text-[var(--text-muted)]">~/{s.path}</span>
+                </span>
+                <button
+                  onClick={() => void add(s.path, false)}
+                  disabled={busy !== null}
+                  className={action}
+                  aria-label={`${t("files.pinFolder")}: ${s.name}`}
+                >
+                  <Icon name="add" size={15} />
+                  <span>{t("files.projectsAddButton")}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <form
+        onSubmit={(e) => { e.preventDefault(); void add(typed, true); }}
+        className="flex flex-col gap-2"
+        data-testid="files-projects-add"
+      >
+        <label htmlFor={inputId} className={sectionLabel}>
+          <Icon name="create_new_folder" size={13} />
+          {t("files.projectsAddPath")}
+        </label>
+        <div className="flex gap-2">
+          <input
+            id={inputId}
+            value={typed}
+            onChange={(e) => { setTyped(e.target.value); setAddError(null); }}
+            placeholder={t("files.projectsPathPlaceholder")}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            aria-invalid={addError ? true : undefined}
+            className={`flex-1 min-w-0 px-3 py-2 bg-[var(--bg-deep)] border rounded-lg text-sm text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)] transition-colors placeholder-[var(--text-muted)] ${
+              addError ? "border-red-500" : "border-[var(--border-subtle)]"
+            }`}
+          />
+          <button
+            type="submit"
+            disabled={!typed.trim() || busy !== null}
+            className="px-4 py-2 rounded-lg text-sm font-semibold text-white btn-gradient hover:opacity-90 cursor-pointer disabled:opacity-40 disabled:cursor-default"
+          >
+            {t("files.projectsAddButton")}
+          </button>
+        </div>
+        {addError ? (
+          <p className="text-xs text-red-400" data-testid="files-projects-add-error">{addError}</p>
+        ) : (
+          <p className="text-[11px] text-[var(--text-muted)]">{t("files.projectsPathHint")}</p>
+        )}
+      </form>
     </div>
   );
 }
@@ -1038,12 +1546,16 @@ function ListView({ files, narrow, showLocation, selected, onSelect, onOpen, onC
 
 // ─── Context Menu ────────────────────────────────────────────────────────────
 
-function ContextMenu({ entry, x, y, onOpen, onDownload, onRename, onDelete, onClose }: {
+function ContextMenu({ entry, x, y, onOpen, onDownload, pinned, onTogglePin, onRename, onDelete, onClose }: {
   entry: FileEntry;
   x: number;
   y: number;
   onOpen: () => void;
+  /** A file downloads as itself, a folder as one ZIP. */
   onDownload: () => void;
+  /** Folders only: whether it is pinned to Projects, and the toggle. */
+  pinned?: boolean;
+  onTogglePin?: () => void;
   onRename: () => void;
   onDelete: () => void;
   onClose: () => void;
@@ -1070,6 +1582,12 @@ function ContextMenu({ entry, x, y, onOpen, onDownload, onRename, onDelete, onCl
 
   if (entry.type === "directory") {
     items.push({ icon: "folder_open", label: t("files.open"), onClick: onOpen });
+    items.push({ icon: "folder_zip", label: t("files.downloadZip"), onClick: onDownload });
+    if (onTogglePin) {
+      items.push(pinned
+        ? { icon: "keep_off", label: t("files.unpinFolder"), onClick: onTogglePin }
+        : { icon: "push_pin", label: t("files.pinFolder"), onClick: onTogglePin });
+    }
   } else {
     items.push({ icon: "open_in_new", label: t("files.open"), onClick: onOpen });
     items.push({ icon: "download", label: t("files.download"), onClick: onDownload });
