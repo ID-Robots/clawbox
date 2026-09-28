@@ -109,6 +109,8 @@ export type ProgressLabelKey =
   | "secretsInjected"
   | "secretsUnreadable"
   | "anthropicAccount"
+  | "accountRefused"
+  | "accountMoved"
   | "accountSwitched"
   | "accountsWaiting"
   | "resumedAfterLimit"
@@ -372,6 +374,12 @@ export const RUNNER_STEP = {
   /** The account hit its usage limit and the run was moved to the next one, in place. */
   accountSwitched: (from: string, to: string, clock: string) =>
     `Anthropic account "${from}" hit its usage limit (back at ${clock}); carrying on with "${to}" in the same session`,
+  /** Anthropic refused the account's credential and the run was moved to the active account, in place (TASK-1260). */
+  accountRefused: (from: string, to: string) =>
+    `Anthropic refused the credential of account "${from}"; carrying on with "${to}" in the same session`,
+  /** Another consumer's limit moved the box's active account; this run followed it, in place (TASK-1260). */
+  accountMoved: (from: string, to: string) =>
+    `Anthropic account "${from}" can no longer answer; carrying on with "${to}" in the same session`,
   /** Every account is limited: the run waits, paused, instead of failing. */
   accountsWaiting: (clock: string) => `Every Anthropic account is at its usage limit; waiting for the reset at ${clock}`,
   /** The box resumed a run that was waiting for a reset — nobody pressed anything. */
@@ -476,6 +484,18 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
     labelKey: "accountSwitched",
     icon: "swap_horiz",
     params: (m) => ({ from: m[1], time: m[2], to: m[3] }),
+  },
+  {
+    re: /^Anthropic refused the credential of account "(.*)"; carrying on with "(.*)" in the same session$/,
+    labelKey: "accountRefused",
+    icon: "key_off",
+    params: (m) => ({ from: m[1], to: m[2] }),
+  },
+  {
+    re: /^Anthropic account "(.*)" can no longer answer; carrying on with "(.*)" in the same session$/,
+    labelKey: "accountMoved",
+    icon: "swap_horiz",
+    params: (m) => ({ from: m[1], to: m[2] }),
   },
   { re: /^Every Anthropic account is at its usage limit; waiting for the reset at (\d{1,2}:\d{2})$/, labelKey: "accountsWaiting", icon: "hourglass_top", params: (m) => ({ time: m[1] }) },
   { re: /^The usage limit reset; carrying on where it left off$/, labelKey: "resumedAfterLimit", icon: "play_circle" },

@@ -398,14 +398,22 @@ describe("the Anthropic account-limit notices", () => {
   const SOFIA = "Europe/Sofia";
   const AT_2250 = Date.UTC(2026, 8, 18, 19, 50);
 
-  it("says which account stopped, when it is back, and where the run carried on", () => {
+  it("says which account stopped, when it is back, and that everything using Claude moved (TASK-1260)", () => {
     expect(buildAnthropicLimitNotice({ kind: "switched", fromLabel: "Work Max", toLabel: "Personal Max", resetAt: AT_2250, runId: "run-k3x9q2ab" }, SOFIA))
-      .toBe('Anthropic account "Work Max" hit its usage limit (back at 22:50). ClawBox switched to "Personal Max" and run-k3x9q2ab carried on.');
+      .toBe('Anthropic account "Work Max" hit its usage limit (back at 22:50). ClawBox switched everything that uses Claude to "Personal Max" and run-k3x9q2ab carried on.');
+    // A limit seen by the chat or a cron: no run to name.
+    expect(buildAnthropicLimitNotice({ kind: "switched", reason: "limit", fromLabel: "Work Max", toLabel: "Personal Max", resetAt: AT_2250, runId: null }, SOFIA))
+      .toBe('Anthropic account "Work Max" hit its usage limit (back at 22:50). ClawBox switched everything that uses Claude to "Personal Max".');
+  });
+
+  it("names a refused credential as one the owner has to sign in again, with no reset time", () => {
+    expect(buildAnthropicLimitNotice({ kind: "switched", reason: "auth", fromLabel: "Work Max", toLabel: "Personal Max", resetAt: null, runId: null }, SOFIA))
+      .toBe('Anthropic account "Work Max" was refused by Anthropic and needs to be signed in again (Settings → Providers). ClawBox switched everything that uses Claude to "Personal Max".');
   });
 
   it("says that runs WAIT when every account is limited, and until when", () => {
     expect(buildAnthropicLimitNotice({ kind: "all_limited", resetAt: AT_2250, runId: null }, SOFIA))
-      .toBe("Every Anthropic account on this ClawBox is at its usage limit. Coding runs are waiting instead of failing, and pick up again at 22:50.");
+      .toBe("Every Anthropic account on this ClawBox is at its usage limit. Coding runs and the chat's Claude work are waiting instead of failing, and pick up again at 22:50.");
     expect(buildAnthropicLimitNotice({ kind: "all_limited", resetAt: null, runId: null }, SOFIA)).toMatch(/as soon as one is back/);
   });
 

@@ -97,6 +97,71 @@ export function detectAnthropicLimit(text: string | null | undefined, now: numbe
   return { kind, resetsAt: parseLimitReset(head, now, timeZone) };
 }
 
+// ── a credential Anthropic refused ──────────────────────────────────────────
+
+/**
+ * The CLI's and the API's wordings of a refused credential (TASK-1260):
+ *
+ *   Invalid API key · Please run /login
+ *   OAuth token revoked · Please run /login
+ *   Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error",…}}
+ *   401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}
+ *   invalid x-api-key
+ *
+ * A 401 is NOT a limit: the account is not coming back by itself at a reset,
+ * it needs the owner (or a renewal). So it is its own answer, and the caller
+ * confirms it against Anthropic before taking the account out — a token the box
+ * can still renew was merely stale in the process that used it.
+ */
+// Anthropic's and the CLI's OWN words only — never a bare "401 Unauthorized",
+// which is also what a package registry says to a run that is publishing.
+const AUTH_RE = /(?:\bauthentication_error\b|invalid (?:x-api-key|api key|bearer token)|oauth token (?:has )?(?:expired|been revoked|revoked)|please run \/login|failed to authenticate)/i;
+
+/**
+ * Is this failure Anthropic refusing the credential itself (a 401, a revoked
+ * grant)? Only the head, for the reason `detectAnthropicLimit` gives.
+ */
+export function detectAnthropicAuthFailure(text: string | null | undefined): boolean {
+  if (typeof text !== "string") return false;
+  const head = text.trim().slice(0, HEAD_CHARS);
+  return head !== "" && AUTH_RE.test(head);
+}
+
+export type AnthropicFailure =
+  | { type: "limit"; limit: AnthropicLimit }
+  | { type: "auth" };
+
+/**
+ * A gateway's failover reason can name the class of a failure its words do not
+ * (its own copy, "API rate limit reached", carries no provider text). Only the
+ * three that mean "this ACCOUNT", never a timeout or a format error — and never
+ * an overload, which is Anthropic's capacity, not the account's cap.
+ */
+const OVERLOAD_RE = /\boverload(?:ed)?(?:_error)?\b|\b529\b/i;
+
+/**
+ * Limit or refused credential, or neither. A limit wins when both read true:
+ * the CLI's limit line is the more specific answer, and a limit is the one
+ * that lifts by itself.
+ */
+export function classifyAnthropicFailure(
+  text: string | null | undefined,
+  now: number,
+  opts: { timeZone?: string; reason?: string | null } = {},
+): AnthropicFailure | null {
+  const limit = detectAnthropicLimit(text, now, opts.timeZone);
+  if (limit) return { type: "limit", limit };
+  if (detectAnthropicAuthFailure(text)) return { type: "auth" };
+  const reason = typeof opts.reason === "string" ? opts.reason.trim().toLowerCase() : "";
+  const words = typeof text === "string" ? text.trim().slice(0, HEAD_CHARS) : "";
+  if (reason === "rate_limit" && !OVERLOAD_RE.test(words)) {
+    return { type: "limit", limit: { kind: "rate", resetsAt: words ? parseLimitReset(words, now, opts.timeZone) : null } };
+  }
+  if (reason === "billing") return { type: "limit", limit: { kind: "credit", resetsAt: null } };
+  if (reason === "auth" || reason === "auth_permanent") return { type: "auth" };
+  return null;
+}
+
 // ── when the limit lifts ────────────────────────────────────────────────────
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -279,6 +344,49 @@ export function isUsable(account: PoolMember, now: number): boolean {
  */
 export function pickAccount<T extends PoolMember>(accounts: readonly T[], now: number, exclude: ReadonlySet<string> = new Set()): T | null {
   return accounts.find((a) => !exclude.has(a.id) && isUsable(a, now)) ?? null;
+}
+
+/**
+ * THE ACTIVE ACCOUNT (TASK-1260): the one every Claude consumer on the box —
+ * coding runs, the gateway's agents and their crons — uses right now.
+ *
+ * STICKY by default. The box stays on the account it moved to until THAT one
+ * cannot answer; then it takes the first usable one in the owner's order. A
+ * limit that resets on account #1 does not move anything back — that would
+ * interrupt the gateway for no gain, and the owner is paying for both.
+ *
+ * `returnToPrimary` is the owner's preference for the opposite: always the
+ * first usable account, so #1 is used again the moment its limit is over (the
+ * pool's behaviour before TASK-1260). `reselect` is a one-off of the same rule,
+ * for a change the owner made to the order: the account they put first is the
+ * one they mean.
+ */
+export function resolveActiveAccount<T extends PoolMember>(
+  accounts: readonly T[],
+  activeId: string | null,
+  now: number,
+  opts: { returnToPrimary?: boolean; reselect?: boolean } = {},
+): T | null {
+  if (!opts.returnToPrimary && !opts.reselect && activeId) {
+    const current = accounts.find((a) => a.id === activeId);
+    if (current && isUsable(current, now)) return current;
+  }
+  return pickAccount(accounts, now);
+}
+
+/**
+ * The account a spawn should use: the active one, unless the caller has just
+ * seen it refuse (`exclude`) — then the first other usable one in order.
+ */
+export function pickForSpawn<T extends PoolMember>(
+  accounts: readonly T[],
+  activeId: string | null,
+  now: number,
+  exclude: ReadonlySet<string> = new Set(),
+): T | null {
+  const active = activeId ? accounts.find((a) => a.id === activeId) : undefined;
+  if (active && !exclude.has(active.id) && isUsable(active, now)) return active;
+  return pickAccount(accounts, now, exclude);
 }
 
 export interface PoolHealth {

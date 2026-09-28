@@ -38,15 +38,27 @@
  * the sign-in after it, and records that it did so. No owner action, and a
  * migration that could not complete (no session secret yet, a store that would
  * not write) leaves the key where it was and is tried again at the next read.
+ *
+ * ONE ACTIVE ACCOUNT FOR THE WHOLE BOX (TASK-1260). The pool also records
+ * WHICH account is in use — `activeId` — and that is the one source of truth
+ * every Claude consumer re-reads: coding runs, review passes and team workers
+ * (src/lib/coding-agent.ts), the OpenClaw gateway's Claude subscription and its
+ * crons (src/lib/anthropic-gateway.ts). It is settled on every read and every
+ * write (`settleActive`), so a limit, a refused credential, a reset, a removal
+ * or the owner's new order all move it through the same few lines; each move
+ * is handed to the listeners (`onActiveChange`) once the write has landed, and
+ * src/lib/anthropic-swap.ts fans it out to the consumers and records what each
+ * did as `lastSwap`.
  */
 
 import crypto from "crypto";
 import fs from "fs";
 import path from "@/lib/runtime-path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
-import { anthropicLoginEmail, hasAnthropicLogin } from "@/lib/claude-login";
+import { anthropicLoginChangedAt, anthropicLoginEmail, hasAnthropicLogin } from "@/lib/claude-login";
 import { ANTHROPIC_API_KEY_CONFIG_KEY } from "@/lib/coding-provider";
 import { OAUTH_PROVIDERS } from "@/lib/oauth-config";
+import { processStore } from "@/lib/process-store";
 import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
 import {
   deleteDeviceSecret,
@@ -59,7 +71,9 @@ import {
   effectiveStatus,
   isUsable,
   pickAccount,
+  pickForSpawn,
   poolHealth,
+  resolveActiveAccount,
   type AnthropicAccountStatus,
   type AnthropicLimitKind,
   type PoolHealth,
@@ -91,16 +105,85 @@ export interface AnthropicAccount {
   lastLimitedAt: number | null;
   /** An `oauth` account's access-token expiry — not a secret, and what the refresh is timed on. */
   expiresAt: number | null;
+  /**
+   * When Anthropic last refused this account's credential (TASK-1260). For the
+   * `claude` sign-in it is what tells a refusal from the owner having signed in
+   * again since: a credential file written after it lifts the refusal.
+   */
+  authFailedAt: number | null;
+}
+
+/** Why the active account moved — said to the owner, and what decides which consumers act. */
+export const SWAP_CAUSES = ["limit", "auth", "reset", "owner", "removed", "added", "renewed"] as const;
+export type SwapCause = (typeof SWAP_CAUSES)[number];
+
+/** Where the failure that moved it was seen. */
+export const SWAP_SOURCES = ["coding", "chat", "cron", "owner", "box"] as const;
+export type SwapSource = (typeof SWAP_SOURCES)[number];
+
+/** The consumers a swap is fanned out to (src/lib/anthropic-swap.ts). */
+export const SWAP_CONSUMERS = ["coding", "gateway", "retries"] as const;
+export type SwapConsumerName = (typeof SWAP_CONSUMERS)[number];
+
+/**
+ * What one consumer did about a swap. `code` is a fixed word the owner's card
+ * says in the owner's language (never free text from a process); `count` is
+ * how many things it moved, resumed or retried.
+ */
+export interface SwapConsumerOutcome {
+  status: "ok" | "skipped" | "failed" | "pending";
+  code: string | null;
+  count: number | null;
+}
+
+/** The most recent move of the active account, and what each consumer did about it. */
+export interface SwapEvent {
+  id: string;
+  at: number;
+  fromId: string | null;
+  fromLabel: string | null;
+  /** Null: no account could answer — every one limited or needing the owner. */
+  toId: string | null;
+  toLabel: string | null;
+  cause: SwapCause;
+  source: SwapSource;
+  limitKind: AnthropicLimitKind | null;
+  /** When the account it moved AWAY from is expected back (a limit), or null. */
+  limitedUntil: number | null;
+  /** With no account left: the earliest time one comes back by itself. */
+  nextResetAt: number | null;
+  consumers: Partial<Record<SwapConsumerName, SwapConsumerOutcome>>;
+}
+
+/**
+ * Where the gateway's Claude subscription credential stands, as this box last
+ * wrote it (src/lib/anthropic-gateway.ts). `fingerprint` is a truncated SHA-256
+ * of the access token — enough to notice that something else has since written
+ * the profile (the owner signing in again in Settings), useless for anything
+ * else. Never the token.
+ */
+export interface GatewayMirror {
+  accountId: string;
+  fingerprint: string;
+  expiresAt: number | null;
+  at: number;
 }
 
 interface PoolFile {
-  version: 1;
+  /** 2 since TASK-1260 added the active account; a file still at 1 adopts one silently. */
+  version: 2;
   /** The single legacy credential has been moved in (see the header). */
   migrated: boolean;
   /** The owner took the `claude` sign-in OUT of the pool; do not put it back by itself. */
   loginDismissed: boolean;
   /** In priority order: the first usable one answers. */
   accounts: AnthropicAccount[];
+  /** The account every consumer uses now; null when none can answer (or there is none). */
+  activeId: string | null;
+  /** The owner's preference: back to the first account in the order once it can answer again. */
+  returnToPrimary: boolean;
+  lastSwap: SwapEvent | null;
+  gateway: GatewayMirror | null;
 }
 
 /** The config-store key the pool's STATE lives under. Never a credential. */
@@ -168,7 +251,56 @@ function normalizeAccount(raw: unknown): AnthropicAccount | null {
     lastUsedAt: num(v.lastUsedAt),
     lastLimitedAt: num(v.lastLimitedAt),
     expiresAt: num(v.expiresAt),
+    authFailedAt: num(v.authFailedAt),
   };
+}
+
+const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+
+function normalizeOutcome(raw: unknown): SwapConsumerOutcome | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = raw as Record<string, unknown>;
+  if (v.status !== "ok" && v.status !== "skipped" && v.status !== "failed" && v.status !== "pending") return null;
+  const code = typeof v.code === "string" && /^[a-z_]{1,40}$/.test(v.code) ? v.code : null;
+  const count = typeof v.count === "number" && Number.isInteger(v.count) && v.count >= 0 ? v.count : null;
+  return { status: v.status, code, count };
+}
+
+/** The last swap off disk, or null — a hand-edited one the card cannot trust is dropped. */
+function normalizeSwapEvent(raw: unknown): SwapEvent | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = raw as Record<string, unknown>;
+  const at = num(v.at);
+  if (at === null || !(SWAP_CAUSES as readonly unknown[]).includes(v.cause)) return null;
+  const consumers: SwapEvent["consumers"] = {};
+  const rawConsumers = (typeof v.consumers === "object" && v.consumers !== null ? v.consumers : {}) as Record<string, unknown>;
+  for (const name of SWAP_CONSUMERS) {
+    const outcome = normalizeOutcome(rawConsumers[name]);
+    if (outcome) consumers[name] = outcome;
+  }
+  const id = (x: unknown) => (typeof x === "string" && ID_RE.test(x) ? x : null);
+  return {
+    id: typeof v.id === "string" && /^[0-9a-f]{12}$/.test(v.id) ? v.id : crypto.randomBytes(6).toString("hex"),
+    at,
+    fromId: id(v.fromId),
+    fromLabel: str(v.fromLabel) ? cleanLabel(v.fromLabel, "Anthropic account") : null,
+    toId: id(v.toId),
+    toLabel: str(v.toLabel) ? cleanLabel(v.toLabel, "Anthropic account") : null,
+    cause: v.cause as SwapCause,
+    source: (SWAP_SOURCES as readonly unknown[]).includes(v.source) ? (v.source as SwapSource) : "box",
+    limitKind: (LIMIT_KINDS as readonly unknown[]).includes(v.limitKind) ? (v.limitKind as AnthropicLimitKind) : null,
+    limitedUntil: num(v.limitedUntil),
+    nextResetAt: num(v.nextResetAt),
+    consumers,
+  };
+}
+
+function normalizeMirror(raw: unknown): GatewayMirror | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = raw as Record<string, unknown>;
+  if (typeof v.accountId !== "string" || !ID_RE.test(v.accountId)) return null;
+  if (typeof v.fingerprint !== "string" || !/^[0-9a-f]{16}$/.test(v.fingerprint)) return null;
+  return { accountId: v.accountId, fingerprint: v.fingerprint, expiresAt: num(v.expiresAt), at: num(v.at) ?? 0 };
 }
 
 function normalizePool(raw: unknown): PoolFile {
@@ -182,12 +314,24 @@ function normalizePool(raw: unknown): PoolFile {
     accounts.push(account);
     if (accounts.length >= MAX_ANTHROPIC_ACCOUNTS) break;
   }
+  const activeId = typeof v.activeId === "string" && seen.has(v.activeId) ? v.activeId : null;
+  const gateway = normalizeMirror(v.gateway);
   return {
-    version: 1,
+    version: 2,
     migrated: v.migrated === true,
     loginDismissed: v.loginDismissed === true,
     accounts,
+    activeId,
+    returnToPrimary: v.returnToPrimary === true,
+    lastSwap: normalizeSwapEvent(v.lastSwap),
+    // A mirror of an account that is no longer on the list is no mirror at all.
+    gateway: gateway && seen.has(gateway.accountId) ? gateway : null,
   };
+}
+
+/** A pool written before TASK-1260 has no active account on record: it adopts one without calling it a swap. */
+function isLegacyPool(raw: unknown): boolean {
+  return typeof raw !== "object" || raw === null || (raw as Record<string, unknown>).version !== 2;
 }
 
 // ── errors ──────────────────────────────────────────────────────────────────
@@ -215,32 +359,147 @@ export class AnthropicAccountError extends Error {
 // ── the state, serialised ───────────────────────────────────────────────────
 
 /**
- * The last pool this process read or wrote. The runner's settle path is
- * synchronous and has to know, in the same tick, whether ANOTHER account can
- * take a run over — this is that answer. Every read and every write refreshes
- * it; nothing but this module assigns it.
+ * What moved the active account, handed to every `onActiveChange` listener
+ * once the write that moved it has landed. Labels are taken at the moment of
+ * the move, so a removed account can still be named.
  */
-let snapshot: PoolFile | null = null;
+export interface ActiveChange {
+  fromId: string | null;
+  fromLabel: string | null;
+  toId: string | null;
+  toLabel: string | null;
+  cause: SwapCause;
+  source: SwapSource;
+  /** The coding run whose failure moved it, when one did. */
+  runId: string | null;
+  limitKind: AnthropicLimitKind | null;
+  /** When the account it moved away from is back (a limit). */
+  limitedUntil: number | null;
+  health: PoolHealth;
+  at: number;
+}
 
-/** Every change runs after the previous one: a read-modify-write of one config key, reachable from two tabs and the runner. */
-let chain: Promise<unknown> = Promise.resolve();
+/** What a mutation knows about why it might move the active account. */
+interface ChangeContext {
+  source?: SwapSource;
+  runId?: string | null;
+  limitKind?: AnthropicLimitKind | null;
+  limitedUntil?: number | null;
+  /** The label of an account the mutation took off the list. */
+  fromLabel?: string | null;
+  /** What the mutation turned out to be, when that is only known inside it. */
+  cause?: SwapCause;
+}
+
+/**
+ * Everything this module keeps between calls, ONE per process.
+ *
+ * Next compiles the boot hook and the routes as two copies of this file inside
+ * one web server (src/lib/process-store.ts). As plain module state, each copy
+ * had its own write chain over the one config key, its own per-account refresh
+ * lock — two copies could spend one single-use refresh token between them —
+ * and its own reset timer, with the runner's listener on only one of them. So
+ * the state lives in the process store, keyed by the data folder it caches.
+ */
+interface PoolRuntime {
+  /**
+   * The last pool this process read or wrote. The runner's settle path is
+   * synchronous and has to know, in the same tick, whether ANOTHER account can
+   * take a run over — this is that answer. Every read and every write
+   * refreshes it; nothing but this module assigns it.
+   */
+  snapshot: PoolFile | null;
+  /** Every change runs after the previous one: a read-modify-write of one config key, reachable from two tabs and the runner. */
+  chain: Promise<unknown>;
+  credentialLocks: Map<string, SerialLock>;
+  wakeListeners: Set<() => void>;
+  changeListeners: Set<(change: ActiveChange) => void>;
+  wakeTimer: ReturnType<typeof setTimeout> | null;
+  wakeAt: number | null;
+}
+
+function runtime(): PoolRuntime {
+  return processStore<PoolRuntime>(`anthropic-accounts:${DATA_DIR}`, () => ({
+    snapshot: null,
+    chain: Promise.resolve(),
+    credentialLocks: new Map(),
+    wakeListeners: new Set(),
+    changeListeners: new Set(),
+    wakeTimer: null,
+    wakeAt: null,
+  }));
+}
 
 function serialised<T>(work: () => Promise<T>): Promise<T> {
-  const next = chain.then(work, work);
-  chain = next.then(() => undefined, () => undefined);
+  const state = runtime();
+  const next = state.chain.then(work, work);
+  state.chain = next.then(() => undefined, () => undefined);
   return next;
 }
 
 async function writePool(file: PoolFile): Promise<void> {
   await configSet(ANTHROPIC_ACCOUNTS_CONFIG_KEY, file);
-  snapshot = file;
+  runtime().snapshot = file;
   armWake(file);
+}
+
+/**
+ * Move the active account if it has to move, and say how. The ONE place
+ * `activeId` changes (besides the silent adoption of a pre-TASK-1260 pool).
+ *
+ * Sticky unless the owner prefers the first account (`returnToPrimary`) or has
+ * just put a different one first (`reselect`) — see `resolveActiveAccount`.
+ * An active account that is no longer on the list is a removal, whatever the
+ * caller said.
+ */
+function settleActive(file: PoolFile, now: number, fallbackCause: SwapCause, ctx: ChangeContext = {}, reselect = false): ActiveChange | null {
+  const cause = ctx.cause ?? fallbackCause;
+  const previous = file.activeId;
+  const stillListed = previous !== null && file.accounts.some((a) => a.id === previous);
+  const next = resolveActiveAccount(file.accounts, stillListed ? previous : null, now, {
+    returnToPrimary: file.returnToPrimary,
+    reselect,
+  })?.id ?? null;
+  if (next === previous) return null;
+  file.activeId = next;
+  const labelOf = (id: string | null) => (id ? file.accounts.find((a) => a.id === id)?.label ?? null : null);
+  return {
+    fromId: previous,
+    fromLabel: labelOf(previous) ?? ctx.fromLabel ?? null,
+    toId: next,
+    toLabel: labelOf(next),
+    cause: previous !== null && !stillListed ? "removed" : cause,
+    source: ctx.source ?? (cause === "owner" || cause === "removed" || cause === "added" || cause === "renewed" ? "owner" : "box"),
+    runId: ctx.runId ?? null,
+    limitKind: ctx.limitKind ?? null,
+    limitedUntil: ctx.limitedUntil ?? null,
+    health: poolHealth(file.accounts, now),
+    at: now,
+  };
+}
+
+/** Hand the moves to the listeners — after the write, outside the chain, never awaited. */
+function emit(change: ActiveChange | null): void {
+  if (!change) return;
+  const listeners = [...runtime().changeListeners];
+  if (listeners.length === 0) return;
+  queueMicrotask(() => {
+    for (const listener of listeners) {
+      try {
+        listener({ ...change, health: { ...change.health } });
+      } catch (err) {
+        console.error("[anthropic-accounts] an active-account listener failed:", err instanceof Error ? err.message : err);
+      }
+    }
+  });
 }
 
 /**
  * Keep the `claude` sign-in's row in step with the files: added when it
  * appears (unless the owner took it out), `expired` when it is gone, back to
- * `ok` when it returns. Answers whether anything changed.
+ * `ok` when it returns — and a sign-in Anthropic REFUSED (TASK-1260) back to
+ * `ok` only once the credential file has been written since, which is the
+ * owner signing in again. Answers whether anything changed.
  */
 function syncLogin(file: PoolFile, now: number): boolean {
   const present = hasAnthropicLogin();
@@ -248,19 +507,7 @@ function syncLogin(file: PoolFile, now: number): boolean {
   const row = file.accounts.find((a) => a.kind === "login");
   if (!row) {
     if (!present || file.loginDismissed || file.accounts.length >= MAX_ANTHROPIC_ACCOUNTS) return false;
-    file.accounts.push({
-      id: newId(file.accounts),
-      label: "Claude Code sign-in",
-      email,
-      kind: "login",
-      status: "ok",
-      limitedUntil: null,
-      limitKind: null,
-      addedAt: now,
-      lastUsedAt: null,
-      lastLimitedAt: null,
-      expiresAt: null,
-    });
+    file.accounts.push(blankAccount(newId(file.accounts), "login", "Claude Code sign-in", email, now));
     return true;
   }
   let changed = false;
@@ -270,6 +517,18 @@ function syncLogin(file: PoolFile, now: number): boolean {
   } else if (present && row.status === "expired") {
     row.status = "ok";
     changed = true;
+  } else if (present && row.status === "revoked") {
+    const writtenAt = anthropicLoginChangedAt();
+    if (writtenAt !== null && row.authFailedAt === null) {
+      // A refusal with no time on it (a hand-edited pool): the file as it is
+      // now is the one that was refused, and only a later write lifts it.
+      row.authFailedAt = Math.ceil(writtenAt);
+      changed = true;
+    } else if (writtenAt !== null && row.authFailedAt !== null && writtenAt > row.authFailedAt) {
+      row.status = "ok";
+      row.authFailedAt = null;
+      changed = true;
+    }
   }
   if (present && email && row.email !== email) {
     row.email = email;
@@ -292,26 +551,20 @@ async function migrateLegacy(file: PoolFile, now: number): Promise<string | null
   if (!key) return null;
   const id = newId(file.accounts);
   await setDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(id), value: key });
-  file.accounts.unshift({
-    id,
-    label: "API key",
-    email: null,
-    kind: "api_key",
-    status: "ok",
-    limitedUntil: null,
-    limitKind: null,
-    addedAt: now,
-    lastUsedAt: null,
-    lastLimitedAt: null,
-    expiresAt: null,
-  });
+  file.accounts.unshift(blankAccount(id, "api_key", "API key", null, now));
   return id;
 }
 
-/** Read the pool, migrating and syncing the sign-in as needed. Inside the chain. */
+/**
+ * Read the pool, migrating and syncing the sign-in as needed, and settle the
+ * active account against the clock — a limit that has run out is how the box
+ * leaves "every account limited" (or, with `returnToPrimary`, goes back to #1).
+ * Inside the chain; the move, if any, is emitted once it is on disk.
+ */
 async function loadLocked(): Promise<PoolFile> {
   const now = Date.now();
-  const file = normalizePool(await configGet(ANTHROPIC_ACCOUNTS_CONFIG_KEY));
+  const raw = await configGet(ANTHROPIC_ACCOUNTS_CONFIG_KEY);
+  const file = normalizePool(raw);
   let dirty = false;
   let migratedKey = false;
   if (!file.migrated) {
@@ -323,10 +576,21 @@ async function loadLocked(): Promise<PoolFile> {
       console.error("[anthropic-accounts] could not move the stored API key into the secret store yet:", err instanceof Error ? err.message : err);
     }
   }
+  const hadNone = file.activeId === null && file.accounts.length === 0;
   if (syncLogin(file, now)) dirty = true;
+  let change: ActiveChange | null = null;
+  if (isLegacyPool(raw)) {
+    // A pool from before the active account existed: the account it would have
+    // used is simply the one in use. Not a swap — nothing moved.
+    file.activeId = resolveActiveAccount(file.accounts, null, now, { returnToPrimary: file.returnToPrimary })?.id ?? null;
+    dirty = true;
+  } else {
+    change = settleActive(file, now, hadNone ? "added" : "reset");
+    if (change) dirty = true;
+  }
   if (dirty) await writePool(file);
   else {
-    snapshot = file;
+    runtime().snapshot = file;
     armWake(file);
   }
   // Out of config.json only once the pool that names it is on disk.
@@ -334,16 +598,35 @@ async function loadLocked(): Promise<PoolFile> {
     await configSet(ANTHROPIC_API_KEY_CONFIG_KEY, undefined);
     console.error("[anthropic-accounts] moved the stored Anthropic API key into the secret store as account #1");
   }
+  emit(change);
   return file;
 }
 
-async function mutate<T>(work: (file: PoolFile, now: number) => Promise<T> | T): Promise<T> {
-  return serialised(async () => {
+interface MutateOptions {
+  /** Why this change might move the active account. */
+  cause?: SwapCause;
+  /** The owner changed the order: the first usable account is the one they mean. */
+  reselect?: boolean;
+}
+
+/**
+ * One change to the pool, after every earlier one. `work` may fill `ctx` with
+ * what it learned (the limit's end, the run that hit it) for the move it may
+ * cause; the move is settled after `work`, written with it, and emitted once
+ * the write has landed.
+ */
+async function mutate<T>(work: (file: PoolFile, now: number, ctx: ChangeContext) => Promise<T> | T, opts: MutateOptions = {}): Promise<T> {
+  const moved: { change: ActiveChange | null } = { change: null };
+  const result = await serialised(async () => {
     const file = await loadLocked();
-    const result = await work(file, Date.now());
+    const ctx: ChangeContext = {};
+    const out = await work(file, Date.now(), ctx);
+    moved.change = settleActive(file, Date.now(), opts.cause ?? "reset", ctx, opts.reselect === true);
     await writePool(file);
-    return result;
+    return out;
   });
+  emit(moved.change);
+  return result;
 }
 
 /** The pool, in priority order. Copies — changing them changes nothing. */
@@ -354,7 +637,52 @@ export async function readAccounts(): Promise<AnthropicAccount[]> {
 
 /** The last pool this process saw, without touching the disk. Null before the first read. */
 export function accountsSnapshot(): AnthropicAccount[] | null {
+  const { snapshot } = runtime();
   return snapshot ? snapshot.accounts.map((a) => ({ ...a })) : null;
+}
+
+/** The whole state the swap and the owner's card need, as copies. Never a credential. */
+export interface PoolState {
+  accounts: AnthropicAccount[];
+  activeId: string | null;
+  returnToPrimary: boolean;
+  lastSwap: SwapEvent | null;
+  gateway: GatewayMirror | null;
+  health: PoolHealth;
+}
+
+function stateOf(file: PoolFile, now: number): PoolState {
+  return {
+    accounts: file.accounts.map((a) => ({ ...a })),
+    activeId: file.activeId,
+    returnToPrimary: file.returnToPrimary,
+    lastSwap: file.lastSwap ? { ...file.lastSwap, consumers: { ...file.lastSwap.consumers } } : null,
+    gateway: file.gateway ? { ...file.gateway } : null,
+    health: poolHealth(file.accounts, now),
+  };
+}
+
+export async function readPoolState(): Promise<PoolState> {
+  const file = await serialised(loadLocked);
+  return stateOf(file, Date.now());
+}
+
+/** The active account as this process last saw it, synchronously. Null before the first read or when none can answer. */
+export function activeAccountSnapshot(): AnthropicAccount | null {
+  const { snapshot } = runtime();
+  const active = snapshot?.activeId ? snapshot.accounts.find((a) => a.id === snapshot.activeId) : undefined;
+  return active ? { ...active } : null;
+}
+
+/**
+ * Be told every time the active account moves (src/lib/anthropic-swap.ts is
+ * the one listener that matters). Called after the write, outside the pool's
+ * chain; a listener may read and write the pool again.
+ */
+export function onActiveChange(listener: (change: ActiveChange) => void): () => void {
+  const listeners = runtime().changeListeners;
+  listeners.add(listener);
+  return () => listeners.delete(listener);
 }
 
 function find(file: PoolFile, id: unknown): AnthropicAccount {
@@ -417,6 +745,7 @@ function blankAccount(id: string, kind: AnthropicAccountKind, label: string, ema
     lastUsedAt: null,
     lastLimitedAt: null,
     expiresAt: null,
+    authFailedAt: null,
   };
 }
 
@@ -433,12 +762,14 @@ export async function addOAuthAccount(input: { label?: unknown; email?: unknown;
     throw new AnthropicAccountError("invalid", "The sign-in did not return a token. Start it again.");
   }
   const email = cleanEmail(input.email);
-  return mutate(async (file, now) => {
+  return mutate(async (file, now, ctx) => {
     const same = email ? file.accounts.find((a) => a.kind === "oauth" && sameEmail(a.email, email)) : undefined;
+    ctx.cause = same ? "renewed" : "added";
     if (same) {
       await storeCredential(same.id, oauthSecret(input.tokens));
       same.expiresAt = input.tokens.expires;
       if (same.status === "expired" || same.status === "revoked") same.status = "ok";
+      same.authFailedAt = null;
       if (typeof input.label === "string" && input.label.trim()) same.label = cleanLabel(input.label, same.label);
       return { ...same };
     }
@@ -462,7 +793,7 @@ export async function addApiKeyAccount(input: { label?: unknown; key: string; fi
     if (input.first) file.accounts.unshift(account);
     else file.accounts.push(account);
     return { ...account };
-  });
+  }, { cause: "added" });
 }
 
 /**
@@ -510,14 +841,16 @@ export async function replaceCredential(id: unknown, credential: { kind: "oauth"
       await storeCredential(account.id, credential.key.trim());
     }
     if (account.status === "expired" || account.status === "revoked") account.status = "ok";
+    account.authFailedAt = null;
     return { ...account };
-  });
+  }, { cause: "renewed" });
 }
 
 /** Take an account out of the pool, and its credential out of the store. A `claude` sign-in is only UNLISTED: it is not this box's to end. */
 export async function removeAccount(id: unknown): Promise<void> {
-  await mutate(async (file) => {
+  await mutate(async (file, _now, ctx) => {
     const account = find(file, id);
+    ctx.fromLabel = account.label;
     file.accounts = file.accounts.filter((a) => a.id !== account.id);
     if (account.kind === "login") file.loginDismissed = true;
     await deleteDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(account.id) }).catch((err: unknown) => {
@@ -525,7 +858,7 @@ export async function removeAccount(id: unknown): Promise<void> {
       // at the next removal; said rather than swallowed.
       console.error("[anthropic-accounts] could not delete a removed account's credential:", err instanceof Error ? err.message : err);
     });
-  });
+  }, { cause: "removed" });
   void sweepOrphanCredentials();
 }
 
@@ -543,10 +876,15 @@ export async function relistLogin(): Promise<AnthropicAccount> {
     const row = file.accounts.find((a) => a.kind === "login");
     if (!row) throw new AnthropicAccountError("invalid", "The Claude Code sign-in could not be added.");
     return { ...row };
-  });
+  }, { cause: "added" });
 }
 
-/** The owner's new order: every id exactly once. */
+/**
+ * The owner's new order: every id exactly once. The order is also the owner's
+ * word on WHICH account to use (TASK-1260): the first usable one in the new
+ * order becomes the active one — moving an account to the top is how the
+ * owner switches to it by hand.
+ */
 export async function reorderAccounts(ids: unknown): Promise<AnthropicAccount[]> {
   return mutate((file) => {
     if (!Array.isArray(ids) || ids.length !== file.accounts.length || new Set(ids).size !== ids.length) {
@@ -554,7 +892,7 @@ export async function reorderAccounts(ids: unknown): Promise<AnthropicAccount[]>
     }
     file.accounts = ids.map((id) => find(file, id));
     return file.accounts.map((a) => ({ ...a }));
-  });
+  }, { cause: "owner", reselect: true });
 }
 
 export async function renameAccount(id: unknown, label: unknown): Promise<AnthropicAccount> {
@@ -583,8 +921,14 @@ export interface LimitRecorded {
  * session one); an earlier one does not shorten a limit the box already knows
  * about, because the account that refused is the evidence and it refused now.
  */
-export async function markLimited(id: unknown, until: number, kind: AnthropicLimitKind): Promise<LimitRecorded> {
-  return mutate((file, now) => {
+/** Who saw the failure a mark records: the swap's event says where it came from. */
+export interface FailureContext {
+  source?: SwapSource;
+  runId?: string | null;
+}
+
+export async function markLimited(id: unknown, until: number, kind: AnthropicLimitKind, context: FailureContext = {}): Promise<LimitRecorded> {
+  return mutate((file, now, ctx) => {
     const before = poolHealth(file.accounts, now);
     const account = find(file, id);
     const wasLimited = effectiveStatus(account, now) === "limited";
@@ -592,9 +936,13 @@ export async function markLimited(id: unknown, until: number, kind: AnthropicLim
     account.limitedUntil = wasLimited && account.limitedUntil !== null ? Math.max(account.limitedUntil, until) : until;
     account.limitKind = kind;
     account.lastLimitedAt = now;
+    ctx.source = context.source ?? "box";
+    ctx.runId = context.runId ?? null;
+    ctx.limitKind = kind;
+    ctx.limitedUntil = account.limitedUntil;
     const after = poolHealth(file.accounts, now);
     return { account: { ...account }, newlyLimited: !wasLimited, becameAllLimited: !before.allLimited && after.allLimited, health: after };
-  });
+  }, { cause: "limit" });
 }
 
 /** Take a recorded limit back (the owner knows better, or a test is over). */
@@ -605,17 +953,58 @@ export async function clearLimit(id: unknown): Promise<AnthropicAccount> {
     account.limitedUntil = null;
     account.limitKind = null;
     return { ...account };
-  });
+  }, { cause: "renewed" });
 }
 
 /** An account's credential needs the owner (`revoked`) or a renewal (`expired`). */
-export async function markCredentialProblem(id: unknown, status: "expired" | "revoked"): Promise<void> {
-  await mutate((file) => {
+export async function markCredentialProblem(id: unknown, status: "expired" | "revoked", context: FailureContext = {}): Promise<void> {
+  await mutate((file, now, ctx) => {
     const account = find(file, id);
     // A limit outranks a credential problem only while it runs: the owner
     // should learn about a dead credential without waiting for a reset.
     account.status = status;
     account.limitedUntil = null;
+    // For the `claude` sign-in, never earlier than its credential file as it
+    // is NOW: only a LATER write of that file (the owner signing in again)
+    // lifts the refusal, and a file clock and this process's clock must not
+    // be compared to the millisecond.
+    const writtenAt = account.kind === "login" ? anthropicLoginChangedAt() : null;
+    account.authFailedAt = writtenAt !== null ? Math.max(now, Math.ceil(writtenAt)) : now;
+    ctx.source = context.source ?? "box";
+    ctx.runId = context.runId ?? null;
+  }, { cause: "auth" });
+}
+
+/**
+ * The owner's preference (TASK-1260): back to the first account in the order
+ * the moment it can answer again, instead of staying on the account the box
+ * moved to. Turning it on applies it at once.
+ */
+export async function setReturnToPrimary(on: boolean): Promise<void> {
+  await mutate((file) => {
+    file.returnToPrimary = on === true;
+  }, { cause: "owner" });
+}
+
+/** File the swap the listeners are fanning out, so the card can show it while it happens. */
+export async function recordSwapEvent(event: SwapEvent): Promise<void> {
+  await mutate((file) => {
+    file.lastSwap = { ...event, consumers: { ...event.consumers } };
+  });
+}
+
+/** What one consumer did about the swap on record — ignored once a newer swap has taken its place. */
+export async function updateSwapConsumer(eventId: string, name: SwapConsumerName, outcome: SwapConsumerOutcome): Promise<void> {
+  await mutate((file) => {
+    if (file.lastSwap?.id !== eventId) return;
+    file.lastSwap.consumers = { ...file.lastSwap.consumers, [name]: { ...outcome } };
+  });
+}
+
+/** Where the gateway's Claude subscription credential now stands (src/lib/anthropic-gateway.ts); null when it no longer follows the pool. */
+export async function setGatewayMirror(mirror: GatewayMirror | null): Promise<void> {
+  await mutate((file) => {
+    file.gateway = mirror && file.accounts.some((a) => a.id === mirror.accountId) ? { ...mirror } : null;
   });
 }
 
@@ -706,17 +1095,19 @@ export async function refreshOAuthTokens(refresh: string, now: number = Date.now
  * it out with no request of its own.
  *
  * In-process is enough: this server is the only thing that renews. The wrapper
- * and the CLI are handed an access token and never see the refresh token. The
- * lock never waits on the pool's own `mutate` chain while that chain waits on
- * it, because nothing inside `mutate` reads a credential.
+ * and the CLI are handed an access token and never see the refresh token — and
+ * so is the gateway's mirror (src/lib/anthropic-gateway.ts). The locks are the
+ * PROCESS's (see PoolRuntime), not one module copy's: the boot hook's copy and
+ * a route's copy renewing the same account would otherwise race exactly as two
+ * runs did. The lock never waits on the pool's own `mutate` chain while that
+ * chain waits on it, because nothing inside `mutate` reads a credential.
  */
-const credentialLocks = new Map<string, SerialLock>();
-
 function credentialLock(id: string): SerialLock {
-  let lock = credentialLocks.get(id);
+  const locks = runtime().credentialLocks;
+  let lock = locks.get(id);
   if (!lock) {
     lock = createSerialLock();
-    credentialLocks.set(id, lock);
+    locks.set(id, lock);
   }
   return lock;
 }
@@ -773,11 +1164,88 @@ async function readCredential(account: AnthropicAccount, now: number): Promise<A
 }
 
 /**
+ * What asking Anthropic about one account's credential answered (TASK-1260):
+ * `ok` — it works (an OAuth grant renewed, a key accepted); `dead` — refused,
+ * and the account is now marked so; `unknown` — Anthropic could not be asked,
+ * and nothing was marked.
+ */
+export type CredentialProbe = "ok" | "dead" | "unknown";
+
+export type KeyCheck = (key: string) => Promise<"ok" | "rejected" | "unreachable">;
+
+/**
+ * A consumer saw a 401 on this account: is the account's credential really
+ * dead, or was the token that process held merely stale?
+ *
+ * Asked the one way that costs no run: an OAuth grant is RENEWED (the pool is
+ * its only holder, so spending the refresh token here is safe, and a renewal
+ * that succeeds is proof the grant is alive — the stale token is replaced with
+ * it); an API key is checked the way the key form checks it (`verifyKey`, the
+ * caller's, since that check lives above this module). The `claude` sign-in
+ * cannot be asked — this box never reads it — and a refusal that reached a
+ * run is one Claude Code could not renew its way out of, so it is marked.
+ */
+export async function probeAccountCredential(id: string, verifyKey: KeyCheck, context: FailureContext = {}): Promise<CredentialProbe> {
+  const account = (await readAccounts()).find((a) => a.id === id);
+  if (!account) return "unknown";
+  return credentialLock(account.id)(async (): Promise<CredentialProbe> => {
+    const dead = async (status: "expired" | "revoked"): Promise<CredentialProbe> => {
+      await markCredentialProblem(account.id, status, context).catch(() => {});
+      return "dead";
+    };
+    if (account.kind === "login") return dead(hasAnthropicLogin() ? "revoked" : "expired");
+    const stored = await readDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(account.id) });
+    if (!stored.found) return stored.reason === "unavailable" ? "unknown" : dead("revoked");
+    if (account.kind === "api_key") {
+      const verdict = await verifyKey(stored.value).catch(() => "unreachable" as const);
+      if (verdict === "rejected") return dead("revoked");
+      return verdict === "ok" ? "ok" : "unknown";
+    }
+    const tokens = parseOAuthSecret(stored.value);
+    if (!tokens) return dead("revoked");
+    const now = Date.now();
+    if (!tokens.refresh) {
+      // Nothing to renew with: a token past its end is dead, one with life in
+      // it cannot be told apart from a stale copy without spending a request.
+      return tokens.expires !== null && tokens.expires <= now ? dead("expired") : "unknown";
+    }
+    const refreshed = await refreshOAuthTokens(tokens.refresh, now);
+    if (!refreshed.ok) return refreshed.reason === "rejected" ? dead("revoked") : "unknown";
+    await storeCredential(account.id, oauthSecret(refreshed.tokens));
+    await mutate((file) => {
+      const row = file.accounts.find((a) => a.id === account.id);
+      if (row) row.expiresAt = refreshed.tokens.expires;
+    }).catch(() => {});
+    return "ok";
+  });
+}
+
+/**
+ * A Claude account's ACCESS token and when it ends, renewed first when it is
+ * near that end — what the gateway's copy of the active account is written
+ * from (src/lib/anthropic-gateway.ts). Never the refresh token: the pool stays
+ * the grant's only holder, so nothing else can spend it. Null for any other
+ * kind of account, or one that cannot answer.
+ */
+export async function gatewayCredentialFor(id: string): Promise<{ access: string; expires: number | null } | null> {
+  const account = (await readAccounts()).find((a) => a.id === id);
+  if (!account || account.kind !== "oauth") return null;
+  return credentialLock(account.id)(async () => {
+    const credential = await readCredential(account, Date.now());
+    if (!credential || credential.kind !== "oauth") return null;
+    const stored = await readDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(account.id) });
+    const tokens = stored.found ? parseOAuthSecret(stored.value) : null;
+    return { access: credential.secret, expires: tokens && tokens.access === credential.secret ? tokens.expires : null };
+  });
+}
+
+/**
  * The account a run should use now, with its credential in hand.
  *
- * The first usable account in the owner's order, skipping any in `exclude` (the
- * one that has just refused) and any whose credential turns out not to work —
- * those are marked on the way past, so the owner's list says why.
+ * The ACTIVE account (TASK-1260) — else the first usable one in the owner's
+ * order — skipping any in `exclude` (the one that has just refused) and any
+ * whose credential turns out not to work — those are marked on the way past,
+ * so the owner's list says why, and marking one moves the active account.
  *
  * `fallback` answers the question "and if NONE can answer?": the runner still
  * has to spawn something on a path that has already committed to a spawn, and
@@ -788,8 +1256,9 @@ export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fall
   const tried = new Set(opts.exclude ?? []);
   for (;;) {
     const now = Date.now();
-    const accounts = await readAccounts();
-    const next = pickAccount(accounts, now, tried);
+    const file = await serialised(loadLocked);
+    const accounts = file.accounts.map((a) => ({ ...a }));
+    const next = pickForSpawn(accounts, file.activeId, now, tried);
     if (!next) {
       if (opts.fallback) {
         for (const account of accounts) {
@@ -815,6 +1284,7 @@ export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fall
  * caller then asks the slow way.
  */
 export function anotherAccountLikely(excludeId: string | null, now: number = Date.now()): boolean | null {
+  const { snapshot } = runtime();
   if (!snapshot) return null;
   return pickAccount(snapshot.accounts, now, new Set(excludeId ? [excludeId] : [])) !== null;
 }
@@ -887,45 +1357,47 @@ export function sweepCredentialHandoffs(now: number = Date.now()): void {
  * Something that wants to know the moment a limited account is back — the
  * runner, which resumes the runs that were waiting for it. The timer lives
  * here because the pool is what knows the times; it is rebuilt from the pool on
- * every read, so a restart re-arms it at the first read after boot.
+ * every read, so a restart re-arms it at the first read after boot. ONE timer
+ * per process (PoolRuntime): the read it ends with is what settles the active
+ * account against the reset, and so what moves every consumer back to work.
  */
-const wakeListeners = new Set<() => void>();
-let wakeTimer: ReturnType<typeof setTimeout> | null = null;
-let wakeAt: number | null = null;
 
 /** A small margin past the reset, so the account is really back when the wake runs. */
 const WAKE_MARGIN_MS = 20_000;
 
 export function onLimitReset(listener: () => void): () => void {
-  wakeListeners.add(listener);
-  return () => wakeListeners.delete(listener);
+  const listeners = runtime().wakeListeners;
+  listeners.add(listener);
+  return () => listeners.delete(listener);
 }
 
 function armWake(file: PoolFile): void {
+  const state = runtime();
   const now = Date.now();
   const next = poolHealth(file.accounts, now).nextResetAt;
   const at = next === null ? null : next + WAKE_MARGIN_MS;
-  if (at === wakeAt && wakeTimer) return;
-  if (wakeTimer) clearTimeout(wakeTimer);
-  wakeTimer = null;
-  wakeAt = at;
+  if (at === state.wakeAt && state.wakeTimer) return;
+  if (state.wakeTimer) clearTimeout(state.wakeTimer);
+  state.wakeTimer = null;
+  state.wakeAt = at;
   if (at === null) return;
   // setTimeout's own ceiling is ~24.8 days; a longer wait re-arms on the way.
   const delay = Math.min(Math.max(at - now, 1_000), 2_147_000_000);
-  wakeTimer = setTimeout(() => {
-    wakeTimer = null;
-    wakeAt = null;
-    for (const listener of wakeListeners) {
+  state.wakeTimer = setTimeout(() => {
+    state.wakeTimer = null;
+    state.wakeAt = null;
+    for (const listener of state.wakeListeners) {
       try {
         listener();
       } catch (err) {
         console.error("[anthropic-accounts] a limit-reset listener failed:", err instanceof Error ? err.message : err);
       }
     }
-    // Re-read: the next limit in line (if any) arms the next wake.
+    // Re-read: it settles the active account against the reset (and emits the
+    // move), and the next limit in line (if any) arms the next wake.
     void readAccounts().catch(() => {});
   }, delay);
-  wakeTimer.unref?.();
+  state.wakeTimer.unref?.();
 }
 
 /** At boot: read the pool (which migrates and arms the wake) and clear stale handoffs. */
@@ -957,17 +1429,26 @@ export interface AnthropicAccountView {
 export interface AnthropicPoolView {
   accounts: AnthropicAccountView[];
   health: PoolHealth;
+  /** The account every Claude consumer on the box uses now (TASK-1260); null when none can answer. */
   activeAccountId: string | null;
   /** Can a `claude` sign-in be put (back) on the list? */
   loginAvailable: boolean;
+  /** The owner's preference: back to the first account once its limit is over. */
+  returnToPrimary: boolean;
+  /** The most recent move of the active account and what each consumer did about it — labels and times only. */
+  lastSwap: SwapEvent | null;
+  /** Whether the gateway's Claude subscription follows the active account, and which one it holds. */
+  gateway: { following: boolean; accountId: string | null; label: string | null; since: number | null };
   now: number;
 }
 
 /** The pool as a route and the MCP tool may show it: labels and states, never a credential. */
 export async function describePool(): Promise<AnthropicPoolView> {
   const now = Date.now();
-  const accounts = await readAccounts();
-  const active = pickAccount(accounts, now);
+  const file = await serialised(loadLocked);
+  const accounts = file.accounts;
+  const active = file.activeId ? accounts.find((a) => a.id === file.activeId) ?? null : null;
+  const mirrored = file.gateway ? accounts.find((a) => a.id === file.gateway?.accountId) ?? null : null;
   return {
     accounts: accounts.map((a, i) => ({
       id: a.id,
@@ -986,6 +1467,14 @@ export async function describePool(): Promise<AnthropicPoolView> {
     health: poolHealth(accounts, now),
     activeAccountId: active?.id ?? null,
     loginAvailable: !accounts.some((a) => a.kind === "login") && hasAnthropicLogin(),
+    returnToPrimary: file.returnToPrimary,
+    lastSwap: file.lastSwap ? { ...file.lastSwap, consumers: { ...file.lastSwap.consumers } } : null,
+    gateway: {
+      following: mirrored !== null,
+      accountId: mirrored?.id ?? null,
+      label: mirrored?.label ?? null,
+      since: mirrored ? file.gateway?.at ?? null : null,
+    },
     now,
   };
 }
@@ -1005,15 +1494,17 @@ export async function poolHasCredential(): Promise<{ any: boolean; hasKey: boole
   };
 }
 
-/** Test seam: forget the snapshot, the wake and the chain. */
+/** Test seam: forget the snapshot, the wake, the chain and every listener. */
 export function _resetAnthropicAccountsForTests(): void {
-  snapshot = null;
-  chain = Promise.resolve();
-  credentialLocks.clear();
-  if (wakeTimer) clearTimeout(wakeTimer);
-  wakeTimer = null;
-  wakeAt = null;
-  wakeListeners.clear();
+  const state = runtime();
+  state.snapshot = null;
+  state.chain = Promise.resolve();
+  state.credentialLocks.clear();
+  if (state.wakeTimer) clearTimeout(state.wakeTimer);
+  state.wakeTimer = null;
+  state.wakeAt = null;
+  state.wakeListeners.clear();
+  state.changeListeners.clear();
 }
 
 export { isUsable };

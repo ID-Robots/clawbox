@@ -221,10 +221,12 @@ the figures with the box yet, the agent says so and points you at your account t
 changes your plan or buys credits.
 
 ### Anthropic accounts — both editions
-`anthropic_accounts` reads the Anthropic accounts your coding runs use, from **Settings →
-Providers → Anthropic accounts**. For each account it gives the name, the kind and the state:
-it can answer, or it is at its usage limit and back at a given time. It also gives the order
-the box uses them in, the one a run starting now would use, and how many can answer. When
+`anthropic_accounts` reads the Anthropic accounts everything that uses Claude on the box
+runs on (coding runs, and the chat and its scheduled tasks when the chat is on a Claude
+subscription), from **Settings → Providers → Anthropic accounts**. For each account it gives
+the name, the kind and the state: it can answer, or it is at its usage limit and back at a
+given time. It also gives the order, the active account every consumer uses now, how many
+can answer, and the last swap (`last_swap`: when, from which account to which, and why). When
 every account is limited, it tells the agent to wait for the first reset: runs that were cut
 off resume by themselves then, and `coding_agent_run` refuses a new Anthropic run until that
 time. The answer never carries an email or a credential. Adding, ordering and removing

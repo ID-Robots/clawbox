@@ -1,46 +1,69 @@
 ---
 title: "Multiple Anthropic Accounts"
 icon: "users"
-summary: "Connect more than one Claude subscription or Anthropic API key for coding runs, put them in the order you want, and let the box move a run to the next account when one hits its usage limit."
+summary: "Connect more than one Claude subscription or Anthropic API key, put them in the order you want, and let the box move everything that uses Claude to the next account when one hits its usage limit."
 ---
 
-The Coding Agent runs Claude Code on your box. A Claude Pro or Max subscription has a
-five-hour session window and a weekly cap. Once one of them is used up, a box with a
-single account stops coding until the limit resets. That includes a queue left running
-overnight.
+The Coding Agent runs Claude Code on your box, and the chat can run on your Claude
+subscription too. A Claude Pro or Max subscription has a five-hour session window and a
+weekly cap. Once one of them is used up, a box with a single account stops until the
+limit resets. That includes a coding queue left running overnight, and the chat's
+scheduled tasks.
 
-Connect more than one Anthropic account and the box carries on. When the account a run
-is using hits its limit, the run moves to the next account and continues in the same
-session. The first account is used again as soon as its limit resets.
+Connect more than one Anthropic account and the box carries on. One account is
+**active** at a time, and everything that uses Claude runs on it: coding runs, review
+passes, team workers, the chat, its scheduled tasks and its check-ins. When the active
+account hits its limit, all of them move to the next account together. Interrupted work
+continues where it was.
 
 <Frame caption="Settings → Providers → Anthropic accounts, in the order the box tries them">
   <img src="/images/4.0/settings-anthropic-accounts.png" alt="The Anthropic accounts card badged 2 of 3 ready: a Claude Max account marked In use, a Claude Pro account marked Limited until a time later today, and an API key marked Ready, with a button to connect another account." />
 </Frame>
 
 <Note>
-These accounts are for **coding runs** only. They do not change which AI answers in the
-chat: that is the provider at the top of **Settings → Providers** (see
-[Choose Your AI Provider](/setup/choose-ai-provider)).
+The accounts do not choose **which** AI answers in the chat. That is still the provider
+at the top of **Settings → Providers** (see
+[Choose Your AI Provider](/setup/choose-ai-provider)). When the chat runs on a Claude
+subscription, it runs on the active account from this list once the box has had to
+switch accounts for the first time. Connecting an account never replaces the sign-in the
+chat already uses by itself.
 </Note>
 
 ## How the fallback works
 
-- **Your order decides.** Every coding run uses the first account in the list that can
-  answer. It never takes turns (round-robin): account #2 only works while account #1 is
-  out.
-- **A limit moves the run; it doesn't end it.** Claude Code reports a limit in its own
-  words, like *"You've hit your session limit · resets 10:50pm"*. When that happens, the
-  box notes when the account is back, switches the run to the next account and resumes
-  it in the same session. The work so far and the conversation are kept.
-- **The first account comes back by itself.** Once its reset time passes, the box uses
-  it again for the next run, with nothing for you to do.
-- **When every account is limited, runs wait.** A run that cannot continue on any
-  account is paused, not failed, and shows *Waiting*. The box resumes it at the first
-  reset without you pressing anything. Until then, a new coding run is refused with the
-  reset time rather than started and cut off.
-- **Only a usage cap counts.** This covers the session (five-hour) window, the weekly
-  cap, an API key's rate limit and a prepaid key with no credit left. Any other failure
-  is a real failure and is not passed from account to account.
+- **One account at a time, for everything.** The box starts on the first account in
+  the list that can answer. It never takes turns (round-robin).
+- **A limit moves everything; it doesn't end anything.** Claude Code reports a limit in
+  its own words, like *"You've hit your weekly limit · resets Mon 9am"*. Whichever part
+  of the box sees it first (a coding run, the chat, a scheduled task), the box notes when
+  the account is back and switches every part to the next account at once:
+  - coding runs, review passes and team workers still on the old account are stopped
+    and resumed **in the same session** on the new one. The branch, the commits and the
+    pull request stay the same.
+  - the chat's Claude subscription is switched and the gateway restarts on it, for
+    every agent and every conversation.
+  - a chat message or scheduled task that failed on the limit is **sent again once**
+    on the new account.
+- **A refused sign-in moves everything too.** If Anthropic refuses an account (a 401,
+  a revoked sign-in or key), the box first checks with Anthropic. If the sign-in really
+  is dead, the account is marked **Needs re-authentication** and everything moves on. If
+  it was only a stale token, the account stays in use.
+- **The box stays where it moved to.** When the first account's limit resets, the box
+  keeps using the account it switched to until that one runs out too. That saves a
+  restart of the chat for nothing. To go back to the first account as soon as it resets,
+  turn on **Return to the first account once its limit resets**. To switch by hand at
+  any time, move an account to the top of the list: the first account that can answer
+  becomes the active one.
+- **When every account is limited, work waits.** The card says **All accounts limited,
+  earliest reset 22:50**. A coding run that cannot continue is paused, not failed, and
+  shows *Waiting*. A failed chat message or scheduled task is held. At the first reset
+  the box switches to that account and resumes all of it without you pressing anything.
+  Until then, a new coding run is refused with the reset time rather than started and cut
+  off.
+- **Only a usage cap or a refused sign-in counts.** This covers the session (five-hour)
+  window, the weekly cap, an API key's rate limit, a prepaid key with no credit left and
+  Anthropic refusing the credential. Any other failure is a real failure and is not
+  passed from account to account.
 
 If a limit message gives no reset time, the account is set aside for five hours, the
 length of a session window.
@@ -98,7 +121,7 @@ or **All limited · back at 22:50**.
 
 | State | What it means |
 |---|---|
-| **In use** | The account a run starting now would use. |
+| **In use** | The active account: everything that uses Claude runs on it. |
 | **Ready** | Can answer; waiting its turn. |
 | **Limited until 22:50** | At its usage limit. The time is in your clock, with the weekday when it is not today. |
 | **Sign-in expired** | The box could not renew the sign-in. Re-authenticate it, or for the Claude Code sign-in, run `claude` in the Terminal app again. |
@@ -106,28 +129,51 @@ or **All limited · back at 22:50**.
 
 | Control | What it does |
 |---|---|
-| ↑ / ↓ | Move the account up or down in the order. |
+| ↑ / ↓ | Move the account up or down in the order. The first account that can answer after the move becomes the active one. |
 | Rename | Change the name. It is only a label for you. |
 | Re-authenticate | Sign in again or paste a new key. The account keeps its place, and a limit it is under stays until its reset. Sign in as the same Claude account: a sign-in for a different one, including another account on the list, is refused and nothing changes. To add that account, use **Connect another account** instead. |
 | Remove | Tap once to arm it and again to remove the account. Its credential is deleted from the box. |
 
 ## What you see when a limit hits
 
+- **On the card:** a line naming the account everything runs on, and a **Last swap**
+  panel: when it happened, from which account to which, why (*Usage limit, back at
+  22:50*, *Anthropic refused the sign-in*, *Your change*…), and what each part of the box
+  did: *Coding runs: 2 carried on*, *Chat and scheduled tasks: switched*, *Failed turns:
+  1 sent again*.
 - **In the run's timeline:** *Anthropic account "Work Max" hit its usage limit (back at
-  22:50); carrying on with "Personal Max" in the same session.*
+  22:50); carrying on with "Personal Max" in the same session.* A run moved because the
+  chat or another run hit the limit first says *Anthropic account "Work Max" can no longer
+  answer; carrying on with "Personal Max" in the same session*.
+- **In the chat**, under the failed message: *That Claude account could not answer, so
+  ClawBox moved everything that uses Claude to Personal Max and sent your message again.*
 - **A notice** on the desktop, and in your Telegram chat if you connected a bot. There
-  are two kinds: one when
-  an account is set aside and the box switches, and one when no account is left. Pressing
-  the desktop notice opens **Settings → Providers**. You get no notice when the box goes
-  back to your first account: that is the list working as intended.
+  are two kinds: one when an account is set aside (limited or refused) and the box
+  switches, and one when no account is left. Pressing the desktop notice opens
+  **Settings → Providers**. You get no notice when the box goes back to your first
+  account, or when you switch by hand.
 - **On a waiting run's card:** *Waiting: every Anthropic account on this box is at its
   usage limit. It carries on by itself at 22:50.* You don't need to press **Resume**.
+
+## Try it with two accounts
+
+1. Connect two Claude accounts (or a Claude account and an API key) on the card.
+2. In **Settings → Providers**, pick a Claude model for the chat with **Sign in with
+   Claude**, so the chat runs on a Claude subscription.
+3. Start a coding run and send a chat message.
+4. Move account #2 to the top of the list. The **Last swap** panel shows *Your change*,
+   and the chat restarts on account #2. A run already working on account #1 finishes
+   there, because that account can still answer.
+5. To see a real limit's path without waiting for one, the owner-only test hook
+   `POST /setup-api/anthropic/accounts` with `{"action":"simulate_limit","id":"<account id>"}`
+   sets the account aside for 30 minutes. Runs on it are stopped and resumed on the next
+   account, the chat is switched, and you get the notice.
 
 ## The assistant knows too
 
 The assistant reads the same list with the `anthropic_accounts` tool: how many accounts
-can answer, which one is in use and when a limited one is back. It uses this before
-starting or retrying a coding run. When every account is limited, it waits for the reset
+can answer, which one is in use, when a limited one is back and why the last swap
+happened. It uses this before starting or retrying a coding run. When every account is limited, it waits for the reset
 instead of spending attempts. The tool can only read: adding, removing and ordering
 accounts needs your signed-in browser session. See
 [Agent Interface](/technical/agent-interface).

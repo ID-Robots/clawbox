@@ -29,6 +29,7 @@ const pool = vi.hoisted(() => ({
   clearLimit: vi.fn(),
   markLimited: vi.fn(),
   readAccounts: vi.fn(),
+  setReturnToPrimary: vi.fn(),
 }));
 vi.mock("@/lib/anthropic-accounts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/anthropic-accounts")>()),
@@ -100,6 +101,7 @@ beforeEach(async () => {
     { id: "bbbbbbbb", label: "Personal", status: "ok", limitedUntil: null },
   ]);
   pool.markLimited.mockResolvedValue({ newlyLimited: true, becameAllLimited: false, health: VIEW.health, account: {} });
+  pool.setReturnToPrimary.mockResolvedValue(undefined);
   simulateAnthropicLimit.mockReturnValue([]);
   handoff.readHandoffTokens.mockResolvedValue({
     ok: true,
@@ -293,10 +295,22 @@ describe("the test hook", () => {
     expect(announceAnthropicLimit).not.toHaveBeenCalled();
   });
 
-  it("marks the account itself when no run was on it, and says the box moved on", async () => {
+  it("marks the account itself when no run was on it — and leaves the swap and its notice to the pool's move (TASK-1260)", async () => {
     await post({ action: "simulate_limit", id: "aaaaaaaa" });
-    expect(pool.markLimited).toHaveBeenCalledWith("aaaaaaaa", expect.any(Number), "session");
-    await vi.waitFor(() => expect(announceAnthropicLimit).toHaveBeenCalledWith(expect.objectContaining({ kind: "switched", fromLabel: "Work" })));
+    expect(pool.markLimited).toHaveBeenCalledWith("aaaaaaaa", expect.any(Number), "session", { source: "owner" });
+    // The notice is src/lib/anthropic-swap.ts's, sent once for the move the
+    // mark causes (pinned in anthropic-swap.test.ts) — never a second one here.
+    expect(announceAnthropicLimit).not.toHaveBeenCalled();
+  });
+});
+
+describe("the owner's preference (TASK-1260)", () => {
+  it("turns \"return to the first account\" on and off, owner-only", async () => {
+    expect((await post({ action: "set_return_to_primary", on: true })).status).toBe(200);
+    expect(pool.setReturnToPrimary).toHaveBeenCalledWith(true);
+    expect((await post({ action: "set_return_to_primary", on: "yes" })).status).toBe(400);
+    expect((await post({ action: "set_return_to_primary", on: false }, { auth: "bearer" })).status).toBe(403);
+    expect(pool.setReturnToPrimary).toHaveBeenCalledTimes(1);
   });
 
   it("refuses an account that is not there", async () => {
