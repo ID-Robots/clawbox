@@ -1468,4 +1468,5 @@ export const sv: Record<string, string> = {
   "tray.signedInAsName": "Inloggad som {name}",
   "tray.switchUser": "Byt användare",
   "tray.nonOwnerHint": "Här är bara Terminalen din — allt annat tillhör boxens ägare.",
+  "users.ownerOnlyPage": "Bara boxens ägare kan öppna den sidan — du är tillbaka på skrivbordet.",
 };

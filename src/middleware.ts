@@ -13,7 +13,7 @@ import { isAllowedHostHeader, isTunnelRequest, systemHostLabel } from "@/lib/hos
 import { USERS_CONFIG_KEY, identityFromClaims, parseUserRegistry, registryVersions } from "@/lib/session-identity";
 import type { SessionIdentity } from "@/lib/session-identity";
 import { ownerUsername } from "@/lib/owner-username";
-import { nonOwnerVerdict } from "@/lib/non-owner-scope";
+import { NON_OWNER_HOME, nonOwnerVerdict, requestIntent } from "@/lib/non-owner-scope";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -711,16 +711,22 @@ export async function middleware(request: NextRequest) {
     // scoped per user — src/lib/non-owner-scope.ts, an allow-list. A 403 rather
     // than the 401 below: the session is fine, and the desktop reads a 401 as
     // "signed out" and sends the person back to /login. The RAW path, for the
-    // same reason as step 2.
+    // same reason as step 2. A page is answered with the desktop instead of the
+    // JSON, carrying the notice the desktop turns into "only the owner can open
+    // that" — `requestIntent`, not `isDocumentRequest`, because the box is
+    // reached over plain HTTP, where browsers send no Sec-Fetch-Dest at all.
     if (!identity.isOwner) {
       const verdict = nonOwnerVerdict({
         pathname: request.nextUrl.pathname,
         method: request.method,
         searchParams: request.nextUrl.searchParams,
-        isDocument: isDocumentRequest(request.headers),
+        intent: requestIntent(request.headers),
       });
       if (verdict === "redirect-home") {
-        return NextResponse.redirect(new URL("/", request.url));
+        return NextResponse.redirect(new URL(NON_OWNER_HOME, request.url), {
+          status: 307,
+          headers: { "cache-control": "no-store" },
+        });
       }
       if (verdict === "deny") {
         return NextResponse.json(

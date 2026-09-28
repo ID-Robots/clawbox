@@ -1472,4 +1472,5 @@ export const nl: Record<string, string> = {
   "tray.signedInAsName": "Aangemeld als {name}",
   "tray.switchUser": "Andere gebruiker",
   "tray.nonOwnerHint": "Hier is alleen de Terminal van jou — al het andere is van de eigenaar van de box.",
+  "users.ownerOnlyPage": "Alleen de eigenaar van de box kan die pagina openen — je bent terug op het bureaublad.",
 };

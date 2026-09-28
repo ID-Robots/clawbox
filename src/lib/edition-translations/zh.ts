@@ -1480,4 +1480,5 @@ export const zh: Record<string, string> = {
   "tray.signedInAsName": "已以 {name} 身份登录",
   "tray.switchUser": "切换用户",
   "tray.nonOwnerHint": "这里只有终端属于你——其他一切都属于设备所有者。",
+  "users.ownerOnlyPage": "只有设备所有者可以打开该页面——你已回到桌面。",
 };

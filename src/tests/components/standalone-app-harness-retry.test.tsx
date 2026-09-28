@@ -16,8 +16,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type React from "react";
-import { render, screen } from "@/tests/helpers/test-utils";
+import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import StandaloneAppPage from "@/app/app/[id]/page";
+import { _resetSessionUserForTest } from "@/lib/use-session-user";
 
 type Probe = { active?: string; edition?: string; activeKnown?: boolean } | null;
 
@@ -36,6 +37,7 @@ vi.mock("@/lib/client-harness", () => ({ fetchHarness: harnessMock }));
 
 beforeEach(() => {
   harnessMock.mockReset();
+  _resetSessionUserForTest();
   vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({}) })));
 });
 
@@ -68,5 +70,24 @@ describe("/app/<id> — a probe that could not name the harness", () => {
 
     expect(await screen.findByRole("link")).toBeInTheDocument();
     expect(harnessMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("/app/<id> — signed in as a user who is not the owner (TASK-1256)", () => {
+  it("never asks the owner's harness route, and fails closed without it", async () => {
+    const fetchMock = vi.fn(async (input: unknown) => ({
+      ok: true,
+      json: async () => (String(input).includes("/setup-api/users/me")
+        ? { username: "alice", isOwner: false, multiUser: true }
+        : {}),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<StandaloneAppPage />);
+
+    // "unknown" hides both harnesses' apps — the answer a failed probe gives.
+    expect(await screen.findByText(/App not found: store/)).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/setup-api/users/me"))).toBe(true));
+    expect(harnessMock).not.toHaveBeenCalled();
   });
 });

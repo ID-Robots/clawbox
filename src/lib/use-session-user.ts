@@ -56,6 +56,36 @@ export function useSessionUser(): SessionUser | null {
   return user;
 }
 
+/**
+ * Whether the browser may call the owner's routes — the gate every desktop
+ * fetch of an owner-only /setup-api route waits on, so a non-owner's desktop
+ * never sends the ~15 requests the server would only refuse with 403
+ * (src/lib/non-owner-scope.ts).
+ *
+ * `false` only once the box has SAID the session is another ClawBox user's.
+ * When `users/me` cannot be had the answer is `true`: the owner's desktop
+ * behaves exactly as it did before multi-user, and the server still refuses
+ * whatever it must — this gate is about noise, never about access.
+ */
+export function mayUseOwnerApis(): Promise<boolean> {
+  return fetchSessionUser().then((u) => u?.isOwner !== false);
+}
+
+/** `mayUseOwnerApis()` as a hook: `null` until settled, so an effect can wait on it. */
+export function useMayUseOwnerApis(): boolean | null {
+  const [may, setMay] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    void mayUseOwnerApis().then((m) => {
+      if (live) setMay(m);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  return may;
+}
+
 /** Test-only: forget the shared request. */
 export function _resetSessionUserForTest(): void {
   pending = null;

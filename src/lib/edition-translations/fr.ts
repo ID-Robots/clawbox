@@ -1472,4 +1472,5 @@ export const fr: Record<string, string> = {
   "tray.signedInAsName": "Connecté en tant que {name}",
   "tray.switchUser": "Changer d’utilisateur",
   "tray.nonOwnerHint": "Ici, seul le Terminal vous appartient — tout le reste appartient au propriétaire de la box.",
+  "users.ownerOnlyPage": "Seul le propriétaire de la box peut ouvrir cette page — vous êtes revenu sur le bureau.",
 };

@@ -1483,4 +1483,5 @@ export const it: Record<string, string> = {
   "tray.signedInAsName": "Accesso effettuato come {name}",
   "tray.switchUser": "Cambia utente",
   "tray.nonOwnerHint": "Qui solo il Terminale è tuo: tutto il resto appartiene al proprietario del dispositivo.",
+  "users.ownerOnlyPage": "Solo il proprietario del dispositivo può aprire quella pagina: sei tornato al desktop.",
 };

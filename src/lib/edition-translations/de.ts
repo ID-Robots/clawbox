@@ -1471,4 +1471,5 @@ export const de: Record<string, string> = {
   "tray.signedInAsName": "Angemeldet als {name}",
   "tray.switchUser": "Benutzer wechseln",
   "tray.nonOwnerHint": "Hier gehört Ihnen nur das Terminal — alles andere gehört dem Eigentümer der Box.",
+  "users.ownerOnlyPage": "Nur der Eigentümer der Box kann diese Seite öffnen — Sie sind wieder auf dem Desktop.",
 };

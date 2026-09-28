@@ -1467,4 +1467,5 @@ export const es: Record<string, string> = {
   "tray.signedInAsName": "Sesión iniciada como {name}",
   "tray.switchUser": "Cambiar de usuario",
   "tray.nonOwnerHint": "Aquí solo el Terminal es tuyo; todo lo demás pertenece al propietario de la caja.",
+  "users.ownerOnlyPage": "Solo el propietario de la caja puede abrir esa página; has vuelto al escritorio.",
 };

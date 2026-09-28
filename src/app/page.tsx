@@ -49,8 +49,8 @@ import type { InstalledMeta } from "@/lib/store-categories";
 import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } from "@/lib/skill-change-message";
 import { apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
-import { useSessionUser } from "@/lib/use-session-user";
-import { NON_OWNER_APP_IDS, installedAppIdsFor } from "@/lib/non-owner-scope";
+import { mayUseOwnerApis, useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
+import { NON_OWNER_APP_IDS, OWNER_ONLY_NOTICE, installedAppIdsFor } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
   brandingHarness,
@@ -352,6 +352,16 @@ function ChromeDesktopInner() {
   const [setupChecked, setSetupChecked] = useState(false);
   const [setupRequired, setSetupRequired] = useState(false);
   const [showClawAiOfferNotification, setShowClawAiOfferNotification] = useState(false);
+  // Multi-user ClawBox OS (TASK-1256): may this browser call the owner's
+  // routes? `null` until /users/me answers, then settled for the page's life.
+  // Every owner-only read, poll and widget below waits for `true`, so another
+  // ClawBox user's desktop sends none of the requests the server would only
+  // refuse with 403 — it used to send about fifteen on every load, several of
+  // them on a poll. (`isOwner` further down is the OPTIMISTIC reading used for
+  // what is drawn, so a single-user box never flickers; this is the strict one
+  // used for what is asked.)
+  const ownerApiAccess = useMayUseOwnerApis();
+  const ownerApis = ownerApiAccess === true;
   // Account-level "is ClawBox AI configured on this device?" — drives
   // the shelf shield (colour + click target) and the offer-notification
   // visibility. Sourced from useClawboxLogin (which now polls
@@ -361,7 +371,7 @@ function ChromeDesktopInner() {
   // falsely flip to false the moment a Max subscriber switches the
   // chat header dropdown to OpenAI, leaving them with a red shield
   // that opens AI Settings instead of ClawKeep.
-  const clawboxLogin = useClawboxLogin();
+  const clawboxLogin = useClawboxLogin(undefined, ownerApis);
   const clawAiAuthenticated = clawboxLogin.loggedIn;
 
   const syncSetupStatus = useCallback(async () => {
@@ -396,7 +406,9 @@ function ChromeDesktopInner() {
   useEffect(() => {
     Promise.all([
       syncSetupStatus(),
-      kv.init(),
+      // The box's KV store is the owner's: another user's desktop keeps the
+      // in-memory cache empty rather than be refused it.
+      mayUseOwnerApis().then((may) => (may ? kv.init() : undefined)),
     ])
       .then(() => setSetupChecked(true))
       .catch(() => setSetupChecked(true)); // If API fails, show desktop anyway
@@ -440,6 +452,9 @@ function ChromeDesktopInner() {
   // product's artwork on the customer's screen half the time.
   const [wallpaperHarness, setWallpaperHarness] = useState<string | null>(null);
   useEffect(() => {
+    // The harness route is the owner's. A non-owner's desktop draws no harness
+    // app and wears the neutral wallpaper, so it has nothing to ask it.
+    if (!ownerApis) return;
     const probe = new AbortController();
     // Backing off and asking again — `install.sh` truncates and rewrites the
     // edition lock on EVERY update and the desktop reloads right after it, so a
@@ -471,7 +486,7 @@ function ChromeDesktopInner() {
       },
     });
     return () => { probe.abort(); };
-  }, []);
+  }, [ownerApis]);
 
   // The harness-specific apps hidden on this edition (OpenClaw Control-UI +
   // App Store on Hermes; the Hermes dashboard + Hermes Skills Store on
@@ -588,6 +603,10 @@ function ChromeDesktopInner() {
   }, [nextZIndex]);
 
   useEffect(() => {
+    // Preferences are box-wide and the owner's to read and write. A non-owner's
+    // desktop never loads them, so `prefsLoaded` stays false and the writer
+    // above never sends one either: it draws the defaults and keeps them.
+    if (!ownerApis) return;
     fetch("/setup-api/preferences?all=1")
       .then(r => r.json())
       .then((data: Record<string, unknown>) => {
@@ -697,7 +716,7 @@ function ChromeDesktopInner() {
         }
       })
       .catch(() => { prefsLoaded.current = true; });
-  }, []);
+  }, [ownerApis]);
 
   // The desktop shelf's ClawKeep shield: one verdict, shared with the ClawKeep
   // card and the `backup_status` tool, and re-judged on a clock of its own so
@@ -707,7 +726,7 @@ function ChromeDesktopInner() {
     unconfigured: clawkeepUnconfigured,
     busy: clawkeepBusy,
     restoring: clawkeepRestoring,
-  } = useClawkeepShieldStatus();
+  } = useClawkeepShieldStatus(ownerApis);
 
   const wpFitStyle: React.CSSProperties = wpFit === "fill"
     ? { backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
@@ -913,6 +932,24 @@ function ChromeDesktopInner() {
   useEffect(() => {
     if (!isOwner && chatOpen) setChatOpen(false);
   }, [isOwner, chatOpen]);
+
+  // A non-owner who opened one of the owner's pages was sent here by the
+  // middleware with `?notice=owner-only` (src/lib/non-owner-scope.ts): say why,
+  // once, and take the notice out of the address so a reload does not repeat
+  // it. Waits for the desktop to be drawn (ToastHost mounts with it) and for
+  // the locale's copy (`t` answers the key itself until translations load).
+  const ownerOnlyNoticeShown = useRef(false);
+  useEffect(() => {
+    if (ownerOnlyNoticeShown.current || !setupChecked || setupRequired) return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("notice") !== OWNER_ONLY_NOTICE) return;
+    const message = t("users.ownerOnlyPage");
+    if (message === "users.ownerOnlyPage") return;
+    ownerOnlyNoticeShown.current = true;
+    url.searchParams.delete("notice");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    window.dispatchEvent(new CustomEvent(TOAST_EVENT, { detail: { message } }));
+  }, [t, setupChecked, setupRequired]);
 
   // ─── Mascot visibility ───
   const [mascotHidden, setMascotHidden] = useState(false);
@@ -1850,6 +1887,12 @@ function ChromeDesktopInner() {
   // sight rather than the browser's clock — comparing across the two dropped
   // every notice while the box ran behind.
   useEffect(() => {
+    // Wait for the role: the owner polls the notice ring; another ClawBox user
+    // (TASK-1256) is refused the ring, so their desktop polls /users/me — a
+    // route open to every signed-in user — for the one thing it needs from
+    // this poll, the update lock below.
+    if (ownerApiAccess === null) return;
+    const pollUrl = ownerApiAccess ? "/setup-api/kv?key=ui:pending-actions" : "/setup-api/users/me";
     let active = true;
     let polling = false;
     let lastSeenTs = Date.now() - 5_000;
@@ -1900,7 +1943,7 @@ function ChromeDesktopInner() {
       if (!active || polling) return;
       polling = true;
       try {
-        const res = await fetch("/setup-api/kv?key=ui:pending-actions");
+        const res = await (ownerApiAccess ? fetch(pollUrl) : fetch(pollUrl, { cache: "no-store" }));
         // An update took the box while this desktop was open. The middleware
         // redirects NAVIGATIONS to the updating page, and an open page makes
         // none — so without this it stayed here, kept polling, and went blank
@@ -1914,7 +1957,7 @@ function ChromeDesktopInner() {
           window.location.replace(UPDATING_PAGE);
           return;
         }
-        if (res.ok) {
+        if (res.ok && ownerApiAccess) {
           // How old an entry is, judged on the one clock both sides agree on:
           // the response's own Date header, which is the BOX's clock — the same
           // clock that stamped the entry — so the skew this poll works around
@@ -1965,7 +2008,7 @@ function ChromeDesktopInner() {
     };
     const id = setInterval(poll, 2000);
     return () => { active = false; clearInterval(id); };
-  }, []);
+  }, [ownerApiAccess]);
 
   // Answers the KV requests framed webapps post — see src/lib/webapp-kv-bridge.ts.
   useEffect(() => attachWebappKvBridge(), []);
@@ -2000,6 +2043,8 @@ function ChromeDesktopInner() {
   const [updateNoticeHidden, setUpdateNoticeHidden] = useState(false);
 
   useEffect(() => {
+    // Updating the box is the owner's call, and so is the card offering it.
+    if (!ownerApis) return;
     let active = true;
     const checkVersions = async () => {
       try {
@@ -2034,7 +2079,7 @@ function ChromeDesktopInner() {
     checkVersions();
     const id = setInterval(checkVersions, 30 * 60 * 1000);
     return () => { active = false; clearInterval(id); };
-  }, [applyUpdateAvailable]);
+  }, [applyUpdateAvailable, ownerApis]);
 
   const updateNoticeKeys = useMemo(() => (updateAvailable && !updateNoticeHidden ? ["update"] : []), [updateAvailable, updateNoticeHidden]);
   const hideUpdateNotice = useCallback(() => setUpdateNoticeHidden(true), []);
@@ -2069,7 +2114,7 @@ function ChromeDesktopInner() {
   // the plan section without a reload. Like every card in the column, it leaves
   // on its own after NOTICE_AUTO_HIDE_MS. That is not recorded, so it is back
   // on the next load until it is dismissed.
-  const whatsNew = useWhatsNew(clawboxLogin.tier);
+  const whatsNew = useWhatsNew(clawboxLogin.tier, ownerApis);
   const whatsNewKeys = useMemo(() => (whatsNew.visible ? ["whats-new"] : []), [whatsNew.visible]);
   useAutoHide(whatsNewKeys, whatsNew.hide);
 
@@ -2120,6 +2165,8 @@ function ChromeDesktopInner() {
   }, []);
 
   useEffect(() => {
+    // The Telegram bot is the owner's, and so is approving who may talk to it.
+    if (!ownerApis) return;
     let active = true;
     let polling = false;
     const poll = async () => {
@@ -2149,7 +2196,7 @@ function ChromeDesktopInner() {
     poll();
     const id = setInterval(poll, 20000);
     return () => { active = false; clearInterval(id); };
-  }, [loadDismissedPairCodes]);
+  }, [loadDismissedPairCodes, ownerApis]);
 
   const approvePairingRequest = useCallback(async (code: string) => {
     if (!code) return;
@@ -2559,7 +2606,10 @@ function ChromeDesktopInner() {
       onDragLeave={handleDesktopDragLeave}
       onDrop={handleDesktopDrop}
     >
-      <TierUpgradeCelebration />
+      {/* The owner's widgets mount only once the box has said this IS the
+          owner (`ownerApis`): each asks an owner-only route the moment it
+          mounts, and another user's session is refused every one of them. */}
+      {ownerApis && <TierUpgradeCelebration />}
       {/* Drop overlay */}
       {desktopDragOver && (
         <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none" style={{ zIndex: DESKTOP_LAYERS.notice }}>
@@ -2585,7 +2635,7 @@ function ChromeDesktopInner() {
           the pairing flow dispatch. Without it ui_notify, `clawbox notify`
           and every server-side owner notice were fired and never shown. */}
       <ToastHost />
-      <PowerApprovalPrompt />
+      {ownerApis && <PowerApprovalPrompt />}
       {noticesUp && (
         <div
           className="desktop-notice-stack pointer-events-none fixed top-4 flex w-[320px] flex-col gap-3"
@@ -3023,24 +3073,29 @@ function ChromeDesktopInner() {
           frozen mascot's position while the chat is open — that used to nudge
           mascotX for a frame right after opening, flashing the popup to the wrong
           corner before it settled. */}
-      {!isMobile && isOwner && (
+      {!isMobile && ownerApis && (
         <Mascot frozen={chatOpen} rightInset={chatPanelInset} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
       )}
-      <ChatPopup
-        isOpen={chatOpen && isOwner}
-        onClose={() => setChatOpen(false)}
-        onOpenSettingsSection={openSettingsSection}
-        onPanelModeChange={handleChatPanelModeChange}
-        initialPanelWidth={chatPanelWidth}
-        floatingZIndex={chatZIndex}
-        onFocus={raiseChat}
-        // Only while a card is up: the popup reports its rect on every pointer
-        // move of a drag, and nothing is dodging it the rest of the time.
-        onFloatingRectChange={noticesUp ? handleChatFloatingRect : undefined}
-        mascotX={mascotHidden ? 85 : mascotX}
-        trayMode={mascotHidden}
-        mobile={isMobile}
-      />
+      {/* Mounted for the owner only, not merely kept closed: a closed popup
+          still resolves its harness and capabilities and the gateway's
+          ws-config on mount, all of which the server refuses another user. */}
+      {ownerApis && (
+        <ChatPopup
+          isOpen={chatOpen && isOwner}
+          onClose={() => setChatOpen(false)}
+          onOpenSettingsSection={openSettingsSection}
+          onPanelModeChange={handleChatPanelModeChange}
+          initialPanelWidth={chatPanelWidth}
+          floatingZIndex={chatZIndex}
+          onFocus={raiseChat}
+          // Only while a card is up: the popup reports its rect on every pointer
+          // move of a drag, and nothing is dodging it the rest of the time.
+          onFloatingRectChange={noticesUp ? handleChatFloatingRect : undefined}
+          mascotX={mascotHidden ? 85 : mascotX}
+          trayMode={mascotHidden}
+          mobile={isMobile}
+        />
+      )}
 
       {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
       {isMobile ? (
@@ -3500,12 +3555,20 @@ function ChromeDesktopInner() {
   );
 }
 
+/**
+ * The box's timezone is the owner's to set (TASK-1256): another ClawBox user's
+ * browser is refused both the read and the write, so it is not asked.
+ */
+function OwnerTimezoneAdopter() {
+  return useMayUseOwnerApis() === true ? <TimezoneAdopter /> : null;
+}
+
 export default function ChromeDesktop() {
   return (
     <I18nProvider>
       {/* A box already in the field never sees the wizard again, and its
           timezone was never asked for — see the component. Renders nothing. */}
-      <TimezoneAdopter />
+      <OwnerTimezoneAdopter />
       <ChromeDesktopInner />
     </I18nProvider>
   );

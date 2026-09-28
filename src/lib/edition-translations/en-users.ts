@@ -48,4 +48,5 @@ export const usersEn: Record<string, string> = {
   "tray.signedInAsName": "Signed in as {name}",
   "tray.switchUser": "Switch user",
   "tray.nonOwnerHint": "Only the Terminal is yours here — everything else belongs to the box owner.",
+  "users.ownerOnlyPage": "Only the box owner can open that page — you are back on the desktop.",
 };

@@ -1472,4 +1472,5 @@ export const ja: Record<string, string> = {
   "tray.signedInAsName": "{name} としてサインイン中",
   "tray.switchUser": "ユーザーを切り替え",
   "tray.nonOwnerHint": "ここで使えるのはターミナルだけです。それ以外はすべてボックスのオーナーのものです。",
+  "users.ownerOnlyPage": "そのページを開けるのはボックスのオーナーだけです。デスクトップに戻りました。",
 };
