@@ -33,6 +33,7 @@ import React, {
 import dynamic from "next/dynamic";
 import { createPortal } from "react-dom";
 import { useTr } from "@/lib/i18n-floor";
+import { SESSION_SWITCH_EVENT } from "@/lib/session-switch";
 import { DESKTOP_LAYERS, shelfHeight } from "@/lib/window-snap";
 import { WINDOW_CHROME } from "@/lib/window-chrome";
 import {
@@ -376,6 +377,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   // resize observer, the touch handlers.
   const terminalCleanupRef = useRef<Array<() => void>>([]);
   const connectLockRef = useRef(false);
+  // The page is leaving for another session (TASK-1247): nothing reconnects on
+  // its own any more. Only the Reconnect button — a person asking for a shell
+  // on whatever session this browser now holds — clears it.
+  const sessionLeftRef = useRef(false);
   // Held from connect until the shell's FIRST byte of output. Sending on
   // `onopen` instead would type into a PTY whose shell has not been exec'd
   // yet on a loaded Orin; waiting for output means the shell demonstrably
@@ -695,6 +700,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     const queryString = query.toString();
     const connectUrl = queryString ? `${wsUrl}?${queryString}` : wsUrl;
 
+    // The session changed while the modules above loaded: the page is on its
+    // way to the new one, so no shell is opened from this one.
+    if (sessionLeftRef.current) { connectLockRef.current = false; return; }
+
     let ws: WebSocket;
     try {
       ws = new WebSocket(connectUrl);
@@ -823,6 +832,42 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Session switch (TASK-1247) ────────────────────────────────────────
+  // This page is leaving its session — its own Switch user, or a sign-in or
+  // sign-out another tab announced (src/lib/session-switch.ts). The socket was
+  // authorised ONCE, at upgrade, with the previous cookie, and the proxy never
+  // looks again, so the shell behind it belongs to the previous session: it is
+  // closed now rather than whenever the navigation gets round to it. A clean
+  // close, and no 3 s retry — a retry would reach the new session from a page
+  // that is being replaced. Ordinary drops keep their retry (see `onclose`).
+  useEffect(() => {
+    const leave = () => {
+      sessionLeftRef.current = true;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      inputDisposableRef.current?.dispose();
+      inputDisposableRef.current = null;
+      pendingCommandRef.current = null;
+      const ws = wsRef.current;
+      if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        try { ws.close(1000, "session switched"); } catch { /* already closed */ }
+        wsRef.current = null;
+        // A socket still opening held the connect lock; its handlers are gone,
+        // so nothing else would lower it and Reconnect would be a no-op.
+        connectLockRef.current = false;
+      }
+      if (mountedRef.current && statusRef.current !== "exited") updateStatus("disconnected");
+    };
+    window.addEventListener(SESSION_SWITCH_EVENT, leave);
+    return () => window.removeEventListener(SESSION_SWITCH_EVENT, leave);
+  }, [updateStatus]);
 
   // ── Settings, live ────────────────────────────────────────────────────
   useEffect(() => {
@@ -1067,6 +1112,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   }[status];
 
   const handleReconnect = useCallback(() => {
+    sessionLeftRef.current = false;
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
     if (wsRef.current) {
       wsRef.current.onclose = null;

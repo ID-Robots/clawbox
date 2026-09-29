@@ -4,6 +4,7 @@ import SubPageLayout from "@/components/SubPageLayout";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
+import { useFollowSessionSwitch } from "@/lib/session-switch";
 
 /**
  * A client component, and the one that mounts the provider for this route.
@@ -31,6 +32,9 @@ function SettingsPageInner() {
 }
 
 export default function SettingsPage() {
+  // A signed-in page: follows a sign-in or sign-out made in another tab
+  // (TASK-1247).
+  useFollowSessionSwitch();
   return (
     <I18nProvider>
       <SettingsPageInner />
