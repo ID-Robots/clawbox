@@ -41,12 +41,16 @@ function codexBlock(): string {
   ].join("\n");
 }
 
-/** The DeepSeek provider install block, verbatim, with the repair helpers it calls. */
+/** The DeepSeek provider install block, verbatim, with the repair and payload helpers it calls. */
 function deepseekBlock(): string {
   return [
     repairHelpers(),
     sliceScript(
-      'if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ ! -f "$OPENCLAW_HOME_DIR/extensions/deepseek/openclaw.plugin.json" ]; then',
+      "# ── Where the DeepSeek provider plugin's payload lives ",
+      "# Patch the installed openclaw deepseek plugin JSON",
+    ),
+    sliceScript(
+      'if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && ! clawbox_deepseek_plugin_on_disk "$OPENCLAW_HOME_DIR"; then',
       "# Resolve the workspace from agents.defaults.workspace",
     ),
   ].join("\n");
@@ -62,7 +66,8 @@ let callsLog: string;
 /**
  * An `openclaw` with the real `config set` semantics — the repair helpers prove
  * their writes against the FILE — whose `plugins install` refuses every spec in
- * `OC_REFUSE` (comma-separated) with `OC_REFUSAL` on stderr.
+ * `OC_REFUSE` (comma-separated) with `OC_REFUSAL` on stderr, or with the
+ * spec's own line from `OC_REFUSALS` (`<spec>\t<message>`, one per line).
  */
 function stubOpenclaw() {
   writeFileSync(
@@ -87,6 +92,9 @@ function stubOpenclaw() {
       "  exit $?",
       "fi",
       'if [ "$1" = "plugins" ] && [ "$2" = "install" ]; then',
+      "  while IFS=$'\\t' read -r spec message; do",
+      '    if [ -n "$spec" ] && [ "$3" = "$spec" ]; then echo "Resolving $3..."; echo "$message" >&2; exit 1; fi',
+      '  done <<< "${OC_REFUSALS:-}"',
       '  IFS=, read -r -a refused <<< "${OC_REFUSE:-}"',
       '  for r in "${refused[@]}"; do',
       '    if [ -n "$r" ] && [ "$3" = "$r" ]; then',
@@ -177,6 +185,7 @@ function runCodexInstall(env: Record<string, string> = {}) {
 }
 
 const DEEPSEEK_PINNED = "clawhub:@openclaw/deepseek-provider@2026.9.4";
+const DEEPSEEK_NPM_PINNED = "npm:@openclaw/deepseek-provider@2026.9.4";
 const DEEPSEEK_UNPINNED = "clawhub:@openclaw/deepseek-provider";
 
 function runDeepseekInstall(env: Record<string, string> = {}) {
@@ -287,18 +296,19 @@ d("gateway-pre-start.sh — Codex rows a 2026.9.3 boot left (TASK-1088)", () => 
 });
 
 d("gateway-pre-start.sh — the DeepSeek row a 2026.9.3 boot left (TASK-1088)", () => {
-  it("records the core's own refusal of the pinned spec, and keeps the switch-off ClawBox's", () => {
+  it("records the core's own refusal of the last spec tried, and keeps the switch-off ClawBox's", () => {
     writeConfig({ deepseek: { enabled: false } });
     writeMarker({ deepseek: DEEPSEEK_ROW_FROM_2026_9_3 });
 
     const r = runDeepseekInstall({
-      OC_REFUSE: `${DEEPSEEK_PINNED},${DEEPSEEK_UNPINNED}`,
+      OC_REFUSE: `${DEEPSEEK_PINNED},${DEEPSEEK_NPM_PINNED},${DEEPSEEK_UNPINNED}`,
       OC_REFUSAL: "Error: clawhub registry answered 503 Service Unavailable",
     });
 
     expect(r.status).toBe(0);
     expect(calls().filter((call) => call.startsWith("plugins install"))).toEqual([
       `plugins install ${DEEPSEEK_PINNED} --accept-capabilities`,
+      `plugins install ${DEEPSEEK_NPM_PINNED} --force --accept-capabilities`,
       `plugins install ${DEEPSEEK_UNPINNED} --accept-capabilities`,
     ]);
     const row = marker().deepseek;
@@ -312,11 +322,81 @@ d("gateway-pre-start.sh — the DeepSeek row a 2026.9.3 boot left (TASK-1088)", 
     writeConfig({ deepseek: { enabled: false } });
     writeMarker({ deepseek: DEEPSEEK_ROW_FROM_2026_9_3 });
 
-    runDeepseekInstall({ OC_REFUSE: DEEPSEEK_PINNED });
+    runDeepseekInstall({ OC_REFUSE: `${DEEPSEEK_PINNED},${DEEPSEEK_NPM_PINNED}` });
 
     expect(config().plugins?.entries?.deepseek?.enabled).toBe(true);
     expect(marker()).toEqual({});
     expect((config().models as typeof OWNER_DATA["models"]).providers.deepseek.apiKey).toBe("claw_owner_key");
+  });
+});
+
+d("gateway-pre-start.sh — the 4.1 box ClawHub has no 2026.9.4 build for (TASK-1302)", () => {
+  // What the owner's box had: the boot switched ClawBox AI's plugin off and
+  // filed "Repair needed" with the pinned spec's "Version not found on ClawHub",
+  // because the unpinned fallback resolved 2026.9.6 and the runtime refused it.
+  const VERSION_NOT_FOUND = "Version not found on ClawHub: @openclaw/deepseek-provider@2026.9.4.";
+  const REPAIR_NEEDED_ROW: Row = {
+    ...DEEPSEEK_ROW_FROM_2026_9_3,
+    reason: "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. The device may be offline, "
+      + `or the package registry unreachable. openclaw plugins install exited 1: ${VERSION_NOT_FOUND}`,
+    spec: DEEPSEEK_PINNED,
+  };
+
+  it("installs the core's build from npm, switches the plugin back on and clears the row", () => {
+    writeConfig({ deepseek: { enabled: false } });
+    writeMarker({ deepseek: REPAIR_NEEDED_ROW });
+
+    const r = runDeepseekInstall({ OC_REFUSE: DEEPSEEK_PINNED, OC_REFUSAL: VERSION_NOT_FOUND });
+
+    expect(r.status).toBe(0);
+    expect(calls().filter((call) => call.startsWith("plugins install"))).toEqual([
+      `plugins install ${DEEPSEEK_PINNED} --accept-capabilities`,
+      `plugins install ${DEEPSEEK_NPM_PINNED} --force --accept-capabilities`,
+    ]);
+    expect(r.stdout).toContain(`DeepSeek provider plugin installed (${DEEPSEEK_NPM_PINNED})`);
+    expect(config().plugins?.entries?.deepseek?.enabled).toBe(true);
+    expect(marker()).toEqual({});
+    expect((config().models as typeof OWNER_DATA["models"]).providers.deepseek.apiKey).toBe("claw_owner_key");
+  });
+
+  it("leaves the npm payload alone on the next boot instead of reinstalling it", () => {
+    // Where the 2026.9.4 CLI put it, measured against a scratch state directory.
+    const payload = path.join(
+      dir, "openclaw-home", "npm", "projects", "openclaw-deepseek-provider-2481ed984b",
+      "node_modules", "@openclaw", "deepseek-provider",
+    );
+    mkdirSync(payload, { recursive: true });
+    writeFileSync(path.join(payload, "openclaw.plugin.json"), "{}");
+    writeFileSync(path.join(payload, "package.json"), JSON.stringify({ version: "2026.9.4" }));
+    writeConfig({ deepseek: { enabled: true } });
+
+    const r = runDeepseekInstall({ OC_REFUSE: DEEPSEEK_PINNED, OC_REFUSAL: VERSION_NOT_FOUND });
+
+    expect(r.status).toBe(0);
+    expect(calls().filter((call) => call.startsWith("plugins install"))).toEqual([]);
+    expect(config().plugins?.entries?.deepseek?.enabled).toBe(true);
+    expect(marker()).toEqual({});
+  });
+
+  it("names the refusal still in the way when every registry says no", () => {
+    writeConfig({ deepseek: { enabled: false } });
+    writeMarker({ deepseek: REPAIR_NEEDED_ROW });
+
+    // Each registry's own answer, as the 2026.9.4 CLI gives it — npm's here
+    // standing in for a box that cannot reach npm either.
+    runDeepseekInstall({
+      OC_REFUSALS: [
+        `${DEEPSEEK_PINNED}\t${VERSION_NOT_FOUND}`,
+        `${DEEPSEEK_NPM_PINNED}\tnpm error code ENOTFOUND`,
+        `${DEEPSEEK_UNPINNED}\tPlugin "@openclaw/deepseek-provider" requires plugin API >=2026.9.6, but this OpenClaw runtime exposes 2026.9.4.`,
+      ].join("\n"),
+    });
+
+    const row = marker().deepseek;
+    expect(row.reason).toContain("openclaw plugins install exited 1: Plugin \"@openclaw/deepseek-provider\" requires plugin API >=2026.9.6");
+    expect(row.reason).not.toContain("Version not found");
+    expect(row.disabled).toBe(true);
+    expect(config().plugins?.entries?.deepseek?.enabled).toBe(false);
   });
 });
 

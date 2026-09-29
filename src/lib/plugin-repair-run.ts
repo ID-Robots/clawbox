@@ -287,15 +287,21 @@ export async function runPluginRepair(
   if (stage !== "consent") {
     if (registryId === "deepseek") {
       // The DeepSeek provider has its own installer, and it is the one that
-      // knows the `clawhub:` scheme and the pinned-then-unpinned order — pinned
-      // to the core that is on the box NOW, so it needs no rebase. `--force`,
-      // because after a core bump the old payload is usually still on disk and
-      // the CLI refuses to install over it otherwise.
+      // knows the registries and their order — pinned ClawHub, pinned npm, then
+      // unpinned ClawHub, exactly as the boot script walks them — pinned to the
+      // core that is on the box NOW, so it needs no rebase. `--force`, because
+      // after a core bump the old payload is usually still on disk and the CLI
+      // refuses to install over it otherwise.
       const result = await installDeepseekProviderPlugin({ force: true });
       if (!result.installed) {
+        // The LAST attempt's refusal (TASK-1302). Each spec is tried because
+        // the one before it failed, so the earlier refusals are already
+        // answered: the 4.1 row kept saying "Version not found on ClawHub" for
+        // a pinned build no Retry could ever fetch, over the fallback's own
+        // refusal — the one that was actually still in the way.
         return fail("repair_failed", "install", causeLine(
           "openclaw plugins install failed",
-          result.failures[0]?.replace(/^\S+:\s*/, "") ?? "",
+          (result.failures[result.failures.length - 1] ?? "").replace(/^\S+:\s*/, ""),
         ));
       }
       spec = result.installed;
