@@ -132,6 +132,120 @@ def test_happy_path(isolate_state: Path, tmp_path: Path) -> None:
     assert final_state.last_heartbeat_status == "ok"
 
 
+def test_the_links_the_archive_skipped_are_on_disk_before_the_upload_and_the_run_is_ok(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """TASK-1304: a backup that skipped links is a FINISHED backup — the
+    heartbeats say running then ok, never error, the portal gets its
+    `lastBackupAt` — and state.json names the links while the upload runs."""
+    import dataclasses
+
+    cfg = _cfg(tmp_path)
+    links = (
+        ("~/.openclaw/workspace/docs/catalogue", "/home/clawbox/Shared/Exports/catalogue"),
+        ("~/.openclaw/workspace/docs/notes.txt", "../../../../Shared/notes.txt"),
+    )
+    archive = dataclasses.replace(
+        _archive(tmp_path), skipped_links=links, skipped_link_count=7,
+    )
+    during: list[state.State] = []
+    heartbeats: list[dict] = []
+    written: list[dict] = []
+
+    def upload(creds, *, archive_path, object_name, progress_cb=None):
+        during.append(state.load(isolate_state))
+
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat",
+              side_effect=lambda server, token, **kw: heartbeats.append(kw)),
+        patch("clawkeep.runner.agent.create_archive", return_value=archive),
+        patch("clawkeep.runner.s3.upload", side_effect=upload),
+        patch("clawkeep.runner.s3.stats", return_value=CloudStats(0, 1)),
+        patch("clawkeep.runner.s3.write_manifest",
+              side_effect=lambda creds, manifest: written.append(manifest)),
+    ):
+        assert runner.run_once(cfg, "claw_x") == runner.EXIT_OK
+
+    assert [hb["status"] for hb in heartbeats] == ["running", "ok"]
+    assert "error" not in heartbeats[-1] and "last_backup_at" in heartbeats[-1]
+    for st in (during[0], state.load(isolate_state)):
+        assert st.last_skipped_link_count == 7
+        assert st.last_skipped_links == [{"path": p, "target": t} for p, t in links]
+    final = state.load(isolate_state)
+    assert final.last_heartbeat_status == "ok" and final.last_backup_at_ms > 0
+    record = written[0]["snapshots"]["snap.tar.gz.enc"]
+    assert record[s3.RECORD_SKIPPED_LINK_COUNT] == 7
+    assert "Shared" not in str(written[0]), "the names go into the manifest sealed"
+
+
+def test_a_seal_that_fails_keeps_the_count_and_the_backup(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    import dataclasses
+
+    from clawkeep import crypto
+
+    archive = dataclasses.replace(
+        _archive(tmp_path), skipped_links=(("~/x", "/y"),), skipped_link_count=1,
+    )
+    written: list[dict] = []
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.agent.create_archive", return_value=archive),
+        patch("clawkeep.runner.s3.upload"),
+        patch("clawkeep.runner.s3.stats", return_value=CloudStats(0, 1)),
+        patch("clawkeep.runner.s3.write_manifest",
+              side_effect=lambda creds, manifest: written.append(manifest)),
+        patch("clawkeep.runner.crypto.seal_text", side_effect=crypto.CryptoError("no openssl")),
+    ):
+        assert runner.run_once(_cfg(tmp_path), "claw_x") == runner.EXIT_OK
+    record = written[0]["snapshots"]["snap.tar.gz.enc"]
+    assert record[s3.RECORD_SKIPPED_LINK_COUNT] == 1
+    assert s3.RECORD_SKIPPED_LINKS not in record
+
+
+def test_a_backup_that_skipped_nothing_writes_the_record_it_always_did(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    written: list[dict] = []
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.agent.create_archive", return_value=_archive(tmp_path)),
+        patch("clawkeep.runner.s3.upload"),
+        patch("clawkeep.runner.s3.stats", return_value=CloudStats(0, 1)),
+        patch("clawkeep.runner.s3.write_manifest",
+              side_effect=lambda creds, manifest: written.append(manifest)),
+    ):
+        assert runner.run_once(_cfg(tmp_path), "claw_x", label="nightly") == runner.EXIT_OK
+    record = written[0]["snapshots"]["snap.tar.gz.enc"]
+    assert set(record) == {"label", "locked", "createdAt"}
+    st = state.load(isolate_state)
+    assert (st.last_skipped_link_count, st.last_skipped_links) == (0, [])
+
+
+def test_state_reads_back_a_garbled_skipped_link_list_as_what_still_reads(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "last_skipped_links": [
+            {"path": "~/a", "target": "/b"}, {"path": 7, "target": "/c"}, "x",
+            {"path": "~/d"},
+        ],
+        "last_skipped_link_count": "lots",
+    }))
+    st = state.load(path)
+    assert st.last_skipped_links == [{"path": "~/a", "target": "/b"}]
+    assert st.last_skipped_link_count == 0
+    path.write_text(json.dumps({"last_skipped_links": {"path": "~/a"}}))
+    assert state.load(path).last_skipped_links == []
+
+
 def test_step_is_persisted_until_failure(isolate_state: Path, tmp_path: Path) -> None:
     """A reopened window mid-upload should see `last_step == "uploading"`."""
     cfg = _cfg(tmp_path)

@@ -40,6 +40,13 @@ class Archive:
     large_archives: tuple[tuple[str, int], ...] = ()
     large_archive_count: int = 0
     large_archive_bytes: int = 0
+    #: Symbolic links this archive does NOT carry because the archiver refuses
+    #: them — a target outside everything the backup contains, or no target at
+    #: all (`backup_guard`) — as ("~/…" link, its target text), sorted by path:
+    #: at most `backup_guard.LISTED_SKIPPED_LINKS` named, all counted. The
+    #: links themselves are still on the box, exactly as they were.
+    skipped_links: tuple[tuple[str, str], ...] = ()
+    skipped_link_count: int = 0
 
 
 #: What a failed archive build was ABOUT — the words `Failure.kind` takes.
