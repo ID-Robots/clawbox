@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "@/lib/runtime-path";
 import { Readable } from "stream";
 import { filesBrowseRoot, isProtectedContainer, isProtectedFilePath } from "@/lib/file-guard";
+import { summarizeFolderForZip, zipFolderStream } from "@/lib/zip-stream";
 
 export const dynamic = "force-dynamic";
 
@@ -70,8 +71,55 @@ function safePath(segments: string[]): string | null {
 
 type Params = { params: Promise<{ path: string[] }> };
 
-// GET /setup-api/files/[...path] — download file
-export async function GET(_req: NextRequest, { params }: Params) {
+/** RFC 5987: quoted ASCII fallback + filename* for Unicode/spaces. */
+function contentDisposition(kind: "inline" | "attachment", filename: string): string {
+  // The ASCII fallback strips anything outside the printable-ASCII range (and
+  // quotes/backslashes) so the quoted-string stays valid.
+  const asciiName = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  return `${kind}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+/**
+ * A folder as one ZIP (`?zip=1`), streamed as it is read — see
+ * src/lib/zip-stream.ts for what goes in. `&check=1` answers what the archive
+ * would hold instead of the archive, so the Files app can tell the owner "too
+ * many files" before a download starts rather than leave a failed one in the
+ * browser's download list.
+ */
+async function folderZipResponse(abs: string, checkOnly: boolean): Promise<NextResponse> {
+  let summary;
+  if (checkOnly) {
+    try {
+      summary = await summarizeFolderForZip(abs);
+    } catch (err) {
+      return fsErrorResponse(err, "Failed to read folder");
+    }
+    const body = { name: `${path.basename(abs)}.zip`, ...summary };
+    if (summary.tooMany) {
+      return NextResponse.json(
+        { ...body, error: `This folder holds more than ${summary.limit} files and folders — too many for one ZIP`, code: "too_many_entries" },
+        { status: 413 },
+      );
+    }
+    return NextResponse.json(body);
+  }
+  const name = path.basename(abs);
+  const stream = zipFolderStream(abs, name);
+  // A walk or read that fails part-way ends the response with an error, which
+  // the browser shows as a failed download — never a ZIP that unzips wrong.
+  stream.on("error", (err) => console.error("[files] ZIP download stopped:", err instanceof Error ? err.message : err));
+  return new NextResponse(Readable.toWeb(stream) as unknown as ReadableStream, {
+    headers: {
+      "Content-Disposition": contentDisposition("attachment", `${name}.zip`),
+      "Content-Type": "application/zip",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+// GET /setup-api/files/[...path] — download file; a folder with ?zip=1
+export async function GET(req: NextRequest, { params }: Params) {
   const { path: segments } = await params;
   const abs = safePath(segments);
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
@@ -82,7 +130,11 @@ export async function GET(_req: NextRequest, { params }: Params) {
   } catch (err) {
     return fsErrorResponse(err, "Failed to read file");
   }
-  if (stat.isDirectory()) return NextResponse.json({ error: "Is a directory" }, { status: 400 });
+  if (stat.isDirectory()) {
+    const query = req.nextUrl.searchParams;
+    if (query.get("zip") === "1") return folderZipResponse(abs, query.get("check") === "1");
+    return NextResponse.json({ error: "Is a directory", code: "is_directory" }, { status: 400 });
+  }
 
   // Stream the file instead of buffering the whole thing into RAM — a
   // multi-hundred-MB download must not OOM the Jetson.
@@ -97,11 +149,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
   const ext = filename.split('.').pop()?.toLowerCase() || '';
   const contentType = MIME_TYPES[ext] || 'application/octet-stream';
   const isInline = (contentType.startsWith('image/') && contentType !== 'image/svg+xml') || contentType === 'application/pdf';
-  // RFC 5987: quoted ASCII fallback + filename* for Unicode/spaces. The ASCII
-  // fallback strips anything outside the printable-ASCII range (and quotes/
-  // backslashes) so the quoted-string stays valid.
-  const asciiName = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  const disposition = `${isInline ? 'inline' : 'attachment'}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+  const disposition = contentDisposition(isInline ? "inline" : "attachment", filename);
   const body = Readable.toWeb(nodeStream) as unknown as ReadableStream;
   return new NextResponse(body, {
     headers: {
