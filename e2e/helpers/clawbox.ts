@@ -307,6 +307,8 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
   const files = clone(options.files ?? DEFAULT_FILES);
   let projectFolders: ProjectFolderEntry[] = clone(options.projectFolders ?? []);
   let projectSuggestions: ProjectFolderEntry[] = clone(options.projectSuggestions ?? []);
+  /** Selection ZIPs the Files app asked for, by ticket. */
+  const zipTickets = new Map<string, { name: string }>();
   let dismissalFingerprint: string | null = null;
   let hotspotConfig = {
     ssid: "ClawBox-Setup",
@@ -1354,6 +1356,23 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     if (path === "/setup-api/files") {
       const dir = normalizeDir(url.searchParams.get("dir"));
 
+      // A multi-selection's ZIP, redeemed by the ticket the POST below issued.
+      const zipTicket = url.searchParams.get("zip");
+      if (method === "GET" && zipTicket !== null) {
+        const ticket = zipTickets.get(zipTicket);
+        if (!ticket) {
+          await fulfillJson(route, { error: "This download has expired.", code: "zip_expired" }, 404);
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/zip",
+          headers: { "Content-Disposition": `attachment; filename="${ticket.name}"` },
+          body: Buffer.from([0x50, 0x4b, 0x05, 0x06, ...new Array(18).fill(0)]),
+        });
+        return;
+      }
+
       if (method === "GET") {
         await fulfillJson(route, {
           files: clone(files[dir] ?? []),
@@ -1372,11 +1391,104 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       }
 
       if (method === "POST") {
-        const payload = await readRequestJson<{ action?: string; name?: string }>(route);
+        const payload = await readRequestJson<{ action?: string; name?: string; paths?: string[]; conflict?: string }>(route);
         if (payload.action === "mkdir" && payload.name) {
           upsertFileEntry(files, dir, directoryEntry(payload.name));
           files[normalizeDir(`${dir}/${payload.name}`)] = [];
           await fulfillJson(route, { success: true });
+          return;
+        }
+
+        // `{ action: "zip", paths }` — what the selection's archive would hold,
+        // and the ticket its download link redeems.
+        if (payload.action === "zip" && Array.isArray(payload.paths)) {
+          const items = payload.paths.map((p) => {
+            const { dir: parent, name } = splitPath(p);
+            return (files[parent] ?? []).find((item) => item.name === name);
+          });
+          if (items.some((item) => !item)) {
+            await fulfillJson(route, { error: "Not found", code: "not_found" }, 404);
+            return;
+          }
+          const name = dir ? `${splitPath(dir).name}-selection.zip` : "selection.zip";
+          const ticket = `${(zipTickets.size + 1).toString(16).padStart(32, "0")}`;
+          zipTickets.set(ticket, { name });
+          await fulfillJson(route, {
+            name,
+            entries: items.length,
+            files: items.filter((item) => item?.type === "file").length,
+            bytes: items.reduce((sum, item) => sum + (item?.size ?? 0), 0),
+            tooMany: false,
+            limit: 100_000,
+            ticket,
+          });
+          return;
+        }
+
+        // `{ action: "move", paths, conflict }` into `dir` — the route's rules
+        // in miniature: never into itself, a clash asked about first, then
+        // keep both (a numbered name) or skip.
+        if (payload.action === "move" && Array.isArray(payload.paths)) {
+          if (!files[dir] && dir !== "") {
+            await fulfillJson(route, { error: "Destination folder not found", code: "not_found" }, 404);
+            return;
+          }
+          const plan: { rel: string; parent: string; entry: FileEntry }[] = [];
+          const conflicts: { path: string; name: string }[] = [];
+          const skipped: { path: string; reason: string }[] = [];
+          const claimed = new Set<string>();
+          for (const rel of payload.paths) {
+            const { dir: parent, name } = splitPath(rel);
+            const entry = (files[parent] ?? []).find((item) => item.name === name);
+            if (!entry) {
+              await fulfillJson(route, { error: "Not found", code: "not_found", path: rel }, 404);
+              return;
+            }
+            if (dir === rel || dir.startsWith(`${rel}/`)) {
+              await fulfillJson(route, { error: "A folder cannot be moved into itself", code: "into_itself", path: rel }, 400);
+              return;
+            }
+            if (parent === dir) {
+              skipped.push({ path: rel, reason: "same_folder" });
+              continue;
+            }
+            if (claimed.has(name) || (files[dir] ?? []).some((item) => item.name === name)) conflicts.push({ path: rel, name });
+            claimed.add(name);
+            plan.push({ rel, parent, entry });
+          }
+          if (payload.conflict !== "rename" && payload.conflict !== "skip" && conflicts.length > 0) {
+            await fulfillJson(route, { error: "Already exists", code: "conflict", conflicts }, 409);
+            return;
+          }
+          const moved: { from: string; to: string; name: string }[] = [];
+          for (const { rel, parent, entry } of plan) {
+            let target = entry.name;
+            if ((files[dir] ?? []).some((item) => item.name === target)) {
+              if (payload.conflict === "skip") {
+                skipped.push({ path: rel, reason: "exists" });
+                continue;
+              }
+              const dot = target.lastIndexOf(".");
+              const stem = dot > 0 ? target.slice(0, dot) : target;
+              const ext = dot > 0 ? target.slice(dot) : "";
+              for (let n = 2; ; n += 1) {
+                const candidate = `${stem} (${n})${ext}`;
+                if (!(files[dir] ?? []).some((item) => item.name === candidate)) { target = candidate; break; }
+              }
+            }
+            const to = dir ? `${dir}/${target}` : target;
+            removeFileEntry(files, parent, entry.name);
+            upsertFileEntry(files, dir, { ...entry, name: target });
+            if (entry.type === "directory") {
+              renameDirectory(files, rel, to);
+              projectFolders = projectFolders.map((f) =>
+                f.path === rel || f.path.startsWith(`${rel}/`)
+                  ? { ...f, path: `${to}${f.path.slice(rel.length)}`, name: f.path === rel ? target : f.name }
+                  : f);
+            }
+            moved.push({ from: rel, to, name: target });
+          }
+          await fulfillJson(route, { ok: true, moved, skipped, failed: [] });
           return;
         }
       }
