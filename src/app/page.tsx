@@ -12,11 +12,14 @@ import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, not
 import { toastDetailForNotice } from "@/lib/notify-action";
 import { useAutoHide } from "@/lib/use-auto-hide";
 import { useWhatsNew } from "@/lib/use-whats-new";
-import { DESKTOP_LAYERS } from "@/lib/window-snap";
+import { DESKTOP_LAYERS, shelfHeight, type SnapZone } from "@/lib/window-snap";
+import { desktopLayoutKey, restoreDesktopWindows, snapshotDesktop, type SavedRect, type SavedTerminalTabs } from "@/lib/desktop-state";
+import { createDesktopStateSaver, loadDesktopState, type DesktopStateSaver } from "@/lib/desktop-state-client";
+import { endTerminalSession } from "@/lib/terminal-sessions";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
-import ChromeWindow from "@/components/ChromeWindow";
+import ChromeWindow, { type WindowMode } from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
 import SettingsApp from "@/components/SettingsApp";
 import AppStore from "@/components/AppStore";
@@ -49,7 +52,7 @@ import type { InstalledMeta } from "@/lib/store-categories";
 import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } from "@/lib/skill-change-message";
 import { apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
-import { mayUseOwnerApis, useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
+import { fetchSessionUser, mayUseOwnerApis, useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
 import { NON_OWNER_APP_IDS, OWNER_ONLY_NOTICE, installedAppIdsFor } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
@@ -339,6 +342,13 @@ interface OpenWindow {
   meta?: Record<string, string>;
   /** Bumped when something asks for this window maximized (a chat's View); ChromeWindow acts on the change. */
   maximizeNonce?: number;
+  // How ChromeWindow last reported the window (TASK-1306), so a refresh
+  // brings it back the same way: maximized or snapped, and where it goes back to.
+  maximized?: boolean;
+  snapped?: SnapZone;
+  restore?: SavedRect;
+  /** A Terminal's tabs and the device session each one's shell runs in. */
+  terminal?: SavedTerminalTabs;
 }
 
 function ChromeDesktopInner() {
@@ -679,18 +689,9 @@ function ChromeDesktopInner() {
           for (const id of shedNeeded.current ?? []) delete grid[`desktop-${id}`];
           setIconPositions(grid);
         }
-        // Open windows
-        if (Array.isArray(data.desktop_open_windows)) {
-          // Restore the workspace but minimized — windows return to the taskbar
-          // instead of popping open over a fresh desktop on every reload/reboot.
-          const restored = (data.desktop_open_windows as Array<{ appId: string; minimized: boolean; x?: number; y?: number; width?: number; height?: number }>)
-            .filter((w) => w.appId !== "setup")
-            .map((w, i) => ({ id: `${w.appId}-${Date.now()}-${i}`, appId: w.appId, zIndex: 100 + i, minimized: true, x: w.x, y: w.y, width: w.width, height: w.height }));
-          if (restored.length > 0) {
-            setOpenWindows(restored);
-            setNextZIndex(100 + restored.length);
-          }
-        }
+        // Open windows are not a preference any more: they are the user's
+        // own desktop state, restored by the effect below (TASK-1306). The
+        // route brings a box's old `desktop_open_windows` back once.
         // Mascot
         if (data.ui_mascot_hidden) setMascotHidden(true);
         // Chat panel dock state — a docked side panel is a deliberate layout so
@@ -718,6 +719,72 @@ function ChromeDesktopInner() {
       })
       .catch(() => { prefsLoaded.current = true; });
   }, [ownerApis]);
+
+  // ─── Open windows, per user (TASK-1306) ───
+  // What was on this user's desktop comes back as it was left: which apps,
+  // where and how big, in what order, minimized/maximized/snapped, which one
+  // had the focus, and every Terminal tab reattached to the shell it runs on
+  // the box. The device keeps it per user (src/lib/desktop-state-client.ts),
+  // so every ClawBox user gets their own — owner or not. Read once; nothing is
+  // saved until it has been, or an empty desktop would be written over it.
+  const desktopSaverRef = useRef<DesktopStateSaver | null>(null);
+  const lastSavedAtRef = useRef(0);
+  // What is saved already — the desktop as it was just restored. A picture
+  // equal to it is not sent: a load changes nothing, and a desktop that came
+  // up empty because the device could not be reached must not write that
+  // emptiness over the layout the device still holds.
+  const lastSavedLayoutRef = useRef<string | null>(null);
+  const [desktopRestored, setDesktopRestored] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void loadDesktopState({ whoAmI: () => fetchSessionUser().then((u) => u?.username ?? null) }).then(({ user, state, resend }) => {
+      if (!live) return;
+      desktopSaverRef.current = createDesktopStateSaver({ user });
+      const restored: OpenWindow[] = state
+        ? restoreDesktopWindows(state, {
+          viewport: { width: window.innerWidth, height: window.innerHeight, shelf: shelfHeight() },
+          // A phone shows one window at a time, full screen: the desktop's
+          // layout is left as it was saved rather than squeezed onto it.
+          clamp: window.innerWidth >= 768,
+        })
+        : [];
+      lastSavedLayoutRef.current = resend ? null : desktopLayoutKey(snapshotDesktop(restored, { savedAt: 0 }));
+      if (restored.length > 0) {
+        const n = restored.length;
+        const ids = new Set(restored.map((w) => w.id));
+        // Anything opened while the state was on its way (a link, the chat)
+        // stays, above the restored windows.
+        setOpenWindows((prev) => [...restored, ...prev.filter((w) => !ids.has(w.id)).map((w) => ({ ...w, zIndex: w.zIndex + n }))]);
+        setNextZIndex((z) => z + n);
+      }
+      setDesktopRestored(true);
+    });
+    return () => { live = false; };
+  }, []);
+  useEffect(() => {
+    const saver = desktopSaverRef.current;
+    if (!desktopRestored || !saver) return;
+    const savedAt = Math.max(Date.now(), lastSavedAtRef.current + 1);
+    const snapshot = snapshotDesktop(openWindows, { savedAt, viewport: { width: window.innerWidth, height: window.innerHeight } });
+    const layout = desktopLayoutKey(snapshot);
+    if (layout === lastSavedLayoutRef.current) return;
+    lastSavedLayoutRef.current = layout;
+    lastSavedAtRef.current = savedAt;
+    saver.save(snapshot);
+  }, [openWindows, desktopRestored]);
+  // A save still settling when the page goes away (F5, a closed tab, a phone
+  // putting the browser away) is sent at once, as a request that outlives it.
+  useEffect(() => {
+    const flush = () => desktopSaverRef.current?.flush();
+    const onVisibility = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+      flush();
+    };
+  }, []);
 
   // The desktop shelf's ClawKeep shield: one verdict, shared with the ClawKeep
   // card and the `backup_status` tool, and re-judged on a clock of its own so
@@ -1064,13 +1131,6 @@ function ChromeDesktopInner() {
   useEffect(() => { savePreferences({ hidden_installed: hiddenInstalledApps }); }, [hiddenInstalledApps, savePreferences]);
   useEffect(() => { savePreferences({ pinned_apps: pinnedOverrides }); }, [pinnedOverrides, savePreferences]);
   useEffect(() => { savePreferences({ icon_grid: iconPositions }); }, [iconPositions, savePreferences]);
-  useEffect(() => {
-    savePreferences({
-      desktop_open_windows: openWindows
-        .filter((w) => w.appId !== "setup")
-        .map(w => ({ appId: w.appId, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height })),
-    });
-  }, [openWindows, savePreferences]);
   useEffect(() => { savePreferences({ ui_mascot_hidden: mascotHidden ? 1 : 0 }); }, [mascotHidden, savePreferences]);
   // The dock width the desktop restores is the last one the chat had while it
   // was OPEN. ChatPopup leaves panel mode whenever it closes — the X, Escape, a
@@ -1726,7 +1786,14 @@ function ChromeDesktopInner() {
     setNextZIndex((z) => z + 1);
   }, [openWindows, nextZIndex, getAllApps, raiseChat]);
 
+  // Closing a window BY HAND is the one thing that ends its terminals'
+  // sessions (TASK-1306): a refresh, a closed browser tab or a phone switching
+  // apps leaves them running for the window to reattach to.
+  const openWindowsRef = useRef(openWindows);
+  useEffect(() => { openWindowsRef.current = openWindows; }, [openWindows]);
   const closeWindow = useCallback((windowId: string) => {
+    const closing = openWindowsRef.current.find((w) => w.id === windowId);
+    for (const tab of closing?.terminal?.tabs ?? []) endTerminalSession(tab.session);
     setOpenWindows((prev) => prev.filter((w) => w.id !== windowId));
   }, []);
 
@@ -2263,6 +2330,30 @@ function ChromeDesktopInner() {
     );
   }, []);
 
+  const updateWindowMode = useCallback((windowId: string, mode: WindowMode) => {
+    setOpenWindows((prev) =>
+      prev.map((w) => w.id === windowId
+        ? {
+          ...w,
+          ...mode.geometry,
+          maximized: mode.maximized || undefined,
+          snapped: mode.snapped ?? undefined,
+          restore: mode.restore ?? undefined,
+        }
+        : w)
+    );
+  }, []);
+
+  const updateTerminalState = useCallback((windowId: string, terminal: SavedTerminalTabs) => {
+    setOpenWindows((prev) => {
+      const at = prev.findIndex((w) => w.id === windowId);
+      if (at < 0) return prev;
+      const next = prev.slice();
+      next[at] = { ...prev[at], terminal };
+      return next;
+    });
+  }, []);
+
   const focusWindow = useCallback((windowId: string) => {
     setOpenWindows((prev) =>
       prev.map((w) => (w.id === windowId ? { ...w, zIndex: nextZIndex } : w))
@@ -2317,7 +2408,7 @@ function ChromeDesktopInner() {
 
   const pinnedApps = getAllApps().filter((a) => isAppPinned(a.id));
 
-  const renderWindowContent = (appId: string, _meta?: Record<string, string>) => {
+  const renderWindowContent = (appId: string, _meta?: Record<string, string>, win?: OpenWindow) => {
     const allApps = getAllApps();
     const app = allApps.find((a) => a.id === appId);
     if (!app) return null;
@@ -2374,7 +2465,16 @@ function ChromeDesktopInner() {
           </div>
         );
       case "terminal":
-        return <TerminalTabs initialCommand={_meta?.command} />;
+        // Its tabs and their device sessions ride with the window's record, so
+        // a refresh — or a phone bringing the window back to the front —
+        // reattaches every tab to the shell it had.
+        return (
+          <TerminalTabs
+            initialCommand={_meta?.command}
+            persisted={win?.terminal}
+            onStateChange={win ? (terminal) => updateTerminalState(win.id, terminal) : undefined}
+          />
+        );
       case "coding":
         return <CodingAgentApp />;
       case "store":
@@ -3156,7 +3256,7 @@ function ChromeDesktopInner() {
               </div>
               {/* Mobile window content */}
               <div className="flex-1 overflow-hidden">
-                {renderWindowContent(top.appId, top.meta)}
+                {renderWindowContent(top.appId, top.meta, top)}
               </div>
             </div>
           );
@@ -3207,8 +3307,13 @@ function ChromeDesktopInner() {
               minimized={window.minimized}
               rightInset={chatPanelInset}
               maximizeSignal={window.maximizeNonce}
+              windowId={window.id}
+              initialMaximized={window.maximized}
+              initialSnapped={window.snapped}
+              initialRestore={window.restore}
+              onModeChange={(mode) => updateWindowMode(window.id, mode)}
             >
-              {renderWindowContent(window.appId, window.meta)}
+              {renderWindowContent(window.appId, window.meta, window)}
             </ChromeWindow>
           );
         })
