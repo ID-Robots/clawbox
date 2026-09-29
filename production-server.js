@@ -14,6 +14,12 @@ const { Transform } = require("stream");
 const { attachAccessLog } = require("./scripts/access-log.js");
 const { attachProxyPeerGuard } = require("./scripts/proxy-peer.js");
 const { isAllowedUpgrade } = require("./scripts/host-allowlist.js");
+const {
+  USERS_CONFIG_KEY,
+  ownerUsername,
+  parseUserRegistry,
+  sessionIdentityFromCookieHeader,
+} = require("./scripts/session-cookie.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // entry point is standalone CommonJS and cannot import the TypeScript helper:
@@ -43,10 +49,34 @@ const IS_DEV = process.env.NODE_ENV === "development";
 // (default) is intentionally NOT gated here — it enforces its own auth token.
 // `sanitizeClose` marks the one upstream that answers a code-less goodbye with
 // a status code no browser will accept — see createCloseFrameRewriter below.
+//
+// Multi-user ClawBox OS (TASK-1256): `ownerOnly` refuses a session of any
+// ClawBox user but the owner — the remote desktop IS the owner's screen. The
+// terminal is open to every signed-in user because it is scoped: `terminal`
+// marks the route that gets the per-boot TERMINAL_TOKEN (without it the PTY
+// server refuses the connection, so a local account cannot dial 127.0.0.1:3006
+// for the owner's shell) and, for a non-owner, the username the PTY server
+// starts the shell AS (scripts/terminal-server.mjs).
 const UPGRADE_ROUTES = [
-  { prefix: "/terminal-ws", targetPort: TERMINAL_WS_PORT, stripPrefix: true, requireAuth: true },
-  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true, sanitizeClose: true },
+  { prefix: "/terminal-ws", targetPort: TERMINAL_WS_PORT, stripPrefix: true, requireAuth: true, terminal: true },
+  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true, ownerOnly: true, sanitizeClose: true },
 ];
+
+// Headers this proxy alone may set on the way to the PTY server. Whatever a
+// client sent under these names is dropped before the real values are added.
+const TERMINAL_TOKEN_HEADER = "x-clawbox-terminal-token";
+const TERMINAL_USER_HEADER = "x-clawbox-terminal-user";
+function isTerminalControlHeader(lc) {
+  return lc === TERMINAL_TOKEN_HEADER || lc === TERMINAL_USER_HEADER;
+}
+
+/** The PTY server's headers for this connection, or {} for any other upstream. */
+function terminalHeadersFor(gate, identity) {
+  if (!gate.terminal || !identity) return {};
+  const headers = { [TERMINAL_TOKEN_HEADER]: process.env.CLAWBOX_TERMINAL_TOKEN || "" };
+  if (!identity.isOwner) headers[TERMINAL_USER_HEADER] = identity.username;
+  return headers;
+}
 
 // A project's own server under /apps/<id>/ (src/lib/app-proxy.ts): the
 // port and the project folder are in the app's data/webapps/<id>/meta.json,
@@ -129,68 +159,74 @@ function resolveUpgradeTarget(reqUrl) {
       const rewritten = r.stripPrefix
         ? (!stripped || stripped.startsWith("?") ? `/${stripped}` : stripped)
         : reqUrl;
-      return { targetPort: r.targetPort, url: rewritten, requireAuth: !!r.requireAuth, sanitizeClose: !!r.sanitizeClose };
+      return {
+        targetPort: r.targetPort,
+        url: rewritten,
+        requireAuth: !!r.requireAuth,
+        ownerOnly: !!r.ownerOnly,
+        terminal: !!r.terminal,
+        sanitizeClose: !!r.sanitizeClose,
+      };
     }
   }
   return { targetPort: GATEWAY_PORT, url: reqUrl, requireAuth: false };
 }
 
-// Current session generation, read from data/config.json (mtime-cached), so WS
-// upgrades honor the same password-change revocation the Next.js middleware
-// enforces (src/middleware.ts). Without this, a cookie revoked by a password
-// change would still be accepted at the /terminal-ws (root shell) and /novnc-ws
-// gates until natural expiry. Defaults to 0 on any read error / missing field.
+// Current session generation and ClawBox users, read from data/config.json
+// (mtime-cached), so WS upgrades honor the same password-change revocation —
+// and, since TASK-1256, the same removed-user revocation — the Next.js
+// middleware enforces (src/middleware.ts). Without this, a revoked cookie would
+// still be accepted at the /terminal-ws (root shell) and /novnc-ws gates until
+// natural expiry. Defaults to generation 0 and no users on any read error.
 const CONFIG_JSON_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "data", "config.json");
-let sessionGenCache = null;
-function readSessionGeneration() {
+let sessionConfigCache = null;
+function readSessionConfig() {
   try {
     const stat = fs.statSync(CONFIG_JSON_PATH);
-    if (sessionGenCache && sessionGenCache.mtimeMs === stat.mtimeMs) return sessionGenCache.value;
+    if (sessionConfigCache && sessionConfigCache.mtimeMs === stat.mtimeMs) return sessionConfigCache.value;
     const parsed = JSON.parse(fs.readFileSync(CONFIG_JSON_PATH, "utf-8"));
-    const value = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
+    const gen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
       : 0;
-    sessionGenCache = { mtimeMs: stat.mtimeMs, value };
+    const value = { gen, users: parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername()) };
+    sessionConfigCache = { mtimeMs: stat.mtimeMs, value };
     return value;
   } catch {
-    sessionGenCache = { mtimeMs: -1, value: 0 };
-    return 0;
+    const value = { gen: 0, users: new Map() };
+    sessionConfigCache = { mtimeMs: -1, value };
+    return value;
   }
 }
 
 // Verify the HMAC-SHA256 `clawbox_session` cookie — the same scheme
 // src/middleware.ts uses (payload.sig; sig = HMAC-SHA256(payload, SESSION_SECRET);
-// base64url payload carries { exp, gen }). Mirrored here in CJS because upgrades
+// base64url payload carries { exp, gen, u?, sv? }) — and say WHO it speaks for
+// (scripts/session-cookie.js, TASK-1256). Mirrored in CJS because upgrades
 // bypass Next.js. Fails closed when the secret is absent.
-function hasValidSession(req) {
-  // Fails closed on ANY error. This runs inside the 'upgrade' listener, so an
-  // uncaught throw here (e.g. `decodeURIComponent` on a malformed `%` cookie)
-  // would crash the whole server — hence the single all-encompassing try.
+function upgradeSessionIdentity(req) {
   try {
-    const secret = process.env.SESSION_SECRET;
-    if (!secret) return false;
-    const m = /(?:^|;\s*)clawbox_session=([^;]+)/.exec(req.headers.cookie || "");
-    if (!m) return false;
-    const cookie = decodeURIComponent(m[1]);
-    const dot = cookie.indexOf(".");
-    if (dot < 0) return false;
-    const payload = cookie.slice(0, dot);
-    const sig = cookie.slice(dot + 1);
-    if (!payload || !sig) return false;
-    const expected = require("crypto").createHmac("sha256", secret).update(payload).digest("hex");
-    const sigBuf = Buffer.from(sig);
-    const expBuf = Buffer.from(expected);
-    if (sigBuf.length !== expBuf.length) return false;
-    if (!require("crypto").timingSafeEqual(sigBuf, expBuf)) return false;
-    const decoded = Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
-    const data = JSON.parse(decoded);
-    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return false;
-    // Reject cookies from before the last password change (session revocation).
-    if ((typeof data.gen === "number" ? data.gen : 0) !== readSessionGeneration()) return false;
-    return true;
+    const { gen, users } = readSessionConfig();
+    return sessionIdentityFromCookieHeader(req.headers.cookie, {
+      secret: process.env.SESSION_SECRET,
+      sessionGen: gen,
+      users,
+      owner: ownerUsername(),
+    });
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * The gate for one upgrade: `{ ok: true, identity }` to proxy it (identity is
+ * null on an ungated route), or `{ ok: false, status }` to refuse it.
+ */
+function authorizeUpgrade(gate, req) {
+  if (!gate.requireAuth) return { ok: true, identity: null };
+  const identity = upgradeSessionIdentity(req);
+  if (!identity) return { ok: false, status: 401 };
+  if (gate.ownerOnly && !identity.isOwner) return { ok: false, status: 403 };
+  return { ok: true, identity };
 }
 
 // An upgrade addressed to a name that is not this box's own (see
@@ -205,9 +241,11 @@ function rejectForeignHostUpgrade(socket) {
   socket.destroy();
 }
 
-function rejectUpgrade(socket) {
+function rejectUpgrade(socket, status = 401) {
   try {
-    socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+    socket.write(status === 403
+      ? "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"
+      : "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
   } catch {
     // socket already gone
   }
@@ -231,6 +269,20 @@ try {
   process.env.SESSION_SECRET = sessionSecret;
 } catch (err) {
   console.warn("[production-server] Failed to set up session secret:", err.message);
+}
+
+// ─── Terminal token (TASK-1256) ───
+// The PTY server on 127.0.0.1:3006 starts a shell for whoever connects, and
+// loopback was the only fence — enough while the box had one human account.
+// With ClawBox users every other account on the box is a person who could dial
+// that port for the OWNER's shell. So the PTY server refuses any connection
+// without this per-boot token, which only this proxy adds, after the session
+// check. Set here, before Next boots, so src/instrumentation-node.ts hands it
+// to the PTY server it spawns; it never reaches a shell (terminal-server.mjs
+// builds each PTY's environment from scratch, and a non-owner's shell starts
+// under sudo's env_reset).
+if (!process.env.CLAWBOX_TERMINAL_TOKEN) {
+  process.env.CLAWBOX_TERMINAL_TOKEN = require("crypto").randomBytes(32).toString("hex");
 }
 
 // ─── MCP bearer token ───
@@ -606,10 +658,13 @@ function attachUpgradeProxy(server) {
     if (!isAllowedUpgrade(req)) {
       return rejectForeignHostUpgrade(socket);
     }
-    const { targetPort, url, requireAuth, sanitizeClose } = resolveUpgradeTarget(req.url);
-    if (requireAuth && !hasValidSession(req)) {
-      return rejectUpgrade(socket);
+    const gate = resolveUpgradeTarget(req.url);
+    const { targetPort, url, sanitizeClose } = gate;
+    const auth = authorizeUpgrade(gate, req);
+    if (!auth.ok) {
+      return rejectUpgrade(socket, auth.status);
     }
+    const extraHeaders = terminalHeadersFor(gate, auth.identity);
     const upstream = net.connect(targetPort, "127.0.0.1", () => {
       const hostHeader = `127.0.0.1:${targetPort}`;
       const originHeader = "http://127.0.0.1";
@@ -617,11 +672,14 @@ function attachUpgradeProxy(server) {
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
         const name = req.rawHeaders[i];
         const lc = name.toLowerCase();
-        if (lc.startsWith("x-forwarded-") || FORWARDED_CLIENT_HEADERS.has(lc)) continue;
+        if (lc.startsWith("x-forwarded-") || FORWARDED_CLIENT_HEADERS.has(lc) || isTerminalControlHeader(lc)) continue;
         const value =
           lc === "origin" ? originHeader :
           lc === "host" ? hostHeader :
           req.rawHeaders[i + 1];
+        raw += `${name}: ${value}\r\n`;
+      }
+      for (const [name, value] of Object.entries(extraHeaders)) {
         raw += `${name}: ${value}\r\n`;
       }
       raw += "\r\n";
@@ -673,8 +731,9 @@ function startHttpsServer(httpServer) {
         return rejectForeignHostUpgrade(socket);
       }
       const gate = resolveUpgradeTarget(req.url || "/");
-      if (gate.requireAuth && !hasValidSession(req)) {
-        return rejectUpgrade(socket);
+      const auth = authorizeUpgrade(gate, req);
+      if (!auth.ok) {
+        return rejectUpgrade(socket, auth.status);
       }
       wss.handleUpgrade(req, socket, head, (clientWs) => {
         const { targetPort, url } = gate;
@@ -684,6 +743,7 @@ function startHttpsServer(httpServer) {
             // Port-less to satisfy the gateway's strict origin allowlist.
             origin: "http://127.0.0.1",
             host: `127.0.0.1:${targetPort}`,
+            ...terminalHeadersFor(gate, auth.identity),
           },
         });
 

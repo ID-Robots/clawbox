@@ -101,6 +101,7 @@ restart restart_ap recover chpasswd gateway_setup ffmpeg_install polkit_rules
 systemd_services directories_permissions captive_portal_dns desktop_theme
 fix_git_perms browser_launch cloudflared_install nm_dispatcher sysctl_linkdown
 post_update update_smoke validate_services clawkeep_install
+user_add user_remove
 "
 
 # Steps allowed to run install.sh's git fetch / reset --hard self-update.

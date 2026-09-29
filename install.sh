@@ -7826,7 +7826,10 @@ install_root_libexec() {
   local src failed=0
   # The integrity helper first: the dispatcher installed at the END of this
   # function refuses to run any step unless the manifest this writes verifies.
-  for src in clawbox-root-manifest.sh clawbox-run-root-step.sh clawbox-gateway-maintenance.sh; do
+  # clawbox-user-helper.sh is the multi-user sign-in check and Terminal shell
+  # (TASK-1256), granted NOPASSWD in config/clawbox-sudoers.
+  for src in clawbox-root-manifest.sh clawbox-run-root-step.sh clawbox-gateway-maintenance.sh \
+             clawbox-user-helper.sh; do
     if [ -f "$SRC_DIR/config/$src" ]; then
       install_root_file "$SRC_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src" || {
         echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
@@ -9756,6 +9759,169 @@ step_chpasswd() {
   printf '%s\n' "$record" | /usr/sbin/chpasswd
 }
 
+# ── ClawBox users (TASK-1256) ────────────────────────────────────────────────
+#
+# Every ClawBox user other than the owner is a real Linux account, created and
+# removed from Settings → Users through these two steps. They are fed like
+# step_chpasswd — ONE record in a 0600 file under data/ that is read once,
+# validated, and deleted — and they never let the web server name an account
+# it could use to reach root:
+#
+#   * the name must match src/lib/username-rules.ts's USERNAME_RE and must not
+#     be root or $CLAWBOX_USER;
+#   * user_add refuses a name any account or group already has, and puts the
+#     new account in exactly one supplementary group, clawbox-users — never
+#     sudo, never adm;
+#   * user_remove removes ONLY a member of clawbox-users with uid >= 1000 that
+#     is not in an administrator group, so it cannot delete the owner, root or
+#     any account the box itself runs as, whatever the web server writes.
+#
+# config/clawbox-user-helper.sh (sign-in and the Terminal) holds itself to the
+# same membership rule.
+CLAWBOX_USERS_GROUP="clawbox-users"
+
+# 1-32 characters, carried by a length test rather than a `{0,31}` bound in
+# the regex (shell-regex-hygiene.test.ts: glibc expands a bounded repeat into
+# one NFA state per repetition).
+clawbox_user_name_ok() {
+  [ "${#1}" -ge 1 ] && [ "${#1}" -le 32 ] && [[ "$1" =~ ^[a-z_][a-z0-9_-]*$ ]]
+}
+
+# Read the one record a user step was handed, refusing a symlink, a missing
+# file and a second record. Prints the record; exits on refusal.
+read_user_step_input() {
+  local input_file="$1" record
+  if [ -L "$input_file" ]; then
+    rm -f "$input_file"
+    echo "Error: user input file is a symlink; refusing" >&2
+    exit 64
+  fi
+  if [ ! -f "$input_file" ]; then
+    echo "Error: user input file not found" >&2
+    exit 1
+  fi
+  record="$(cat "$input_file")"
+  rm -f "$input_file"
+  case "$record" in
+    *$'\n'*)
+      echo "Error: user input must be exactly one record" >&2
+      exit 64
+      ;;
+    *$'\r'*)
+      echo "Error: user input contains a carriage return" >&2
+      exit 64
+      ;;
+  esac
+  printf '%s' "$record"
+}
+
+step_user_add() {
+  local record user password home owner_home
+  record="$(read_user_step_input "$PROJECT_DIR/data/.user-add-input")" || exit $?
+  user="${record%%:*}"
+  password="${record#*:}"
+  if ! clawbox_user_name_ok "$user"; then
+    echo "Error: '$user' is not a valid username" >&2
+    exit 64
+  fi
+  if [ "$user" = "root" ] || [ "$user" = "$CLAWBOX_USER" ]; then
+    echo "Error: '$user' cannot be created here" >&2
+    exit 64
+  fi
+  if [ "$record" = "$user" ] || [ -z "$password" ]; then
+    echo "Error: user input has no password" >&2
+    exit 64
+  fi
+  if getent passwd "$user" >/dev/null 2>&1 || getent group "$user" >/dev/null 2>&1; then
+    echo "Error: an account or group named '$user' already exists" >&2
+    exit 65
+  fi
+
+  if ! getent group "$CLAWBOX_USERS_GROUP" >/dev/null 2>&1; then
+    groupadd --system "$CLAWBOX_USERS_GROUP" || {
+      echo "Error: could not create the $CLAWBOX_USERS_GROUP group" >&2
+      exit 1
+    }
+  fi
+  useradd --create-home --shell /bin/bash --user-group \
+    --groups "$CLAWBOX_USERS_GROUP" "$user" || {
+    echo "Error: useradd could not create '$user'" >&2
+    exit 1
+  }
+  if ! printf '%s:%s\n' "$user" "$password" | /usr/sbin/chpasswd; then
+    userdel --remove "$user" >/dev/null 2>&1 || true
+    echo "Error: could not set the password for '$user'; the account was removed again" >&2
+    exit 1
+  fi
+
+  # Each user's home is theirs alone, and the owner's stops being readable by
+  # the accounts this step creates: /home/<owner> holds data/, the assistant's
+  # state and every credential store. Nothing on the box that runs as another
+  # user reads from it (the gateway, the embedder, Chromium and the terminal
+  # server all run as $CLAWBOX_USER). Only the "other" bits are dropped, so the
+  # owner's own group access is untouched.
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  if [ -n "$home" ] && [ -d "$home" ]; then
+    chmod 0750 "$home" || true
+  fi
+  owner_home="$(getent passwd "$CLAWBOX_USER" | cut -d: -f6)"
+  if [ -n "$owner_home" ] && [ -d "$owner_home" ] && [ "$owner_home" != "/" ]; then
+    chmod o-rwx "$owner_home" || echo "  Warning: could not restrict $owner_home" >&2
+  fi
+  echo "Created ClawBox user '$user'"
+}
+
+step_user_remove() {
+  local user uid groups
+  user="$(read_user_step_input "$PROJECT_DIR/data/.user-remove-input")" || exit $?
+  if ! clawbox_user_name_ok "$user"; then
+    echo "Error: '$user' is not a valid username" >&2
+    exit 64
+  fi
+  if [ "$user" = "root" ] || [ "$user" = "$CLAWBOX_USER" ]; then
+    echo "Error: '$user' cannot be removed here" >&2
+    exit 64
+  fi
+  if ! getent passwd "$user" >/dev/null 2>&1; then
+    # Already gone (removed by hand, or a retry after a partial run): the
+    # registry entry is what the owner is asking to clear, and it has been.
+    echo "ClawBox user '$user' has no account; nothing to remove"
+    return 0
+  fi
+  uid="$(getent passwd "$user" | cut -d: -f3)"
+  groups=" $(id -nG "$user" 2>/dev/null || true) "
+  case "$groups" in
+    *" $CLAWBOX_USERS_GROUP "*) ;;
+    *)
+      echo "Error: '$user' is not a ClawBox user (not in $CLAWBOX_USERS_GROUP); refusing" >&2
+      exit 64
+      ;;
+  esac
+  case "$groups" in
+    *" sudo "*|*" admin "*|*" wheel "*|*" root "*|*" adm "*)
+      echo "Error: '$user' is an administrator account; refusing" >&2
+      exit 64
+      ;;
+  esac
+  if ! [[ "$uid" =~ ^[0-9]+$ ]] || [ "$uid" -lt 1000 ] || [ "$uid" -eq 65534 ]; then
+    echo "Error: '$user' is a system account; refusing" >&2
+    exit 64
+  fi
+
+  # End everything the user is running first — a Terminal session is a login
+  # shell under their uid — or userdel refuses with "user is currently used".
+  pkill -KILL -u "$uid" >/dev/null 2>&1 || true
+  sleep 1
+  local rc=0
+  userdel --remove "$user" || rc=$?
+  # 12: the account is gone but its home or mail spool could not be removed.
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 12 ]; then
+    echo "Error: userdel could not remove '$user' (exit $rc)" >&2
+    exit 1
+  fi
+  echo "Removed ClawBox user '$user'"
+}
+
 step_rebuild() {
   do_rebuild
   # `restart`, not `start`, for the reason spelled out in
@@ -11137,6 +11303,8 @@ DISPATCH_STEPS=(
   network_setup set_hostname set_timezone setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
+  # Settings → Users, multi-user ClawBox OS: TASK-1256. On WEB_ROOT_STEPS, never on the UI list.
+  user_add user_remove
   directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch cloudflared_install
   nm_dispatcher sysctl_linkdown persistent_journal resource_limits desktop_mode

@@ -48,8 +48,11 @@ export interface ClawkeepShieldStatus {
  * The facts are never invented: nothing is re-derived until at least one
  * successful answer has been seen, and the tick re-judges only what that answer
  * actually said.
+ *
+ * `enabled: false` asks nothing (a non-owner's desktop, TASK-1256: the backup
+ * is the owner's, and the route refuses anyone else with 403).
  */
-export function useClawkeepShieldStatus(): ClawkeepShieldStatus {
+export function useClawkeepShieldStatus(enabled: boolean = true): ClawkeepShieldStatus {
   const [protection, setProtection] = useState<Protection | null>(null);
   const [unconfigured, setUnconfigured] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -76,6 +79,7 @@ export function useClawkeepShieldStatus(): ClawkeepShieldStatus {
   }, [publish]);
 
   useEffect(() => {
+    if (!enabled) return;
     let aborted = false;
     let inFlight = false;
     const check = async () => {
@@ -137,7 +141,7 @@ export function useClawkeepShieldStatus(): ClawkeepShieldStatus {
       aborted = true;
       window.clearInterval(id);
     };
-  }, [publish]);
+  }, [publish, enabled]);
 
   return { protection, unconfigured, busy, restoring };
 }

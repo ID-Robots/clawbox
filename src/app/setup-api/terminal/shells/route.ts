@@ -10,8 +10,12 @@ export const dynamic = "force-dynamic";
 // tab: those /etc/shells lists that are installed here, one per binary, and
 // which one a tab gets when none is chosen. Only a list — the PTY server
 // checks the request again when it spawns (scripts/terminal-launch.mjs).
+//
+// Every signed-in ClawBox user may read it (TASK-1256): the Terminal is the
+// one app scoped per user, and a list of installed shells tells nobody
+// anything about the owner.
 export async function GET(req: Request) {
-  const denied = await requireSession(req);
+  const denied = await requireSession(req, { allowNonOwner: true });
   if (denied) return denied;
   return NextResponse.json({ shells: availableShells(readEtcShells()), defaultShell: DEFAULT_SHELL });
 }
