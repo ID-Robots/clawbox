@@ -76,6 +76,10 @@ interface ClawKeepStatus {
   /** When auto-backup was last armed or tightened. Optional so a status from
    *  an older server still renders; see deriveProtection() for what it guards. */
   scheduleArmedAtMs?: number;
+  /** Auto-backup was switched off while the account was full, and the box
+   *  switches it back on by itself once backups can run again. 0 or absent
+   *  for any other "off", and from older servers. */
+  scheduleQuotaHoldSinceMs?: number;
   /** True when the device has a stored backup-encryption passphrase. The
    * "Run a backup now" button is gated on this; without it the runner
    * refuses to run since unencrypted backups would leak to the operator. */
@@ -729,6 +733,7 @@ export default function ClawKeepApp() {
               <ScheduleCard
                 schedule={status.schedule}
                 nextRunAtMs={status.nextRunAtMs}
+                quotaHoldSinceMs={status.scheduleQuotaHoldSinceMs ?? 0}
                 onSaved={(next) => {
                   setStatus((prev) => prev
                     ? {
@@ -742,6 +747,8 @@ export default function ClawKeepApp() {
                       // same clock, and a save that armed nothing returns the
                       // OLD stamp — which is the point.
                       scheduleArmedAtMs: next.scheduleArmedAtMs,
+                      // Absent from an older server's answer: no hold.
+                      scheduleQuotaHoldSinceMs: next.scheduleQuotaHoldSinceMs ?? 0,
                     }
                     : prev);
                 }}
@@ -829,6 +836,8 @@ interface ScheduleSaveResponse {
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
   scheduleArmedAtMs: number;
+  /** Optional: an older server does not send it. */
+  scheduleQuotaHoldSinceMs?: number;
 }
 
 function sameSchedule(a: ClawKeepSchedule, b: ClawKeepSchedule): boolean {
@@ -840,11 +849,13 @@ function sameSchedule(a: ClawKeepSchedule, b: ClawKeepSchedule): boolean {
 function ScheduleCard({
   schedule,
   nextRunAtMs,
+  quotaHoldSinceMs,
   onSaved,
   onError,
 }: {
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
+  quotaHoldSinceMs: number;
   onSaved: (next: ScheduleSaveResponse) => void;
   onError: (msg: string) => void;
 }) {
@@ -891,10 +902,16 @@ function ScheduleCard({
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t("clawkeep.schedule.title")}</h3>
-          <p className="text-xs text-[var(--text-muted)] mt-0.5">
+          <p className="text-xs text-[var(--text-muted)] mt-0.5" data-testid="clawkeep-schedule-summary">
             {draft.enabled
               ? t("clawkeep.schedule.nextRun", { when: formatNextRun(nextRunAtMs, t) })
-              : t("clawkeep.schedule.off")}
+              // Off BECAUSE the account was full is a pause the box ends by
+              // itself — said here, so switching it off is not read as "for
+              // good". Only while the saved schedule is off, too: a draft
+              // the owner has not saved is not what the box is doing.
+              : quotaHoldSinceMs > 0 && !schedule.enabled
+                ? t("clawkeep.schedule.quotaHold")
+                : t("clawkeep.schedule.off")}
           </p>
         </div>
         <label className="relative inline-flex items-center cursor-pointer">

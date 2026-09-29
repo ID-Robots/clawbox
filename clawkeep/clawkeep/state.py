@@ -45,6 +45,12 @@ class State:
     upload_bytes_total: int = 0
     upload_bytes_done: int = 0
     upload_started_at_ms: int = 0
+    # When the portal first refused to mint credentials because the account is
+    # over quota (402 quota_full), in the current run of refusals; 0 once it
+    # mints them again. The TS bridge reads it to tell "auto-backup was
+    # switched off while the account was full" — a pause it re-arms by itself
+    # once credentials work again — from an owner switching it off for good.
+    quota_full_since_ms: int = 0
 
 
 def _safe_int(value: object) -> int:
@@ -82,6 +88,7 @@ def load(path: Path | str | None = None) -> State:
         upload_bytes_total=_safe_int(raw.get("upload_bytes_total", 0)),
         upload_bytes_done=_safe_int(raw.get("upload_bytes_done", 0)),
         upload_started_at_ms=_safe_int(raw.get("upload_started_at_ms", 0)),
+        quota_full_since_ms=_safe_int(raw.get("quota_full_since_ms", 0)),
     )
 
 
