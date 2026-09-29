@@ -385,10 +385,19 @@ ensure_cuda_bashrc_exports() {
 
 install_kokoro_packages() {
   echo "  Installing Kokoro TTS..."
-  # Install kokoro first, then force transformers<5 as a separate step.
-  # pip 22's resolver won't downgrade huggingface-hub (pulled in by
-  # faster-whisper) to satisfy transformers<5 in a single command, so it
-  # silently picks transformers 5.x. Keep these two as two pip invocations.
+  # transformers<5 and huggingface-hub<1 are both in the kokoro command. Left
+  # out, the resolve takes transformers 5.x with huggingface-hub 1.x, and apt's
+  # pip 22.0.2 dies on that graph in get_topological_weights before installing
+  # anything. It is the same assertion the faster-whisper step hit on the board
+  # (see install_whisper_stt). This command hit it too, under pip 22.0.2 +
+  # CPython 3.10 over jammy-era apt package versions (off-board, 2026-09-29).
+  # Both ceilings are needed. With the hub one alone, pip 22 downloads every
+  # transformers 5.x wheel (32 of them) on its way down to 4.57.6. With both,
+  # it takes 4.57.6 straight away, and a box that still has hub 1.x from an
+  # older faster-whisper install gets 0.36.2 in the same command.
+  # The separate transformers<5 step dates from when pip 22 "would not
+  # downgrade huggingface-hub in a single command". The hub ceiling does that
+  # now; the step is a no-op on a clean resolve and stays as a guard.
   #
   # The numpy FLOOR is what makes this pip step do anything at all. JetPack
   # ships numpy 1.21.5 as an apt package in /usr/lib/python3/dist-packages,
@@ -401,7 +410,7 @@ install_kokoro_packages() {
   # The <2 ceiling stays: torch 2.5.0a0+872d972e41.nv24.8 is a numpy-1.x build.
   # This defect was inherited from the pre-existing full path, which calls this
   # same function, so both paths are fixed here.
-  pip_as_clawbox "'numpy>=1.24,<2' kokoro soundfile 'Pillow>=10'" || return 1
+  pip_as_clawbox "'numpy>=1.24,<2' kokoro soundfile 'Pillow>=10' 'transformers<5' 'huggingface-hub<1'" || return 1
   pip_as_clawbox "'transformers<5'" || return 1
 }
 
@@ -1318,7 +1327,20 @@ install_whisper_stt() {
   # board, `pip install faster-whisper` resolves 7 prebuilt aarch64 wheels and
   # touches neither numpy nor transformers when Kokoro is already installed —
   # the floor is here so that stays true on a box where it is not.
-  if ! pip_as_clawbox "'numpy>=1.24,<2' faster-whisper"; then
+  #
+  # The huggingface-hub ceiling is what lets the box's own pip resolve this at
+  # all. JetPack's pip is apt's 22.0.2, and it must stay that one: this script
+  # never upgrades pip. Unpinned, the resolve took huggingface-hub 1.33.0, and
+  # the hub 1.x graph (httpx, httpcore, ...) trips a pip 22.0.x resolver bug. It
+  # fails before installing anything (hardware validation of TASK-1214, 2026-09-29):
+  #   File ".../pip/_internal/resolution/resolvelib/resolver.py", line 276, in get_topological_weights
+  #     assert len(weights) == expected_node_count
+  #   AssertionError
+  # With `huggingface-hub<1` the same board installed faster-whisper 1.2.1,
+  # ctranslate2 4.8.2, huggingface-hub 0.36.2, tokenizers 0.23.2, numpy 1.26.4,
+  # onnxruntime 1.23.2 and av 17.1.0. faster-whisper only asks for hub>=0.21,
+  # and Kokoro's transformers<5 needs hub<1 anyway, so both engines agree on it.
+  if ! pip_as_clawbox "'numpy>=1.24,<2' faster-whisper 'huggingface-hub<1'"; then
     echo "  Warning: faster-whisper wheels did not install" >&2
     return 12
   fi
@@ -1549,7 +1571,10 @@ fi
 # ── Step 2: Install faster-whisper ───────────────────────────────────────────
 
 echo "[2/7] Installing faster-whisper (STT)..."
-su - "$CLAWBOX_USER" -c "$PIP install --user faster-whisper" 2>&1 | tail -3
+# The command install_whisper_stt runs, which the board resolved on its pip
+# 22.0.2: without huggingface-hub<1 that pip cannot resolve the hub 1.x graph,
+# and the numpy floor keeps the Jetson torch wheel from step 1 working.
+su - "$CLAWBOX_USER" -c "$PIP install --user 'numpy>=1.24,<2' faster-whisper 'huggingface-hub<1'" 2>&1 | tail -3
 
 # ── Step 3: Build CTranslate2 with CUDA (if available) ──────────────────────
 
