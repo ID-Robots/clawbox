@@ -425,6 +425,8 @@ import {
   revokePreviews,
   type StagingFailure,
 } from '@/lib/chat-attachments'
+import { useChatFileDrop, useChatUploads } from '@/lib/use-chat-drop'
+import { ChatDropOverlay, ChatUploadChips } from './ChatDropUploads'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 import { usePortrait } from '@/lib/use-portrait'
@@ -1370,6 +1372,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // strip: the previous behaviour was to return early on a non-OK response,
   // which is indistinguishable to the user from a paste that never fired.
   const [attachmentError, setAttachmentError] = useState<(StagingFailure & { file: string }) | null>(null)
+  // What is still on its way to the box — a chip per file or dropped folder,
+  // so a big upload is not a composer that looks like nothing happened.
+  const uploadTracker = useChatUploads()
+  const beginUpload = uploadTracker.begin
   // The image the full-size preview is showing, or null when it is closed.
   // It carries the picture's accessible name as well as its URL: a screen
   // reader must not be told "generated image" after opening one the customer
@@ -3863,6 +3869,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (!isCurrent()) return
         setAttachmentError({ ...classifyStagingFailure(status, payload), file: filename })
       }
+      const chip = beginUpload(filename, 'file')
       try {
         const res = await fetch('/setup-api/chat/attachments', { method: 'POST', body: formData })
         const json = await res.json().catch(() => ({} as { name?: string; path?: string; error?: string }))
@@ -3898,10 +3905,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // that to the box's problem rather than the file's, and the thrown
         // error itself is never shown — it can carry the request URL.
         fail(undefined, null)
+      } finally {
+        chip.end()
       }
     })
     void Promise.all(tasks)
-  }, [caps])
+  }, [caps, beginUpload])
+
+  // Files and whole folders dragged onto the chat. Loose files take the path
+  // above; a folder is staged as a folder and comes back as one attachment.
+  const addFolderAttachment = useCallback((folder: ChatAttachment) => {
+    setAttachments(prev => [...prev, folder])
+  }, [])
+  const drop = useChatFileDrop({
+    enabled: status === 'connected' && (caps.canAttachImages || caps.canAttachDocuments),
+    caps,
+    stageFiles: uploadFiles,
+    onFolderStaged: addFolderAttachment,
+    onError: setAttachmentError,
+    generationRef: uploadGenerationRef,
+    tracker: uploadTracker,
+  })
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
@@ -6470,6 +6494,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // their own pointer events, and a click that raises no surface is a click
       // that leaves the chat buried under the window that covered it.
       onPointerDownCapture={onFocus}
+      // Files and folders dragged from the owner's computer attach to the
+      // composer wherever on the chat they are let go.
+      {...drop.dropHandlers}
       style={{
         position: 'fixed',
         ...posStyle,
@@ -6540,6 +6567,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         willChange: 'transform, opacity',
       }}
     >
+      <ChatDropOverlay active={drop.dragActive} t={t} />
       {/* Spring burst out of the mascot: overshoot + tilt-wobble, transform +
           opacity only. transform-origin (set on the container) pins it to where
           the crab is. The previous version also tweened filter:blur/brightness/
@@ -7531,6 +7559,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           on disk — so the thumbnail IS the confirmation that the right image
           is about to be sent. The file name stays beside it for the
           file-picker case and for non-images, which have no thumbnail. */}
+      <ChatUploadChips uploads={uploadTracker.uploads} onCancel={uploadTracker.cancel} t={t} />
       {attachments.length > 0 && (
         <div data-testid="chat-attachments" style={{ padding: '6px 14px 0', display: 'flex', gap: 6, flexWrap: 'wrap', background: 'rgba(0,0,0,0.2)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
           {attachments.map((a, i) => (
@@ -7546,9 +7575,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   style={{ width: 34, height: 34, borderRadius: 6, objectFit: 'cover', display: 'block', background: 'rgba(0,0,0,0.35)' }}
                 />
               ) : (
-                <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{isPreviewableImage(a.type) ? 'image' : 'attach_file'}</span>
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{a.kind === 'folder' ? 'folder' : isPreviewableImage(a.type) ? 'image' : 'attach_file'}</span>
               )}
               <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
+              {a.kind === 'folder' && typeof a.fileCount === 'number' && (
+                <span data-testid="chat-attachment-folder-count" style={{ color: 'rgba(255,255,255,0.5)', whiteSpace: 'nowrap' }}>
+                  {t('chat.attachment.folderFiles', { count: a.fileCount })}
+                </span>
+              )}
               <button
                 onClick={() => removeAttachment(i)}
                 aria-label={t('chat.attachment.remove', { name: a.name })}
@@ -7577,7 +7611,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         >
           <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 15, flexShrink: 0 }}>error</span>
           <span style={{ flex: 1 }}>
-            {t(`chat.attachment.error.${attachmentError.reason}`, { name: attachmentError.file })}
+            {t(`chat.attachment.error.${attachmentError.reason}`, { ...attachmentError.params, name: attachmentError.file })}
             {attachmentError.detail ? ` ${attachmentError.detail}` : ''}
           </span>
           <button

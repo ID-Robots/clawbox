@@ -111,12 +111,41 @@ export interface ZipSummary {
   limit: number;
 }
 
-/** What a ZIP of the folder would hold, counted without reading a byte of it. */
-export async function summarizeFolderForZip(rootAbs: string, limit = MAX_ZIP_ENTRIES): Promise<ZipSummary> {
+/**
+ * One thing the owner SELECTED for a ZIP (the Files app's multi-select
+ * download): where it is, and the name it goes into the archive under.
+ */
+export interface ZipSelectionItem {
+  abs: string;
+  name: string;
+}
+
+/**
+ * Every entry of a selection: a file as itself, a folder the way
+ * `walkFolderForZip` walks one, each under its own `name`. The same rule as a
+ * folder's walk — `isProtectedFilePath` on the item itself, a vanished item
+ * passed over — so a selection holds exactly what the items downloaded one by
+ * one would.
+ */
+export async function* walkSelectionForZip(items: readonly ZipSelectionItem[]): AsyncGenerator<ZipWalkEntry> {
+  for (const item of items) {
+    if (isProtectedFilePath(item.abs)) continue;
+    let st: import("fs").Stats;
+    try { st = await fsp.stat(item.abs); } catch { continue; }
+    if (st.isDirectory()) {
+      yield* walkFolderForZip(item.abs, item.name);
+      continue;
+    }
+    if (!st.isFile()) continue;
+    yield { kind: "file", abs: item.abs, name: item.name, size: st.size, mtime: st.mtime, mode: st.mode };
+  }
+}
+
+async function summarizeWalk(walk: AsyncIterable<ZipWalkEntry>, limit: number): Promise<ZipSummary> {
   let entries = 0;
   let files = 0;
   let bytes = 0;
-  for await (const entry of walkFolderForZip(rootAbs, path.basename(rootAbs))) {
+  for await (const entry of walk) {
     entries += 1;
     if (entries > limit) return { entries: limit, files, bytes, tooMany: true, limit };
     if (entry.kind === "file") {
@@ -125,6 +154,16 @@ export async function summarizeFolderForZip(rootAbs: string, limit = MAX_ZIP_ENT
     }
   }
   return { entries, files, bytes, tooMany: false, limit };
+}
+
+/** What a ZIP of the folder would hold, counted without reading a byte of it. */
+export async function summarizeFolderForZip(rootAbs: string, limit = MAX_ZIP_ENTRIES): Promise<ZipSummary> {
+  return summarizeWalk(walkFolderForZip(rootAbs, path.basename(rootAbs)), limit);
+}
+
+/** What a ZIP of the selection would hold, counted the same way. */
+export async function summarizeSelectionForZip(items: readonly ZipSelectionItem[], limit = MAX_ZIP_ENTRIES): Promise<ZipSummary> {
+  return summarizeWalk(walkSelectionForZip(items), limit);
 }
 
 // ── The format ───────────────────────────────────────────────────────────────
@@ -432,4 +471,9 @@ export async function* zipEntries(
 /** A ZIP of the folder at `rootAbs`, its entries under `topName/`, as a Node stream. */
 export function zipFolderStream(rootAbs: string, topName: string, opts: { maxEntries?: number } = {}): Readable {
   return Readable.from(zipEntries(walkFolderForZip(rootAbs, topName), opts), { objectMode: false });
+}
+
+/** A ZIP of the selected files and folders, each at the top of the archive, as a Node stream. */
+export function zipSelectionStream(items: readonly ZipSelectionItem[], opts: { maxEntries?: number } = {}): Readable {
+  return Readable.from(zipEntries(walkSelectionForZip(items), opts), { objectMode: false });
 }
