@@ -80,6 +80,15 @@ interface ClawKeepStatus {
    * "Run a backup now" button is gated on this; without it the runner
    * refuses to run since unencrypted backups would leak to the operator. */
   encryptionConfigured: boolean;
+  /** The box's own backup archives the last archive build left out, and
+   *  their size. Optional, like every field an older server did not send. */
+  leftOutCount?: number;
+  leftOutBytes?: number;
+  /** Snapshot-sized archive files the last archive still carried: the five
+   *  largest named, all of them counted. */
+  largeArchives?: { path: string; bytes: number }[];
+  largeArchiveCount?: number;
+  largeArchiveBytes?: number;
 }
 
 // Map the daemon's phase id to an i18n key for the progress panel.
@@ -726,6 +735,10 @@ export default function ClawKeepApp() {
                     : null
                 }
               />
+              {/* Outside the dashboard card on purpose: the daemon writes this
+                  before the upload starts, and the card is the progress panel
+                  for exactly that stretch. */}
+              <LargeArchivesCard status={status} />
               <ScheduleCard
                 schedule={status.schedule}
                 nextRunAtMs={status.nextRunAtMs}
@@ -1349,6 +1362,21 @@ function DashboardCard({
         <Stat label={t("clawkeep.stat.snapshots")} value={status.snapshotCount.toString()} />
       </div>
 
+      {/* The box's own backups the last archive left out — said here because
+          the owner who wonders why a snapshot is smaller than ~/.openclaw is
+          reading exactly this card. */}
+      {(status.leftOutCount ?? 0) > 0 && (
+        <p
+          className="relative mt-3 max-w-md text-xs text-[var(--text-muted)] leading-relaxed"
+          data-testid="clawkeep-left-out"
+        >
+          {t("clawkeep.leftOut.summary", {
+            count: status.leftOutCount ?? 0,
+            size: formatBytes(status.leftOutBytes ?? 0),
+          })}
+        </p>
+      )}
+
       {/* Optional name for this backup → becomes the snapshot's label */}
       {!disabled && (
         <div className="relative mt-5 w-full max-w-xs">
@@ -1468,6 +1496,14 @@ function BackupContentsInfo({ status }: { status: ClawKeepStatus }) {
               {source.excludesKeys.map((key) => t(key)).join("; ")}.
             </p>
           )}
+          {(status.leftOutCount ?? 0) > 0 && (
+            <p className="text-xs text-[var(--text-muted)] leading-relaxed" data-testid="clawkeep-contents-left-out">
+              {t("clawkeep.contents.leftOutLast", {
+                count: status.leftOutCount ?? 0,
+                size: formatBytes(status.leftOutBytes ?? 0),
+              })}
+            </p>
+          )}
           {status.backupContainsCredentials !== false && (
             <p className="text-xs text-amber-200/90 leading-relaxed">
               🔒 {t("clawkeep.contents.credentialWarning")}
@@ -1475,6 +1511,58 @@ function BackupContentsInfo({ status }: { status: ClawKeepStatus }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Snapshot-sized archive files the last backup still CARRIED.
+ *
+ * The box's own backups are left out by the daemon (`clawkeep/own_backups.py`);
+ * what is named here is everything else of that size in the backed-up folders
+ * — an export zip in the workspace, or one of the box's own archives that could
+ * not be set aside because nothing outside the backup shares its disk. Each one
+ * is uploaded again with every snapshot, which is how a 2.5 GB box reached
+ * 13 GB snapshots and a full quota without anyone being told. The daemon writes
+ * it before the upload, so the card can be up while the upload runs.
+ */
+function LargeArchivesCard({ status }: { status: ClawKeepStatus }) {
+  const { t } = useT();
+  const count = status.largeArchiveCount ?? 0;
+  if (count <= 0) return null;
+  const named = status.largeArchives ?? [];
+  return (
+    <div
+      className={`${CARD} space-y-2 border-amber-500/20 bg-amber-500/5`}
+      role="status"
+      data-testid="clawkeep-large-archives"
+    >
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-amber-200">
+        <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">folder_zip</span>
+        {t("clawkeep.largeArchives.title")}
+      </h2>
+      <p className="text-sm text-amber-100/90 leading-relaxed">
+        {t("clawkeep.largeArchives.body", {
+          count,
+          size: formatBytes(status.largeArchiveBytes ?? 0),
+        })}
+      </p>
+      {named.length > 0 && (
+        <ul className="space-y-1 text-xs text-amber-100/85">
+          {named.map((archive) => (
+            <li key={archive.path} className="flex items-baseline justify-between gap-3">
+              <code className="min-w-0 break-all font-mono">{archive.path}</code>
+              <span className="shrink-0 tabular-nums">{formatBytes(archive.bytes)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {count > named.length && (
+        <p className="text-xs text-amber-100/70">
+          {t("clawkeep.largeArchives.more", { count: count - named.length })}
+        </p>
+      )}
+      <p className="text-xs text-amber-100/70 leading-relaxed">{t("clawkeep.largeArchives.hint")}</p>
     </div>
   );
 }

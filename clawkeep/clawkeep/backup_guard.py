@@ -92,11 +92,21 @@ LEFTOVERS
   output directory, where the runner never learns its name — a plaintext,
   credential-bearing tarball left beside the next run. Whatever a failed call
   leaves in ClawKeep's output directory is removed before the error travels on.
+
+THE BOX'S OWN BACKUPS
+  See :mod:`clawkeep.own_backups`: the core carries everything in the state
+  directory, older backup archives included, and offers no way to leave a path
+  out. Archives in `<state>/backups/` and OpenClaw's own archive files are set
+  aside for the build by a same-filesystem rename, journalled like the links
+  and put back with them; the walk that finds the links also measures every
+  archive file it passes, so a snapshot-sized one the backup still carries is
+  named before the upload.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import fcntl
 import json
 import logging
@@ -108,7 +118,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import crypto, openclaw, sqlite_recovery, token
+from . import crypto, openclaw, own_backups, sqlite_recovery, token
 from .config import Config
 from .openclaw import (
     FAILURE_DUPLICATE,
@@ -161,8 +171,8 @@ class RefusedLink:
         return bool(self.rule)
 
 
-def _is_volatile_link(path: str, state_dir: str | None) -> bool:
-    """The archiver's own skip list, for the links it would never look at
+def _is_volatile(path: str, state_dir: str | None) -> bool:
+    """The archiver's own skip list, for the paths it would never look at
     (`backup-volatile-filter.ts`): sockets, pid and tmp files under the state
     dir, Chromium's singleton links, the skills sandbox and the UI cache."""
     if state_dir is None or not _inside(path, state_dir):
@@ -222,19 +232,39 @@ def managed_rule(path: str, asset_root: str, state_dir: str | None) -> str:
     return ""
 
 
+@dataclass(frozen=True)
+class Preflight:
+    """What one walk over the planned assets found."""
+
+    #: Every symlink the archiver would refuse, sorted by path.
+    links: list[RefusedLink]
+    #: Every archive-named regular file the archiver would carry, sorted by
+    #: path, with its size and the rule that leaves it out, if one does.
+    archives: list[own_backups.ArchiveFile]
+
+
 def find_refused_links(plan: BackupPlan) -> list[RefusedLink]:
     """Every symlink in the planned assets the archiver would refuse, sorted.
 
     Walks with `os.scandir` and never follows a link. Trees the plan says the
     archiver will not walk (`regenerable`, `private`) are not walked here.
     """
+    return scan(plan).links
+
+
+def scan(plan: BackupPlan) -> Preflight:
+    """The pre-flight's ONE walk: the links :func:`find_refused_links`
+    describes, and — in the same pass, so the check costs no second walk —
+    every archive-named file the archiver would carry, `stat`ed only when its
+    NAME says archive (:func:`own_backups.archive_named`)."""
     roots = [asset.source_path for asset in plan.assets]
     unwalked = [src for _, src, reason in plan.skipped if reason in _UNWALKED_REASONS]
     state_dir = next((a.source_path for a in plan.assets if a.kind == "state"), None)
     found: dict[str, RefusedLink] = {}
+    archives: dict[str, own_backups.ArchiveFile] = {}
 
     def consider(path: str, asset_root: str) -> None:
-        if path in found or _is_volatile_link(path, state_dir):
+        if path in found or _is_volatile(path, state_dir):
             return
         try:
             target = os.readlink(path)
@@ -242,6 +272,19 @@ def find_refused_links(plan: BackupPlan) -> list[RefusedLink]:
             return
         if _link_refused(path, target, roots):
             found[path] = RefusedLink(path, target, managed_rule(path, asset_root, state_dir))
+
+    def measure(entry: os.DirEntry[str], asset_root: str) -> None:
+        if (entry.path in archives or not own_backups.archive_named(entry.name)
+                or _is_volatile(entry.path, state_dir)):
+            return
+        if not entry.is_file(follow_symlinks=False):
+            return
+        archives[entry.path] = own_backups.ArchiveFile(
+            entry.path,
+            entry.stat(follow_symlinks=False).st_size,
+            own_backups.left_out_rule(entry.path, state_dir),
+            asset_root,
+        )
 
     for asset in plan.assets:
         top = asset.source_path
@@ -265,9 +308,14 @@ def find_refused_links(plan: BackupPlan) -> list[RefusedLink]:
                         consider(entry.path, top)
                     elif entry.is_dir(follow_symlinks=False):
                         stack.append(entry.path)
+                    else:
+                        measure(entry, top)
                 except OSError:
                     continue
-    return [found[p] for p in sorted(found)]
+    return Preflight(
+        links=[found[p] for p in sorted(found)],
+        archives=[archives[p] for p in sorted(archives)],
+    )
 
 
 def _journal_entries(journal: Path) -> list[dict[str, str]] | None:
@@ -314,6 +362,9 @@ def _write_journal(journal: Path, entries: list[dict[str, str]]) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+    # The rename into place is durable only once the directory is: a journal
+    # lost to a power cut is a set of links nothing knows to put back.
+    own_backups._fsync_dir(journal.parent)
 
 
 def detach_links(links: list[RefusedLink], journal: Path) -> list[RefusedLink]:
@@ -553,17 +604,22 @@ def _damaged(
 
 
 @contextlib.contextmanager
-def exclusive(lock: Path) -> Iterator[None]:
-    """One archive build at a time on this box; a second run waits its turn."""
+def exclusive(lock: Path, *, wait: bool = True) -> Iterator[bool]:
+    """One archive build at a time on this box; a second run waits its turn.
+    With `wait=False` nothing waits: the block runs with `False` when another
+    process holds the lock, and must then leave what it guards alone."""
     lock.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            if not wait:
+                yield False
+                return
             log.info("another backup is building its archive; waiting for it to finish")
             fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        yield True
     finally:
         os.close(fd)
 
@@ -575,17 +631,49 @@ def create_archive(cfg: Config, *, output_dir: Path) -> Archive:
         return _create_archive(cfg, output_dir=output_dir)
 
 
+def _put_back(journal: Path, held_journal: Path) -> None:
+    """Everything an interrupted build set aside, back where it was."""
+    try:
+        returned = own_backups.put_back(held_journal)
+        if returned:
+            log.warning("put back %d file(s) an interrupted backup had set aside: %s",
+                        len(returned), ", ".join(returned))
+    finally:
+        restored = reattach_links(journal)
+        if restored:
+            log.warning("put back %d package link(s) an interrupted backup had set aside: %s",
+                        len(restored), ", ".join(restored))
+
+
+def put_back_interrupted() -> None:
+    """Put back what a build killed mid-way set aside — package links and the
+    box's own backup archives — unless a build holds the lock right now (that
+    one puts back its own when it ends). The idle tick calls this, so a box
+    whose next backup is days away, or switched off, still gets its files back
+    within the hour."""
+    data = token.data_dir()
+    journal, held_journal = data / JOURNAL_NAME, data / own_backups.JOURNAL_NAME
+    if not journal.exists() and not held_journal.exists():
+        return
+    with exclusive(data / LOCK_NAME, wait=False) as ours:
+        if ours:
+            _put_back(journal, held_journal)
+
+
 def _create_archive(cfg: Config, *, output_dir: Path) -> Archive:
-    journal = token.data_dir() / JOURNAL_NAME
-    restored = reattach_links(journal)
-    if restored:
-        log.warning("put back %d package link(s) an interrupted backup had set aside: %s",
-                    len(restored), ", ".join(restored))
+    data = token.data_dir()
+    journal = data / JOURNAL_NAME
+    held_journal = data / own_backups.JOURNAL_NAME
+    _put_back(journal, held_journal)
 
     plan = _plan(cfg)
     if plan is not None:
         assert_no_duplicate_paths(plan)
-    links = find_refused_links(plan) if plan is not None else []
+    # No plan, no walk: the pre-flight is best effort, and without the dry-run
+    # there is no declared asset list to hold anything outside of — so nothing
+    # is set aside either, and the core carries the tree as it always did.
+    found = scan(plan) if plan is not None else Preflight(links=[], archives=[])
+    links = found.links
     foreign = [link for link in links if not link.managed]
     if foreign:
         log.warning(
@@ -601,11 +689,26 @@ def _create_archive(cfg: Config, *, output_dir: Path) -> Archive:
         # Inside the `try`: the journal is written before the first unlink, so
         # a detach that raises part-way (a full disk on the second journal
         # write) has already taken links out of the tree. The put-back must
-        # run for that run too, not wait for the next one a day later.
+        # run for that run too, not wait for the next one a day later. The
+        # same holds for the files set aside after them.
         detach_links(links, journal)
-        return _create_with_sqlite_recovery(cfg, output_dir, plan)
+        roots = [asset.source_path for asset in plan.assets] if plan is not None else []
+        set_aside = own_backups.set_aside(found.archives, roots, held_journal, data)
+        account = own_backups.report(found.archives, set_aside)
+        if account["large_archive_count"]:
+            log.warning(
+                "this snapshot will carry %d snapshot-sized archive file(s), %d bytes in all, and "
+                "every snapshot uploads them again: %s",
+                account["large_archive_count"], account["large_archive_bytes"],
+                ", ".join(f"{path} ({size} bytes)" for path, size in account["large_archives"]),
+            )
+        archive = _create_with_sqlite_recovery(cfg, output_dir, plan)
+        return dataclasses.replace(archive, **account)
     finally:
-        reattach_links(journal)
+        try:
+            own_backups.put_back(held_journal)
+        finally:
+            reattach_links(journal)
 
 
 #: Why a database the core refused AGAIN, after ClawKeep's look, is left alone.

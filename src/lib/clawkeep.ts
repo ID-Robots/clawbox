@@ -173,6 +173,26 @@ export interface ClawKeepStatus {
    * `paired && !encryptionConfigured` is the gate the UI watches to surface
    * the "Set encryption passphrase" CTA before the first backup. */
   encryptionConfigured: boolean;
+  /** How many of the box's own backup archives the last archive build left
+   * out, and their size: files in `~/.openclaw/backups/` and OpenClaw's own
+   * `…-openclaw-backup.tar.gz[.enc]` files, which the core would otherwise
+   * carry into every snapshot (`clawkeep/own_backups.py`). They stay on the
+   * box, untouched. 0 on Hermes, whose archiver leaves nothing out. */
+  leftOutCount: number;
+  leftOutBytes: number;
+  /** Snapshot-sized archive files (256 MiB or more) the last archive still
+   * CARRIED — outside that rule, or unable to be set aside — largest first,
+   * at most five named (`~/…`); `largeArchiveCount`/`Bytes` count them all.
+   * Written before the upload, so it can be said while the upload runs. */
+  largeArchives: LargeArchive[];
+  largeArchiveCount: number;
+  largeArchiveBytes: number;
+}
+
+/** One snapshot-sized archive file a backup carries. */
+export interface LargeArchive {
+  path: string;
+  bytes: number;
 }
 
 export class ClawKeepError extends Error {
@@ -701,6 +721,28 @@ interface StateFile {
   upload_bytes_total?: number;
   upload_bytes_done?: number;
   upload_started_at_ms?: number;
+  last_left_out_count?: number;
+  last_left_out_bytes?: number;
+  last_large_archives?: unknown;
+  last_large_archive_count?: number;
+  last_large_archive_bytes?: number;
+}
+
+/** The daemon writes these; a hand-edited or half-written state.json must not
+ * put a string or a negative into a byte count the UI formats. */
+function stateCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/** At most five, as the daemon writes them; anything that does not read as
+ * `{path, bytes}` is dropped rather than rendered. */
+function stateLargeArchives(value: unknown): LargeArchive[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is { path: string; bytes?: unknown } =>
+      typeof item === "object" && item !== null && typeof (item as { path?: unknown }).path === "string")
+    .slice(0, 5)
+    .map((item) => ({ path: item.path, bytes: stateCount(item.bytes) }));
 }
 
 /** Pull just the `server` value out of a config.toml. The Python daemon does
@@ -1029,6 +1071,11 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     nextRunAtMs: computeNextRunMs(schedule, new Date()),
     scheduleArmedAtMs,
     encryptionConfigured,
+    leftOutCount: stateCount(stateRaw.last_left_out_count),
+    leftOutBytes: stateCount(stateRaw.last_left_out_bytes),
+    largeArchives: stateLargeArchives(stateRaw.last_large_archives),
+    largeArchiveCount: stateCount(stateRaw.last_large_archive_count),
+    largeArchiveBytes: stateCount(stateRaw.last_large_archive_bytes),
   };
 }
 

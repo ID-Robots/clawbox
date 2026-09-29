@@ -29,6 +29,16 @@ The Hermes archiver works from an explicit **allowlist**, so the ~1.5 GB
 out. `clawkeep/hermes.py`'s module docstring is the authoritative list, with the
 reasoning for each inclusion and exclusion.
 
+On OpenClaw the core takes the whole state directory as one asset and has no
+exclude option, so a snapshot would carry every older backup kept inside
+`~/.openclaw`. ClawKeep leaves out archive files in `~/.openclaw/backups/` (any
+depth) and OpenClaw's own `…-openclaw-backup.tar.gz[.enc]` files anywhere in
+the backup: each is set aside for the build by a same-filesystem rename into
+`set-aside/` and put back as the same file the moment the build ends
+(`clawkeep/own_backups.py` has the rule and every crash case). The run records
+what it left out (count and bytes), and any archive file of 256 MiB or more the
+snapshot still carries, in `state.json` before the upload.
+
 > **A snapshot is a credential.** Both editions' archives include the device's
 > provider keys (`~/.hermes/.env`, OpenClaw's `credentials`), because a restore
 > that brought back the config but not the keys would hand the customer a dead
@@ -110,8 +120,10 @@ SSH to the device's listener.
 |---|---|---|---|
 | `/etc/clawkeep/config.toml` | 0644 | root | User-editable config |
 | `/var/lib/clawkeep/token` | 0600 | clawkeep | The `claw_*` portal token |
-| `/var/lib/clawkeep/state.json` | 0600 | clawkeep | Last run result + last cloudBytes |
+| `/var/lib/clawkeep/state.json` | 0600 | clawkeep | Last run result + last cloudBytes, and what the last archive left out / still carried |
 | `/var/lib/clawkeep/detached-links.json` | 0600 | clawkeep | Links set aside for an archive build still in progress (or killed mid-build); put back by the next run |
+| `/var/lib/clawkeep/set-aside-files.json` | 0600 | clawkeep | The box's own backup archives set aside for a build in progress (or killed mid-build), and where each is held; put back by the build, the next run or the hourly idle tick |
+| `/var/lib/clawkeep/set-aside/run-*/` | 0700 | clawkeep | Where those files are held while the build runs (a `.clawkeep-set-aside/` beside the state dir when the data dir is on another filesystem); empty and removed afterwards |
 | `/var/lib/clawkeep/sqlite-recovery/` | 0700 | clawkeep | A database as found before its indexes were rebuilt (the newest 3 per database) |
 
 > **Note on encryption:** archives are encrypted on the device before upload
