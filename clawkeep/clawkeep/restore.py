@@ -35,7 +35,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import agent, api, crypto, passphrase, s3
+from . import agent, api, backup_guard, crypto, passphrase, s3, state
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -70,6 +70,13 @@ class RestoreResult:
     #: always empty. Carried out to the caller rather than left in the log so
     #: a restore that dropped something can never present itself as complete.
     skipped_members: list[str] = field(default_factory=list)
+    #: The symbolic links the BACKUP skipped, so this snapshot never carried
+    #: them — as its own record says ({"path": "~/…", "target": "<link
+    #: text>"}, the first `backup_guard.LISTED_SKIPPED_LINKS`), and how many
+    #: there were. The restore itself is complete without them; they are
+    #: named so nobody looks for them in the restored tree.
+    skipped_links: list[dict[str, str]] = field(default_factory=list)
+    skipped_link_count: int = 0
 
 
 class RestoreError(Exception):
@@ -703,6 +710,38 @@ def _resolve_passphrase_file(
     )
 
 
+def _skipped_links_of(
+    creds: api.Credentials, object_name: str, password_file: Path | None,
+) -> tuple[int, list[dict[str, str]]]:
+    """What the snapshot's own record says it does not carry: the symbolic
+    links its backup skipped (`runner._skipped_record`), as (count, links).
+    Best effort, and never a reason for a restore to fail — a record that
+    cannot be read or opened costs the names, and the log says so. The names
+    are only ever SAID: nothing is created from them, least of all a link out
+    of the restored tree."""
+    try:
+        manifest = s3.read_manifest(creds)
+    except s3.S3Error as e:
+        log.warning("could not read the snapshot records to name its skipped links: %s", e)
+        return 0, []
+    record = manifest.get("snapshots", {}).get(object_name)
+    if not isinstance(record, dict):
+        return 0, []
+    raw_count = record.get(s3.RECORD_SKIPPED_LINK_COUNT)
+    count = raw_count if type(raw_count) is int and raw_count > 0 else 0
+    sealed = record.get(s3.RECORD_SKIPPED_LINKS)
+    if not count or not isinstance(sealed, str) or password_file is None:
+        return count, []
+    try:
+        links = state.skipped_links(
+            json.loads(crypto.open_sealed(sealed, password_file=password_file)),
+        )
+    except (crypto.CryptoError, ValueError) as e:
+        log.warning("could not open the snapshot's list of skipped links: %s", e)
+        return count, []
+    return max(count, len(links)), links[: backup_guard.LISTED_SKIPPED_LINKS]
+
+
 def restore_snapshot(
     cfg: Config,
     token: str,
@@ -733,6 +772,10 @@ def restore_snapshot(
         raise RestoreError(f"expected a .tar.gz snapshot name, got {snapshot_name!r}")
 
     creds = api.mint_credentials(cfg.server, token)
+    # The name the snapshot has in the bucket, and in its record there; the
+    # one below turns into the plaintext archive's name once it is decrypted.
+    object_name = snapshot_name
+    pw_file: Path | None = None
 
     staging_dir = Path(tempfile.mkdtemp(prefix="clawkeep-restore-"))
     # Asset staging happens beside each live target (see `_staging_beside`),
@@ -947,11 +990,24 @@ def restore_snapshot(
         for db_target in pending_sqlite:
             _retire_sqlite_sidecars(db_target, ts=ts)
 
+        # Only an encrypted snapshot can have a record of skipped links: the
+        # backup that writes one also encrypts, and seals the names with it.
+        skipped_link_count, skipped_links = (
+            _skipped_links_of(creds, object_name, pw_file) if pw_file is not None else (0, [])
+        )
+        if skipped_link_count:
+            log.info(
+                "this snapshot does not carry %d symbolic link(s) its backup skipped: %s",
+                skipped_link_count,
+                ", ".join(f"{link['path']} -> {link['target']}" for link in skipped_links),
+            )
         return RestoreResult(
             archive_name=snapshot_name,
             archive_size_bytes=size,
             assets=results,
             skipped_members=skipped_members,
+            skipped_links=skipped_links,
+            skipped_link_count=skipped_link_count,
         )
     finally:
         # Best-effort cleanup of the staging tree. The swap moved any

@@ -108,6 +108,26 @@ def _archive_exit_code(exc: BaseException) -> int:
     return EXIT_OPENCLAW
 
 
+def _skipped_record(archive: openclaw.Archive) -> dict[str, object]:
+    """What a snapshot's sidecar-manifest record says about the symbolic links
+    it does not carry, so a restore can name them. The count is in the clear;
+    the links are SEALED with the backup passphrase, because they are file
+    names and the manifest is plaintext in the bucket — the portal operator
+    reads neither a snapshot nor what it left out. Best effort: a seal that
+    fails costs the names, never the count or the backup."""
+    if not archive.skipped_link_count:
+        return {}
+    record: dict[str, object] = {s3.RECORD_SKIPPED_LINK_COUNT: archive.skipped_link_count}
+    listed = [{"path": path, "target": target} for path, target in archive.skipped_links]
+    try:
+        record[s3.RECORD_SKIPPED_LINKS] = crypto.seal_text(
+            json.dumps(listed), password_file=passphrase.default_passphrase_path(),
+        )
+    except (crypto.CryptoError, OSError) as e:
+        log.warning("could not seal the skipped links into the snapshot's record: %s", e)
+    return record
+
+
 def _heartbeat_safe(server: str, token: str, **kwargs: object) -> bool:
     """Section 9: don't retry heartbeat aggressively. Log + move on.
 
@@ -400,6 +420,12 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         ]
         st.last_large_archive_count = archive.large_archive_count
         st.last_large_archive_bytes = archive.large_archive_bytes
+        # The links this archive skipped: the archiver refuses them, so the
+        # snapshot does not carry them — the backup goes on, and says which.
+        st.last_skipped_links = [
+            {"path": path, "target": target} for path, target in archive.skipped_links
+        ]
+        st.last_skipped_link_count = archive.skipped_link_count
 
         # Encrypt the freshly-built tarball before it leaves the device.
         # The encrypted file replaces the plaintext for the upload step;
@@ -520,6 +546,7 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
                 "label": label,
                 "locked": False,
                 "createdAt": api.now_ms(),
+                **_skipped_record(archive),
             }
             s3.write_manifest(creds, manifest)
         except s3.S3Error as e:
@@ -561,12 +588,14 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
         state.save(st)
 
         log.info(
-            "backup ok: archive=%s (encrypted %d bytes); cloud=%s/%d, snapshots=%s",
+            "backup ok: archive=%s (encrypted %d bytes); cloud=%s/%d, snapshots=%s; "
+            "%d symbolic link(s) skipped",
             encrypted_path.name,
             encrypted_size,
             cloud.cloud_bytes if cloud is not None else "?",
             creds.quotaBytes,
             cloud.snapshot_count if cloud is not None else "?",
+            archive.skipped_link_count,
         )
         return EXIT_OK
 

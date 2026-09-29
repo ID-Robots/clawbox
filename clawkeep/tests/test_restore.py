@@ -756,6 +756,106 @@ def test_restore_snapshot_end_to_end(tmp_path: Path) -> None:
     assert not download_dest.parent.exists()
 
 
+def _encrypted_snapshot_with_skipped_links(
+    tmp_path: Path, target: Path, pw_file: Path,
+) -> tuple[Path, dict]:
+    """TASK-1304: the snapshot a backup that skipped two links makes — the
+    archive carries neither link, and the snapshot's record in the plaintext
+    manifest has their count in the clear and their names sealed."""
+    from clawkeep import crypto, s3
+
+    plain = tmp_path / "made" / "snap-root.tar.gz"
+    plain.parent.mkdir()
+    _make_archive(
+        plain, archive_root="snap-root", target_dir=target,
+        payload={"docs/order-form-2026.pdf": b"%PDF"},
+    )
+    encrypted = plain.with_name("snap-root.tar.gz.enc")
+    crypto.encrypt_file(plaintext_path=plain, ciphertext_path=encrypted, password_file=pw_file)
+    links = [
+        {"path": "~/.openclaw/workspace/docs/catalogue", "target": "/srv/shared/catalogue"},
+        {"path": "~/.openclaw/workspace/docs/notes.txt", "target": "../../../notes.txt"},
+    ]
+    record = {
+        "label": None, "locked": False, "createdAt": 1,
+        s3.RECORD_SKIPPED_LINK_COUNT: 2,
+        s3.RECORD_SKIPPED_LINKS: crypto.seal_text(json.dumps(links), password_file=pw_file),
+    }
+    return encrypted, {"version": 1, "snapshots": {encrypted.name: record}}
+
+
+def _pw(tmp_path: Path, secret: str = "correct horse battery staple") -> Path:
+    pw_file = tmp_path / "pw"
+    pw_file.write_text(secret, encoding="utf-8")
+    pw_file.chmod(0o600)
+    return pw_file
+
+
+def test_a_snapshot_with_skipped_links_restores_cleanly_and_names_them(tmp_path: Path) -> None:
+    target = tmp_path / "state"
+    (target / "docs").mkdir(parents=True)
+    # The box still has the link the backup skipped; the snapshot never had it.
+    (target / "docs" / "catalogue").symlink_to("/srv/shared/catalogue")
+    pw_file = _pw(tmp_path)
+    encrypted, manifest = _encrypted_snapshot_with_skipped_links(tmp_path, target, pw_file)
+
+    with (
+        patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.restore.s3.download", side_effect=_fake_download_of(encrypted)),
+        patch("clawkeep.restore.s3.read_manifest", return_value=manifest),
+        patch("clawkeep.restore.agent.verify_archive"),
+    ):
+        result = restore.restore_snapshot(
+            _cfg(), "claw_x", encrypted.name, passphrase_file=pw_file,
+        )
+
+    assert (target / "docs" / "order-form-2026.pdf").read_bytes() == b"%PDF"
+    assert not os.path.lexists(target / "docs" / "catalogue"), "never recreated from the record"
+    assert os.readlink(result.assets[0].backup_path / "docs" / "catalogue") == (
+        "/srv/shared/catalogue"
+    )
+    assert result.skipped_members == []
+    assert result.skipped_link_count == 2
+    assert result.skipped_links == [
+        {"path": "~/.openclaw/workspace/docs/catalogue", "target": "/srv/shared/catalogue"},
+        {"path": "~/.openclaw/workspace/docs/notes.txt", "target": "../../../notes.txt"},
+    ]
+
+
+@pytest.mark.parametrize("damage", ["unreadable-manifest", "garbled-seal", "no-record"])
+def test_a_record_that_cannot_be_read_never_fails_the_restore(
+    tmp_path: Path, damage: str,
+) -> None:
+    from clawkeep import s3
+
+    target = tmp_path / "state"
+    target.mkdir()
+    pw_file = _pw(tmp_path)
+    encrypted, manifest = _encrypted_snapshot_with_skipped_links(tmp_path, target, pw_file)
+    read = patch("clawkeep.restore.s3.read_manifest", return_value=manifest)
+    if damage == "unreadable-manifest":
+        read = patch("clawkeep.restore.s3.read_manifest", side_effect=s3.S3Error("503"))
+    elif damage == "garbled-seal":
+        manifest["snapshots"][encrypted.name][s3.RECORD_SKIPPED_LINKS] = "not a seal"
+    else:
+        manifest["snapshots"] = {}
+
+    with (
+        patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.restore.s3.download", side_effect=_fake_download_of(encrypted)),
+        read,
+        patch("clawkeep.restore.agent.verify_archive"),
+    ):
+        result = restore.restore_snapshot(
+            _cfg(), "claw_x", encrypted.name, passphrase_file=pw_file,
+        )
+
+    assert (target / "docs" / "order-form-2026.pdf").read_bytes() == b"%PDF"
+    assert result.skipped_links == []
+    # A seal that does not open still leaves the count the record gave.
+    assert result.skipped_link_count == (2 if damage == "garbled-seal" else 0)
+
+
 def test_restore_snapshot_rejects_bad_name() -> None:
     with pytest.raises(restore.RestoreError, match="expected a .tar.gz"):
         restore.restore_snapshot(_cfg(), "claw_x", "not-an-archive")
