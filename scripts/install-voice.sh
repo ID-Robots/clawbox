@@ -990,9 +990,13 @@ else:
 # and a box without the engine gets no unit: src/lib/local-models.ts reads
 # `installed` off the unit's presence, and a unit with no engine behind it
 # would advertise one. Best-effort — the engine is the Local AI tab's to
-# install, not this run's.
+# install, not this run's. An unstamped box is looked at only when this run
+# retired a legacy unit (whisper_adopt_legacy_engine).
 whisper_refresh_present() {
-  whisper_stack_present || return 0
+  if ! whisper_stack_present; then
+    whisper_adopt_legacy_engine
+    return 0
+  fi
   if write_whisper_unit; then
     activate_user_units
   else
@@ -1046,6 +1050,230 @@ Restart=no
 [Install]
 WantedBy=default.target
 EOF
+}
+
+# ── The legacy clawbox-whisper.service ──────────────────────────────────────
+# Not a ClawBox unit. Every Whisper unit this file has written, since it first
+# wrote one (c313b21d, 2026-02-15, shipped from v2.0.0), is the clawbox USER's
+# whisper-server.service, and no commit before TASK-1214 names
+# `clawbox-whisper` or `whisper-server-gpu.py`. A box in the field has one
+# anyway, a SYSTEM unit written 2026-05-09 while it ran v3.0.x:
+#   ExecStart=/usr/bin/python3 /home/clawbox/clawbox/scripts/openclaw/whisper-server-gpu.py
+# That file has never existed. The tree ships scripts/openclaw/whisper-server.py.
+# The unit failed and restarted every 10 s (NRestarts=31681 on 2026-09-25).
+# The box also had no whisper-server.service, so Settings → Local AI and the
+# chat microphone's fallback reported on-box speech as not installed, while the
+# engine itself imported and transcribed fine.
+#
+# So every mode takes that unit off, in whichever scope it sits: stopped,
+# disabled, reset, deleted and reloaded. That happens when it cannot run, meaning
+# its ExecStart names a path that is not on the box, or it runs
+# whisper-server-gpu.py. A clawbox-whisper.service that starts something real
+# belongs to somebody, so it is left in place and the run says so. Nothing here
+# can fail the run.
+LEGACY_WHISPER_UNIT="clawbox-whisper.service"
+# Overridable, like $TTS_STATUS_FILE, so tests can point it somewhere writable.
+# install.sh does not export it, so a device always takes /etc.
+SYSTEMD_SYSTEM_DIR="${CLAWBOX_SYSTEMD_SYSTEM_DIR:-/etc/systemd/system}"
+# Set when this run retired one. It is the evidence whisper_adopt_legacy_engine
+# acts on.
+LEGACY_WHISPER_RETIRED=0
+
+# Why the unit file at $1 cannot run, printed on stdout. Prints nothing and
+# returns 1 when it can.
+#
+# ExecStart= is read from the file and its drop-ins in the order systemd applies
+# them, and an empty `ExecStart=` clears what came before. Every absolute path
+# on the command must exist: the interpreter AND the script, because
+# `/usr/bin/python3 <a file that is not there>` is exactly the loop above. A
+# word carrying a specifier or a variable (%h, $HOME) cannot be resolved here,
+# so it never counts as missing. Doubt keeps a unit.
+legacy_whisper_unit_stale() {
+  local unit_file="$1" conf line key value word
+  local -a confs=() execs=() words=()
+  if [ ! -e "$unit_file" ]; then
+    # systemd still holds a unit whose file was deleted without a reload.
+    # Whatever it loaded can only go on failing.
+    printf 'its unit file %s is gone' "$unit_file"
+    return 0
+  fi
+  # The unit and its drop-ins that are really there. An unmatched glob stays a
+  # literal word, and nothing below should have to read one.
+  for conf in "$unit_file" "$unit_file".d/*.conf; do
+    if [ -f "$conf" ]; then confs+=("$conf"); fi
+  done
+  [ "${#confs[@]}" -gt 0 ] || return 1
+  if grep -qs 'whisper-server-gpu\.py' "${confs[@]}"; then
+    printf 'it runs whisper-server-gpu.py, which no ClawBox release has shipped'
+    return 0
+  fi
+  for conf in "${confs[@]}"; do
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      case "$line" in *=*) ;; *) continue ;; esac
+      key="${line%%=*}"
+      key="${key%"${key##*[![:space:]]}"}"
+      [ "$key" = "ExecStart" ] || continue
+      value="${line#*=}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      if [ -z "$value" ]; then execs=(); else execs+=("$value"); fi
+    done < "$conf"
+  done
+  if [ "${#execs[@]}" -eq 0 ]; then
+    printf 'it has no ExecStart= to run'
+    return 0
+  fi
+  for value in "${execs[@]}"; do
+    read -r -a words <<< "$value"
+    for word in "${words[@]}"; do
+      word="${word//\"/}"
+      word="${word//\'/}"
+      # The prefixes systemd allows in front of the command: - @ : + !
+      while :; do
+        case "$word" in
+          [-@:+!]*) word="${word#?}" ;;
+          *) break ;;
+        esac
+      done
+      case "$word" in
+        *[%\$]*) ;;
+        /*)
+          if [ ! -e "$word" ]; then
+            printf 'its ExecStart names %s, which is not on this box' "$word"
+            return 0
+          fi
+          ;;
+      esac
+    done
+  done
+  return 1
+}
+
+# Retire the legacy unit in ONE scope. `system` is the system manager and
+# $SYSTEMD_SYSTEM_DIR. `user` is the clawbox user's manager and $SYSTEMD_USER,
+# reached the way restart_voice_servers reaches it.
+#
+# The unit file is looked for in the admin directory AND wherever systemd says it
+# loaded it from (FragmentPath). A hand-written unit can sit in /lib, /usr/local
+# or /etc/systemd/user as well as /etc. A unit masked to /dev/null cannot start,
+# so a mask alone is left as it is.
+retire_legacy_whisper_scope() {
+  local scope="$1" unit="$LEGACY_WHISPER_UNIT" dir frag f reason stale="" live=""
+  local -a files=()
+  if [ "$scope" = "system" ]; then
+    dir="$SYSTEMD_SYSTEM_DIR"
+    frag=$(systemctl show --property=FragmentPath --value "$unit" 2>/dev/null | tail -1) || frag=""
+  else
+    dir="$SYSTEMD_USER"
+    frag=$(su - "$CLAWBOX_USER" -c "
+      export XDG_RUNTIME_DIR=/run/user/\$(id -u)
+      systemctl --user show --property=FragmentPath --value $unit
+    " 2>/dev/null | tail -1) || frag=""
+  fi
+  # Only a path that names this unit counts. `su -` runs a login shell, and a
+  # profile may print, so the last line is systemd's answer or nothing useful.
+  case "$frag" in
+    /*/"$unit") ;;
+    *) frag="" ;;
+  esac
+  if [ -e "$dir/$unit" ] || [ -L "$dir/$unit" ]; then files+=("$dir/$unit"); fi
+  if [ -n "$frag" ] && [ "$frag" != "$dir/$unit" ]; then files+=("$frag"); fi
+  # A box that never had it ends here, having only asked.
+  [ "${#files[@]}" -gt 0 ] || return 0
+
+  for f in "${files[@]}"; do
+    if [ -L "$f" ] && [ "$(readlink -f "$f" 2>/dev/null || true)" = "/dev/null" ]; then
+      continue
+    fi
+    if reason=$(legacy_whisper_unit_stale "$f"); then
+      stale="$reason"
+    else
+      live="$f"
+    fi
+  done
+  if [ -z "$stale" ]; then
+    if [ -n "$live" ]; then
+      echo "  $unit ($scope scope, $live) is not a ClawBox unit, and what it starts is on this box: left in place"
+    fi
+    return 0
+  fi
+
+  # Stop first: that is what ends a pending auto-restart. Disable removes the
+  # links its [Install] made. reset-failed clears the failure record while the
+  # unit is still loaded.
+  if [ "$scope" = "system" ]; then
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+    systemctl disable "$unit" >/dev/null 2>&1 || true
+    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+  else
+    su - "$CLAWBOX_USER" -c "
+      export XDG_RUNTIME_DIR=/run/user/\$(id -u)
+      systemctl --user stop $unit
+      systemctl --user disable $unit
+      systemctl --user reset-failed $unit
+    " >/dev/null 2>&1 || true
+  fi
+  for f in "${files[@]}"; do
+    rm -f "$f" 2>/dev/null || true
+    rm -rf "$f.d" 2>/dev/null || true
+  done
+  # Links a hand-made `ln -s` left, which disable cannot know about.
+  find "$dir" -mindepth 2 -maxdepth 2 -type l -name "$unit" \
+    \( -path "*.wants/$unit" -o -path "*.requires/$unit" \) -delete 2>/dev/null || true
+  if [ "$scope" = "system" ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  else
+    su - "$CLAWBOX_USER" -c "
+      export XDG_RUNTIME_DIR=/run/user/\$(id -u)
+      systemctl --user daemon-reload
+    " >/dev/null 2>&1 || true
+  fi
+  echo "  Retired the legacy $unit ($scope scope): $stale"
+  LEGACY_WHISPER_RETIRED=1
+}
+
+# Both scopes, every mode. Called under `|| true` so that errexit is off inside
+# (bash ignores it in a function run from an `||` list). A best-effort cleanup
+# must not be able to abort an update over a unit the product never wrote.
+retire_legacy_whisper_unit() {
+  retire_legacy_whisper_scope system || true
+  retire_legacy_whisper_scope user || true
+  return 0
+}
+
+# Give the engine the retired unit could not start the unit it should have had.
+#
+# A box whose Whisper ran, or tried to run, under the legacy unit has
+# faster-whisper and no stamp. The stamp arrived with the Local AI tab's Install,
+# long after. Left to whisper_refresh_present such a box stays unit-less for
+# ever, and that is the box that reports on-box speech as not installed.
+#
+# Only on the run that retired a legacy unit. A box whose owner pressed Uninstall
+# still has faster-whisper's wheels, because whisper-models.ts removes the unit,
+# the stamp and the weights but not the packages. An update that wrote a unit on
+# the strength of an import alone would put back the engine the owner took off.
+#
+# The rule is install_whisper_stt's: the import is verified, THEN the unit is
+# written. Nothing is fetched. The stamp follows only when the weights are whole
+# as well, since the stamp exists so that `import faster_whisper` alone cannot
+# latch a box in as ready while its weights are still missing.
+whisper_adopt_legacy_engine() {
+  [ "$LEGACY_WHISPER_RETIRED" = "1" ] || return 0
+  if ! clawbox_python "import faster_whisper" >/dev/null 2>&1; then
+    echo "  faster-whisper does not import for $CLAWBOX_USER, so no whisper-server.service was written. Install speech from Settings → Local AI"
+    return 0
+  fi
+  if ! write_whisper_unit; then
+    echo "  Warning: could not write whisper-server.service" >&2
+    return 0
+  fi
+  if whisper_model_cached; then
+    whisper_mark_installed
+  else
+    echo "  The Whisper base weights are not on this box yet. The first on-box transcription fetches them"
+  fi
+  activate_user_units
+  echo "  whisper-server.service now runs the faster-whisper that was already on this box"
 }
 
 # Install on-device speech-to-text.
@@ -1188,6 +1416,12 @@ if [ "$VOICE_MODE" != "full" ]; then
   # ONLY in --whisper: everywhere else the contract is Kokoro's, and install.sh
   # grades the step by it. In --tts-only it still comes AFTER Kokoro, so a
   # failed pip or a lost network can never cost the box its voice.
+  #
+  # The legacy clawbox-whisper.service goes first, in every mode. On an update
+  # the refresh below then gives an engine it had been pointed at the
+  # whisper-server.service it lacked. The Local AI tab's Install writes that
+  # unit anyway, so the same click also heals a box left in that state.
+  retire_legacy_whisper_unit
   STT_RC=0
   case "$VOICE_MODE" in
     whisper|tts-only)
@@ -1444,7 +1678,9 @@ fi
 
 # One writer for this unit — see write_whisper_unit. The copy that used to sit
 # here pointed at $SCRIPTS_DST and the --tts-only path could not reach it, which
-# is exactly how two paths ship two different units.
+# is exactly how two paths ship two different units. The legacy
+# clawbox-whisper.service is retired first, as in every other mode.
+retire_legacy_whisper_unit
 write_whisper_unit
 
 # Owner, lingering and daemon-reload (servers start on demand via stt-client.py)

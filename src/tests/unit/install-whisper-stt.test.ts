@@ -72,7 +72,12 @@ describe("the STT half is reachable on a click, and never on an update", () => {
     expect(arm).toMatch(/^\s*\*\) whisper_refresh_present ;;\s*$/m);
     const refresh = shellCode(extractShellFunction("whisper_refresh_present"));
     expect(refresh).not.toMatch(/pip_as_clawbox|build_ctranslate2_cuda|whisper_predownload_model|install_whisper_stt/);
-    expect(refresh).toMatch(/whisper_stack_present \|\| return 0/);
+    // An unstamped box reaches only the adoption of an engine a retired legacy
+    // unit was pointed at (install-whisper-legacy-unit.test.ts), which fetches
+    // nothing either.
+    expect(refresh).toMatch(/if ! whisper_stack_present; then\s*\n\s*whisper_adopt_legacy_engine\s*\n\s*return 0\s*\n\s*fi/);
+    const adopt = shellCode(extractShellFunction("whisper_adopt_legacy_engine"));
+    expect(adopt).not.toMatch(/pip_as_clawbox|build_ctranslate2_cuda|whisper_predownload_model|install_whisper_stt/);
   });
 
   it("in --tts-only it still comes after Kokoro", () => {
