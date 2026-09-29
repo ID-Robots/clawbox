@@ -55,16 +55,7 @@ if [ ! -d "$checkout/.git" ] && [ ! -f "$checkout/.git" ]; then
   exit 1
 fi
 checkout="$(cd "$checkout" && pwd -P)" || exit 1
-
-# Never as root over somebody else's tree. Everything below writes into a
-# directory the checkout's owner can also write, so root doing it would be the
-# symlink primitive install.sh already refuses elsewhere (see
-# persist_update_branch_pin); the callers drop to the owner first.
 owner_uid="$(stat -c %u "$checkout" 2>/dev/null || echo "")"
-if [ "$(id -u)" = "0" ] && [ -n "$owner_uid" ] && [ "$owner_uid" != "0" ]; then
-  echo "preserve-local-edits: refusing to run as root over $checkout, which uid $owner_uid owns — run it as that user" >&2
-  exit 1
-fi
 
 save_root="${2:-${CLAWBOX_LOCAL_EDITS_DIR:-$(dirname "$checkout")/clawbox-local-edits}}"
 keep="${CLAWBOX_LOCAL_EDITS_KEEP:-5}"
@@ -134,15 +125,22 @@ save_to_directory() {
   } > "$dest/README.txt" || return 1
 }
 
-# Root only reaches this over a tree root owns (an operator's own clone), and
-# even then it does not write into a directory another account controls: the
+# Root never writes the copy into a directory another account controls: the
 # default save root sits beside the checkout, in /home/clawbox, where a planted
-# symlink would redirect root's writes. Such a run keeps the edits in the
-# checkout's own stash below instead — root's tree, root's stash.
+# symlink would redirect root's writes (the primitive persist_update_branch_pin
+# refuses too). The callers drop to the checkout's owner first, so root only
+# gets here over a tree root owns (an operator's own clone) or one whose owning
+# uid has no account any more — use_tree_owner_for_git then leaves git running
+# as root, deliberately. Either way the edits go into the checkout's own stash
+# below instead of stopping the update: a refusal here fired on CLEAN trees too
+# and made such a box unable to update at all.
 use_dir=1
 if [ "$(id -u)" = "0" ]; then
-  if [ -L "$save_root" ] || [ "$(stat -c %u "$(dirname "$save_root")" 2>/dev/null || echo x)" != "0" ]; then
-    echo "preserve-local-edits: not writing into $(dirname "$save_root") as root — another account owns it" >&2
+  if [ -n "$owner_uid" ] && [ "$owner_uid" != "0" ]; then
+    echo "preserve-local-edits: running as root over $checkout, which uid $owner_uid owns — not writing a copy as root; using the checkout's git stash" >&2
+    use_dir=0
+  elif [ -L "$save_root" ] || [ "$(stat -c %u "$(dirname "$save_root")" 2>/dev/null || echo x)" != "0" ]; then
+    echo "preserve-local-edits: not writing into $(dirname "$save_root") as root — another account owns it; using the checkout's git stash" >&2
     use_dir=0
   fi
 fi

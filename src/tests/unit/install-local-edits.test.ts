@@ -371,13 +371,26 @@ d("scripts/preserve-local-edits.sh", () => {
     expect(dated.some((n) => n.startsWith("2026010") === false)).toBe(true);
   });
 
-  it("never runs as root over another account's tree", () => {
+  it("as root over another account's tree, writes no copy — and neither blocks a clean tree nor drops edits", () => {
+    // install.sh leaves git running as root when the tree's owning uid has no
+    // account (use_tree_owner_for_git). Refusing there failed EVERY update,
+    // clean tree included, with "could not be saved (is the disk full?)".
     shim("id-root");
+    const clean = preserve();
+    expect(clean.status, clean.out).toBe(0);
+    expect(clean.out).not.toContain("CLAWBOX-WARN");
+
     dirty();
     const r = preserve();
-    expect(r.status).toBe(1);
-    expect(r.out).toContain("refusing to run as root");
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("not writing a copy as root");
+    expect(r.out).toMatch(/^CLAWBOX-WARN\[local-edits-saved\]: .*git stash/m);
+    expect(r.out).toContain("CLAWBOX-LOCAL-EDITS: git-stash");
+    // Root wrote nothing into the directory beside the tree...
     expect(fs.existsSync(saves)).toBe(false);
+    // ...and the edits are in the checkout's stash, untracked files included.
+    expect(git(checkout, "stash", "list")).toContain("clawbox-update");
+    expect(git(checkout, "show", "--name-only", "--format=", "stash@{0}^3")).toContain("notes.md");
   });
 
   it("copies a symlink as a symlink rather than following it out of the tree", () => {
