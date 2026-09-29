@@ -202,8 +202,9 @@ export default function ClawKeepWizard({
     setBusy("finish");
     setError(null);
     try {
-      // The whole object, under the route's own names: the schedule route
-      // replaces rather than merges (see the dashboard's ScheduleCard).
+      // The whole object, under the route's own names. The route keeps any
+      // field a body leaves out; this step still sends all five, carrying the
+      // retention count over from the status, so what is saved is what it shows.
       const saved = await fetch("/setup-api/clawkeep/schedule", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },

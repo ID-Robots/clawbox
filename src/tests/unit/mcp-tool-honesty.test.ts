@@ -667,6 +667,37 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     expect(notes).toMatch(/nothing is scheduled to make a newer one/i);
   });
 
+  it("says a schedule paused for a full account is not off for good (TASK-1211)", async () => {
+    // `schedule.enabled: false, nextRunAtMs: 0` is all an agent had, and the
+    // owner's question was whether ClawBox had disabled it. The hold says it
+    // did not — and that the box re-arms it by itself.
+    const box = {
+      paired: true,
+      configured: true,
+      supportedOnEdition: true,
+      encryptionConfigured: true,
+      lastBackupAtMs: Date.now() - 20 * 24 * 60 * 60 * 1000,
+      lastHeartbeatStatus: "error",
+      schedule: { enabled: false, frequency: "daily" },
+      nextRunAtMs: 0,
+    };
+    apiGet.mockResolvedValue({ ...box, scheduleQuotaHoldSinceMs: Date.now() - 60_000 });
+
+    const out = await system("openclaw").call("backup_status", {});
+    if (out.isError) throw new Error("backup_status failed");
+    const notes = (JSON.parse(out.text).notes as string[]).join("\n");
+    expect(notes).toMatch(/Auto-backup is paused, not off/);
+    expect(notes).toMatch(/switches auto-backup back on by itself/);
+
+    // A plain off, and an older server with no field, carry no such note.
+    for (const hold of [0, undefined]) {
+      apiGet.mockResolvedValue({ ...box, scheduleQuotaHoldSinceMs: hold });
+      const plain = await system("openclaw").call("backup_status", {});
+      if (plain.isError) throw new Error("backup_status failed");
+      expect((JSON.parse(plain.text).notes as string[]).join("\n")).not.toMatch(/paused, not off/);
+    }
+  });
+
   it("caveats a missing schedule the same as a disabled one", async () => {
     // expectedBackupWindowMs() widens to the no-schedule week on
     // `!schedule?.enabled` — false OR null OR absent — and the ClawKeep card

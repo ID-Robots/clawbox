@@ -178,6 +178,72 @@ d("resolveUpdateBranch (src/lib/updater.ts) — a detached HEAD is never main by
   });
 });
 
+/**
+ * TASK-1213: a box with no recorded update branch could not see a release
+ * waiting for it — the version check declined to look instead of resolving the
+ * branch the way an update does. `resolveEffectiveUpdateBranch` is that
+ * resolution for the two read-only surfaces (the check, and Advanced options),
+ * and it must agree with `resolveUpdateBranch` everywhere except the one case
+ * an update refuses.
+ */
+d("resolveEffectiveUpdateBranch — what a box with no pin follows", () => {
+  let mod: typeof import("@/lib/updater");
+
+  beforeEach(async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    mod = await import("@/lib/updater");
+  });
+
+  it("follows main on a box checked out on main with no pin", async () => {
+    git("checkout", "-q", "main");
+
+    expect(await mod.resolveEffectiveUpdateBranch(repo)).toEqual({ branch: "main", source: "checkout-branch" });
+  });
+
+  it("treats an empty pin file as no pin", async () => {
+    git("checkout", "-q", "main");
+    fs.writeFileSync(path.join(repo, ".update-branch"), "\n");
+
+    expect(await mod.resolveEffectiveUpdateBranch(repo)).toEqual({ branch: "main", source: "checkout-branch" });
+  });
+
+  it("follows the checked-out branch, as an update would, rather than main", async () => {
+    expect(await mod.resolveEffectiveUpdateBranch(repo)).toEqual({ branch: "beta", source: "checkout-branch" });
+  });
+
+  it("names the recorded pin when there is one", async () => {
+    git("checkout", "-q", "main");
+    fs.writeFileSync(path.join(repo, ".update-branch"), "beta\n");
+
+    expect(await mod.resolveEffectiveUpdateBranch(repo)).toEqual({ branch: "beta", source: "pin-file" });
+  });
+
+  it("answers main, marked unresolved, where an update would refuse", async () => {
+    git("checkout", "-q", "--detach", git("rev-parse", "HEAD"));
+    fs.writeFileSync(path.join(repo, "hotfix.txt"), "support engineer was here\n");
+    git("add", "-A");
+    git("commit", "-qm", "detached work no branch contains");
+    // The update's own answer is unchanged: it still refuses to guess a channel.
+    await expect(mod.resolveUpdateBranch(repo)).rejects.toThrow(mod.UnresolvableUpdateBranchError);
+
+    expect(await mod.resolveEffectiveUpdateBranch(repo)).toEqual({ branch: "main", source: "unresolved" });
+    // And nothing was written: main is never pinned on a guess.
+    expect(fs.existsSync(path.join(repo, ".update-branch"))).toBe(false);
+  });
+
+  it("names the origin branch a local branch tracks, which is what the check fetches", async () => {
+    // `@{u}` resolves only through a remote with a fetch refspec, which a real
+    // clone has and seedRepo() does not.
+    git("config", "remote.origin.url", "https://github.com/ID-Robots/clawbox.git");
+    git("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*");
+    git("checkout", "-qb", "work");
+    git("config", "branch.work.remote", "origin");
+    git("config", "branch.work.merge", "refs/heads/beta");
+
+    expect(await mod.resolveEffectiveUpdateBranch(repo)).toEqual({ branch: "beta", source: "checkout-branch" });
+  });
+});
+
 d("repinUpdateBranch — a pin is a record, so only evidence may be pinned", () => {
   let mod: typeof import("@/lib/updater");
   const pinFile = () => path.join(repo, ".update-branch");

@@ -295,6 +295,8 @@ const BACKUP_RULES: ErrorRule[] = [
 interface BackupStatusBody extends Partial<ProtectionInput> {
   supportedOnEdition?: boolean;
   paired?: boolean;
+  /** Auto-backup paused for a full account; absent from older servers. */
+  scheduleQuotaHoldSinceMs?: number;
   /** The box's own backup archives the last archive left out (TASK-1301). */
   leftOutCount?: number;
   leftOutBytes?: number;
@@ -350,6 +352,16 @@ function backupNotes(body: BackupStatusBody, protection: Protection | null): str
       "No backup schedule is armed (schedule.enabled), so this verdict says only that the last backup is recent "
       + "enough for a box with no schedule: nothing is scheduled to make a newer one. Say that, rather than "
       + "\"you're protected\".",
+    );
+  }
+  // TASK-1211: `schedule.enabled: false, nextRunAtMs: 0` on its own reads as
+  // "switched off for good", and an agent asked "did ClawBox disable it?" has
+  // nothing else to go on.
+  if (!body.schedule?.enabled && (body.scheduleQuotaHoldSinceMs ?? 0) > 0) {
+    notes.push(
+      "Auto-backup is paused, not off: it was switched off while the ClawKeep account was full "
+      + "(scheduleQuotaHoldSinceMs). The box checks the account hourly and switches auto-backup back on by "
+      + "itself, with the same schedule, as soon as the account accepts backups again.",
     );
   }
   // What the last archive left out, and what it still carried. Nothing is

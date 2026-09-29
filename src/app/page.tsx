@@ -304,6 +304,7 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     setup: "construction",
     terminal: "terminal",
     files: "folder",
+    projects: "folder_special",
     clawkeep: "shield_lock",
     // A faceted gem rather than a memory chip: the shard is the thing the app
     // is named for. `diamond`, not `diamond_shine` — both ship a ligature in
@@ -2325,7 +2326,9 @@ function ChromeDesktopInner() {
           />
         ) : null;
       case "files":
-        return <FilesApp initialPath={_meta?.path} />;
+        // The Projects icon is the Files app opened on its Projects view; a
+        // window record that names a folder (`meta.path`) still opens there.
+        return <FilesApp initialPath={_meta?.path} initialPlace={app.id === "projects" || _meta?.place === "projects" ? "projects" : undefined} />;
       case "clawkeep":
         return <ClawKeepApp />;
       case "memory_shard":

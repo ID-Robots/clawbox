@@ -169,6 +169,10 @@ export interface ClawKeepStatus {
    * schedule.json was last saved": the same file holds the retention count and
    * the time of day. */
   scheduleArmedAtMs: number;
+  /** When auto-backup was paused for a full account, or 0. While it is above
+   * 0 (and `schedule.enabled` is false) the box switches auto-backup back on
+   * by itself once the account issues credentials again. */
+  scheduleQuotaHoldSinceMs: number;
   /** True when the device-local passphrase file is present (and non-empty).
    * `paired && !encryptionConfigured` is the gate the UI watches to surface
    * the "Set encryption passphrase" CTA before the first backup. */
@@ -332,6 +336,17 @@ export interface ClawKeepScheduleSnapshot {
    * evidence of nothing rather than evidence of "off".
    */
   unreadable: boolean;
+  /**
+   * When auto-backup was switched off WHILE the account was refusing
+   * credentials for quota, as unix ms; 0 for any other "off" (TASK-1211).
+   *
+   * That switch-off is a pause, not a decision: the owner (or their agent) was
+   * stopping a nightly run that could only fail. The scheduler probes the
+   * account while it stands and switches auto-backup back on — same cadence —
+   * the first time credentials mint again, so a transient quota error can
+   * never leave a box without backups for good. Meaningless while `enabled`.
+   */
+  quotaHoldSinceMs: number;
 }
 
 /**
@@ -344,7 +359,7 @@ export interface ClawKeepScheduleSnapshot {
  * the stamp of the next. That pair is a verdict neither version would give.
  */
 export async function readScheduleSnapshot(): Promise<ClawKeepScheduleSnapshot> {
-  const unknownFile = { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: true };
+  const unknownFile = { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: true, quotaHoldSinceMs: 0 };
   let raw: string;
   try {
     raw = await fs.readFile(SCHEDULE_PATH, "utf8");
@@ -356,7 +371,7 @@ export async function readScheduleSnapshot(): Promise<ClawKeepScheduleSnapshot> 
     // there and says nothing we can read, which is evidence of nothing.
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT" && code !== "ENOTDIR") return unknownFile;
-    return { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: false };
+    return { schedule: { ...DEFAULT_SCHEDULE }, armedAtMs: 0, unreadable: false, quotaHoldSinceMs: 0 };
   }
   let parsed: unknown;
   try {
@@ -370,10 +385,15 @@ export async function readScheduleSnapshot(): Promise<ClawKeepScheduleSnapshot> 
   // click a fresh window. Parsing is not the same as being a schedule.
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return unknownFile;
   const stamp = Number((parsed as { armedAtMs?: unknown }).armedAtMs);
+  const schedule = sanitiseSchedule(parsed);
+  const hold = Number((parsed as { quotaHoldSinceMs?: unknown }).quotaHoldSinceMs);
   return {
-    schedule: sanitiseSchedule(parsed),
+    schedule,
     armedAtMs: Number.isFinite(stamp) && stamp > 0 ? Math.round(stamp) : 0,
     unreadable: false,
+    // A hold only means something on a schedule that is off; a hand-edited
+    // file carrying one beside `enabled: true` is simply armed.
+    quotaHoldSinceMs: !schedule.enabled && Number.isFinite(hold) && hold > 0 ? Math.round(hold) : 0,
   };
 }
 
@@ -464,13 +484,63 @@ async function nextArmedAtMs(
   return now - lastBackupAtMs > expectedBackupWindowMs(prev) ? prevArmedAtMs : now;
 }
 
-export async function writeSchedule(next: ClawKeepSchedule): Promise<{
+const SCHEDULE_FIELDS = ["enabled", "frequency", "timeOfDay", "weekday", "retentionKeepLast"] as const;
+
+/**
+ * A save is an UPDATE of the fields it names, laid over the schedule it
+ * replaces.
+ *
+ * It used to be a replacement, so any field a caller left out fell to
+ * `sanitiseSchedule`'s default — and `enabled` defaults to false. A body that
+ * only meant to change the retention count or the time of day
+ * (`{"retentionKeepLast": 3}`, the natural call for an agent or a script)
+ * switched auto-backup off without a word, and the box reported
+ * `enabled=false, nextRunAtMs=0` from then on (TASK-1211). Switching it off
+ * now takes an `enabled: false` someone actually sent. A field that IS sent is
+ * sanitised exactly as before.
+ */
+function mergeScheduleUpdate(current: ClawKeepSchedule, update: unknown): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...current };
+  if (update === null || typeof update !== "object" || Array.isArray(update)) return merged;
+  for (const field of SCHEDULE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(update, field)) {
+      merged[field] = (update as Record<string, unknown>)[field];
+    }
+  }
+  return merged;
+}
+
+/**
+ * The quota hold to persist with this save (see `quotaHoldSinceMs`).
+ *
+ *   - switched ON, or left on: no hold — there is nothing to re-arm;
+ *   - switched OFF while the daemon's last word is that the account refuses
+ *     credentials for quota: a hold, from now. The owner was stopping a run
+ *     that could only fail, and the box takes it back once one can succeed;
+ *   - switched off with room in the account: a real "off", and it stays off;
+ *   - already off (a retention or time-of-day save): the hold it had, so
+ *     tidying the card while the account is full does not cancel the pause.
+ */
+async function nextQuotaHoldSinceMs(
+  prevSnapshot: ClawKeepScheduleSnapshot,
+  next: ClawKeepSchedule,
+): Promise<number> {
+  if (next.enabled) return 0;
+  if (!prevSnapshot.schedule.enabled) return prevSnapshot.quotaHoldSinceMs;
+  const quotaFullSinceMs = (await readStateFile()).quota_full_since_ms ?? 0;
+  return quotaFullSinceMs > 0 ? Date.now() : 0;
+}
+
+export async function writeSchedule(update: Partial<ClawKeepSchedule>): Promise<{
   schedule: ClawKeepSchedule;
   armedAtMs: number;
+  quotaHoldSinceMs: number;
 }> {
   await ensureDataDir();
-  const sanitised = sanitiseSchedule(next);
-  const armedAtMs = await nextArmedAtMs(await readScheduleSnapshot(), sanitised);
+  const prevSnapshot = await readScheduleSnapshot();
+  const sanitised = sanitiseSchedule(mergeScheduleUpdate(prevSnapshot.schedule, update));
+  const armedAtMs = await nextArmedAtMs(prevSnapshot, sanitised);
+  const quotaHoldSinceMs = await nextQuotaHoldSinceMs(prevSnapshot, sanitised);
   // Per-call temp name (pid + monotonic counter), like writeStateFile: this is
   // a read-modify-write now, and two saves from the same card must not
   // interleave into one temp file and rename a torn schedule into place —
@@ -480,12 +550,87 @@ export async function writeSchedule(next: ClawKeepSchedule): Promise<{
   // `armedAtMs` rides alongside the schedule rather than in it: it is not a
   // setting the owner edits, and `sanitiseSchedule` drops it on the way back
   // out so `ClawKeepSchedule` stays exactly what the PUT body may contain.
-  await fs.writeFile(tmp, JSON.stringify({ ...sanitised, armedAtMs }, null, 2), { mode: 0o600 });
+  // `quotaHoldSinceMs` rides alongside for the same reason, and is written
+  // only while it means something so an ordinary file keeps its old shape.
+  const onDisk = quotaHoldSinceMs > 0 ? { ...sanitised, armedAtMs, quotaHoldSinceMs } : { ...sanitised, armedAtMs };
+  await fs.writeFile(tmp, JSON.stringify(onDisk, null, 2), { mode: 0o600 });
   await fs.rename(tmp, SCHEDULE_PATH);
   // The stamp comes back with the schedule rather than being re-read: a second
   // save landing between the rename and a re-read would pair this schedule with
   // that one's stamp, and the card folds the pair into its local status.
-  return { schedule: sanitised, armedAtMs };
+  return { schedule: sanitised, armedAtMs, quotaHoldSinceMs };
+}
+
+/** What a look at a quota hold found — see `releaseQuotaHoldIfCredentialsWork`. */
+export type QuotaHoldCheck =
+  /** Credentials mint again: auto-backup is back on, and this is what was saved. */
+  | { outcome: "released"; schedule: ClawKeepSchedule; armedAtMs: number }
+  /** The account still refuses, or the answer is unknown (offline, unpaired). */
+  | { outcome: "held" }
+  /** There is no hold to release (on, off for good, or unreadable). */
+  | { outcome: "none" };
+
+/**
+ * Switch auto-backup back on if it is paused for quota and the account issues
+ * credentials again (TASK-1211).
+ *
+ * Evidence, cheapest first:
+ *   1. a backup has succeeded since the pause began — a "Back up now" once the
+ *      owner freed space. It could not have without credentials;
+ *   2. otherwise, ask: `clawkeep snapshots` mints credentials and lists, and
+ *      uploads nothing. Only an answer releases the hold — a quota refusal
+ *      keeps it, and so does anything else (offline, unpaired, no daemon),
+ *      which is evidence of nothing.
+ *
+ * The file is read again before the write, because the listing takes seconds
+ * and an owner who switched auto-backup on (or off for good) meanwhile has
+ * already answered the question.
+ */
+export async function releaseQuotaHoldIfCredentialsWork(): Promise<QuotaHoldCheck> {
+  const held = await readScheduleSnapshot();
+  if (held.unreadable || held.schedule.enabled || held.quotaHoldSinceMs <= 0) return { outcome: "none" };
+
+  const lastBackupAtMs = (await readStateFile()).last_backup_at_ms ?? 0;
+  if (lastBackupAtMs <= held.quotaHoldSinceMs) {
+    try {
+      await fetchCloudSnapshots();
+    } catch (err) {
+      const code = err instanceof ClawKeepError ? err.code : undefined;
+      if (code !== "quota_full") {
+        console.warn(
+          "[clawkeep] could not check whether the account issues credentials again (keeping auto-backup paused):",
+          err instanceof Error ? err.message : err,
+        );
+      }
+      return { outcome: "held" };
+    }
+    // The listing minted credentials, so the daemon's quota record is stale;
+    // left as it is, the next switch-off would read as another quota pause.
+    await clearQuotaRefusal();
+  }
+
+  const current = await readScheduleSnapshot();
+  if (current.unreadable || current.schedule.enabled || current.quotaHoldSinceMs !== held.quotaHoldSinceMs) {
+    return { outcome: "none" };
+  }
+  // Only `enabled` is sent: a save is an update, so a cadence or retention the
+  // owner changed while the listing ran is kept rather than written back over.
+  const saved = await writeSchedule({ enabled: true });
+  return { outcome: "released", schedule: saved.schedule, armedAtMs: saved.armedAtMs };
+}
+
+/** Zero `quota_full_since_ms` in state.json, keeping every other field as it is. */
+async function clearQuotaRefusal(): Promise<void> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await fs.readFile(STATE_PATH, "utf8"));
+  } catch {
+    return;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  const stateFile = parsed as StateFile;
+  if (!stateFile.quota_full_since_ms) return;
+  await writeStateFile({ ...stateFile, quota_full_since_ms: 0 });
 }
 
 let scheduleWriteSeq = 0;
@@ -666,6 +811,9 @@ export async function resetRunningState(): Promise<void> {
     upload_bytes_total: 0,
     upload_bytes_done: 0,
     upload_started_at_ms: 0,
+    // Not in-flight state: the portal's last word on quota, which the schedule
+    // save reads to tell a quota pause from a switch-off (TASK-1211).
+    quota_full_since_ms: parsed.quota_full_since_ms ?? 0,
   };
   await writeStateFile(cleaned);
 }
@@ -726,6 +874,9 @@ interface StateFile {
   last_large_archives?: unknown;
   last_large_archive_count?: number;
   last_large_archive_bytes?: number;
+  /** When the portal started refusing credentials for quota; 0 once it mints
+   * them again. Written by the daemon (`runner._note_credentials`). */
+  quota_full_since_ms?: number;
 }
 
 /** The daemon writes these; a hand-edited or half-written state.json must not
@@ -1022,7 +1173,7 @@ export async function getStatus(): Promise<ClawKeepStatus> {
   ]);
   // Both halves off one read: the pair decides the verdict, so they must be
   // the same version of the file. See readScheduleSnapshot().
-  const { schedule, armedAtMs: scheduleArmedAtMs } = scheduleSnapshot;
+  const { schedule, armedAtMs: scheduleArmedAtMs, quotaHoldSinceMs: scheduleQuotaHoldSinceMs } = scheduleSnapshot;
 
   const server = readServer(configToml);
   // A single-harness edition names its own agent. "dual" installs both and
@@ -1070,6 +1221,7 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     schedule,
     nextRunAtMs: computeNextRunMs(schedule, new Date()),
     scheduleArmedAtMs,
+    scheduleQuotaHoldSinceMs,
     encryptionConfigured,
     leftOutCount: stateCount(stateRaw.last_left_out_count),
     leftOutBytes: stateCount(stateRaw.last_left_out_bytes),
@@ -1496,6 +1648,9 @@ export async function syncStateFromCloud(): Promise<void> {
     upload_bytes_total: 0,
     upload_bytes_done: 0,
     upload_started_at_ms: 0,
+    // The listing above minted credentials, so the account is not refusing
+    // them for quota.
+    quota_full_since_ms: 0,
   });
 }
 
