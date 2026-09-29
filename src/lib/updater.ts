@@ -494,26 +494,23 @@ function unresolvedTargetReason(branch: string): RemoteReachability {
 }
 
 /**
- * There is no branch to compare against at all.
+ * There is a `.update-branch` and it cannot be used.
  *
- * The same unknown one step earlier: an unreadable `.update-branch`, or a
- * pinned value `isSafeBranch` refuses. Both used to answer "the remote is
- * reachable" over a comparison that never happened — and then the tag list,
- * which between releases says "the latest tag is the one I have", supplied the
- * green all-clear to a box dozens of commits behind its branch.
- *
- * An update still RUNS on such a box: `resolveUpdateBranch()` falls back to the
- * checked-out branch and its origin copy, all of it local. Making this check
- * resolve the branch the same way is the better answer and a change to the
- * branch-resolution module, not to this card's honesty; until then the check
- * says it does not know rather than claiming the box is current.
+ * An unreadable file (EACCES, EIO), or a pinned value `isSafeBranch` refuses.
+ * Both used to answer "the remote is reachable" over a comparison that never
+ * happened — and then the tag list, which between releases says "the latest
+ * tag is the one I have", supplied the green all-clear to a box dozens of
+ * commits behind its branch. Unlike a MISSING pin, which follows the branch the
+ * updater would resolve (see `resolveEffectiveUpdateBranch`), a pin that is
+ * there and says nothing usable is evidence of nothing: the check says it does
+ * not know rather than guessing which branch the operator meant.
  */
 function noUpdateBranchReason(): RemoteReachability {
   return {
     reachable: false,
     cause: "device",
-    reason: "This ClawBox records no update branch to compare itself against, so it cannot say whether "
-      + "an update is waiting. Set the update branch in System Update → Advanced options.",
+    reason: "This ClawBox records no update branch it can use to compare itself against, so it cannot say "
+      + "whether an update is waiting. Set the update branch in System Update → Advanced options.",
   };
 }
 
@@ -1219,6 +1216,54 @@ export async function resolveUpdateBranch(projectDir: string = PROJECT_DIR): Pro
     + "channel change, not an update. Set the update branch in System Update → Advanced options "
     + "(or check out the branch this device belongs to) and run the update again.",
   );
+}
+
+/** The branch this box follows for updates, and how that was decided. */
+export interface EffectiveUpdateBranch {
+  /** Branch on `origin` that the version check compares HEAD against. */
+  branch: string;
+  /**
+   * `unresolved` is the one answer an update does not share: a detached HEAD
+   * with no pin and no evidence, which `resolveUpdateBranch()` refuses. The
+   * check still looks at `main`; the update asks for a branch first.
+   */
+  source: BranchSource | "unresolved";
+}
+
+/**
+ * Which branch this box follows, for the two places that only LOOK: the
+ * version check and System Update → Advanced options.
+ *
+ * The same rules as `resolveUpdateBranch()`, so the check compares against the
+ * branch an update would actually move to — with one difference. Where that
+ * function refuses (a detached HEAD with nothing on it naming a branch), this
+ * answers `main`, the release channel, marked `unresolved`. Refusing there is
+ * right for an UPDATE, which would otherwise change the device's channel on a
+ * guess; for a look it only made releases invisible. A box with no recorded
+ * branch could not say whether v4.1.0 was waiting, and its owner could not see
+ * which branch to enter.
+ *
+ * Nothing is written: `main` is never auto-pinned (see `repinUpdateBranch`).
+ */
+export async function resolveEffectiveUpdateBranch(
+  projectDir: string = PROJECT_DIR,
+): Promise<EffectiveUpdateBranch> {
+  try {
+    const resolved = await resolveUpdateBranch(projectDir);
+    // The version check fetches `origin <branch>` and compares against
+    // `origin/<branch>`, so name the branch on origin, not the local one — a
+    // local branch may track an origin branch of another name.
+    const branch = resolved.upstream.startsWith("origin/")
+      ? resolved.upstream.slice("origin/".length)
+      : resolved.local;
+    // It is interpolated into git argv below; `origin/-x` passes the check the
+    // full upstream got, and `-x` would be read as an option.
+    if (!isSafeBranch(branch)) return { branch: "main", source: "default" };
+    return { branch, source: resolved.source };
+  } catch (err) {
+    if (err instanceof UnresolvableUpdateBranchError) return { branch: "main", source: "unresolved" };
+    throw err;
+  }
 }
 
 /**
@@ -3788,10 +3833,19 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
   let branch: string;
   try {
     branch = (await readFile(path.join(projectDir, ".update-branch"), "utf-8")).trim();
-  } catch {
-    return { target: null, remote: noUpdateBranchReason() };
+  } catch (err) {
+    // Only "there is no file" means "no branch is recorded". Any other read
+    // error is a pin that IS there and could not be read.
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      return { target: null, remote: noUpdateBranchReason() };
+    }
+    branch = "";
   }
-  if (!branch || !isSafeBranch(branch)) return { target: null, remote: noUpdateBranchReason() };
+  // No branch recorded — missing file or an empty one. Follow the branch the
+  // updater would resolve, `main` by default, instead of declining to look:
+  // a box in that state could not see a release waiting for it (TASK-1213).
+  if (!branch) branch = (await resolveEffectiveUpdateBranch(projectDir)).branch;
+  else if (!isSafeBranch(branch)) return { target: null, remote: noUpdateBranchReason() };
 
   const remote = await reachOrigin(projectDir, ["fetch", "--quiet", "origin", branch], {
     timeout: 20_000,
@@ -3873,8 +3927,14 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   const taggedClawboxTarget = targetVersion && compareSemverTags(targetVersion, baseTag) > 0
     ? targetVersion
     : null;
+  // `main` is the release channel and its releases are tagged, so a box behind
+  // main is offered the release by its name — "v4.1.0", the number in the
+  // release notes — rather than `main@<sha>`. Any other branch, or main moved on
+  // with no newer tag, is named by its commit: that is what the update installs.
   const clawboxTarget = pinnedBranchTarget
-    ? `${pinnedBranchTarget.branch}@${pinnedBranchTarget.targetSha.slice(0, 7)}`
+    ? pinnedBranchTarget.branch === "main" && taggedClawboxTarget
+      ? taggedClawboxTarget
+      : `${pinnedBranchTarget.branch}@${pinnedBranchTarget.targetSha.slice(0, 7)}`
     : taggedClawboxTarget;
 
   cachedVersionInfo = {

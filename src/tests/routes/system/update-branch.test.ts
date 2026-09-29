@@ -7,6 +7,12 @@ vi.mock("fs/promises", () => ({
   unlink: vi.fn(),
 }));
 
+// The effective branch is worked out with git; the route's own contract is
+// what it does with the answer, so the resolver is stubbed here and covered
+// against real repositories in updater-branch-resolution.test.ts.
+const { mockResolveEffective } = vi.hoisted(() => ({ mockResolveEffective: vi.fn() }));
+vi.mock("@/lib/updater", () => ({ resolveEffectiveUpdateBranch: mockResolveEffective }));
+
 const mockReadFile = vi.mocked(fsp.readFile);
 const mockWriteFile = vi.mocked(fsp.writeFile);
 const mockUnlink = vi.mocked(fsp.unlink);
@@ -30,6 +36,7 @@ describe("/setup-api/system/update-branch", () => {
     mockReadFile.mockResolvedValue("main\n");
     mockWriteFile.mockResolvedValue();
     mockUnlink.mockResolvedValue();
+    mockResolveEffective.mockResolvedValue({ branch: "main", source: "default" });
 
     const mod = await import("@/app/setup-api/system/update-branch/route");
     updateBranchGet = mod.GET;
@@ -72,6 +79,37 @@ describe("/setup-api/system/update-branch", () => {
       expect(body.branch).toBe(null);
     });
 
+    it("names the branch updates follow when nothing is recorded (TASK-1213)", async () => {
+      const enoent = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      mockReadFile.mockRejectedValue(enoent);
+
+      const res = await updateBranchGet();
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body).toEqual({ branch: null, effective: { branch: "main", source: "default" } });
+    });
+
+    it("names the recorded branch as the effective one when there is a pin", async () => {
+      mockReadFile.mockResolvedValue("beta\n");
+      mockResolveEffective.mockResolvedValue({ branch: "beta", source: "pin-file" });
+
+      const body = await (await updateBranchGet()).json();
+
+      expect(body).toEqual({ branch: "beta", effective: { branch: "beta", source: "pin-file" } });
+    });
+
+    it("still answers the recorded branch when the effective one cannot be worked out", async () => {
+      mockReadFile.mockResolvedValue("beta\n");
+      mockResolveEffective.mockRejectedValue(new Error("git exploded"));
+
+      const res = await updateBranchGet();
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body).toEqual({ branch: "beta", effective: null });
+    });
+
     it("returns 500 on other errors", async () => {
       mockReadFile.mockRejectedValue(new Error("Permission denied"));
 
@@ -106,6 +144,16 @@ describe("/setup-api/system/update-branch", () => {
       expect(body.success).toBe(true);
       expect(body.branch).toBe(null);
       expect(mockUnlink).toHaveBeenCalled();
+      // The owner sees at once what clearing the pin fell back to.
+      expect(body.effective).toEqual({ branch: "main", source: "default" });
+    });
+
+    it("answers the new effective branch after a save", async () => {
+      mockResolveEffective.mockResolvedValue({ branch: "beta", source: "pin-file" });
+
+      const body = await (await updateBranchPost(jsonRequest({ branch: "beta" }))).json();
+
+      expect(body).toEqual({ success: true, branch: "beta", effective: { branch: "beta", source: "pin-file" } });
     });
 
     it("clears branch when set to empty string", async () => {

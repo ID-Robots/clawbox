@@ -74,6 +74,8 @@ The channel is a one-line file: `/home/clawbox/clawbox/.update-branch` (absent =
 
 Switch in **System Update → Advanced options** (Beta toggle / branch override), or over SSH: `echo beta > /home/clawbox/clawbox/.update-branch`. The pin survives updates **and** factory resets; clear it from the same UI or by deleting the file. All update mechanisms (UI, installer, recovery script) honor it.
 
+With no pin recorded (file absent or empty) the box follows the branch it is checked out on, and `main` otherwise, so it still sees new releases. **Advanced options** shows the branch updates actually follow and whether it was recorded. The one exception is a detached checkout that nothing on the box ties to a branch. The update check still compares it against `main`, but the update itself refuses to guess a channel and asks for a branch to be entered first.
+
 ## Ways to update
 
 | Method | What it runs | When to use |
@@ -105,5 +107,5 @@ On the **beta channel** (and the next stable release), this state is detected ex
 | `POST /setup-api/update/run` | Start the full update |
 | `GET /setup-api/update/status` | Live step progress (polled by the UI) |
 | `POST /setup-api/update/reset` | Reset-to-channel & update *(beta)* |
-| `GET/POST /setup-api/system/update-branch` | Read/set the channel pin |
+| `GET/POST /setup-api/system/update-branch` | Read/set the channel pin; both also answer `effective: { branch, source }`, the branch updates follow |
 | `GET /setup-api/system/build-identity` | Deployed build vs checkout vs pin, with the drift verdict (add `?force=1` to bypass the 30 s cache) |
