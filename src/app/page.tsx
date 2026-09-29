@@ -1698,10 +1698,14 @@ function ChromeDesktopInner() {
   }, [installedApps, installedMeta, activeHarness, harnessHiddenAppIds, isOwner]);
 
   const getActiveWindowId = useCallback(() => {
-    const visibleWindows = openWindows.filter((w) => !w.minimized);
+    // A window whose app is not on this desktop — restored from a saved state
+    // after the app went (TASK-1306) — draws nothing, so it cannot be the one
+    // with the focus either.
+    const known = new Set(getAllApps().map((a) => a.id));
+    const visibleWindows = openWindows.filter((w) => !w.minimized && known.has(w.appId));
     if (visibleWindows.length === 0) return null;
     return visibleWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b)).id;
-  }, [openWindows]);
+  }, [openWindows, getAllApps]);
 
   const openApp = useCallback((appId: string, forceNew = false, meta?: Record<string, string>) => {
     // `maximize` is a request, not a property of the window: the record
@@ -3204,10 +3208,12 @@ function ChromeDesktopInner() {
       {isMobile ? (
         // Mobile: render only the topmost non-minimized window as fullscreen
         (() => {
-          const visible = openWindows.filter(w => !w.minimized);
+          // Only windows whose app is on this desktop: one restored after its
+          // app went would otherwise be the "top" and leave the screen empty.
+          const allApps = getAllApps();
+          const visible = openWindows.filter(w => !w.minimized && allApps.some(a => a.id === w.appId));
           if (visible.length === 0) return null;
           const top = visible.reduce((a, b) => a.zIndex > b.zIndex ? a : b);
-          const allApps = getAllApps();
           const app = allApps.find(a => a.id === top.appId);
           if (!app) return null;
           return (
