@@ -134,6 +134,23 @@ loudly. Only if neither can hold them does the update stop, with the tree
 untouched. The update then runs on a clean tree: `sync_repo_to_update_target`
 now also runs `git clean -fd`, as the in-app updater always has.
 
+One update leaves one save. The bootstrap block's `reset --hard` takes the
+tracked changes but leaves the untracked files, so the sync that follows finds
+them again. When the newest save already holds every edit in the tree, byte for
+byte, the script names that save again instead of writing a second one. The
+in-app updater's card is skipped when step 1's card already names the same
+save.
+
+The in-app updater never runs the script out of the tree it is about to reset.
+By the restart step, step 1 has moved the tree to the update target: `main`, an
+older release, or whatever a downgrade or channel switch names. Such a tree may
+have no `scripts/preserve-local-edits.sh`. So `next.config.ts` bakes the
+script's text into the build, and `src/lib/local-edits.ts` runs that copy with
+`bash -c`. The tree's copy is used only for a build that carries none. With no
+copy at all, the edits go into `git stash`. install.sh does the same when its
+`scripts/` has no helper, as with `bash <(curl …)`. A missing helper never stops
+an update.
+
 The first update **into** a release that carries this runs the previous
 release's bootstrap block, which does not save. Only updates after that are
 covered.

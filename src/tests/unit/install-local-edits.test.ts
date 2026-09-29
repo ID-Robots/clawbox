@@ -146,12 +146,12 @@ function savedDirs(): string[] {
 }
 
 /** step_bootstrap_updater as the in-app update's step 1 runs it, root and network stubbed. */
-function runStep1(extra: Record<string, string> = {}): { status: number; out: string } {
+function runStep1(extra: Record<string, string> = {}, srcDir: string = REPO): { status: number; out: string } {
   const script = [
     "set -euo pipefail",
     `PROJECT_DIR=${JSON.stringify(checkout)}`,
     // install.sh reads scripts/ out of $SRC_DIR — the root-owned mirror on a box.
-    `SRC_DIR=${JSON.stringify(REPO)}`,
+    `SRC_DIR=${JSON.stringify(srcDir)}`,
     "CLAWBOX_USER=clawbox",
     "ROOT_EXEC_TREE_RESYNCED=0",
     "chown() { :; }",
@@ -268,6 +268,59 @@ d("sync_repo_to_update_target saves the owner's edits, then updates a clean tree
     expect(fs.readFileSync(path.join(checkout, "notes.md"), "utf-8")).toBe("my notes\n");
   });
 
+  it("leaves the first-boot installer's marker alone: not an owner edit, not a stray to clean", () => {
+    // E2E Install's harness drops .needs-install in the checkout and waits for
+    // it to go as the sign install.sh FINISHED. Untracked, the save counted it
+    // as an owner edit and the clean deleted it at the start of the install,
+    // and the suite ran against a box still installing. The rules are the
+    // repository's own .gitignore, applied without committing it.
+    fs.copyFileSync(path.join(REPO, ".gitignore"), path.join(checkout, ".git", "info", "exclude"));
+    write(path.join(checkout, ".needs-install"), "");
+    const target = release();
+    const r = runStep1();
+    expect(r.status, r.out).toBe(0);
+    expect(git(checkout, "rev-parse", "HEAD")).toBe(target);
+    expect(fs.existsSync(path.join(checkout, ".needs-install"))).toBe(true);
+    expect(r.out).not.toContain("CLAWBOX-WARN");
+    expect(fs.existsSync(saves)).toBe(false);
+  });
+
+  it("with no helper beside install.sh, keeps the edits in the checkout's stash and still updates", () => {
+    // `bash <(curl …)` has no scripts/ beside it. A missing helper must never
+    // stop an update; the edits go where the helper's own fallback puts them.
+    dirty();
+    const target = release();
+    const bare = path.join(tmp, "no-scripts");
+    fs.mkdirSync(bare);
+    const r = runStep1({}, bare);
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toMatch(/^CLAWBOX-WARN\[local-edits-saved\]: .*git stash \("clawbox-update \d{8}T\d{6}Z"\)/m);
+    expect(git(checkout, "rev-parse", "HEAD")).toBe(target);
+    expect(git(checkout, "status", "--porcelain")).toBe("");
+    expect(git(checkout, "stash", "list")).toContain("clawbox-update");
+    expect(git(checkout, "show", "--name-only", "--format=", "stash@{0}^3")).toContain("notes.md");
+    expect(fs.existsSync(saves)).toBe(false);
+  });
+
+  it("with no helper, updates a clean tree without a word, and refuses only edits the stash cannot take", () => {
+    const bare = path.join(tmp, "no-scripts");
+    fs.mkdirSync(bare);
+    const target = release();
+    const clean = runStep1({}, bare);
+    expect(clean.status, clean.out).toBe(0);
+    expect(clean.out).not.toContain("CLAWBOX-WARN");
+    expect(git(checkout, "rev-parse", "HEAD")).toBe(target);
+
+    dirty();
+    const before = git(checkout, "rev-parse", "HEAD");
+    shim("git-no-stash");
+    const r = runStep1({}, bare);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("git stash could not take them");
+    expect(git(checkout, "rev-parse", "HEAD")).toBe(before);
+    expect(fs.readFileSync(path.join(checkout, "notes.md"), "utf-8")).toBe("my notes\n");
+  });
+
   it("saves before EVERY reset in the function, and cleans only after the reset to upstream", () => {
     const body = fn("sync_repo_to_update_target");
     const saveAt = body.indexOf("preserve_local_edits");
@@ -331,6 +384,36 @@ d("the bootstrap block saves before ITS reset, the first one an update performs"
     expect(fs.readFileSync(path.join(saved, "untracked", "notes.md"), "utf-8")).toBe("my notes\n");
   });
 
+  it("one update, one save: the sync after the bootstrap names the bootstrap's save", () => {
+    // Measured on a lab board: one update wrote …T162140Z (tracked.patch +
+    // untracked/) and …T162142Z (untracked/ only). The bootstrap's reset takes
+    // the tracked changes and leaves the untracked files, and the sync two
+    // seconds later found them and saved them again — so every update ate two
+    // of the newest five.
+    dirty();
+    const target = release();
+    const boot = runBootstrap();
+    expect(boot.status, boot.out).toBe(0);
+    // What the bootstrap leaves for the sync: the new files, and nothing else.
+    expect(fs.existsSync(path.join(checkout, "notes.md"))).toBe(true);
+    expect(git(checkout, "diff", "--name-only", "HEAD")).toBe("");
+
+    const step1 = runStep1();
+    expect(step1.status, step1.out).toBe(0);
+    expect(git(checkout, "rev-parse", "HEAD")).toBe(target);
+    expect(git(checkout, "status", "--porcelain")).toBe("");
+
+    const dirs = savedDirs();
+    expect(dirs).toHaveLength(1);
+    const saved = path.join(saves, dirs[0]);
+    expect(fs.existsSync(path.join(saved, "tracked.patch"))).toBe(true);
+    expect(fs.readFileSync(path.join(saved, "untracked", "notes.md"), "utf-8")).toBe("my notes\n");
+    expect(fs.readFileSync(path.join(saved, "untracked", "tools", "helper.sh"), "utf-8")).toBe("echo mine\n");
+    // ...and the sync still tells the owner where their files went.
+    expect(step1.out).toContain(`CLAWBOX-LOCAL-EDITS: ${saved}`);
+    expect(step1.out).toContain("already saved in");
+  });
+
   it("does not reset at all when the edits cannot be saved", () => {
     dirty();
     release();
@@ -391,6 +474,56 @@ d("scripts/preserve-local-edits.sh", () => {
     // ...and the edits are in the checkout's stash, untracked files included.
     expect(git(checkout, "stash", "list")).toContain("clawbox-update");
     expect(git(checkout, "show", "--name-only", "--format=", "stash@{0}^3")).toContain("notes.md");
+  });
+
+  it("names the save that already holds every edit instead of writing another", () => {
+    dirty();
+    const first = preserve();
+    expect(first.status, first.out).toBe(0);
+    const [dir] = savedDirs();
+    git(checkout, "reset", "-q", "--hard", "HEAD");
+    const again = preserve();
+    expect(again.status, again.out).toBe(0);
+    expect(savedDirs()).toEqual([dir]);
+    expect(again.out).toMatch(/^CLAWBOX-WARN\[local-edits-saved\]: .*0 changed files, 2 new files/m);
+    expect(again.out).toContain(`CLAWBOX-LOCAL-EDITS: ${path.join(saves, dir)}`);
+  });
+
+  it("saves again whatever the newest save does not hold byte for byte", () => {
+    dirty();
+    expect(preserve().status).toBe(0);
+    git(checkout, "reset", "-q", "--hard", "HEAD");
+
+    // A new file changed since the save: a second save, holding the new bytes.
+    write(path.join(checkout, "notes.md"), "my notes, edited again\n");
+    const changed = preserve();
+    expect(changed.status, changed.out).toBe(0);
+    expect(savedDirs()).toHaveLength(2);
+    const second = path.join(saves, savedDirs()[1]);
+    expect(changed.out).toContain(`CLAWBOX-LOCAL-EDITS: ${second}`);
+    expect(fs.readFileSync(path.join(second, "untracked", "notes.md"), "utf-8")).toBe("my notes, edited again\n");
+
+    // A tracked change the newest save has no patch for: a third.
+    write(path.join(checkout, "src", "app.ts"), "export const v = 9;\n");
+    expect(preserve().status).toBe(0);
+    expect(savedDirs()).toHaveLength(3);
+
+    // The same edits once more: named, not copied.
+    const same = preserve();
+    expect(same.out).toContain("already saved in");
+    expect(savedDirs()).toHaveLength(3);
+  });
+
+  it("does not take a save that was cut short for one that holds the edits", () => {
+    dirty();
+    expect(preserve().status).toBe(0);
+    const [dir] = savedDirs();
+    // README.txt is the last file a save writes.
+    fs.rmSync(path.join(saves, dir, "README.txt"));
+    const again = preserve();
+    expect(again.status, again.out).toBe(0);
+    expect(again.out).not.toContain("already saved in");
+    expect(savedDirs()).toHaveLength(2);
   });
 
   it("copies a symlink as a symlink rather than following it out of the tree", () => {

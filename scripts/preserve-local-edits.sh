@@ -27,6 +27,18 @@
 # it does for git). The newest $CLAWBOX_LOCAL_EDITS_KEEP (default 5) saves are
 # kept; older ones are removed.
 #
+# One update asks more than once — install.sh's bootstrap block, then
+# sync_repo_to_update_target, then the updater's restart step — and a later ask
+# can find edits an earlier one already saved (the bootstrap's `reset --hard`
+# takes the tracked changes and leaves the untracked files). When the newest
+# save already holds every edit the tree has now, byte for byte, that save is
+# named again rather than a second one written: one update, one save.
+#
+# The in-app updater runs the copy of this script its own build carries
+# (next.config.ts bakes it in; src/lib/local-edits.ts), never only the one in
+# the tree it is about to reset — so nothing here may depend on where the
+# script file is: it is also run as `bash -c <text> <name> <checkout>`.
+#
 # The update then proceeds on a clean tree — it never aborts BECAUSE of local
 # edits. If the copy cannot be written (a full disk, a save root that is not
 # writable), the edits go into the checkout's own `git stash` instead. Only when
@@ -145,6 +157,60 @@ if [ "$(id -u)" = "0" ]; then
   fi
 fi
 
+# The saves this script wrote, oldest first. Only its own names, only real
+# directories — never a symlink planted beside them. Fixed-width UTC stamps, so
+# a byte-order sort is a time-order sort.
+list_saves() {
+  find "$save_root" -mindepth 1 -maxdepth 1 -type d \
+      -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z(-[0-9]+)?' -printf '%f\n' 2>/dev/null \
+    | LC_ALL=C sort
+}
+
+# Does the save in $1 already hold every edit the tree has now? A finished save
+# (README.txt is the last file written), the same tracked patch byte for byte
+# when there is one, and each untracked file there with the same content, kind
+# and mode. Any doubt answers no and a new save is written: a duplicate is the
+# cost of being wrong that way, a lost edit the cost of the other.
+#
+# This is what keeps one update to one save. Measured on a lab board: one
+# update wrote …T162140Z (tracked.patch + untracked/) and, two seconds later,
+# …T162142Z (untracked/ only) — the bootstrap's reset had taken the tracked
+# changes and left the untracked files for sync_repo_to_update_target to find
+# and save again, and every such duplicate ate a place in the newest $keep.
+save_holds_current_edits() {
+  local d="$1" f src kept
+  [ -f "$d/README.txt" ] || return 1
+  if [ -n "$tracked" ]; then
+    [ -f "$d/tracked.patch" ] && cmp -s "$d/tracked.patch" <(git_ diff --binary HEAD --) || return 1
+  fi
+  if [ -n "$untracked" ]; then
+    [ -d "$d/untracked" ] || return 1
+    while IFS= read -r -d '' f; do
+      src="$checkout/$f"
+      kept="$d/untracked/$f"
+      if [ -L "$src" ]; then
+        [ -L "$kept" ] && [ "$(readlink "$src")" = "$(readlink "$kept")" ] || return 1
+      elif [ -f "$src" ]; then
+        [ -f "$kept" ] && [ ! -L "$kept" ] && cmp -s "$src" "$kept" \
+          && [ "$(stat -c %a "$src")" = "$(stat -c %a "$kept")" ] || return 1
+      else
+        return 1
+      fi
+    done < <(git_ ls-files -z --others --exclude-standard)
+  fi
+  return 0
+}
+
+if [ "$use_dir" = "1" ] && [ -d "$save_root" ]; then
+  last="$(list_saves | tail -n 1)"
+  if [ -n "$last" ] && save_holds_current_edits "$save_root/$last"; then
+    echo "  This box's local code changes ($summary) are already saved in $save_root/$last"
+    echo "CLAWBOX-WARN[local-edits-saved]: This box had local changes to its code ($summary). They were saved to $save_root/$last before the update reset the code — README.txt there says how to put them back."
+    echo "CLAWBOX-LOCAL-EDITS: $save_root/$last"
+    exit 0
+  fi
+fi
+
 saved=""
 if [ "$use_dir" = "1" ] && mkdir -p "$save_root" 2>/dev/null; then
   dest="$save_root/$stamp"
@@ -167,11 +233,8 @@ if [ "$use_dir" = "1" ] && mkdir -p "$save_root" 2>/dev/null; then
 fi
 
 if [ -n "$saved" ]; then
-  # Keep the newest $keep. Only names this script writes, only real
-  # directories — never a symlink planted beside them.
-  find "$save_root" -mindepth 1 -maxdepth 1 -type d \
-      -regextype posix-extended -regex '.*/[0-9]{8}T[0-9]{6}Z(-[0-9]+)?' -printf '%f\n' 2>/dev/null \
-    | sort | head -n "-$keep" \
+  # Keep the newest $keep (list_saves: only names this script writes).
+  list_saves | head -n "-$keep" \
     | while IFS= read -r old; do rm -rf "${save_root:?}/$old"; done
   echo "  Saved this box's local code changes ($summary) to $saved"
   echo "CLAWBOX-WARN[local-edits-saved]: This box had local changes to its code ($summary). They were saved to $saved before the update reset the code — README.txt there says how to put them back."

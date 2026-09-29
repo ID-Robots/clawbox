@@ -1718,8 +1718,15 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // resets); this catches anything written since, so nothing the two commands
   // below remove is lost without a word. A save that fails stops the update
   // here — this step is failFast — with the tree untouched. TASK-1316.
+  //
+  // The script is the one this build carries (local-edits.ts), because the
+  // tree was moved by step 1 and may be a release that never had it. And a save
+  // step 1's card already names is not a second place the owner's work went:
+  // the script names a save it recognises rather than writing another.
   const saved = await preserveLocalEdits(PROJECT_DIR);
-  if (saved) {
+  const alreadyNamed = saved !== null && saved.savedTo !== "git-stash"
+    && (runtime.state.warnings ?? []).some((w) => w.message.split(/\s+/).includes(saved.savedTo));
+  if (saved && !alreadyNamed) {
     warnUpdate(LOCAL_EDITS_SAVED_BEFORE_RESTART, saved.message);
     await persistWarnings();
   }

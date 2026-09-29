@@ -185,13 +185,22 @@ preserve_local_edits() {
   script="$src/scripts/preserve-local-edits.sh"
   if [ ! -f "$script" ]; then
     # A copy of install.sh that shipped without the helper (`bash <(curl …)`
-    # has no scripts/ beside it). Refuse only when there is something to lose.
-    if [ -n "$(${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -c safe.directory="$dir" -C "$dir" \
-                 status --porcelain --untracked-files=all 2>/dev/null)" ]; then
-      echo "Error: $dir has local changes and $script is missing, so they cannot be saved before the reset" >&2
-      return 1
+    # has no scripts/ beside it). A missing helper never stops an update: the
+    # edits go into the checkout's own stash — the helper's own fallback, and
+    # said the same way — and only edits the stash cannot take either refuse.
+    local runner=(${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -c safe.directory="$dir" -C "$dir") stamp
+    [ -n "$("${runner[@]}" status --porcelain --untracked-files=all 2>/dev/null)" ] || return 0
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    if "${runner[@]}" -c user.name="ClawBox updater" -c user.email="updater@clawbox.invalid" \
+         stash push --include-untracked \
+         --message "clawbox-update $stamp: local edits saved without $script" >/dev/null 2>&1; then
+      echo "  $script is missing; kept the local code changes in the checkout's git stash instead"
+      echo "CLAWBOX-WARN[local-edits-saved]: This box had local changes to its code. They were kept in the code's git stash (\"clawbox-update $stamp\") — run: git -C $dir stash list"
+      echo "CLAWBOX-LOCAL-EDITS: git-stash"
+      return 0
     fi
-    return 0
+    echo "Error: $dir has local changes, $script is missing and git stash could not take them, so they cannot be saved before the reset" >&2
+    return 1
   fi
   ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} bash "$script" "$dir"
 }
