@@ -736,7 +736,9 @@ def _skipped_links_of(
         links = state.skipped_links(
             json.loads(crypto.open_sealed(sealed, password_file=password_file)),
         )
-    except (crypto.CryptoError, ValueError) as e:
+    except (crypto.CryptoError, ValueError, OSError) as e:
+        # OSError too: opening the seal writes two temp files, and a full /tmp
+        # must not turn a restore that has already swapped into a "failed" one.
         log.warning("could not open the snapshot's list of skipped links: %s", e)
         return count, []
     return max(count, len(links)), links[: backup_guard.LISTED_SKIPPED_LINKS]

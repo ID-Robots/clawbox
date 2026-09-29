@@ -1620,7 +1620,7 @@ function SkippedLinkList({ links, count }: { links: SkippedLink[]; count: number
       {links.length > 0 && (
         <ul className="space-y-1 text-xs">
           {links.map((link) => (
-            <li key={link.path} className="min-w-0 break-all">
+            <li key={link.path} className="min-w-0 wrap-anywhere">
               <code className="font-mono">{link.path}</code>
               <span className="mx-1.5 opacity-60" aria-hidden="true">→</span>
               <code className="font-mono opacity-80">{link.target}</code>

@@ -822,7 +822,7 @@ def test_a_snapshot_with_skipped_links_restores_cleanly_and_names_them(tmp_path:
     ]
 
 
-@pytest.mark.parametrize("damage", ["unreadable-manifest", "garbled-seal", "no-record"])
+@pytest.mark.parametrize("damage", ["unreadable-manifest", "garbled-seal", "no-record", "tmp-full"])
 def test_a_record_that_cannot_be_read_never_fails_the_restore(
     tmp_path: Path, damage: str,
 ) -> None:
@@ -837,13 +837,19 @@ def test_a_record_that_cannot_be_read_never_fails_the_restore(
         read = patch("clawkeep.restore.s3.read_manifest", side_effect=s3.S3Error("503"))
     elif damage == "garbled-seal":
         manifest["snapshots"][encrypted.name][s3.RECORD_SKIPPED_LINKS] = "not a seal"
-    else:
+    elif damage == "no-record":
         manifest["snapshots"] = {}
+    # "tmp-full" is applied below: the seal cannot be opened for want of space.
+    no_space = patch(
+        "clawkeep.restore.crypto.open_sealed",
+        side_effect=OSError(28, "No space left on device"),
+    ) if damage == "tmp-full" else patch("clawkeep.restore.log.debug")
 
     with (
         patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
         patch("clawkeep.restore.s3.download", side_effect=_fake_download_of(encrypted)),
         read,
+        no_space,
         patch("clawkeep.restore.agent.verify_archive"),
     ):
         result = restore.restore_snapshot(
@@ -853,7 +859,7 @@ def test_a_record_that_cannot_be_read_never_fails_the_restore(
     assert (target / "docs" / "order-form-2026.pdf").read_bytes() == b"%PDF"
     assert result.skipped_links == []
     # A seal that does not open still leaves the count the record gave.
-    assert result.skipped_link_count == (2 if damage == "garbled-seal" else 0)
+    assert result.skipped_link_count == (2 if damage in ("garbled-seal", "tmp-full") else 0)
 
 
 def test_restore_snapshot_rejects_bad_name() -> None:
