@@ -40,6 +40,33 @@ interface ChromeWindowProps {
   rightInset?: number;
   /** Bumped by the desktop when something asks for this window maximized; each new value maximizes. */
   maximizeSignal?: number;
+  /**
+   * How a restored window stood when it was saved (TASK-1306): maximized, or
+   * snapped to a zone (laid out again for THIS desktop), and the rect either
+   * one goes back to. Read once, when the window mounts.
+   */
+  initialMaximized?: boolean;
+  initialSnapped?: SnapZone;
+  initialRestore?: WindowRect;
+  /**
+   * Told whenever the window is maximized, snapped or set free again, with
+   * the rect it goes back to and where it stands now — what the desktop saves
+   * so a refresh brings it back the same way. Not told at mount.
+   */
+  onModeChange?: (mode: WindowMode) => void;
+  /** The desktop's id for this window, carried as `data-window-id`. */
+  windowId?: string;
+}
+
+export interface WindowRect { x: number; y: number; width: number; height: number }
+
+export interface WindowMode {
+  maximized: boolean;
+  snapped: SnapZone;
+  /** Where a maximized or snapped window goes back to; null for a free one. */
+  restore: WindowRect | null;
+  /** Where it stands now — a snapped window's zone rect, a maximized one's free rect. */
+  geometry: WindowRect;
 }
 
 function getSavedSize(appId: string | undefined, defaultWidth: number, defaultHeight: number) {
@@ -82,6 +109,11 @@ export default function ChromeWindow({
   minimized = false,
   rightInset = 0,
   maximizeSignal,
+  initialMaximized = false,
+  initialSnapped = null,
+  initialRestore,
+  onModeChange,
+  windowId,
 }: ChromeWindowProps) {
   const { t } = useT();
   // Geometry that arrives from outside — a restored workspace, a size saved on
@@ -92,17 +124,24 @@ export default function ChromeWindow({
   // A window the desktop places for the FIRST time is fitted to the strip
   // beside a docked chat as well (see `fitWindowSize`); one restored to a
   // saved place keeps the size it had there, like every window already open.
-  const [size, setSize] = useState(() => fitWindowSize(
-    initialSize || getSavedSize(appId, defaultWidth, defaultHeight),
-    initialPosition ? 0 : rightInset,
-  ));
+  // A window restored SNAPPED takes its zone's rect on this desktop, whatever
+  // rect it had on the one it was saved on.
+  const [initialSnapRect] = useState(() => (initialSnapped && typeof window !== "undefined" ? getSnapRect(initialSnapped, rightInset) : null));
+  const [size, setSize] = useState(() => initialSnapRect
+    ? { width: initialSnapRect.width, height: initialSnapRect.height }
+    : fitWindowSize(
+      initialSize || getSavedSize(appId, defaultWidth, defaultHeight),
+      initialPosition ? 0 : rightInset,
+    ));
   const [position, setPosition] = useState(() => (
-    initialPosition
-      ? clampWindowPosition({ ...initialPosition, ...size })
-      : getInitialPosition(size.width, size.height, rightInset)
+    initialSnapRect
+      ? { x: initialSnapRect.x, y: initialSnapRect.y }
+      : initialPosition
+        ? clampWindowPosition({ ...initialPosition, ...size })
+        : getInitialPosition(size.width, size.height, rightInset)
   ));
-  const [maximized, setMaximized] = useState(false);
-  const [snapped, setSnapped] = useState<SnapZone>(null);
+  const [maximized, setMaximized] = useState(initialMaximized);
+  const [snapped, setSnapped] = useState<SnapZone>(initialSnapRect ? initialSnapped : null);
   const [snapPreview, setSnapPreview] = useState<SnapZone>(null);
   const [closing, setClosing] = useState(false);
   const [opening, setOpening] = useState(true);
@@ -127,7 +166,17 @@ export default function ChromeWindow({
     startPosX: number;
     startPosY: number;
   }>({ isResizing: false, edge: "", startX: 0, startY: 0, startW: 0, startH: 0, startPosX: 0, startPosY: 0 });
-  const prevSizeRef = useRef({ width: defaultWidth, height: defaultHeight, x: 0, y: 0 });
+  // Where Restore (or dragging a snapped window free) goes back to. A window
+  // restored maximized or snapped brings its own; otherwise it is set the
+  // moment the window is maximized or snapped.
+  const [initialPrevRect] = useState<WindowRect>(() => {
+    if (initialRestore && (initialMaximized || initialSnapRect)) {
+      const fitted = fitWindowSize(initialRestore);
+      return { ...fitted, ...clampWindowPosition({ ...initialRestore, ...fitted }) };
+    }
+    return { width: size.width, height: size.height, x: position.x, y: position.y };
+  });
+  const prevSizeRef = useRef<WindowRect>(initialPrevRect);
   const currentSizeRef = useRef({ width: defaultWidth, height: defaultHeight });
   const currentPosRef = useRef(position);
   const prevMinimizedRef = useRef(minimized);
@@ -467,6 +516,29 @@ export default function ChromeWindow({
     return () => window.removeEventListener("resize", relayout);
   }, [maximized, snapped, rightInset]);
 
+  // Maximized, snapped, set free: the desktop hears each change (not the
+  // mount — it already knows how the window started) so a refresh brings the
+  // window back the way it was left.
+  const onModeChangeRef = useRef(onModeChange);
+  useLayoutEffect(() => {
+    onModeChangeRef.current = onModeChange;
+  }, [onModeChange]);
+  const modeMountedRef = useRef(false);
+  useEffect(() => {
+    if (!modeMountedRef.current) {
+      modeMountedRef.current = true;
+      return;
+    }
+    const pos = currentPosRef.current;
+    const cur = currentSizeRef.current;
+    onModeChangeRef.current?.({
+      maximized,
+      snapped,
+      restore: maximized || snapped ? { ...prevSizeRef.current } : null,
+      geometry: { x: pos.x, y: pos.y, width: cur.width, height: cur.height },
+    });
+  }, [maximized, snapped]);
+
   const handleMinimize = useCallback(() => {
     setMinimizing(true);
     setTimeout(() => {
@@ -494,6 +566,10 @@ export default function ChromeWindow({
     <div
       ref={windowRef}
       data-testid={appId ? `chrome-window-${appId}` : undefined}
+      data-window-id={windowId}
+      data-active={isActive ? "true" : "false"}
+      data-maximized={maximized ? "true" : undefined}
+      data-snapped={snapped ?? undefined}
       className={`fixed flex flex-col overflow-hidden ${
         opening ? "chrome-window-opening" : ""
       } ${closing ? "chrome-window-closing" : ""} ${

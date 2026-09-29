@@ -13,7 +13,10 @@
 //     settings to read, the public setup status, the update status the
 //     /updating page polls, and whether the box is online (the tray's dot —
 //     `network/internet` answers `online`/`latencyMs` and nothing of the
-//     network's configuration).
+//     network's configuration);
+//   * their own open windows (`desktop/state`, TASK-1306) — read and written,
+//     because the route keys the file on the SESSION's user, never the
+//     request's, so there is nobody else's to reach.
 //
 // Everything else — Settings, the assistant and its gateway, Files, the
 // coding agent, the app store, VNC — runs as the owner's Linux account or
@@ -55,6 +58,14 @@ const NON_OWNER_API_READS: ReadonlySet<string> = new Set([
   // pins the answer to those three fields, so the route cannot start carrying
   // network configuration without this line being looked at again.
   "/setup-api/network/internet",
+]);
+
+/**
+ * /setup-api paths a non-owner may READ AND WRITE (GET/HEAD/PUT), by exact
+ * path. Only routes that are scoped to the session's own user belong here.
+ */
+const NON_OWNER_API_OWN_STATE: ReadonlySet<string> = new Set([
+  "/setup-api/desktop/state",
 ]);
 
 /** Pages a non-owner may open. Any other page navigation is sent to the desktop. */
@@ -139,6 +150,7 @@ export function nonOwnerVerdict(req: NonOwnerRequest): NonOwnerVerdict {
   const isRead = method === "GET" || method === "HEAD";
 
   if (underPrefix(pathname, "/setup-api")) {
+    if (NON_OWNER_API_OWN_STATE.has(pathname)) return isRead || method === "PUT" ? "allow" : "deny";
     if (!isRead) return "deny";
     if (NON_OWNER_API_READS.has(pathname)) return "allow";
     if (pathname === "/setup-api/preferences" && isReadablePreferenceQuery(req.searchParams)) return "allow";
