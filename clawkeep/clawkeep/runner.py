@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import agent, api, crypto, openclaw, passphrase, s3, state, token
+from . import agent, api, backup_guard, crypto, openclaw, passphrase, s3, state, token
 from .api import ApiError
 from .config import Config
 
@@ -389,6 +389,18 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
             state.save(st)
             return _archive_exit_code(e)
 
+        # What this archive left out — the box's own backup archives — and
+        # the snapshot-sized archive files it carries, recorded BEFORE the
+        # upload so the app and `backup_status` can say it while the upload
+        # runs. The step stamp below saves them.
+        st.last_left_out_count = archive.left_out_count
+        st.last_left_out_bytes = archive.left_out_bytes
+        st.last_large_archives = [
+            {"path": path, "bytes": size} for path, size in archive.large_archives
+        ]
+        st.last_large_archive_count = archive.large_archive_count
+        st.last_large_archive_bytes = archive.large_archive_bytes
+
         # Encrypt the freshly-built tarball before it leaves the device.
         # The encrypted file replaces the plaintext for the upload step;
         # we wipe the plaintext immediately on success so a transient peek
@@ -597,6 +609,16 @@ def run_idle(cfg: Config, token: str) -> int:
     reads `last_cloud_bytes` out of state.json — stops showing the size of a
     snapshot set the account no longer has.
     """
+    # A build killed mid-way (the bridge's cap, a power cut) leaves package
+    # links and the box's own backup archives set aside until something puts
+    # them back. The next backup does, first thing; on a box whose next backup
+    # is days away, or switched off, that is this tick. Never at the cost of
+    # the heartbeat.
+    try:
+        backup_guard.put_back_interrupted()
+    except Exception as e:  # noqa: BLE001 — best effort, logged
+        log.warning("could not put back what an interrupted backup set aside: %s", e)
+
     st = state.load()
     interval_ms = cfg.heartbeat.idle_interval_hours * 3600 * 1000
     now = api.now_ms()

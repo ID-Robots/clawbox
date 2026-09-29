@@ -157,6 +157,48 @@ def test_step_is_persisted_until_failure(isolate_state: Path, tmp_path: Path) ->
     assert captured_steps == ["uploading"]
 
 
+def test_what_the_archive_left_out_is_on_disk_before_the_upload(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """The box's own backups the archive left out, and the snapshot-sized
+    archives it carries, are in state.json while the upload runs — the app
+    and `backup_status` read them from there — and stay after it."""
+    import dataclasses
+
+    cfg = _cfg(tmp_path)
+    archive = dataclasses.replace(
+        _archive(tmp_path),
+        left_out_count=3,
+        left_out_bytes=20_000_000_000,
+        large_archives=(("~/.openclaw/workspace/dump.tar.gz", 1_900_000_000),),
+        large_archive_count=1,
+        large_archive_bytes=1_900_000_000,
+    )
+    during: list[state.State] = []
+
+    def upload(creds, *, archive_path, object_name, progress_cb=None):
+        during.append(state.load(isolate_state))
+
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        # One level above the core: the account is the guard's to give.
+        patch("clawkeep.runner.agent.create_archive", return_value=archive),
+        patch("clawkeep.runner.s3.upload", side_effect=upload),
+        patch("clawkeep.runner.s3.stats", return_value=CloudStats(0, 1)),
+    ):
+        assert runner.run_once(cfg, "claw_x") == runner.EXIT_OK
+
+    for st in (during[0], state.load(isolate_state)):
+        assert st.last_left_out_count == 3
+        assert st.last_left_out_bytes == 20_000_000_000
+        assert st.last_large_archives == [
+            {"path": "~/.openclaw/workspace/dump.tar.gz", "bytes": 1_900_000_000},
+        ]
+        assert st.last_large_archive_count == 1
+        assert st.last_large_archive_bytes == 1_900_000_000
+
+
 def test_step_cleared_on_error(isolate_state: Path, tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     with (
