@@ -124,3 +124,11 @@ Removing the package should be coordinated manually: the maintained user
 gateway is independent of it. Do not stop or remove the bridge in the middle
 of an update. Back up the replaced root template and service drop-ins before
 initial installation if a complete package-level rollback is required.
+
+## Kiosk remote debugging (x64 laptop)
+
+`kiosk/enable-kiosk-remote-debugging.sh` adds a loopback-only Chrome DevTools
+port (default 18801) to `/usr/local/bin/clawbox-kiosk-browser`, mirroring the
+VNC browser's port 18800, so the agent can screenshot/drive the ClawBox UI on
+the physical display. Run it with sudo after any update that rewrites the
+launcher; it is idempotent and restarts the kiosk Chromium.
