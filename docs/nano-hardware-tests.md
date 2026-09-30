@@ -30,7 +30,10 @@ never runs on the lab host (see [Safety](#safety)).
 gh workflow run nano-hardware-tests.yml -f ref=<branch, tag or commit sha>
 ```
 
-`refs/pull/*` is refused: that is how fork code would get in.
+`refs/pull/*` is refused, so a fork's PR head is never picked up by name. A
+dispatch needs write access and runs whatever commit it is given — GitHub also
+serves a fork PR's commits by SHA from this repository — so dispatch only
+commits that are on a branch or tag of this repository.
 
 **Re-running** a finished or failed job is the Actions page's *Re-run jobs*, or
 `gh run rerun <run id>`. It reserves a board afresh.

@@ -131,10 +131,15 @@ jobs:
             echo "::error title=nano-ci reserve failed::exit $rc"
             exit 1
           fi
-          # "SERIAL IP LAB" — the last line that has all three.
-          read -r serial ip lab <<<"$(printf '%s\n' "$out" | awk 'NF >= 3 { line = $0 } END { print line }')"
+          # "SERIAL IP LAB": the first line of exactly three fields whose second
+          # is an address. A status line the helper prints around it ("leased
+          # until …") must not be read as a serial: every later step, cleanup
+          # and release included, would then act on a board that is not ours.
+          line=$(printf '%s\n' "$out" | awk 'NF == 3 && ($2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ || $2 ~ /^[0-9A-Fa-f:]+:[0-9A-Fa-f:]*$/) { print; exit }')
+          read -r serial ip lab <<<"$line"
           if ! [[ ${serial:-} =~ ^[A-Za-z0-9._:-]+$ ]]; then
-            echo "::error title=Unreadable reservation::nano-ci reserve printed no 'SERIAL IP LAB' line; if it leased a board, release it by hand"
+            printf '%s\n' "$out"
+            echo "::error title=Unreadable reservation::nano-ci reserve printed no 'SERIAL IP LAB' line (above); if it leased a board, release it by hand"
             exit 1
           fi
           # Once `serial` is an output, the cleanup and release steps run.

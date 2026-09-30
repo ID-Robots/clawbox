@@ -48,17 +48,26 @@ fi
 
 # The served build: the tree the service runs from (its cwd is
 # .next/standalone, see build-identity.ts) and when the service last started.
+# Answer: "<BUILD_ID> <its mtime> <service start, epoch s>", "-" for any it
+# cannot read — so a missing value never shifts the next one into its place.
+# An empty start stamp (a service that never started) is "-", not handed to
+# `date -d ""`, which answers today's midnight.
 # shellcheck disable=SC2016  # expanded on the board
 SERVED=$(board '
   dir=$REPO/.next/standalone/.next
   [ -f "$dir/BUILD_ID" ] || dir=$REPO/.next
-  started=$(systemctl show clawbox-setup.service -p ExecMainStartTimestamp --value)
-  printf "%s %s %s\n" "$(tr -d "[:space:]" < "$dir/BUILD_ID")" "$(stat -c %Y "$dir/BUILD_ID")" \
-    "$(date -d "$started" +%s 2>/dev/null || echo 0)"
+  id=$(tr -d "[:space:]" < "$dir/BUILD_ID" 2>/dev/null)
+  built=$(stat -c %Y "$dir/BUILD_ID" 2>/dev/null)
+  started=$(systemctl show clawbox-setup.service -p ExecMainStartTimestamp --value 2>/dev/null)
+  started_s=""
+  [ -z "$started" ] || started_s=$(date -d "$started" +%s 2>/dev/null)
+  echo "${id:--} ${built:--} ${started_s:--}"
 ')
 read -r SERVED_ID BUILT_AT STARTED_AT <<<"$SERVED"
-if [ -z "${STARTED_AT:-}" ] || [ "${STARTED_AT:-0}" = 0 ]; then
-  not_ok "cannot tell when clawbox-setup.service started (answer: '${SERVED:-nothing}')"
+if [ "${SERVED_ID:--}" = - ] || ! [[ ${BUILT_AT:-} =~ ^[0-9]+$ ]]; then
+  not_ok "no deployed BUILD_ID on the board (answer: '${SERVED:-nothing}')"
+elif ! [[ ${STARTED_AT:-} =~ ^[0-9]+$ ]]; then
+  not_ok "cannot tell when clawbox-setup.service started (answer: '$SERVED')"
 elif [ "$SERVED_ID" != "$DEPLOYED" ]; then
   not_ok "the service's build folder holds '$SERVED_ID', build-identity reported '$DEPLOYED'"
 elif [ "$STARTED_AT" -ge "$BUILT_AT" ]; then
