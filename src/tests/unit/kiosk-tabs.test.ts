@@ -98,12 +98,18 @@ describe("parseKioskEnv / readKioskUrl", () => {
 });
 
 describe("isDesktopUrl", () => {
-  it("is the kiosk origin, except the top-level /app/<id> pages", () => {
+  it("is the kiosk origin's shell pages, not the pages the desktop opens top-level", () => {
     expect(isDesktopUrl("http://localhost:3005/", KIOSK)).toBe(true);
+    expect(isDesktopUrl("http://localhost:3005/?chat=1", KIOSK)).toBe(true);
     expect(isDesktopUrl("http://localhost:3005/login", KIOSK)).toBe(true);
+    expect(isDesktopUrl("http://localhost:3005/setup/settings", KIOSK)).toBe(true);
     expect(isDesktopUrl("http://localhost:3005/updating?x=1", KIOSK)).toBe(true);
+    expect(isDesktopUrl("http://localhost:3005/portal/subscribe", KIOSK)).toBe(true);
     expect(isDesktopUrl("http://localhost:3005/app/vnc", KIOSK)).toBe(false);
     expect(isDesktopUrl("http://localhost:3005/app/settings#a", KIOSK)).toBe(false);
+    expect(isDesktopUrl("http://localhost:3005/apps/starcraft/", KIOSK)).toBe(false);
+    expect(isDesktopUrl("http://localhost:3005/setup-api/webapps?app=weather", KIOSK)).toBe(false);
+    expect(isDesktopUrl("http://localhost:3005/loginx", KIOSK)).toBe(false);
   });
 
   it("is never another origin, and never an unparsable string", () => {

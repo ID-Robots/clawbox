@@ -50,6 +50,7 @@ import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } fr
 import { apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
 import { mayUseOwnerApis, useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
+import { openInKiosk, useKioskTabs } from "@/lib/kiosk-tabs-client";
 import { NON_OWNER_APP_IDS, OWNER_ONLY_NOTICE, installedAppIdsFor } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
@@ -374,6 +375,10 @@ function ChromeDesktopInner() {
   // that opens AI Settings instead of ClawKeep.
   const clawboxLogin = useClawboxLogin(undefined, ownerApis);
   const clawAiAuthenticated = clawboxLogin.loggedIn;
+  // The tabs of the kiosk Chrome on the x64 laptop's own display, for the
+  // shelf (src/lib/kiosk-tabs.ts). Owner-gated like every other poll here;
+  // on a box with no kiosk the first answer is "none" and the poll goes slow.
+  const kiosk = useKioskTabs(ownerApis);
 
   const syncSetupStatus = useCallback(async () => {
     const data = await fetch("/setup-api/setup/status").then((r) => r.json());
@@ -1660,7 +1665,9 @@ function ChromeDesktopInner() {
       const url = app.url === "hermes-dashboard"
         ? `${window.location.protocol}//${window.location.hostname}:${HERMES_DASH_PROXY_PORT}/`
         : app.url;
-      window.open(url, "_blank", "noopener,noreferrer");
+      // Through the kiosk API on the laptop's kiosk Chrome (the shelf then
+      // lists the tab at once); plain window.open everywhere else.
+      openInKiosk(url);
       return;
     }
 
@@ -1674,7 +1681,7 @@ function ChromeDesktopInner() {
       try {
         const u = new URL(app.url, window.location.origin);
         if (["http:", "https:"].includes(u.protocol)) {
-          window.open(u.href, "_blank", "noopener,noreferrer");
+          openInKiosk(u.href);
           return;
         }
       } catch {}
@@ -3327,6 +3334,9 @@ function ChromeDesktopInner() {
           setOpenWindows(prev => prev.filter(w => w.appId !== appId));
         }}
         onShelfSettings={() => openApp("settings")}
+        kioskTabs={kiosk.tabs}
+        onKioskTabClick={kiosk.activate}
+        onKioskTabClose={kiosk.close}
         onChatClick={() => setChatOpen(prev => !prev)}
         showChatButton={isOwner && (mascotHidden || isMobile)}
         time={time}
@@ -3413,7 +3423,7 @@ function ChromeDesktopInner() {
               )}
               {!isSkill && (
                 <button onClick={() => {
-                  window.open(`/app/${encodeURIComponent(resolvedAppId)}`, "_blank");
+                  openInKiosk(`/app/${encodeURIComponent(resolvedAppId)}`, "");
                 }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                   <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.openNewTab")}
                 </button>

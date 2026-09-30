@@ -141,6 +141,10 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "shelf.pinToShelf": "Pin to shelf",
     "shelf.close": "Close",
     "shelf.shelfSettings": "Shelf Settings",
+    "shelf.kioskTabs": "Browser tabs",
+    "shelf.kioskSwitchTo": "Switch to “{title}”",
+    "shelf.kioskCloseTab": "Close “{title}”",
+    "shelf.kioskUntitled": "Untitled page",
 
     // === ChromeLauncher ===
     "launcher.searchPlaceholder": "Search apps or store...",

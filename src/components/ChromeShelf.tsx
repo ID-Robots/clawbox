@@ -4,6 +4,7 @@ import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
 import { useT } from "@/lib/i18n";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import type { Protection, ProtectionReason } from "@/lib/clawkeep-protection";
+import { openInKiosk, type KioskTabView } from "@/lib/kiosk-tabs-client";
 
 /** The reasons that put a shield in an at-risk state. `ok` is not among them. */
 type AtRiskReason = Exclude<ProtectionReason, "ok">;
@@ -70,6 +71,25 @@ interface ChromeShelfProps {
    * a single-user shelf is unchanged. Opens the tray, where "Switch user" is.
    */
   sessionUser?: { username: string; isOwner: boolean } | null;
+  /**
+   * The tabs of the KIOSK Chrome on the laptop's own display, besides the
+   * desktop's (src/lib/kiosk-tabs.ts). Drawn after the open apps, one entry
+   * per page the desktop opened top-level — the Anthropic sign-in, the app
+   * store, VNC — because that Chrome runs `--kiosk` and has no tab strip of
+   * its own. Empty or absent on every other box, and nothing is drawn.
+   */
+  kioskTabs?: KioskTabView[];
+  onKioskTabClick?: (id: string) => void;
+  onKioskTabClose?: (id: string) => void;
+}
+
+/** What a kiosk tab is called when its page has no title yet: its host, or nothing. */
+function kioskTabHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
 }
 
 export default function ChromeShelf({
@@ -90,6 +110,9 @@ export default function ChromeShelf({
   time,
   clawAiAuthenticated = false,
   sessionUser = null,
+  kioskTabs = [],
+  onKioskTabClick,
+  onKioskTabClose,
 }: ChromeShelfProps) {
   const { t } = useT();
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
@@ -342,6 +365,45 @@ export default function ChromeShelf({
     </button>
   );
 
+  // The kiosk's own pages, never the desktop's tab (that is the page this
+  // shelf is drawn on). Each is a pill — favicon, title, close — rather than
+  // a bare icon, because the pages are strangers the icon alone would not name.
+  const pageTabs = kioskTabs.filter((tab) => !tab.isDesktop);
+  const renderKioskTab = (tab: KioskTabView) => {
+    const name = tab.title.trim() || kioskTabHost(tab.url) || t("shelf.kioskUntitled");
+    return (
+      <div
+        key={tab.id}
+        className="relative shrink-0 h-11 flex items-center rounded-lg hover:bg-white/10 transition-colors group"
+        data-testid={`shelf-kiosk-tab-${tab.id}`}
+      >
+        <button
+          onClick={() => onKioskTabClick?.(tab.id)}
+          className="h-11 flex items-center gap-2 pl-2.5 pr-1 max-w-[220px] cursor-pointer text-white/85"
+          title={t("shelf.kioskSwitchTo", { title: name })}
+          aria-label={t("shelf.kioskSwitchTo", { title: name })}
+        >
+          {tab.favicon ? (
+            // eslint-disable-next-line @next/next/no-img-element -- a page's own favicon, any host
+            <img src={tab.favicon} alt="" className="w-4 h-4 shrink-0 rounded-sm" />
+          ) : (
+            <span className="material-symbols-rounded text-white/60 shrink-0" style={{ fontSize: 18 }} aria-hidden="true">language</span>
+          )}
+          <span className="text-xs truncate">{name}</span>
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onKioskTabClose?.(tab.id); }}
+          className="w-7 h-7 mr-1 flex items-center justify-center rounded-full text-white/50 hover:text-white hover:bg-white/15 transition-colors cursor-pointer"
+          title={t("shelf.kioskCloseTab", { title: name })}
+          aria-label={t("shelf.kioskCloseTab", { title: name })}
+          data-testid={`shelf-kiosk-tab-close-${tab.id}`}
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">close</span>
+        </button>
+      </div>
+    );
+  };
+
   return (
     <>
       {/* `data-mascot-ground` marks the surface a Hermes pet walks on. The
@@ -485,6 +547,21 @@ export default function ChromeShelf({
 
           {/* Unpinned open apps */}
           {unpinnedApps.map(renderApp)}
+
+          {/* The kiosk Chrome's other tabs (x64 laptop only; empty elsewhere) */}
+          {pageTabs.length > 0 && (
+            <>
+              <div className="w-px h-8 bg-white/10 mx-1" />
+              <div
+                className="flex items-center gap-1"
+                role="group"
+                aria-label={t("shelf.kioskTabs")}
+                data-testid="shelf-kiosk-tabs"
+              >
+                {pageTabs.map(renderKioskTab)}
+              </div>
+            </>
+          )}
         </div>
 
         {/* Right side: system tray */}
@@ -571,7 +648,7 @@ export default function ChromeShelf({
 
           {/* Open in new tab */}
           <button
-            onClick={() => { window.open(`/app/${encodeURIComponent(ctxMenu.app.id)}`, "_blank"); setCtxMenu(null); }}
+            onClick={() => { openInKiosk(`/app/${encodeURIComponent(ctxMenu.app.id)}`, ""); setCtxMenu(null); }}
             className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
           >
             <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.openNewTab")}

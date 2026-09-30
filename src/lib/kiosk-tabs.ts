@@ -56,7 +56,9 @@ export const CDP_TIMEOUT_MS = 1500;
 /** CDP target ids are hex; anything else never reaches a URL path. */
 const TAB_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
-export function kioskCdpPort(env: NodeJS.ProcessEnv = process.env): number {
+export type EnvLike = Record<string, string | undefined>;
+
+export function kioskCdpPort(env: EnvLike = process.env): number {
   const raw = Number(env.CLAWBOX_KIOSK_CDP_PORT);
   return Number.isInteger(raw) && raw > 0 && raw < 65536 ? raw : DEFAULT_KIOSK_CDP_PORT;
 }
@@ -91,7 +93,7 @@ export function parseKioskEnv(raw: string, key = "CLAWBOX_KIOSK_URL"): string | 
  * default. Anything that is not http(s) falls back to the default rather than
  * making every tab "not the desktop".
  */
-export function readKioskUrl(env: NodeJS.ProcessEnv = process.env): string {
+export function readKioskUrl(env: EnvLike = process.env): string {
   const candidates: (string | null | undefined)[] = [env.CLAWBOX_KIOSK_URL];
   try {
     candidates.push(parseKioskEnv(fs.readFileSync(/* turbopackIgnore: true */ KIOSK_ENV_FILE, "utf-8")));
@@ -111,14 +113,22 @@ export function readKioskUrl(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
+ * The desktop SHELL's own pages: the ones the kiosk tab itself lands on. The
+ * desktop root, sign-in, the setup wizard, the update lock screen and the
+ * subscription portal. Everything else on the origin — `/app/<id>` ("Open in
+ * new tab", the Browser app's `/app/vnc` fallback), `/apps/<id>/` and
+ * `/setup-api/webapps?app=` (a webapp with `launch: "window"`) — is a page the
+ * desktop OPENED, top-level, and in `--kiosk` a tab the taskbar did not list
+ * would be one with no way back.
+ */
+const SHELL_PATH_RE = /^\/(?:(?:login|setup|updating|portal)(?:\/.*)?)?$/;
+
+/**
  * Is `url` the ClawBox desktop, as opposed to a page the desktop opened?
  *
- * Same origin as the kiosk URL, EXCEPT `/app/<id>` — the desktop opens those
- * top-level too ("Open in new tab", a webapp with `launch: "window"`, the
- * Browser app's `/app/vnc` fallback), and a tab the taskbar did not list would
- * be one with no way back in `--kiosk`. `/login`, `/updating` and the rest of
- * the desktop's own pages count as the desktop: the kiosk tab itself lands on
- * them, and listing the kiosk tab as something to switch to would be circular.
+ * Same origin as the kiosk URL AND one of the shell's own pages. `/login` and
+ * the rest count as the desktop because the kiosk tab itself lands on them,
+ * and listing the kiosk tab as something to switch to would be circular.
  */
 export function isDesktopUrl(url: string, kioskUrl: string): boolean {
   let u: URL;
@@ -130,7 +140,7 @@ export function isDesktopUrl(url: string, kioskUrl: string): boolean {
     return false;
   }
   if (u.origin !== k.origin) return false;
-  return !u.pathname.startsWith("/app/");
+  return SHELL_PATH_RE.test(u.pathname);
 }
 
 /** The tab `home` should land on: the desktop root first, then any desktop page. */
