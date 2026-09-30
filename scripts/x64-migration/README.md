@@ -132,3 +132,42 @@ port (default 18801) to `/usr/local/bin/clawbox-kiosk-browser`, mirroring the
 VNC browser's port 18800, so the agent can screenshot/drive the ClawBox UI on
 the physical display. Run it with sudo after any update that rewrites the
 launcher; it is idempotent and reboots (the running launcher loop keeps the old flags).
+
+## Kiosk tabs managed by the ClawBox desktop (x64 laptop)
+
+`kiosk/install-kiosk-tabs.sh` supersedes the script above: it adds the same
+CDP flags AND turns the browser into a real kiosk, with the tabs managed by
+the ClawBox desktop rather than Chrome's tab strip:
+
+```sh
+sudo scripts/x64-migration/kiosk/install-kiosk-tabs.sh            # reboots
+sudo scripts/x64-migration/kiosk/install-kiosk-tabs.sh --no-restart
+```
+
+It adds, idempotently and after `--start-maximized`, `--kiosk`,
+`--load-extension=<checkout>/kiosk/extension` and
+`--disable-extensions-except=<same>` (the path follows the checkout the script
+is run from; `CLAWBOX_KIOSK_EXTENSION` overrides it), keeps a backup beside the
+launcher and `bash -n`-checks the result. Run it again after any update that
+rewrites the launcher.
+
+The three pieces that then work together:
+
+- `src/lib/kiosk-tabs.ts` + `/setup-api/kiosk/tabs` — the web server lists,
+  opens, activates and closes the kiosk Chrome's tabs over the loopback CDP
+  port (`CLAWBOX_KIOSK_CDP_PORT`, default 18801). The kiosk URL is read from
+  `/etc/clawbox/kiosk.env` (`CLAWBOX_KIOSK_URL`, default
+  `http://localhost:3005/`). On a box with nothing on the port it answers
+  `{ available: false }` and the desktop draws nothing.
+- The desktop shelf lists every page the kiosk opened (favicon, title, close)
+  and `openInKiosk(url)` routes the desktop's "open an external page" clicks
+  (Anthropic sign-in, the store, VNC) through the kiosk API; elsewhere it is
+  the plain `window.open` it always was.
+- `kiosk/extension` — an MV3 extension (permission: `tabs` only) that draws a
+  36 px ClawBox bar on every page the desktop opens: back to ClawBox, switch
+  between open pages, close this one. It never runs on the desktop's origin.
+
+Verify after the reboot: `curl -s http://127.0.0.1:18801/json/list` lists the
+desktop tab; `chrome://extensions` is not reachable in kiosk, so the bar on a
+page opened from Settings → Providers → Anthropic is the proof the extension
+loaded.
