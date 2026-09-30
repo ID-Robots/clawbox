@@ -386,17 +386,29 @@ describe("a model error after the model has answered", () => {
 
   it("counts the first attempt's answers when the automatic retry is what fails", async () => {
     // Answered, then the model error with nothing changed: the one automatic
-    // retry runs, and fails the same way. The model answered THIS run, and
-    // the bill the retry leaves in place is what says so.
-    installEmittingWrapper([
-      INIT,
-      answer([{ type: "text", text: "Looking around first." }], { input_tokens: 4_000, output_tokens: 120 }),
-      midRunResultError(UNRECOGNIZED, 2),
-    ]);
+    // retry runs and is refused on its first request, with no answer of its
+    // own. The model answered THIS run seconds earlier, and the retry carries
+    // that evidence rather than starting from nothing.
+    const attempted = path.join(base, "attempted");
+    const lines = (ls: string[]) => ls.map((l) => `'${l.replace(/'/g, "'\\''")}'`).join(" ");
+    installWrapper([
+      `if [ -f "${attempted}" ]; then`,
+      `  printf '%s\\n' ${lines([INIT, resultError(UNRECOGNIZED)])}`,
+      "else",
+      `  touch "${attempted}"`,
+      `  printf '%s\\n' ${lines([
+        INIT,
+        answer([{ type: "text", text: "Looking around first." }], { input_tokens: 4_000, output_tokens: 120 }),
+        midRunResultError(UNRECOGNIZED, 2),
+      ])}`,
+      "fi",
+      "exit 1",
+    ].join("\n"));
     enableAgent();
     makeProject("site");
     const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner" })).id);
 
+    expect(fs.existsSync(attempted)).toBe(true);
     expect(run.status).toBe("failed");
     expect(run.retries).toBe(1);
     expect(run.failureKind).toBeNull();
@@ -421,6 +433,34 @@ describe("a model error after the model has answered", () => {
     expect(run.failureKind).toBeNull();
     expect(readConfig()[HARNESS_FAULT_CONFIG_KEY]).toBeFalsy();
     expect((await lib.checkReadiness()).harnessHealthy).toBe(true);
+  });
+
+  it("still locks out when a RESUMED run is refused on its first request", async () => {
+    // The record carries the tokens of the spawn before the pause; the resumed
+    // spawn never got a model to answer. That is the startup case again, and
+    // the record's old bill must not talk the box out of the lockout.
+    const never = path.join(base, "never");
+    installWrapper([
+      `printf '%s\\n' '${INIT}' '${answer([{ type: "text", text: "Starting." }], { input_tokens: 5_000, output_tokens: 200 })}'`,
+      `while [ ! -f "${never}" ]; do sleep 0.05; done`,
+      "exit 0",
+    ].join("\n"));
+    enableAgent();
+    makeProject("site");
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.tokensUsed).toBeGreaterThan(0); }, { timeout: 5_000 });
+    lib.pauseRun(started.id);
+    expect((await settled(started.id)).status).toBe("paused");
+
+    installFailingWrapper();
+    await lib.resumeRun(started.id);
+    const run = await settled(started.id);
+
+    expect(run.status).toBe("failed");
+    expect(run.tokensUsed).toBeGreaterThan(0);
+    expect(run.failureKind).toBe("harness_not_ready");
+    expect(run.error).toContain(HARNESS_NOT_READY_SENTENCE);
+    expect((await lib.checkReadiness()).harnessHealthy).toBe(false);
   });
 
   it("still locks out when the only 'answer' is the CLI's own error message at turn one", async () => {

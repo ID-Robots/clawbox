@@ -64,15 +64,16 @@ export function isHarnessFault(error: string | null | undefined): boolean {
  * What a run showed of a model before it failed.
  *
  * Two signals, and deliberately not a third. `tokensUsed` is billed from the
- * model's own usage reports and is kept across the one automatic retry, so it
- * speaks for the whole run. `sawModelAnswer` covers a backend that reports no
+ * model's own usage reports, counted from the start of the current spawn and
+ * across its one automatic retry — NOT the record's whole bill, which a resume
+ * carries over from spawns long past. `sawModelAnswer` covers a backend that reports no
  * usage on its assistant events. `numTurns` is NOT one of them: the CLI counts
  * the message it writes ITSELF for an API error (model "<synthetic>", "API
  * Error: 401 …") as a turn, so a harness refused on its very first request can
  * finish with one turn and no model answer at all.
  */
 export interface ModelAnswerEvidence {
-  /** Tokens the run was billed, across its attempts. */
+  /** Tokens billed since this spawn began, its automatic retry included. */
   tokensUsed: number;
   /** A real assistant message arrived — not one the CLI synthesised. */
   sawModelAnswer: boolean;
