@@ -87,6 +87,22 @@ describe("kiosk extension", () => {
     expect(JSON.parse(read("manifest.json")).permissions).toEqual(["tabs"]);
   });
 
+  it("closes the desktop tabs Chrome's session restore re-added, keeping the first", () => {
+    // Session restore re-adds the desktop tab on every relaunch of the kiosk.
+    // The worker dedupes on browser startup, on install, AND shortly after its
+    // own load (neither event fires reliably after a relaunch), keeping the
+    // desktop tab the owner is looking at, else the first.
+    const bg = read("background.js");
+    expect(bg).toContain("chrome.runtime.onStartup.addListener(dedupeDesktopTabs)");
+    expect(bg).toContain("chrome.runtime.onInstalled.addListener(dedupeDesktopTabs)");
+    expect(bg).toMatch(/\nsetTimeout\(dedupeDesktopTabs, \d+\);/);
+    expect(bg).toContain("const desktops = all.filter((t) => t.id != null && isDesktop(t.url))");
+    expect(bg).toContain("const keep = desktops.find((t) => t.active) || desktops[0];");
+    expect(bg).toContain("await chrome.tabs.remove(desktops.filter((t) => t.id !== keep.id).map((t) => t.id));");
+    // One implementation, not two: a second declaration would silently win.
+    expect(bg.match(/async function dedupeDesktopTabs\(/g)).toHaveLength(1);
+  });
+
   it("Enter: an address goes there, anything else is a DuckDuckGo search", () => {
     const js = read("content.js");
     const urlLike = new Function(`return ${regexLiteral(js, "URL_LIKE")}`)() as RegExp;
