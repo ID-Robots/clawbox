@@ -130,7 +130,7 @@ import {
 // quotes the command it ran. Bound every such field before logging it — see
 // src/lib/log-safe.ts.
 import { logSafe } from "@/lib/log-safe";
-import { installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
+import { deepseekPluginOnDisk, installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
 import { clawboxDisabledEntryId, clearPluginRepair } from "@/lib/plugin-repair";
 import { installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
 
@@ -3231,9 +3231,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // below and the gateway's own readiness report names the missing plugin
     // loudly.
     if (isClawAI) {
-      try {
-        await fs.access(path.join(OPENCLAW_HOME_DIR, "extensions", "deepseek", "openclaw.plugin.json"));
-      } catch {
+      // On disk from EITHER registry, for the running core (TASK-1302): a
+      // ClawHub install lands in `extensions/deepseek/`, an npm one under
+      // `npm/projects/`, and looking only at the first reinstalled an
+      // npm-installed plugin on every configure.
+      if (!(await deepseekPluginOnDisk(OPENCLAW_HOME_DIR))) {
         console.log("[AI Config] Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it)...");
         const plugin = await installDeepseekProviderPlugin();
         if (plugin.installed) {

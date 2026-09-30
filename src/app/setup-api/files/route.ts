@@ -8,6 +8,11 @@ import Busboy from "busboy";
 import { boundedBody } from "@/lib/bounded-body";
 import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
 import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
+import { MAX_MOVE_ITEMS, moveEntries, type MoveConflictPolicy } from "@/lib/files-move";
+import { followMovedProjectFolders } from "@/lib/project-folders";
+import { summarizeSelectionForZip, zipSelectionStream } from "@/lib/zip-stream";
+import { issueZipTicket, redeemZipTicket, uniqueArchiveNames } from "@/lib/zip-tickets";
+import { contentDisposition } from "@/lib/content-disposition";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -244,9 +249,117 @@ function ensureBaseDir() {
   }
 }
 
-// GET /setup-api/files?dir=relative/path
+/**
+ * The items a request names by browse-relative path, or why they cannot be
+ * taken: a list of 1..`max` non-empty strings, each through `safePath` (the
+ * browse root itself is never an item). Shared by the selection's ZIP and its
+ * move so the two read a selection the same way.
+ */
+function parseItemPaths(raw: unknown, max: number): { ok: true; paths: string[] } | { ok: false; response: NextResponse } {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > max || !raw.every((p) => typeof p === "string" && p.length > 0)) {
+    return { ok: false, response: NextResponse.json({ error: `paths must list 1 to ${max} items`, code: "invalid" }, { status: 400 }) };
+  }
+  return { ok: true, paths: raw as string[] };
+}
+
+/** Items one selection ZIP may name; the archive's own entry cap still applies to what they hold. */
+const MAX_ZIP_SELECTION = 10_000;
+
+/**
+ * `{ action: "zip", paths }` — a selection as one ZIP. Answers what the archive
+ * would hold (the folder download's `check=1` shape) and a ticket the download
+ * link redeems; see src/lib/zip-tickets.ts for why the list is not in the link.
+ */
+async function selectionZipTicket(dirAbs: string, raw: unknown): Promise<NextResponse> {
+  const parsed = parseItemPaths(raw, MAX_ZIP_SELECTION);
+  if (!parsed.ok) return parsed.response;
+  const base = path.resolve(BASE_DIR);
+  const items: { rel: string; abs: string }[] = [];
+  for (const rel of parsed.paths) {
+    const abs = safePath(rel);
+    if (!abs || abs === base) return NextResponse.json({ error: "Invalid path", code: "invalid_path", path: rel }, { status: 400 });
+    if (!fs.existsSync(/* turbopackIgnore: true */ abs)) {
+      return NextResponse.json({ error: "Not found", code: "not_found", path: rel }, { status: 404 });
+    }
+    items.push({ rel: path.relative(base, abs).split(path.sep).join("/"), abs });
+  }
+  const names = uniqueArchiveNames(items.map((item) => path.basename(item.abs)));
+  let summary;
+  try {
+    summary = await summarizeSelectionForZip(items.map((item, i) => ({ abs: item.abs, name: names[i] })));
+  } catch {
+    return NextResponse.json({ error: "Failed to read the selection" }, { status: 500 });
+  }
+  const archiveName = dirAbs === base ? "selection.zip" : `${path.basename(dirAbs)}-selection.zip`;
+  const body = { name: archiveName, ...summary };
+  if (summary.tooMany) {
+    return NextResponse.json(
+      { ...body, error: `This selection holds more than ${summary.limit} files and folders — too many for one ZIP`, code: "too_many_entries" },
+      { status: 413 },
+    );
+  }
+  const ticket = issueZipTicket({ rels: items.map((item) => item.rel), names, archiveName });
+  return NextResponse.json({ ...body, ticket });
+}
+
+/** `GET ?zip=<ticket>` — the selection's archive, streamed as it is read. */
+function selectionZipDownload(ticketId: string): NextResponse {
+  const ticket = redeemZipTicket(ticketId);
+  if (!ticket) {
+    return NextResponse.json({ error: "This download has expired. Select the items and download them again.", code: "zip_expired" }, { status: 404 });
+  }
+  const base = path.resolve(BASE_DIR);
+  // Re-judged NOW: the ticket vouches for what was selected, not for what the
+  // paths lead to by the time the bytes are read.
+  const items: { abs: string; name: string }[] = [];
+  ticket.rels.forEach((rel, i) => {
+    const abs = safePath(rel);
+    if (abs && abs !== base) items.push({ abs, name: ticket.names[i] });
+  });
+  const stream = zipSelectionStream(items);
+  stream.on("error", (err) => console.error("[files] selection ZIP stopped:", err instanceof Error ? err.message : err));
+  return new NextResponse(Readable.toWeb(stream) as unknown as ReadableStream, {
+    headers: {
+      "Content-Disposition": contentDisposition("attachment", ticket.archiveName),
+      "Content-Type": "application/zip",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+/**
+ * `{ action: "move", paths, conflict }` into the request's `dir` — the Files
+ * app's "Move to…" and its drag-and-drop. See src/lib/files-move.ts for the
+ * rules; a pinned project folder that moves keeps its pin.
+ */
+async function moveAction(destAbs: string, body: Record<string, unknown>): Promise<NextResponse> {
+  const parsed = parseItemPaths(body.paths, MAX_MOVE_ITEMS);
+  if (!parsed.ok) return parsed.response;
+  const conflict: MoveConflictPolicy = body.conflict === "rename" || body.conflict === "skip" ? body.conflict : "fail";
+  const result = moveEntries({
+    root: BASE_DIR,
+    destAbs,
+    conflict,
+    sources: parsed.paths.map((rel) => ({ rel, abs: safePath(rel) })),
+  });
+  if (!result.ok) return NextResponse.json(result.refusal.body, { status: result.refusal.status });
+  const { moved, skipped, failed } = result.outcome;
+  if (moved.length > 0) {
+    try {
+      await followMovedProjectFolders(moved.map((m) => ({ from: m.from, to: m.to })));
+    } catch (err) {
+      console.warn("[files] could not carry Projects pins through a move:", err instanceof Error ? err.message : err);
+    }
+  }
+  return NextResponse.json({ ok: failed.length === 0, moved, skipped, failed });
+}
+
+// GET /setup-api/files?dir=relative/path  (or ?zip=<ticket> — a selection's ZIP)
 export async function GET(req: NextRequest) {
   ensureBaseDir();
+  const zipTicket = req.nextUrl.searchParams.get("zip");
+  if (zipTicket !== null) return selectionZipDownload(zipTicket);
   const dir = req.nextUrl.searchParams.get("dir") ?? "";
   const abs = safePath(dir);
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
@@ -486,8 +599,11 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // JSON action
-  const body = await req.json().catch(() => ({}));
+  // JSON action. Anything that is not a plain object carries no action.
+  const parsedBody: unknown = await req.json().catch(() => null);
+  const body = (parsedBody && typeof parsedBody === "object" ? parsedBody : {}) as Record<string, unknown> & { name?: string; filePath?: string };
+  if (body.action === "move") return moveAction(abs, body);
+  if (body.action === "zip") return selectionZipTicket(abs, body.paths);
   if (body.action === "mkdir") {
     if (!body.name) return NextResponse.json({ error: "Name required" }, { status: 400 });
     const newDir = safePath(path.join(dir, body.name));

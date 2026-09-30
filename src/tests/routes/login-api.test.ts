@@ -15,6 +15,14 @@ vi.mock("@/lib/auth", () => ({
   createSessionCookie: vi.fn().mockReturnValue("session.cookie"),
   getSessionSigningSecret: vi.fn().mockResolvedValue("secret"),
   getSessionGeneration: vi.fn().mockResolvedValue(0),
+  getSystemUsername: vi.fn().mockReturnValue("clawbox"),
+}));
+
+// Multi-user (TASK-1256): no ClawBox users besides the owner in these cases,
+// so every login here is the owner's single-password login.
+vi.mock("@/lib/clawbox-users", () => ({
+  findUser: vi.fn().mockResolvedValue(null),
+  verifyUserPassword: vi.fn().mockResolvedValue(false),
 }));
 
 vi.mock("@/lib/system-password", () => ({
@@ -31,7 +39,7 @@ vi.mock("@/lib/login-rate-limit", () => ({
 }));
 
 import * as config from "@/lib/config-store";
-import { verifyPassword, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
+import { verifyPassword, createSessionCookie, getSessionSigningSecret, getSystemUsername } from "@/lib/auth";
 import { checkLockout, recordFailure, recordSuccess, padResponseTime } from "@/lib/login-rate-limit";
 import { hasOwnerPassword } from "@/lib/system-password";
 
@@ -56,6 +64,7 @@ describe("/login-api", () => {
     mockVerifyPassword.mockResolvedValue(false);
     mockCreateSessionCookie.mockReturnValue("session.cookie");
     mockGetSessionSigningSecret.mockResolvedValue("secret");
+    vi.mocked(getSystemUsername).mockReturnValue("clawbox");
     mockCheckLockout.mockResolvedValue({ locked: false, retryAfterSeconds: 0 });
     mockRecordFailure.mockResolvedValue({ locked: false, retryAfterSeconds: 0 });
     mockRecordSuccess.mockResolvedValue(undefined);
@@ -139,7 +148,10 @@ describe("/login-api", () => {
     await POST(req);
     expect(mockRecordFailure).toHaveBeenCalledWith("cf:1.2.3.5", { maxLockMs: undefined });
     expect(mockRecordFailure).toHaveBeenCalledWith("global", { maxLockMs: 300000 });
-    expect(mockRecordFailure).toHaveBeenCalledTimes(2);
+    // Multi-user (TASK-1256): the account's own bucket too — the owner's here,
+    // capped like `global` so nobody on the LAN can drive it to the 24h tier.
+    expect(mockRecordFailure).toHaveBeenCalledWith("user:clawbox", { maxLockMs: 300000 });
+    expect(mockRecordFailure).toHaveBeenCalledTimes(3);
   });
 
   it("a locked global bucket refuses a request with a fresh cf header before verifyPassword", async () => {

@@ -26,8 +26,11 @@ export interface WhatsNewCardState {
  * `refreshKey` asks the route again when it changes. The desktop passes the
  * ClawBox AI tier it already polls, so an owner who upgrades in the portal
  * stops seeing the plan section without reloading the page.
+ *
+ * `enabled: false` asks nothing and shows nothing — a non-owner's desktop
+ * (TASK-1256): the card is the owner's, and the route refuses anyone else.
  */
-export function useWhatsNew(refreshKey?: unknown): WhatsNewCardState {
+export function useWhatsNew(refreshKey?: unknown, enabled: boolean = true): WhatsNewCardState {
   const [state, setState] = useState<WhatsNewState | null>(null);
   // Once hidden, never shown again on this page load. An answer still in
   // flight when the owner dismissed (a refresh that left before the POST
@@ -35,6 +38,7 @@ export function useWhatsNew(refreshKey?: unknown): WhatsNewCardState {
   const [hidden, setHidden] = useState(false);
 
   useEffect(() => {
+    if (!enabled) return;
     let active = true;
     fetch(WHATS_NEW_ENDPOINT, { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
@@ -44,7 +48,7 @@ export function useWhatsNew(refreshKey?: unknown): WhatsNewCardState {
       })
       .catch(() => { /* no card this time; the next load asks again */ });
     return () => { active = false; };
-  }, [refreshKey]);
+  }, [refreshKey, enabled]);
 
   const dismiss = useCallback(() => {
     setHidden(true);

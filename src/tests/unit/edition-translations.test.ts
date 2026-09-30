@@ -13,6 +13,7 @@ import { clawaiUsageEn } from "@/lib/edition-translations/en-clawai-usage";
 import { clawaiPitchEn } from "@/lib/edition-translations/en-clawai-pitch";
 import { anthropicAccountsEn } from "@/lib/edition-translations/en-anthropic-accounts";
 import { whatsNewEn } from "@/lib/edition-translations/en-whats-new";
+import { usersEn } from "@/lib/edition-translations/en-users";
 import { bg } from "@/lib/edition-translations/bg";
 import { de } from "@/lib/edition-translations/de";
 import { es } from "@/lib/edition-translations/es";
@@ -73,6 +74,10 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // release's highlights and the plan it takes to use them. The first thing an
   // updated box says about itself, so it is not left in English on any locale.
   { name: "What's new in 4.1 card", matches: (k) => k.startsWith("whatsNew.") },
+  // Multi-user ClawBox OS (TASK-1256): Settings → Users, the login screen's
+  // user picker and error lines, and the tray's "signed in as". The login
+  // screen is the one page every person on the box sees before anything else.
+  { name: "Users, login picker and tray", matches: (k) => k in usersEn },
 ];
 
 /**
@@ -149,6 +154,8 @@ describe("edition-translations (TASK-458)", () => {
       ["clawaiPitchEn", clawaiPitchEn, (k) => k.startsWith("settings.clawaiPitch.")],
       ["anthropicAccountsEn", anthropicAccountsEn, (k) => k.startsWith("settings.anthropicAccounts.")],
       ["whatsNewEn", whatsNewEn, (k) => k.startsWith("whatsNew.")],
+      // Multi-user ClawBox OS (TASK-1256): Settings → Users, the login picker, the tray.
+      ["usersEn", usersEn, (k) => k in usersEn && (k.startsWith("users.") || k === "settings.users" || k.startsWith("login.") || k.startsWith("tray."))],
     ];
 
     for (const [name, table, prefixed] of surfaces) {

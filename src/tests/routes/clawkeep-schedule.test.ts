@@ -144,7 +144,7 @@ describe("/setup-api/clawkeep/schedule", () => {
       // the OLD cadence armed under this 200 — the box goes on backing up
       // after the owner switched auto-backup off.
       expect(scheduler.refresh).toHaveBeenCalledTimes(1);
-      expect(scheduler.refresh).toHaveBeenCalledWith(body.schedule);
+      expect(scheduler.refresh).toHaveBeenCalledWith(body.schedule, 0);
 
       // Round-trip: GET should see the same thing.
       const after = await (await GET()).json();
@@ -163,7 +163,7 @@ describe("/setup-api/clawkeep/schedule", () => {
       expect(body.schedule.timeOfDay).toBe(clawkeep.DEFAULT_SCHEDULE.timeOfDay);
       expect(body.schedule.weekday).toBe(0);
       expect(scheduler.refresh).toHaveBeenCalledTimes(1);
-      expect(scheduler.refresh).toHaveBeenCalledWith(body.schedule);
+      expect(scheduler.refresh).toHaveBeenCalledWith(body.schedule, 0);
     });
 
     // TASK-433 — "the ClawKeep cron is not backing up".
@@ -211,7 +211,7 @@ describe("/setup-api/clawkeep/schedule", () => {
       expect(body.nextRunAtMs).toBeGreaterThan(0);
     });
 
-    it("treats an empty body as a disable + defaults", async () => {
+    it("treats an empty body as changing nothing — on a fresh box, the defaults", async () => {
       const res = await PUT(new NextRequest(new URL("http://localhost/setup-api/clawkeep/schedule"), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -219,6 +219,96 @@ describe("/setup-api/clawkeep/schedule", () => {
       }));
       const body = await res.json();
       expect(body.schedule).toEqual(clawkeep.DEFAULT_SCHEDULE);
+    });
+  });
+
+  /**
+   * TASK-1211: a box reported `schedule.enabled=false, nextRunAtMs=0` and
+   * nothing re-armed it. Nothing in the device turns auto-backup off on a
+   * failed run; the one writer is this route, and it had two ways to do it
+   * that nobody meant.
+   */
+  describe("switching auto-backup off (TASK-1211)", () => {
+    async function writeState(state: Record<string, unknown>): Promise<void> {
+      await fs.writeFile(path.join(DATA_DIR, "state.json"), JSON.stringify(state, null, 2));
+    }
+
+    it("does not switch auto-backup off for a body that leaves `enabled` out", async () => {
+      await PUT(jsonReq(ARMED_DAILY));
+
+      // The natural call for an agent or a script changing only the retention.
+      const body = await (await PUT(jsonReq({ retentionKeepLast: 3 }))).json();
+
+      expect(body.schedule).toEqual({ ...ARMED_DAILY, retentionKeepLast: 3 });
+      expect(body.nextRunAtMs).toBeGreaterThan(Date.now());
+      expect(JSON.parse(await fs.readFile(SCHEDULE_FILE, "utf8")).enabled).toBe(true);
+    });
+
+    it("keeps every field a body leaves out, and sanitises the ones it sends", async () => {
+      await PUT(jsonReq({ ...ARMED_DAILY, frequency: "weekly", weekday: 3 }));
+
+      const body = await (await PUT(jsonReq({ timeOfDay: "99:99" }))).json();
+
+      // The sent field is judged as before (an impossible hour falls back)...
+      expect(body.schedule.timeOfDay).toBe(clawkeep.DEFAULT_SCHEDULE.timeOfDay);
+      // ...and the ones it left out are the box's own.
+      expect(body.schedule).toMatchObject({ enabled: true, frequency: "weekly", weekday: 3 });
+    });
+
+    it("still switches off on an explicit `enabled: false`", async () => {
+      await PUT(jsonReq(ARMED_DAILY));
+
+      const body = await (await PUT(jsonReq({ enabled: false }))).json();
+
+      expect(body.schedule.enabled).toBe(false);
+      expect(body.nextRunAtMs).toBe(0);
+      expect(body.scheduleQuotaHoldSinceMs).toBe(0);
+    });
+
+    it("records a switch-off while the account refuses credentials for quota as a pause", async () => {
+      await PUT(jsonReq(ARMED_DAILY));
+      await writeState({ last_heartbeat_status: "error", quota_full_since_ms: Date.now() - DAY_MS });
+
+      const before = Date.now();
+      const body = await (await PUT(jsonReq({ ...ARMED_DAILY, enabled: false }))).json();
+
+      expect(body.schedule.enabled).toBe(false);
+      expect(body.scheduleQuotaHoldSinceMs).toBeGreaterThanOrEqual(before);
+      // The scheduler is handed the hold, which is what starts it looking.
+      expect(scheduler.refresh).toHaveBeenLastCalledWith(body.schedule, body.scheduleQuotaHoldSinceMs);
+      // It is on disk, and the GET reports it.
+      const onDisk = JSON.parse(await fs.readFile(SCHEDULE_FILE, "utf8"));
+      expect(onDisk.quotaHoldSinceMs).toBe(body.scheduleQuotaHoldSinceMs);
+      expect((await (await GET()).json()).scheduleQuotaHoldSinceMs).toBe(body.scheduleQuotaHoldSinceMs);
+    });
+
+    it("keeps the pause through a save that leaves auto-backup off", async () => {
+      await PUT(jsonReq(ARMED_DAILY));
+      await writeState({ quota_full_since_ms: Date.now() });
+      const paused = await (await PUT(jsonReq({ enabled: false }))).json();
+
+      const tidied = await (await PUT(jsonReq({ retentionKeepLast: 5 }))).json();
+
+      expect(tidied.scheduleQuotaHoldSinceMs).toBe(paused.scheduleQuotaHoldSinceMs);
+    });
+
+    it("ends the pause when auto-backup is switched back on, and leaves the file its old shape", async () => {
+      await PUT(jsonReq(ARMED_DAILY));
+      await writeState({ quota_full_since_ms: Date.now() });
+      await PUT(jsonReq({ enabled: false }));
+
+      const body = await (await PUT(jsonReq({ enabled: true }))).json();
+
+      expect(body.scheduleQuotaHoldSinceMs).toBe(0);
+      expect(JSON.parse(await fs.readFile(SCHEDULE_FILE, "utf8"))).not.toHaveProperty("quotaHoldSinceMs");
+    });
+
+    it("does not pause a schedule that was never on", async () => {
+      await writeState({ quota_full_since_ms: Date.now() });
+
+      const body = await (await PUT(jsonReq({ ...ARMED_DAILY, enabled: false }))).json();
+
+      expect(body.scheduleQuotaHoldSinceMs).toBe(0);
     });
   });
 

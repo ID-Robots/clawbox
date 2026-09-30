@@ -1,9 +1,9 @@
 import { spawn } from "child_process";
 import crypto from "crypto";
 import fs from "fs/promises";
-import os from "os";
 import path from "./runtime-path";
 import { DATA_DIR, get, set } from "./config-store";
+import { ownerUsername } from "./owner-username";
 
 const SECRET_PATH = path.join(DATA_DIR, ".session-secret");
 
@@ -29,18 +29,7 @@ export async function getSessionSigningSecret(): Promise<string> {
 
 /** Resolve the install user across default, sudo-launched, and x64 setups. */
 export function getSystemUsername(): string {
-  let osUsername: string | undefined;
-  try {
-    osUsername = os.userInfo().username;
-  } catch {
-    osUsername = undefined;
-  }
-
-  return process.env.CLAWBOX_USER
-    || process.env.SUDO_USER
-    || process.env.USER
-    || osUsername
-    || "clawbox";
+  return ownerUsername();
 }
 
 // Reject CR/LF/NUL/C0/DEL to prevent shell/PAM injection and terminal control
@@ -94,40 +83,79 @@ export async function bumpSessionGeneration(): Promise<number> {
   return next;
 }
 
+/**
+ * Who a new cookie is issued to (TASK-1256). `u` is the Linux username; `sv`
+ * is set only for a user other than the owner and must match that user's
+ * entry in the registry (src/lib/session-identity.ts) for the cookie to count.
+ * Omitted entirely, the cookie is the owner's — the pre-multi-user shape.
+ */
+export interface SessionCookieIdentity {
+  u: string;
+  sv?: string;
+}
+
 /** Create a signed session cookie value bound to the given generation. */
-export function createSessionCookie(durationSeconds: number, secret: string, gen: number = 0): string {
+export function createSessionCookie(
+  durationSeconds: number,
+  secret: string,
+  gen: number = 0,
+  identity?: SessionCookieIdentity,
+): string {
   const exp = Math.floor(Date.now() / 1000) + durationSeconds;
-  const payload = Buffer.from(JSON.stringify({ exp, gen })).toString("base64url");
+  const claims: Record<string, unknown> = { exp, gen };
+  if (identity) {
+    claims.u = identity.u;
+    if (identity.sv) claims.sv = identity.sv;
+  }
+  const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   return `${payload}.${sig}`;
 }
 
 /**
- * Verify a session cookie — returns true if valid and not expired. When
- * `expectedGen` is provided, the cookie's generation must match (a mismatch
- * means it was minted before the last password change and is revoked).
+ * The verified payload of a session cookie — signature, expiry and (when
+ * `expectedGen` is given) generation all checked — or `null`. Who the payload
+ * speaks for is decided separately by `identityFromClaims`
+ * (src/lib/session-identity.ts), which needs facts this module does not read.
  */
-export function verifySessionCookie(cookie: string, secret: string, expectedGen?: number): boolean {
+export function readSessionClaims(
+  cookie: string,
+  secret: string,
+  expectedGen?: number,
+): Record<string, unknown> | null {
   const [payload, sig] = cookie.split(".");
-  if (!payload || !sig) return false;
+  if (!payload || !sig) return null;
   // Validate sig is valid hex and correct length (SHA-256 = 64 hex chars)
-  if (!/^[0-9a-f]{64}$/i.test(sig)) return false;
+  if (!/^[0-9a-f]{64}$/i.test(sig)) return null;
 
   try {
     const expectedSig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
     const sigBuf = Buffer.from(sig, "hex");
     const expectedBuf = Buffer.from(expectedSig, "hex");
     if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
-      return false;
+      return null;
     }
 
     const data = JSON.parse(Buffer.from(payload, "base64url").toString());
-    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return false;
+    if (typeof data !== "object" || data === null) return null;
+    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return null;
     if (expectedGen !== undefined && (typeof data.gen === "number" ? data.gen : 0) !== expectedGen) {
-      return false;
+      return null;
     }
-    return true;
+    return data as Record<string, unknown>;
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * Verify a session cookie — returns true if valid and not expired. When
+ * `expectedGen` is provided, the cookie's generation must match (a mismatch
+ * means it was minted before the last password change and is revoked).
+ *
+ * Says nothing about WHOSE session it is; owner-only callers go through
+ * `hasOwnerSession` (src/lib/owner-session.ts).
+ */
+export function verifySessionCookie(cookie: string, secret: string, expectedGen?: number): boolean {
+  return readSessionClaims(cookie, secret, expectedGen) !== null;
 }

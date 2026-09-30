@@ -139,7 +139,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "ui_open_app",
-    `Open a window on the ClawBox desktop, so the user can see or do something themselves. Built-in apps here: ${appLine}. For an app the user installed or you built, pass "installed-<id>" — call ui_list_apps first to get the id. To browse the web, use browser_open, not the "browser" app.`,
+    `Open a window on the ClawBox desktop for the user to see or use. Built-in apps here: ${appLine}. For an app the user installed or you built, pass "installed-<id>" — call ui_list_apps first to get the id. To browse the web, use browser_open, not the "browser" app.`,
     {
       app_id: zText(80, "A built-in app id, or \"installed-<id>\" for an installed app."),
     },

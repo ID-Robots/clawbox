@@ -29,10 +29,28 @@
  *                                             request was not honoured
  *     { type: "output", data: string }      — raw PTY output
  *     { type: "exit", code: number }        — PTY exited
+ *
+ * Who the shell runs as (multi-user ClawBox OS, TASK-1256): the owner — the
+ * account this server runs as — unless production-server.js, having checked
+ * the session cookie, names another ClawBox user in `x-clawbox-terminal-user`.
+ * That user's shell is started through the root-owned helper
+ * (`sudo -n clawbox-user-helper.sh shell <user>`, config/clawbox-user-helper.sh),
+ * which re-checks the name and its `clawbox-users` membership and runs the
+ * login shell AS that user in their home folder. Their Terminal settings
+ * (shell, folder) are not applied: those are paths on the owner's side.
+ *
+ * And every connection must carry `x-clawbox-terminal-token`, the per-boot
+ * secret production-server.js puts in CLAWBOX_TERMINAL_TOKEN before this
+ * process is spawned. Loopback alone was the fence while the box had one human
+ * account; with ClawBox users, any of them could otherwise dial 127.0.0.1:3006
+ * and be handed the owner's shell. Without the variable (a dev server started
+ * with `next dev`, which has no proxy in front) the old loopback-only rule
+ * applies and no other user's shell can be requested.
  */
 
 import * as http from "node:http";
 import * as os from "node:os";
+import { timingSafeEqual } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import * as pty from "node-pty";
 import { readEtcShells, resolveCwd, resolveShell } from "./terminal-launch.mjs";
@@ -55,16 +73,68 @@ function envPort(value, fallback) {
 
 const PORT = envPort(process.env.TERMINAL_WS_PORT, 3006);
 
+const TERMINAL_TOKEN = process.env.CLAWBOX_TERMINAL_TOKEN || "";
+const TOKEN_HEADER = "x-clawbox-terminal-token";
+const USER_HEADER = "x-clawbox-terminal-user";
+// Same rule as src/lib/username-rules.ts; the helper checks it again as root.
+const USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
+
+/**
+ * @param {import("node:http").IncomingMessage} req
+ * @returns {boolean}
+ */
+function hasTerminalToken(req) {
+  if (!TERMINAL_TOKEN) return true;
+  const sent = req.headers[TOKEN_HEADER];
+  if (typeof sent !== "string" || !sent) return false;
+  const a = Buffer.from(sent);
+  const b = Buffer.from(TERMINAL_TOKEN);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * The ClawBox user (not the owner) this connection's shell must run as, `null`
+ * for the owner, or `false` for a request that names a user it may not.
+ *
+ * @param {import("node:http").IncomingMessage} req
+ * @returns {string | null | false}
+ */
+function scopedUser(req) {
+  const named = req.headers[USER_HEADER];
+  if (named === undefined) return null;
+  // Only the proxy can name a user, and only when it proved itself with the
+  // token; a dev server with no token takes no one's word for it.
+  if (!TERMINAL_TOKEN) return false;
+  if (typeof named !== "string" || !USERNAME_RE.test(named)) return false;
+  return named;
+}
+
 const server = http.createServer((_req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("ClawBox Terminal WebSocket Server\n");
 });
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({
+  server,
+  verifyClient: (info, done) => {
+    if (!hasTerminalToken(info.req)) {
+      console.warn(`[terminal-server] Refused a connection without the terminal token from ${info.req.socket.remoteAddress}`);
+      done(false, 401, "Unauthorized");
+      return;
+    }
+    if (scopedUser(info.req) === false) {
+      console.warn("[terminal-server] Refused a connection naming a user it may not start a shell for");
+      done(false, 403, "Forbidden");
+      return;
+    }
+    done(true);
+  },
+});
 
 wss.on("connection", (ws, req) => {
   const remote = req.socket.remoteAddress;
   console.log(`[terminal-server] New connection from ${remote}`);
+  const asUser = scopedUser(req);
 
   // Spawn a PTY as the user running the ClawBox UI (clawbox on Jetson,
   // whatever user installed on x64). Derive from $USER/$HOME with the
@@ -97,23 +167,39 @@ wss.on("connection", (ws, req) => {
   /** @type {import("node-pty").IPty} */
   let term;
   try {
-    term = pty.spawn(shell, ["-l"], {
-      name: "xterm-256color",
-      cols: 80,
-      rows: 24,
-      cwd,
-      env: cleanEnv,
-    });
-
-    console.log(`[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}`);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: "started",
-        shell,
+    if (asUser) {
+      // A ClawBox user other than the owner: their own login shell, as them,
+      // in their own home — never the owner's account, shell or folder.
+      term = pty.spawn("/usr/bin/sudo", ["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "shell", asUser], {
+        name: "xterm-256color",
+        cols: 80,
+        rows: 24,
+        cwd: "/",
+        env: { TERM: "xterm-256color", LANG: cleanEnv.LANG, PATH: "/usr/sbin:/usr/bin:/sbin:/bin" },
+      });
+      console.log(`[terminal-server] Spawned PTY pid=${term.pid} for ClawBox user ${asUser}`);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "started", shell: "login shell", cwd: "~", user: asUser }));
+      }
+    } else {
+      term = pty.spawn(shell, ["-l"], {
+        name: "xterm-256color",
+        cols: 80,
+        rows: 24,
         cwd,
-        ...(shellRefused ? { shellRefused } : {}),
-        ...(cwdRefused ? { cwdRefused } : {}),
-      }));
+        env: cleanEnv,
+      });
+
+      console.log(`[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}`);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "started",
+          shell,
+          cwd,
+          ...(shellRefused ? { shellRefused } : {}),
+          ...(cwdRefused ? { cwdRefused } : {}),
+        }));
+      }
     }
 
     // PTY → WebSocket

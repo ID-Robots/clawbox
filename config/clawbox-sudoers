@@ -211,6 +211,17 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-embed
 # by root-owned code rather than by string matching, the same shape as the
 # optimize-ollama.sh grant.
 clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-run-root-step.sh
+# Multi-user ClawBox OS (TASK-1256): the sign-in check and the Terminal shell
+# for a ClawBox user other than the owner (config/clawbox-user-helper.sh).
+# unix_chkpwd lets the web server check only its OWN account's password, and a
+# shell AS another account needs root to start. No argument spec, like the
+# launcher above: the helper takes a verb and, for `shell`, a username, and
+# validates both in root-owned code — the name against the useradd rule AND
+# membership of `clawbox-users` (which only install.sh's user_add step grants),
+# refusing root, uid < 1000 and any administrator group. It is therefore no
+# oracle for root's or the owner's password and no shell as either. The
+# password travels on stdin, never argv.
+clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-user-helper.sh
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff
 # apt is granted ONLY for the exact commands the Browser-app chromium recovery

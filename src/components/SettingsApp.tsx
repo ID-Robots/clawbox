@@ -46,6 +46,7 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import BackgroundJobsPanel from "./BackgroundJobsPanel";
 import ClawboxMcpPanel from "./ClawboxMcpPanel";
+import UsersPanel from "./UsersPanel";
 // From the pure module, never `@/lib/plugin-repair`: that one reads the
 // marker file and would pull `fs` into the browser bundle.
 import { canonicalPluginId } from "@/lib/plugin-repair-id";
@@ -231,7 +232,7 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "users", "system", "update", "about"] as const;
 
 /**
  * The channels that live behind the single "Messaging Channels" entry — the same idea
@@ -351,6 +352,9 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
+  // Who can sign in to the box — each a real Linux account (TASK-1256). Only
+  // the owner ever sees Settings; the route behind the panel checks too.
+  { id: "users", icon: "group", labelKey: "settings.users" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   // The whole system update — versions, the run, beta channel, branch pin,
   // force — is a Settings page now; the About tile only points here.
@@ -6424,6 +6428,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
         {/* ─── Remote Control ─── */}
         {activeSection === "remote" && renderRemoteSection()}
+
+        {/* ─── Users (multi-user ClawBox OS) ─── */}
+        {activeSection === "users" && <UsersPanel />}
 
         {/* ─── About ─── */}
         {activeSection === "update" && (

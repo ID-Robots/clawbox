@@ -31,6 +31,7 @@ const runner = vi.hoisted(() => ({
   isCodingAgentEnabled: vi.fn(),
   getTeamDynamic: vi.fn(),
   teamSpawnSlot: vi.fn(),
+  suiteSandbox: vi.fn(),
 }));
 /** How many runs a team may have going at once: the box's own number unless a case says otherwise (read on every use, reset before each case). */
 const teamSlots = vi.hoisted(() => ({ value: null as number | null }));
@@ -127,6 +128,9 @@ beforeEach(async () => {
   // The lead's switch: OFF, as on every box that never touched it.
   runner.getTeamDynamic.mockResolvedValue(false);
   runner.resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/Projects/site", projectId: null });
+  // The project's own suite runs through `env` instead of `setpriv`, which a
+  // test runner cannot use; only a case with a suite on disk ever asks.
+  runner.suiteSandbox.mockResolvedValue({ bin: "/usr/bin/env", args: ["PYTHONDONTWRITEBYTECODE=1"], env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root } });
   runner.startRun.mockImplementation(async (input: Record<string, unknown>) => fakeRun(input));
   // A wait settles the run with the next scripted outcome.
   runner.waitForRun.mockImplementation(async (id: string) => {
@@ -1278,6 +1282,26 @@ describe("the words", () => {
     expect(team.vanishedFiles(path.join(root, "no-such-folder"), ["index.html"]).size).toBe(0);
     expect(team.vanishedFiles("relative/dir", ["index.html"]).size).toBe(0);
   });
+
+  // A worker's scratch file is no stray (above), but a red suite's failure
+  // that names one does not point at every task for it (TASK-1321).
+  it("sends a red suite back to the tasks whose hints hold the failing files — a scratch-named file included", () => {
+    type Task = Parameters<Team["suiteSuspects"]>[0][number];
+    const task = (task_id: string, files_hint: string[], attempts = 1): Task =>
+      ({ task_id, files_hint, attempts, status: "complete" }) as Task;
+    const calc = task("t1", ["calc.py"]);
+    const tests = task("t2", ["tests"]);
+    const done = task("t3", ["cli.py"], 2);
+    const ids = (named: string[]) => team.suiteSuspects([calc, tests, done], named).map((t) => t.task_id);
+    expect(ids(["calc.py"])).toEqual(["t1"]);
+    expect(ids(["tests/__probe_test.py"])).toEqual(["t2"]);
+    expect(ids(["calc.py", "__probe_test.py"])).toEqual(["t1"]);
+    // Named by none of them, or no attempt left for the one it names: every task with an attempt left.
+    expect(ids(["__probe_test.py"])).toEqual(["t1", "t2"]);
+    expect(ids(["cli.py"])).toEqual(["t1", "t2"]);
+    expect(team.outsideHint(["__probe_test.py"], ["calc.py"])).toEqual([]);
+    expect(team.outsideHint(["__probe_test.py"], ["calc.py"], { scratch: false })).toEqual(["__probe_test.py"]);
+  });
 });
 
 
@@ -1724,6 +1748,193 @@ describe("the planner's shape", () => {
     expect(done.status).toBe("done");
     expect(done.tasks[0]).toMatchObject({ attempts: 2, rejections: 1 });
     expect(done.metrics).toMatchObject({ tasksRejected: 1, tasksAcceptedFirstTry: 1 });
+  });
+});
+
+describe("the project's own tests on the merged result (TASK-1321)", () => {
+  // The bench's team-cli-tool, cut down: a converter CLI and a unittest suite
+  // for its pairs. The CLI prints the right number and exits 1 — the suite's
+  // failure is the one the team signed off over: "AssertionError: 1 != 0 : 1.609344".
+  const CLI = [
+    "import sys",
+    "FACTORS = {('mi', 'km'): 1.609344, ('km', 'mi'): 1 / 1.609344}",
+    "value, src, dst = float(sys.argv[1]), sys.argv[2], sys.argv[3]",
+    "print(round(value * FACTORS[(src, dst)], 6))",
+    "sys.exit(1)",
+    "",
+  ].join("\n");
+  const CLI_TESTS = [
+    "import subprocess, sys, unittest",
+    "",
+    "def convert(*args):",
+    "    return subprocess.run([sys.executable, 'convert.py', *args], capture_output=True, text=True)",
+    "",
+    "class TestConvert(unittest.TestCase):",
+    "    def test_mi_to_km(self):",
+    "        out = convert('1', 'mi', 'km')",
+    "        self.assertEqual(out.returncode, 0, out.stdout.strip())",
+    "",
+    "    def test_km_to_mi_prints(self):",
+    "        self.assertEqual(convert('1.609344', 'km', 'mi').stdout.strip(), '1.0')",
+    "",
+  ].join("\n");
+  // The same pairs as a module: one pair missing, so the failure's traceback
+  // runs through convert.py as well as through the test.
+  const MODULE = "FACTORS = {('mi', 'km'): 1.609344}\n\ndef convert(value, src, dst):\n    return round(value * FACTORS[(src, dst)], 6)\n";
+  const MODULE_FIXED = "FACTORS = {('mi', 'km'): 1.609344, ('km', 'mi'): 1 / 1.609344}\n\ndef convert(value, src, dst):\n    return round(value * FACTORS[(src, dst)], 6)\n";
+  const MODULE_TESTS = [
+    "import unittest",
+    "from convert import convert",
+    "",
+    "class TestConvert(unittest.TestCase):",
+    "    def test_mi_to_km(self):",
+    "        self.assertEqual(convert(1, 'mi', 'km'), 1.609344)",
+    "",
+    "    def test_km_to_mi(self):",
+    "        self.assertEqual(convert(1.609344, 'km', 'mi'), 1.0)",
+    "",
+  ].join("\n");
+  const SUITE_PLAN = JSON.stringify([
+    { task_description: "Write the converter, convert.py", files_hint: ["convert.py"] },
+    { task_description: "Test every pair in tests/test_convert.py", depends_on: ["t1"], files_hint: ["tests/test_convert.py"] },
+  ]);
+
+  /** The merged result on disk: the team's folder, with what its workers left there. */
+  function project(files: Record<string, string>): string {
+    const dir = path.join(root, "site");
+    for (const [rel, body] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+      fs.writeFileSync(path.join(dir, rel), body);
+    }
+    runner.resolveWorkingDirectory.mockResolvedValue({ directory: dir, projectId: null });
+    return dir;
+  }
+  const notes = (done: { log: Array<{ type: string; message: string }> }) => done.log.filter((e) => e.type === "note").map((e) => e.message);
+
+  it("is not done while the suite is red: the rejection names the failing test, the task it points at is offered once more, and a suite still red fails the team", async () => {
+    project({ "convert.py": CLI, "tests/test_convert.py": CLI_TESTS });
+    outcomes = [
+      // The evidence's shape: workers accepted by rule, one final review over the merged whole.
+      { summary: shaped({ parallelism: 1, review: "final", rationale: "A small tool." }, SUITE_PLAN) },
+      { summary: "Wrote convert.py.", filesTouched: ["convert.py"] },
+      { summary: "Wrote the tests.", filesTouched: ["tests/test_convert.py"] },
+      { summary: "Looked again; the tests are right.", filesTouched: ["tests/test_convert.py"] },
+    ];
+    const board = await team.startTeam({ goal: "A unit converter CLI with a test for every pair", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("failed");
+    expect(done.error).toContain("The project's own tests fail on the merged result: python3 -m unittest discover -s tests — Ran 2 tests, FAILED (failures=1)");
+    expect(done.error).toContain("Failing: test_convert.TestConvert.test_mi_to_km");
+    expect(done.error).toContain("AssertionError: 1 != 0 : 1.609344");
+    // The failure named tests/test_convert.py, so t2 went back — once — with the
+    // failing test in the words its next worker read first; no final reviewer
+    // was spent on a red tree.
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "worker"]);
+    expect(starts[3].team).toMatchObject({ role: "worker", taskId: "t2" });
+    const retry = String(starts[3].task);
+    expect(retry).toContain("A previous attempt was rejected: The project's own tests fail on the merged result");
+    expect(retry).toContain("Failing: test_convert.TestConvert.test_mi_to_km");
+    expect(retry).toContain("First failure: AssertionError: 1 != 0 : 1.609344");
+    expect(retry).toContain("run `python3 -m unittest discover -s tests` yourself");
+    expect(done.tasks.map((t) => [t.task_id, t.attempts, t.rejections])).toEqual([["t1", 1, 0], ["t2", 2, 1]]);
+    expect(done.log.find((e) => e.type === "review" && e.message.startsWith("Task t2 rejected"))).toMatchObject({ actor: { kind: "reviewer" } });
+    expect(notes(done)).toEqual([
+      expect.stringMatching(/^The project's own tests fail on the merged result: .*test_mi_to_km\. Offered once more: t2\.$/),
+      expect.stringMatching(/^The project's own tests fail on the merged result: .*test_mi_to_km\.$/),
+    ]);
+    expect(done.finalReview).toBeNull();
+    // A red suite is a rejection, never an alert toward the team's ceiling.
+    expect(done.alerts).toBe(0);
+  });
+
+  it("finishes once the re-attempt turns the suite green — whatever the review shape", async () => {
+    const dir = project({ "convert.py": MODULE, "tests/test_convert.py": MODULE_TESTS });
+    outcomes = [
+      { summary: SUITE_PLAN },
+      { summary: "Wrote convert.py.", filesTouched: ["convert.py"] },
+      { summary: "Wrote the tests.", filesTouched: ["tests/test_convert.py"] },
+      { summary: "Added km → mi.", filesTouched: ["convert.py"] },
+      { summary: "The tests stand.", filesTouched: ["tests/test_convert.py"] },
+    ];
+    // t1's second worker is the one that fixes the module.
+    let t1Workers = 0;
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      const who = input.team as { role: string; taskId: string | null };
+      if (who.role === "worker" && who.taskId === "t1" && ++t1Workers === 2) fs.writeFileSync(path.join(dir, "convert.py"), MODULE_FIXED);
+      return fakeRun(input);
+    });
+    const board = await team.startTeam({ goal: "A unit converter", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    // The KeyError's traceback ran through both files: both tasks went back, in
+    // dependency order, each reviewed as any task is.
+    expect(starts.map(role)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer", "worker", "reviewer", "worker", "reviewer"]);
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.rejections])).toEqual([["t1", "complete", 2, 1], ["t2", "complete", 2, 1]]);
+    expect(String(starts[5].task)).toContain("Failing: test_convert.TestConvert.test_km_to_mi");
+    expect(notes(done)).toEqual([
+      expect.stringMatching(/^The project's own tests fail on the merged result: python3 -m unittest discover -s tests — Ran 2 tests, FAILED \(errors=1\)\. Failing: test_convert\.TestConvert\.test_km_to_mi\. Offered once more: t1, t2\.$/),
+      "The project's own tests pass on the merged result: python3 -m unittest discover -s tests — Ran 2 tests, OK.",
+    ]);
+  });
+
+  it("is accepted when the suite passes, and the final reviewer is told so", async () => {
+    project({ "convert.py": MODULE_FIXED, "tests/__init__.py": "", "tests/test_convert.py": MODULE_TESTS });
+    outcomes = [
+      { summary: shaped({ parallelism: 1, review: "final", rationale: "" }, SUITE_PLAN) },
+      { summary: "Wrote convert.py.", filesTouched: ["convert.py"] },
+      { summary: "Wrote the tests.", filesTouched: ["tests/test_convert.py"] },
+    ];
+    const board = await team.startTeam({ goal: "A unit converter", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    expect(runner.suiteSandbox).toHaveBeenCalledTimes(1);
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer"]);
+    // tests/ is a package here, so discovery starts at the top.
+    expect(String(starts[3].task)).toContain("The harness ran the project's own tests on the merged result and they pass: python3 -m unittest discover — Ran 2 tests, OK.");
+    expect(done.finalReview).toMatchObject({ verdict: "accepted" });
+    expect(notes(done)).toEqual(["The project's own tests pass on the merged result: python3 -m unittest discover — Ran 2 tests, OK."]);
+    expect(done.tasks.map((t) => t.attempts)).toEqual([1, 1]);
+  });
+
+  it("changes nothing for a project with no test suite", async () => {
+    project({ "index.html": "<!doctype html><title>Site</title>", "app.js": "console.log('hi');\n" });
+    outcomes = [
+      { summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) },
+      { summary: "index", filesTouched: ["index.html"] },
+      { summary: "app", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    expect(runner.suiteSandbox).not.toHaveBeenCalled();
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer"]);
+    expect(String(starts[3].task)).not.toContain("own tests");
+    expect(notes(done)).toEqual([]);
+    expect(done.finalReview).toMatchObject({ verdict: "accepted" });
+  });
+
+  it("puts a red suite before the lead first, when the team has one", async () => {
+    runner.getTeamDynamic.mockResolvedValue(true);
+    project({ "convert.py": CLI, "tests/test_convert.py": CLI_TESTS });
+    outcomes = [
+      { summary: shaped({ parallelism: 1, review: "final", rationale: "" }, SUITE_PLAN) },
+      { summary: "Wrote convert.py.", filesTouched: ["convert.py"] },
+      { summary: "Wrote the tests.", filesTouched: ["tests/test_convert.py"] },
+      { summary: "Looked again.", filesTouched: ["tests/test_convert.py"] },
+    ];
+    const board = await team.startTeam({ goal: "A unit converter CLI", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("failed");
+    // Both workers were accepted clean, so the lead had nothing to decide until the suite spoke.
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "lead", "worker"]);
+    expect(starts[3].team).toMatchObject({ role: "lead", taskId: "t2" });
+    expect(String(starts[3].task)).toContain("rejected: The project's own tests fail on the merged result");
+    expect(String(starts[3].task)).toContain("test_convert.TestConvert.test_mi_to_km");
   });
 });
 

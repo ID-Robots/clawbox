@@ -15,6 +15,7 @@ import {
 } from "@/lib/language-persona";
 import { logSafe } from "@/lib/log-safe";
 import { requireSession } from "@/lib/route-auth";
+import { NON_OWNER_READABLE_PREF_KEYS } from "@/lib/non-owner-scope";
 import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 
 export const dynamic = "force-dynamic";
@@ -136,8 +137,14 @@ export async function GET(req: Request) {
   // makes never pays for a cookie verification; `requireSession` mirrors the
   // middleware's own order (bearer, cookie, test mode), so the MCP tool's
   // `preferences_get` and the e2e harness keep the door they have.
+  //
+  // A ClawBox user other than the owner (TASK-1256) may read the few keys the
+  // desktop and their Terminal need, NON_OWNER_READABLE_PREF_KEYS — the same
+  // list middleware's allow-list admits them for — and nothing wider.
   if (!isAnonymousReadable(allParam, keysParam)) {
-    const denied = await requireSession(req);
+    const nonOwnerReadable = !allParam && typeof keysParam === "string" && keysParam.length > 0
+      && keysParam.split(",").every((k) => NON_OWNER_READABLE_PREF_KEYS.has(k.trim()));
+    const denied = await requireSession(req, { allowNonOwner: nonOwnerReadable });
     if (denied) return denied;
   }
 
