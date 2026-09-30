@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .token import data_dir
@@ -45,6 +45,22 @@ class State:
     upload_bytes_total: int = 0
     upload_bytes_done: int = 0
     upload_started_at_ms: int = 0
+    # What the last archive build left out — the box's own backup archives,
+    # `own_backups` — and the snapshot-sized archive files it still carried,
+    # as [{"path": "~/…", "bytes": n}], largest first. Written once the archive
+    # is built and BEFORE the upload, so the app and `backup_status` can say it
+    # while the upload runs; kept until the next build replaces it.
+    last_left_out_count: int = 0
+    last_left_out_bytes: int = 0
+    last_large_archives: list[dict[str, object]] = field(default_factory=list)
+    last_large_archive_count: int = 0
+    last_large_archive_bytes: int = 0
+    # When the portal first refused to mint credentials because the account is
+    # over quota (402 quota_full), in the current run of refusals; 0 once it
+    # mints them again. The TS bridge reads it to tell "auto-backup was
+    # switched off while the account was full" — a pause it re-arms by itself
+    # once credentials work again — from an owner switching it off for good.
+    quota_full_since_ms: int = 0
 
 
 def _safe_int(value: object) -> int:
@@ -55,6 +71,18 @@ def _safe_int(value: object) -> int:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0
+
+
+def _large_archives(value: object) -> list[dict[str, object]]:
+    """`last_large_archives` as written, or the part of it that still reads
+    as one; a hand-edited or garbled list costs the list, not the daemon."""
+    if not isinstance(value, list):
+        return []
+    return [
+        {"path": item["path"], "bytes": _safe_int(item.get("bytes", 0))}
+        for item in value
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    ]
 
 
 def load(path: Path | str | None = None) -> State:
@@ -82,6 +110,12 @@ def load(path: Path | str | None = None) -> State:
         upload_bytes_total=_safe_int(raw.get("upload_bytes_total", 0)),
         upload_bytes_done=_safe_int(raw.get("upload_bytes_done", 0)),
         upload_started_at_ms=_safe_int(raw.get("upload_started_at_ms", 0)),
+        last_left_out_count=_safe_int(raw.get("last_left_out_count", 0)),
+        last_left_out_bytes=_safe_int(raw.get("last_left_out_bytes", 0)),
+        last_large_archives=_large_archives(raw.get("last_large_archives")),
+        last_large_archive_count=_safe_int(raw.get("last_large_archive_count", 0)),
+        last_large_archive_bytes=_safe_int(raw.get("last_large_archive_bytes", 0)),
+        quota_full_since_ms=_safe_int(raw.get("quota_full_since_ms", 0)),
     )
 
 

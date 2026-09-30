@@ -4101,6 +4101,53 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
   fi
 fi
 
+# ── Where the DeepSeek provider plugin's payload lives (TASK-1302) ──────────
+#
+# Two registries, two places — measured with the 2026.9.4 CLI against a scratch
+# state directory: a ClawHub install writes <home>/extensions/deepseek/, an npm
+# one <home>/npm/projects/<package>-<hash>[__openclaw-generation__g-<gen>]/
+# node_modules/@openclaw/deepseek-provider/ (flat under <home>/npm/node_modules/
+# on older cores, as the codex block records). The install block further down
+# falls back to npm when ClawHub has no build of the core's release, so the
+# xhigh patch below and that block's "already installed?" guard both look in
+# both. A guard that looked only at the first read an npm payload as missing on
+# every boot, and the reinstall it then ran refuses ("plugin already exists")
+# and boots WITHOUT the plugin it had just installed.
+
+# Every deepseek plugin manifest under <home>, one per line; nothing when none.
+clawbox_deepseek_plugin_manifests() {
+  local manifest
+  for manifest in "$1/extensions/deepseek/openclaw.plugin.json" \
+    "$1"/npm/node_modules/@openclaw/deepseek-provider/openclaw.plugin.json \
+    "$1"/npm/projects/*/node_modules/@openclaw/deepseek-provider/openclaw.plugin.json; do
+    if [ -f "$manifest" ]; then printf '%s\n' "$manifest"; fi
+  done
+}
+
+# Succeeds when <home> holds a payload the running core can load. The ClawHub
+# one keeps the rule it always had — present is present. An npm one counts only
+# when it is the core's own release ($CLAWBOX_OPENCLAW_EFFECTIVE, or a republish
+# of it; any at all when that is unknown): npm payloads are keyed to the core
+# generation, so one an older core left behind is on disk yet unreachable
+# (TASK-602), and treating it as installed would skip the one install that
+# brings the plugin back. `deepseekPluginOnDisk` in
+# src/lib/openclaw-deepseek-plugin.ts is the configure route's twin.
+clawbox_deepseek_plugin_on_disk() {
+  local manifest version
+  [ ! -f "$1/extensions/deepseek/openclaw.plugin.json" ] || return 0
+  for manifest in "$1"/npm/node_modules/@openclaw/deepseek-provider/openclaw.plugin.json \
+    "$1"/npm/projects/*/node_modules/@openclaw/deepseek-provider/openclaw.plugin.json; do
+    [ -f "$manifest" ] || continue
+    [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ] || return 0
+    version="$(python3 -c 'import json, sys; v = json.load(open(sys.argv[1])).get("version"); print(v if isinstance(v, str) else "")' \
+      "${manifest%/openclaw.plugin.json}/package.json" 2>/dev/null || true)"
+    case "$version" in
+      "$CLAWBOX_OPENCLAW_EFFECTIVE"|"$CLAWBOX_OPENCLAW_EFFECTIVE"-*|"$CLAWBOX_OPENCLAW_EFFECTIVE"+*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # Patch the installed openclaw deepseek plugin JSON to declare that the
 # DeepSeek V4 models accept `off` and `xhigh` reasoning efforts. The shipped plugin
 # only sets `supportsReasoningEffort: true`, but `catalogSupportsXHigh()`
@@ -4115,15 +4162,19 @@ fi
 # openclaw@latest` overwrites this file and the patch needs to survive
 # system updates. Idempotent: skips the rewrite if the field already
 # matches the target.
-DEEPSEEK_PLUGIN_JSON="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/dist/extensions/deepseek/openclaw.plugin.json"
-if [ ! -f "$DEEPSEEK_PLUGIN_JSON" ]; then
+DEEPSEEK_PLUGIN_JSONS="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/dist/extensions/deepseek/openclaw.plugin.json"
+if [ ! -f "$DEEPSEEK_PLUGIN_JSONS" ]; then
   # OpenClaw 2 unbundled the provider: the manifest lives with the installed
   # plugin, not in the core dist. Same patch, same idempotence — without this
   # the xhigh declaration silently stopped landing and the effort picker
-  # refused xhigh for deepseek on every 2026.8 box.
-  DEEPSEEK_PLUGIN_JSON="$(dirname "$OPENCLAW_CONFIG")/extensions/deepseek/openclaw.plugin.json"
+  # refused xhigh for deepseek on every 2026.8 box. From either registry
+  # (TASK-1302): the npm 2026.9.4 manifest declares no efforts either, and the
+  # core's payload verification checks the package's files are there, not what
+  # they say, so a patched npm payload still loads (measured on 2026.9.4).
+  DEEPSEEK_PLUGIN_JSONS="$(clawbox_deepseek_plugin_manifests "$(dirname "$OPENCLAW_CONFIG")")"
 fi
-if [ -f "$DEEPSEEK_PLUGIN_JSON" ]; then
+while IFS= read -r DEEPSEEK_PLUGIN_JSON; do
+  [ -f "$DEEPSEEK_PLUGIN_JSON" ] || continue
   # Guarded, like the guide seeding further down and for the same reason: this
   # is a bare top-level command in a script under `set -e`, its write `raise`s
   # on failure, and a read-only rootfs or a full disk would turn a cosmetic
@@ -4170,7 +4221,9 @@ PY
   then
     echo "  WARN: could not patch the deepseek plugin JSON with xhigh reasoning effort; the gateway starts without it" >&2
   fi
-fi
+done <<DEEPSEEK_PLUGIN_JSONS_EOF
+$DEEPSEEK_PLUGIN_JSONS
+DEEPSEEK_PLUGIN_JSONS_EOF
 
 # Reconciliation, second half: the `llamacpp:default` / `ollama:default` AUTH
 # PROFILES vs data/.local-ai-token (TASK-1196). The Python pass above re-points
@@ -7428,9 +7481,10 @@ fi
 # installs the plugin — the first 2026.8.1 boot on a paired box parked at
 # "Plugin \"deepseek\" requires capability consent" until it was installed
 # by hand. Heal it here, exactly like the codex plugin above: idempotent
-# (the marker file check), consent given explicitly, non-fatal — a failed
-# install leaves the gateway refusing readiness with its own clear message.
-if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ ! -f "$OPENCLAW_HOME_DIR/extensions/deepseek/openclaw.plugin.json" ]; then
+# (the payload check — from either registry since TASK-1302, see
+# `clawbox_deepseek_plugin_on_disk`), consent given explicitly, non-fatal — a
+# failed install leaves the gateway refusing readiness with its own clear message.
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && ! clawbox_deepseek_plugin_on_disk "$OPENCLAW_HOME_DIR"; then
   # TOTAL, like the reader in the background-job block below and the two
   # assignments above: this is a BLOCKING ExecStartPre under `set -euo
   # pipefail`, so an unhandled shape here is not a bad answer, it is NO
@@ -7459,33 +7513,64 @@ PY
     # >=2026.8.2, but this OpenClaw runtime exposes 2026.8.1"), and every
     # fresh install parked at a gateway that would not report ready. The
     # binary decides, not the pin file: it is the process that loads the
-    # plugin, and the two disagree mid-update. The unpinned spec is only the
-    # fallback for a core with no plugin build of its own version.
+    # plugin, and the two disagree mid-update.
+    #
+    # THREE SPECS, in the order src/lib/openclaw-deepseek-plugin.ts walks them
+    # for the configure route and the Settings Retry (TASK-1302): the core's
+    # build from ClawHub, the SAME build from npm, and only then the unpinned
+    # ClawHub spec, for a core with no plugin build of its own version at all.
+    # ClawHub does not carry every release npm does — it has no 2026.9.4, the
+    # build the 4.1 core needs ("Version not found on ClawHub"), while npm has
+    # 2026.9.1 through 2026.9.6 — and the unpinned spec cannot stand in for it:
+    # it resolves `latest`, 2026.9.6, which declares `pluginApi >=2026.9.6` and
+    # which the 2026.9.4 runtime refuses. Every 4.1 box parked at "Repair
+    # needed" with both registries up. `--force` on the npm spec only: the CLI
+    # reads it as the consent to a non-ClawHub source, and this block runs only
+    # when no payload for the running core is on disk, so whatever it replaces
+    # is stale.
     DEEPSEEK_PLUGIN_SPEC="clawhub:@openclaw/deepseek-provider"
     DEEPSEEK_PLUGIN_PINNED=""
+    DEEPSEEK_PLUGIN_NPM_PINNED=""
     if [ -n "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
       DEEPSEEK_PLUGIN_PINNED="${DEEPSEEK_PLUGIN_SPEC}@${CLAWBOX_OPENCLAW_EFFECTIVE}"
+      DEEPSEEK_PLUGIN_NPM_PINNED="npm:@openclaw/deepseek-provider@${CLAWBOX_OPENCLAW_EFFECTIVE}"
     fi
     echo "  Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it; ClawBox AI needs it)..."
     # CAPTURED (TASK-1088), like the codex install above: the row below used to
     # say "the device may be offline" whatever the core had actually answered.
-    # The FIRST refusal is the one kept — the pinned spec is the one the row
-    # records and the Retry runs, and the unpinned one is only its fallback.
+    # The LAST refusal is the one kept (TASK-1302): each spec is tried because
+    # the one before it failed, so the earlier refusals are already answered,
+    # and the 4.1 row kept the pinned spec's "Version not found on ClawHub"
+    # while the refusal actually in the way was the fallback's.
     DEEPSEEK_INSTALL_RC=""
     DEEPSEEK_INSTALL_OUT=""
     DEEPSEEK_INSTALLED=""
-    for DEEPSEEK_TRY_SPEC in $DEEPSEEK_PLUGIN_PINNED $DEEPSEEK_PLUGIN_SPEC; do
+    DEEPSEEK_CLAWHUB_TIMED_OUT=""
+    for DEEPSEEK_TRY_SPEC in $DEEPSEEK_PLUGIN_PINNED $DEEPSEEK_PLUGIN_NPM_PINNED $DEEPSEEK_PLUGIN_SPEC; do
       DEEPSEEK_TRY_RC=0
-      clawbox_run_openclaw_capture 180 plugins install "$DEEPSEEK_TRY_SPEC" --accept-capabilities \
-        || DEEPSEEK_TRY_RC=$?
+      case "$DEEPSEEK_TRY_SPEC" in
+        npm:*)
+          clawbox_run_openclaw_capture 180 plugins install "$DEEPSEEK_TRY_SPEC" --force --accept-capabilities \
+            || DEEPSEEK_TRY_RC=$?
+          ;;
+        *)
+          # A ClawHub that let one spec run into its deadline will not answer
+          # the next either (the 2026-09-01 clawhub.dev outage burned the full
+          # timeout on every attempt). Skipping it keeps this BLOCKING
+          # ExecStartPre to the two attempts it spent before the npm step, well
+          # inside the unit's TimeoutStartSec.
+          if [ -n "$DEEPSEEK_CLAWHUB_TIMED_OUT" ]; then continue; fi
+          clawbox_run_openclaw_capture 180 plugins install "$DEEPSEEK_TRY_SPEC" --accept-capabilities \
+            || DEEPSEEK_TRY_RC=$?
+          case "$DEEPSEEK_TRY_RC" in 124|137) DEEPSEEK_CLAWHUB_TIMED_OUT=1 ;; esac
+          ;;
+      esac
       if [ "$DEEPSEEK_TRY_RC" = "0" ]; then
         DEEPSEEK_INSTALLED="$DEEPSEEK_TRY_SPEC"
         break
       fi
-      if [ -z "$DEEPSEEK_INSTALL_RC" ]; then
-        DEEPSEEK_INSTALL_RC="$DEEPSEEK_TRY_RC"
-        DEEPSEEK_INSTALL_OUT="$CLAWBOX_CLI_OUT"
-      fi
+      DEEPSEEK_INSTALL_RC="$DEEPSEEK_TRY_RC"
+      DEEPSEEK_INSTALL_OUT="$CLAWBOX_CLI_OUT"
     done
     if [ -n "$DEEPSEEK_INSTALLED" ]; then
       echo "  DeepSeek provider plugin installed ($DEEPSEEK_INSTALLED)"

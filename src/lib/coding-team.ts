@@ -32,7 +32,11 @@
  * The team's SHAPE is the planner's to choose per goal (TASK-1099): how many
  * workers run side by side (never more than the box's own slots) and how the
  * work is reviewed — a reviewer per task, one over the merged result, or the
- * rule alone. Every worker reads a bounded digest of the whole board. With
+ * rule alone. Whatever the shape, a team whose project has its own test suite
+ * is never "done" while that suite is red on the merged result (TASK-1321,
+ * `suiteGate`): the failing tests go back as a rejection, the tasks they point
+ * at are offered once more, and a suite still red after that fails the team.
+ * Every worker reads a bounded digest of the whole board. With
  * the owner's `coding_team_dynamic` switch on, the planner comes back as the
  * LEAD once per batch of settled workers — only when there is something to
  * decide — and may add or retire a few tasks; with it off, no lead run is
@@ -58,6 +62,7 @@ import {
   resolveWorkingDirectory,
   startRun,
   stopRun,
+  suiteSandbox,
   teamSpawnSlot,
   waitForRun,
   type CodingRun,
@@ -82,6 +87,7 @@ import {
 import { addWorkerWorktree, changedFiles, ensureTeamBranch, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
 import { FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, reviewerTask } from "@/lib/coding-team-reviewer";
+import { runProjectSuite, suiteFailure, suiteNote, suiteRejection } from "@/lib/coding-team-suite";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
   allComplete,
@@ -622,6 +628,12 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // Tasks whose worker settled and that the lead has not looked at yet —
   // only ever filled while the owner's switch was on when the team started.
   const leadAfter: string[] = [];
+  // The project's own tests on the merged result (TASK-1321, `suiteGate`):
+  // how many times they ran, the words the team fails with when they are
+  // still red after the one re-attempt, and what they said when they passed.
+  let suiteRounds = 0;
+  let suiteFailed: string | null = null;
+  let suitePassed: string | null = null;
   while (!team.stopRequested) {
     const counted = board.alerts - team.uncountedAlerts;
     if (counted >= MAX_ALERTS) {
@@ -668,7 +680,24 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
       inFlight.set(task.task_id, work);
     }
     if (inFlight.size === 0) {
-      if (isExhausted(board)) break;
+      if (isExhausted(board)) {
+        // Every task is in. Before the team may say "done", the project's
+        // own tests on the merged result: red, the tasks the failure points
+        // at go back for their normal re-attempt — once — and the loop goes
+        // on (the lead, when there is one, looks first); red again, the team
+        // fails with the failing tests named.
+        if (allComplete(board)) {
+          const gate = await suiteGate(team, suiteRounds++ === 0);
+          if (team.stopRequested) break;
+          if (gate.reoffered.length) {
+            if (board.dynamic) leadAfter.push(...gate.reoffered);
+            continue;
+          }
+          suiteFailed = gate.failed;
+          suitePassed = gate.passed;
+        }
+        break;
+      }
       if (!waitingForRoom) break;
       await sleep(SLOT_WAIT_MS);
       continue;
@@ -680,11 +709,16 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   await Promise.allSettled([...inFlight.values()]);
   if (team.stopRequested) return;
   if (isSettledStatus(board.status)) return;
+  if (suiteFailed) {
+    setTeamStatus(board, SYSTEM, "failed", suiteFailed);
+    saveBoard(board);
+    return;
+  }
 
   // 3. The review over the merged result, when the planner asked for ONE
   //    rather than one per task — and only for work that is all there.
   if (allComplete(board) && board.shape?.review === "final") {
-    const verdict = await finalReview(team, source);
+    const verdict = await finalReview(team, source, suitePassed);
     if (team.stopRequested || isSettledStatus(board.status)) return;
     if (verdict?.verdict === "rejected") {
       setTeamStatus(board, SYSTEM, "failed", `The final review rejected the merged work: ${verdict.notes}`);
@@ -962,9 +996,11 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
  * Review mode `final`: ONE read-only reviewer over the merged result, once
  * every task passed the rule. Its verdict goes on the board either way; a
  * review that could not be done falls back to the rule with an alert, as a
- * task's reviewer does. Null when the team was stopped meanwhile.
+ * task's reviewer does. Null when the team was stopped meanwhile. `tests` is
+ * what the project's own suite said when the harness ran it green on this
+ * tree (`suiteGate`) — the reviewer may not run it.
  */
-async function finalReview(team: LiveTeam, source: CodingRunSource): Promise<{ verdict: "accepted" | "rejected"; notes: string } | null> {
+async function finalReview(team: LiveTeam, source: CodingRunSource, tests: string | null): Promise<{ verdict: "accepted" | "rejected"; notes: string } | null> {
   const { board, bus } = team;
   setTeamStatus(board, SYSTEM, "reviewing");
   saveBoard(board);
@@ -975,7 +1011,7 @@ async function finalReview(team: LiveTeam, source: CodingRunSource): Promise<{ v
     return verdict;
   };
   const files = [...new Set(board.tasks.filter((t) => t.status === "complete").flatMap((t) => t.files_hint))];
-  const where = { goal: board.goal, branch: board.branch, base: board.base, files };
+  const where = { goal: board.goal, branch: board.branch, base: board.base, files, tests };
   let run: CodingRun;
   try {
     run = await startRun({
@@ -1002,6 +1038,40 @@ async function finalReview(team: LiveTeam, source: CodingRunSource): Promise<{ v
   if (!parsed.ok) return byRule(parsed.reason, `The final reviewer gave no verdict: ${parsed.reason}`);
   bus.send(REVIEWER, { type: "final_review", ...parsed.verdict });
   return parsed.verdict;
+}
+
+/**
+ * The project's own test suite on the merged result, once every task is in
+ * (TASK-1321; detection and reading in `coding-team-suite.ts`). A team signed
+ * off "done" with its own suite red — 11 of 56 failing — because its workers
+ * were accepted by rule "since the final review checks the merged result" and
+ * the final reviewer is read-only: nobody ran the tests (team-59631zvn,
+ * nano-lab1, 2026-09-30). So the harness runs them itself, in the checkout the
+ * merges landed in, before the final review and before "done".
+ *
+ * No suite: nothing on the board, and the team finishes as it always did. A
+ * suite that passed, or that could not be judged: one note. A RED suite is a
+ * rejection by rule, the failing tests named — while `mayReoffer`, of every
+ * task the failure points at (`suiteSuspects`), each offered once more through
+ * the ordinary review loop and returned in `reoffered`; after that, or with no
+ * task left to offer it to, `failed` holds the words the team fails with.
+ * `passed` is what a green suite said, for the final reviewer.
+ */
+async function suiteGate(team: LiveTeam, mayReoffer: boolean): Promise<{ reoffered: string[]; failed: string | null; passed: string | null }> {
+  const { board, bus } = team;
+  const nothing = { reoffered: [], failed: null, passed: null };
+  const suite = await runProjectSuite(board.directory, suiteSandbox);
+  if (team.stopRequested || suite.kind === "none") return nothing;
+  if (suite.kind !== "fail") {
+    bus.send(SYSTEM, { type: "note", text: suiteNote(suite) });
+    return { ...nothing, passed: suite.kind === "pass" ? `${suite.command} — ${suite.summary}` : null };
+  }
+  const suspects = mayReoffer ? suiteSuspects(board.tasks, suite.files) : [];
+  bus.send(SYSTEM, { type: "note", text: suiteNote(suite, suspects.map((t) => t.task_id)) });
+  if (!suspects.length) return { ...nothing, failed: suiteFailure(suite) };
+  const notes = suiteRejection(suite);
+  for (const task of suspects) bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes });
+  return { ...nothing, reoffered: suspects.map((t) => t.task_id) };
 }
 
 /**
@@ -1238,6 +1308,19 @@ export function outsideHint(touched: string[], hint: string[]): string[] {
     .map(norm)
     .filter((f) => !isGeneratedArtifact(f))
     .filter((f) => !hints.some((h) => f === h || f.startsWith(`${h}/`)));
+}
+
+/**
+ * The tasks a red suite goes back to: the complete tasks with an attempt left
+ * (a rejection on the second one would end the task rather than retry it)
+ * whose files the failure names — a traceback's frame, a failing spec's path —
+ * or, when it names none of theirs, every one of them: a suite broken between
+ * tasks is not any one task's to fix alone.
+ */
+export function suiteSuspects(tasks: TeamTask[], named: string[]): TeamTask[] {
+  const open = tasks.filter((t) => t.status === "complete" && t.attempts < 2);
+  const pointed = open.filter((t) => named.some((f) => outsideHint([f], t.files_hint).length === 0));
+  return pointed.length ? pointed : open;
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────

@@ -464,6 +464,96 @@ describe("a box with no update branch to compare against is not 'up to date'", (
   });
 });
 
+describe("a box with NO recorded update branch still sees its releases (TASK-1213)", () => {
+  const BEHIND = "2222222222222222222222222222222222222222";
+
+  function enoent(): Error {
+    return Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" });
+  }
+
+  /**
+   * A box as it left the factory before install.sh learned to pin: no
+   * `.update-branch` (or an empty one), checked out on `checkout`, HEAD at SHA.
+   */
+  function unpinnedBox(opts: {
+    pin: Error | string;
+    checkout: string;
+    installed: string;
+    tags: string[];
+    originTip: string;
+  }): void {
+    install({
+      "remote get-url origin": { stdout: "https://github.com/ID-Robots/clawbox.git\n", stderr: "" },
+      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
+      [`fetch --quiet origin ${opts.checkout}`]: { stdout: "", stderr: "" },
+      "ls-remote": { stdout: opts.tags.map((t) => `${SHA}\trefs/tags/${t}\n`).join(""), stderr: "" },
+      "symbolic-ref --short HEAD": { stdout: `${opts.checkout}\n`, stderr: "" },
+      [`refs/remotes/origin/${opts.checkout}`]: { stdout: `${opts.originTip}\n`, stderr: "" },
+      "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
+      [`rev-parse origin/${opts.checkout}`]: { stdout: `${opts.originTip}\n`, stderr: "" },
+      openclaw: { stdout: "1.0.0", stderr: "" },
+    });
+    mockReadFile.mockImplementation(async (file) => {
+      const p = String(file);
+      if (p.endsWith(".update-branch")) {
+        if (opts.pin instanceof Error) throw opts.pin;
+        return opts.pin;
+      }
+      if (p.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+      if (p.endsWith("package.json")) return JSON.stringify({ version: opts.installed });
+      throw enoent();
+    });
+  }
+
+  it("offers the release on main by its name when no pin file exists", async () => {
+    // The field case: v4.0.x on main, v4.1.0 published, nothing recorded.
+    unpinnedBox({ pin: enoent(), checkout: "main", installed: "4.0.2", tags: ["v4.0.2", "v4.1.0"], originTip: BEHIND });
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(info.remote?.reachable).toBe(true);
+    expect(info.clawbox.updateAvailable).toBe(true);
+    expect(info.clawbox.target).toBe("v4.1.0");
+    // It looked at main, the branch an update would move it to.
+    expect(countArgv("fetch --quiet origin main")).toBeGreaterThan(0);
+  });
+
+  it("treats an empty pin file as no pin, and says up to date only after comparing", async () => {
+    unpinnedBox({ pin: "\n", checkout: "main", installed: "4.1.0", tags: ["v4.1.0"], originTip: SHA });
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    // `false`, not `null`: this box DID compare itself against origin/main.
+    expect(info.remote?.reachable).toBe(true);
+    expect(info.clawbox.updateAvailable).toBe(false);
+    expect(info.clawbox.target).toBeNull();
+    expect(countArgv("rev-parse origin/main")).toBeGreaterThan(0);
+  });
+
+  it("names the commit when main moved on without a newer release", async () => {
+    unpinnedBox({ pin: enoent(), checkout: "main", installed: "4.1.0", tags: ["v4.1.0"], originTip: BEHIND });
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(info.clawbox.updateAvailable).toBe(true);
+    expect(info.clawbox.target).toBe("main@2222222");
+  });
+
+  it("follows the branch the box is checked out on, as an update would — not main", async () => {
+    unpinnedBox({ pin: enoent(), checkout: "beta", installed: "4.0.2", tags: ["v4.0.2", "v4.1.0"], originTip: BEHIND });
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(info.clawbox.target).toBe("beta@2222222");
+    expect(countArgv("fetch --quiet origin beta")).toBeGreaterThan(0);
+    expect(countArgv("fetch --quiet origin main")).toBe(0);
+  });
+});
+
 describe("a retry delay an operator got wrong", () => {
   it("is replaced with the default, and said out loud", async () => {
     // `Number("soon")` is NaN and a negative value stays negative; `setTimeout`

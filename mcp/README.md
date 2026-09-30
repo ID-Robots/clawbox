@@ -345,7 +345,9 @@ object the agent reads as "not paired yet".
 
 `backup_status` returns the shared `protection` verdict plus a `notes` array —
 the caveats that apply to *this* box (a `lastHeartbeatStatus` that is not the
-outcome by itself, a protected verdict with no schedule behind it). They are on
+outcome by itself, a protected verdict with no schedule behind it, the box's own
+backup archives the last snapshot left out, the snapshot-sized archive files it
+still carried — named in `largeArchives`, never quoted in a note). They are on
 the result rather than in the tool description because they are conditional,
 and because description text is paid for in the `tools/list` payload on every
 turn. The key is always present on a status result, and the array is often

@@ -30,6 +30,16 @@ class Archive:
     created_at: str   # ISO8601 from openclaw
     size_bytes: int   # local file size at upload time
     asset_count: int  # number of state assets (state, credentials, …)
+    #: What ClawKeep left out of this archive: the box's own backup archives,
+    #: set aside for the build (`own_backups`). Zero from the core itself and
+    #: from Hermes' archiver, which leave nothing out.
+    left_out_count: int = 0
+    left_out_bytes: int = 0
+    #: Snapshot-sized archive files this archive CARRIES, as ("~/…", bytes),
+    #: largest first — at most `own_backups.LISTED_LARGE` named, all counted.
+    large_archives: tuple[tuple[str, int], ...] = ()
+    large_archive_count: int = 0
+    large_archive_bytes: int = 0
 
 
 #: What a failed archive build was ABOUT — the words `Failure.kind` takes.

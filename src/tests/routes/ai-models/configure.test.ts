@@ -54,6 +54,18 @@ vi.mock("@/lib/clawkeep", () => ({
   unpairLocal: vi.fn(),
 }));
 
+// The ClawBox AI plugin install clears the "Repair needed" row a boot filed
+// (TASK-1302). Passed straight through to the real store — only the calls are
+// watched, so every other case here runs exactly as it did.
+vi.mock("@/lib/plugin-repair", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/plugin-repair")>("@/lib/plugin-repair");
+  return {
+    ...actual,
+    clawboxDisabledEntryId: vi.fn(actual.clawboxDisabledEntryId),
+    clearPluginRepair: vi.fn(actual.clearPluginRepair),
+  };
+});
+
 // Connecting a provider re-enables it. The switch itself is exercised by the
 // providers/enabled route tests; here only the call matters.
 vi.mock("@/lib/provider-enablement", () => ({
@@ -3553,6 +3565,57 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(retry.some(isEnable)).toBe(true);
       expect(retry.some(carriesAnthropicPrimary)).toBe(false);
       expect(warn.mock.calls.map(([first]) => String(first)).some((line) => line.includes("Primary written directly"))).toBe(true);
+    });
+  });
+
+  describe("ClawBox AI's plugin on a core ClawHub has no build for (TASK-1302)", () => {
+    // The 4.1 box: core 2026.9.4, which ClawHub answers "Version not found"
+    // for, while npm carries the build.
+    const PINNED = "clawhub:@openclaw/deepseek-provider@2026.9.4";
+    const NPM_PINNED = "npm:@openclaw/deepseek-provider@2026.9.4";
+    const UNPINNED = "clawhub:@openclaw/deepseek-provider";
+
+    function registriesRefuse(specs: string[]) {
+      vi.mocked(spawnOpenclawCli).mockImplementation(async (args: string[]) => {
+        if (args[0] === "--version") return "OpenClaw 2026.9.4 (3a9d69d)\n";
+        if (args[0] === "plugins" && args[1] === "install" && specs.includes(args[2])) {
+          throw new Error(`Version not found on ClawHub: ${args[2].replace(/^[a-z]+:/, "")}.`);
+        }
+        return "";
+      });
+    }
+
+    const installs = () => vi.mocked(spawnOpenclawCli).mock.calls
+      .filter(([args]) => args[0] === "plugins" && args[1] === "install")
+      .map(([args]) => args.join(" "));
+
+    it("installs the core's build from npm and takes the Repair needed row away", async () => {
+      registriesRefuse([PINNED]);
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+
+      expect(res.status).toBe(200);
+      expect(installs()).toEqual([
+        `plugins install ${PINNED} --accept-capabilities`,
+        `plugins install ${NPM_PINNED} --force --accept-capabilities`,
+      ]);
+      const { clearPluginRepair } = await import("@/lib/plugin-repair");
+      expect(vi.mocked(clearPluginRepair)).toHaveBeenCalledWith("deepseek");
+    });
+
+    it("leaves the row in place when no registry can serve it, and still connects the provider", async () => {
+      registriesRefuse([PINNED, NPM_PINNED, UNPINNED]);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+
+      expect(res.status).toBe(200);
+      expect(installs()).toHaveLength(3);
+      const { clearPluginRepair } = await import("@/lib/plugin-repair");
+      expect(vi.mocked(clearPluginRepair)).not.toHaveBeenCalled();
+      expect(warn.mock.calls.some(([first]) => String(first).includes("deepseek provider plugin install did not complete")))
+        .toBe(true);
+      warn.mockRestore();
     });
   });
 });

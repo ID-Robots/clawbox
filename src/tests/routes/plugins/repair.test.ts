@@ -644,3 +644,50 @@ describe("plugins/repair — a row an older core left (TASK-1088)", () => {
     ]);
   });
 });
+
+describe("plugins/repair — ClawBox AI on a core ClawHub has no build for (TASK-1302)", () => {
+  // The owner's box: core 2026.9.4, a "Repair needed" row saying ClawHub has
+  // no such version. The installer now asks npm for the same build.
+  const ROW = {
+    id: "deepseek",
+    stage: "install",
+    reason: "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. The device may be offline, "
+      + "or the package registry unreachable. openclaw plugins install exited 1: Version not found on ClawHub: "
+      + "@openclaw/deepseek-provider@2026.9.4",
+    atMs: 7,
+    disabled: true,
+    spec: "clawhub:@openclaw/deepseek-provider@2026.9.4",
+  };
+
+  it("repairs it from npm, switches it back on, restarts and clears the row", async () => {
+    readPluginRepairs.mockResolvedValue({ deepseek: ROW });
+    installDeepseek.mockResolvedValue({
+      installed: "npm:@openclaw/deepseek-provider@2026.9.4",
+      failures: ["clawhub:@openclaw/deepseek-provider@2026.9.4: Version not found on ClawHub: @openclaw/deepseek-provider@2026.9.4."],
+    });
+    stubExec(async () => ({ stdout: JSON.stringify({ plugin: { id: "deepseek", status: "loaded", activated: true } }) }));
+
+    const r = await post({ pluginId: "deepseek" });
+
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true, pluginId: "deepseek", restarted: true, markerCleared: true });
+    // Forced: after a core bump the old payload is usually still on disk.
+    expect(installDeepseek).toHaveBeenCalledWith({ force: true });
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith(['plugins.entries["deepseek"].enabled', "true", "--strict-json"]);
+    expect(restartGateway).toHaveBeenCalled();
+    expect(clearUnlessRefiled).toHaveBeenCalledWith("deepseek", 7);
+  });
+
+  it("keeps the row, and the Retry, when no registry can serve it", async () => {
+    readPluginRepairs.mockResolvedValue({ deepseek: ROW });
+    installDeepseek.mockResolvedValue({ installed: null, failures: ["a: one", "b: two", "c: three"] });
+
+    const r = await post({ pluginId: "deepseek" });
+
+    expect(r.status).toBe(502);
+    expect(await r.json()).toMatchObject({ ok: false, code: "repair_failed" });
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(clearUnlessRefiled).not.toHaveBeenCalled();
+    expect(setInProgress).toHaveBeenCalledWith("deepseek", false);
+  });
+});

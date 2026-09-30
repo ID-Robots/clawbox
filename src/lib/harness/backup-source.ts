@@ -82,7 +82,10 @@ const OPENCLAW: BackupSource = {
     "clawkeep.contents.openclaw.sessions",
     "clawkeep.contents.openclaw.workspace",
   ],
-  excludesKeys: [],
+  // `openclaw backup create` carries the whole state directory and has no
+  // exclude option; ClawKeep sets the box's own archives aside for the build
+  // (`clawkeep/own_backups.py`), so this line is the rule said in the UI.
+  excludesKeys: ["clawkeep.contents.openclaw.excludeBackups"],
 };
 
 export function backupSourceFor(id: HarnessId): BackupSource {
