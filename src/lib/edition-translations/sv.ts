@@ -800,6 +800,7 @@ export const sv: Record<string, string> = {
   "codingAgent.team.messageToAssistant": "till assistenten",
   "codingAgent.team.messageToRun": "till {run}",
   "codingAgent.team.messageUndelivered": "inte levererat",
+  "codingAgent.team.messageReceiverFinished": "{run} var redan klar",
   "codingAgent.team.task.retired": "Indragen",
   "codingAgent.team.roleLead": "Teamets ledare · efter {task}",
   "codingAgent.team.agentsWithLead": "{total} agenter arbetade här — planerare {planner} · arbetare {workers} · granskare {reviewers} · ledare {leads}",

@@ -814,6 +814,7 @@ export const zh: Record<string, string> = {
   "codingAgent.team.messageToAssistant": "发给助手",
   "codingAgent.team.messageToRun": "发给 {run}",
   "codingAgent.team.messageUndelivered": "未送达",
+  "codingAgent.team.messageReceiverFinished": "{run} 已经结束",
   "codingAgent.team.task.retired": "已撤销",
   "codingAgent.team.roleLead": "团队负责人 · {task} 之后",
   "codingAgent.team.agentsWithLead": "{total} 个代理在此工作 — 规划者 {planner} · 工作者 {workers} · 审核者 {reviewers} · 负责人 {leads}",

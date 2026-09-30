@@ -804,6 +804,7 @@ export const nl: Record<string, string> = {
   "codingAgent.team.messageToAssistant": "aan de assistent",
   "codingAgent.team.messageToRun": "aan {run}",
   "codingAgent.team.messageUndelivered": "niet afgeleverd",
+  "codingAgent.team.messageReceiverFinished": "{run} was al klaar",
   "codingAgent.team.task.retired": "Ingetrokken",
   "codingAgent.team.roleLead": "Teamleider · na {task}",
   "codingAgent.team.agentsWithLead": "{total} agents werkten hier — planner {planner} · werkers {workers} · teamreviewers {reviewers} · teamleider {leads}",

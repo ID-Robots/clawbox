@@ -31,6 +31,7 @@ import { DATA_DIR } from "@/lib/config-store";
 import {
   MAX_TEAM_MESSAGE_CHARS,
   MAX_TEAM_MESSAGES_PER_RUN,
+  RUN_ID_RE,
   TEAM_MESSAGE_TARGETS,
   teamMessageAllowance,
   type TeamMessageRefusal,
@@ -113,7 +114,13 @@ export interface TeamMetrics {
   tokensUsed: number;
   /** From the team's creation to its end — or to now, while it works. */
   wallMs: number;
-  /** Team messages on the log (team_message), and of those: to the lead, to a sibling, and the ones the box could not hand on. */
+  /**
+   * Team messages on the log (team_message), and of those: to the lead, to a
+   * sibling, and the ones that never reached anybody — the box could not hand
+   * them on (a `message` entry), or the sibling had already finished (a
+   * `note`, `UndeliveredNote`). A message the SENDER got wrong is an alert and
+   * is in none of these.
+   */
   messagesSent: number;
   messagesToLead: number;
   messagesToSibling: number;
@@ -215,6 +222,21 @@ export interface TeamMessagePayload {
   text: string;
   delivered?: false;
   code?: TeamMessageRefusal;
+}
+
+/**
+ * A `note` entry's `undelivered` payload: a team message that never reached
+ * its receiver because the receiver had already finished (`NOTED_REFUSALS`) —
+ * who sent it, in which role, to whom, and why. The figures count it as an
+ * undelivered message and the card words it in the reader's language. The
+ * words themselves are not kept: nobody read them, and the sender was told.
+ */
+export interface UndeliveredNote {
+  code: TeamMessageRefusal;
+  from: string;
+  role: TeamRunRef["role"];
+  to: TeamMessageTarget;
+  toRunId?: string;
 }
 
 export interface TeamBoard {
@@ -701,13 +723,37 @@ export function raiseAlert(board: TeamBoard, actor: Actor, reason: string, taskI
  * the team's alert ceiling. Only the system (the orchestrator) writes one —
  * today, a worker whose every refusal only LOOKED (`readOnlyDenial`) or wrote
  * outside its folders (`outsideFolderWriteDenial`), with how many, which the
- * figures count; and a plan's text cut to fit its bound
- * (`clippedNote`), every cut on one line.
+ * figures count; a plan's text cut to fit its bound (`clippedNote`), every
+ * cut on one line; and a team message whose receiver had already finished
+ * (`undelivered`, from `TeamBus.refuse`), which the figures count too.
  */
-export function postNote(board: TeamBoard, actor: Actor, text: string, taskId?: string, readOnlyRefusals?: number): void {
+export function postNote(board: TeamBoard, actor: Actor, text: string, taskId?: string, readOnlyRefusals?: number, undelivered?: UndeliveredNote): void {
   if (actor.kind !== "system") throw new BoardAccessError(actor, "note", `Only the system writes a note; ${describeActor(actor)} may not.`);
   const now = Date.now();
-  append(board, { ts: now, actor, type: "note", task_id: taskId, message: firstLine(text, 600), ...(readOnlyRefusals ? { payload: { readOnlyRefusals } } : {}) });
+  const payload = { ...(readOnlyRefusals ? { readOnlyRefusals } : {}), ...(undelivered ? { undelivered } : {}) };
+  append(board, { ts: now, actor, type: "note", task_id: taskId, message: firstLine(text, 600), ...(Object.keys(payload).length ? { payload } : {}) });
+}
+
+/**
+ * A note's `undelivered` payload read back, or null — for any other entry, and
+ * for one whose payload is not the shape `postNote` writes: a board file is
+ * re-read, never trusted, and a malformed one is a line, not a figure.
+ */
+export function undeliveredNoteOf(entry: Pick<LogEntry, "type" | "payload">): UndeliveredNote | null {
+  if (entry.type !== "note") return null;
+  const u = entry.payload?.undelivered as Record<string, unknown> | undefined;
+  if (!u || typeof u !== "object") return null;
+  if (typeof u.code !== "string" || typeof u.from !== "string" || !RUN_ID_RE.test(u.from)) return null;
+  if (!(RUN_ROLES as readonly unknown[]).includes(u.role)) return null;
+  if (typeof u.to !== "string" || !(TEAM_MESSAGE_TARGETS as readonly string[]).includes(u.to)) return null;
+  if (u.toRunId !== undefined && (typeof u.toRunId !== "string" || !RUN_ID_RE.test(u.toRunId))) return null;
+  return {
+    code: u.code as TeamMessageRefusal,
+    from: u.from,
+    role: u.role as TeamRunRef["role"],
+    to: u.to as TeamMessageTarget,
+    ...(typeof u.toRunId === "string" ? { toRunId: u.toRunId } : {}),
+  };
 }
 
 /**
@@ -990,6 +1036,9 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
   // read back is still a message sent, just not one to anybody in particular.
   const messages = board.log.filter((e) => e.type === "message");
   const payloads = messages.map((e) => e.payload as Partial<TeamMessagePayload> | undefined);
+  // A message to a sibling that had finished is a note, not a message entry —
+  // still one the run sent, and one nobody got.
+  const unreached = board.log.map(undeliveredNoteOf).filter((u): u is UndeliveredNote => u !== null);
   return {
     plannerRuns: agents.planner,
     workerRuns: agents.workers,
@@ -1002,10 +1051,10 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
     tasksRejected: board.tasks.filter((t) => t.rejections > 0).length,
     tokensUsed: board.runs.reduce((sum, r) => sum + (typeof r.tokens === "number" && Number.isFinite(r.tokens) ? r.tokens : 0), 0),
     wallMs: board.createdAt > 0 ? Math.max(0, ended - board.createdAt) : 0,
-    messagesSent: messages.length,
-    messagesToLead: payloads.filter((p) => p?.to === "lead").length,
-    messagesToSibling: payloads.filter((p) => p?.to === "sibling").length,
-    messagesUndelivered: payloads.filter((p) => p?.delivered === false).length,
+    messagesSent: messages.length + unreached.length,
+    messagesToLead: payloads.filter((p) => p?.to === "lead").length + unreached.filter((u) => u.to === "lead").length,
+    messagesToSibling: payloads.filter((p) => p?.to === "sibling").length + unreached.filter((u) => u.to === "sibling").length,
+    messagesUndelivered: payloads.filter((p) => p?.delivered === false).length + unreached.length,
     readOnlyRefusals: board.log.reduce((sum, e) => {
       const n = e.type === "note" ? e.payload?.readOnlyRefusals : undefined;
       return sum + (typeof n === "number" && Number.isInteger(n) && n > 0 ? n : 0);

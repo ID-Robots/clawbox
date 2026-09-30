@@ -805,6 +805,7 @@ export const ja: Record<string, string> = {
   "codingAgent.team.messageToAssistant": "アシスタント宛て",
   "codingAgent.team.messageToRun": "{run} 宛て",
   "codingAgent.team.messageUndelivered": "未配信",
+  "codingAgent.team.messageReceiverFinished": "{run} はすでに終了していました",
   "codingAgent.team.task.retired": "取り下げ",
   "codingAgent.team.roleLead": "チームのリード · {task} の後",
   "codingAgent.team.agentsWithLead": "{total} 体のエージェントが作業しました — プランナー {planner} · ワーカー {workers} · レビュアー {reviewers} · リード {leads}",
