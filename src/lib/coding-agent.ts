@@ -8409,6 +8409,25 @@ async function deliverableSandbox(run: CodingRun): Promise<DeliverableSandbox | 
 }
 
 /**
+ * The sandbox a coding team runs the project's own test suite in, on its
+ * merged result (`coding-team-suite.ts`, TASK-1321): the harness's own, as for
+ * a deliverable command, with a run's environment and no run behind it — plus
+ * two words for a test runner: CI, so one that would watch for changes runs
+ * once, and no bytecode, so the suite leaves no __pycache__ in the checkout the
+ * team's next merge lands in. Null when `setpriv` cannot be found: the suite is
+ * then not run at all.
+ */
+export async function suiteSandbox(): Promise<DeliverableSandbox | null> {
+  const setprivPath = await findExecutableOnPath(CAPABILITY_DROP_COMMAND);
+  if (!setprivPath) return null;
+  return {
+    bin: setprivPath,
+    args: CAPABILITY_DROP_ARGS,
+    env: { ...buildRunEnv(), CI: "1", PYTHONDONTWRITEBYTECODE: "1" },
+  };
+}
+
+/**
  * Put the pull request step back to pending for a run that is going back to
  * work, when no pull request was ever opened.
  *
