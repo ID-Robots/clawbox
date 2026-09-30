@@ -212,7 +212,45 @@ async function checkCommand(
   if (!sandbox) {
     return verdict(false, "The deliverable command could not be run: this box is missing setpriv, so there is no sandbox to run it in.");
   }
-  return await new Promise<DeliverableVerdict>((resolve) => {
+  const ran = await runSandboxed(directory, command, sandbox, { timeoutMs: DELIVERABLE_COMMAND_TIMEOUT_MS, keepChars: MAX_COMMAND_OUTPUT_CHARS * 4 });
+  if (ran.error !== null) return verdict(false, `The deliverable command could not be run: ${ran.error}`);
+  if (ran.timedOut) {
+    return verdict(false, `The deliverable command did not finish within ${Math.round(DELIVERABLE_COMMAND_TIMEOUT_MS / 60_000)} minutes.`);
+  }
+  if (ran.code === 0) return verdict(true, null);
+  const tail = lastLine(ran.output);
+  return verdict(false, `The deliverable command exited ${ran.code ?? "without a code"}${tail ? `: ${tail}` : "."}`);
+}
+
+/** What a sandboxed command did. */
+export interface SandboxedOutcome {
+  /** Its exit code; null when it timed out, could not start, or ended on a signal. */
+  code: number | null;
+  /** The TAIL of what it said on stdout and stderr together, at most `keepChars`. */
+  output: string;
+  /** It was still going at the deadline, and its process group was ended. */
+  timedOut: boolean;
+  /** Why it could not be spawned at all; null when it ran. */
+  error: string | null;
+}
+
+/**
+ * Run `command` in `directory` through the sandbox, the way the harness itself
+ * is run, and say what it did. A command that cannot be spawned is an `error`
+ * in the outcome (only an argument `spawn` refuses outright rejects).
+ *
+ * The one place a CHECK spawns a project's own command: the deliverable
+ * command above, and a coding team's run of the project's test suite on its
+ * merged result (`coding-team-suite.ts`), which needs more of the output than
+ * a last line — the failing tests' names are in it.
+ */
+export async function runSandboxed(
+  directory: string,
+  command: string,
+  sandbox: DeliverableSandbox,
+  opts: { timeoutMs: number; keepChars: number },
+): Promise<SandboxedOutcome> {
+  return await new Promise<SandboxedOutcome>((resolve) => {
     let output = "";
     let settled = false;
     const child = spawn(sandbox.bin, [...sandbox.args, "/bin/bash", "-lc", command], {
@@ -236,7 +274,7 @@ async function checkCommand(
       // The TAIL, kept by trimming as it arrives: a command that prints a
       // megabyte must not put a megabyte in this closure on its way to a
       // 200-character field.
-      output = (output + String(chunk)).slice(-(MAX_COMMAND_OUTPUT_CHARS * 4));
+      output = (output + String(chunk)).slice(-opts.keepChars);
     };
     child.stdout?.on("data", keep);
     child.stderr?.on("data", keep);
@@ -267,31 +305,24 @@ async function checkCommand(
         try { child.kill("SIGKILL"); } catch { /* already gone */ }
       }
     };
-    const done = (result: DeliverableVerdict): void => {
+    const done = (result: Omit<SandboxedOutcome, "output">): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(result);
+      resolve({ ...result, output });
     };
     const timer = setTimeout(() => {
       // The child is definitely still alive here, so the pgid is certainly ours.
       endGroup();
-      done(verdict(false, `The deliverable command did not finish within ${Math.round(DELIVERABLE_COMMAND_TIMEOUT_MS / 60_000)} minutes.`));
-    }, DELIVERABLE_COMMAND_TIMEOUT_MS);
+      done({ code: null, timedOut: true, error: null });
+    }, opts.timeoutMs);
     // The timer must never hold the web server open: this is the one
     // long-lived ClawBox process.
     timer.unref?.();
 
-    const settle = (code: number | null): void => {
-      if (code === 0) return done(verdict(true, null));
-      const tail = lastLine(output);
-      done(verdict(
-        false,
-        `The deliverable command exited ${code ?? "without a code"}${tail ? `: ${tail}` : "."}`,
-      ));
-    };
+    const settle = (code: number | null): void => done({ code, timedOut: false, error: null });
     child.on("error", (err) => {
-      done(verdict(false, `The deliverable command could not be run: ${err.message}`));
+      done({ code: null, timedOut: false, error: err.message });
     });
     // `exit` with a grace, and `close` whichever comes first — see
     // COMMAND_EXIT_GRACE_MS. `done` is idempotent, so the pair cannot double-settle.
