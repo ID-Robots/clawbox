@@ -54,3 +54,6 @@ scripts/nm-dispatcher-failover.sh
 __pycache__/
 *.pyc
 bench/results/
+# scripts/nano-tests/run.sh writes its logs and summary.json to ./results by
+# default (the nano-lab job uploads them as an artifact).
+/results/

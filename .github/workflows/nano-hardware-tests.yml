@@ -1,0 +1,239 @@
+name: Nano hardware tests
+
+# The on-device suite (scripts/nano-tests/, TASK-1324) on ONE real Jetson from
+# the nano lab: reserve a free board, rebuild it to the commit under test, prove
+# it runs that commit, run the suite, and then — whatever happened, a failure or
+# a cancel included — clean the board back to beta and release it.
+#
+# Everything that needs the real hardware and nothing that the container CI
+# already covers: see docs/nano-hardware-tests.md.
+#
+# Opt-in, per pull request: add the label `nano-test` to a PR into beta. The job
+# then runs on that labelling and again on every push to the PR while the label
+# stays. `workflow_dispatch` runs it on any branch, tag or commit of this
+# repository.
+#
+# Never fork code on the lab host. The `if:` below admits a pull_request only
+# when its head is in THIS repository; since a pull_request run takes its
+# workflow file from the PR, the real fence for a fork is the repository setting
+# that makes fork PRs wait for a maintainer's approval — approve no fork run of
+# this workflow. A dispatch refuses refs/pull/* for the same reason.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    branches: [beta]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit SHA of this repository to test on a lab board (not refs/pull/*)"
+        required: true
+        default: beta
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  nano-hardware-tests:
+    name: On-device tests (nano-lab)
+    # A `labeled` event for some OTHER label on a PR that already carries
+    # nano-test is not a reason to take a board for another hour.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(github.event.pull_request.labels.*.name, 'nano-test') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'nano-test'))
+    runs-on: [self-hosted, nano-lab]
+    # One board job at a time across the repository, and a running job is never
+    # cancelled by the next one — a push to the PR queues behind it instead.
+    # GitHub keeps ONE pending job per group: a third queued job replaces the
+    # second, which then shows as cancelled (before it took a board) and needs
+    # a re-run.
+    concurrency:
+      group: nano-lab-board
+      cancel-in-progress: false
+    # The budget, so that cleanup always has room: rebuild 20 + health 10 +
+    # suite 40 min at the very worst; a normal run spends ~25 of the 90 before
+    # cleanup, leaving a reflash (~40 min) time to finish.
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      NANO_RESULTS_DIR: ${{ github.workspace }}/results
+    steps:
+      # Before the checkout: a pull-request ref names code from a fork, and the
+      # steps after the checkout run the code they checked out.
+      - name: Refuse fork refs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          if ! [[ $INPUT_REF =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "::error title=Refused ref::not a branch, tag or commit name"
+            exit 1
+          fi
+          case "$INPUT_REF" in
+            refs/pull/*|pull/*|refs/remotes/*)
+              echo "::error title=Refused ref::$INPUT_REF may be fork code; dispatch a branch, tag or commit of this repository"
+              exit 1
+              ;;
+          esac
+
+      - name: Check out the commit under test
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.ref }}
+          persist-credentials: false
+
+      - name: Resolve the commit and check the lab host
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          if [ "$EVENT" = pull_request ] && [ "$sha" != "$PR_HEAD_SHA" ]; then
+            echo "::error::checked out $sha, but the PR head is $PR_HEAD_SHA"
+            exit 1
+          fi
+          missing=""
+          for tool in nano-ci jq timeout base64; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error title=Lab host not ready::missing on the runner host:$missing"
+            exit 1
+          fi
+          if [ "$EVENT" = pull_request ]; then
+            purpose="clawbox PR #$PR_NUMBER $sha"
+          else
+            purpose="clawbox dispatch $INPUT_REF $sha"
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "purpose=$purpose" >> "$GITHUB_OUTPUT"
+          echo "Testing $sha on a nano-lab board ($purpose)"
+
+      - name: Reserve a free nano-lab board
+        id: reserve
+        env:
+          PURPOSE: ${{ steps.target.outputs.purpose }}
+        run: |
+          rc=0
+          out=$(nano-ci reserve "$PURPOSE") || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "::error title=No free nano-lab board::every board in the lab is leased right now; re-run this job when one is free"
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=nano-ci reserve failed::exit $rc"
+            exit 1
+          fi
+          # "SERIAL IP LAB" — the last line that has all three.
+          read -r serial ip lab <<<"$(printf '%s\n' "$out" | awk 'NF >= 3 { line = $0 } END { print line }')"
+          if ! [[ ${serial:-} =~ ^[A-Za-z0-9._:-]+$ ]]; then
+            echo "::error title=Unreadable reservation::nano-ci reserve printed no 'SERIAL IP LAB' line; if it leased a board, release it by hand"
+            exit 1
+          fi
+          # Once `serial` is an output, the cleanup and release steps run.
+          {
+            echo "serial=$serial"
+            echo "ip=$ip"
+            echo "lab=$lab"
+          } >> "$GITHUB_OUTPUT"
+          echo "Reserved $serial ($ip) in $lab"
+
+      - name: Rebuild the board at the commit under test
+        id: rebuild
+        timeout-minutes: 20
+        env:
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: nano-ci rebuild "$SERIAL" "$SHA"
+
+      # The rebuild restarts the web server (and the gateway, twice).
+      - name: Wait for the board to come back
+        id: healthy
+        timeout-minutes: 10
+        env:
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+        run: |
+          for attempt in $(seq 1 60); do
+            if nano-ci health "$SERIAL"; then
+              echo "healthy (check $attempt)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error title=Board unhealthy::$SERIAL is not healthy 10 minutes after the rebuild"
+          exit 1
+
+      - name: Verify the board runs the commit under test
+        id: verify
+        env:
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          board_sha=$(nano-ci ssh "$SERIAL" 'git -C /home/clawbox/clawbox rev-parse HEAD' | tail -n 1 | tr -d '[:space:]') || true
+          if [ "$board_sha" != "$SHA" ]; then
+            echo "::error title=Wrong commit on the board::$SERIAL is at '${board_sha:-nothing}', expected $SHA"
+            exit 1
+          fi
+          echo "$SERIAL is at $SHA"
+
+      - name: Run the on-device suite
+        id: suite
+        timeout-minutes: 40
+        env:
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+          NANO_LAB: ${{ steps.reserve.outputs.lab }}
+          NANO_SHA: ${{ steps.target.outputs.sha }}
+          NANO_RUN_ID: gh${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/nano-tests/run.sh "$SERIAL"
+
+      - name: Upload the suite's results
+        if: always() && steps.reserve.outputs.serial != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: nano-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.NANO_RESULTS_DIR }}
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Job summary
+        if: always()
+        env:
+          NANO_SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+          NANO_LAB: ${{ steps.reserve.outputs.lab }}
+          NANO_SHA: ${{ steps.target.outputs.sha || github.event.pull_request.head.sha || inputs.ref }}
+          NANO_OUTCOME: "Steps: reserve ${{ steps.reserve.outcome || 'not run' }} · rebuild ${{ steps.rebuild.outcome || 'not run' }} · back up ${{ steps.healthy.outcome || 'not run' }} · commit verified ${{ steps.verify.outcome || 'not run' }} · suite ${{ steps.suite.outcome || 'not run' }}"
+        run: |
+          if [ -f scripts/nano-tests/summary.sh ]; then
+            bash scripts/nano-tests/summary.sh "$NANO_RESULTS_DIR/summary.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Clean the board up
+        if: always() && steps.reserve.outputs.serial != ''
+        env:
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+        run: |
+          if nano-ci cleanup "$SERIAL"; then
+            echo "- Cleanup: \`$SERIAL\` rebuilt back to beta and its test projects wiped." >> "$GITHUB_STEP_SUMMARY"
+          else
+            rc=$?
+            echo "::error title=Board cleanup failed::nano-ci cleanup $SERIAL exited $rc; the board needs a look before its next job"
+            echo "- **Cleanup FAILED** for \`$SERIAL\` (exit $rc): the board needs a look before its next job." >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
+
+      - name: Release the board
+        if: always() && steps.reserve.outputs.serial != ''
+        env:
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+        run: |
+          nano-ci release "$SERIAL"
+          echo "- Released \`$SERIAL\`." >> "$GITHUB_STEP_SUMMARY"

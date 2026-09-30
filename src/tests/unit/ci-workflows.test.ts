@@ -197,6 +197,14 @@ describe("the checks CI runs, and their blocking status", () => {
     runsBlocking("bun run scripts/i18n-scan.ts");
   });
 
+  it("shellchecks and self-tests the on-device suite's runner, blocking", () => {
+    // The suite itself needs a lab board (nano-hardware-tests.yml, opt-in by
+    // label); the runner that turns its output into a verdict does not, and a
+    // runner that could not fail would report every board green.
+    runsBlocking("shellcheck -x scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh");
+    runsBlocking("bash scripts/nano-tests/selftest.sh");
+  });
+
   it("runs eslint, and says out loud that it is advisory", () => {
     // eslint reports errors on beta today, so it cannot be blocking without
     // being fixed first. `continue-on-error` is the mechanism that says so out
@@ -278,6 +286,7 @@ describe("the checks CI runs, and their blocking status", () => {
       "./scripts/check-doc-images.sh", "bun run check:sudoers", "python3 -m unittest discover -s scripts/x64-migration",
       "bun run scripts/i18n-scan.ts", "bun run typecheck:mcp", "bun run check:mcp-tools", "bun run lint",
       "bun run test:coverage:shard", "bash scripts/check-vitest-shards.sh", "bun run test:coverage:merge",
+      "shellcheck -x scripts/nano-tests/", "bash scripts/nano-tests/selftest.sh",
     ]) {
       const runners = [...jobs].filter(([, text]) => runsOfEachStep(text).some((body) => body.includes(command))).map(([key]) => key);
       expect(runners.length, `${command} is not run by any step of any job`).toBeGreaterThan(0);
