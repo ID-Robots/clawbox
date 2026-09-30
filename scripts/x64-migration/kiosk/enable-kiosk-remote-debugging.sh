@@ -6,8 +6,8 @@
 #
 # Idempotent: adds the two --remote-debugging flags to
 # /usr/local/bin/clawbox-kiosk-browser right after --start-maximized, keeps a
-# backup beside it, and (unless --no-restart) restarts the kiosk Chromium so
-# the flags take effect. Loopback only: nothing off the laptop can reach it.
+# backup beside it, and (unless --no-restart) reboots so the kiosk session
+# picks the flags up (the running launcher loop holds the old flag list). Loopback only: nothing off the laptop can reach it.
 #
 # Run as root:  sudo scripts/x64-migration/kiosk/enable-kiosk-remote-debugging.sh
 set -euo pipefail
@@ -31,18 +31,15 @@ else
 fi
 
 if [ "$RESTART" -eq 1 ]; then
-  # The launcher's own loop restarts Chromium after a non-zero exit; a clean
-  # exit counts as a "close" and is also relaunched. Kill the parent process
-  # only, so the loop keeps running.
-  PID=$(pgrep -f 'chrome-linux64/chrome --ozone-platform=wayland' | head -1 || true)
-  if [ -n "$PID" ]; then
-    kill "$PID"
-    for _ in $(seq 1 20); do
-      curl -sf -m 1 "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1 && { echo "kiosk CDP is up"; exit 0; }
-      sleep 1
-    done
-    echo "kiosk restarted but CDP not answering yet on $PORT; check ~/.cache/clawbox-kiosk.log" >&2
-    exit 1
+  # The launcher is a long-running bash loop that evaluated its FLAGS array
+  # when the session started; killing only Chromium relaunches it with the
+  # OLD flags. The whole kiosk session has to restart: GDM autologin brings
+  # it straight back on a reboot, so that is the default.
+  if pgrep -f 'bash /usr/local/bin/clawbox-kiosk-browser' >/dev/null; then
+    echo "kiosk session is running with the old flags; rebooting in 5s (Ctrl+C to skip; then reboot later)"
+    sleep 5
+    systemctl reboot
+  else
+    echo "kiosk session not running; flags apply at next session start"
   fi
-  echo "kiosk browser not running; flags apply at next session start"
 fi

@@ -131,4 +131,4 @@ initial installation if a complete package-level rollback is required.
 port (default 18801) to `/usr/local/bin/clawbox-kiosk-browser`, mirroring the
 VNC browser's port 18800, so the agent can screenshot/drive the ClawBox UI on
 the physical display. Run it with sudo after any update that rewrites the
-launcher; it is idempotent and restarts the kiosk Chromium.
+launcher; it is idempotent and reboots (the running launcher loop keeps the old flags).
