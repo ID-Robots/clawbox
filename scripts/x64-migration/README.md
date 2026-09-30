@@ -149,9 +149,13 @@ It adds, idempotently and after `--start-maximized`, `--kiosk`,
 `--disable-extensions-except=<same>` (the path follows the checkout the script
 is run from; `CLAWBOX_KIOSK_EXTENSION` overrides it), `--force-dark-mode` and
 `--enable-features=WebUIDarkMode` (Chrome's own dialogs, error pages and
-scrollbars in dark, beside the dark desktop), keeps a backup beside the
-launcher and `bash -n`-checks the result. Run it again after any update that
-rewrites the launcher.
+scrollbars in dark, beside the dark desktop) and
+`--remote-allow-origins=chrome-extension://<id>` (the extension's DevTools
+button: the CDP port refuses a WebSocket from any origin not listed; `<id>` is
+Chrome's id for the unpacked extension, the first 32 hex digits of the
+SHA-256 of its path written as a..p), keeps a backup beside the launcher and
+`bash -n`-checks the result. Run it again after any update that rewrites the
+launcher, and after moving the checkout (the id follows the path).
 
 The three pieces that then work together:
 
@@ -161,22 +165,52 @@ The three pieces that then work together:
   `/etc/clawbox/kiosk.env` (`CLAWBOX_KIOSK_URL`, default
   `http://localhost:3005/`). On a box with nothing on the port it answers
   `{ available: false }` and the desktop draws nothing.
-- The desktop shelf lists every page the kiosk opened (favicon, title, close)
-  and `openInKiosk(url)` routes the desktop's "open an external page" clicks
-  (Anthropic sign-in, the store, VNC) through the kiosk API; elsewhere it is
-  the plain `window.open` it always was.
+- The desktop shelf shows the kiosk's pages as ONE app, Web (`web` in
+  `src/lib/desktop-apps.ts`), drawn like any other open app: its icon joins
+  the shelf while a page is open, with a dot per page (up to four); a click
+  goes back to the page last used (Chrome's `/json/list` is most recently
+  used first), or opens a new one when none is; its menu offers a new tab and
+  Close, which closes every page. `openInKiosk(url)` routes the desktop's
+  "open an external page" clicks (Anthropic sign-in, the store, VNC) through
+  the kiosk API; elsewhere it is the plain `window.open` it always was.
 - `kiosk/extension` — an MV3 extension (permission: `tabs` only) that draws a
   40 px ClawBox bar on every page the desktop opens, in the desktop's own
-  tokens (`--ground`, coral, Satoshi/system-ui): back to ClawBox, the open
-  pages as shelf-style chips (favicon, title, the current one underlined in
-  coral, × on hover), back / forward / reload, an address bar (Enter goes to a
-  URL or host, anything else is a DuckDuckGo search; Escape restores the
-  page's URL), a `+` that opens a new tab on the extension's own start page,
-  close this one; a thin coral line under the bar runs while the page loads.
-  It never runs on the desktop's origin. The bar is `bar.js`, mounted by
-  `content.js` on web pages and by `newtab.html` on the start page (content
-  scripts do not run on `chrome-extension://` pages, so the start page loads
-  it with a script tag). `newtab.html` is also `chrome_url_overrides.newtab`:
+  tokens (`--ground`, coral, Satoshi/system-ui): back to ClawBox (its first
+  tab wears the desktop's crab, `logo.png` = `public/clawbox-icon.png`, and
+  the wordmark in the brand gradient), the open pages as shelf-style chips
+  sharing the room equally (favicon, title, the current one underlined in
+  coral, × on hover; the favicon alone once they get narrow), a `+` that opens
+  a new tab on the extension's own start page, back / forward / reload, an
+  address bar CENTRED on the bar (the middle of three columns whose sides are
+  equal; Enter goes to a URL or host, anything else is a DuckDuckGo search;
+  Escape restores the page's URL), `</>` for Chrome's DevTools on this tab
+  (also F12 and Ctrl+Shift+I, and on the desktop's own strip too: the worker
+  sends `Target.openDevTools` to the kiosk's CDP port, so they open docked as
+  F12 would in a normal window; the extension holds `debugger` only for
+  `chrome.debugger.getTargets()`, the tab-to-target map, and never attaches),
+  close this one; a thin coral line under the bar runs while the page loads. The page is pushed down by `content.css`'s
+  `margin-top` on `<html>`, which moves the normal flow and nothing else, so
+  `offset.js` lays out the rest below the bar the way a 40 px shorter viewport
+  would: `position: fixed`/`sticky` headers with a `top` (YouTube's masthead,
+  Stack Overflow's top bar) move down by the bar, a fixed panel that reached
+  the bottom edge or a box as tall as the viewport (`100vh` app shells such as
+  Excalidraw) loses the bar's height, an absolute header on the canvas moves
+  down, and `scroll-padding-top` grows by it. It writes inline `!important`
+  values it takes back off to re-judge a box whenever the page changes it
+  (MutationObserver, resize, a stylesheet arriving).
+  The bar is `bar.js`, mounted by `content.js` on web pages, by `newtab.html`
+  on the start page (content scripts do not run on `chrome-extension://`
+  pages, so the start page loads it with a script tag) and by `desktop.js` on
+  the desktop page itself — there always, as the kiosk's tab strip: the
+  ClawBox chip is the current page, the chips switch to the others and `+`
+  opens a new tab on the start page; the address box, back / forward / reload
+  and Close are left out there. On the desktop it wears the shelf's glass (the same
+  tint, blur and hairline as `ChromeShelf.tsx`) instead of the solid ground,
+  so the wallpaper runs on behind its empty space. The desktop's surfaces are
+  `position: fixed`, so a page offset cannot make room there; the bar sets
+  `--clawbox-kiosk-bar-h` on `<html>` and fires `clawbox:kiosk-bar` instead,
+  and `src/lib/kiosk-bar-inset.ts` lays the desktop out under it (windows,
+  maximized and snapped, the docked chat, the notice cards, the icon grid). `newtab.html` is also `chrome_url_overrides.newtab`:
   a ClawBox-styled dark page with a DuckDuckGo search box and quick links
   (DuckDuckGo, Wikipedia, GitHub, YouTube). The desktop's "Web" icon (`web` in
   `src/lib/desktop-apps.ts`) still opens DuckDuckGo directly through the kiosk
@@ -187,7 +221,10 @@ The three pieces that then work together:
 across restarts and only re-reads the files when the version changes. The
 kiosk Chrome must then be relaunched to load it — end the running Chrome's
 parent process (the `bash /usr/local/bin/clawbox-kiosk-browser` loop restarts
-it with the new files) rather than rebooting. The launcher's flags
+it with the new files) rather than rebooting. Do not call
+`chrome.runtime.reload()` on it over the CDP port instead: on this kiosk that
+leaves the extension unloaded — no bar anywhere, Chrome's own new-tab page
+back — until Chrome restarts. The launcher's flags
 (`--force-dark-mode` etc.) are the exception: they need the launcher loop
 itself restarted, which is the reboot the install script offers.
 
