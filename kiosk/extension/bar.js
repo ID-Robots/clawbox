@@ -1,18 +1,38 @@
 // ClawBox Kiosk Tabs — the bar itself, shared by content.js (every web page
-// the desktop opened) and newtab.html (the extension's own start page, where
-// content scripts do not run). Both load this file first and then call
-// `clawboxKioskBar.mount({ startPage })`.
+// the desktop opened), newtab.html (the extension's own start page, where
+// content scripts do not run) and desktop.js (the ClawBox desktop page). Each
+// loads this file first and then calls `clawboxKioskBar.mount(opts)`:
+// `{ startPage: true }` on the start page, `{ desktop: true }` on the desktop.
+//
+// On the DESKTOP the bar is the kiosk's tab strip, always up: the ClawBox
+// chip is the current page, the tab chips switch to the others and "+" opens
+// a new tab. The address box is left out there — the desktop is not a page to
+// type an address over, and "+" lands on the start page's own search box —
+// and so are back/forward/reload and Close, which would act on the desktop
+// itself. DevTools stays: the desktop is a page like any other to inspect. It wears the shelf's glass
+// there rather than the solid ground (ChromeShelf.tsx: the same tint, blur and
+// hairline), so the desktop's wallpaper runs on behind the bar's empty space
+// and the top bar and the shelf read as one frame. The desktop cannot be
+// pushed down the way a web page is (every surface on it is position: fixed),
+// so the bar TELLS it how tall it is instead: `--clawbox-kiosk-bar-h` on
+// <html>, and a `clawbox:kiosk-bar` event on window once it is up, which
+// src/lib/kiosk-bar-inset.ts reads to lay the desktop out under it.
 //
 // Fixed 40 px strip at the top, in a shadow root so the page's CSS cannot
 // restyle it and ours cannot leak into the page. The page is pushed down by
-// the same 40 px (content.css for web pages, newtab.css for the start page)
-// so nothing sits under the bar. Everything the bar does that needs the
-// `tabs` permission goes through background.js; navigation is the page's own
-// location/history and needs nothing.
+// the same 40 px (content.css plus offset.js for web pages, newtab.css for
+// the start page) so nothing sits under the bar. Everything the bar does that
+// needs the `tabs` permission goes through background.js; navigation is the
+// page's own location/history and needs nothing.
 //
-// Left to right: ClawBox home, the tab chips, back / forward / reload, the
-// address bar, "+" (a new tab on the start page), Close. A thin coral line
-// under the bar runs while the page is loading or leaving.
+// Three columns, the middle one at the bar's exact horizontal centre: on the
+// left the ClawBox tab (the crab and the wordmark, as the desktop draws them),
+// the tab chips, "+" (a new tab on the start page) and back / forward /
+// reload; in the middle the address box; on the right DevTools for this tab
+// (also F12 / Ctrl+Shift+I) and Close. The two side
+// columns are always equal, so the address box stays centred whatever the
+// tab count. A thin coral line under the bar runs while the page is loading
+// or leaving.
 //
 // The look is the desktop's (src/app/globals.css tokens, ChromeShelf.tsx):
 // --ground behind, --border-subtle under, Satoshi/system-ui 13 px, shelf-style
@@ -20,6 +40,10 @@
 
 (() => {
   const BAR_H = 40;
+  // What the desktop reads (src/lib/kiosk-bar-inset.ts: KIOSK_BAR_VAR and
+  // KIOSK_BAR_EVENT; the extension test holds the names together).
+  const INSET_VAR = "--clawbox-kiosk-bar-h";
+  const INSET_EVENT = "clawbox:kiosk-bar";
   // Where Enter sends text that is not an address.
   const SEARCH_URL = "https://duckduckgo.com/?q=";
   // Typed text that is an address rather than a search: http(s)://…, or a
@@ -38,6 +62,9 @@
     globe: '<path d="M12 22a10 10 0 1 1 0-20 10 10 0 0 1 0 20zm-1-2.05V18c-.55 0-1-.45-1-1v-1l-4.8-4.8A8 8 0 0 0 11 19.95zM17.9 17.4A8 8 0 0 0 14 4.25V5a2 2 0 0 1-2 2H10v2a1 1 0 0 1-1 1H7v2h6a1 1 0 0 1 1 1v3h1a2 2 0 0 1 1.9 1.4z"/>',
     close: '<path d="m12 13.4-4.9 4.9-1.4-1.4 4.9-4.9-4.9-4.9 1.4-1.4 4.9 4.9 4.9-4.9 1.4 1.4-4.9 4.9 4.9 4.9-1.4 1.4z"/>',
     plus: '<path d="M11 13H5v-2h6V5h2v6h6v2h-6v6h-2z"/>',
+    lock: '<path d="M6 22q-.82 0-1.41-.59T4 20V10q0-.82.59-1.41T6 8h1V6q0-2.07 1.46-3.54T12 1t3.54 1.46T17 6v2h1q.82 0 1.41.59T20 10v10q0 .82-.59 1.41T18 22zm0-2h12V10H6zm6-3q.82 0 1.41-.59T14 15t-.59-1.41T12 13t-1.41.59T10 15t.59 1.41T12 17M9 8h6V6q0-1.25-.87-2.13T12 3t-2.13.87T9 6z"/>',
+    code: '<path d="m8 18-6-6 6-6 1.4 1.43L4.83 12l4.58 4.58zm8 0-1.4-1.43L19.17 12l-4.58-4.58L16 6l6 6z"/>',
+    search: '<path d="M9.5 16a6.5 6.5 0 1 1 4.53-1.84l.06.05 4.85 4.85-1.41 1.41-4.85-4.85-.05-.06A6.47 6.47 0 0 1 9.5 16zm0-2a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9z"/>',
   };
   const svg = (name, size) =>
     `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="currentColor" aria-hidden="true">${ICON[name]}</svg>`;
@@ -74,11 +101,15 @@
       --coral-bright: #f97316; --coral-mid: #ea580c; --cyan-bright: #00e5cc;
       --text-primary: #f9fafb; --text-secondary: #9ca3af; --text-muted: #6b7280;
       --border-subtle: rgba(54, 65, 83, 0.6); --coral-ring: rgba(249, 115, 22, 0.6);
-      box-sizing: border-box; position: relative; height: ${BAR_H}px; display: flex; align-items: center; gap: 4px; padding: 0 6px;
+      box-sizing: border-box; position: relative; height: ${BAR_H}px; padding: 0 6px;
+      display: grid; grid-template-columns: minmax(0, 1fr) clamp(260px, 32vw, 560px) minmax(0, 1fr); align-items: center; column-gap: 12px;
       background: var(--ground); border-bottom: 1px solid var(--border-subtle);
       font: 500 13px/1 "Satoshi", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--text-primary);
       -webkit-font-smoothing: antialiased; }
     .bar *, .bar *::before, .bar *::after { box-sizing: border-box; }
+    .start, .end { display: flex; align-items: center; gap: 4px; min-width: 0; }
+    .end { justify-content: flex-end; }
+    .center { display: flex; min-width: 0; }
     button { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; height: 32px;
       padding: 0 10px; border-radius: 8px; color: var(--text-secondary); white-space: nowrap; flex: none;
       transition: background-color .12s, color .12s; }
@@ -88,12 +119,23 @@
     button[disabled] { opacity: 0.35; cursor: default; }
     button[disabled]:hover { background: none; color: var(--text-secondary); }
     .icon { width: 32px; padding: 0; justify-content: center; }
-    .home { color: var(--coral-bright); font-weight: 600; letter-spacing: 0.01em; padding: 0 10px 0 8px; }
-    .home:hover { color: var(--coral-bright); background: rgba(249,115,22,0.12); }
-    .home img { width: 18px; height: 18px; border-radius: 5px; }
+    .home { position: relative; gap: 7px; padding: 0 12px 0 6px; background: rgba(249,115,22,0.08); }
+    .home:hover { background: rgba(249,115,22,0.16); }
+    .home img { width: 26px; height: 26px; object-fit: contain; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.45)); }
+    .home .word { font-weight: 700; font-size: 14px; letter-spacing: -0.01em;
+      background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: var(--coral-bright); }
+    .bar.desktop { background: rgba(17, 24, 39, 0.55); -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+    .bar.desktop .home { background: rgba(249,115,22,0.14); cursor: default; }
+    .bar.desktop .home::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: 0; height: 2px; border-radius: 2px 2px 0 0; background: var(--coral-bright); }
+    .bar.desktop { grid-template-columns: minmax(0, 1fr) auto; }
+    .bar.desktop .nav, .bar.desktop .center, .bar.desktop .close { display: none; }
+    .devtools.failed { color: #f87171; }
     .sep { width: 1px; height: 24px; background: var(--border-subtle); margin: 0 2px; flex: none; }
-    .tabs { display: flex; align-items: center; gap: 2px; flex: 2 1 0; min-width: 0; overflow: hidden; }
-    .tab { flex: 0 1 auto; min-width: 0; max-width: 220px; height: 32px; padding: 0 2px 0 8px; color: var(--text-secondary); position: relative; }
+    .tabs { display: flex; align-items: center; gap: 2px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+    .tabs:empty { display: none; }
+    .tab { flex: 1 1 0; min-width: 32px; max-width: 200px; height: 32px; padding: 0 2px 0 8px; color: var(--text-secondary); position: relative; overflow: hidden; }
     .tab.current { color: var(--text-primary); background: rgba(249,115,22,0.10); }
     .tab.current::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: 0; height: 2px; border-radius: 2px 2px 0 0; background: var(--coral-bright); }
     .tab img, .tab .globe { width: 14px; height: 14px; border-radius: 3px; flex: none; }
@@ -102,14 +144,20 @@
     .x { height: 22px; width: 22px; padding: 0; justify-content: center; border-radius: 11px; color: var(--text-muted); opacity: 0; }
     .tab:hover .x, .tab.current .x, .x:focus-visible { opacity: 1; }
     .x:hover { color: var(--text-primary); background: rgba(255,255,255,0.15); }
-    .nav { gap: 0; }
-    .address { all: unset; box-sizing: border-box; flex: 1 1 0; min-width: 140px; max-width: 560px; height: 32px;
-      padding: 0 12px; border-radius: 8px; background: var(--bg-surface); border: 1px solid transparent; color: var(--text-primary);
-      font: inherit; font-weight: 400; line-height: 30px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      transition: background-color .12s, border-color .12s; }
+    .tabs.narrow .tab { justify-content: center; padding: 0; }
+    .tabs.narrow .tab .t, .tabs.narrow .tab .x { display: none; }
+    .tabs.narrow .tab:hover img, .tabs.narrow .tab:hover .globe { display: none; }
+    .tabs.narrow .tab:hover .x { display: inline-flex; opacity: 1; }
+    .nav { display: flex; gap: 0; margin-left: auto; flex: none; }
+    .omni { display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 14px 0 12px;
+      border-radius: 16px; background: var(--bg-surface); border: 1px solid var(--border-subtle); color: var(--text-muted);
+      cursor: text; transition: background-color .12s, border-color .12s, box-shadow .12s; }
+    .omni:hover { background: var(--bg-elevated); }
+    .omni:focus-within { background: var(--bg-elevated); border-color: var(--coral-ring); box-shadow: 0 0 0 1px var(--coral-ring); }
+    .lead { display: inline-flex; flex: none; }
+    .address { all: unset; box-sizing: border-box; flex: 1 1 0; min-width: 0; height: 100%; color: var(--text-primary);
+      font: inherit; font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .address::placeholder { color: var(--text-muted); }
-    .address:hover { background: var(--bg-elevated); }
-    .address:focus { background: var(--bg-elevated); border-color: var(--coral-ring); outline: 2px solid var(--coral-ring); outline-offset: -1px; }
     .close { color: var(--text-secondary); padding: 0 10px 0 8px; }
     .close:hover { color: var(--text-primary); }
     .progress { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; pointer-events: none; opacity: 0; transition: opacity .2s; }
@@ -121,6 +169,7 @@
 
   function mount(opts) {
     const startPage = !!(opts && opts.startPage);
+    const desktop = !!(opts && opts.desktop);
     if (window.top !== window || document.getElementById("clawbox-kiosk-bar")) return null;
 
     const host = document.createElement("div");
@@ -128,20 +177,27 @@
     const root = host.attachShadow({ mode: "closed" });
     root.innerHTML = `
       <style>${STYLE}</style>
-      <div class="bar" role="toolbar" aria-label="ClawBox">
-        <button class="home" title="Back to ClawBox"><img alt="" src="${chrome.runtime.getURL("icon.svg")}"><span>ClawBox</span></button>
-        <span class="sep"></span>
-        <div class="tabs"></div>
-        <span class="sep"></span>
-        <span class="nav">
-          <button class="icon back" title="Back" aria-label="Back">${svg("back", 20)}</button>
-          <button class="icon forward" title="Forward" aria-label="Forward">${svg("forward", 20)}</button>
-          <button class="icon reload" title="Reload" aria-label="Reload">${svg("reload", 18)}</button>
-        </span>
-        <input class="address" type="text" spellcheck="false" autocomplete="off" autocapitalize="off"
-          placeholder="Search or enter address" title="Search or enter address" aria-label="Address">
-        <button class="icon add" title="New tab" aria-label="New tab">${svg("plus", 20)}</button>
-        <button class="close" title="Close this page">${svg("close", 18)}<span>Close</span></button>
+      <div class="bar${desktop ? " desktop" : ""}" role="toolbar" aria-label="ClawBox">
+        <div class="start">
+          <button class="home" title="${desktop ? "ClawBox" : "Back to ClawBox"}"${desktop ? ' aria-current="page"' : ""}><img alt="" src="${chrome.runtime.getURL("logo.png")}"><span class="word">ClawBox</span></button>
+          <span class="sep"></span>
+          <div class="tabs"></div>
+          <button class="icon add" title="New tab" aria-label="New tab">${svg("plus", 20)}</button>
+          <span class="nav">
+            <button class="icon back" title="Back" aria-label="Back">${svg("back", 20)}</button>
+            <button class="icon forward" title="Forward" aria-label="Forward">${svg("forward", 20)}</button>
+            <button class="icon reload" title="Reload" aria-label="Reload">${svg("reload", 18)}</button>
+          </span>
+        </div>
+        <label class="center omni">
+          <span class="lead"></span>
+          <input class="address" type="text" spellcheck="false" autocomplete="off" autocapitalize="off"
+            placeholder="Search or enter address" title="Search or enter address" aria-label="Address">
+        </label>
+        <div class="end">
+          <button class="icon devtools" title="Developer tools (F12)" aria-label="Developer tools">${svg("code", 18)}</button>
+          <button class="close" title="Close this page">${svg("close", 18)}<span>Close</span></button>
+        </div>
         <div class="progress" aria-hidden="true"></div>
       </div>`;
 
@@ -162,7 +218,8 @@
     window.addEventListener("beforeunload", () => setLoading(true));
     const go = (fn) => { setLoading(true); fn(); };
 
-    root.querySelector(".home").addEventListener("click", () => send({ type: "home" }));
+    // On the desktop the ClawBox chip is the page already showing.
+    root.querySelector(".home").addEventListener("click", () => { if (!desktop) send({ type: "home" }); });
     // No URL: the worker opens the extension's own start page.
     root.querySelector(".add").addEventListener("click", () => send({ type: "create" }));
     root.querySelector(".close").addEventListener("click", async () => {
@@ -172,6 +229,27 @@
       await send({ type: "home" });
       if (me && me.currentId != null) send({ type: "close", id: me.currentId });
     });
+    // DevTools on this tab, through the worker (see openDevTools there). A
+    // refusal turns the button red with the reason as its tooltip.
+    const devtoolsEl = root.querySelector(".devtools");
+    const devtoolsTitle = devtoolsEl.title;
+    async function openDevTools() {
+      const r = await send({ type: "devtools" });
+      const failed = !r || !r.ok;
+      devtoolsEl.classList.toggle("failed", failed);
+      devtoolsEl.title = failed ? "Developer tools: " + ((r && r.error) || "the extension did not answer") : devtoolsTitle;
+    }
+    devtoolsEl.addEventListener("click", openDevTools);
+    // F12 and Ctrl+Shift+I, the keys every browser opens DevTools on. In a
+    // window with menus Chrome takes them before the page does; in --kiosk
+    // they reach the page, so they are caught here, ahead of its own handlers.
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "F12" || (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.code === "KeyI")) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        openDevTools();
+      }
+    }, true);
     backEl.addEventListener("click", () => go(() => history.back()));
     forwardEl.addEventListener("click", () => go(() => history.forward()));
     root.querySelector(".reload").addEventListener("click", () => go(() => location.reload()));
@@ -185,13 +263,25 @@
       forwardEl.disabled = !nav.canGoForward;
     }
 
+    // The start page has no address worth showing; there the box is a search
+    // box. (The desktop draws no box at all.)
+    const searchOnly = startPage;
+    // The glyph at the head of the box: a magnifier where it is a search box,
+    // a lock over https, a globe otherwise.
+    const leadEl = root.querySelector(".lead");
+    function updateLead() {
+      const kind = searchOnly ? "search" : location.protocol === "https:" ? "lock" : "globe";
+      if (leadEl.dataset.kind === kind) return;
+      leadEl.dataset.kind = kind;
+      leadEl.innerHTML = svg(kind, 16);
+    }
     function showCurrentAddress() {
-      // The start page has no address worth showing; the box is a search box.
-      if (startPage) { addressEl.value = ""; return; }
+      updateLead();
+      if (searchOnly) { addressEl.value = ""; return; }
       addressEl.value = root.activeElement === addressEl ? location.href : shortAddress(location.href);
     }
     addressEl.addEventListener("focus", () => {
-      if (startPage) return;
+      if (searchOnly) return;
       addressEl.value = location.href;
       addressEl.select();
     });
@@ -207,7 +297,7 @@
       } else if (e.key === "Escape") {
         // Back to the page's own URL, still focused, the way an omnibox does.
         e.preventDefault();
-        addressEl.value = startPage ? "" : location.href;
+        addressEl.value = searchOnly ? "" : location.href;
         addressEl.select();
       }
     });
@@ -255,7 +345,18 @@
         b.addEventListener("click", () => send({ type: "activate", id: tab.id }));
         tabsEl.appendChild(b);
       }
+      fitTabs();
     }
+
+    // Chips share the room equally (up to 200 px each). Once that is too
+    // little for a title, they show the site's icon alone, and the close
+    // button takes its place under the pointer.
+    function fitTabs() {
+      tabsEl.classList.remove("narrow");
+      const n = tabsEl.childElementCount;
+      if (n && tabsEl.clientWidth / n < 84) tabsEl.classList.add("narrow");
+    }
+    window.addEventListener("resize", fitTabs);
 
     chrome.runtime.onMessage.addListener((msg) => {
       if (msg && msg.type === "changed") refresh();
@@ -264,7 +365,14 @@
     window.addEventListener("hashchange", showCurrentAddress);
 
     (document.body || document.documentElement).appendChild(host);
-    document.documentElement.classList.add("clawbox-kiosk-bar-shown");
+    if (desktop) {
+      // The desktop makes its own room (see the header).
+      document.documentElement.style.setProperty(INSET_VAR, BAR_H + "px");
+      window.dispatchEvent(new Event(INSET_EVENT));
+    } else {
+      // A web page is pushed down (content.css / newtab.css key on the class).
+      document.documentElement.classList.add("clawbox-kiosk-bar-shown");
+    }
     settle();
     refresh();
     // The worker broadcasts changes; this is the fallback for a broadcast a

@@ -1,14 +1,15 @@
 // ClawBox Kiosk Tabs — service worker.
 //
-// The kiosk Chrome on the x64 laptop runs --kiosk: no tab strip. The desktop's
-// own shelf lists the tabs through the CDP port (src/lib/kiosk-tabs.ts), but
-// a page the desktop OPENED has no shelf — so the content script draws a bar
-// on it and asks this worker, which holds the `tabs` permission, to do the
-// switching. Messages: { type: "list" } → { tabs, currentId, homeId };
+// The kiosk Chrome on the x64 laptop runs --kiosk: no tab strip. The content
+// scripts draw one instead — the bar on every page the desktop OPENED, and on
+// the desktop itself while such a page is open (desktop.js) — and ask this
+// worker, which holds the `tabs` permission, to do the switching. Messages: { type: "list" } → { tabs, currentId, homeId };
 // { type: "activate", id }; { type: "close", id }; { type: "home" };
 // { type: "create", url? } opens a new active tab: on the extension's own
 // start page (newtab.html, also chrome_url_overrides.newtab) when no URL is
-// given — which is what the bar's "+" sends — else on the http(s) URL given.
+// given — which is what the bar's "+" sends — else on the http(s) URL given;
+// { type: "devtools" } opens Chrome's DevTools on the asking tab (see
+// openDevTools below).
 //
 // The desktop is found by URL prefix: the origin of DESKTOP_ORIGINS, which is
 // what the launcher's CLAWBOX_KIOSK_URL is on a laptop (a different URL means
@@ -27,6 +28,53 @@ const SHELL_PATH = /^\/(?:(?:login|setup|updating|portal)(?:\/.*)?)?$/;
 // chrome://newtab so the tab lands on it whether or not Chrome honours the
 // override in --kiosk.
 const START_PAGE = chrome.runtime.getURL("newtab.html");
+
+// DevTools for a tab. --kiosk leaves no menu to open them from, so the bar
+// asks here (its </> button, F12, Ctrl+Shift+I) and this asks Chrome itself
+// over the loopback DevTools port the launcher opens — CLAWBOX_KIOSK_CDP_PORT
+// in install-kiosk-tabs.sh, 18801 by default, the port src/lib/kiosk-tabs.ts
+// lists the tabs on. `Target.openDevTools` opens the same DevTools F12 does,
+// docked in the kiosk window. The port refuses a WebSocket from a page's
+// origin, so the launcher lists this extension's own
+// (--remote-allow-origins=chrome-extension://<id>); without it the bar says
+// the kiosk needs the script run again. `debugger` is only for getTargets(),
+// the one map from a tab to its DevTools target — nothing here attaches.
+const CDP_PORT = 18801;
+const CDP_TIMEOUT_MS = 5000;
+
+function cdpCall(wsUrl, method, params) {
+  return new Promise((resolve, reject) => {
+    let ws;
+    try { ws = new WebSocket(wsUrl); } catch (err) { reject(err); return; }
+    const timer = setTimeout(() => { ws.close(); reject(new Error("the kiosk's DevTools port did not answer")); }, CDP_TIMEOUT_MS);
+    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method, params }));
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      if (m.id !== 1) return;
+      clearTimeout(timer);
+      ws.close();
+      if (m.error) reject(new Error(m.error.message));
+      else resolve(m.result);
+    };
+    ws.onerror = () => {
+      clearTimeout(timer);
+      reject(new Error("the kiosk's DevTools port refused the extension; run install-kiosk-tabs.sh again"));
+    };
+  });
+}
+
+async function openDevTools(tabId) {
+  const targets = await chrome.debugger.getTargets();
+  const target = targets.find((t) => t.tabId === tabId && t.type === "page");
+  if (!target) throw new Error("this tab has no DevTools target");
+  let version;
+  try {
+    version = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`)).json();
+  } catch {
+    throw new Error(`nothing answers on the kiosk's DevTools port ${CDP_PORT}`);
+  }
+  await cdpCall(version.webSocketDebuggerUrl, "Target.openDevTools", { targetId: target.id });
+}
 
 function isDesktop(url) {
   if (!url) return false;
@@ -76,6 +124,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "home":
         await goHome();
         return { ok: true };
+      case "devtools":
+        if (!sender.tab || sender.tab.id == null) return { ok: false, error: "not from a tab" };
+        await openDevTools(sender.tab.id);
+        return { ok: true };
       case "create": {
         if (msg.url == null) {
           await chrome.tabs.create({ url: START_PAGE, active: true });
@@ -95,12 +147,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // async sendResponse
 });
 
-// Tell every bar to refresh when the tab set changes, so a page closed from
-// the desktop's shelf leaves the bars without waiting for their own poll.
+// Tell every bar to refresh when the tab set changes — the desktop's too,
+// which shows its bar when the first page opens and hides it when the last
+// one closes — without waiting for their own poll.
 function broadcast() {
   chrome.tabs.query({ windowType: "normal" }).then((tabs) => {
     for (const t of tabs) {
-      if (t.id == null || isDesktop(t.url)) continue;
+      if (t.id == null) continue;
       chrome.tabs.sendMessage(t.id, { type: "changed" }).catch(() => {});
     }
   });

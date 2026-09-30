@@ -45,8 +45,15 @@ body {
   letter-spacing: -0.02em;
   color: var(--text-primary);
 }
-.wordmark img { width: 44px; height: 44px; border-radius: 12px; box-shadow: 0 0 0 1px var(--border-subtle), 0 8px 24px rgba(249, 115, 22, 0.25); }
-.wordmark em { font-style: normal; color: var(--coral-bright); }
+/* The crab and the wordmark in the desktop's brand gradient (.title-gradient
+   in globals.css). */
+.wordmark img { width: 64px; height: 64px; object-fit: contain; filter: drop-shadow(0 8px 20px rgba(249, 115, 22, 0.35)); }
+.wordmark span {
+  background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
 
 .search {
   display: flex;
