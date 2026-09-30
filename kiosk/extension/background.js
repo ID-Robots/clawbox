@@ -6,8 +6,9 @@
 // on it and asks this worker, which holds the `tabs` permission, to do the
 // switching. Messages: { type: "list" } → { tabs, currentId, homeId };
 // { type: "activate", id }; { type: "close", id }; { type: "home" };
-// { type: "create", url } opens a new active tab (http(s) only; the bar's
-// "+" sends the start page).
+// { type: "create", url? } opens a new active tab: on the extension's own
+// start page (newtab.html, also chrome_url_overrides.newtab) when no URL is
+// given — which is what the bar's "+" sends — else on the http(s) URL given.
 //
 // The desktop is found by URL prefix: the origin of DESKTOP_ORIGINS, which is
 // what the launcher's CLAWBOX_KIOSK_URL is on a laptop (a different URL means
@@ -22,6 +23,10 @@ const DESKTOP_ORIGINS = [
 // The pages the shell itself lands on. /app/<id> and /apps/<id>/ on the same
 // origin are pages the desktop opened, and get a bar like any other.
 const SHELL_PATH = /^\/(?:(?:login|setup|updating|portal)(?:\/.*)?)?$/;
+// The extension's own start page. Opened by its full URL rather than
+// chrome://newtab so the tab lands on it whether or not Chrome honours the
+// override in --kiosk.
+const START_PAGE = chrome.runtime.getURL("newtab.html");
 
 function isDesktop(url) {
   if (!url) return false;
@@ -72,8 +77,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await goHome();
         return { ok: true };
       case "create": {
-        // Only a web page: a tab opened from the bar must not land on a
-        // chrome:// or file:// URL the kiosk otherwise never shows.
+        if (msg.url == null) {
+          await chrome.tabs.create({ url: START_PAGE, active: true });
+          return { ok: true };
+        }
+        // Otherwise only a web page: a tab opened from the bar must not land
+        // on a chrome:// or file:// URL the kiosk otherwise never shows.
         if (typeof msg.url !== "string" || !/^https?:\/\//i.test(msg.url)) return { ok: false, error: "not a web url" };
         await chrome.tabs.create({ url: msg.url, active: true });
         return { ok: true };

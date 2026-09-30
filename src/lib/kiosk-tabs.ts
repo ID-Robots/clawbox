@@ -55,6 +55,8 @@ export const CDP_TIMEOUT_MS = 1500;
 
 /** CDP target ids are hex; anything else never reaches a URL path. */
 const TAB_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+/** The kiosk extension's start page: `chrome-extension://<id>/newtab.html`, with or without a query/hash. */
+const START_PAGE_RE = /^chrome-extension:\/\/[a-p]{32}\/newtab\.html(?:[?#]|$)/;
 
 export type EnvLike = Record<string, string | undefined>;
 
@@ -181,10 +183,13 @@ async function cdpFetch(path: string, method: "GET" | "PUT" = "GET"): Promise<Re
 function tabFromTarget(t: CdpTarget, kioskUrl: string): KioskTab | null {
   // Extension pages, service workers and iframes are targets too; a tab is a
   // `page` on http(s). `about:blank` (a tab still loading its URL) is kept so
-  // a page that was just opened shows up at once rather than a poll later.
+  // a page that was just opened shows up at once rather than a poll later,
+  // and so is the kiosk extension's own start page (kiosk/extension/
+  // newtab.html, where the bar's "+" lands) — the one extension page that
+  // is a tab the owner is looking at.
   if (t.type !== "page" || typeof t.id !== "string" || typeof t.url !== "string") return null;
   if (!TAB_ID_RE.test(t.id)) return null;
-  if (!/^(https?:|about:blank)/.test(t.url)) return null;
+  if (!/^(https?:|about:blank)/.test(t.url) && !START_PAGE_RE.test(t.url)) return null;
   return {
     id: t.id,
     title: typeof t.title === "string" ? t.title : "",

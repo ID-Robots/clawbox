@@ -1,13 +1,16 @@
 {
   "manifest_version": 3,
   "name": "ClawBox Kiosk Tabs",
-  "version": "1.0.0",
-  "description": "A slim top bar on every page the ClawBox desktop opens in the kiosk Chrome: back to ClawBox, switch between open pages, close this one. The kiosk runs --kiosk and has no tab strip of its own.",
+  "version": "1.1.0",
+  "description": "A slim ClawBox bar on every page the ClawBox desktop opens in the kiosk Chrome: back to ClawBox, switch between open pages, back/forward/reload, an address bar, a new tab on a ClawBox start page, close this one. The kiosk runs --kiosk and has no tab strip of its own.",
   "permissions": [
     "tabs"
   ],
   "background": {
     "service_worker": "background.js"
+  },
+  "chrome_url_overrides": {
+    "newtab": "newtab.html"
   },
   "content_scripts": [
     {
@@ -22,6 +25,7 @@
         "http://127.0.0.1/*"
       ],
       "js": [
+        "bar.js",
         "content.js"
       ],
       "css": [
