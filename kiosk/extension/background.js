@@ -102,3 +102,25 @@ chrome.tabs.onUpdated.addListener((_id, info) => {
   if (info.title || info.url || info.favIconUrl || info.status === "complete") broadcast();
 });
 chrome.tabs.onActivated.addListener(broadcast);
+
+// One desktop tab, not two. Every relaunch of the kiosk Chrome restores the
+// previous session's tabs AND opens the command-line URL, so the profile
+// accumulates a hidden desktop tab per restart (a reboot leaves the profile
+// marked Crashed, which is what triggers the restore). Keep the desktop tab
+// the user is looking at (the active one, else the first) and close the rest.
+async function dedupeDesktopTabs() {
+  try {
+    const all = await chrome.tabs.query({ windowType: "normal" });
+    const desktops = all.filter((t) => t.id != null && isDesktop(t.url));
+    if (desktops.length < 2) return;
+    const keep = desktops.find((t) => t.active) || desktops[0];
+    await chrome.tabs.remove(desktops.filter((t) => t.id !== keep.id).map((t) => t.id));
+  } catch {
+    // A tab that closed under us; nothing to do.
+  }
+}
+chrome.runtime.onStartup.addListener(dedupeDesktopTabs);
+chrome.runtime.onInstalled.addListener(dedupeDesktopTabs);
+// The worker also starts fresh after a relaunch without either event firing
+// reliably; session restore takes a moment, so ask again shortly after.
+setTimeout(dedupeDesktopTabs, 2500);
