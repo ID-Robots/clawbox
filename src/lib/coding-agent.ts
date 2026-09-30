@@ -1819,6 +1819,14 @@ export interface CodingDenial {
    * from before the hint.
    */
   worktreePath?: string;
+  /**
+   * The refused action's whole text, when `text` is its first MAX_DENIAL_CHARS
+   * only — up to MAX_DENIAL_FULL_CHARS. Never shown: a team judges a refusal by
+   * it (`readOnlyDenial`), because a long read-only probe cut at the display
+   * length could be anything after the cut. Absent when `text` is the whole of
+   * it, and on a record from before it.
+   */
+  fullText?: string;
 }
 
 /** How many finished helpers a run record keeps — the newest; the counts by type keep the total. */
@@ -3606,6 +3614,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
           // render as nothing beside a refusal that then explains itself twice.
           refusal: isAllowRuleRefusal(d.refusal) ? d.refusal : null,
           ...(typeof d.worktreePath === "string" && path.isAbsolute(d.worktreePath) ? { worktreePath: d.worktreePath } : {}),
+          // Only as what it claims to be: the rest of `text`, within its bound.
+          ...(typeof d.fullText === "string" && d.fullText.length > d.text.length && d.fullText.startsWith(d.text)
+            ? { fullText: d.fullText.slice(0, MAX_DENIAL_FULL_CHARS) }
+            : {}),
         }))
       : [],
     worktreeHints: typeof raw.worktreeHints === "number" && Number.isFinite(raw.worktreeHints) && raw.worktreeHints > 0 ? Math.floor(raw.worktreeHints) : 0,
@@ -6249,6 +6261,8 @@ interface StreamEvent {
 /** How many refused actions a run keeps. Enough to see the pattern. */
 const MAX_DENIALS_KEPT = 5;
 const MAX_DENIAL_CHARS = 160;
+/** The bound on a refused action's whole text (`CodingDenial.fullText`); mirrored by DENIAL_FULL_TEXT_CUT in coding-team-board.ts. */
+const MAX_DENIAL_FULL_CHARS = 2000;
 
 /**
  * One refused action, as the owner should read it. Claude Code sends
@@ -6270,9 +6284,14 @@ function denialParts(entry: unknown): { tool: string; target: string | null } {
   return { tool, target: target ?? null };
 }
 
-function describeDenial(entry: unknown): string {
+/** A refused action's whole description, uncut. */
+function wholeDenial(entry: unknown): string {
   const { tool, target } = denialParts(entry);
-  return `${tool}: ${target ?? "(no details)"}`.slice(0, MAX_DENIAL_CHARS);
+  return `${tool}: ${target ?? "(no details)"}`;
+}
+
+function describeDenial(entry: unknown): string {
+  return wholeDenial(entry).slice(0, MAX_DENIAL_CHARS);
 }
 
 /**
@@ -6318,11 +6337,14 @@ function denialsFrom(entries: readonly unknown[]): CodingDenial[] {
   let context: AllowRuleContext | null = null;
   return entries.map((entry) => {
     const parts = denialParts(entry);
-    const text = describeDenial(entry);
-    if (!deriveAllowRule(parts)) return { text, rule: null, refusal: null };
+    const whole = wholeDenial(entry);
+    const text = whole.slice(0, MAX_DENIAL_CHARS);
+    // Kept only when the display cut left some of it out.
+    const full = whole.length > text.length ? { fullText: whole.slice(0, MAX_DENIAL_FULL_CHARS) } : {};
+    if (!deriveAllowRule(parts)) return { text, rule: null, refusal: null, ...full };
     context ??= allowRuleContext();
     const { rule, refusal } = suggestAllowRule(parts, context);
-    return { text, rule, refusal };
+    return { text, rule, refusal, ...full };
   });
 }
 
