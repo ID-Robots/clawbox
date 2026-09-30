@@ -145,9 +145,11 @@ sudo scripts/x64-migration/kiosk/install-kiosk-tabs.sh --no-restart
 ```
 
 It adds, idempotently and after `--start-maximized`, `--kiosk`,
-`--load-extension=<checkout>/kiosk/extension` and
+`--load-extension=<checkout>/kiosk/extension`,
 `--disable-extensions-except=<same>` (the path follows the checkout the script
-is run from; `CLAWBOX_KIOSK_EXTENSION` overrides it), keeps a backup beside the
+is run from; `CLAWBOX_KIOSK_EXTENSION` overrides it), `--force-dark-mode` and
+`--enable-features=WebUIDarkMode` (Chrome's own dialogs, error pages and
+scrollbars in dark, beside the dark desktop), keeps a backup beside the
 launcher and `bash -n`-checks the result. Run it again after any update that
 rewrites the launcher.
 
@@ -164,14 +166,33 @@ The three pieces that then work together:
   (Anthropic sign-in, the store, VNC) through the kiosk API; elsewhere it is
   the plain `window.open` it always was.
 - `kiosk/extension` — an MV3 extension (permission: `tabs` only) that draws a
-  36 px ClawBox bar on every page the desktop opens: back to ClawBox, switch
-  between open pages, an address bar (Enter goes to a URL or host, anything
-  else is a DuckDuckGo search; Escape restores the page's URL), a `+` that
-  opens a new tab on the start page, close this one. It never runs on the
-  desktop's origin. The desktop's "Web" icon (`web` in
-  `src/lib/desktop-apps.ts`) opens that same start page through the kiosk.
+  40 px ClawBox bar on every page the desktop opens, in the desktop's own
+  tokens (`--ground`, coral, Satoshi/system-ui): back to ClawBox, the open
+  pages as shelf-style chips (favicon, title, the current one underlined in
+  coral, × on hover), back / forward / reload, an address bar (Enter goes to a
+  URL or host, anything else is a DuckDuckGo search; Escape restores the
+  page's URL), a `+` that opens a new tab on the extension's own start page,
+  close this one; a thin coral line under the bar runs while the page loads.
+  It never runs on the desktop's origin. The bar is `bar.js`, mounted by
+  `content.js` on web pages and by `newtab.html` on the start page (content
+  scripts do not run on `chrome-extension://` pages, so the start page loads
+  it with a script tag). `newtab.html` is also `chrome_url_overrides.newtab`:
+  a ClawBox-styled dark page with a DuckDuckGo search box and quick links
+  (DuckDuckGo, Wikipedia, GitHub, YouTube). The desktop's "Web" icon (`web` in
+  `src/lib/desktop-apps.ts`) still opens DuckDuckGo directly through the kiosk
+  (the web server cannot address the extension's page by URL).
+
+**Every change to `kiosk/extension` must bump `"version"` in `manifest.json`**
+(semver; the unit test checks it): Chrome caches an unpacked extension's code
+across restarts and only re-reads the files when the version changes. The
+kiosk Chrome must then be relaunched to load it — end the running Chrome's
+parent process (the `bash /usr/local/bin/clawbox-kiosk-browser` loop restarts
+it with the new files) rather than rebooting. The launcher's flags
+(`--force-dark-mode` etc.) are the exception: they need the launcher loop
+itself restarted, which is the reboot the install script offers.
 
 Verify after the reboot: `curl -s http://127.0.0.1:18801/json/list` lists the
 desktop tab; `chrome://extensions` is not reachable in kiosk, so the bar on a
 page opened from Settings → Providers → Anthropic is the proof the extension
-loaded.
+loaded, and the `+` on it landing on the ClawBox start page is the proof the
+version in use is the one on disk.

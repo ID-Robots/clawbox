@@ -12,6 +12,9 @@
 #   --load-extension=$EXT --disable-extensions-except=$EXT
 #       (kiosk/extension from this checkout: the ClawBox bar on every page
 #        the desktop opens, so a page has a way back without the shelf)
+#   --force-dark-mode --enable-features=WebUIDarkMode
+#       (Chrome's own dialogs, error pages and scrollbars in dark, so they
+#        sit with the ClawBox desktop rather than flashing white)
 #
 # Keeps a backup beside the launcher, checks the result with `bash -n`, and
 # (unless --no-restart) reboots so the kiosk session picks the flags up — the
@@ -44,7 +47,7 @@ add_flag() {
   # Appended after the last flag this script owns, so the order in the file
   # is the order above; sed's `a` needs the line, not a pattern, escaped.
   local anchor
-  anchor="$(grep -n -- '^  --start-maximized$\|^  --remote-debugging-\|^  --kiosk$\|^  --load-extension=\|^  --disable-extensions-except=' "$LAUNCHER" | tail -1 | cut -d: -f1)"
+  anchor="$(grep -n -- '^  --start-maximized$\|^  --remote-debugging-\|^  --kiosk$\|^  --load-extension=\|^  --disable-extensions-except=\|^  --force-dark-mode$\|^  --enable-features=WebUIDarkMode$' "$LAUNCHER" | tail -1 | cut -d: -f1)"
   sed -i "${anchor}a\\  ${flag//\\/\\\\}" "$LAUNCHER"
   echo "added $flag"
 }
@@ -61,12 +64,14 @@ add_flag "--remote-debugging-port=$PORT"
 add_flag "--kiosk"
 add_flag "--load-extension=$EXT"
 add_flag "--disable-extensions-except=$EXT"
+add_flag "--force-dark-mode"
+add_flag "--enable-features=WebUIDarkMode"
 
 bash -n "$LAUNCHER"
 if [ "$changed" -eq 1 ]; then
   echo "launcher updated (backup: $LAUNCHER.bak)"
 else
-  echo "already installed: CDP on 127.0.0.1:$PORT, --kiosk, extension $EXT"
+  echo "already installed: CDP on 127.0.0.1:$PORT, --kiosk, dark mode, extension $EXT"
 fi
 
 if [ "$RESTART" -eq 1 ] && [ "$changed" -eq 1 ]; then
