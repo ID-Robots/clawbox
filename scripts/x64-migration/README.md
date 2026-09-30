@@ -165,7 +165,11 @@ The three pieces that then work together:
   the plain `window.open` it always was.
 - `kiosk/extension` — an MV3 extension (permission: `tabs` only) that draws a
   36 px ClawBox bar on every page the desktop opens: back to ClawBox, switch
-  between open pages, close this one. It never runs on the desktop's origin.
+  between open pages, an address bar (Enter goes to a URL or host, anything
+  else is a DuckDuckGo search; Escape restores the page's URL), a `+` that
+  opens a new tab on the start page, close this one. It never runs on the
+  desktop's origin. The desktop's "Web" icon (`web` in
+  `src/lib/desktop-apps.ts`) opens that same start page through the kiosk.
 
 Verify after the reboot: `curl -s http://127.0.0.1:18801/json/list` lists the
 desktop tab; `chrome://extensions` is not reachable in kiosk, so the bar on a

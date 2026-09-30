@@ -5,7 +5,9 @@
 // a page the desktop OPENED has no shelf — so the content script draws a bar
 // on it and asks this worker, which holds the `tabs` permission, to do the
 // switching. Messages: { type: "list" } → { tabs, currentId, homeId };
-// { type: "activate", id }; { type: "close", id }; { type: "home" }.
+// { type: "activate", id }; { type: "close", id }; { type: "home" };
+// { type: "create", url } opens a new active tab (http(s) only; the bar's
+// "+" sends the start page).
 //
 // The desktop is found by URL prefix: the origin of DESKTOP_ORIGINS, which is
 // what the launcher's CLAWBOX_KIOSK_URL is on a laptop (a different URL means
@@ -69,6 +71,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "home":
         await goHome();
         return { ok: true };
+      case "create": {
+        // Only a web page: a tab opened from the bar must not land on a
+        // chrome:// or file:// URL the kiosk otherwise never shows.
+        if (typeof msg.url !== "string" || !/^https?:\/\//i.test(msg.url)) return { ok: false, error: "not a web url" };
+        await chrome.tabs.create({ url: msg.url, active: true });
+        return { ok: true };
+      }
       default:
         return { ok: false, error: "unknown message" };
     }
