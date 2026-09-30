@@ -102,9 +102,9 @@ import { parseClawaiAllowanceRefusal } from "@/lib/clawai-allowance";
 import {
   HARNESS_FAULT_CONFIG_KEY,
   type HarnessFault,
+  classifyHarnessFailure,
   harnessFaultMessage,
   harnessFaultProblem,
-  isHarnessFault,
   parseHarnessFault,
 } from "@/lib/coding-harness-fault";
 // The runner writes its fixed lines from this table so the surfaces that draw
@@ -4063,6 +4063,14 @@ interface LiveRun {
    */
   sawWriteAttempt: boolean;
   /**
+   * Whether a model has actually answered this spawn: a real assistant
+   * message, main loop or helper, not one the CLI wrote itself ("<synthetic>")
+   * to carry an API error. With `run.tokensUsed`, what tells a model error
+   * in the middle of a run from a harness that never got a model to answer —
+   * only the second is recorded as a harness fault (TASK-1320).
+   */
+  sawModelAnswer: boolean;
+  /**
    * tool_use ids of sub-agents that have started and not yet reported back.
    * Ids rather than a counter: a tool_result can arrive out of order, and a
    * duplicate must not decrement twice.
@@ -4352,6 +4360,9 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     worktreeTargets: new Map<string, { tool: string; counterpart: string }>(),
     worktreeHinted: new Set<string>(),
     sawWriteAttempt: false,
+    // What the process saw before the restart is gone with it; the record's
+    // `tokensUsed` still speaks for any answer it got.
+    sawModelAnswer: false,
     sawThinking: false,
     thinkingSeen: 0,
     tools,
@@ -6636,6 +6647,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   }
 
   if (event.type === "assistant") {
+    // A model answered — unless the CLI wrote this message itself to carry an
+    // API error, which is exactly the shape of a harness that never got one to
+    // answer. First, ahead of the billing below and its early return.
+    if (event.message?.model !== "<synthetic>" && !event.error) state.sawModelAnswer = true;
     // Every request pays for the input it carries, so input is summed per turn
     // even though the conversation repeats — that is what a bill counts. Per
     // MESSAGE, not per event: see LiveRun.lastBilledMessageId.
@@ -9945,7 +9960,21 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   //
   // Not resumable, whatever the result event claimed: the session holds no
   // work, and Claude Code replays a failure that is in the session.
-  if (run.status === "failed" && isHarnessFault(run.error)) {
+  //
+  // And only BEFORE the first answer. The same line after a model has answered
+  // this run proves nothing about the harness — it plainly could get a model
+  // to answer — and recorded, it refused every run for fifteen minutes: a
+  // bench worker 347 s and 563,595 tokens into its task hit one, and the next
+  // 16 team goals were turned away in ~35 ms each on a box that was answering
+  // fine (run-dazazpqx, TASK-1320). That run fails with its own error, whole,
+  // like any other failure of the run, and nothing is remembered.
+  const harnessVerdict = run.status === "failed"
+    ? classifyHarnessFailure(run.error, { tokensUsed: run.tokensUsed, sawModelAnswer: state.sawModelAnswer })
+    : null;
+  if (harnessVerdict === "run_failure") {
+    console.error(`[coding-agent] ${run.id} hit a model error after the model had answered (${run.tokensUsed} tokens); failed as the run's own error, no harness fault recorded`);
+  }
+  if (harnessVerdict === "harness_not_ready") {
     run.failureKind = "harness_not_ready";
     run.error = harnessFaultMessage(run.error);
     run.resumable = false;
@@ -10320,6 +10349,7 @@ function spawnRun(
     worktreeTargets: new Map<string, { tool: string; counterpart: string }>(),
     worktreeHinted: new Set<string>(),
     sawWriteAttempt: false,
+    sawModelAnswer: false,
     sawThinking: false,
     thinkingSeen: 0,
     tools,
