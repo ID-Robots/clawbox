@@ -86,7 +86,7 @@ import {
 } from "@/lib/coding-team-messages";
 import { addWorkerWorktree, changedFiles, ensureTeamBranch, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
-import { FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, reviewerTask } from "@/lib/coding-team-reviewer";
+import { answerHead, FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, REVIEWER_NUDGE, reviewerTask, type Verdict } from "@/lib/coding-team-reviewer";
 import { runProjectSuite, suiteFailure, suiteNote, suiteRejection } from "@/lib/coding-team-suite";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
@@ -933,7 +933,8 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
 async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSource, work: { files: string[]; report: string }, starting: ReadonlySet<string>): Promise<{ verdict: "accepted" | "rejected"; notes: string }> {
   const { board, bus } = team;
   const role: RunTeam = { id: board.id, role: "reviewer", taskId: task.task_id };
-  const start = async (): Promise<CodingRun | { reason: string; wait: boolean }> => {
+  // `resumeOf` names the reviewer run whose own session a re-ask continues (verdictOf).
+  const start = async (resumeOf: string | null): Promise<CodingRun | { reason: string; wait: boolean }> => {
     // The orchestrator's own look first, as for a worker; the spawn asks
     // again, and a refusal there that is still about room is the same wait.
     // The reservations are read on every ask: a launch lands while we wait.
@@ -943,17 +944,33 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
     // wrote in its worktree — gone by now — is said in the project instead.
     const here = (text: string) => toFolderPaths(text, board.directory, board.directory);
     try {
-      return await startRun({
-        task: reviewerTask({ taskId: task.task_id, description: here(task.task_description), files: work.files, report: here(work.report), goal: board.goal }),
-        projectId: board.projectId,
-        directory: board.directory,
-        source,
-        team: role,
-        readOnly: true,
-        extraBrief: REVIEWER_BRIEF,
-      });
+      return await startRun(resumeOf
+        ? { task: REVIEWER_NUDGE, resumeRunId: resumeOf, source, team: role, readOnly: true, extraBrief: REVIEWER_BRIEF }
+        : {
+          task: reviewerTask({ taskId: task.task_id, description: here(task.task_description), files: work.files, report: here(work.report), goal: board.goal }),
+          projectId: board.projectId,
+          directory: board.directory,
+          source,
+          team: role,
+          readOnly: true,
+          extraBrief: REVIEWER_BRIEF,
+        });
     } catch (err) {
       return { reason: err instanceof Error ? err.message : String(err), wait: err instanceof CodingAgentError && err.wait };
+    }
+  };
+  // A started run, or why none could start; null once the team is stopped.
+  const launch = async (resumeOf: string | null): Promise<CodingRun | { reason: string } | null> => {
+    const waitingSince = Date.now();
+    for (;;) {
+      if (team.stopRequested) return null;
+      const started = await start(resumeOf);
+      if ("id" in started) return started;
+      if (!started.wait) return { reason: started.reason };
+      if (Date.now() - waitingSince >= RUN_BUDGET_MS) {
+        return { reason: `no room for ${Math.round(RUN_BUDGET_MS / 60_000)} minutes (${started.reason})` };
+      }
+      await sleep(REVIEWER_SLOT_POLL_MS);
     }
   };
   const noReviewer = (reason: string): { verdict: "accepted"; notes: string } => {
@@ -962,19 +979,10 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
     return { verdict: "accepted", notes: "Accepted by rule: the reviewer could not start." };
   };
 
-  const waitingSince = Date.now();
-  let run: CodingRun;
-  for (;;) {
-    // Never posted: the caller drops the verdict of a stopped team.
-    if (team.stopRequested) return { verdict: "accepted", notes: "The team was stopped before the review." };
-    const started = await start();
-    if ("id" in started) { run = started; break; }
-    if (!started.wait) return noReviewer(started.reason);
-    if (Date.now() - waitingSince >= RUN_BUDGET_MS) {
-      return noReviewer(`no room for ${Math.round(RUN_BUDGET_MS / 60_000)} minutes (${started.reason})`);
-    }
-    await sleep(REVIEWER_SLOT_POLL_MS);
-  }
+  const run = await launch(null);
+  // Never posted: the caller drops the verdict of a stopped team.
+  if (run === null) return { verdict: "accepted", notes: "The team was stopped before the review." };
+  if (!("id" in run)) return noReviewer(run.reason);
   const row = board.tasks.find((t) => t.task_id === task.task_id);
   if (row) row.reviewRunId = run.id;
   board.runs.push({ id: run.id, role: "reviewer", taskId: task.task_id });
@@ -984,12 +992,59 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
     bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `The reviewer of ${task.task_id} (${run.id}) ended ${settled?.status ?? "without a record"}.` });
     return { verdict: "accepted", notes: "Accepted by rule: the reviewer did not finish." };
   }
-  const parsed = parseVerdict(settled.resultText ?? settled.summary);
-  if (!parsed.ok) {
-    bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `The reviewer of ${task.task_id} gave no verdict: ${parsed.reason}` });
-    return { verdict: "accepted", notes: `Accepted by rule: ${parsed.reason}` };
+  const answer = await verdictOf(team, settled, `The reviewer of ${task.task_id}`, task.task_id, launch);
+  if (answer === null) return { verdict: "accepted", notes: "The team was stopped during the review." };
+  if (!answer.ok) {
+    bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: answer.alert });
+    return { verdict: "accepted", notes: `Accepted by rule: ${answer.reason}` };
   }
-  return parsed.verdict;
+  return answer.verdict;
+}
+
+/**
+ * The verdict in a finished reviewer's answer, asked for ONCE more when the
+ * answer carries no JSON object at all (TASK-1323). On the bench the
+ * reviewer had done its review and only its closing words lacked the
+ * object, and every such answer cost the team an alert and an acceptance by
+ * rule. The re-ask continues the reviewer's own session with
+ * `REVIEWER_NUDGE`, under the same budget as the review (`settle`), and is a
+ * note on the board, never an alert; only a second answer without the
+ * object is the alert, quoting how that answer began. An object that is
+ * there but wrong is what the reviewer said: the alert at once, as before.
+ *
+ * `who` names the reviewer the way the board does; `reask` starts the
+ * follow-up run on the settled one's id. Null once the team is stopped.
+ */
+async function verdictOf(
+  team: LiveTeam,
+  settled: CodingRun,
+  who: string,
+  taskId: string | null,
+  reask: (runId: string) => Promise<CodingRun | { reason: string } | null>,
+): Promise<{ ok: true; verdict: Verdict } | { ok: false; reason: string; alert: string } | null> {
+  const { board, bus } = team;
+  const first = settled.resultText ?? settled.summary;
+  const parsed = parseVerdict(first);
+  if (parsed.ok) return parsed;
+  if (!parsed.missing) return { ok: false, reason: parsed.reason, alert: `${who} gave no verdict: ${parsed.reason}` };
+  if (team.stopRequested) return null;
+  bus.send(SYSTEM, { type: "note", ...(taskId ? { task_id: taskId } : {}), text: `${who} answered without a JSON verdict; asking it once more for the verdict alone. It answered: ${answerHead(first)}` });
+  const again = await reask(settled.id);
+  if (again === null) return null;
+  if (!("id" in again)) return { ok: false, reason: parsed.reason, alert: `${who} gave no verdict: ${parsed.reason} Asked once more, it could not start: ${again.reason}` };
+  board.runs.push({ id: again.id, role: "reviewer", taskId });
+  saveBoard(board);
+  const resettled = await settle(team, again.id);
+  if (team.stopRequested) return null;
+  if (resettled?.status !== "completed") {
+    return { ok: false, reason: parsed.reason, alert: `${who} gave no verdict: ${parsed.reason} Asked once more, it (${again.id}) ended ${resettled?.status ?? "without a record"}.` };
+  }
+  const second = resettled.resultText ?? resettled.summary;
+  const reparsed = parseVerdict(second);
+  if (reparsed.ok) return reparsed;
+  if (!reparsed.missing) return { ok: false, reason: reparsed.reason, alert: `${who} gave no verdict: ${reparsed.reason}` };
+  // Worded short: an alert is one line of 300 characters, and the quote is the point.
+  return { ok: false, reason: reparsed.reason, alert: `${who} gave no verdict: asked twice, it answered ${second?.trim() ? `no JSON object — ${answerHead(second)}` : "nothing"}` };
 }
 
 /**
@@ -1034,10 +1089,18 @@ async function finalReview(team: LiveTeam, source: CodingRunSource, tests: strin
   if (settled?.status !== "completed") {
     return byRule("the final reviewer did not finish.", `The final reviewer (${run.id}) ended ${settled?.status ?? "without a record"}.`);
   }
-  const parsed = parseVerdict(settled.resultText ?? settled.summary);
-  if (!parsed.ok) return byRule(parsed.reason, `The final reviewer gave no verdict: ${parsed.reason}`);
-  bus.send(REVIEWER, { type: "final_review", ...parsed.verdict });
-  return parsed.verdict;
+  const reask = async (runId: string): Promise<CodingRun | { reason: string }> => {
+    try {
+      return await startRun({ task: REVIEWER_NUDGE, resumeRunId: runId, source, team: { id: board.id, role: "reviewer", taskId: null }, readOnly: true, extraBrief: FINAL_REVIEWER_BRIEF });
+    } catch (err) {
+      return { reason: err instanceof Error ? err.message : String(err) };
+    }
+  };
+  const answer = await verdictOf(team, settled, "The final reviewer", null, reask);
+  if (answer === null) return null;
+  if (!answer.ok) return byRule(answer.reason, answer.alert);
+  bus.send(REVIEWER, { type: "final_review", ...answer.verdict });
+  return answer.verdict;
 }
 
 /**

@@ -724,8 +724,10 @@ export function raiseAlert(board: TeamBoard, actor: Actor, reason: string, taskI
  * today, a worker whose every refusal only LOOKED (`readOnlyDenial`) or wrote
  * outside its folders (`outsideFolderWriteDenial`), with how many, which the
  * figures count; a plan's text cut to fit its bound (`clippedNote`), every
- * cut on one line; and a team message whose receiver had already finished
- * (`undelivered`, from `TeamBus.refuse`), which the figures count too.
+ * cut on one line; a reviewer asked once more for the verdict its answer
+ * lacked (`verdictOf`, TASK-1323); and a team message whose receiver had
+ * already finished (`undelivered`, from `TeamBus.refuse`), which the figures
+ * count too.
  */
 export function postNote(board: TeamBoard, actor: Actor, text: string, taskId?: string, readOnlyRefusals?: number, undelivered?: UndeliveredNote): void {
   if (actor.kind !== "system") throw new BoardAccessError(actor, "note", `Only the system writes a note; ${describeActor(actor)} may not.`);
