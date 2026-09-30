@@ -59,5 +59,13 @@ export const apps: AppDef[] = [
   { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
+  // The web itself: a start page with a search box, opened as an EXTERNAL
+  // page — through the kiosk API on the x64 laptop's kiosk Chrome, where the
+  // extension's bar then gives it an address bar and tab chips, and as a plain
+  // window.open everywhere else. Not the `browser` app above, which is the
+  // VNC-framed Chromium the agent drives. kiosk/extension/content.js opens
+  // its own new tabs on the same start page; the kiosk extension test holds
+  // the two URLs together.
+  { id: "web", name: "app.web", color: "#0f766e", type: "external", url: "https://duckduckgo.com/", pinned: false },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
 ];

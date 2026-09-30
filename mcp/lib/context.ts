@@ -57,6 +57,7 @@ const APP_DESCRIPTIONS: Record<string, Omit<DesktopApp, "id">> = {
   system_update: { name: "System Update", description: "The installed ClawBox version and the update button" },
   store: { name: "Store", description: "App store" },
   browser: { name: "Browser Setup", description: "Browser integration panel, not the browsing window" },
+  web: { name: "Web", description: "The web: a search start page in a browser tab (on the kiosk laptop, with an address bar)", external: true },
   vnc: { name: "Remote Desktop", description: "VNC viewer" },
 };
 

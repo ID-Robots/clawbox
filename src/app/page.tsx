@@ -318,6 +318,8 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     "memory-shard": "diamond",
     system_update: "system_update",
     vnc: "desktop_windows",
+    // The globe: the open web, as opposed to `browser`'s Chrome roundel.
+    web: "language",
     camera: "photo_camera",
     store: "storefront",
     chat: "chat_bubble",
