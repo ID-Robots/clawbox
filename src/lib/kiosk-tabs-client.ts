@@ -68,6 +68,23 @@ function parseTabs(data: unknown): { available: boolean; tabs: KioskTabView[] } 
   return { available: true, tabs };
 }
 
+/**
+ * The desktop app that stands for the kiosk's pages on the shelf: `web`, the
+ * same app as the desktop's Web icon (src/lib/desktop-apps.ts). One shelf
+ * icon for every page the desktop opened, like any other app's; the pages
+ * themselves are listed and switched in the kiosk bar across the top.
+ */
+export const KIOSK_PAGES_APP_ID = "web";
+
+/**
+ * The kiosk's own pages — every tab but the desktop's — in the order the
+ * server hands them over, which is Chrome's `/json/list` order: most recently
+ * used first. So `[0]` is the page the owner was last on.
+ */
+export function kioskPageTabs(tabs: KioskTabView[]): KioskTabView[] {
+  return tabs.filter((t) => !t.isDesktop);
+}
+
 /** One read of the tab list. Never throws; a failure is "no kiosk". */
 export async function fetchKioskTabs(): Promise<{ available: boolean; tabs: KioskTabView[] }> {
   try {

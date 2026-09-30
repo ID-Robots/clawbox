@@ -11,12 +11,14 @@ import {
   MIN_WINDOW_HEIGHT,
   MIN_WINDOW_WIDTH,
   clampWindowPosition,
+  desktopTop,
   fitWindowSize,
   getSnapRect,
   getSnapZone,
   shelfHeight,
   type SnapZone,
 } from "@/lib/window-snap";
+import { useKioskBarInset } from "@/lib/kiosk-bar-inset";
 
 /** Flat fallback for the CSS `calc()` that maximizes a window. */
 const SHELF_HEIGHT = 56;
@@ -53,15 +55,17 @@ function getSavedSize(appId: string | undefined, defaultWidth: number, defaultHe
 function getInitialPosition(width: number, height: number, rInset = 0) {
   if (typeof window === "undefined") return { x: 100, y: 50 };
   const maxWidth = window.innerWidth - rInset;
-  const maxHeight = window.innerHeight - shelfHeight();
+  // Centred in the strip between the kiosk bar (0 without one) and the shelf.
+  const top = desktopTop();
+  const maxHeight = window.innerHeight - shelfHeight() - top;
   const centredX = Math.max(20, (maxWidth - width) / 2);
   return {
     // Beside a docked chat the 20px floor alone could still put the right end
     // of a strip-wide window — where its controls live — under the panel, so
-    // the window ends DESKTOP_GAP before the chat's edge, the margin a
-    // maximized window keeps there.
+    // the window ends DESKTOP_GAP before the chat's edge, the margin the
+    // desktop's floating surfaces keep from each other.
     x: rInset > 0 ? Math.min(centredX, Math.max(DESKTOP_GAP, maxWidth - DESKTOP_GAP - width)) : centredX,
-    y: Math.max(20, (maxHeight - height) / 2),
+    y: top + Math.max(20, (maxHeight - height) / 2),
   };
 }
 
@@ -277,7 +281,9 @@ export default function ChromeWindow({
         if (r.edge.includes("t")) {
           const dh = Math.min(dy, r.startH - MIN_WINDOW_HEIGHT);
           newH = r.startH - dh;
-          newY = Math.max(0, r.startPosY + dh);
+          // Not above the desktop's top: under the kiosk bar the title bar
+          // could not be grabbed again.
+          newY = Math.max(desktopTop(), r.startPosY + dh);
         }
 
         // Direct DOM update — no React re-render during resize
@@ -431,7 +437,9 @@ export default function ChromeWindow({
   // maximize and close buttons under the chat; a free window can be left with
   // its title bar off the smaller desktop, which is the one handle it has. A
   // MAXIMIZED window needs nothing — its geometry is a CSS calc that already
-  // follows both.
+  // follows both. The kiosk bar showing or hiding (`barInset`) moves the top
+  // of the desktop, which is the same kind of change.
+  const barInset = useKioskBarInset();
   useEffect(() => {
     if (maximized) return;
     const relayout = () => {
@@ -465,7 +473,7 @@ export default function ChromeWindow({
     relayout();
     window.addEventListener("resize", relayout);
     return () => window.removeEventListener("resize", relayout);
-  }, [maximized, snapped, rightInset]);
+  }, [maximized, snapped, rightInset, barInset]);
 
   const handleMinimize = useCallback(() => {
     setMinimizing(true);
@@ -477,18 +485,25 @@ export default function ChromeWindow({
 
   if (minimized && !restoring) return null;
 
-  // Maximized: the desktop's one gap on every side — beside a docked chat,
-  // between the window and the chat as well, because `rightInset` ends at the
-  // chat's left edge and the chat's own gap is on its far side. Corners kept,
-  // so a full-screen window sits in the desktop the way the chat does.
+  // Maximized: edge to edge, flush with the screen and the shelf, square
+  // corners — exactly what a snapped window is (the owner's ask, 2026-09-30:
+  // no small paddings around the windows; it used to keep DESKTOP_GAP on every
+  // side, with its corners). Beside a docked chat it ends where `rightInset`
+  // ends, the chat's left edge, so the one margin left on screen is the chat's
+  // own, on the chat's side of that line. On the laptop's kiosk it starts
+  // under the kiosk bar while that bar is up (`barInset`, 0 everywhere else).
   const windowStyle = maximized
     ? {
-      left: DESKTOP_GAP,
-      top: DESKTOP_GAP,
-      width: `calc(100% - ${DESKTOP_GAP * 2 + rightInset}px)`,
-      height: `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px) - ${DESKTOP_GAP * 2}px)`,
+      left: 0,
+      top: barInset,
+      width: rightInset > 0 ? `calc(100% - ${rightInset}px)` : "100%",
+      height: barInset > 0
+        ? `calc(100vh - ${SHELF_HEIGHT + barInset}px - env(safe-area-inset-bottom, 0px))`
+        : `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px))`,
     }
       : { left: position.x, top: position.y, width: size.width, height: size.height };
+  // A flush window has no corners to round: snapped to an edge, or maximized.
+  const flush = snapped || maximized;
 
   return (
     <div
@@ -502,7 +517,7 @@ export default function ChromeWindow({
       style={{
         ...windowStyle,
         zIndex,
-        borderRadius: snapped ? 0 : 8,
+        borderRadius: flush ? 0 : 8,
         boxShadow: isActive ? palette.shadow : palette.shadowInactive,
         opacity: 1,
         transition: snapped && !isDragging
@@ -517,7 +532,7 @@ export default function ChromeWindow({
         style={{
           background: isActive ? palette.titleBar : palette.titleBarInactive,
           borderBottom: `1px solid ${palette.hairline}`,
-          borderRadius: snapped ? 0 : "8px 8px 0 0",
+          borderRadius: flush ? 0 : "8px 8px 0 0",
         }}
         onMouseDown={handleDragStart}
         onTouchStart={handleDragStart}

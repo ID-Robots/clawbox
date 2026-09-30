@@ -113,7 +113,10 @@ describe("the top-right notices", () => {
     // still lands on the chat's buttons.
     expect(src).toMatch(/const NOTICE_COLUMN_WIDTH = 320;/);
     expect(src).toMatch(/const NOTICE_MARGIN = 16;/);
-    expect(src).toMatch(/className="desktop-notice-stack pointer-events-none fixed top-4 flex w-\[320px\] flex-col gap-3"/);
+    expect(src).toMatch(/className="desktop-notice-stack pointer-events-none fixed flex w-\[320px\] flex-col gap-3"/);
+    // The column's top is the same margin, below the laptop's kiosk bar while
+    // that bar is up (0 everywhere else).
+    expect(src).toMatch(/top: NOTICE_MARGIN \+ kioskBarInset \}/);
   });
 
   it("ask the chat where it is standing only while a card is up", () => {

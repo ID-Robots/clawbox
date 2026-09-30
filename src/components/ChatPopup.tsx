@@ -413,7 +413,8 @@ import { renderText, audioLabel } from '@/lib/chat-markdown'
 import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
 import { claimSpokenReply, releaseSpokenReply, spokenReplyInterruptions, stopSpokenReply } from '@/lib/spoken-reply-playback'
 import SnapPreviewOverlay from '@/components/SnapPreviewOverlay'
-import { DESKTOP_GAP, DESKTOP_LAYERS, getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
+import { DESKTOP_GAP, DESKTOP_LAYERS, desktopTop, getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
+import { useKioskBarInset } from '@/lib/kiosk-bar-inset'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import {
   attachmentAcceptAttribute,
@@ -683,8 +684,10 @@ const DEFAULT_PANEL_WIDTH = 420
  * same chat, only wider, so it keeps the popup's radius and shadow and floats
  * clear of the edges instead.
  *
- * It is the DESKTOP's gap, not the chat's own — the same margin a maximized
- * window keeps — which is why the number comes from `window-snap`. Still
+ * It is the DESKTOP's gap, not the chat's own — the margin the desktop keeps
+ * between the panel and the windows beside it (a maximized window fills the
+ * strip up to it edge to edge) — which is why the number comes from
+ * `window-snap`. Still
  * exported under this name because the desktop reserves this strip: `page.tsx`
  * passes the reserved width to windows and to the mascot as `rightInset`, and
  * that reservation has to include the gap or a maximized window slides under
@@ -914,6 +917,9 @@ function emailRefusalSentence(rows: unknown[]): string {
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, onFloatingRectChange, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t, locale } = useT()
   const tr = useTr()
+  // The kiosk bar's height on the laptop (0 everywhere else): the docked panel
+  // starts under it.
+  const barInset = useKioskBarInset()
   // The words a failed turn is said in. A ref, because the gateway's event
   // handlers outlive the render that created them and must still speak the
   // owner's current language.
@@ -1907,9 +1913,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // the top-left gutter, where its header is at least on screen.
       const x = d.origX + (ev.clientX - d.startX)
       const y = d.origY + (ev.clientY - d.startY)
+      // The top gutter starts under the kiosk bar on the laptop (0 elsewhere):
+      // a header dropped under it could not be grabbed again.
+      const top = desktopTop() + VIEWPORT_MARGIN
       setPos({
         x: Math.max(VIEWPORT_MARGIN, Math.min(x, window.innerWidth - rect.width - VIEWPORT_MARGIN)),
-        y: Math.max(VIEWPORT_MARGIN, Math.min(y, window.innerHeight - rect.height - VIEWPORT_MARGIN)),
+        y: Math.max(top, Math.min(y, window.innerHeight - rect.height - VIEWPORT_MARGIN)),
       })
       setSnapPreview(getSnapZone(ev.clientX, ev.clientY))
     }
@@ -1963,7 +1972,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Growing leftward/upward moves the far edge, which is what has to stay
       // inside: the right edge is fixed at `start.left + start.w`.
       if (edge.includes('l')) { newW = Math.max(MIN_CHAT_WIDTH, Math.min(start.w - dx, start.left + start.w - VIEWPORT_MARGIN)); newX = start.left + (start.w - newW) }
-      if (edge.includes('t')) { newH = Math.max(MIN_CHAT_HEIGHT, Math.min(start.h - dy, start.top + start.h - VIEWPORT_MARGIN)); newY = start.top + (start.h - newH) }
+      if (edge.includes('t')) { newH = Math.max(MIN_CHAT_HEIGHT, Math.min(start.h - dy, start.top + start.h - VIEWPORT_MARGIN - desktopTop())); newY = start.top + (start.h - newH) }
       setSize({ w: newW, h: newH })
       setPos({ x: newX, y: newY })
       last = { w: newW, h: newH }
@@ -6247,7 +6256,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const posStyle: React.CSSProperties = panelMode
     ? {
         right: DESKTOP_GAP,
-        top: DESKTOP_GAP,
+        // Under the kiosk bar on the laptop while it is up; the bar's height
+        // is 0 everywhere else, so this is the old DESKTOP_GAP there.
+        top: barInset + DESKTOP_GAP,
         // The safe-area inset rides along because a maximized window subtracts
         // it from its height too; a flat 62 left the panel hanging below the
         // window's bottom edge on a device that has an inset.

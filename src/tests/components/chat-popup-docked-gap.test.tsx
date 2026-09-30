@@ -24,10 +24,12 @@ vi.mock("@/lib/i18n", async (importOriginal) => {
 });
 
 /**
- * The docked chat's own margins, which nothing pinned before: it and a
- * maximized window are meant to be one gap from the screen edges and one gap
- * from each other, and the two were free to drift apart because only the
- * window side was under test.
+ * The docked chat's own margins, which nothing pinned before: the panel is
+ * meant to be one gap from the screen edges, and the strip the desktop
+ * reserves beside it (`page.tsx`: the panel's width plus the same gap) ends
+ * one gap short of it — the two were free to drift apart because only the
+ * window side was under test. A MAXIMIZED window fills that strip edge to edge
+ * since 2026-09-30, so this gap is the only margin between it and the chat.
  */
 
 // ChromeShelf's height, the strip the docked panel sits above.
@@ -93,9 +95,9 @@ describe("the docked chat's margins", () => {
     expect(el.style.width).toBe(`${DEFAULT_PANEL_WIDTH}px`);
   });
 
-  it("is the same gap the maximized window keeps", () => {
+  it("is the same gap the desktop reserves beside the panel", () => {
     // page.tsx still imports the old name from this component; it has to be
-    // the shared number, or the reserved strip and the window's margin drift.
+    // the shared number, or the reserved strip and the chat's margin drift.
     expect(CHAT_PANEL_GAP).toBe(DESKTOP_GAP);
   });
 
