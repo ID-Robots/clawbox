@@ -59,22 +59,23 @@ export function reviewerTask(input: { taskId: string; description: string; files
 
 /**
  * The final reviewer's task text: the goal, where the work is, the files the
- * tasks were given, and the board — each task and what its worker reported —
- * inside the run route's cap. `digest` is built for the room this leaves
+ * tasks were given, the project's own tests when the harness ran them green,
+ * and the board — each task and what its worker reported — inside the run
+ * route's cap. `digest` is built for the room this leaves
  * (`finalReviewRoom`).
  */
-export function finalReviewerTask(input: { goal: string; branch: string | null; base: string | null; files: string[]; digest: string }): string {
+export function finalReviewerTask(input: { goal: string; branch: string | null; base: string | null; files: string[]; tests?: string | null; digest: string }): string {
   const text = [...finalReviewHead(input), `The board — every task, what its worker reported, the latest alerts:\n${input.digest.trim() || "(empty)"}`].join("\n\n");
   return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
 }
 
 /** How many characters the final reviewer's task text leaves for the board's digest. */
-export function finalReviewRoom(input: { goal: string; branch: string | null; base: string | null; files: string[] }): number {
+export function finalReviewRoom(input: { goal: string; branch: string | null; base: string | null; files: string[]; tests?: string | null }): number {
   const head = finalReviewHead(input).join("\n\n");
   return Math.max(0, MAX_TASK_CHARS - head.length - "\n\nThe board — every task, what its worker reported, the latest alerts:\n".length);
 }
 
-function finalReviewHead(input: { goal: string; branch: string | null; base: string | null; files: string[] }): string[] {
+function finalReviewHead(input: { goal: string; branch: string | null; base: string | null; files: string[]; tests?: string | null }): string[] {
   const named = input.files.slice(0, MAX_REVIEW_FILES);
   const more = input.files.length - named.length;
   const goal = input.goal.length > FINAL_GOAL_CHARS ? `${input.goal.slice(0, FINAL_GOAL_CHARS - 1)}…` : input.goal;
@@ -82,6 +83,8 @@ function finalReviewHead(input: { goal: string; branch: string | null; base: str
     `Review the team's whole result for its goal: ${goal}`,
     input.branch ? `The merged work is on the team's branch ${input.branch}${input.base ? `, forked from ${input.base}` : ""}, checked out here.` : "The merged work is in this folder.",
     named.length ? `Files the tasks were given:\n${named.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- … and ${more} more` : ""}` : "The tasks named no files.",
+    // The reviewer may not run anything; the harness ran the project's own suite on this tree first (TASK-1321).
+    ...(input.tests ? [`The harness ran the project's own tests on the merged result and they pass: ${input.tests}.`] : []),
   ];
 }
 
