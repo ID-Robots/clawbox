@@ -166,6 +166,17 @@ describe("listKioskTabs", () => {
     expect(list.tabs[2]).toMatchObject({ isDesktop: false, url: "http://localhost:3005/app/vnc" });
   });
 
+  it("lists the kiosk extension's start page, and no other extension page", async () => {
+    // kiosk/extension/newtab.html is where the bar's "+" lands; the shelf
+    // must show that tab or a fresh tab is invisible until it navigates.
+    const START = { id: "FFFF5555", type: "page", title: "New tab", url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/newtab.html" };
+    const OTHER = { id: "FFFF6666", type: "page", title: "x", url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/other.html" };
+    respond = () => json([DESKTOP, START, OTHER, WORKER]);
+    const list = await listKioskTabs();
+    expect(list.tabs.map((t) => t.id)).toEqual(["AAAA1111", "FFFF5555"]);
+    expect(list.tabs[1]).toMatchObject({ isDesktop: false, title: "New tab", favicon: "" });
+  });
+
   it("drops a target whose id could not go into a URL path", async () => {
     respond = () => json([{ ...ANTHROPIC, id: "../json/close/AAAA1111" }, { ...DESKTOP, title: 7 }]);
     const list = await listKioskTabs();
