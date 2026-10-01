@@ -55,6 +55,13 @@ class State:
     last_large_archives: list[dict[str, object]] = field(default_factory=list)
     last_large_archive_count: int = 0
     last_large_archive_bytes: int = 0
+    # The symbolic links the last archive build SKIPPED — the archiver refuses
+    # them (a target outside the backup, or none), so the snapshot does not
+    # carry them; `backup_guard` — as [{"path": "~/…", "target": "<link text>"}]
+    # sorted by path, the first `backup_guard.LISTED_SKIPPED_LINKS` of
+    # `last_skipped_link_count`. Written with the fields above.
+    last_skipped_links: list[dict[str, str]] = field(default_factory=list)
+    last_skipped_link_count: int = 0
     # When the portal first refused to mint credentials because the account is
     # over quota (402 quota_full), in the current run of refusals; 0 once it
     # mints them again. The TS bridge reads it to tell "auto-backup was
@@ -82,6 +89,20 @@ def _large_archives(value: object) -> list[dict[str, object]]:
         {"path": item["path"], "bytes": _safe_int(item.get("bytes", 0))}
         for item in value
         if isinstance(item, dict) and isinstance(item.get("path"), str)
+    ]
+
+
+def skipped_links(value: object) -> list[dict[str, str]]:
+    """A list of skipped links as written — `last_skipped_links`, or a
+    snapshot's record — or the part of it that still reads as one."""
+    if not isinstance(value, list):
+        return []
+    return [
+        {"path": item["path"], "target": item["target"]}
+        for item in value
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and isinstance(item.get("target"), str)
     ]
 
 
@@ -115,6 +136,8 @@ def load(path: Path | str | None = None) -> State:
         last_large_archives=_large_archives(raw.get("last_large_archives")),
         last_large_archive_count=_safe_int(raw.get("last_large_archive_count", 0)),
         last_large_archive_bytes=_safe_int(raw.get("last_large_archive_bytes", 0)),
+        last_skipped_links=skipped_links(raw.get("last_skipped_links")),
+        last_skipped_link_count=_safe_int(raw.get("last_skipped_link_count", 0)),
         quota_full_since_ms=_safe_int(raw.get("quota_full_since_ms", 0)),
     )
 

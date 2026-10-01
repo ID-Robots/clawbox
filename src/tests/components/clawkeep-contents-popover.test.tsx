@@ -133,3 +133,57 @@ describe("what a backup leaves out, and what it carried", () => {
     expect(card).toHaveTextContent(/into ~\/\.openclaw\/backups, which ClawKeep leaves out/);
   });
 });
+
+/**
+ * TASK-1304: a symbolic link out of the backup used to fail the whole run.
+ * ClawKeep now skips it and the backup finishes — and the screen says both:
+ * "backup finished, N links skipped" beside the verdict, the links themselves
+ * on a card of their own, and the rule on the "Not included" line.
+ */
+describe("the links a backup skipped", () => {
+  const app = () => render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+  const said = (id: string, text: string | RegExp) =>
+    waitFor(() => expect(screen.getByTestId(id)).toHaveTextContent(text), { timeout: 5000 });
+  const skipped = {
+    lastHeartbeatStatus: "ok",
+    skippedLinks: [
+      { path: "~/.openclaw/workspace/docs/catalogue", target: "/home/clawbox/Shared/Exports/catalogue" },
+      { path: "~/.openclaw/workspace/docs/notes.txt", target: "../../../../Shared/notes.txt" },
+    ],
+    skippedLinkCount: 3,
+  };
+
+  it("says the backup finished, and lists the links it skipped", async () => {
+    stubFetch(skipped);
+    app();
+    await said("clawkeep-skipped-links-summary", "Backup finished · 3 symbolic link(s) skipped");
+    await said("clawkeep-skipped-links", "3 symbolic link(s) point outside the backed-up folders");
+    const card = screen.getByTestId("clawkeep-skipped-links");
+    // Informational, not an error: the box is fine and the backup finished.
+    expect(card).toHaveAttribute("role", "status");
+    expect(card).toHaveTextContent("still on this box, untouched");
+    const rows = card.querySelectorAll("li");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("~/.openclaw/workspace/docs/catalogue");
+    expect(rows[0]).toHaveTextContent("/home/clawbox/Shared/Exports/catalogue");
+    expect(rows[1]).toHaveTextContent("../../../../Shared/notes.txt");
+    expect(card).toHaveTextContent("…and 1 more.");
+    expect(card).toHaveTextContent(/keep the file itself inside the backed-up folders/);
+  });
+
+  it("does not call a backup finished while it is still uploading", async () => {
+    stubFetch({ ...skipped, lastHeartbeatStatus: "running" });
+    app();
+    await said("clawkeep-skipped-links", "3 symbolic link(s)");
+    expect(screen.queryByTestId("clawkeep-skipped-links-summary")).not.toBeInTheDocument();
+  });
+
+  it("names the rule under Not included, and draws nothing when nothing was skipped", async () => {
+    stubFetch();
+    app();
+    fireEvent.click(await screen.findByTestId("clawkeep-contents-toggle"));
+    await said("clawkeep-contents-popover", /symbolic links that point outside these folders, or at nothing/);
+    expect(screen.queryByTestId("clawkeep-skipped-links")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("clawkeep-skipped-links-summary")).not.toBeInTheDocument();
+  });
+});

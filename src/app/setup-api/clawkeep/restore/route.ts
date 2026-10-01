@@ -207,6 +207,11 @@ export async function POST(request: NextRequest) {
         // recreate part of the archive is not a clean success, and the card
         // has to be able to say which part.
         skippedMembers: result.skippedMembers ?? [],
+        // The links the BACKUP skipped (TASK-1304): the snapshot never had
+        // them, so the card names them instead of letting the owner look for
+        // them in the restored tree.
+        skippedLinks: result.skippedLinks ?? [],
+        skippedLinkCount: result.skippedLinkCount ?? 0,
         restartErrors: restart.errors,
         // Separate from `restartErrors` on purpose: the card prescribes a
         // manual `systemctl restart` for that one, and prescribing it over a

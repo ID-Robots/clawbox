@@ -25,6 +25,35 @@
 
 import { sanitizeErrorPayload } from "./safe-error-text";
 
+// -- Limits ------------------------------------------------------------------
+//
+// The staging route's own ceilings, in one place so the composer can refuse a
+// file BEFORE it is sent rather than after 25 MB of it crossed the network.
+
+/** Largest single file the staging route accepts (`chat/attachments`). */
+export const CHAT_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Files one drop may stage, a folder's whole tree included. A folder of
+ * thousands is a repository with its dependencies, not something to hand the
+ * agent one file at a time; zipping it is the better way in.
+ */
+export const CHAT_DROP_MAX_FILES = 500;
+
+/**
+ * Bytes one drop may stage — HALF of the staging directory's 500 MB retention
+ * (`chat/attachments` RETENTION.maxBytes). The sweep runs before every upload
+ * and trims oldest-first, so a drop bigger than the budget would sweep its own
+ * first files away while its last ones were still arriving.
+ */
+export const CHAT_DROP_MAX_BYTES = 250 * 1024 * 1024;
+
+/** How many folders deep a drop is read and staged. */
+export const CHAT_DROP_MAX_DEPTH = 32;
+
+/** A folder drop's batch id as the staging route accepts it. */
+export const CHAT_DROP_BATCH_RE = /^[A-Za-z0-9-]{8,64}$/;
+
 export type ChatAttachment = {
   /** File name as staged on the box. */
   name: string;
@@ -39,6 +68,13 @@ export type ChatAttachment = {
    * icon, never throw.
    */
   previewUrl?: string;
+  /**
+   * A dropped FOLDER, staged with its structure: `path` is the folder as
+   * staged, which is the one path the turn names. Absent for a file.
+   */
+  kind?: "folder";
+  /** For a folder: how many files it holds as staged. */
+  fileCount?: number;
 };
 
 /** Whether this attachment can be shown as a thumbnail. */
@@ -88,10 +124,16 @@ export function revokePreviews(items: readonly { previewUrl?: string }[] | undef
 
 /** Why an attachment could not be staged, in terms the composer can render. */
 export type StagingFailure = {
-  /** Translation key for the generic line. */
-  reason: "tooLarge" | "rejected" | "session" | "box" | "imagesOnly";
+  /**
+   * Translation key for the generic line (`chat.attachment.error.<reason>`).
+   * The last three are a DROP's: a folder over the drop's limits, a folder
+   * with nothing this box can take, and a folder that staged only in part.
+   */
+  reason: "tooLarge" | "rejected" | "session" | "box" | "imagesOnly" | "dropTooBig" | "emptyFolder" | "folderPartial";
   /** A vetted message from the box, when it gave one that is safe to show. */
   detail: string | null;
+  /** Numbers the line names beside the file (`{count}`, `{total}`, `{size}`). */
+  params?: Record<string, string | number>;
 };
 
 /**
@@ -168,4 +210,128 @@ export function attachmentAcceptAttribute(
   if (caps.canAttachImages) parts.push("image/*");
   if (caps.canAttachDocuments) parts.push(".pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css");
   return parts.join(",");
+}
+
+// -- Drops -------------------------------------------------------------------
+//
+// Files AND folders dragged onto the composer. A folder is read as its tree
+// (src/lib/dropped-files.ts) and staged as a folder, so the agent is handed
+// one path with the structure intact rather than a heap of loose files — on a
+// box that can read documents. Where it cannot (Hermes: pictures only), a
+// folder has no way into the turn, so its pictures go in as pictures.
+
+/** One file of a dropped folder: the file, and its place inside the folder (`site/src/app.js`). */
+export interface DroppedFile {
+  file: File;
+  relativePath: string;
+}
+
+/** What one drop held: loose files, and folders read as their trees. */
+export type DroppedItem =
+  | { kind: "file"; file: File }
+  | {
+      kind: "folder";
+      name: string;
+      files: DroppedFile[];
+      /** Entries passed over on purpose — hidden ones, dependency and cache folders. */
+      skipped: number;
+      /** The walk stopped at the drop's file limit: there is more than a drop may hold. */
+      truncated: boolean;
+    };
+
+/** A folder the drop will stage, with what it could not take. */
+export interface PlannedFolder {
+  name: string;
+  files: DroppedFile[];
+  /** Files left out because this box cannot take them (too large, a document where only pictures go). */
+  left: number;
+}
+
+export interface ChatDropPlan {
+  /** Loose files to stage the way a picked file is staged. */
+  files: File[];
+  folders: PlannedFolder[];
+  /** The first thing the drop could not take, worded for the composer's error line; null when it took everything. */
+  refusal: (StagingFailure & { file: string }) | null;
+}
+
+export interface ChatDropLimits {
+  maxFiles: number;
+  maxBytes: number;
+  maxFileBytes: number;
+}
+
+export const CHAT_DROP_LIMITS: ChatDropLimits = {
+  maxFiles: CHAT_DROP_MAX_FILES,
+  maxBytes: CHAT_DROP_MAX_BYTES,
+  maxFileBytes: CHAT_ATTACHMENT_MAX_BYTES,
+};
+
+/**
+ * Decide what a drop stages, BEFORE a byte is sent: the same capability
+ * partition a picked file gets, the staging route's per-file ceiling, and the
+ * drop's own totals. A folder over the totals is refused WHOLE — half a folder
+ * handed to the agent reads as the whole folder and is worse than none.
+ */
+export function planChatDrop(
+  items: readonly DroppedItem[],
+  caps: { canAttachImages: boolean; canAttachDocuments: boolean },
+  limits: ChatDropLimits = CHAT_DROP_LIMITS,
+): ChatDropPlan {
+  const allowed = (file: File) =>
+    typeof file.type === "string" && file.type.startsWith("image/") ? caps.canAttachImages : caps.canAttachDocuments;
+  const tooBig = (name: string): StagingFailure & { file: string } => ({
+    reason: "dropTooBig",
+    detail: null,
+    file: name,
+    params: { count: limits.maxFiles, size: `${Math.round(limits.maxBytes / (1024 * 1024))} MB` },
+  });
+  const plan: ChatDropPlan = { files: [], folders: [], refusal: null };
+  const refuse = (failure: StagingFailure & { file: string }) => {
+    plan.refusal ??= failure;
+  };
+  let count = 0;
+  let bytes = 0;
+  for (const item of items) {
+    if (item.kind === "file") {
+      const { file } = item;
+      if (!allowed(file)) { refuse({ reason: "imagesOnly", detail: null, file: file.name }); continue; }
+      if (file.size > limits.maxFileBytes) { refuse({ reason: "tooLarge", detail: null, file: file.name }); continue; }
+      if (count + 1 > limits.maxFiles || bytes + file.size > limits.maxBytes) { refuse(tooBig(file.name)); continue; }
+      count += 1;
+      bytes += file.size;
+      plan.files.push(file);
+      continue;
+    }
+    if (item.truncated) { refuse(tooBig(item.name)); continue; }
+    const usable: DroppedFile[] = [];
+    let left = 0;
+    for (const dropped of item.files) {
+      if (!allowed(dropped.file) || dropped.file.size > limits.maxFileBytes) { left += 1; continue; }
+      usable.push(dropped);
+    }
+    if (usable.length === 0) { refuse({ reason: "emptyFolder", detail: null, file: item.name }); continue; }
+    const folderBytes = usable.reduce((sum, d) => sum + d.file.size, 0);
+    if (count + usable.length > limits.maxFiles || bytes + folderBytes > limits.maxBytes) { refuse(tooBig(item.name)); continue; }
+    count += usable.length;
+    bytes += folderBytes;
+    if (caps.canAttachDocuments) {
+      plan.folders.push({ name: item.name, files: usable, left });
+    } else {
+      plan.files.push(...usable.map((d) => d.file));
+      if (left > 0) refuse({ reason: "folderPartial", detail: null, file: item.name, params: { count: left, total: item.files.length } });
+    }
+  }
+  return plan;
+}
+
+/**
+ * A fresh batch id for a folder drop. `crypto.randomUUID` exists only in a
+ * secure context, and the box is usually reached over plain http on the LAN,
+ * so the id is built from `getRandomValues`, which exists in both.
+ */
+export function newDropBatchId(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }

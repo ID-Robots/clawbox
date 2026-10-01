@@ -22,6 +22,7 @@ import {
   type ReviewMode,
   type TeamBoard,
   type TeamTask,
+  type UndeliveredNote,
   BoardAccessError,
   REVIEW_MODES,
   assignTask,
@@ -37,7 +38,7 @@ import {
   submitResult,
   updateStatus,
 } from "@/lib/coding-team-board";
-import { MAX_TEAM_MESSAGE_CHARS, TEAM_MESSAGE_TARGETS, type TeamMessageRefusal, type TeamMessageTarget } from "@/lib/coding-team-messages";
+import { MAX_TEAM_MESSAGE_CHARS, NOTED_REFUSALS, TEAM_MESSAGE_TARGETS, type TeamMessageRefusal, type TeamMessageTarget } from "@/lib/coding-team-messages";
 
 export type TeamMessage =
   | { type: "task"; task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string }
@@ -196,10 +197,39 @@ export class TeamBus {
    * message route (coding-team.ts), which knows whether a run is still live
    * and whether a sibling can still be told anything — so that refusal reads
    * on the board exactly like the ones the board makes itself.
+   *
+   * That caller passes its refusal's `code` too. A team message refused only
+   * because its receiver had already finished (`NOTED_REFUSALS`) is a race,
+   * not the sender's fault: the same line goes on the board as a NOTE with
+   * who, to whom and why (`UndeliveredNote`, counted as undelivered), and the
+   * team's alert count is not touched. It is refused all the same, and it is
+   * on the sender's caps (`TeamRunRef.sentAt`) the way an undelivered message
+   * is: no longer bounded by MAX_ALERTS, a run retrying there would otherwise
+   * write notes without end and push the log's oldest entries out.
    */
-  refuse(actor: Actor, message: TeamMessage, reason: string): never {
-    raiseAlert(this.board, { kind: "system" }, `Refused ${message.type} from ${actor.kind === "worker" ? `worker ${actor.id}` : actor.kind}: ${reason}`, "task_id" in message ? message.task_id : undefined);
+  refuse(actor: Actor, message: TeamMessage, reason: string, code?: TeamMessageRefusal): never {
+    const line = `Refused ${message.type} from ${actor.kind === "worker" ? `worker ${actor.id}` : actor.kind}: ${reason}`;
+    const unreached = unreachedNote(actor, message, code);
+    if (unreached) {
+      const from = this.board.runs.find((r) => r.id === unreached.from);
+      if (from) from.sentAt = [...(from.sentAt ?? []), Date.now()];
+      postNote(this.board, { kind: "system" }, line, undefined, undefined, unreached);
+    } else {
+      raiseAlert(this.board, { kind: "system" }, line, "task_id" in message ? message.task_id : undefined);
+    }
     saveBoard(this.board);
     throw new BoardAccessError(actor, message.type, reason);
   }
+}
+
+/**
+ * The note a refusal leaves instead of an alert, or null when it is an alert:
+ * only a well-formed team message, from a run of the team speaking as itself,
+ * refused for a `NOTED_REFUSALS` code. Anything else — a malformed message, a
+ * worker speaking as another run — is the alert it always was.
+ */
+function unreachedNote(actor: Actor, message: TeamMessage, code: TeamMessageRefusal | undefined): UndeliveredNote | null {
+  if (!code || !NOTED_REFUSALS.includes(code) || message.type !== "message" || validateMessage(message) !== null) return null;
+  if (actor.kind === "owner" || actor.kind === "system" || (actor.kind === "worker" && actor.id !== message.from_run_id)) return null;
+  return { code, from: message.from_run_id, role: actor.kind, to: message.to, ...(message.to_run_id ? { toRunId: message.to_run_id } : {}) };
 }

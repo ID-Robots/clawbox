@@ -4,6 +4,8 @@ import path from "@/lib/runtime-path";
 import { Readable } from "stream";
 import { filesBrowseRoot, isProtectedContainer, isProtectedFilePath } from "@/lib/file-guard";
 import { summarizeFolderForZip, zipFolderStream } from "@/lib/zip-stream";
+import { contentDisposition } from "@/lib/content-disposition";
+import { followMovedProjectFolders } from "@/lib/project-folders";
 
 export const dynamic = "force-dynamic";
 
@@ -70,14 +72,6 @@ function safePath(segments: string[]): string | null {
 }
 
 type Params = { params: Promise<{ path: string[] }> };
-
-/** RFC 5987: quoted ASCII fallback + filename* for Unicode/spaces. */
-function contentDisposition(kind: "inline" | "attachment", filename: string): string {
-  // The ASCII fallback strips anything outside the printable-ASCII range (and
-  // quotes/backslashes) so the quoted-string stays valid.
-  const asciiName = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  return `${kind}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
-}
 
 /**
  * A folder as one ZIP (`?zip=1`), streamed as it is read — see
@@ -206,10 +200,22 @@ export async function PUT(req: NextRequest, { params }: Params) {
   if (isProtectedContainer(newAbs)) return protectedContainerResponse();
   if (fs.existsSync(newAbs)) return NextResponse.json({ error: "Already exists" }, { status: 409 });
 
+  let isFolder = false;
+  try { isFolder = fs.lstatSync(/* turbopackIgnore: true */ abs).isDirectory(); } catch { /* renameSync reports it */ }
   try {
     fs.renameSync(abs, newAbs);
   } catch (err) {
     return mutationErrorResponse(err, "Failed to rename");
+  }
+  // A renamed folder keeps its Projects pin (and the pins inside it). Best
+  // effort: the rename has happened, and a pin list that could not be written
+  // is not a reason to report that it did not.
+  if (isFolder) {
+    try {
+      await followMovedProjectFolders([{ from: path.relative(base, abs), to: path.relative(base, newAbs) }]);
+    } catch (err) {
+      console.warn("[files] could not carry a Projects pin through a rename:", err instanceof Error ? err.message : err);
+    }
   }
   return NextResponse.json({ ok: true });
 }

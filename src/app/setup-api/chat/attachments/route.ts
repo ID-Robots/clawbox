@@ -10,6 +10,7 @@ import { chatAttachmentDir, pruneMediaDir, type MediaRetention } from "@/lib/har
 import { getActiveHarness } from "@/lib/harness";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import { isImageMedia } from "@/lib/chat-media";
+import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_DROP_BATCH_RE, CHAT_DROP_MAX_DEPTH } from "@/lib/chat-attachments";
 
 export const dynamic = "force-dynamic";
 
@@ -52,8 +53,9 @@ export const dynamic = "force-dynamic";
 // OpenClaw refuses an inline chat image over 6 MB
 // (`attachment-normalize-CpH9LzfB.js`), but this path is not the inline one --
 // it stages a file the agent opens by path, and the composer also accepts PDFs
-// and text. 25 MB matches the ceiling the sibling media reader uses.
-const MAX_BYTES = 25 * 1024 * 1024;
+// and text. 25 MB matches the ceiling the sibling media reader uses. The
+// composer reads the same constant to refuse a bigger file before sending it.
+const MAX_BYTES = CHAT_ATTACHMENT_MAX_BYTES;
 
 // `limits.fileSize` bounds each file, not the request. Without a total-bytes
 // guard a caller can stream unbounded data at the disk under one part, or pile
@@ -80,9 +82,17 @@ const MAX_PARTS = 12;
 // The sweep itself lives in `media-root` and is shared with the generated-
 // picture directory on the other side of the same tree: same policy, different
 // numbers. Only the numbers are this route's business.
+//
+// A dropped FOLDER is staged as a folder (see `relativePath` below), so this
+// directory holds batch folders beside the loose files, and each one is swept
+// as ONE item — its age is its newest file's, its size the whole tree's. A
+// sweep that skipped directories would leave every dropped folder on the disk
+// for good; one that went file by file would thin a folder out from the
+// oldest end while the agent is still reading it.
 const RETENTION: MediaRetention = {
   maxAgeMs: 7 * 24 * 60 * 60 * 1000,
   maxBytes: 500 * 1024 * 1024,
+  folders: true,
 };
 
 /** Raised for input the client got wrong (400) as opposed to a failure of ours (500). */
@@ -230,10 +240,37 @@ function resolveDest(dirReal: string, name: string): string | null {
   return dest;
 }
 
+/**
+ * A folder drop's `relativePath` (`site/src/app.js`) as the segments it will
+ * be staged under, each one a `safeLeafName` — or null when any segment has
+ * nothing usable left, or the path is deeper than a drop may be. The same
+ * leaf rule as a loose file, one segment at a time, so no segment can be
+ * `..`, carry a separator or land as a dotfile.
+ */
+function safeRelativePath(raw: string): string[] | null {
+  const parts = String(raw).split("/").filter((p) => p.length > 0);
+  if (parts.length === 0 || parts.length > CHAT_DROP_MAX_DEPTH) return null;
+  const out: string[] = [];
+  for (const part of parts) {
+    const leaf = safeLeafName(part);
+    if (!leaf) return null;
+    out.push(leaf);
+  }
+  return out;
+}
+
 // POST /setup-api/chat/attachments
 // Body: multipart/form-data with one `file` part.
 // Returns { ok, name, path } -- the same shape the composer already reads back
 // from the Files API, so only the URL changes on the client.
+//
+// A FOLDER dropped on the composer arrives one file per request, each carrying
+// two fields ahead of its file part: `batch`, one id for the whole drop, and
+// `relativePath`, the file's place inside the dropped folder. Every file of a
+// batch lands under `<staging>/<batch>/`, rebuilt as the folder it came from,
+// and the answer adds `root` — the dropped folder as staged — which is the
+// one path the turn names, so the agent opens the folder with its structure
+// intact instead of a heap of loose files.
 export async function POST(req: NextRequest) {
   const contentType = req.headers.get("content-type") ?? "";
   if (!contentType.includes("multipart/form-data")) {
@@ -283,7 +320,7 @@ export async function POST(req: NextRequest) {
   // and an unlink that races it just gets the bytes written back underneath it.
   const pendingWrites: Promise<unknown>[] = [];
   try {
-    const result = await new Promise<{ name: string; path: string }>((resolve, reject) => {
+    const result = await new Promise<{ name: string; path: string; root: string | null }>((resolve, reject) => {
       const busboy = Busboy({
         headers: { "content-type": contentType },
         limits: {
@@ -297,7 +334,13 @@ export async function POST(req: NextRequest) {
       let settled = false;
       let fileName = "";
       let destPath = "";
+      let rootPath: string | null = null;
       let sawFile = false;
+      // A folder drop's two fields. Read only AHEAD of the file part — the
+      // composer appends them first — so a field that trails the file cannot
+      // re-route bytes that are already being written.
+      let relativeSegments: string[] | null = null;
+      let batch: string | null = null;
       const writes: Promise<void>[] = [];
       // The file stream currently being written, so an abort can stop it at the
       // source rather than wait for bytes nobody wants any more.
@@ -359,6 +402,20 @@ export async function POST(req: NextRequest) {
       busboy.on("partsLimit", () => fail(new BadUpload("Too many multipart parts")));
       busboy.on("fieldsLimit", () => fail(new BadUpload("Too many form fields")));
 
+      busboy.on("field", (name, value) => {
+        if (sawFile || settled) return;
+        if (name === "relativePath") {
+          relativeSegments = safeRelativePath(value);
+          if (!relativeSegments) fail(new BadUpload("Invalid relative path"));
+        } else if (name === "batch") {
+          if (!CHAT_DROP_BATCH_RE.test(value)) {
+            fail(new BadUpload("Invalid batch"));
+            return;
+          }
+          batch = value;
+        }
+      });
+
       busboy.on("file", (_field, fileStream, info) => {
         sawFile = true;
         // Registered before the first thing that can reject, so an abort on
@@ -367,7 +424,19 @@ export async function POST(req: NextRequest) {
         // A body truncated while this part is open surfaces here rather than on
         // busboy, so the classifier has to run on this path too.
         fileStream.on("error", (err) => fail(asBadUpload(err)));
-        const leaf = safeLeafName(info.filename);
+        if (settled) {
+          fileStream.resume();
+          return;
+        }
+        const segments: string[] | null = relativeSegments;
+        if (segments && !batch) {
+          fail(new BadUpload("A folder upload needs its batch"));
+          return;
+        }
+        // In a folder drop the file's own name is the last segment of its
+        // place in the folder; the part's filename is the same name as the
+        // browser read it, and is not what decides where it lands.
+        const leaf = segments ? segments[segments.length - 1] : safeLeafName(info.filename);
         if (!leaf) {
           fail(new BadUpload("Invalid filename"));
           return;
@@ -386,8 +455,31 @@ export async function POST(req: NextRequest) {
         // earlier chat message already points at — `createWriteStream` opens
         // "w", which truncates. The uuid prefix also makes the exclusive open
         // below a genuine collision check rather than a formality.
-        const storageName = `${randomUUID()}-${leaf}`;
-        const dest = resolveDest(dirReal, storageName);
+        //
+        // A folder drop's files keep the names they have: the batch folder is
+        // the uuid, and "wx" below still refuses the one collision it can
+        // meet, the same relative path sent twice.
+        let dest: string | null;
+        if (segments && batch) {
+          const batchDir = resolveDest(dirReal, batch);
+          dest = batchDir;
+          for (const segment of segments) {
+            dest = dest ? resolveDest(dest, segment) : null;
+          }
+          // The dropped folder is the first segment; a caller that sent a bare
+          // name put the file straight into the batch, which is then the folder.
+          rootPath = batchDir ? (segments.length > 1 ? resolveDest(batchDir, segments[0]) : batchDir) : null;
+          if (dest) {
+            try {
+              fs.mkdirSync(path.dirname(dest), { recursive: true });
+            } catch (err) {
+              fail(err);
+              return;
+            }
+          }
+        } else {
+          dest = resolveDest(dirReal, `${randomUUID()}-${leaf}`);
+        }
         if (!dest) {
           fail(new BadUpload("Invalid destination"));
           return;
@@ -416,7 +508,7 @@ export async function POST(req: NextRequest) {
           .then(() => {
             if (settled) return;
             settled = true;
-            resolve({ name: fileName, path: destPath });
+            resolve({ name: fileName, path: destPath, root: rootPath });
           })
           .catch(fail);
       });
@@ -447,19 +539,26 @@ export async function POST(req: NextRequest) {
     if (!documentsAllowed && !looksLikeImage(await readHead(result.path))) {
       throw new BadUpload(IMAGE_ONLY_MESSAGE, 415);
     }
-    return NextResponse.json({ ok: true, name: result.name, path: result.path });
+    return NextResponse.json(result.root
+      ? { ok: true, name: result.name, path: result.path, root: result.root }
+      : { ok: true, name: result.name, path: result.path });
   } catch (err) {
     // A rejected upload must not leave a partial file behind: the composer
     // would be told nothing, but a later request reusing the name would
     // silently inherit whatever bytes did land.
-    if (written) {
+    // EXCEPT when the exclusive open itself was refused: then the file at that
+    // path is the earlier upload of the same relative path, which a chat
+    // message may already name, and nothing of this request was written.
+    if (written && (err as NodeJS.ErrnoException)?.code !== "EEXIST") {
       await Promise.allSettled(pendingWrites);
       try { await fsp.unlink(written); } catch { /* best effort */ }
     }
     // 400/413 only for input the caller can fix. Anything else is ours —
     // a full disk, a permission problem — and reporting it as a client error
     // sends the user off debugging a request that was fine.
-    const status = err instanceof BadUpload ? err.status : 500;
+    // The same relative path twice in one batch: "wx" refused to clobber the
+    // first copy, which is the caller's doing, not the box's.
+    const status = err instanceof BadUpload ? err.status : (err as NodeJS.ErrnoException)?.code === "EEXIST" ? 409 : 500;
     return NextResponse.json(
       { error: `Upload failed: ${err instanceof Error ? err.message : String(err)}` },
       { status },

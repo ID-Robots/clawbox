@@ -22,6 +22,13 @@
  * on screen holds a WebGL context; a browser allows a page about sixteen.
  * Character widths follow Unicode 11, so an emoji takes the two cells the
  * shell counted for it.
+ *
+ * With `persist` (the desktop's Terminal windows, TASK-1306) the shell is a
+ * SESSION on the box that outlives this page: a refresh, a closed tab or a
+ * dropped connection leaves it running, and the terminal that comes back
+ * reattaches by id and is shown what it missed (scripts/terminal-sessions.mjs).
+ * A session that no longer exists — the box restarted, nobody reattached for
+ * hours — is said as such, never replaced by a fresh shell that looks like it.
  */
 
 import React, {
@@ -35,7 +42,8 @@ import { createPortal } from "react-dom";
 import { useTr } from "@/lib/i18n-floor";
 import { SESSION_SWITCH_EVENT } from "@/lib/session-switch";
 import { DESKTOP_LAYERS, shelfHeight } from "@/lib/window-snap";
-import { WINDOW_CHROME } from "@/lib/window-chrome";
+import { WINDOW_CHROME, useWindowChrome } from "@/lib/window-chrome";
+import { terminalWsUrl } from "@/lib/terminal-sessions";
 import {
   TERMINAL_FONTS,
   TERMINAL_THEMES,
@@ -78,6 +86,54 @@ export interface TerminalAppProps {
   onOpenSettings?: () => void;
   /** The shell rang the bell (with the visual bell on) — the strip marks a tab behind the front one. */
   onBell?: () => void;
+  /**
+   * The shell is a session on the box that outlives this page (TASK-1306):
+   * closing the socket leaves it running, and a reconnect — this page's after a
+   * dropped network, or the next page's after a refresh — reattaches to it.
+   * Without it the shell ends with its socket, as it always did.
+   */
+  persist?: boolean;
+  /** The session to reattach to when the terminal mounts (a restored tab's); read once. */
+  session?: string;
+  /** Told the id of each session this terminal starts or reattaches to. */
+  onSession?: (id: string) => void;
+}
+
+interface XtermModules {
+  Terminal: typeof import("@xterm/xterm").Terminal;
+  FitAddon: typeof import("@xterm/addon-fit").FitAddon;
+  WebLinksAddon: typeof import("@xterm/addon-web-links").WebLinksAddon;
+  /** Unicode 11 widths; null where the addon would not load (xterm's own tables then). */
+  Unicode11Addon: typeof import("@xterm/addon-unicode11").Unicode11Addon | null;
+}
+
+let xtermModules: Promise<XtermModules> | null = null;
+
+/**
+ * xterm and its addons, loaded ONCE however many terminals ask at the same
+ * moment — a restored desktop mounts every Terminal tab at once (TASK-1306).
+ * A load that fails is not kept: the next Reconnect loads again.
+ */
+function loadXtermModules(): Promise<XtermModules> {
+  if (!xtermModules) {
+    const loading = (async () => {
+      const { Terminal } = await import("@xterm/xterm");
+      const { FitAddon } = await import("@xterm/addon-fit");
+      const { WebLinksAddon } = await import("@xterm/addon-web-links");
+      let Unicode11Addon: XtermModules["Unicode11Addon"] = null;
+      try {
+        ({ Unicode11Addon } = await import("@xterm/addon-unicode11"));
+      } catch {
+        // xterm's own Unicode 6 tables: emoji may count as one cell.
+      }
+      return { Terminal, FitAddon, WebLinksAddon, Unicode11Addon };
+    })();
+    xtermModules = loading;
+    loading.catch(() => {
+      if (xtermModules === loading) xtermModules = null;
+    });
+  }
+  return xtermModules;
 }
 
 /** The default face's stack, as the rest of the desktop has always read it. */
@@ -324,7 +380,7 @@ const MENU_H = 270;
 
 const IS_MAC = isMacPlatform();
 
-function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSettings, onBell }: TerminalAppProps) {
+function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSettings, onBell, persist = false, session, onSession }: TerminalAppProps) {
   const tr = useTr();
   // Read through a ref for the same reason `initialCommand` is: `connect` must
   // not change identity — and with it the live socket's handlers — because the
@@ -347,6 +403,20 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   const onBellRef = useRef(onBell);
   useEffect(() => { onBellRef.current = onBell; }, [onBell]);
   const activeRef = useRef(active);
+  // Whether the WINDOW is the one in front. A restored desktop mounts every
+  // terminal at once; only the focused window's may take the keyboard, or the
+  // last terminal to connect would steal it from whatever had the focus.
+  const windowChrome = useWindowChrome();
+  const windowActive = windowChrome ? windowChrome.active : true;
+  const windowActiveRef = useRef(windowActive);
+  useEffect(() => { windowActiveRef.current = windowActive; }, [windowActive]);
+  // The device session (see `persist`): the one to reattach to on the next
+  // connect, or null to start one. Read once from the prop — afterwards the
+  // server's `started`/`attached` answers are what move it.
+  const persistRef = useRef(persist);
+  const sessionRef = useRef<string | null>(persist && session ? session : null);
+  const onSessionRef = useRef(onSession);
+  useEffect(() => { onSessionRef.current = onSession; }, [onSession]);
   // Read by the key handler xterm calls before it forwards a key to the
   // shell, so an Escape meant for the menu never reaches the PTY.
   const menuOpenRef = useRef(false);
@@ -363,8 +433,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   const wsRef = useRef<WebSocket | null>(null);
   // `exited`: the SHELL ended — `exit`, Ctrl+D — as opposed to the connection
   // to it going away. The first is the owner's doing and gets no retry; the
-  // second is a dropped socket and gets one (sweep FT-4).
-  type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error" | "exited";
+  // second is a dropped socket and gets one (sweep FT-4). `gone`: the session
+  // this terminal was to reattach to no longer exists on the box; like an
+  // ended shell, a new one is one Enter or Reconnect away and never automatic.
+  type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error" | "exited" | "gone";
   const statusRef = useRef<ConnectionStatus>("connecting");
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   // The Reconnect button's action, read by the key handler installed once at
@@ -398,9 +470,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   // the page — the production server proxies `/terminal-ws` upgrades to
   // 127.0.0.1:3006. Using the same origin means it works on the LAN, through
   // the Cloudflare tunnel, and under HTTPS (mixed-content-safe).
-  const wsUrl = typeof window !== "undefined"
-    ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/terminal-ws`
-    : "ws://localhost/terminal-ws";
+  const wsUrl = terminalWsUrl();
 
   const updateStatus = useCallback((s: typeof status) => {
     statusRef.current = s;
@@ -559,9 +629,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     if (connectLockRef.current) return;
     connectLockRef.current = true;
 
-    const { Terminal } = await import("@xterm/xterm");
-    const { FitAddon } = await import("@xterm/addon-fit");
-    const { WebLinksAddon } = await import("@xterm/addon-web-links");
+    const { Terminal, FitAddon, WebLinksAddon, Unicode11Addon } = await loadXtermModules();
     // Unmounted while the modules loaded: nothing to draw into, and the
     // lock goes back so a remount can connect.
     if (!mountedRef.current || !containerRef.current) { connectLockRef.current = false; return; }
@@ -607,12 +675,13 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       term.loadAddon(fitAddon);
       term.loadAddon(new WebLinksAddon());
       // Widths are decided as text is written, so before anything is.
-      try {
-        const { Unicode11Addon } = await import("@xterm/addon-unicode11");
-        term.loadAddon(new Unicode11Addon());
-        term.unicode.activeVersion = "11";
-      } catch {
-        // xterm's own Unicode 6 tables: emoji may count as one cell.
+      if (Unicode11Addon) {
+        try {
+          term.loadAddon(new Unicode11Addon());
+          term.unicode.activeVersion = "11";
+        } catch {
+          // xterm's own Unicode 6 tables: emoji may count as one cell.
+        }
       }
       if (!mountedRef.current || !containerRef.current) { term.dispose(); connectLockRef.current = false; return; }
 
@@ -629,7 +698,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
         }
         // The shell is gone and the socket with it: Enter is the offer the
         // status bar makes, and there is nothing else for the key to reach.
-        if (statusRef.current === "exited" && ev.key === "Enter") {
+        if ((statusRef.current === "exited" || statusRef.current === "gone") && ev.key === "Enter") {
           if (ev.type === "keydown") reconnectRef.current();
           return false;
         }
@@ -697,6 +766,8 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     const query = new URLSearchParams();
     if (shell) query.set("shell", shell);
     if (cwd) query.set("cwd", cwd);
+    // A device session: the one this terminal was showing, or a new one.
+    if (persistRef.current) query.set("session", sessionRef.current ?? "new");
     const queryString = query.toString();
     const connectUrl = queryString ? `${wsUrl}?${queryString}` : wsUrl;
 
@@ -734,7 +805,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       if (!mountedRef.current) { ws.close(); return; }
       updateStatus("connected");
       term.clear();
-      if (activeRef.current) term.focus();
+      if (activeRef.current && windowActiveRef.current) term.focus();
 
       // Send initial size; later changes go out from xterm's onResize.
       ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
@@ -757,7 +828,30 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
             pendingCommandRef.current = null;
             ws.send(JSON.stringify({ type: "input", data: `${pending}\r` }));
           }
+        } else if (msg.type === "attached") {
+          // Back on the session this terminal was showing: its scrollback
+          // follows as one replay, so the screen starts from nothing rather
+          // than printing it twice after a dropped connection. The shell is
+          // already running whatever it was given — nothing is typed into it.
+          pendingCommandRef.current = null;
+          if (typeof msg.session === "string") {
+            sessionRef.current = msg.session;
+            onSessionRef.current?.(msg.session);
+          }
+          term.reset();
+        } else if (msg.type === "gone") {
+          // The session is not on the box any more: said, and left at that.
+          // The next Enter or Reconnect starts a new shell; until then a
+          // refresh says the same again rather than opening one silently.
+          pendingCommandRef.current = null;
+          sessionRef.current = null;
+          term.writeln(`\r\n\x1b[33m${trRef.current("terminal.sessionGone", "This terminal's session no longer exists on the box — it ended when the box restarted or after it was left unattended. Press Enter or Reconnect to start a new shell")}\x1b[0m`);
+          updateStatus("gone");
         } else if (msg.type === "started") {
+          if (persistRef.current && typeof msg.session === "string") {
+            sessionRef.current = msg.session;
+            onSessionRef.current?.(msg.session);
+          }
           // The server could not honour a chosen shell or folder and started
           // the box's default instead: said once, dimmed, above the prompt.
           if (typeof msg.shellRefused === "string" && typeof msg.shell === "string") {
@@ -767,6 +861,9 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
             term.writeln(`\x1b[2m${trRef.current("terminal.cwdFallback", "{cwd} is not a folder on this box — started in {fallback}", { cwd: msg.cwdRefused, fallback: msg.cwd })}\x1b[0m`);
           }
         } else if (msg.type === "exit") {
+          // The next Enter starts a new session; the tab keeps naming this one
+          // until then, so a refresh still shows how it ended.
+          sessionRef.current = null;
           term.writeln(`\r\n\x1b[33m[Process exited with code ${msg.code}]\x1b[0m`);
           term.writeln(`\x1b[2m${trRef.current("terminal.shellEnded", "The shell ended — press Enter or Reconnect to start a new one")}\x1b[0m`);
           updateStatus("exited");
@@ -792,7 +889,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       // reported as one and respawned a shell three seconds later, with the
       // window's own URL in the bar (sweep FT-4). A new shell is one Enter or
       // Reconnect away instead.
-      if (statusRef.current === "exited") return;
+      if (statusRef.current === "exited" || statusRef.current === "gone") return;
       if (statusRef.current !== "error") {
         updateStatus("disconnected");
         if (ev.code !== 1000) {
@@ -930,7 +1027,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   // Re-focus terminal when the window becomes visible/active
   useEffect(() => {
     const refocus = () => {
-      if (!active) return;
+      if (!active || !windowActiveRef.current) return;
       if (termRef.current && statusRef.current === "connected") {
         termRef.current.focus();
       }
@@ -1060,7 +1157,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     if (xtermTextarea && document.activeElement !== xtermTextarea) {
       // Try to focus xterm first
       termRef.current?.focus();
-      if (statusRef.current === "exited") {
+      if (statusRef.current === "exited" || statusRef.current === "gone") {
         if (e.key === "Enter") { e.preventDefault(); reconnectRef.current(); }
         return;
       }
@@ -1098,6 +1195,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     disconnected: "bg-gray-500",
     error: "bg-red-400",
     exited: "bg-gray-500",
+    gone: "bg-amber-400",
   }[status];
 
   const statusLabel = {
@@ -1109,6 +1207,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     // scrollback where Enter is the next keystroke, and the button it names
     // is the next thing in this row.
     exited: tr("terminal.exited", "Shell ended"),
+    gone: tr("terminal.sessionGoneStatus", "Session no longer exists"),
   }[status];
 
   const handleReconnect = useCallback(() => {
@@ -1146,7 +1245,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
           </span>
           {/* The socket's address is a diagnostic for a connection that
               failed; a shell the owner ended has nothing to diagnose. */}
-          {status !== "exited" && (
+          {status !== "exited" && status !== "gone" && (
             <span className="text-xs font-mono ml-1 min-w-0 truncate" style={{ opacity: 0.45 }}>
               — {wsUrl}
             </span>

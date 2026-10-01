@@ -212,6 +212,38 @@ export function removeProjectFolder(input: unknown): Promise<{ removed: boolean;
 }
 
 /**
+ * Carry the pins along when folders move (the Files app's move and rename):
+ * a pin on a moved folder, or on a folder inside one, now names its new path.
+ * Without this a moved project stayed in the sidebar as "missing" and the
+ * owner had to unpin it and find it again. Browse-relative in, as the pins
+ * are stored; answers whether anything changed. Lexical — both sides of each
+ * move were checked by the route that made it.
+ */
+export function followMovedProjectFolders(moves: readonly { from: string; to: string }[]): Promise<boolean> {
+  return serialized(async () => {
+    if (moves.length === 0) return false;
+    const root = browseRoot();
+    const norm = (rel: string) => toRel(root, path.resolve(root, rel));
+    const pairs = moves.map((m) => ({ from: norm(m.from), to: norm(m.to) })).filter((m) => m.from && m.from !== m.to);
+    if (pairs.length === 0) return false;
+    const pinned = await readPinned();
+    let changed = false;
+    const next = pinned.map((rel) => {
+      for (const { from, to } of pairs) {
+        if (rel === from) { changed = true; return to; }
+        if (rel.startsWith(`${from}/`)) { changed = true; return `${to}${rel.slice(from.length)}`; }
+      }
+      return rel;
+    });
+    if (!changed) return false;
+    // Two pins can only become one if a move put a pinned folder where another
+    // pinned one was — which the move refuses — but the list stays a set.
+    await writePinned([...new Set(next)]);
+    return true;
+  });
+}
+
+/**
  * Folders this box already keeps projects in, offered for one-click pinning:
  * the OpenClaw agent's `projects` folder in each of its workspaces (the
  * assistant writes the owner's projects there), the Coding Agent's default
