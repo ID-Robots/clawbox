@@ -62,6 +62,7 @@ vi.mock("@/lib/plugin-repair", async () => {
   return {
     ...actual,
     clawboxDisabledEntryId: vi.fn(actual.clawboxDisabledEntryId),
+    readPluginRepairs: vi.fn(actual.readPluginRepairs),
     clearPluginRepair: vi.fn(actual.clearPluginRepair),
   };
 });
@@ -3601,6 +3602,46 @@ describe("POST /setup-api/ai-models/configure", () => {
       ]);
       const { clearPluginRepair } = await import("@/lib/plugin-repair");
       expect(vi.mocked(clearPluginRepair)).toHaveBeenCalledWith("deepseek");
+    });
+
+    // The board's TEST 2 row: filed by a 4.1 boot with `disabled: false`, while
+    // the entry is an explicit `false` (what `plugins uninstall deepseek`
+    // leaves). `plugins install` keeps that `false`, so clearing the row on the
+    // install alone left ClawBox AI off with no row for any boot to act on.
+    const deepseekEnable = () => vi.mocked(runOpenclawConfigSet).mock.calls
+      .filter(([args]) => (args as string[])[0] === 'plugins.entries["deepseek"].enabled');
+
+    it("switches ClawBox AI's plugin on for its row even when the row says ClawBox never switched it off", async () => {
+      registriesRefuse([PINNED]);
+      const { readPluginRepairs, clearPluginRepair } = await import("@/lib/plugin-repair");
+      vi.mocked(readPluginRepairs).mockResolvedValueOnce({
+        deepseek: {
+          id: "deepseek", stage: "install", atMs: 1790685915162, disabled: false, spec: PINNED,
+          reason: "openclaw plugins install exited 1: Version not found on ClawHub: @openclaw/deepseek-provider@2026.9.4.",
+        },
+      });
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+
+      expect(res.status).toBe(200);
+      expect(deepseekEnable().map(([args]) => args)).toEqual([
+        ['plugins.entries["deepseek"].enabled', "true", "--strict-json"],
+      ]);
+      // Switched on FIRST, then the row goes.
+      expect(vi.mocked(runOpenclawConfigSet).mock.invocationCallOrder[
+        vi.mocked(runOpenclawConfigSet).mock.calls.findIndex(([args]) => (args as string[])[0] === 'plugins.entries["deepseek"].enabled')
+      ]).toBeLessThan(vi.mocked(clearPluginRepair).mock.invocationCallOrder[0]);
+    });
+
+    it("leaves the entry alone when no row asks for the plugin — an entry that is off is the owner's", async () => {
+      registriesRefuse([PINNED]);
+      const { readPluginRepairs } = await import("@/lib/plugin-repair");
+      vi.mocked(readPluginRepairs).mockResolvedValueOnce({});
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+
+      expect(res.status).toBe(200);
+      expect(deepseekEnable()).toEqual([]);
     });
 
     it("leaves the row in place when no registry can serve it, and still connects the provider", async () => {

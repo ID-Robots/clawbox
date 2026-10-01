@@ -65,7 +65,26 @@ type MockOptions = {
    * box does.
    */
   chatFacts?: Record<string, unknown>;
+  /**
+   * The signed-in user's saved windows (`/setup-api/desktop/state`,
+   * TASK-1306). Pass the same store to two pages — or two browser contexts —
+   * and they share it the way two browsers share the box's copy. A fresh,
+   * empty one otherwise.
+   */
+  desktopState?: DesktopStateMock;
 };
+
+/** The box's copy of one user's saved windows, as the mocked route keeps it. */
+export interface DesktopStateMock {
+  user: string;
+  state: unknown;
+  /** Every state the desktop saved, oldest first. */
+  saves: unknown[];
+}
+
+export function createDesktopStateMock(user = "clawbox"): DesktopStateMock {
+  return { user, state: null, saves: [] };
+}
 
 /**
  * The chat capability facts the mocked box reports.
@@ -304,6 +323,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
   const wifiNetworks = clone(options.wifiNetworks ?? DEFAULT_WIFI_NETWORKS);
   const storeApps = clone(options.storeApps ?? DEFAULT_STORE_APPS);
   const kvEntries: Record<string, string> = clone(options.kvEntries ?? {});
+  const desktopState = options.desktopState ?? createDesktopStateMock();
   const files = clone(options.files ?? DEFAULT_FILES);
   let projectFolders: ProjectFolderEntry[] = clone(options.projectFolders ?? []);
   let projectSuggestions: ProjectFolderEntry[] = clone(options.projectSuggestions ?? []);
@@ -679,6 +699,18 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
 
     if (path === "/setup-api/setup/status") {
       await fulfillJson(route, setupState);
+      return;
+    }
+
+    if (path === "/setup-api/desktop/state") {
+      if (method === "PUT") {
+        const payload = await readRequestJson<{ state?: unknown }>(route);
+        desktopState.state = payload.state ?? null;
+        desktopState.saves.push(payload.state ?? null);
+        await fulfillJson(route, { ok: true });
+        return;
+      }
+      await fulfillJson(route, { user: desktopState.user, state: desktopState.state });
       return;
     }
 

@@ -26,9 +26,12 @@ it via `/proc/<pid>/cmdline`).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .limits import SUBPROCESS_TIMEOUT_S
@@ -184,6 +187,46 @@ def is_bad_password_error(err: CryptoError) -> bool:
         "wrong final block length",
         "digital envelope routines",
     ))
+
+
+def seal_text(text: str, *, password_file: Path, timeout: float = SUBPROCESS_TIMEOUT_S) -> str:
+    """`text` encrypted exactly as a snapshot is (:func:`encrypt_file`), as
+    base64 — for the few lines of a snapshot's record in the plaintext sidecar
+    manifest that name files, which the portal operator must not read.
+    Raises CryptoError."""
+    with tempfile.TemporaryDirectory(prefix="clawkeep-seal-") as tmp:
+        plain, sealed = Path(tmp) / "plain", Path(tmp) / "sealed"
+        plain.write_text(text, encoding="utf-8")
+        try:
+            encrypt_file(
+                plaintext_path=plain, ciphertext_path=sealed,
+                password_file=password_file, timeout=timeout,
+            )
+        finally:
+            secure_unlink(plain)
+        return base64.b64encode(sealed.read_bytes()).decode("ascii")
+
+
+def open_sealed(blob: str, *, password_file: Path, timeout: float = SUBPROCESS_TIMEOUT_S) -> str:
+    """The text :func:`seal_text` sealed. Raises CryptoError — for a wrong
+    passphrase as for a blob that is not one."""
+    try:
+        raw = base64.b64decode(blob, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise CryptoError(f"sealed text is not base64: {e}") from e
+    with tempfile.TemporaryDirectory(prefix="clawkeep-seal-") as tmp:
+        sealed, plain = Path(tmp) / "sealed", Path(tmp) / "plain"
+        sealed.write_bytes(raw)
+        decrypt_file(
+            ciphertext_path=sealed, plaintext_path=plain,
+            password_file=password_file, timeout=timeout,
+        )
+        try:
+            return plain.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise CryptoError(f"sealed text did not open to text: {e}") from e
+        finally:
+            secure_unlink(plain)
 
 
 def is_likely_encrypted(path: Path) -> bool:

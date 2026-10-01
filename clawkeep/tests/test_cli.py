@@ -276,3 +276,32 @@ def _stub_cfg() -> object:
         server = "https://portal.example"
 
     return Cfg()
+
+
+def test_restore_prints_the_links_the_snapshot_never_carried(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """TASK-1304: the restore's report names the links the backup skipped,
+    so the app can say which ones the restored tree does not have."""
+    from pathlib import Path
+
+    from clawkeep import restore
+
+    links = [{"path": "~/.openclaw/workspace/docs/catalogue", "target": "/srv/shared/catalogue"}]
+    result = restore.RestoreResult(
+        archive_name="snap.tar.gz",
+        archive_size_bytes=10,
+        assets=[restore.RestoredAsset("state", Path("/s"), Path("/s.bak"), 10)],
+        skipped_links=links,
+        skipped_link_count=3,
+    )
+    with (
+        patch("clawkeep.cli._load_cfg_and_token", return_value=(object(), "claw_x")),
+        patch("clawkeep.cli.restore_mod.restore_snapshot", return_value=result),
+    ):
+        assert cli._restore_main(["snap.tar.gz.enc"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is True
+    assert out["skippedMembers"] == []
+    assert out["skippedLinks"] == links
+    assert out["skippedLinkCount"] == 3

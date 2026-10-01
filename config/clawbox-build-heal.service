@@ -1,0 +1,27 @@
+[Unit]
+Description=ClawBox: heal a web build an interrupted update left behind
+# TASK-1316. Runs once per boot and, on a healthy box, exits in well under a
+# second having changed nothing. It exists for the one state the web server
+# cannot leave by itself: a build that starts its root steps a way the box no
+# longer allows (see config/clawbox-build-heal.sh). The heal's rebuild runs
+# `bun install`, which may need the package registry, hence the network wait —
+# it never fetches git.
+After=network-online.target local-fs.target
+Wants=network-online.target
+# Deliberately NOT ordered against clawbox-setup.service. When it heals, the
+# rebuild stops and restarts that unit itself, and an ordering either way would
+# have that restart wait on this very unit.
+
+[Service]
+Type=oneshot
+# Root-owned, installed by install.sh::install_root_libexec. What root runs after
+# the check is the root-step dispatcher's decision, out of the root-exec mirror.
+ExecStart=/usr/local/libexec/clawbox/clawbox-build-heal.sh
+EnvironmentFile=-/etc/clawbox/network.env
+EnvironmentFile=-/etc/clawbox/edition.env
+# A heal is a full rebuild on a Jetson. Same ceiling as the root-update units:
+# a ceiling, not a wait — a healthy boot is done in under a second.
+TimeoutStartSec=7200
+
+[Install]
+WantedBy=multi-user.target

@@ -32,6 +32,7 @@ import { startRootStep } from "@/lib/root-step-runner";
 import { createSerialLock } from "@/lib/serial-lock";
 import { USERS_CONFIG_KEY, parseUserRegistry, type ClawboxUserRecord } from "@/lib/session-identity";
 import { checkUsername, USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
+import { removeDesktopState } from "@/lib/desktop-state-store";
 
 const execFile = promisify(execFileCb);
 
@@ -272,6 +273,11 @@ export async function removeUser(username: string, opts: { currentUser: string }
       }
       throw new UserAdminError("remove_failed", "The account could not be removed from this box.");
     }
+    // Their saved windows (TASK-1306) go with the account: a user created
+    // later under the same name starts on an empty desktop, never this one's.
+    await removeDesktopState(removable).catch((err) => {
+      console.error("[clawbox-users] could not remove the desktop state:", err instanceof Error ? err.message : err);
+    });
   });
 }
 

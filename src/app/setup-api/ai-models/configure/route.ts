@@ -131,7 +131,7 @@ import {
 // src/lib/log-safe.ts.
 import { logSafe } from "@/lib/log-safe";
 import { deepseekPluginOnDisk, installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
-import { clawboxDisabledEntryId, clearPluginRepair } from "@/lib/plugin-repair";
+import { canonicalPluginId, clearPluginRepair, readPluginRepairs } from "@/lib/plugin-repair";
 import { installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
 
 const OPENCLAW_BIN = findOpenclawBin();
@@ -3253,8 +3253,16 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           // wrote exactly that — so clearing here on the install alone would
           // take the badge off a plugin still switched off, and this route's
           // installer is a bare `plugins install` with no enable step of its
-          // own. Only for a row that says CLAWBOX disabled it.
-          const switchedOff = await clawboxDisabledEntryId("deepseek").catch(() => null);
+          // own. For ANY row on file for ClawBox AI's own plugin, whatever its
+          // `disabled` says (TASK-1302, the same rule as the Retry and the boot
+          // script): the row a 4.1 boot filed says `disabled: false`, the entry
+          // can still be an explicit `false` (`plugins uninstall deepseek`
+          // leaves one), and clearing the row over it left ClawBox AI off with
+          // nothing — no row — left for any boot to act on. No row: an entry
+          // that is off stays the owner's.
+          const switchedOff = await readPluginRepairs()
+            .then((rows) => Object.values(rows).find((row) => canonicalPluginId(row.id) === "deepseek")?.id ?? null)
+            .catch(() => null);
           let backOn = true;
           if (switchedOff) {
             try {

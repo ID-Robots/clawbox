@@ -305,7 +305,15 @@ interface BackupStatusBody extends Partial<ProtectionInput> {
   largeArchives?: { path: string; bytes: number }[];
   largeArchiveCount?: number;
   largeArchiveBytes?: number;
+  /** Symbolic links the last archive skipped (TASK-1304): the route names the
+   * first twenty (`~/…` path and the link's own text — data, never spliced
+   * into a note), `backup_status` passes on five; all counted. */
+  skippedLinks?: { path: string; target: string }[];
+  skippedLinkCount?: number;
 }
+
+/** Skipped links `backup_status` names; the count covers the rest. */
+const LISTED_SKIPPED_LINKS = 5;
 
 /** What every backup tool says on an edition that cannot run ClawKeep. */
 const NOT_ON_THIS_EDITION =
@@ -380,6 +388,17 @@ function backupNotes(body: BackupStatusBody, protection: Protection | null): str
       "largeArchives: the last backup carried archive files big enough to matter, and every snapshot uploads "
       + "them again (largeArchiveCount/largeArchiveBytes count them all). Tell the user which; moving them out "
       + "of the backed-up folders, or into ~/.openclaw/backups, shrinks the next snapshot by that much.",
+    );
+  }
+  // TASK-1304. `skippedLinks` is file names AND link text, chosen by whoever
+  // made the link — data in the body, never words in a note.
+  if ((body.skippedLinkCount ?? 0) > 0) {
+    notes.push(
+      "skippedLinks: the last backup skipped that many symbolic links (skippedLinkCount counts them all) because "
+      + "they point outside the backed-up folders, or at nothing. That is not a failure: the backup finished "
+      + "without them, the snapshot carries neither the links nor what they point at, and the links are still on "
+      + "the box, untouched. Tell the user which; to back up what one points at, keep the file itself inside the "
+      + "backed-up folders.",
     );
   }
   return notes;
@@ -748,7 +767,11 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
     "backup_status",
     "Report whether this ClawBox is protected by cloud backup. `protection` is the answer — {state: protected|lapsed|unprotected, reason: ok|error|blocked|stale|never}, the verdict the ClawKeep shield draws, or null when the box is not paired. Read the result's `notes` out too: they qualify the verdict for THIS box.",
     {},
-    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 4_000 },
+    // 6,000, as `backup_list`: every note firing with the longest names the
+    // body carries — five archives, five skipped links (TASK-1304) — measures
+    // about 5,750, and a result cut at the cap is no JSON at all. Paid only
+    // when the tool is called, and only by a box with that much to say.
+    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 6_000 },
     async () => {
       const body = await apiGet<BackupStatusBody>("/setup-api/clawkeep", {
         timeoutMs: 20_000,
@@ -777,7 +800,17 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
       const protection = body.paired === false
         ? null
         : deriveProtection({ ...body, lastBackupAtMs: body.lastBackupAtMs ?? 0 }, Date.now());
-      return json({ ...body, protection, notes: backupNotes(body, protection) });
+      // The route names twenty skipped links for the dashboard; the agent gets
+      // the first five, as `largeArchives` names five — `skippedLinkCount`
+      // still counts them all, and twenty long paths would push this result
+      // past its cap, where a cut would leave the agent no JSON at all.
+      const skippedLinks = body.skippedLinks?.slice(0, LISTED_SKIPPED_LINKS);
+      return json({
+        ...body,
+        ...(skippedLinks ? { skippedLinks } : {}),
+        protection,
+        notes: backupNotes(body, protection),
+      });
     },
   );
 

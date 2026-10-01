@@ -985,6 +985,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "terminal.retrying": "Disconnected — will retry in 3s…",
     "terminal.shellEnded": "The shell ended — press Enter or Reconnect to start a new one",
     "terminal.exited": "Shell ended",
+    "terminal.sessionGone": "This terminal's session no longer exists on the box — it ended when the box restarted or after it was left unattended. Press Enter or Reconnect to start a new shell",
+    "terminal.sessionGoneStatus": "Session no longer exists",
     "terminal.tabsLabel": "Terminal tabs",
     "terminal.copied": "Copied to clipboard",
     "terminal.copyFailed": "The browser refused the clipboard — select the text and press {keys}",

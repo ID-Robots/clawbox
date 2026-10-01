@@ -834,6 +834,12 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
       leftOutCount: 8, leftOutBytes: 20_400_000_000,
       largeArchives: Array.from({ length: 5 }, (_, i) => ({ path: `${named}-${i}.zip`, bytes: 1_900_000_000 })),
       largeArchiveCount: 9, largeArchiveBytes: 17_100_000_000,
+      // TASK-1304: the route names twenty skipped links, each a path AND the
+      // link's own text — both chosen by whoever made the link.
+      skippedLinks: Array.from({ length: 20 }, (_, i) => ({
+        path: `${named}/link-${i}`, target: `/home/clawbox/Shared/Exports/${"y".repeat(80)}-${i}`,
+      })),
+      skippedLinkCount: 31,
     });
 
     const out = await system("openclaw").call("backup_status", {});
@@ -841,20 +847,28 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     const body = JSON.parse(out.text);
     expect(body.leftOutCount).toBe(8);
     expect(body.largeArchives).toHaveLength(5);
+    // Five of the twenty reach the agent; the count still says all of them.
+    expect(body.skippedLinks).toHaveLength(5);
+    expect(body.skippedLinks[0].path).toBe(`${named}/link-0`);
+    expect(body.skippedLinkCount).toBe(31);
     const notes = (body.notes as string[]).join("\n");
     expect(notes).toMatch(/leftOutCount\/leftOutBytes/);
     expect(notes).toMatch(/still on the box, untouched/);
     expect(notes).toMatch(/largeArchives: the last backup carried/);
+    expect(notes).toMatch(/skippedLinks: the last backup skipped/);
+    expect(notes).toMatch(/That is not a failure: the backup finished/);
     expect(notes).not.toContain("IGNORE PREVIOUS");
+    expect(notes).not.toContain("Shared/Exports");
 
     // Nothing to say, nothing said.
     apiGet.mockResolvedValue({
       paired: true, supportedOnEdition: true, lastBackupAtMs: Date.now(),
       schedule: { enabled: true, frequency: "daily" }, leftOutCount: 0, largeArchiveCount: 0,
+      skippedLinkCount: 0,
     });
     const quiet = await system("openclaw").call("backup_status", {});
     if (quiet.isError) throw new Error("backup_status failed");
-    expect((JSON.parse(quiet.text).notes as string[]).join("\n")).not.toMatch(/leftOut|largeArchives/);
+    expect((JSON.parse(quiet.text).notes as string[]).join("\n")).not.toMatch(/leftOut|largeArchives|skippedLinks/);
   });
 
   it("reports a failed backup as a failure, from the status the route now answers", async () => {

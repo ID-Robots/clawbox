@@ -28,6 +28,7 @@ import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { classifyUpdaterHandover } from "./updater-handover";
 import { startRootStep } from "./root-step-runner";
+import { preserveLocalEdits } from "./local-edits";
 import { watchRootStepProgress } from "./root-step-follow";
 import {
   setUpdateLock,
@@ -91,6 +92,13 @@ import {
 
 const PROJECT_DIR = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
+/**
+ * The card for edits saved by the restart step's own save. Step 1's save
+ * arrives as `local-edits-saved` through install.sh's CLAWBOX-WARN marker, and
+ * `warnUpdate` keeps the first card per code — so a second save needs its own
+ * code or the second place the owner's work went would never be named.
+ */
+const LOCAL_EDITS_SAVED_BEFORE_RESTART = "local-edits-saved:restart";
 // Pinned OpenClaw version — single source of truth shared with install.sh
 // so the in-UI "Latest" column reflects the ClawBox-approved release, not
 // whatever npm last published. Bump the file in a PR → beta → main and the
@@ -1704,6 +1712,23 @@ async function updateClawBoxAndReboot(): Promise<void> {
       `This ClawBox has no local copy of ${upstream}. Step 1 of this update was supposed to fetch it — `
       + "run the update again, and if it keeps failing, GitHub may be refusing this address's anonymous requests.",
     );
+  }
+  // SAVE, then reset and clean. Step 1 already saved whatever the tree held
+  // when the update started (install.sh runs the same script before its own
+  // resets); this catches anything written since, so nothing the two commands
+  // below remove is lost without a word. A save that fails stops the update
+  // here — this step is failFast — with the tree untouched. TASK-1316.
+  //
+  // The script is the one this build carries (local-edits.ts), because the
+  // tree was moved by step 1 and may be a release that never had it. And a save
+  // step 1's card already names is not a second place the owner's work went:
+  // the script names a save it recognises rather than writing another.
+  const saved = await preserveLocalEdits(PROJECT_DIR);
+  const alreadyNamed = saved !== null && saved.savedTo !== "git-stash"
+    && (runtime.state.warnings ?? []).some((w) => w.message.split(/\s+/).includes(saved.savedTo));
+  if (saved && !alreadyNamed) {
+    warnUpdate(LOCAL_EDITS_SAVED_BEFORE_RESTART, saved.message);
+    await persistWarnings();
   }
   await execGit(PROJECT_DIR, ["reset", "--hard", "HEAD"], gitOptions);
   try {
@@ -5179,8 +5204,14 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       }
       // Only let the unit's journal override the error when the unit actually
       // FAILED — on a generic budget overrun its last journal line can still
-      // be whatever fixup happened to finish most recently.
-      if (step.requiresRoot && rootStepResultFailed(await getRootStepResult(step.id))) {
+      // be whatever fixup happened to finish most recently. And never over a
+      // launcher that could not be asked (root-step-runner's
+      // RootStepUnavailableError, duck-typed because route tests mock that
+      // module): the unit did not run this time, so its "failed" result and
+      // any line in its journal belong to an earlier run, while the message
+      // already says what is wrong and names the command that repairs it.
+      const launcherUnavailable = (err as { rootStepUnavailable?: boolean } | null)?.rootStepUnavailable === true;
+      if (step.requiresRoot && !launcherUnavailable && rootStepResultFailed(await getRootStepResult(step.id))) {
         const rootFailure = await readRootStepFailure(step.id, stepStartedAt);
         if (rootFailure) message = rootFailure;
       }

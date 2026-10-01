@@ -18,17 +18,26 @@
  * Usage:
  *   node scripts/terminal-server.mjs
  *
- * Protocol:
+ * Protocol: scripts/terminal-sessions.mjs, which also keeps the sessions.
  *   Connect: /?shell=/usr/bin/zsh&cwd=~/projects  — both optional
+ *            /?session=new | /?session=<id> | /?end=<id> — a shell that
+ *            outlives the page, reattached by id (TASK-1306)
  *   Client → Server:
  *     { type: "input", data: string }       — raw keyboard input
  *     { type: "resize", cols: N, rows: N }  — terminal resize event
  *   Server → Client:
- *     { type: "started", shell, cwd, shellRefused?, cwdRefused? }
+ *     { type: "started", session?, shell, cwd, shellRefused?, cwdRefused? }
  *                                           — what was spawned, and which
  *                                             request was not honoured
- *     { type: "output", data: string }      — raw PTY output
+ *     { type: "attached", session, … }      — reattached; the scrollback follows
+ *     { type: "output", data: string, replay? } — raw PTY output
  *     { type: "exit", code: number }        — PTY exited
+ *     { type: "gone" }                      — no such session (any more)
+ *
+ * A session nobody is attached to is ended after CLAWBOX_TERMINAL_IDLE_MINUTES
+ * (default 720), keeps the last CLAWBOX_TERMINAL_SCROLLBACK_KB thousand
+ * characters of output (default 512) for a reattach, and lives in this
+ * process's memory: a reboot, or a restart of this server, ends them all.
  *
  * Who the shell runs as (multi-user ClawBox OS, TASK-1256): the owner — the
  * account this server runs as — unless production-server.js, having checked
@@ -51,9 +60,18 @@
 import * as http from "node:http";
 import * as os from "node:os";
 import { timingSafeEqual } from "node:crypto";
-import { WebSocketServer, WebSocket } from "ws";
+import { WebSocketServer } from "ws";
 import * as pty from "node-pty";
 import { readEtcShells, resolveCwd, resolveShell } from "./terminal-launch.mjs";
+import {
+  DEFAULT_IDLE_MS,
+  DEFAULT_MAX_DETACHED_PER_USER,
+  DEFAULT_SCROLLBACK_CHARS,
+  OWNER_KEY,
+  createSessionRegistry,
+  envInt,
+  handleConnection,
+} from "./terminal-sessions.mjs";
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // script is standalone ESM and cannot import the TypeScript helper: an integer
@@ -131,147 +149,90 @@ const wss = new WebSocketServer({
   },
 });
 
-wss.on("connection", (ws, req) => {
-  const remote = req.socket.remoteAddress;
-  console.log(`[terminal-server] New connection from ${remote}`);
-  const asUser = scopedUser(req);
+const registry = createSessionRegistry({
+  idleMs: envInt(process.env.CLAWBOX_TERMINAL_IDLE_MINUTES, DEFAULT_IDLE_MS / 60000, 1, 7 * 24 * 60) * 60000,
+  scrollbackChars: envInt(process.env.CLAWBOX_TERMINAL_SCROLLBACK_KB, DEFAULT_SCROLLBACK_CHARS / 1024, 16, 8192) * 1024,
+  maxDetachedPerUser: DEFAULT_MAX_DETACHED_PER_USER,
+  log: (line) => console.log(line),
+});
 
+/**
+ * Start the shell a connection asked for.
+ *
+ * @param {string | null} asUser the ClawBox user (not the owner) it runs as
+ * @param {URLSearchParams} requested the connection's `shell`/`cwd`
+ * @returns {{ pty: import("node-pty").IPty, info: Record<string, unknown> }}
+ */
+function spawnShell(asUser, requested) {
   // Spawn a PTY as the user running the ClawBox UI (clawbox on Jetson,
   // whatever user installed on x64). Derive from $USER/$HOME with the
   // historical clawbox/clawbox values as a final fallback.
   const targetUser = process.env.USER || process.env.LOGNAME || os.userInfo().username || "clawbox";
   const targetHome = process.env.HOME || os.homedir() || `/home/${targetUser}`;
+  const lang = process.env.LANG || "en_US.UTF-8";
+
+  if (asUser) {
+    // A ClawBox user other than the owner: their own login shell, as them,
+    // in their own home — never the owner's account, shell or folder.
+    const term = pty.spawn("/usr/bin/sudo", ["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "shell", asUser], {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      cwd: "/",
+      env: { TERM: "xterm-256color", LANG: lang, PATH: "/usr/sbin:/usr/bin:/sbin:/bin" },
+    });
+    console.log(`[terminal-server] Spawned PTY pid=${term.pid} for ClawBox user ${asUser}`);
+    return { pty: term, info: { shell: "login shell", cwd: "~", user: asUser } };
+  }
+
   // What the Terminal's settings asked for, checked: a shell /etc/shells
   // lists and that is installed, a folder that exists. Otherwise bash in the
   // home folder, as it always was — and the client is told which it got.
-  const requested = new URL(req.url ?? "/", "http://terminal.invalid").searchParams;
   const { shell, refused: shellRefused } = resolveShell(requested.get("shell"), readEtcShells());
   const { cwd, refused: cwdRefused } = resolveCwd(requested.get("cwd"), targetHome);
-  const cleanEnv = {
-    HOME: targetHome,
-    USER: targetUser,
-    LOGNAME: targetUser,
-    SHELL: shell,
-    TERM: "xterm-256color",
-    COLORTERM: "truecolor",
-    PATH: process.env.PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    LANG: process.env.LANG || "en_US.UTF-8",
-    POWERLEVEL9K_INSTANT_PROMPT: "quiet",
+  const term = pty.spawn(shell, ["-l"], {
+    name: "xterm-256color",
+    cols: 80,
+    rows: 24,
+    cwd,
+    env: {
+      HOME: targetHome,
+      USER: targetUser,
+      LOGNAME: targetUser,
+      SHELL: shell,
+      TERM: "xterm-256color",
+      COLORTERM: "truecolor",
+      PATH: process.env.PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      LANG: lang,
+      POWERLEVEL9K_INSTANT_PROMPT: "quiet",
+    },
+  });
+  console.log(`[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}`);
+  return {
+    pty: term,
+    info: {
+      shell,
+      cwd,
+      ...(shellRefused ? { shellRefused } : {}),
+      ...(cwdRefused ? { cwdRefused } : {}),
+    },
   };
+}
 
-  // Spawning the PTY can fail (EAGAIN/ENOMEM under load, a missing shell,
-  // node-pty ABI mismatch). Without a guard here one bad spawn throws out of
-  // the 'connection' handler and crashes the whole :3006 server, dropping
-  // every other live terminal session. Contain the failure to this one socket:
-  // tell the client and close, leaving the server up.
-  /** @type {import("node-pty").IPty} */
-  let term;
-  try {
-    if (asUser) {
-      // A ClawBox user other than the owner: their own login shell, as them,
-      // in their own home — never the owner's account, shell or folder.
-      term = pty.spawn("/usr/bin/sudo", ["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "shell", asUser], {
-        name: "xterm-256color",
-        cols: 80,
-        rows: 24,
-        cwd: "/",
-        env: { TERM: "xterm-256color", LANG: cleanEnv.LANG, PATH: "/usr/sbin:/usr/bin:/sbin:/bin" },
-      });
-      console.log(`[terminal-server] Spawned PTY pid=${term.pid} for ClawBox user ${asUser}`);
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "started", shell: "login shell", cwd: "~", user: asUser }));
-      }
-    } else {
-      term = pty.spawn(shell, ["-l"], {
-        name: "xterm-256color",
-        cols: 80,
-        rows: 24,
-        cwd,
-        env: cleanEnv,
-      });
-
-      console.log(`[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}`);
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: "started",
-          shell,
-          cwd,
-          ...(shellRefused ? { shellRefused } : {}),
-          ...(cwdRefused ? { cwdRefused } : {}),
-        }));
-      }
-    }
-
-    // PTY → WebSocket
-    term.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "output", data }));
-      }
-    });
-
-    term.onExit(({ exitCode }) => {
-      console.log(`[terminal-server] PTY exited pid=${term.pid} code=${exitCode}`);
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "exit", code: exitCode }));
-        ws.close();
-      }
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("[terminal-server] Failed to spawn PTY:", err);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "output", data: `\r\n[terminal-server] Failed to start shell: ${message}\r\n` }));
-      ws.send(JSON.stringify({ type: "exit", code: 1 }));
-    }
-    try {
-      ws.close();
-    } catch {
-      /* socket already gone */
-    }
-    return;
-  }
-
-  // WebSocket → PTY
-  ws.on("message", (raw) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-      if (msg.type === "input" && typeof msg.data === "string") {
-        term.write(msg.data);
-      } else if (msg.type === "resize") {
-        const cols = Number(msg.cols);
-        const rows = Number(msg.rows);
-        if (Number.isInteger(cols) && cols > 0 && Number.isInteger(rows) && rows > 0) {
-          term.resize(cols, rows);
-        } else {
-          console.warn(`[terminal-server] Ignoring invalid resize cols=${msg.cols} rows=${msg.rows}`);
-        }
-      }
-    } catch (e) {
-      console.warn("[terminal-server] Bad message:", e);
-    }
-  });
-
-  ws.on("close", () => {
-    console.log(`[terminal-server] Connection closed, killing PTY pid=${term.pid}`);
-    try {
-      term.kill();
-    } catch (err) {
-      console.error(`[terminal-server] Failed to kill PTY pid=${term.pid} on close:`, err);
-    }
-  });
-
-  ws.on("error", (err) => {
-    console.error("[terminal-server] WebSocket error:", err);
-    try {
-      term.kill();
-    } catch (killErr) {
-      console.error(`[terminal-server] Failed to kill PTY pid=${term.pid} on error:`, killErr);
-    }
+wss.on("connection", (ws, req) => {
+  console.log(`[terminal-server] New connection from ${req.socket.remoteAddress}`);
+  const asUser = scopedUser(req) || null;
+  // Sessions are the user's own: another ClawBox user's session id is
+  // answered exactly as one that never existed.
+  handleConnection(registry, ws, {
+    owner: asUser ?? OWNER_KEY,
+    params: new URL(req.url ?? "/", "http://terminal.invalid").searchParams,
+    spawn: (params) => spawnShell(asUser, params),
+    log: (line) => console.log(line),
   });
 });
 
-// Bind loopback only. This PTY server spawns an unauthenticated shell per
-// connection, so it must never be reachable directly from the LAN (SEC-1).
+// Bind loopback only. This PTY server spawns a shell per connection, so it must never be reachable directly from the LAN (SEC-1).
 // The port-80 production-server proxy reaches it via 127.0.0.1 and enforces a
 // ClawBox session cookie on the /terminal-ws upgrade.
 server.listen(PORT, "127.0.0.1", () => {
@@ -288,6 +249,7 @@ process.on("uncaughtException", (err) => {
 
 process.on("SIGTERM", () => {
   console.log("[terminal-server] SIGTERM received, shutting down");
+  registry.shutdown();
   wss.close();
   server.close();
   process.exit(0);
@@ -295,6 +257,7 @@ process.on("SIGTERM", () => {
 
 process.on("SIGINT", () => {
   console.log("[terminal-server] SIGINT received, shutting down");
+  registry.shutdown();
   wss.close();
   server.close();
   process.exit(0);

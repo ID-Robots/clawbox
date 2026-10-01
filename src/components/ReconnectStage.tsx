@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 import CrabWaitMark from "./CrabWaitMark";
 
@@ -37,6 +38,13 @@ export interface ReconnectStageProps {
    * default to elsewhere.
    */
   doneTone?: "emerald" | "cyan";
+  /**
+   * Optional SECONDARY content beside the wait screen — the /updating screen's
+   * "What's new" panel (TASK-1205). On a wide screen it sits to the right of
+   * the step list; on a phone it follows it, so the steps are always what is
+   * read first. Absent, the overlay renders exactly as it always has.
+   */
+  aside?: ReactNode;
 }
 
 /**
@@ -57,6 +65,7 @@ export default function ReconnectStage({
   action,
   hermes = false,
   doneTone = "emerald",
+  aside,
 }: ReconnectStageProps) {
   // These overlays only render after a client-side interaction, so the portal
   // target is always present; guard against SSR where document is undefined.
@@ -73,6 +82,67 @@ export default function ReconnectStage({
   const spinnerRing = hermes
     ? "border-[var(--agent-live,#4ade80)]"
     : "border-[var(--coral-bright)]";
+
+  const column = (
+    <div className="flex flex-col items-center gap-7 max-w-md w-full text-center my-auto">
+      <CrabWaitMark completed={completed} hermes={hermes} doneTone={doneTone} />
+
+      <div className="reconnect-fade-in" style={{ animationDelay: "0.2s" }}>
+        <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">{title}</h2>
+        <p className="text-sm text-[var(--text-muted)]">{description}</p>
+      </div>
+
+      {instruction && (
+        <div className="w-full max-w-[320px] rounded-lg border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-300 reconnect-fade-in" style={{ animationDelay: "0.25s" }}>
+          {instruction}
+        </div>
+      )}
+
+      {secondaryInstruction && (
+        <div className="w-full max-w-[320px] -mt-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)]/60 px-4 py-3 text-xs text-[var(--text-muted)] reconnect-fade-in" style={{ animationDelay: "0.3s" }}>
+          {secondaryInstruction}
+        </div>
+      )}
+
+      <div className="w-full max-w-[300px] space-y-2.5 mt-1 text-left">
+        {steps.map((step, index) => (
+          <div
+            key={step}
+            className={`flex items-center gap-2.5 text-xs transition-all duration-300 ${
+              completed || index <= phaseIndex ? "opacity-100" : "opacity-0 translate-y-1"
+            }`}
+          >
+            {completed || index < phaseIndex ? (
+              <span className={`flex items-center justify-center w-5 h-5 rounded-full shrink-0 ${stepDoneBadge}`}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
+              </span>
+            ) : index === phaseIndex ? (
+              <span className="flex items-center justify-center w-5 h-5 shrink-0">
+                <span className={`w-3.5 h-3.5 rounded-full border-2 ${spinnerRing} border-t-transparent animate-spin`} data-testid="reconnect-step-spinner" />
+              </span>
+            ) : (
+              <span className="flex items-center justify-center w-5 h-5 rounded-full bg-gray-700/50 shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
+              </span>
+            )}
+            <span className={completed || index <= phaseIndex ? (completed || index < phaseIndex ? stepDoneText : "text-[var(--text-primary)]") : "text-[var(--text-muted)]"}>
+              {step}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {action && (
+        <a
+          href={action.href}
+          className="inline-flex items-center justify-center px-6 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] reconnect-fade-in"
+          style={{ animationDelay: "0.3s" }}
+        >
+          {action.label}
+        </a>
+      )}
+    </div>
+  );
 
   return createPortal(
     <div
@@ -92,64 +162,21 @@ export default function ReconnectStage({
         .reconnect-fade-in { animation: reconnect-fade-in 0.4s ease-out both }
       `}</style>
 
-      <div className="flex flex-col items-center gap-7 max-w-md w-full text-center my-auto">
-        <CrabWaitMark completed={completed} hermes={hermes} doneTone={doneTone} />
-
-        <div className="reconnect-fade-in" style={{ animationDelay: "0.2s" }}>
-          <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">{title}</h2>
-          <p className="text-sm text-[var(--text-muted)]">{description}</p>
-        </div>
-
-        {instruction && (
-          <div className="w-full max-w-[320px] rounded-lg border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-300 reconnect-fade-in" style={{ animationDelay: "0.25s" }}>
-            {instruction}
+      {aside ? (
+        // The wait screen stays the first thing on every screen: to the LEFT
+        // of the aside from `lg` up, ABOVE it on anything narrower.
+        <div
+          className="flex w-full max-w-5xl flex-col items-center gap-8 my-auto lg:flex-row lg:items-center lg:justify-center lg:gap-14"
+          data-testid="reconnect-stage-with-aside"
+        >
+          {column}
+          {/* Out of the overlay's live region: the steps are what a screen
+              reader should announce as they change, not a list arriving. */}
+          <div className="w-full max-w-md lg:max-w-sm shrink-0 reconnect-fade-in" style={{ animationDelay: "0.4s" }} aria-live="off">
+            {aside}
           </div>
-        )}
-
-        {secondaryInstruction && (
-          <div className="w-full max-w-[320px] -mt-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)]/60 px-4 py-3 text-xs text-[var(--text-muted)] reconnect-fade-in" style={{ animationDelay: "0.3s" }}>
-            {secondaryInstruction}
-          </div>
-        )}
-
-        <div className="w-full max-w-[300px] space-y-2.5 mt-1 text-left">
-          {steps.map((step, index) => (
-            <div
-              key={step}
-              className={`flex items-center gap-2.5 text-xs transition-all duration-300 ${
-                completed || index <= phaseIndex ? "opacity-100" : "opacity-0 translate-y-1"
-              }`}
-            >
-              {completed || index < phaseIndex ? (
-                <span className={`flex items-center justify-center w-5 h-5 rounded-full shrink-0 ${stepDoneBadge}`}>
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
-                </span>
-              ) : index === phaseIndex ? (
-                <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                  <span className={`w-3.5 h-3.5 rounded-full border-2 ${spinnerRing} border-t-transparent animate-spin`} data-testid="reconnect-step-spinner" />
-                </span>
-              ) : (
-                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-gray-700/50 shrink-0">
-                  <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
-                </span>
-              )}
-              <span className={completed || index <= phaseIndex ? (completed || index < phaseIndex ? stepDoneText : "text-[var(--text-primary)]") : "text-[var(--text-muted)]"}>
-                {step}
-              </span>
-            </div>
-          ))}
         </div>
-
-        {action && (
-          <a
-            href={action.href}
-            className="inline-flex items-center justify-center px-6 py-2.5 btn-gradient text-white rounded-lg text-sm font-semibold cursor-pointer transition transform hover:scale-105 shadow-lg shadow-[rgba(249,115,22,0.25)] reconnect-fade-in"
-            style={{ animationDelay: "0.3s" }}
-          >
-            {action.label}
-          </a>
-        )}
-      </div>
+      ) : column}
     </div>,
     document.body
   );
