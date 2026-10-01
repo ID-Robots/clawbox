@@ -67,11 +67,13 @@ export type MediaErrorCode =
   | "write_failed"
   // The box is already generating as much as it can queue at once. Not the
   // allowance and not a fault — the one refusal here worth asking about again.
+  // Sent as a 429 like "allowance", so the MCP tool tells the two apart by
+  // this code: a busy box is waited on, a spent allowance is not.
   | "busy"
-  // What the far side answered, when the refusal was not this box's. The MCP
-  // rules branch on the HTTP status, but the code is what a person reading the
-  // JSON needs, and "bad_request" over a 429 would be a lie in the one place
-  // the run is told to stop asking.
+  // What the far side answered, when the refusal was not this box's. Most MCP
+  // rules branch on the HTTP status alone, but the code is what a person
+  // reading the JSON needs, and "bad_request" over a 429 would be a lie in the
+  // one place the run is told to stop asking.
   | "allowance"
   | "not_linked"
   | "timeout"
