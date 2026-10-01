@@ -6,6 +6,7 @@ import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
 import { describeChatFailure, describeFallbackReply } from '@/lib/chat-error-text'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
+import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
@@ -1336,11 +1337,14 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     }
   }, [])
 
-  // Focus input when connected
+  // Focus input when connected — on a big screen with a mouse only. On a phone
+  // or a touch screen a focused input is an open soft keyboard, and the chat
+  // jumped up under one before the owner had touched anything (and again on
+  // every reconnect); there the keyboard waits for a tap on the input.
   useEffect(() => {
-    if (status === 'connected') {
-      setTimeout(() => inputRef.current?.focus(), 100)
-    }
+    if (status !== 'connected') return
+    if (!shouldAutoFocusChatInput(readChatFirstEnvironment(window))) return
+    setTimeout(() => inputRef.current?.focus(), 100)
   }, [status])
 
 
