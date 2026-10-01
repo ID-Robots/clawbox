@@ -567,37 +567,31 @@ export default function ChromeShelf({
             <span className="text-base">▶️</span> {ctxMenu.app.isOpen ? t("shelf.focus") : t("shelf.open")}
           </button>
 
-          {/* New Window — only if app is already open. A web page's "new
-              window" is a new tab, open or not. */}
-          {ctxMenu.app.external ? (
-            onNewWindow && (
-              <button
-                onClick={() => { onNewWindow(ctxMenu.app.id); setCtxMenu(null); }}
-                className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-                data-testid="shelf-ctx-new-tab"
-              >
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.openNewTab")}
-              </button>
-            )
-          ) : (
-            <>
-              {ctxMenu.app.isOpen && onNewWindow && (
-                <button
-                  onClick={() => { onNewWindow(ctxMenu.app.id); setCtxMenu(null); }}
-                  className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-                >
-                  <span className="text-base">🪟</span> {t("shelf.newWindow")}
-                </button>
-              )}
+          {/* New Window — only if app is already open, and never for a web
+              page, whose "new window" is the new tab below. */}
+          {!ctxMenu.app.external && ctxMenu.app.isOpen && onNewWindow && (
+            <button
+              onClick={() => { onNewWindow(ctxMenu.app.id); setCtxMenu(null); }}
+              className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+            >
+              <span className="text-base">🪟</span> {t("shelf.newWindow")}
+            </button>
+          )}
 
-              {/* Open in new tab */}
-              <button
-                onClick={() => { openInKiosk(`/app/${encodeURIComponent(ctxMenu.app.id)}`, ""); setCtxMenu(null); }}
-                className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-              >
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.openNewTab")}
-              </button>
-            </>
+          {/* Open in new tab: this app's own /app/<id> page — or, for a web
+              page, one more tab of it, open or not. */}
+          {(!ctxMenu.app.external || onNewWindow) && (
+            <button
+              onClick={() => {
+                if (ctxMenu.app.external) onNewWindow?.(ctxMenu.app.id);
+                else openInKiosk(`/app/${encodeURIComponent(ctxMenu.app.id)}`, "");
+                setCtxMenu(null);
+              }}
+              className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+              data-testid={ctxMenu.app.external ? "shelf-ctx-new-tab" : undefined}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.openNewTab")}
+            </button>
           )}
 
           {/* Pin / Unpin */}

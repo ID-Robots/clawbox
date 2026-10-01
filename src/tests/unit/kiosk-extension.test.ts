@@ -34,7 +34,14 @@ import nodePath from "node:path";
  *  - the bar's address rule (Enter: address or search), the "+" landing on
  *    the extension's start page, and the start page's own search box;
  *  - the version is bumped (semver): Chrome caches unpacked extension code
- *    across restarts and re-reads it only when the version changes.
+ *    across restarts and re-reads it only when the version changes;
+ *  - what keeps the extension cheap on a busy page: offset.js judges a box
+ *    again only for a change that can move one, the bar redraws its strip
+ *    only when the tabs changed and not at all while hidden, and the worker
+ *    sends one broadcast per burst of tab events.
+ *
+ * kiosk-extension-runtime.test.ts RUNS the three scripts (jsdom, a stand-in
+ * `chrome`) for the behaviour behind the last point.
  */
 const EXT = nodePath.resolve(__dirname, "../../../kiosk/extension");
 const read = (f: string) => fs.readFileSync(nodePath.join(EXT, f), "utf-8");
@@ -112,7 +119,6 @@ describe("kiosk extension", () => {
     // The names and the height the desktop reads (src/lib/kiosk-bar-inset.ts).
     expect(stringConst(bar, "INSET_VAR")).toBe(stringConst(inset, "KIOSK_BAR_VAR"));
     expect(stringConst(bar, "INSET_EVENT")).toBe(stringConst(inset, "KIOSK_BAR_EVENT"));
-    expect(inset).toContain(`export const KIOSK_BAR_HEIGHT = ${BAR_H};`);
     expect(bar).toContain('document.documentElement.style.setProperty(INSET_VAR, BAR_H + "px")');
     expect(bar).toContain("window.dispatchEvent(new Event(INSET_EVENT))");
     // Always up: never hidden, whatever the tab count, and no page offset on
@@ -135,11 +141,39 @@ describe("kiosk extension", () => {
     expect(bg).toContain('chrome.tabs.sendMessage(t.id, { type: "changed" })');
   });
 
-  it("carries a semver version, bumped past 1.4.0 (centred address box, crab, page offset)", () => {
+  it("the strip is redrawn only when the tabs changed, and not while its page is hidden", () => {
+    const bar = read("bar.js");
+    // A signature of exactly what the chips show and act on.
+    expect(bar).toContain("const key = JSON.stringify(chips);");
+    expect(bar).toContain('if (key === drawn) return;');
+    expect(bar).toMatch(/const chips = r\.tabs\.map\(\(tab\) => \(\{\s*id: tab\.id,\s*name: [^\n]*,\s*favicon: [^\n]*,\s*current: tab\.id === r\.currentId,\s*\}\)\);/);
+    // Hidden: nothing; shown again: once.
+    expect(bar).toMatch(/async function refresh\(\) \{[^}]*?if \(document\.hidden\) return;/);
+    expect(bar).toContain('document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });');
+    // The fit is measured after a rebuild, a resize or a font, never on a
+    // refresh that changed nothing.
+    expect(bar.match(/fitTabs\(\);/g)).toHaveLength(1);
+    expect(bar).toContain('window.addEventListener("resize", fitTabs);');
+    expect(bar).toContain('document.fonts.addEventListener("loadingdone", fitTabs);');
+  });
+
+  it("the worker sends one broadcast per burst of tab events", () => {
+    const bg = read("background.js");
+    expect(bg).toMatch(/const BROADCAST_DELAY_MS = \d+;/);
+    expect(Number(/const BROADCAST_DELAY_MS = (\d+);/.exec(bg)?.[1])).toBeLessThanOrEqual(250);
+    for (const ev of ["onCreated", "onRemoved", "onActivated"]) {
+      expect(bg).toContain(`chrome.tabs.${ev}.addListener(broadcastSoon);`);
+    }
+    expect(bg).toContain('if (info.title || info.url || info.favIconUrl || info.status === "complete") broadcastSoon();');
+    // No listener broadcasts on its own.
+    expect(bg).not.toMatch(/addListener\(broadcast\)|\) broadcast\(\);/);
+  });
+
+  it("carries a semver version, bumped past 1.5.0 (offset.js skips inert style writes, the strip redraws only on change, one broadcast per burst)", () => {
     const m = JSON.parse(read("manifest.json"));
     expect(m.version).toMatch(/^\d+\.\d+\.\d+$/);
     const [major, minor, patch] = m.version.split(".").map(Number);
-    expect(major * 1e6 + minor * 1e3 + patch).toBeGreaterThan(1e6 + 4e3);
+    expect(major * 1e6 + minor * 1e3 + patch).toBeGreaterThan(1e6 + 5e3);
   });
 
   it("centres the address box: three columns, the two sides equal", () => {
@@ -208,7 +242,7 @@ describe("kiosk extension", () => {
     expect(off).toContain('const moves = new Set(els.filter((el) => /[1-9]/.test(getComputedStyle(el).transitionDuration)));');
     // The scan keeps only boxes worth judging and yields on a big page; a
     // whole-document pass is spaced out.
-    expect(off).toMatch(/if \(pos !== "static" && pos !== "relative"\) s\.candidates\.add\(el\);\s*else if \(el\.offsetHeight >= window\.innerHeight - SLACK\) s\.candidates\.add\(el\);/);
+    expect(off).toMatch(/if \(pos === "absolute"\) \{ if \(el\.offsetParent === document\.body\) s\.candidates\.add\(el\); \}\s*else if \(pos !== "static" && pos !== "relative"\) s\.candidates\.add\(el\);\s*else if \(el\.offsetHeight >= window\.innerHeight - SLACK\) s\.candidates\.add\(el\);/);
     expect(off).toContain("performance.now() - t0 > SLICE_MS) return false;");
     expect(off).toContain("now - lastFull >= FULL_GAP_MS");
     expect(off).toMatch(/const REPLACED = new Set\(\[[^\]]*"CANVAS"/);
@@ -220,6 +254,44 @@ describe("kiosk extension", () => {
     expect(off).toContain("mo.takeRecords();");
     // The margin that moves the flow is still content.css's.
     expect(read("content.css")).toContain("html.clawbox-kiosk-bar-shown {\n  margin-top: 40px !important;\n}");
+  });
+
+  it("offset.js judges a box again only for a change that can move one", () => {
+    const off = read("offset.js");
+    // The old value is what tells a change from a rewrite; every class and
+    // style record goes through the filter, and nothing asks for a frame
+    // unless the filter left something to look at.
+    expect(off).toContain('attributeFilter: ["class", "style"], attributeOldValue: true');
+    expect(off).toContain("if (!changed(r, page)) continue;");
+    expect(off).toContain("if (r.oldValue === t.getAttribute(r.attributeName)) return false;");
+    expect(off).toContain("const mo = new MutationObserver((records) => { note(records); if (due()) askFrame(); });");
+    // The rule: which longhands a verdict cannot read.
+    const paintOnly = new Function(`return ${regexLiteral(off, "PAINT_ONLY")}`)() as RegExp;
+    const selfOnly = new Function(`return ${regexLiteral(off, "SELF_ONLY")}`)() as RegExp;
+    const inert = (prop: string, page: boolean) => paintOnly.test(prop) || (!page && selfOnly.test(prop));
+    // A header hidden on scroll, a fade, a colour, a reading-progress bar's
+    // width: never a pass, on an ordinary box.
+    for (const p of ["transform", "translate", "opacity", "color", "background-color", "box-shadow", "width", "left", "will-change", "filter", "transition-duration", "visibility", "z-index"]) {
+      expect(inert(p, false), p).toBe(true);
+    }
+    // What a verdict reads — the box's position, its vertical insets and
+    // sizes, what makes up its offsetHeight — and anything unknown,
+    // custom properties included (a `var()` can feed a `top`).
+    for (const p of ["position", "top", "bottom", "height", "min-height", "max-height", "display", "margin-top", "padding-top", "border-top-width", "box-sizing", "inset-block-start", "block-size", "--header-top", "overflow-y", "contain", "font-size", "animation-name"]) {
+      expect(inert(p, false), p).toBe(false);
+      expect(inert(p, true), p).toBe(false);
+    }
+    // On <html> and <body> a transform, a filter or a will-change makes them
+    // the containing block of every fixed box on the page: that still counts.
+    for (const p of ["transform", "translate", "filter", "backdrop-filter", "will-change", "perspective", "clip-path", "width"]) {
+      expect(inert(p, true), p).toBe(false);
+    }
+    expect(inert("opacity", true)).toBe(true);
+    expect(inert("background-color", true)).toBe(true);
+    // HEAVY is "more than HEAVY_SUBTREE descendants", found without counting
+    // the whole subtree on every write.
+    expect(off).toContain('el.getElementsByTagName("*")[HEAVY_SUBTREE]) heavy.add(el);');
+    expect(off).not.toContain('getElementsByTagName("*").length');
   });
 
   it("wears the shelf's glass on the desktop, so the wallpaper shows behind the bar", () => {
@@ -307,14 +379,15 @@ describe("kiosk extension", () => {
     // manifest registers as the new-tab override.
     expect(bar).toContain('send({ type: "create" })');
     const bg = read("background.js");
-    expect(bg).toMatch(/case "create":/);
+    expect(bg).toMatch(/case "create":\s*await chrome\.tabs\.create\(\{ url: START_PAGE, active: true \}\);/);
     expect(bg).toContain('const START_PAGE = chrome.runtime.getURL("newtab.html");');
-    expect(bg).toContain("if (msg.url == null) {");
-    expect(bg).toContain("await chrome.tabs.create({ url: START_PAGE, active: true });");
     expect(JSON.parse(read("manifest.json")).chrome_url_overrides).toEqual({ newtab: "newtab.html" });
-    // A URL given still has to be a web page.
-    expect(bg).toMatch(/\^https\?:\\\/\\\/.*\.test\(msg\.url\)/);
-    expect(bg).toContain("chrome.tabs.create({ url: msg.url, active: true })");
+    // Nothing the worker is told can open another URL: "create" takes none.
+    expect(bg).not.toContain("msg.url");
+    // Close is the worker's: it knows which tab asked (sender.tab), lands on
+    // the desktop first and then closes that tab — no list round trip.
+    expect(bar).toContain('send({ type: "closeSelf" })');
+    expect(bg).toMatch(/case "closeSelf":[\s\S]*?await goHome\(\);[\s\S]*?await chrome\.tabs\.remove\(sender\.tab\.id\);/);
     // Navigation is the page's own location; no permission grows for it.
     expect(bar).toContain("location.assign(to)");
   });

@@ -497,9 +497,7 @@ export default function ChromeWindow({
       left: 0,
       top: barInset,
       width: rightInset > 0 ? `calc(100% - ${rightInset}px)` : "100%",
-      height: barInset > 0
-        ? `calc(100vh - ${SHELF_HEIGHT + barInset}px - env(safe-area-inset-bottom, 0px))`
-        : `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px))`,
+      height: `calc(100vh - ${SHELF_HEIGHT + barInset}px - env(safe-area-inset-bottom, 0px))`,
     }
       : { left: position.x, top: position.y, width: size.width, height: size.height };
   // A flush window has no corners to round: snapped to an edge, or maximized.

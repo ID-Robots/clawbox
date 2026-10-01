@@ -4,25 +4,24 @@ import {
   DEFAULT_KIOSK_URL,
   activateKioskTab,
   closeKioskTab,
-  goHome,
   isDesktopUrl,
   kioskCdpPort,
+  kioskConfigured,
   listKioskTabs,
   openKioskTab,
   parseKioskEnv,
-  pickHomeTab,
   readKioskUrl,
-  type KioskTab,
 } from "@/lib/kiosk-tabs";
 
 /**
  * The CDP HTTP client behind the kiosk tab API, against a MOCKED Chrome.
  *
  * The real port (18801) is only live on the x64 laptop after its kiosk session
- * restarts with the flags enable-kiosk-remote-debugging.sh adds; nothing in CI
- * or on a Jetson has it, and the module's whole contract for that case is
+ * restarts with the flags install-kiosk-tabs.sh adds; nothing in CI or on a
+ * Jetson has it, and the module's whole contract for that case is
  * `available: false` — so the fetch stub is the seam, and "nothing on the
- * port" is a rejected fetch, exactly what undici throws for ECONNREFUSED.
+ * port" is a rejected fetch, exactly what undici throws for ECONNREFUSED. A
+ * box with no kiosk.env never reaches the fetch at all (`kioskConfigured`).
  */
 
 const KIOSK = "http://localhost:3005/";
@@ -121,15 +120,25 @@ describe("isDesktopUrl", () => {
   });
 });
 
-describe("pickHomeTab", () => {
-  const tab = (url: string, isDesktop: boolean, id = url): KioskTab => ({ id, title: "", url, favicon: "", isDesktop });
+describe("a box with no kiosk", () => {
+  // Every Jetson: no kiosk.env (the suite points the file at nowhere,
+  // vitest.config.ts) and no CLAWBOX_KIOSK_URL.
+  beforeEach(() => { delete process.env.CLAWBOX_KIOSK_URL; });
 
-  it("prefers the tab on the kiosk URL's own path, then any desktop page, then nothing", () => {
-    const login = tab("http://localhost:3005/login", true, "L");
-    const root = tab("http://localhost:3005/?x=1", true, "R");
-    expect(pickHomeTab([login, root, tab("https://x/", false)], KIOSK)?.id).toBe("R");
-    expect(pickHomeTab([login, tab("https://x/", false)], KIOSK)?.id).toBe("L");
-    expect(pickHomeTab([tab("https://x/", false)], KIOSK)).toBeNull();
+  it("is configured only by kiosk.env or CLAWBOX_KIOSK_URL", () => {
+    expect(kioskConfigured()).toBe(false);
+    expect(kioskConfigured({ CLAWBOX_KIOSK_URL: KIOSK })).toBe(true);
+    expect(kioskConfigured({ CLAWBOX_KIOSK_ENV_FILE: __filename })).toBe(true);
+  });
+
+  it("never dials the CDP port — OpenClaw's own browsers may hold it — and answers available:false", async () => {
+    // Something DOES answer on the port: it must still not be taken for a kiosk.
+    respond = () => json([ANTHROPIC]);
+    expect(await listKioskTabs()).toEqual({ available: false, tabs: [] });
+    expect(await openKioskTab("https://example.com/")).toEqual({ ok: false, available: false });
+    expect(await activateKioskTab("BBBB2222")).toEqual({ ok: false, available: false });
+    expect(await closeKioskTab("BBBB2222")).toEqual({ ok: false, available: false });
+    expect(calls).toHaveLength(0);
   });
 });
 
@@ -186,14 +195,14 @@ describe("listKioskTabs", () => {
 });
 
 describe("openKioskTab", () => {
-  it("PUTs /json/new with the encoded URL and answers the new tab", async () => {
+  it("PUTs /json/new with the encoded URL", async () => {
     respond = () => json({ ...ANTHROPIC, id: "NEW1" });
     const r = await openKioskTab("https://claude.ai/oauth/authorize?x=1&y=2");
     expect(calls[0]).toEqual({
       url: `http://127.0.0.1:18801/json/new?${encodeURIComponent("https://claude.ai/oauth/authorize?x=1&y=2")}`,
       method: "PUT",
     });
-    expect(r).toMatchObject({ ok: true, available: true, tab: { id: "NEW1", isDesktop: false } });
+    expect(r).toEqual({ ok: true, available: true });
   });
 
   it("refuses anything but http(s) before touching Chrome", async () => {
@@ -211,10 +220,6 @@ describe("openKioskTab", () => {
     expect(await openKioskTab("https://example.com/")).toMatchObject({ ok: false, available: true, code: "cdp_error" });
   });
 
-  it("still reports ok when Chrome opened the tab but answered no record", async () => {
-    respond = () => new Response("", { status: 200 });
-    expect(await openKioskTab("https://example.com/")).toEqual({ ok: true, available: true });
-  });
 });
 
 describe("activateKioskTab / closeKioskTab", () => {
@@ -240,35 +245,5 @@ describe("activateKioskTab / closeKioskTab", () => {
     expect(await activateKioskTab("ZZZZ")).toMatchObject({ ok: false, available: true, code: "not_found" });
     respond = refused;
     expect(await closeKioskTab("ZZZZ")).toEqual({ ok: false, available: false });
-  });
-});
-
-describe("goHome", () => {
-  it("activates the desktop tab", async () => {
-    respond = (url) => url.endsWith("/json/list") ? json([ANTHROPIC, DESKTOP]) : new Response("ok", { status: 200 });
-    expect(await goHome()).toEqual({ ok: true, available: true });
-    expect(calls.map((c) => c.url)).toEqual([
-      "http://127.0.0.1:18801/json/list",
-      "http://127.0.0.1:18801/json/activate/AAAA1111",
-    ]);
-  });
-
-  it("prefers the desktop root over a /login page of the desktop", async () => {
-    const login = { ...DESKTOP, id: "LOGIN1", url: "http://localhost:3005/login" };
-    respond = (url) => url.endsWith("/json/list") ? json([login, DESKTOP]) : new Response("ok", { status: 200 });
-    await goHome();
-    expect(calls[1].url).toBe("http://127.0.0.1:18801/json/activate/AAAA1111");
-  });
-
-  it("reopens the kiosk URL when the desktop tab is gone", async () => {
-    respond = (url) => url.endsWith("/json/list") ? json([ANTHROPIC]) : json(DESKTOP);
-    expect(await goHome()).toMatchObject({ ok: true, tab: { id: "AAAA1111", isDesktop: true } });
-    expect(calls[1]).toEqual({ url: `http://127.0.0.1:18801/json/new?${encodeURIComponent(KIOSK)}`, method: "PUT" });
-  });
-
-  it("is available:false when the list itself is", async () => {
-    respond = refused;
-    expect(await goHome()).toEqual({ ok: false, available: false });
-    expect(calls).toHaveLength(1);
   });
 });

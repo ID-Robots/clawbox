@@ -4,7 +4,6 @@ import { NextResponse } from "next/server";
 import {
   activateKioskTab,
   closeKioskTab,
-  goHome,
   listKioskTabs,
   openKioskTab,
   type KioskAction,
@@ -17,13 +16,12 @@ import { isSameOriginRequest } from "@/lib/same-origin";
  * POST /setup-api/kiosk/tabs { action: "open", url }
  * POST /setup-api/kiosk/tabs { action: "activate", id }
  * POST /setup-api/kiosk/tabs { action: "close", id }
- * POST /setup-api/kiosk/tabs { action: "home" }
  *
  * The desktop taskbar's view of the kiosk Chrome's tabs (see
  * src/lib/kiosk-tabs.ts for why). On a box with no kiosk the GET answers
  * `{ available: false, tabs: [] }` with a 200 and the POSTs answer the same
- * shape with a 503 — a Jetson asks this every time its desktop mounts, and
- * that is not an error.
+ * shape with a 503 — not an error, and never a CDP call: a box with no
+ * kiosk.env (every Jetson) does not dial the port at all.
  *
  * The POSTs are the OWNER's (cookie, never the MCP bearer) and OUR PAGE's
  * (same origin): they steer the browser on the owner's screen, and a cross-site
@@ -35,7 +33,7 @@ import { isSameOriginRequest } from "@/lib/same-origin";
  */
 
 const NO_STORE = { "Cache-Control": "no-store" };
-const ACTIONS = ["open", "activate", "close", "home"] as const;
+const ACTIONS = ["open", "activate", "close"] as const;
 type Action = (typeof ACTIONS)[number];
 
 function refuse(error: string, code: string, status: number) {
@@ -50,7 +48,7 @@ function answer(result: KioskAction) {
     const status = result.code === "not_found" ? 404 : result.code.startsWith("invalid") ? 400 : 502;
     return NextResponse.json({ available: true, ok: false, error: result.error, code: result.code }, { status, headers: NO_STORE });
   }
-  return NextResponse.json({ available: true, ok: true, tab: result.tab }, { headers: NO_STORE });
+  return NextResponse.json({ available: true, ok: true }, { headers: NO_STORE });
 }
 
 export async function GET() {
@@ -83,7 +81,6 @@ export async function POST(req: Request) {
     if (typeof body.url !== "string" || !body.url) return refuse("Missing url", "invalid_url", 400);
     return answer(await openKioskTab(body.url));
   }
-  if (action === "home") return answer(await goHome());
 
   if (typeof body.id !== "string" || !body.id) return refuse("Missing tab id", "invalid_id", 400);
   return answer(action === "activate" ? await activateKioskTab(body.id) : await closeKioskTab(body.id));

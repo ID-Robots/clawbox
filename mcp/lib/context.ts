@@ -13,6 +13,7 @@
 
 import { capabilitiesFor, type HarnessFacts } from "../../src/lib/harness/capabilities";
 import { appExistsOnEdition } from "../../src/lib/desktop-app-editions";
+import { kioskConfigured } from "../../src/lib/kiosk-tabs";
 import type { HarnessId } from "../../src/lib/harness/transport";
 import { hasBinary, spawnArgv } from "./guard";
 import { apiTry } from "./api";
@@ -29,6 +30,12 @@ export interface DesktopApp {
    * src/lib/desktop-apps.ts; the drift test holds the two together.
    */
   external?: boolean;
+  /**
+   * Only on a box with the x64 laptop's kiosk (`kioskConfigured`). Mirrors
+   * `kioskOnly` in src/lib/desktop-apps.ts, which the desktop hides off the
+   * kiosk — so a Jetson's agent is not offered an app its desktop never shows.
+   */
+  kioskOnly?: boolean;
 }
 
 // Every built-in desktop app, in the order src/lib/desktop-apps.ts declares
@@ -57,7 +64,7 @@ const APP_DESCRIPTIONS: Record<string, Omit<DesktopApp, "id">> = {
   system_update: { name: "System Update", description: "The installed ClawBox version and the update button" },
   store: { name: "Store", description: "App store" },
   browser: { name: "Browser Setup", description: "Browser integration panel, not the browsing window" },
-  web: { name: "Web", description: "The web: a search start page in a browser tab (on the kiosk laptop, with an address bar)", external: true },
+  web: { name: "Web", description: "The web: a search start page in a browser tab, with the kiosk's address bar", external: true, kioskOnly: true },
   vnc: { name: "Remote Desktop", description: "VNC viewer" },
 };
 
@@ -66,8 +73,9 @@ const APP_DESCRIPTIONS: Record<string, Omit<DesktopApp, "id">> = {
  * determined — answers the apps that exist on BOTH, never one harness's guess.
  */
 export function builtInApps(edition: Ed | null): DesktopApp[] {
+  const kiosk = kioskConfigured();
   return Object.entries(APP_DESCRIPTIONS)
-    .filter(([id]) => appExistsOnEdition(id, edition))
+    .filter(([id, def]) => appExistsOnEdition(id, edition) && (!def.kioskOnly || kiosk))
     .map(([id, def]) => ({ id, ...def }));
 }
 

@@ -161,11 +161,14 @@
     .close { color: var(--text-secondary); padding: 0 10px 0 8px; }
     .close:hover { color: var(--text-primary); }
     .progress { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; pointer-events: none; opacity: 0; transition: opacity .2s; }
-    .progress::before { content: ""; position: absolute; top: 0; bottom: 0; left: -40%; width: 40%; border-radius: 2px;
+    .progress::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; border-radius: 2px; transform: translateX(-100%);
       background: linear-gradient(90deg, var(--coral-mid), var(--coral-bright), var(--cyan-bright)); }
     .bar.loading .progress { opacity: 1; }
     .bar.loading .progress::before { animation: clawbox-kiosk-slide 1.1s ease-in-out infinite; }
-    @keyframes clawbox-kiosk-slide { 0% { left: -40%; } 100% { left: 100%; } }`;
+    /* transform, not left: the line runs while a page loads, when the main
+       thread is busiest, and a transform is the compositor's alone. 250% of
+       its own 40% width is the bar's far edge. */
+    @keyframes clawbox-kiosk-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }`;
 
   function mount(opts) {
     const startPage = !!(opts && opts.startPage);
@@ -220,15 +223,10 @@
 
     // On the desktop the ClawBox chip is the page already showing.
     root.querySelector(".home").addEventListener("click", () => { if (!desktop) send({ type: "home" }); });
-    // No URL: the worker opens the extension's own start page.
+    // The worker opens the extension's own start page.
     root.querySelector(".add").addEventListener("click", () => send({ type: "create" }));
-    root.querySelector(".close").addEventListener("click", async () => {
-      // Land on the desktop, then close: closing the only foreground page
-      // otherwise leaves Chrome showing whichever tab it picks.
-      const me = await send({ type: "list" });
-      await send({ type: "home" });
-      if (me && me.currentId != null) send({ type: "close", id: me.currentId });
-    });
+    // The worker knows which tab asked: it lands on the desktop, then closes it.
+    root.querySelector(".close").addEventListener("click", () => send({ type: "closeSelf" }));
     // DevTools on this tab, through the worker (see openDevTools there). A
     // refusal turns the button red with the reason as its tooltip.
     const devtoolsEl = root.querySelector(".devtools");
@@ -304,23 +302,42 @@
     addressEl.addEventListener("keyup", (e) => e.stopPropagation());
     addressEl.addEventListener("keypress", (e) => e.stopPropagation());
 
+    // What the chips on screen were drawn from: a refresh that finds the same
+    // leaves them (and their measure) alone. Every refresh used to take the
+    // strip down and build it again — new buttons, images and SVGs, then a
+    // forced layout to fit them — every 5 s on every tab, desktop included,
+    // whether or not anything had changed.
+    let drawn = "";
+
     async function refresh() {
+      // A page nobody can see keeps no strip up to date: it catches up the
+      // moment it is shown (visibilitychange below).
+      if (document.hidden) return;
       // A single-page app moves without a load; the bar follows the URL on
       // every refresh unless the owner is typing in it.
       if (root.activeElement !== addressEl) showCurrentAddress();
       updateNav();
       const r = await send({ type: "list" });
       if (!r || !Array.isArray(r.tabs)) return;
+      // Exactly what a chip shows and acts on.
+      const chips = r.tabs.map((tab) => ({
+        id: tab.id,
+        name: (tab.title || "").trim() || hostOf(tab.url) || "Untitled page",
+        favicon: tab.favicon && /^(?:https?:|data:image\/)/.test(tab.favicon) ? tab.favicon : "",
+        current: tab.id === r.currentId,
+      }));
+      const key = JSON.stringify(chips);
+      if (key === drawn) return;
+      drawn = key;
       tabsEl.textContent = "";
-      for (const tab of r.tabs) {
-        const name = (tab.title || "").trim() || hostOf(tab.url) || "Untitled page";
+      for (const chip of chips) {
         const b = document.createElement("button");
-        b.className = "tab" + (tab.id === r.currentId ? " current" : "");
-        b.title = name;
-        if (tab.favicon && /^(?:https?:|data:image\/)/.test(tab.favicon)) {
+        b.className = "tab" + (chip.current ? " current" : "");
+        b.title = chip.name;
+        if (chip.favicon) {
           const img = document.createElement("img");
           img.alt = "";
-          img.src = tab.favicon;
+          img.src = chip.favicon;
           b.appendChild(img);
         } else {
           const g = document.createElement("span");
@@ -330,19 +347,19 @@
         }
         const t = document.createElement("span");
         t.className = "t";
-        t.textContent = name;
+        t.textContent = chip.name;
         b.appendChild(t);
         const x = document.createElement("button");
         x.className = "x";
         x.title = "Close";
-        x.setAttribute("aria-label", "Close " + name);
+        x.setAttribute("aria-label", "Close " + chip.name);
         x.innerHTML = svg("close", 14);
         x.addEventListener("click", (e) => {
           e.stopPropagation();
-          send({ type: "close", id: tab.id }).then(refresh);
+          send({ type: "close", id: chip.id }).then(refresh);
         });
         b.appendChild(x);
-        b.addEventListener("click", () => send({ type: "activate", id: tab.id }));
+        b.addEventListener("click", () => send({ type: "activate", id: chip.id }));
         tabsEl.appendChild(b);
       }
       fitTabs();
@@ -351,16 +368,23 @@
     // Chips share the room equally (up to 200 px each). Once that is too
     // little for a title, they show the site's icon alone, and the close
     // button takes its place under the pointer.
+    //
+    // Measured only when that can change: the chips were rebuilt, the window
+    // was resized, or a font arrived (the wordmark and the titles change width
+    // with it — the 5 s rebuild used to correct a fit made before it came).
     function fitTabs() {
       tabsEl.classList.remove("narrow");
       const n = tabsEl.childElementCount;
       if (n && tabsEl.clientWidth / n < 84) tabsEl.classList.add("narrow");
     }
     window.addEventListener("resize", fitTabs);
+    if (document.fonts) document.fonts.addEventListener("loadingdone", fitTabs);
 
     chrome.runtime.onMessage.addListener((msg) => {
       if (msg && msg.type === "changed") refresh();
     });
+    // Once on being shown: the broadcasts and polls it sat out while hidden.
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
     window.addEventListener("popstate", () => { showCurrentAddress(); updateNav(); });
     window.addEventListener("hashchange", showCurrentAddress);
 
@@ -376,7 +400,8 @@
     settle();
     refresh();
     // The worker broadcasts changes; this is the fallback for a broadcast a
-    // sleeping worker missed.
+    // sleeping worker missed (a no-op while the page is hidden, and nothing
+    // redrawn when the tabs are as they were).
     setInterval(refresh, 5000);
     return { refresh, focusAddress: () => addressEl.focus() };
   }

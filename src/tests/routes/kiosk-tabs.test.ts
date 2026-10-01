@@ -40,15 +40,13 @@ vi.mock("@/lib/kiosk-tabs", () => {
     }),
     openKioskTab: vi.fn(async (url: string) => {
       if (!/^https?:/.test(url)) return { ok: false, available: true, error: "Invalid URL", code: "invalid_url" };
-      const r = okFor(`open:${url}`);
-      return r.ok ? { ...r, tab: { id: "N", title: "", url, favicon: "", isDesktop: false } } : r;
+      return okFor(`open:${url}`);
     }),
     activateKioskTab: vi.fn(async (id: string) => {
       if (id === "GONE") return { ok: false, available: true, error: "No such tab", code: "not_found" };
       return okFor(`activate:${id}`);
     }),
     closeKioskTab: vi.fn(async (id: string) => okFor(`close:${id}`)),
-    goHome: vi.fn(async () => okFor("home")),
   };
 });
 
@@ -91,7 +89,7 @@ describe("GET /setup-api/kiosk/tabs", () => {
 describe("POST /setup-api/kiosk/tabs", () => {
   it("refuses the MCP bearer (no owner cookie) with 403 owner_only and calls nothing", async () => {
     h.ownerSession = false;
-    const res = await POST(post({ action: "home" }));
+    const res = await POST(post({ action: "close", id: "A" }));
     expect(res.status).toBe(403);
     expect((await res.json()).code).toBe("owner_only");
     expect(h.calls).toEqual([]);
@@ -113,10 +111,10 @@ describe("POST /setup-api/kiosk/tabs", () => {
     expect(h.calls).toEqual([]);
   });
 
-  it("open → the lib, answering the new tab", async () => {
+  it("open → the lib", async () => {
     const res = await POST(post({ action: "open", url: "https://claude.ai/x" }));
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, available: true, tab: { id: "N" } });
+    expect(await res.json()).toEqual({ ok: true, available: true });
     expect(h.calls).toEqual(["open:https://claude.ai/x"]);
   });
 
@@ -142,9 +140,11 @@ describe("POST /setup-api/kiosk/tabs", () => {
     expect((await res.json()).code).toBe("not_found");
   });
 
-  it("home → the lib", async () => {
-    expect((await POST(post({ action: "home" }))).status).toBe(200);
-    expect(h.calls).toEqual(["home"]);
+  it("has no home verb: the bar's Home goes through the extension's own worker", async () => {
+    const res = await POST(post({ action: "home" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("invalid_action");
+    expect(h.calls).toEqual([]);
   });
 
   it("a dead port is a 503 { available: false }, never a 500", async () => {

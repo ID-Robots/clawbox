@@ -125,19 +125,14 @@ gateway is independent of it. Do not stop or remove the bridge in the middle
 of an update. Back up the replaced root template and service drop-ins before
 initial installation if a complete package-level rollback is required.
 
-## Kiosk remote debugging (x64 laptop)
-
-`kiosk/enable-kiosk-remote-debugging.sh` adds a loopback-only Chrome DevTools
-port (default 18801) to `/usr/local/bin/clawbox-kiosk-browser`, mirroring the
-VNC browser's port 18800, so the agent can screenshot/drive the ClawBox UI on
-the physical display. Run it with sudo after any update that rewrites the
-launcher; it is idempotent and reboots (the running launcher loop keeps the old flags).
-
 ## Kiosk tabs managed by the ClawBox desktop (x64 laptop)
 
-`kiosk/install-kiosk-tabs.sh` supersedes the script above: it adds the same
-CDP flags AND turns the browser into a real kiosk, with the tabs managed by
-the ClawBox desktop rather than Chrome's tab strip:
+`kiosk/install-kiosk-tabs.sh` adds a loopback-only Chrome DevTools port
+(default 18801, beside the VNC browser's 18800) to
+`/usr/local/bin/clawbox-kiosk-browser`, so the desktop can list and switch the
+kiosk's tabs and the agent can screenshot the physical display, AND turns the
+browser into a real kiosk, with the tabs managed by the ClawBox desktop rather
+than Chrome's tab strip:
 
 ```sh
 sudo scripts/x64-migration/kiosk/install-kiosk-tabs.sh            # reboots

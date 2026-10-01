@@ -51,7 +51,7 @@ import { apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
 import { mayUseOwnerApis, useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
 import { KIOSK_PAGES_APP_ID, kioskPageTabs, openInKiosk, useKioskTabs } from "@/lib/kiosk-tabs-client";
-import { KIOSK_BAR_HEIGHT, useKioskBarInset } from "@/lib/kiosk-bar-inset";
+import { useKioskBarInset } from "@/lib/kiosk-bar-inset";
 import { NON_OWNER_APP_IDS, OWNER_ONLY_NOTICE, installedAppIdsFor } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
@@ -378,18 +378,23 @@ function ChromeDesktopInner() {
   // that opens AI Settings instead of ClawKeep.
   const clawboxLogin = useClawboxLogin(undefined, ownerApis);
   const clawAiAuthenticated = clawboxLogin.loggedIn;
-  // The tabs of the kiosk Chrome on the x64 laptop's own display, for the
-  // shelf (src/lib/kiosk-tabs.ts). Owner-gated like every other poll here;
-  // on a box with no kiosk the first answer is "none" and the poll goes slow.
-  const kiosk = useKioskTabs(ownerApis);
+  // The kiosk bar's height while the x64 laptop's kiosk extension draws it
+  // over this page, 0 on every other browser: top-anchored surfaces start
+  // under it, and it is how this page knows it IS the kiosk.
+  const kioskBarInset = useKioskBarInset();
+  const onKiosk = kioskBarInset > 0;
+  // The tabs of the kiosk Chrome on the laptop's own display, for the shelf
+  // (src/lib/kiosk-tabs.ts). Owner-gated like every other poll here, and
+  // polled only on the kiosk itself: every other box — every Jetson — sends
+  // nothing.
+  const kiosk = useKioskTabs(ownerApis && onKiosk);
+  // A stable callback on its own, so the shelf's click handler can depend on
+  // it rather than on the whole `kiosk` object, a new one every render.
   const activateKioskTab = kiosk.activate;
   // The pages the desktop opened in the kiosk, most recently used first. The
   // shelf shows them as ONE app — Web — like any other open app; the kiosk
   // bar across the top is where each of them is named and switched to.
   const kioskPages = useMemo(() => kioskPageTabs(kiosk.tabs), [kiosk.tabs]);
-  // The kiosk bar's height while the extension draws it over this page (0 on
-  // every other browser): top-anchored surfaces start under it.
-  const kioskBarInset = useKioskBarInset();
 
   const syncSetupStatus = useCallback(async () => {
     const data = await fetch("/setup-api/setup/status").then((r) => r.json());
@@ -523,9 +528,10 @@ function ChromeDesktopInner() {
   const isOwner = sessionUser?.isOwner !== false;
   const harnessHiddenAppIds = useMemo<string[]>(
     () => isOwner
-      ? hiddenAppIdsForHarness(activeHarness)
+      // A kiosk-only app (Web) exists on the laptop's kiosk desktop alone.
+      ? [...hiddenAppIdsForHarness(activeHarness), ...(onKiosk ? [] : apps.filter((a) => a.kioskOnly).map((a) => a.id))]
       : apps.map((a) => a.id).filter((id) => !NON_OWNER_APP_IDS.includes(id)),
-    [activeHarness, isOwner],
+    [activeHarness, isOwner, onKiosk],
   );
 
   // ─── Desktop shortcuts for built-in apps ───
@@ -985,10 +991,8 @@ function ChromeDesktopInner() {
   // column count (a width derivative) could trigger an arrange, so shrinking a
   // window vertically left the icons laid out for the old height.
   const [gridDims, setGridDims] = useState({ cols: 10, cellW: 100, mobile: false, rowsPerColumn: 6 });
-  // The kiosk bar's room above the icons: from the moment the desktop knows it
-  // is the laptop's kiosk, or the bar is up — whichever says so first (a
-  // non-owner session polls no tabs, and still gets the bar).
-  const kioskIconReserve = Math.max(kiosk.available ? KIOSK_BAR_HEIGHT : 0, kioskBarInset);
+  // The kiosk bar's room above the icons (0 without one).
+  const kioskIconReserve = kioskBarInset;
   useEffect(() => {
     const update = () => {
       const w = window.innerWidth;
@@ -3298,24 +3302,10 @@ function ChromeDesktopInner() {
           if (webApp && kioskPages.length > 0 && !pinnedIds.has(webApp.id)) unpinnedOpenApps.push(webApp);
 
           const mapApp = (app: AppDef) => {
-            if (app.id === KIOSK_PAGES_APP_ID && kiosk.available) {
-              return {
-                id: app.id,
-                name: resolveAppName(app),
-                icon: (
-                  <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: app.color }}>
-                    <AppIcon id={app.id} />
-                  </div>
-                ),
-                isOpen: kioskPages.length > 0,
-                // The desktop is what is showing whenever this shelf is.
-                isActive: false,
-                isPinned: pinnedIds.has(app.id),
-                windowCount: kioskPages.length,
-                url: app.url,
-                external: true,
-              };
-            }
+            // Web on the kiosk counts the kiosk's pages as its windows. It is
+            // never the active one: the desktop is what is showing whenever
+            // this shelf is.
+            const kioskPageCount = app.id === KIOSK_PAGES_APP_ID && kiosk.available ? kioskPages.length : null;
             const appWindows = openWindows.filter((w) => w.appId === app.id);
             const topWin = appWindows.length > 0
               ? appWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b))
@@ -3334,15 +3324,17 @@ function ChromeDesktopInner() {
                 </div>
               );
             };
+            const count = kioskPageCount ?? appWindows.length;
             return {
               id: app.id,
               name: resolveAppName(app),
               icon: renderIcon(),
-              isOpen: appWindows.length > 0,
-              isActive: topWin?.id === activeWindowId && !topWin?.minimized,
+              isOpen: count > 0,
+              isActive: kioskPageCount === null && topWin?.id === activeWindowId && !topWin?.minimized,
               isPinned: pinnedIds.has(app.id),
-              windowCount: appWindows.length,
+              windowCount: count,
               url: app.url,
+              ...(kioskPageCount !== null ? { external: true } : {}),
             };
           };
 

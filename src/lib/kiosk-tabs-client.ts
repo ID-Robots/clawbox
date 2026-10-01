@@ -1,59 +1,54 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { kioskBarInset } from "./kiosk-bar-inset";
+// Type-only: erased from the bundle, so the server module's fs never reaches
+// the browser.
+import type { KioskTab, KioskTabs } from "./kiosk-tabs";
 
 /**
  * The desktop's side of the kiosk tab API (/setup-api/kiosk/tabs; see
  * src/lib/kiosk-tabs.ts for what a kiosk is and why the desktop lists its
  * tabs).
  *
- * Two things live here on purpose, in ONE module: the poll that knows whether
- * this box has a kiosk at all, and `openInKiosk`, which every "open an
- * external page" click goes through. The second reads the first's answer
- * SYNCHRONOUSLY — a click handler that awaited a probe before calling
- * `window.open` would be the popup blocker's business on a browser that is
- * not the kiosk, and on every Jetson, every phone and every laptop reaching
- * the box over the LAN the answer is "no kiosk" and the behaviour has to stay
- * exactly the old `window.open`.
+ * Whether THIS page is the kiosk is answered by the page itself, never by the
+ * server: the kiosk extension draws its bar on the desktop and says so on
+ * `<html>` (`kioskBarInset() > 0`, src/lib/kiosk-bar-inset.ts). Every Jetson,
+ * every phone and every browser reaching the laptop over the LAN has no bar,
+ * so none of them polls the tab list or sends a command, and `openInKiosk` is
+ * exactly the old `window.open` there — decided synchronously, in the click's
+ * own tick, so no await stands between the gesture and the popup.
  */
 
-export interface KioskTabView {
-  id: string;
-  title: string;
-  url: string;
-  favicon: string;
-  isDesktop: boolean;
+export type KioskTabView = KioskTab;
+
+const NO_KIOSK: KioskTabs = { available: false, tabs: [] };
+
+/** Is this page the laptop's kiosk desktop (its extension's bar is on it)? */
+export function inKiosk(): boolean {
+  return kioskBarInset() > 0;
 }
+
+/**
+ * Fired on `window` after `openInKiosk` opened a tab, so the taskbar re-reads
+ * the list at once rather than on its next tick.
+ */
+export const KIOSK_TABS_CHANGED_EVENT = "clawbox:kiosk-tabs-changed";
 
 export const KIOSK_TABS_URL = "/setup-api/kiosk/tabs";
 /** How often the taskbar re-reads the tab list while a kiosk is answering. */
 export const KIOSK_POLL_MS = 2_000;
 /**
- * How often a box that answered "no kiosk" is asked again. Not never: the
- * kiosk Chrome is restarted by its launcher loop after a crash, and the port
- * is dark for those seconds. Slow, because on a box that has no kiosk this is
- * the only cost the feature has.
+ * How often the kiosk's tab list is asked again while its Chrome does not
+ * answer — restarted by its launcher loop after a crash, the port dark for
+ * those seconds. Only ever on the kiosk itself (see `useKioskTabs`).
  */
 export const KIOSK_RECHECK_MS = 30_000;
 
-// Module state, so a click handler anywhere on the desktop can read the last
-// answer without a provider: null until the first poll answers.
-let lastAvailable: boolean | null = null;
-
-/** What the last poll said. `null` before anything has answered. */
-export function kioskAvailable(): boolean | null {
-  return lastAvailable;
-}
-
-/** Tests only: forget what the last poll said. */
-export function resetKioskAvailability(): void {
-  lastAvailable = null;
-}
-
-function parseTabs(data: unknown): { available: boolean; tabs: KioskTabView[] } {
-  if (typeof data !== "object" || data === null) return { available: false, tabs: [] };
+function parseTabs(data: unknown): KioskTabs {
+  if (typeof data !== "object" || data === null) return NO_KIOSK;
   const d = data as { available?: unknown; tabs?: unknown };
-  if (d.available !== true || !Array.isArray(d.tabs)) return { available: false, tabs: [] };
+  if (d.available !== true || !Array.isArray(d.tabs)) return NO_KIOSK;
   const tabs: KioskTabView[] = [];
   for (const t of d.tabs as Record<string, unknown>[]) {
     if (typeof t?.id !== "string" || typeof t.url !== "string") continue;
@@ -86,33 +81,28 @@ export function kioskPageTabs(tabs: KioskTabView[]): KioskTabView[] {
 }
 
 /** One read of the tab list. Never throws; a failure is "no kiosk". */
-export async function fetchKioskTabs(): Promise<{ available: boolean; tabs: KioskTabView[] }> {
+export async function fetchKioskTabs(): Promise<KioskTabs> {
   try {
     const res = await fetch(KIOSK_TABS_URL, { cache: "no-store" });
-    const parsed = res.ok ? parseTabs(await res.json()) : { available: false, tabs: [] };
-    lastAvailable = parsed.available;
-    return parsed;
+    return res.ok ? parseTabs(await res.json()) : NO_KIOSK;
   } catch {
-    lastAvailable = false;
-    return { available: false, tabs: [] };
+    return NO_KIOSK;
   }
 }
 
 type KioskCommand =
   | { action: "open"; url: string }
   | { action: "activate"; id: string }
-  | { action: "close"; id: string }
-  | { action: "home" };
+  | { action: "close"; id: string };
 
 /** One command to the kiosk. True when Chrome did it. */
-export async function kioskCommand(body: KioskCommand): Promise<boolean> {
+async function kioskCommand(body: KioskCommand): Promise<boolean> {
   try {
     const res = await fetch(KIOSK_TABS_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (res.status === 503) lastAvailable = false;
     return res.ok;
   } catch {
     return false;
@@ -122,21 +112,20 @@ export async function kioskCommand(body: KioskCommand): Promise<boolean> {
 /**
  * Open `url` the way this browser opens an external page.
  *
- * On the kiosk (the last poll said so) the page is opened THROUGH the kiosk
- * API, so it is a tab the taskbar knows the moment it exists rather than two
- * seconds later, and the `--kiosk` Chrome shows it at once. If that fails —
- * the port went dark between the poll and the click — the old `window.open`
- * runs, which in the kiosk is still a new tab.
+ * On the kiosk the page is opened THROUGH the kiosk API, and the taskbar is
+ * told at once (`KIOSK_TABS_CHANGED_EVENT`) rather than at its next tick. If
+ * that fails — the kiosk Chrome's port went dark — the old `window.open`
+ * runs, which in the kiosk is still a new tab (a localhost round trip is well
+ * inside the click's activation window, so the popup is still allowed).
  *
  * Everywhere else this IS `window.open(url, "_blank", features)`, called in the
- * same tick as the click: no await stands between the user's gesture and the
- * popup, so nothing a browser allowed before is blocked now.
+ * same tick as the click: nothing a browser allowed before is blocked now.
  *
  * A relative `url` (`/app/vnc`) is resolved against this page's origin for the
  * kiosk API, which opens absolute URLs only; `window.open` resolves it itself.
  */
 export function openInKiosk(url: string, features = "noopener,noreferrer"): void {
-  if (lastAvailable !== true) {
+  if (!inKiosk()) {
     window.open(url, "_blank", features);
     return;
   }
@@ -148,25 +137,27 @@ export function openInKiosk(url: string, features = "noopener,noreferrer"): void
     return;
   }
   void kioskCommand({ action: "open", url: absolute }).then((done) => {
-    if (!done) window.open(url, "_blank", features);
+    if (done) window.dispatchEvent(new Event(KIOSK_TABS_CHANGED_EVENT));
+    else window.open(url, "_blank", features);
   });
 }
 
 /**
- * The kiosk's tabs, polled while the kiosk answers. `available: false` (and an
- * empty list) on every other box, re-asked at the slow rate.
+ * The kiosk's tabs, polled while its Chrome answers (and re-asked at the slow
+ * rate while it does not).
  *
- * `enabled: false` polls nothing at all — page.tsx passes the owner gate, since
- * another ClawBox user's browser must not send a request the server would 403.
+ * `enabled: false` polls nothing at all. page.tsx passes the owner gate (another
+ * ClawBox user's browser must not send a request the server would 403) AND
+ * `inKiosk()`: on any page without the kiosk bar — every Jetson — this hook
+ * sends nothing.
  */
 export function useKioskTabs(enabled: boolean): {
   available: boolean;
   tabs: KioskTabView[];
   activate: (id: string) => void;
   close: (id: string) => void;
-  home: () => void;
 } {
-  const [state, setState] = useState<{ available: boolean; tabs: KioskTabView[] }>({ available: false, tabs: [] });
+  const [state, setState] = useState<KioskTabs>(NO_KIOSK);
   // "Re-read soon", as the running poll loop defines it; a no-op while the
   // loop is not running.
   const refreshSoon = useRef<() => void>(() => {});
@@ -188,26 +179,31 @@ export function useKioskTabs(enabled: boolean): {
     // After a command the list is re-read at once rather than on the next
     // tick, so a closed tab leaves the taskbar with the click and not up to
     // two seconds later.
+    const onChanged = () => refreshSoon.current();
     refreshSoon.current = () => { if (live) schedule(150); };
+    window.addEventListener(KIOSK_TABS_CHANGED_EVENT, onChanged);
     void tick();
     return () => {
       live = false;
       if (timer) clearTimeout(timer);
+      window.removeEventListener(KIOSK_TABS_CHANGED_EVENT, onChanged);
       refreshSoon.current = () => {};
     };
   }, [enabled]);
 
   const activate = useCallback((id: string) => { void kioskCommand({ action: "activate", id }).then(() => refreshSoon.current()); }, []);
   const close = useCallback((id: string) => { void kioskCommand({ action: "close", id }).then(() => refreshSoon.current()); }, []);
-  const home = useCallback(() => { void kioskCommand({ action: "home" }).then(() => refreshSoon.current()); }, []);
 
-  return { available: state.available, tabs: state.tabs, activate, close, home };
+  return { available: state.available, tabs: state.tabs, activate, close };
 }
 
-function sameTabs(a: { available: boolean; tabs: KioskTabView[] }, b: { available: boolean; tabs: KioskTabView[] }): boolean {
+/**
+ * Same as far as the desktop can tell: it draws the pages by id, in order, and
+ * whether each is the desktop — never a title, URL or favicon (the kiosk bar
+ * names them). So a page that changes its title ("(3) Inbox") or finishes
+ * loading its favicon does not re-render the desktop.
+ */
+function sameTabs(a: KioskTabs, b: KioskTabs): boolean {
   if (a.available !== b.available || a.tabs.length !== b.tabs.length) return false;
-  return a.tabs.every((t, i) => {
-    const o = b.tabs[i];
-    return t.id === o.id && t.title === o.title && t.url === o.url && t.favicon === o.favicon && t.isDesktop === o.isDesktop;
-  });
+  return a.tabs.every((t, i) => t.id === b.tabs[i].id && t.isDesktop === b.tabs[i].isDesktop);
 }

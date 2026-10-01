@@ -6,7 +6,7 @@
 # --start-maximized:
 #   --remote-debugging-address=127.0.0.1 --remote-debugging-port=$PORT
 #       (the loopback CDP port src/lib/kiosk-tabs.ts lists and switches tabs
-#        on; same as enable-kiosk-remote-debugging.sh, which this supersedes)
+#        on)
 #   --kiosk
 #       (no tab strip, no address bar: the desktop's shelf is the tab strip)
 #   --load-extension=$EXT --disable-extensions-except=$EXT

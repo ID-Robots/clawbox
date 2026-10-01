@@ -23,6 +23,9 @@ export interface AppDef {
   defaultWidth?: number;
   defaultHeight?: number;
   storeApp?: StoreApp;
+  // Only on the x64 laptop's kiosk desktop (its extension's bar is on the
+  // page, `inKiosk()`); hidden everywhere else — every Jetson included.
+  kioskOnly?: boolean;
 }
 
 export const apps: AppDef[] = [
@@ -60,12 +63,12 @@ export const apps: AppDef[] = [
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   // The web itself: a start page with a search box, opened as an EXTERNAL
-  // page — through the kiosk API on the x64 laptop's kiosk Chrome, where the
-  // extension's bar then gives it an address bar and tab chips, and as a plain
-  // window.open everywhere else. Not the `browser` app above, which is the
+  // page through the kiosk API on the x64 laptop's kiosk Chrome, where the
+  // extension's bar then gives it an address bar and tab chips. Kiosk-only:
+  // no other box shows it. Not the `browser` app above, which is the
   // VNC-framed Chromium the agent drives. kiosk/extension/content.js opens
   // its own new tabs on the same start page; the kiosk extension test holds
   // the two URLs together.
-  { id: "web", name: "app.web", color: "#0f766e", type: "external", url: "https://duckduckgo.com/", pinned: false },
+  { id: "web", name: "app.web", color: "#0f766e", type: "external", url: "https://duckduckgo.com/", pinned: false, kioskOnly: true },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
 ];

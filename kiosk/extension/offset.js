@@ -56,6 +56,15 @@
 // before it is painted. A whole-document pass (resize, a stylesheet, a class
 // on <html> or <body>) runs at most every FULL_GAP_MS: a page that injects
 // <style> tags as it renders asks for one constantly.
+//
+// A class or style attribute written with the value it already had is not a
+// change, and neither is a style change that touches nothing a verdict reads:
+// one only to what paints (PAINT_ONLY — opacity, colour, a background), or,
+// on any box but <html> and <body>, to what matters only to the boxes inside
+// it or runs along the inline axis (SELF_ONLY — a transform, a width). A page
+// that hides its header on scroll with `style.transform`, or draws a reading
+// progress bar with `style.width`, writes one every frame, and judging the box
+// again for it cost a release, a forced layout and a rewrite per frame.
 
 (() => {
   // Replaced elements keep the height a script gave them: shrinking a canvas
@@ -71,6 +80,18 @@
   // element page), so it is judged again only on a resize or a change of its
   // own, never as a bystander to someone else's.
   const HEAVY_SUBTREE = 400;
+  // Inline properties that cannot change any box's verdict, on any box: they
+  // paint or composite and move nothing, and none of them makes a box the
+  // containing block of its fixed descendants. Longhand names, as a style
+  // declaration lists them; anything not named here counts, custom
+  // properties included (a `var()` can feed a `top`).
+  const PAINT_ONLY = /^(?:opacity|visibility|color|cursor|pointer-events|(?:-webkit-)?user-select|z-index|isolation|mix-blend-mode|box-shadow|text-shadow|caret-color|accent-color|background(?:-[a-z-]+)?|outline(?:-[a-z-]+)?|transition(?:-[a-z-]+)?|border-(?:top|bottom)-(?:left|right)-radius|text-decoration(?:-[a-z-]+)?)$/;
+  // …and those that cannot change the box's OWN verdict: they matter only to
+  // the boxes inside it (a transform or a filter contains its fixed
+  // descendants — which a style change never re-judged: it judges the box
+  // alone) or run along the inline axis. Not for <html> and <body>, whose
+  // style change re-judges the whole document.
+  const SELF_ONLY = /^(?:transform(?:-[a-z-]+)?|translate|rotate|scale|perspective(?:-origin)?|backface-visibility|will-change|filter|(?:-webkit-)?backdrop-filter|clip-path|left|right|width|min-width|max-width)$/;
 
   function start(barH) {
     const BAR_H = barH;
@@ -225,7 +246,10 @@
       }
       managed.set(el, props);
       adjusted.add(el);
-      if (el === html || el === document.body || el.getElementsByTagName("*").length > HEAVY_SUBTREE) heavy.add(el);
+      // More than HEAVY_SUBTREE descendants? Asking for the one past the
+      // limit walks at most that many; `.length` counted the whole subtree on
+      // every write.
+      if (el === html || el === document.body || el.getElementsByTagName("*")[HEAVY_SUBTREE]) heavy.add(el);
       else heavy.delete(el);
     }
 
@@ -288,7 +312,12 @@
         return;
       }
       const pos = getComputedStyle(el).position;
-      if (pos !== "static" && pos !== "relative") s.candidates.add(el);
+      // An absolute box gets a verdict only against the page itself
+      // (`againstCanvas`); one inside a positioned box — the badge on every
+      // thumbnail — is not worth judging, and its offsetParent says so for the
+      // price of the layout this scan has already paid.
+      if (pos === "absolute") { if (el.offsetParent === document.body) s.candidates.add(el); }
+      else if (pos !== "static" && pos !== "relative") s.candidates.add(el);
       else if (el.offsetHeight >= window.innerHeight - SLACK) s.candidates.add(el);
     }
 
@@ -353,7 +382,13 @@
       const done = scan;
       scan = null;
       judge(done.candidates);
-      if (dirty.size || dirtySelf.size || (fullWanted && !fullTimer)) askFrame();
+      if (due()) askFrame();
+    }
+
+    // Anything left to look at (a whole pass waiting on its timer comes back
+    // on its own).
+    function due() {
+      return dirty.size > 0 || dirtySelf.size > 0 || (fullWanted && !fullTimer);
     }
 
     function askFrame() {
@@ -380,22 +415,53 @@
           }
         } else if (r.type === "attributes") {
           if (t.id === BAR_HOST_ID) continue;
+          const page = t === html || t === document.body;
+          if (!changed(r, page)) continue;
           // A class or style on <html> or <body> can move anything; and it is
           // theirs, so they are judged again themselves.
-          if (t === html || t === document.body) { fullWanted = true; dirtySelf.add(t); }
+          if (page) { fullWanted = true; dirtySelf.add(t); }
           else if (r.attributeName === "style") dirtySelf.add(t);
           else dirty.add(t);
         }
       }
     }
 
+    // Where an old style attribute is read back into declarations: a box in
+    // no document, so parsing costs no style recalc and no observer sees it.
+    const scratch = document.createElement("div");
+
+    // Did this attribute record change anything a verdict reads? Its old
+    // value is compared with the attribute as it is NOW (the page may have
+    // written it again since): when every record since a pass says no, the
+    // box reads as that pass left it, however many writes got it there.
+    function changed(r, page) {
+      const t = r.target;
+      if (r.oldValue === t.getAttribute(r.attributeName)) return false;
+      if (r.attributeName !== "style" || !t.style) return true;
+      scratch.style.cssText = r.oldValue || "";
+      const was = scratch.style;
+      // An old value that reads back as nothing cannot be compared: count it.
+      if (r.oldValue && !was.length) return true;
+      const now = t.style;
+      for (const [a, b] of [[now, was], [was, now]]) {
+        for (let i = 0; i < a.length; i++) {
+          const prop = a[i];
+          if (a.getPropertyValue(prop) === b.getPropertyValue(prop) && a.getPropertyPriority(prop) === b.getPropertyPriority(prop)) continue;
+          if (PAINT_ONLY.test(prop) || (!page && SELF_ONLY.test(prop))) continue;
+          return true;
+        }
+      }
+      return false;
+    }
+
     function watch(root) {
       if (observedRoots.has(root)) return;
       observedRoots.add(root);
-      mo.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] });
+      mo.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"], attributeOldValue: true });
     }
 
-    const mo = new MutationObserver((records) => { note(records); askFrame(); });
+    // A frame only when a record left something to look at.
+    const mo = new MutationObserver((records) => { note(records); if (due()) askFrame(); });
     watch(document);
     window.addEventListener("resize", onResize);
     window.addEventListener("load", rescanAll);

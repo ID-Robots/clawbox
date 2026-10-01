@@ -28,13 +28,6 @@ import { useEffect, useState } from "react";
 export const KIOSK_BAR_VAR = "--clawbox-kiosk-bar-h";
 /** Fired on `window` by the extension once its bar is up on the desktop. */
 export const KIOSK_BAR_EVENT = "clawbox:kiosk-bar";
-/**
- * The bar's height as `kiosk/extension/bar.js` draws it (its `BAR_H`; the
- * extension test holds the two together). Only for the room the icon grid
- * keeps on the kiosk from the first paint, before the extension has mounted
- * the bar; everything else reads the live `kioskBarInset()`.
- */
-export const KIOSK_BAR_HEIGHT = 40;
 /** Anything larger is not the bar, and is not allowed to swallow the desktop. */
 const MAX_INSET = 120;
 

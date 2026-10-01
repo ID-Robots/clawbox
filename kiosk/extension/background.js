@@ -1,15 +1,16 @@
 // ClawBox Kiosk Tabs — service worker.
 //
-// The kiosk Chrome on the x64 laptop runs --kiosk: no tab strip. The content
-// scripts draw one instead — the bar on every page the desktop OPENED, and on
-// the desktop itself while such a page is open (desktop.js) — and ask this
-// worker, which holds the `tabs` permission, to do the switching. Messages: { type: "list" } → { tabs, currentId, homeId };
-// { type: "activate", id }; { type: "close", id }; { type: "home" };
-// { type: "create", url? } opens a new active tab: on the extension's own
-// start page (newtab.html, also chrome_url_overrides.newtab) when no URL is
-// given — which is what the bar's "+" sends — else on the http(s) URL given;
-// { type: "devtools" } opens Chrome's DevTools on the asking tab (see
-// openDevTools below).
+// The kiosk Chrome runs --kiosk: no tab strip. The content scripts draw one
+// instead — the bar on every page the desktop OPENED, and on the desktop
+// itself, always (desktop.js) — and ask this worker, which holds the `tabs`
+// permission, to do the switching. Messages:
+//   { type: "list" } → { tabs, currentId } (every tab but the desktop's);
+//   { type: "activate", id }; { type: "close", id }; { type: "home" };
+//   { type: "closeSelf" } — back to the desktop, then close the asking tab;
+//   { type: "create" } — a new active tab on the extension's own start page
+//     (newtab.html, also chrome_url_overrides.newtab), the bar's "+";
+//   { type: "devtools" } — Chrome's DevTools on the asking tab (see
+//     openDevTools below).
 //
 // The desktop is found by URL prefix: the origin of DESKTOP_ORIGINS, which is
 // what the launcher's CLAWBOX_KIOSK_URL is on a laptop (a different URL means
@@ -37,7 +38,7 @@ const START_PAGE = chrome.runtime.getURL("newtab.html");
 // docked in the kiosk window. The port refuses a WebSocket from a page's
 // origin, so the launcher lists this extension's own
 // (--remote-allow-origins=chrome-extension://<id>); without it the bar says
-// the kiosk needs the script run again. `debugger` is only for getTargets(),
+// it cannot open them. `debugger` is only for getTargets(),
 // the one map from a tab to its DevTools target — nothing here attaches.
 const CDP_PORT = 18801;
 const CDP_TIMEOUT_MS = 5000;
@@ -58,7 +59,7 @@ function cdpCall(wsUrl, method, params) {
     };
     ws.onerror = () => {
       clearTimeout(timer);
-      reject(new Error("the kiosk's DevTools port refused the extension; run install-kiosk-tabs.sh again"));
+      reject(new Error("the kiosk's DevTools port refused the extension"));
     };
   });
 }
@@ -86,20 +87,23 @@ function isDesktop(url) {
   return false;
 }
 
+// Every tab of the kiosk window (the --kiosk Chrome has the one).
+function normalTabs() {
+  return chrome.tabs.query({ windowType: "normal" });
+}
+
 async function listTabs(sender) {
-  const all = await chrome.tabs.query({ windowType: "normal" });
-  const home = all.find((t) => isDesktop(t.url));
+  const all = await normalTabs();
   return {
-    homeId: home ? home.id : null,
     currentId: sender.tab ? sender.tab.id : null,
     tabs: all
       .filter((t) => !isDesktop(t.url))
-      .map((t) => ({ id: t.id, title: t.title || "", url: t.url || "", favicon: t.favIconUrl || "", active: !!t.active })),
+      .map((t) => ({ id: t.id, title: t.title || "", url: t.url || "", favicon: t.favIconUrl || "" })),
   };
 }
 
 async function goHome() {
-  const all = await chrome.tabs.query({ windowType: "normal" });
+  const all = await normalTabs();
   const home = all.find((t) => isDesktop(t.url));
   if (home) {
     await chrome.tabs.update(home.id, { active: true });
@@ -124,21 +128,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "home":
         await goHome();
         return { ok: true };
+      case "closeSelf":
+        // Land on the desktop first: closing the only foreground page
+        // otherwise leaves Chrome showing whichever tab it picks.
+        await goHome();
+        if (sender.tab && sender.tab.id != null) await chrome.tabs.remove(sender.tab.id);
+        return { ok: true };
       case "devtools":
         if (!sender.tab || sender.tab.id == null) return { ok: false, error: "not from a tab" };
         await openDevTools(sender.tab.id);
         return { ok: true };
-      case "create": {
-        if (msg.url == null) {
-          await chrome.tabs.create({ url: START_PAGE, active: true });
-          return { ok: true };
-        }
-        // Otherwise only a web page: a tab opened from the bar must not land
-        // on a chrome:// or file:// URL the kiosk otherwise never shows.
-        if (typeof msg.url !== "string" || !/^https?:\/\//i.test(msg.url)) return { ok: false, error: "not a web url" };
-        await chrome.tabs.create({ url: msg.url, active: true });
+      case "create":
+        await chrome.tabs.create({ url: START_PAGE, active: true });
         return { ok: true };
-      }
       default:
         return { ok: false, error: "unknown message" };
     }
@@ -147,23 +149,39 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // async sendResponse
 });
 
-// Tell every bar to refresh when the tab set changes — the desktop's too,
-// which shows its bar when the first page opens and hides it when the last
-// one closes — without waiting for their own poll.
+// Tell every bar to refresh when the tab set changes — the desktop's too —
+// without waiting for their own poll.
 function broadcast() {
-  chrome.tabs.query({ windowType: "normal" }).then((tabs) => {
+  normalTabs().then((tabs) => {
     for (const t of tabs) {
       if (t.id == null) continue;
       chrome.tabs.sendMessage(t.id, { type: "changed" }).catch(() => {});
     }
   });
 }
-chrome.tabs.onCreated.addListener(broadcast);
-chrome.tabs.onRemoved.addListener(broadcast);
+// Tab events come in bursts: one page load is a url, a title, a favicon and
+// a "complete" (onUpdated fires for each), a new tab is onCreated then
+// onActivated, a close onRemoved then onActivated. Each used to be its own
+// broadcast, and each broadcast has every tab ask for the list again. The
+// first event of a burst schedules ONE broadcast BROADCAST_DELAY_MS later and
+// the rest of the burst joins it; it is sent after all of them, so every bar
+// still reads the tabs as they ended up, and a stream that never pauses (a
+// title that ticks) still gets one broadcast per window rather than none.
+const BROADCAST_DELAY_MS = 150;
+let broadcastTimer = 0;
+function broadcastSoon() {
+  if (broadcastTimer) return;
+  broadcastTimer = setTimeout(() => {
+    broadcastTimer = 0;
+    broadcast();
+  }, BROADCAST_DELAY_MS);
+}
+chrome.tabs.onCreated.addListener(broadcastSoon);
+chrome.tabs.onRemoved.addListener(broadcastSoon);
 chrome.tabs.onUpdated.addListener((_id, info) => {
-  if (info.title || info.url || info.favIconUrl || info.status === "complete") broadcast();
+  if (info.title || info.url || info.favIconUrl || info.status === "complete") broadcastSoon();
 });
-chrome.tabs.onActivated.addListener(broadcast);
+chrome.tabs.onActivated.addListener(broadcastSoon);
 
 // One desktop tab, not two. Every relaunch of the kiosk Chrome restores the
 // previous session's tabs AND opens the command-line URL, so the profile
@@ -172,7 +190,7 @@ chrome.tabs.onActivated.addListener(broadcast);
 // the user is looking at (the active one, else the first) and close the rest.
 async function dedupeDesktopTabs() {
   try {
-    const all = await chrome.tabs.query({ windowType: "normal" });
+    const all = await normalTabs();
     const desktops = all.filter((t) => t.id != null && isDesktop(t.url));
     if (desktops.length < 2) return;
     const keep = desktops.find((t) => t.active) || desktops[0];

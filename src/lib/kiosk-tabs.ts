@@ -13,25 +13,25 @@
  *
  * It speaks Chrome's DevTools HTTP endpoints — `/json/list`, `PUT /json/new`,
  * `/json/activate/<id>`, `/json/close/<id>` — on the loopback port
- * `scripts/x64-migration/kiosk/enable-kiosk-remote-debugging.sh` gives the
- * launcher (`CLAWBOX_KIOSK_CDP_PORT`, default 18801; the VNC browser's is
- * 18800 and is `src/lib/cdp-probe.ts`'s business). No WebSocket, no
- * Playwright: the four HTTP calls are all this needs.
+ * `scripts/x64-migration/kiosk/install-kiosk-tabs.sh` gives the launcher
+ * (`CLAWBOX_KIOSK_CDP_PORT`, default 18801; the VNC browser's is 18800 and is
+ * `src/lib/cdp-probe.ts`'s business). No WebSocket, no Playwright: the four
+ * HTTP calls are all this needs.
  *
- * A box with no kiosk — every Jetson, a dev machine, the laptop before its
- * reboot picked the flags up — has nothing on the port. That is `available:
- * false`, never an error: the taskbar reads it as "draw nothing", and a route
- * that answered 500 for the normal state of most boxes would fill the log.
+ * A box with no kiosk — every Jetson, a dev machine — never dials the port at
+ * all (`kioskConfigured`), and the laptop before its reboot picked the flags
+ * up has nothing on it. Both are `available: false`, never an error: the
+ * taskbar reads it as "draw nothing", and a route that answered 500 for the
+ * normal state of most boxes would fill the log.
  */
 import fs from "fs";
+import { envPort } from "./port-probe";
 
 export interface KioskTab {
   id: string;
   title: string;
   url: string;
   favicon: string;
-  /** Not reported by `/json/list`; reserved for a future CDP session. */
-  active?: boolean;
   /** The ClawBox desktop itself (or a page of it), as opposed to a page it opened. */
   isDesktop: boolean;
 }
@@ -61,8 +61,7 @@ const START_PAGE_RE = /^chrome-extension:\/\/[a-p]{32}\/newtab\.html(?:[?#]|$)/;
 export type EnvLike = Record<string, string | undefined>;
 
 export function kioskCdpPort(env: EnvLike = process.env): number {
-  const raw = Number(env.CLAWBOX_KIOSK_CDP_PORT);
-  return Number.isInteger(raw) && raw > 0 && raw < 65536 ? raw : DEFAULT_KIOSK_CDP_PORT;
+  return envPort(env.CLAWBOX_KIOSK_CDP_PORT, DEFAULT_KIOSK_CDP_PORT);
 }
 
 function cdpEndpoint(): string {
@@ -70,12 +69,38 @@ function cdpEndpoint(): string {
 }
 
 /**
- * Minimal EnvironmentFile parser (the shape `edition-source.ts` reads):
- * `KEY=value`, optional `export`, optional surrounding quotes.
+ * Does this box have a kiosk at all? Only the x64 laptop's migration writes
+ * `/etc/clawbox/kiosk.env` (its launcher sources it); a Jetson never has one.
+ * `CLAWBOX_KIOSK_URL` in the environment counts too (the tests, a hand run).
+ *
+ * Without one the CDP port is never dialled. OpenClaw's own managed browser
+ * profiles take CDP ports from 18800 up, so on a box with no kiosk 18801 can
+ * be one of THEM — and a desktop that took that browser for the kiosk would
+ * list its tabs and send the owner's sign-in pages to a screen nobody sees.
  */
-export function parseKioskEnv(raw: string, key = "CLAWBOX_KIOSK_URL"): string | null {
+export function kioskConfigured(env: EnvLike = process.env): boolean {
+  return !!env.CLAWBOX_KIOSK_URL || fs.existsSync(/* turbopackIgnore: true */ kioskEnvFile(env));
+}
+
+/**
+ * `KIOSK_ENV_FILE`, unless `CLAWBOX_KIOSK_ENV_FILE` points elsewhere — the
+ * suite points it at nowhere (vitest.config.ts, the CLAWBOX_EDITION_FILE
+ * way), or a run on the kiosk laptop itself would see that box's kiosk.
+ */
+export function kioskEnvFile(env: EnvLike = process.env): string {
+  return env.CLAWBOX_KIOSK_ENV_FILE || KIOSK_ENV_FILE;
+}
+
+const KIOSK_URL_LINE_RE = /^\s*(?:export\s+)?CLAWBOX_KIOSK_URL\s*=\s*(.*)$/;
+
+/**
+ * `CLAWBOX_KIOSK_URL` out of the launcher's EnvironmentFile (the shape
+ * `edition-source.ts` reads): `KEY=value`, optional `export`, optional
+ * surrounding quotes.
+ */
+export function parseKioskEnv(raw: string): string | null {
   for (const line of raw.split(/\r?\n/)) {
-    const match = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=\\s*(.*)$`).exec(line);
+    const match = KIOSK_URL_LINE_RE.exec(line);
     if (!match) continue;
     let value = match[1].trim();
     if (
@@ -98,7 +123,7 @@ export function parseKioskEnv(raw: string, key = "CLAWBOX_KIOSK_URL"): string | 
 export function readKioskUrl(env: EnvLike = process.env): string {
   const candidates: (string | null | undefined)[] = [env.CLAWBOX_KIOSK_URL];
   try {
-    candidates.push(parseKioskEnv(fs.readFileSync(/* turbopackIgnore: true */ KIOSK_ENV_FILE, "utf-8")));
+    candidates.push(parseKioskEnv(fs.readFileSync(/* turbopackIgnore: true */ kioskEnvFile(env), "utf-8")));
   } catch {
     // No kiosk.env: not a kiosk box, or one whose launcher takes the default.
   }
@@ -145,21 +170,6 @@ export function isDesktopUrl(url: string, kioskUrl: string): boolean {
   return SHELL_PATH_RE.test(u.pathname);
 }
 
-/** The tab `home` should land on: the desktop root first, then any desktop page. */
-export function pickHomeTab(tabs: KioskTab[], kioskUrl: string): KioskTab | null {
-  const desktop = tabs.filter((t) => t.isDesktop);
-  const kioskPath = safePathname(kioskUrl);
-  return desktop.find((t) => safePathname(t.url) === kioskPath) ?? desktop[0] ?? null;
-}
-
-function safePathname(url: string): string {
-  try {
-    return new URL(url).pathname;
-  } catch {
-    return "";
-  }
-}
-
 interface CdpTarget {
   id?: unknown;
   type?: unknown;
@@ -200,7 +210,9 @@ function tabFromTarget(t: CdpTarget, kioskUrl: string): KioskTab | null {
 }
 
 /** Every open PAGE of the kiosk Chrome, or `available: false` when nothing answers. */
-export async function listKioskTabs(kioskUrl = readKioskUrl()): Promise<KioskTabs> {
+export async function listKioskTabs(): Promise<KioskTabs> {
+  if (!kioskConfigured()) return { available: false, tabs: [] };
+  const kioskUrl = readKioskUrl();
   const res = await cdpFetch("/json/list");
   if (!res || !res.ok) return { available: false, tabs: [] };
   let raw: unknown;
@@ -219,14 +231,15 @@ export async function listKioskTabs(kioskUrl = readKioskUrl()): Promise<KioskTab
 }
 
 export type KioskAction =
-  | { ok: true; available: true; tab?: KioskTab }
+  | { ok: true; available: true }
   | { ok: false; available: false }
   | { ok: false; available: true; error: string; code: string };
 
 const UNAVAILABLE: KioskAction = { ok: false, available: false };
 
 /** Open `url` as a new tab of the kiosk (it becomes the active one). http(s) only. */
-export async function openKioskTab(url: string, kioskUrl = readKioskUrl()): Promise<KioskAction> {
+export async function openKioskTab(url: string): Promise<KioskAction> {
+  if (!kioskConfigured()) return UNAVAILABLE;
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -240,16 +253,11 @@ export async function openKioskTab(url: string, kioskUrl = readKioskUrl()): Prom
   const res = await cdpFetch(`/json/new?${encodeURIComponent(parsed.href)}`, "PUT");
   if (!res) return UNAVAILABLE;
   if (!res.ok) return { ok: false, available: true, error: `Chrome refused to open the page (${res.status})`, code: "cdp_error" };
-  try {
-    const tab = tabFromTarget(await res.json() as CdpTarget, kioskUrl);
-    if (tab) return { ok: true, available: true, tab };
-  } catch {
-    // Opened, but the answer was not the target record; the next poll lists it.
-  }
   return { ok: true, available: true };
 }
 
 async function tabVerb(verb: "activate" | "close", id: string): Promise<KioskAction> {
+  if (!kioskConfigured()) return UNAVAILABLE;
   if (!TAB_ID_RE.test(id)) return { ok: false, available: true, error: "Invalid tab id", code: "invalid_id" };
   const res = await cdpFetch(`/json/${verb}/${id}`);
   if (!res) return UNAVAILABLE;
@@ -268,14 +276,3 @@ export function closeKioskTab(id: string): Promise<KioskAction> {
   return tabVerb("close", id);
 }
 
-/**
- * Back to the desktop: activate its tab, or — when the kiosk tab itself has
- * gone (closed by hand, the crash loop mid-restart) — open the kiosk URL anew.
- */
-export async function goHome(kioskUrl = readKioskUrl()): Promise<KioskAction> {
-  const list = await listKioskTabs(kioskUrl);
-  if (!list.available) return UNAVAILABLE;
-  const home = pickHomeTab(list.tabs, kioskUrl);
-  if (home) return activateKioskTab(home.id);
-  return openKioskTab(kioskUrl, kioskUrl);
-}
