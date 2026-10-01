@@ -53,6 +53,7 @@ import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } fr
 import { apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
 import { fetchSessionUser, mayUseOwnerApis, useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
+import { useFollowSessionSwitch } from "@/lib/session-switch";
 import { NON_OWNER_APP_IDS, OWNER_ONLY_NOTICE, installedAppIdsFor } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
@@ -3678,6 +3679,9 @@ function OwnerTimezoneAdopter() {
 }
 
 export default function ChromeDesktop() {
+  // Another tab signed in or out (TASK-1247): reopen at "/" on that session
+  // rather than keep this one's windows, role and Terminal sockets.
+  useFollowSessionSwitch();
   return (
     <I18nProvider>
       {/* A box already in the field never sees the wizard again, and its

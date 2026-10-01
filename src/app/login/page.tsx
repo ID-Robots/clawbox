@@ -3,6 +3,12 @@
 import { useState, useEffect } from "react";
 import Image from "next/image";
 import { I18nProvider, useT } from "@/lib/i18n";
+import {
+  announceSessionSwitch,
+  loginRedirectTarget,
+  useFollowSessionSwitch,
+  type SessionSwitchDestination,
+} from "@/lib/session-switch";
 
 /**
  * Who may sign in here (GET /login-api/users, TASK-1256). `multiUser: false`
@@ -36,6 +42,14 @@ const DURATION_OPTIONS = [
 ];
 
 /**
+ * Another tab signed in (TASK-1247): this browser holds a session now, so this
+ * tab goes where its own sign-in would have taken it. A sign-out elsewhere
+ * leaves it here — it is already the page that asks for one.
+ */
+const followSignInElsewhere: SessionSwitchDestination = (change) =>
+  change.kind === "login" ? loginRedirectTarget(window.location.search, window.location.origin) : null;
+
+/**
  * The error line: a catalogue key, translated when it is DRAWN, or the
  * server's own text. Never a string translated when it was SET — the
  * catalogue is a lazy chunk, and a password submitted before it arrived froze
@@ -46,6 +60,7 @@ type LoginError = { key: string } | { text: string } | null;
 
 function LoginForm() {
   const { t } = useT();
+  useFollowSessionSwitch(followSignInElsewhere);
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [duration, setDuration] = useState(43200);
@@ -141,25 +156,15 @@ function LoginForm() {
         return;
       }
 
-      // Redirect to the original page or home — parse via URL with the
-      // current origin as base, then enforce same-origin and pathname starts
-      // with a single "/" (rejects "//evil.com" and "javascript:" tricks).
-      const params = new URLSearchParams(window.location.search);
-      const raw = params.get("redirect") || "/";
-      let target = "/";
-      try {
-        const parsed = new URL(raw, window.location.origin);
-        if (
-          parsed.origin === window.location.origin &&
-          parsed.pathname.startsWith("/") &&
-          !parsed.pathname.startsWith("//")
-        ) {
-          target = parsed.pathname + parsed.search + parsed.hash;
-        }
-      } catch {
-        target = "/";
-      }
-      window.location.href = target;
+      // Redirect to the original page or home (same-origin only — see
+      // loginRedirectTarget). Every other open tab is told first, so the
+      // desktops, Terminals and /login tabs it left behind move to this
+      // session too instead of waiting for a manual reload (TASK-1247).
+      // `replace`: this form belongs to the moment before the session, and
+      // Back must not land on it again.
+      const target = loginRedirectTarget(window.location.search, window.location.origin);
+      announceSessionSwitch("login");
+      window.location.replace(target);
     } catch {
       setError({ key: "login.connectionFailed" });
       setLoading(false);

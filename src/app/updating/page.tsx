@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { I18nProvider, useT } from "@/lib/i18n";
+import { useFollowSessionSwitch } from "@/lib/session-switch";
 import ReconnectStage from "@/components/ReconnectStage";
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
 import { updateWhatsNewPanel } from "@/lib/update-whats-new";
@@ -222,6 +223,9 @@ function UpdatingScreen() {
  * /app/[id] each mount their own for exactly this reason; this is the third.
  */
 export default function UpdatingPage() {
+  // Signed-in page like the desktop: a sign-in or sign-out in another tab
+  // reopens it on the session that now holds (TASK-1247).
+  useFollowSessionSwitch();
   return (
     <I18nProvider>
       <UpdatingScreen />
