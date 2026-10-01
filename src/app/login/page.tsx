@@ -3,6 +3,12 @@
 import { useState, useEffect } from "react";
 import Image from "next/image";
 import { I18nProvider, useT } from "@/lib/i18n";
+import {
+  announceSessionSwitch,
+  loginRedirectTarget,
+  useFollowSessionSwitch,
+  type SessionSwitchDestination,
+} from "@/lib/session-switch";
 
 /**
  * Who may sign in here (GET /login-api/users, TASK-1256). `multiUser: false`
@@ -35,12 +41,30 @@ const DURATION_OPTIONS = [
   { value: 86400, labelKey: "login.24h" },
 ];
 
+/**
+ * Another tab signed in (TASK-1247): this browser holds a session now, so this
+ * tab goes where its own sign-in would have taken it. A sign-out elsewhere
+ * leaves it here — it is already the page that asks for one.
+ */
+const followSignInElsewhere: SessionSwitchDestination = (change) =>
+  change.kind === "login" ? loginRedirectTarget(window.location.search, window.location.origin) : null;
+
+/**
+ * The error line: a catalogue key, translated when it is DRAWN, or the
+ * server's own text. Never a string translated when it was SET — the
+ * catalogue is a lazy chunk, and a password submitted before it arrived froze
+ * the raw key ("login.incorrectPassword") on screen for good, while every
+ * other line re-rendered in English around it.
+ */
+type LoginError = { key: string } | { text: string } | null;
+
 function LoginForm() {
   const { t } = useT();
+  useFollowSessionSwitch(followSignInElsewhere);
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [duration, setDuration] = useState(43200);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<LoginError>(null);
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
   const [now, setNow] = useState(() => new Date());
@@ -94,12 +118,12 @@ function LoginForm() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!password.trim()) {
-      setError(t("login.passwordRequired"));
+      setError({ key: "login.passwordRequired" });
       return;
     }
 
     setLoading(true);
-    setError("");
+    setError(null);
 
     try {
       const res = await fetch("/login-api", {
@@ -113,46 +137,36 @@ function LoginForm() {
       });
 
       if (!res.ok) {
-        let message = `Login failed (${res.status})`;
+        let message: LoginError = { text: `Login failed (${res.status})` };
         try {
           const data = await res.json();
           if (data?.code === "bad_credentials") {
-            message = loginUsers.multiUser ? t("login.incorrectCredentials") : t("login.incorrectPassword");
+            message = { key: loginUsers.multiUser ? "login.incorrectCredentials" : "login.incorrectPassword" };
           } else if (data?.code === "locked") {
-            message = t("login.tooManyAttempts");
+            message = { key: "login.tooManyAttempts" };
           } else if (typeof data?.error === "string") {
-            message = data.error;
+            message = { text: data.error };
           }
         } catch {
           const text = await res.text().catch(() => "");
-          if (text) message = text;
+          if (text) message = { text };
         }
         setError(message);
         setLoading(false);
         return;
       }
 
-      // Redirect to the original page or home — parse via URL with the
-      // current origin as base, then enforce same-origin and pathname starts
-      // with a single "/" (rejects "//evil.com" and "javascript:" tricks).
-      const params = new URLSearchParams(window.location.search);
-      const raw = params.get("redirect") || "/";
-      let target = "/";
-      try {
-        const parsed = new URL(raw, window.location.origin);
-        if (
-          parsed.origin === window.location.origin &&
-          parsed.pathname.startsWith("/") &&
-          !parsed.pathname.startsWith("//")
-        ) {
-          target = parsed.pathname + parsed.search + parsed.hash;
-        }
-      } catch {
-        target = "/";
-      }
-      window.location.href = target;
+      // Redirect to the original page or home (same-origin only — see
+      // loginRedirectTarget). Every other open tab is told first, so the
+      // desktops, Terminals and /login tabs it left behind move to this
+      // session too instead of waiting for a manual reload (TASK-1247).
+      // `replace`: this form belongs to the moment before the session, and
+      // Back must not land on it again.
+      const target = loginRedirectTarget(window.location.search, window.location.origin);
+      announceSessionSwitch("login");
+      window.location.replace(target);
     } catch {
-      setError(t("login.connectionFailed"));
+      setError({ key: "login.connectionFailed" });
       setLoading(false);
     }
   };
@@ -206,7 +220,7 @@ function LoginForm() {
                       aria-checked={active}
                       onClick={() => {
                         setUsername(u.username);
-                        setError("");
+                        setError(null);
                       }}
                       className={`flex items-center gap-2 h-11 pl-1.5 pr-3.5 rounded-full text-sm transition-colors cursor-pointer border ${
                         active
@@ -302,7 +316,7 @@ function LoginForm() {
 
           {error && (
             <div className="px-3.5 py-2.5 rounded-lg text-xs bg-red-500/10 text-red-400 border border-red-500/20">
-              {error}
+              {"key" in error ? t(error.key) : error.text}
             </div>
           )}
 

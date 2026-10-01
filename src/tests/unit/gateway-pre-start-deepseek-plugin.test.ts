@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testEnv } from "@/tests/helpers/env";
-import { repairHelpers, sliceScript } from "@/tests/helpers/gateway-pre-start";
+import { inspectAllJson, repairHelpers, sliceScript } from "@/tests/helpers/gateway-pre-start";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -86,10 +86,20 @@ interface RunOptions {
   npmPayload?: { version: string; flat?: boolean };
   /** Whether openclaw.json already carries `plugins.entries.deepseek.enabled: false`. */
   entryDisabled?: boolean;
+  /** Whether openclaw.json already carries `plugins.entries.deepseek.enabled: true`. */
+  entryEnabled?: boolean;
   /** Whether a repair marker for deepseek is already on disk, and what it says. */
-  marked?: { disabled: boolean };
+  marked?: { disabled: boolean; reason?: string; spec?: string; atMs?: number };
   /** Make `config set` refuse, as an unwritable config would. */
   refuseConfigSet?: boolean;
+  /**
+   * What `plugins enable` answers: it switches the entry on and exits 0 unless
+   * given a refusal, which it prints and exits 1 on — AFTER switching the entry
+   * on, as the real verb does (it writes the entry before it loads anything).
+   */
+  enableRefusal?: string;
+  /** What `plugins inspect --all --json` prints; nothing by default. */
+  inspectAll?: string;
 }
 
 /** Where the 2026.9.4 CLI put an npm install of the plugin, measured against a scratch state directory. */
@@ -99,7 +109,7 @@ function npmPayloadDir(home: string, flat = false): string {
     : path.join(home, "npm", "projects", "openclaw-deepseek-provider-2481ed984b", "node_modules", "@openclaw", "deepseek-provider");
 }
 
-function run(opts: RunOptions): { installs: string[]; argv: string[]; stdout: string; stderr: string } {
+function run(opts: RunOptions): { installs: string[]; argv: string[]; calls: string[]; stdout: string; stderr: string } {
   const home = path.join(dir, "openclaw-home");
   mkdirSync(home, { recursive: true });
   if (opts.present) {
@@ -120,18 +130,20 @@ function run(opts: RunOptions): { installs: string[]; argv: string[]; stdout: st
     ? { models: { providers: {} } }
     : { models: { providers: { deepseek: { apiKey: "sk-test", baseUrl: "https://clawbox.com/api/ai" } } } };
   if (opts.entryDisabled) document.plugins = { entries: { deepseek: { enabled: false } } };
+  if (opts.entryEnabled) document.plugins = { entries: { deepseek: { enabled: true } } };
   writeFileSync(config, JSON.stringify(document));
   if (opts.marked) {
     mkdirSync(path.join(dir, "data"), { recursive: true });
     writeFileSync(markerPath(), JSON.stringify({
       deepseek: {
-        id: "deepseek", stage: "install", reason: "offline", atMs: 1,
-        disabled: opts.marked.disabled, spec: "clawhub:@openclaw/deepseek-provider@2026.8.1",
+        id: "deepseek", stage: "install", reason: opts.marked.reason ?? "offline", atMs: opts.marked.atMs ?? 1,
+        disabled: opts.marked.disabled, spec: opts.marked.spec ?? "clawhub:@openclaw/deepseek-provider@2026.8.1",
       },
     }));
   }
   const log = path.join(dir, "installs.log");
   const argvLog = path.join(dir, "argv.log");
+  const callsLog = path.join(dir, "calls.log");
   const bin = path.join(dir, "openclaw");
   // Records every `plugins install <spec>` and refuses the specs it is told
   // to — a ClawHub build the runtime rejects exits non-zero the same way.
@@ -139,6 +151,17 @@ function run(opts: RunOptions): { installs: string[]; argv: string[]; stdout: st
     bin,
     [
       "#!/usr/bin/env bash",
+      `echo "$*" >> "${callsLog}"`,
+      // `plugins enable` switches the entry on through the same writer, then
+      // refuses if told to — the real verb writes the entry first.
+      'if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then',
+      '  "$0" config set "plugins.entries[\\"$3\\"].enabled" true --strict-json || exit 1',
+      ...(opts.enableRefusal ? [`  echo '${opts.enableRefusal}' >&2`, "  exit 1"] : ["  exit 0"]),
+      "fi",
+      'if [ "$1" = "plugins" ] && [ "$2" = "inspect" ] && [ "$3" = "--all" ]; then',
+      `  printf '%s' '${opts.inspectAll ?? ""}'`,
+      "  exit 0",
+      "fi",
       // The real `config set` semantics, because the repair helpers prove their
       // write against the FILE rather than against an exit code.
       'if [ "$1" = "config" ] && [ "$2" = "set" ]; then',
@@ -185,7 +208,9 @@ function run(opts: RunOptions): { installs: string[]; argv: string[]; stdout: st
   });
   if (result.status !== 0) throw new Error(`block exited ${result.status}: ${result.stderr}`);
   const lines = (file: string) => (existsSync(file) ? readFileSync(file, "utf-8").trim().split("\n").filter(Boolean) : []);
-  return { installs: lines(log), argv: lines(argvLog), stdout: result.stdout, stderr: result.stderr ?? "" };
+  return {
+    installs: lines(log), argv: lines(argvLog), calls: lines(callsLog), stdout: result.stdout, stderr: result.stderr ?? "",
+  };
 }
 
 function markerPath(): string {
@@ -327,14 +352,117 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh deepseek plugin i
     expect(config().plugins?.entries?.deepseek?.enabled).toBe(false);
     expect(Object.keys(marker())).toEqual(["deepseek"]);
     expect(r.stderr).toContain("could not switch the deepseek plugin back on");
+    // …and the row says what is wrong NOW, not the install refusal this boot
+    // has just got past (TASK-1302). Still ClawBox's switch-off.
+    expect(marker().deepseek?.reason).toBe(
+      "The DeepSeek provider plugin, which ClawBox AI runs on, is installed "
+        + `(${PINNED("2026.8.1")}) but could not be switched on.`,
+    );
+    expect(marker().deepseek?.disabled).toBe(true);
   });
 
-  it("does not touch the entry for a row it did not switch off", () => {
-    // `disabled: false` means ClawBox recorded a failure and changed nothing —
-    // an entry the OWNER turned off must stay off.
-    run({ effective: "2026.8.1", entryDisabled: true, marked: { disabled: false } });
+  it("switches ClawBox AI's plugin on for its row even when the row says ClawBox never switched it off (TASK-1302)", () => {
+    // The board's TEST 2 at boot. The row a 4.1 boot filed says `disabled:
+    // false` — there was no entry to switch off yet — while the entry is an
+    // explicit `false`: what `openclaw plugins uninstall deepseek` leaves
+    // behind (measured, 2026.9.4). This used to clear the row over the entry
+    // it left off — ClawBox AI dead, with nothing on screen to say so.
+    const { stdout } = run({ effective: "2026.8.1", entryDisabled: true, marked: { disabled: false } });
+    expect(stdout).toContain("Switched the deepseek plugin back on after repairing it");
+    expect(config().plugins?.entries?.deepseek?.enabled).toBe(true);
+    expect(marker()).toEqual({});
+  });
+
+  it("leaves an entry the owner switched off his when no row asks for the plugin", () => {
+    const { stdout, installs } = run({ effective: "2026.8.1", entryDisabled: true });
+    expect(installs).toEqual([PINNED("2026.8.1")]);
     expect(config().plugins?.entries?.deepseek?.enabled).toBe(false);
     expect(marker()).toEqual({});
+    expect(stdout).toContain("no repair record asks for it; leaving it as the owner set it");
+  });
+});
+
+// TASK-1302, hardware validation: the state a Retry's install left on the
+// board — the npm payload of the running core on disk, the entry still an
+// explicit `false`, and the row still open. The install block's guard sees the
+// payload and skips, the consent loop visits only entries that are already on,
+// and the re-attempt block only rows that say `disabled: true`: the gateway
+// restart the install itself triggered came up with ClawBox AI off and the row
+// still reading "Version not found on ClawHub".
+describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh deepseek — payload on disk, entry off, row open", () => {
+  const VERSION_NOT_FOUND_ROW = {
+    disabled: false,
+    atMs: 1790685915162,
+    spec: PINNED("2026.9.4"),
+    reason: "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. The device may be offline, "
+      + "or the package registry unreachable. openclaw plugins install exited 1: Version not found on ClawHub: "
+      + "@openclaw/deepseek-provider@2026.9.4.",
+  };
+  const CONSENTED = inspectAllJson([{ id: "deepseek" }]);
+  const boardState = {
+    effective: "2026.9.4",
+    npmPayload: { version: "2026.9.4" },
+    entryDisabled: true,
+    marked: VERSION_NOT_FOUND_ROW,
+  };
+
+  it("switches it on with its capabilities accepted, proves it, and clears the row — without reinstalling", () => {
+    const { installs, calls, stdout } = run({ ...boardState, inspectAll: CONSENTED });
+    expect(installs).toEqual([]);
+    expect(calls).toContain("plugins enable deepseek --accept-capabilities");
+    // Proven against a report taken AFTER the write.
+    expect(calls.indexOf("plugins inspect --all --json")).toBeGreaterThan(calls.indexOf("plugins enable deepseek --accept-capabilities"));
+    expect(stdout).toContain("deepseek plugin switched on and its capabilities accepted");
+    expect(config().plugins?.entries?.deepseek?.enabled).toBe(true);
+    expect(marker()).toEqual({});
+  });
+
+  it("puts it back off and files what is wrong NOW when the core refuses the switch-on", () => {
+    const { stderr } = run({
+      ...boardState,
+      enableRefusal: "Error: plugin deepseek failed to register: state schema 18 is newer than this OpenClaw supports",
+    });
+    expect(config().plugins?.entries?.deepseek?.enabled).toBe(false);
+    const row = marker().deepseek;
+    expect(row?.reason).toBe(
+      "The DeepSeek provider plugin, which ClawBox AI runs on, is installed but could not be switched on. "
+        + "openclaw plugins enable exited 1: Error: plugin deepseek failed to register: state schema 18 is newer "
+        + "than this OpenClaw supports",
+    );
+    expect(row?.reason).not.toContain("Version not found");
+    // The switch-off is ClawBox's now: the verb had switched the entry on.
+    expect(row?.disabled).toBe(true);
+    expect((row as { stage?: string })?.stage).toBe("consent");
+    // The spec the row carried is kept for the Retry.
+    expect(row?.spec).toBe(PINNED("2026.9.4"));
+    expect(stderr).toContain("could not switch the deepseek plugin on for its repair record");
+  });
+
+  it("does not trust an exit code: a consent the core still reports pending puts it back off", () => {
+    run({ ...boardState, inspectAll: inspectAllJson([{ id: "deepseek", consentRequired: true }]) });
+    expect(config().plugins?.entries?.deepseek?.enabled).toBe(false);
+    expect(marker().deepseek?.reason).toContain(
+      "is installed but could not be switched on. The core still reports it as requiring capability consent",
+    );
+  });
+
+  it("files the row as the install it is when the core cannot find the payload", () => {
+    run({ ...boardState, enableRefusal: "Plugin not found: deepseek" });
+    const row = marker().deepseek as { stage?: string; reason?: string };
+    expect(row.stage).toBe("install");
+    expect(row.reason).toContain("is on disk but the core cannot find it");
+  });
+
+  it("changes nothing without a row: an entry that is off is the owner's", () => {
+    const { calls } = run({ ...boardState, marked: undefined, inspectAll: CONSENTED });
+    expect(calls).toEqual([]);
+    expect(config().plugins?.entries?.deepseek?.enabled).toBe(false);
+  });
+
+  it("leaves an entry that is already on to the consent loop that owns it", () => {
+    const { calls } = run({ ...boardState, entryDisabled: false, entryEnabled: true, inspectAll: CONSENTED });
+    expect(calls).toEqual([]);
+    expect(Object.keys(marker())).toEqual(["deepseek"]);
   });
 });
 

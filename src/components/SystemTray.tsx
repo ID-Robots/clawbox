@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
 import { useSessionUser } from "@/lib/use-session-user";
+import { announceSessionSwitch } from "@/lib/session-switch";
 import CrabWaitMark from "./CrabWaitMark";
 
 const BRAND_ORANGE = "#fe6e00";
@@ -355,7 +356,12 @@ export default function SystemTray({
             <button
               onClick={async () => {
                 await fetch("/login-api/logout", { method: "POST" }).catch(() => {});
-                window.location.href = "/login";
+                // The cookie is gone for every tab of this browser, so every
+                // other open desktop, Terminal and app page is told to leave
+                // the session with this one (TASK-1247). `replace`: Back must
+                // not bring back a desktop whose session just ended.
+                announceSessionSwitch("logout");
+                window.location.replace("/login");
               }}
               className="flex items-center justify-center gap-2 h-10 rounded-lg transition-colors cursor-pointer bg-white/10 hover:bg-white/15 w-full"
             >

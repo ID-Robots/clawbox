@@ -62,7 +62,7 @@ describe("what an OpenClaw snapshot leaves out", () => {
 
   it("names the folder the rule actually leaves out", () => {
     expect(rule).toContain('BACKUPS_DIRNAME = "backups"');
-    expect(backupSourceFor("openclaw").excludesKeys).toEqual(["clawkeep.contents.openclaw.excludeBackups"]);
+    expect(backupSourceFor("openclaw").excludesKeys).toContain("clawkeep.contents.openclaw.excludeBackups");
     const en = clawkeepTranslations.en["clawkeep.contents.openclaw.excludeBackups"];
     expect(en).toContain(`${backupSourceFor("openclaw").stateDir}/backups`);
     expect(en).toMatch(/OpenClaw's own backup files/);
@@ -78,6 +78,13 @@ describe("what an OpenClaw snapshot leaves out", () => {
         "clawkeep.largeArchives.body",
         "clawkeep.largeArchives.more",
         "clawkeep.largeArchives.hint",
+        "clawkeep.contents.openclaw.excludeLinks",
+        "clawkeep.skippedLinks.summary",
+        "clawkeep.skippedLinks.title",
+        "clawkeep.skippedLinks.body",
+        "clawkeep.skippedLinks.more",
+        "clawkeep.skippedLinks.hint",
+        "clawkeep.result.skippedLinks",
       ]) {
         expect(table[key], `${locale} ${key}`).toBeTruthy();
         for (const param of clawkeepTranslations.en[key].match(/\{\w+\}/g) ?? []) {
@@ -87,6 +94,25 @@ describe("what an OpenClaw snapshot leaves out", () => {
       expect(table["clawkeep.contents.openclaw.excludeBackups"], locale).toContain("~/.openclaw/backups");
       expect(table["clawkeep.largeArchives.hint"], locale).toContain("~/.openclaw/backups");
     }
+  });
+});
+
+describe("what an OpenClaw snapshot skips", () => {
+  // TASK-1304. The archiver refuses a link out of the backup; ClawKeep's pre-
+  // flight (`clawkeep/backup_guard.py`) leaves every such link out instead of
+  // letting one fail the run, and this "Not included" line is that rule.
+  const guard = fs.readFileSync(path.join(process.cwd(), "clawkeep", "clawkeep", "backup_guard.py"), "utf-8");
+
+  it("says the links the guard leaves out are never followed", () => {
+    expect(guard).toContain("def skipped_report(");
+    expect(backupSourceFor("openclaw").excludesKeys).toEqual([
+      "clawkeep.contents.openclaw.excludeBackups",
+      "clawkeep.contents.openclaw.excludeLinks",
+    ]);
+    expect(backupSourceFor("hermes").excludesKeys).not.toContain("clawkeep.contents.openclaw.excludeLinks");
+    const en = clawkeepTranslations.en["clawkeep.contents.openclaw.excludeLinks"];
+    expect(en).toMatch(/symbolic links that point outside these folders/);
+    expect(en).toMatch(/never followed/);
   });
 });
 

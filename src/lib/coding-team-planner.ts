@@ -349,10 +349,11 @@ export function leadRoom(ctx: ReplanContext): { adds: number; retires: number; r
 /**
  * A line of a worker's result that says it could not do its part: a
  * blocker in its own words, or the refusal the orchestrator appends when
- * the work could not be committed or merged. Read at the start of a line,
- * after any list or emphasis marks, as a whole word.
+ * the work could not be committed or merged, or never reached the branch.
+ * Read at the start of a line, after any list or emphasis marks, as a whole
+ * word.
  */
-const BLOCKER_LINE = /^(?:(?:BLOCKED|MISSING|[Cc]annot|[Cc]ould not|NOT COMMITTED|MERGE CONFLICT|MERGE FAILED)(?![\w-])|[Bb]locked:)/;
+const BLOCKER_LINE = /^(?:(?:BLOCKED|MISSING|[Cc]annot|[Cc]ould not|NOT COMMITTED|NO CHANGE|MERGE CONFLICT|MERGE FAILED)(?![\w-])|[Bb]locked:)/;
 /** What a report section with nothing in it says: "Could not finish: nothing." */
 const NOTHING = /^(?:none|nothing|n\/a)\b/i;
 

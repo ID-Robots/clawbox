@@ -2,6 +2,7 @@ import fsp from "fs/promises";
 import zlib from "zlib";
 import { Readable } from "stream";
 import path from "@/lib/runtime-path";
+import { DATA_DIR } from "@/lib/config-store";
 import { isProtectedFilePath } from "@/lib/file-guard";
 
 // ── A folder, downloaded as one ZIP ─────────────────────────────────────────
@@ -37,6 +38,44 @@ import { isProtectedFilePath } from "@/lib/file-guard";
  * carry an empty `node_modules/` that looks like a broken install.
  */
 export const ZIP_SKIPPED_DIRS: ReadonlySet<string> = new Set(["node_modules", ".cache", ".npm", "__pycache__", ".venv"]);
+
+/**
+ * The box's local-model stores, left out by WHERE they are rather than by name:
+ * a project's own `models/` folder is content, these are re-downloadable
+ * weights of several GB each (llamacpp-server.ts and embed-server.ts own the
+ * paths). A ZIP of the data directory carried a 3.3 GB `.gguf` before this.
+ */
+export const ZIP_SKIPPED_MODEL_DIRS: readonly string[] = [
+  path.join(DATA_DIR, "llamacpp", "models"),
+  path.join(DATA_DIR, "embed", "models"),
+];
+
+/**
+ * A model file anywhere else — a GGUF downloaded by hand into a project — is
+ * left out past this size: weights, not the project. A small test fixture of
+ * the same format stays in.
+ */
+export const ZIP_MAX_GGUF_BYTES = 256 * 1024 * 1024;
+
+function isSkippedModelFile(name: string, size: number): boolean {
+  return size > ZIP_MAX_GGUF_BYTES && name.toLowerCase().endsWith(".gguf");
+}
+
+/**
+ * Judged on the real path too, so a link to the data directory
+ * (`~/link/llamacpp/models`) does not spell its way past the rule. Only a
+ * folder named `models` pays for the realpath calls.
+ */
+async function isSkippedModelDir(abs: string, name: string): Promise<boolean> {
+  if (name !== "models") return false;
+  if (ZIP_SKIPPED_MODEL_DIRS.includes(abs)) return true;
+  let real: string;
+  try { real = await fsp.realpath(abs); } catch { return false; }
+  for (const dir of ZIP_SKIPPED_MODEL_DIRS) {
+    try { if (real === (await fsp.realpath(dir))) return true; } catch { /* not downloaded on this box */ }
+  }
+  return false;
+}
 
 /**
  * How many entries (files and folders) one archive may hold. The central
@@ -82,7 +121,7 @@ export async function* walkFolderForZip(rootAbs: string, topName: string): Async
       const name = `${dir.name}/${dirent.name}`;
       if (isProtectedFilePath(abs)) continue;
       if (dirent.isDirectory()) {
-        if (ZIP_SKIPPED_DIRS.has(dirent.name)) continue;
+        if (ZIP_SKIPPED_DIRS.has(dirent.name) || (await isSkippedModelDir(abs, dirent.name))) continue;
         let st: import("fs").Stats;
         try { st = await fsp.stat(abs); } catch { continue; }
         yield { kind: "directory", abs, name: `${name}/`, size: 0, mtime: st.mtime, mode: st.mode };
@@ -93,6 +132,7 @@ export async function* walkFolderForZip(rootAbs: string, topName: string): Async
       let st: import("fs").Stats;
       try { st = await fsp.stat(abs); } catch { continue; } // a dangling link
       if (!st.isFile()) continue; // a link to a directory is not descended
+      if (isSkippedModelFile(dirent.name, st.size)) continue;
       yield { kind: "file", abs, name, size: st.size, mtime: st.mtime, mode: st.mode };
     }
     // Reversed onto the stack so the first subfolder is walked first.

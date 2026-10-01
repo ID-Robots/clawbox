@@ -17,6 +17,20 @@ function verdict(url: string, method = "GET", intent: RequestIntent = "fetch") {
 }
 
 describe("nonOwnerVerdict", () => {
+  // TASK-1306: a user's own open windows — the route keys the file on the
+  // session's user, so reading and writing it reaches nobody else's.
+  it("allows reading and saving the user's own desktop state, and nothing else on that path", () => {
+    expect(verdict("/setup-api/desktop/state")).toBe("allow");
+    expect(verdict("/setup-api/desktop/state", "HEAD")).toBe("allow");
+    expect(verdict("/setup-api/desktop/state", "PUT")).toBe("allow");
+    for (const method of ["POST", "DELETE", "PATCH"]) {
+      expect(verdict("/setup-api/desktop/state", method)).toBe("deny");
+    }
+    expect(verdict("/setup-api/desktop/state/other")).toBe("deny");
+    expect(verdict("/setup-api/desktop", "PUT")).toBe("deny");
+    expect(verdict("/setup-api/preferences", "PUT")).toBe("deny");
+  });
+
   it.each([
     "/setup-api/users/me",
     "/setup-api/setup/status",

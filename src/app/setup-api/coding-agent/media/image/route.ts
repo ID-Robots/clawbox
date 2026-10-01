@@ -39,13 +39,18 @@ const MAX_PROMPT_CHARS = 2_000;
 const SIZES: Record<string, number> = { "1024": 1024, "512": 512, "256": 256 };
 
 /**
- * One picture being drawn plus this many waiting; anything past that is told
- * to come back later.
+ * One picture being drawn plus this many other requests waiting; anything past
+ * that is told to come back later.
  *
  * The MCP client gives a call 180 s (IMAGE_CALL_TIMEOUT_MS) and the upstream
  * budget for ONE picture is 120 s, so a third caller could not be served
  * inside its own deadline anyway — queueing it would only keep a connection
  * and a promise alive on an 8 GB box for an answer nobody is still waiting for.
+ *
+ * Icon jobs waiting in the same slot do not count: this route enters it as a
+ * `request`, which is served ahead of them (see withGenerationSlot). Counting
+ * them refused a run's first picture behind the project icon the run itself
+ * had queued at start.
  */
 const MAX_WAITING_PICTURES = 2;
 
@@ -91,18 +96,22 @@ export async function POST(request: Request) {
       // at once must open one upstream request rather than N. Bounded here and
       // not in the icon pipeline, because this caller is a REQUEST: a queue
       // that only drains at 120 s an entry would hold open connections and
-      // pending promises on the box long after the run gave up waiting.
+      // pending promises on the box long after the run gave up waiting. And
+      // for the same reason it goes ahead of the icon jobs still waiting: a
+      // run is waiting on this one, and nobody is waiting on an icon.
       const generated = await withGenerationSlot(
         () => generateClawaiImageBytes(prompt),
-        { maxWaiting: MAX_WAITING_PICTURES },
+        { maxWaiting: MAX_WAITING_PICTURES, priority: "request" },
       );
       picture = await asPng(generated.bytes, generated.extension, size);
     } catch (err) {
       if (err instanceof GenerationSlotBusy) {
-        // 429 is what the MCP rules read as "carry on without", which is the
-        // right answer: the box is drawing, not broken.
+        // 429 like a spent allowance, but NOT that: the box is drawing, the
+        // allowance is untouched, and a later call will be served. The code is
+        // what tells them apart — mcp/tools/media.ts waits and asks once more
+        // on "busy", and only "allowance" tells the run to stop asking.
         return mediaError(
-          "This ClawBox is already drawing as many pictures as it can queue. Try again later.",
+          "This ClawBox is already drawing as many pictures as it can queue. Try again in a minute.",
           "busy",
           429,
         );

@@ -349,6 +349,80 @@ describe("ensureWebappIcon", () => {
     await expect(mod.withGenerationSlot(async () => "after", { maxWaiting: 1 })).resolves.toBe("after");
   });
 
+  it("serves a run's picture before the icon jobs waiting, and does not count them against it", async () => {
+    // TASK-1355: every run with pictures on queues its project's icon at
+    // start, so a run's first picture met a slot already "full" of icon work
+    // and was refused in 30 ms. Waiting icons are not ahead of a request.
+    const order: string[] = [];
+    const held = deferredGeneration();
+    const drawing = mod.withGenerationSlot(async () => {
+      await held.promise;
+      order.push("icon-drawing");
+    });
+    const icons = ["icon-1", "icon-2", "icon-3"].map((name) =>
+      mod.withGenerationSlot(async () => {
+        order.push(name);
+      }),
+    );
+    expect(mod.admittedGenerations()).toBe(4);
+
+    // Four admitted, and still not busy for a request allowed two waiting:
+    // only the icon already drawing is ahead of it.
+    const picture = mod.withGenerationSlot(async () => {
+      order.push("picture");
+      return "drawn";
+    }, { maxWaiting: 2, priority: "request" });
+    expect(mod.admittedGenerations()).toBe(5);
+
+    held.finish(generationOf(PNG));
+    await expect(picture).resolves.toBe("drawn");
+    await Promise.all([drawing, ...icons]);
+    // Never in front of the one already drawing — that one is paid for — but
+    // in front of every icon that was still waiting, which then run in order.
+    expect(order).toEqual(["icon-drawing", "picture", "icon-1", "icon-2", "icon-3"]);
+    await vi.waitFor(() => expect(mod.admittedGenerations()).toBe(0));
+  });
+
+  it("still bounds requests by the requests ahead of them", async () => {
+    const held = deferredGeneration();
+    const drawing = mod.withGenerationSlot(() => held.promise);
+    void mod.withGenerationSlot(async () => "icon");
+    const asRequest = (label: string) =>
+      mod.withGenerationSlot(async () => label, { maxWaiting: 2, priority: "request" });
+
+    // The one drawing plus two requests waiting is the most a request stands.
+    const first = asRequest("first");
+    const second = asRequest("second");
+    await expect(asRequest("third")).rejects.toBeInstanceOf(mod.GenerationSlotBusy);
+
+    held.finish(generationOf(PNG));
+    await drawing;
+    await expect(first).resolves.toBe("first");
+    await expect(second).resolves.toBe("second");
+    await vi.waitFor(() => expect(mod.admittedGenerations()).toBe(0));
+  });
+
+  it("hands the slot on to the next waiter, requests first, when a generation throws", async () => {
+    const order: string[] = [];
+    const held = deferredGeneration();
+    const failing = mod.withGenerationSlot(async () => {
+      await held.promise;
+      throw new Error("upstream 502");
+    });
+    const icon = mod.withGenerationSlot(async () => {
+      order.push("icon");
+    });
+    const picture = mod.withGenerationSlot(async () => {
+      order.push("picture");
+    }, { maxWaiting: 2, priority: "request" });
+
+    held.finish(generationOf(PNG));
+    await expect(failing).rejects.toThrow("upstream 502");
+    await Promise.all([icon, picture]);
+    expect(order).toEqual(["picture", "icon"]);
+    await vi.waitFor(() => expect(mod.admittedGenerations()).toBe(0));
+  });
+
   it("releases the slot when a generation fails, so the next app is still drawn", async () => {
     installApp("notes");
     mocks.generate

@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "@/lib/runtime-path";
 import * as config from "@/lib/config-store";
 import { DATA_DIR } from "@/lib/config-store";
-import { filesBrowseRoot, isProtectedFilePath, OPENCLAW_AGENT_SUBTREE_RE } from "@/lib/file-guard";
+import { filesBrowseRoot, isProtectedContainer, isProtectedFilePath, OPENCLAW_AGENT_SUBTREE_RE } from "@/lib/file-guard";
 
 // ── The owner's project folders, in the Files app ───────────────────────────
 //
@@ -105,7 +105,12 @@ export function resolveProjectFolder(input: unknown): { abs: string; rel: string
   if (!resolved.startsWith(root + path.sep)) {
     throw new ProjectFolderError("outside_root", "Only folders inside the home folder can be added");
   }
-  if (isProtectedFilePath(resolved)) {
+  // `isProtectedFilePath` keeps the data directory itself openable, so the
+  // Files app can list its public subtrees; a pin is a different question. A
+  // folder that HOLDS the box's state — the data directory, the checkout above
+  // it, a credential store's parent — is not a project, and pinning it put the
+  // box's own state (and its multi-GB local models) one "Download as ZIP" away.
+  if (isProtectedFilePath(resolved) || isProtectedContainer(resolved)) {
     throw new ProjectFolderError("protected", "That folder holds the box's private data and cannot be shown here");
   }
   let stat: fs.Stats;
@@ -156,8 +161,9 @@ function describeFolder(root: string, rel: string): ProjectFolder | null {
   const abs = path.resolve(root, rel);
   if (!abs.startsWith(root + path.sep)) return null;
   // A rule that covers it now (a store renamed into place, the folder
-  // replaced by a link into one): not shown, and not named.
-  if (isProtectedFilePath(abs)) return null;
+  // replaced by a link into one, or a folder that holds the box's state and
+  // was pinned before such pins were refused): not shown, and not named.
+  if (isProtectedFilePath(abs) || isProtectedContainer(abs)) return null;
   let missing = false;
   try {
     missing = !fs.statSync(/* turbopackIgnore: true */ abs).isDirectory();
@@ -284,7 +290,7 @@ export async function suggestedProjectFolders(pinned?: ProjectFolder[]): Promise
     if (abs === root || !abs.startsWith(root + path.sep)) continue;
     const rel = toRel(root, abs);
     if (taken.has(rel)) continue;
-    if (isProtectedFilePath(abs)) continue;
+    if (isProtectedFilePath(abs) || isProtectedContainer(abs)) continue;
     let real: string;
     try {
       if (!fs.statSync(/* turbopackIgnore: true */ abs).isDirectory()) continue;
