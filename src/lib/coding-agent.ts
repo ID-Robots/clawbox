@@ -345,6 +345,14 @@ import {
   type PipelineVerify,
   type StageOutcome,
 } from "@/lib/coding-pipeline";
+import {
+  EXPERIENCE_BLOCK_MAX_CHARS,
+  EXPERIENCE_RULE_ID,
+  readExperienceInput,
+  renderExperience,
+  type ExperienceInputRefusal,
+  type RunExperience,
+} from "@/lib/coding-experience";
 import { closeSessionsForRun } from "@/lib/browser-sessions";
 import { ensureProjectIcon } from "@/lib/project-icon";
 import { webappIconPath } from "@/lib/webapp-icon";
@@ -1373,6 +1381,25 @@ export interface CodingRun {
   /** Words the team appended to the brief — the planner's or a worker's role. */
   extraBrief: string | null;
   /**
+   * The lessons from the training cluster's experience store this run's system
+   * prompt carried (TASK-1348, src/lib/coding-experience.ts): which rules
+   * reached it, whether the repository's skill document did, and how long the
+   * block was. Null on a run that was given none — every run the dispatcher did
+   * not start, and the baseline the cluster's metric compares against.
+   *
+   * Optional in the type, like `resultText`, so a record built before it
+   * existed still type-checks; normalizeRun and newRunRecord always set it.
+   */
+  experience?: RunExperience | null;
+  /**
+   * The rendered block itself: what every spawn of this run — a retry, an
+   * account switch, a resume — hands the CLI again, and what a run resuming
+   * this one inherits. Kept on the box's own record and left out of what the
+   * routes answer (cloneRun): `experience` says what it held, and the list it
+   * would ride along in is polled every five seconds.
+   */
+  experienceBrief?: string | null;
+  /**
    * The pull request this run's work went into, once the auto-PR switch is on.
    *
    * A FIELD and not a new run status, on purpose. RUN_STATUSES is the persisted
@@ -2148,6 +2175,16 @@ export interface StartRunInput {
    * into every prompt.
    */
   pipeline?: unknown;
+  /**
+   * Lessons from earlier verified runs — the training cluster's experience
+   * store, as its dispatcher selected it for this task — as the CALLER sent
+   * them: unvalidated, read through `readExperienceInput`, which refuses with a
+   * stable code rather than repairing. Rendered into the run's system prompt,
+   * never into its task. Absent or null, the run starts exactly as it did
+   * before the field existed — or, on a resume, carries the block of the run it
+   * resumes.
+   */
+  experience?: unknown;
 }
 
 /** A run's place in a coding team. */
@@ -2744,6 +2781,18 @@ export class PipelineChoiceError extends CodingAgentError {
   constructor(readonly code: PipelineInputRefusal, message: string) {
     super("invalid", message);
     this.name = "PipelineChoiceError";
+  }
+}
+
+/**
+ * An `experience` field the box refused, with the reason's stable code beside
+ * the shared 400 — so the dispatcher can tell "rule 3's id is malformed" from
+ * "too many rules" without parsing a sentence. See readExperienceInput.
+ */
+export class ExperienceChoiceError extends CodingAgentError {
+  constructor(readonly code: ExperienceInputRefusal, message: string) {
+    super("invalid", message);
+    this.name = "ExperienceChoiceError";
   }
 }
 
@@ -3695,6 +3744,22 @@ function normalizeTeam(raw: unknown): RunTeam | null {
   return { id: t.id, role: t.role, taskId: typeof t.taskId === "string" ? t.taskId : null };
 }
 
+/**
+ * A stored `experience` summary, rebuilt field by field. Ids this code could
+ * not have written are dropped rather than trusted: the training cluster joins
+ * on them, and a hand-edited record must not credit a rule with a run it never
+ * reached.
+ */
+function parseRunExperience(raw: unknown): RunExperience | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const v = raw as Record<string, unknown>;
+  return {
+    ruleIds: Array.isArray(v.ruleIds) ? v.ruleIds.filter((id): id is string => typeof id === "string" && EXPERIENCE_RULE_ID.test(id)) : [],
+    skill: v.skill === true,
+    chars: typeof v.chars === "number" && Number.isFinite(v.chars) && v.chars >= 0 ? Math.round(v.chars) : 0,
+  };
+}
+
 function normalizePr(raw: unknown): PrState | null {
   if (typeof raw !== "object" || raw === null) return null;
   const v = raw as Partial<Record<keyof PrState, unknown>>;
@@ -3861,6 +3926,12 @@ function normalizeRun(raw: CodingRun): CodingRun {
     team: normalizeTeam(raw.team),
     readOnly: raw.readOnly === true,
     extraBrief: typeof raw.extraBrief === "string" && raw.extraBrief ? raw.extraBrief : null,
+    experience: parseRunExperience(raw.experience),
+    // No longer than the renderer ever writes: a longer one on a hand-edited
+    // record is not a block this box rendered, and it travels into a prompt.
+    experienceBrief: typeof raw.experienceBrief === "string" && raw.experienceBrief && raw.experienceBrief.length <= EXPERIENCE_BLOCK_MAX_CHARS
+      ? raw.experienceBrief
+      : null,
     // Every field must be reconstructed here: normalizeRun builds a fresh
     // object field by field, so anything omitted survives in memory and
     // disappears the next time the file is read.
@@ -4712,7 +4783,7 @@ function persist(immediate = false): void {
 }
 
 function cloneRun(run: CodingRun): CodingRun {
-  return {
+  const clone: CodingRun = {
     ...run,
     workflowTelemetry: cachedWorkflowTelemetry(transcriptPath(run), run.startedAt, run.completedAt),
     filesTouched: [...run.filesTouched],
@@ -4745,7 +4816,12 @@ function cloneRun(run: CodingRun): CodingRun {
     // Nested two deep — steps, and the evidence under each — so a route holding
     // a clone can neither see nor write the driver's later stages.
     pipeline: run.pipeline ? clonePipeline(run.pipeline) : null,
+    experience: run.experience ? { ...run.experience, ruleIds: [...run.experience.ruleIds] } : null,
   };
+  // The experience block is left out, not copied: it is for the next spawn,
+  // which reads the record itself — see CodingRun.experienceBrief.
+  delete clone.experienceBrief;
+  return clone;
 }
 
 export function getRun(id: string): CodingRun | null {
@@ -5728,7 +5804,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT.
   const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
@@ -5750,6 +5826,12 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // words, never instead of them.
     ...(opts.extraBrief ? [opts.extraBrief] : []),
   ].join(" ");
+  // The lessons from earlier verified runs (src/lib/coding-experience.ts), last
+  // and on their own lines: a delimited block the device rendered from a
+  // validated request, after every word of the device's own. In the system
+  // prompt rather than the task, so the task stays what the caller typed. A
+  // run given none gets the brief above unchanged, byte for byte.
+  const systemPrompt = opts.experience ? `${brief}\n\n${opts.experience}` : brief;
   const args = [
     "-p",
     "--verbose",
@@ -5757,7 +5839,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     "--permission-mode", "acceptEdits",
     "--setting-sources", "user",
     "--max-turns", String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
-    "--append-system-prompt", brief,
+    "--append-system-prompt", systemPrompt,
   ];
   // The task still travels on stdin either way; what this changes is the
   // SHAPE of what is written there and whether the pipe is closed behind it.
@@ -10805,7 +10887,7 @@ function spawnRun(
   // from this run's branch when it settles, and then to watch it — see
   // PR_DRAFT_BRIEF.
   const draftPullRequests = run.pr?.phase === "opening";
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -11474,6 +11556,9 @@ export async function sweepCodingWorktrees(options: { force?: boolean } = {}): P
 
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
   const task = normalizeTask(input.task, isBoxWrittenTask(input));
+  // Read before anything is held — the slot, the folder — so a malformed
+  // request is a plain 400 that cost the box nothing.
+  const givenExperience = requireExperience(input.experience);
 
   let resumeSessionId: string | null = null;
   let directory: string;
@@ -11578,6 +11663,11 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // owner's current setting could be the weaker of the two.
     if (previous && typeof input.reviewLoopOf === "string") settings.effort = previous.effort;
     await assertProviderReady(settings.provider);
+    // A resume carries the lessons of the run it continues, the way it carries
+    // that run's account and folder — the automatic review pass and every
+    // review-loop round included — unless the caller sent a block of its own.
+    const experience = givenExperience
+      ?? (previous ? { brief: previous.experienceBrief ?? null, record: previous.experience ?? null } : null);
     const run = newRunRecord({
       task,
       directory,
@@ -11592,6 +11682,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       team: input.team ?? null,
       readOnly: input.readOnly === true,
       extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
+      experience: experience?.record ?? null,
+      experienceBrief: experience?.brief ?? null,
     });
     // THE FILES THIS RUN WAS GIVEN, staged before anything else: the task
     // context names the folder, so what is in it has to be true by the time the
@@ -11853,6 +11945,24 @@ function requireDeliverable(input: StartRunInput): Deliverable | null {
   return read.deliverable;
 }
 
+/**
+ * The caller's lessons, validated and rendered, or a thrown `invalid` with the
+ * code saying why not — refused rather than dropped for `requireDeliverable`'s
+ * reason: a dispatcher whose block was quietly ignored would count the run as
+ * one that had the store. Null when the caller sent none.
+ *
+ * `brief` is null when the block rendered to nothing (no rules, no skill);
+ * the record still says the run was given an empty one, which is a different
+ * fact from being given none.
+ */
+function requireExperience(raw: unknown): { brief: string | null; record: RunExperience } | null {
+  const read = readExperienceInput(raw);
+  if (read === null) return null;
+  if (!read.ok) throw new ExperienceChoiceError(read.code, read.error);
+  const rendered = renderExperience(read.experience);
+  return { brief: rendered.text || null, record: rendered.record };
+}
+
 /** The settings a run is spawned with, and the ceiling the device enforces itself. */
 interface RunSettings {
   /** Which account pays — the owner's default, unless the caller named one. */
@@ -11948,6 +12058,8 @@ function newRunRecord(fields: {
   team?: RunTeam | null;
   readOnly?: boolean;
   extraBrief?: string | null;
+  experience?: RunExperience | null;
+  experienceBrief?: string | null;
   deliverable?: Deliverable | null;
   pipeline?: PipelineState | null;
 }): CodingRun {
@@ -12012,6 +12124,8 @@ function newRunRecord(fields: {
     team: fields.team ?? null,
     readOnly: fields.readOnly === true,
     extraBrief: fields.extraBrief ?? null,
+    experience: fields.experience ?? null,
+    experienceBrief: fields.experienceBrief ?? null,
     // No pull request until the aftermath opens one, and no loop until it has.
     pr: null,
     review: null,
