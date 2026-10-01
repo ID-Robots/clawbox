@@ -142,6 +142,14 @@ const nextConfig: NextConfig = {
     // run page builds its terminal command in the browser, where a runtime
     // process.env read is not available.
     NEXT_PUBLIC_CLAWBOX_ROOT: process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
+    // The in-app updater's own copy of scripts/preserve-local-edits.sh, carried
+    // IN the build (src/lib/local-edits.ts). Its restart step saves the owner's
+    // edits just before resetting a tree that step 1 has already moved to the
+    // update target — which, on a switch to main, a downgrade or an older
+    // release, has no such script. Server-only: nothing in the browser reads
+    // it, so it is inlined nowhere else. A missing file fails the build here
+    // rather than an owner's update later.
+    CLAWBOX_PRESERVE_LOCAL_EDITS_SH: readFileSync(path.join(__dirname, "scripts", "preserve-local-edits.sh"), "utf-8"),
   },
   async rewrites() {
     return {

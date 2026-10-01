@@ -93,6 +93,16 @@ interface ClawKeepStatus {
   largeArchives?: { path: string; bytes: number }[];
   largeArchiveCount?: number;
   largeArchiveBytes?: number;
+  /** Symbolic links the last archive build skipped — pointing outside the
+   *  backed-up folders, or at nothing — the first twenty named, all counted. */
+  skippedLinks?: SkippedLink[];
+  skippedLinkCount?: number;
+}
+
+/** One symbolic link a backup did not carry: where it is, and its text. */
+interface SkippedLink {
+  path: string;
+  target: string;
 }
 
 // Map the daemon's phase id to an i18n key for the progress panel.
@@ -137,6 +147,10 @@ interface RestoreResponse {
   restartPending?: string[];
   /** Members the daemon could not recreate. Absent from older servers. */
   skippedMembers?: string[];
+  /** Symbolic links the BACKUP skipped, so this snapshot never carried them.
+   *  Absent from older servers. */
+  skippedLinks?: SkippedLink[];
+  skippedLinkCount?: number;
 }
 
 
@@ -743,6 +757,7 @@ export default function ClawKeepApp() {
                   before the upload starts, and the card is the progress panel
                   for exactly that stretch. */}
               <LargeArchivesCard status={status} />
+              <SkippedLinksCard status={status} />
               <ScheduleCard
                 schedule={status.schedule}
                 nextRunAtMs={status.nextRunAtMs}
@@ -1394,6 +1409,19 @@ function DashboardCard({
         </p>
       )}
 
+      {/* A backup that skipped links FINISHED — said as such, beside the
+          verdict it did not spoil. Only once the run ended ok: the daemon
+          writes the list before the upload, and "finished" is not true yet
+          while that runs. The links themselves are on SkippedLinksCard. */}
+      {(status.skippedLinkCount ?? 0) > 0 && status.lastHeartbeatStatus === "ok" && (
+        <p
+          className="relative mt-3 max-w-md text-xs text-[var(--text-muted)] leading-relaxed"
+          data-testid="clawkeep-skipped-links-summary"
+        >
+          {t("clawkeep.skippedLinks.summary", { count: status.skippedLinkCount ?? 0 })}
+        </p>
+      )}
+
       {/* Optional name for this backup → becomes the snapshot's label */}
       {!disabled && (
         <div className="relative mt-5 w-full max-w-xs">
@@ -1584,6 +1612,64 @@ function LargeArchivesCard({ status }: { status: ClawKeepStatus }) {
   );
 }
 
+/** `path → target` per link, and how many more there were than are named. */
+function SkippedLinkList({ links, count }: { links: SkippedLink[]; count: number }) {
+  const { t } = useT();
+  return (
+    <>
+      {links.length > 0 && (
+        <ul className="space-y-1 text-xs">
+          {links.map((link) => (
+            <li key={link.path} className="min-w-0 wrap-anywhere">
+              <code className="font-mono">{link.path}</code>
+              <span className="mx-1.5 opacity-60" aria-hidden="true">→</span>
+              <code className="font-mono opacity-80">{link.target}</code>
+            </li>
+          ))}
+        </ul>
+      )}
+      {count > links.length && (
+        <p className="text-xs opacity-70">
+          {t("clawkeep.skippedLinks.more", { count: count - links.length })}
+        </p>
+      )}
+    </>
+  );
+}
+
+/**
+ * Symbolic links the last backup SKIPPED (TASK-1304).
+ *
+ * The archiver refuses a link whose target is outside everything the backup
+ * contains — a file kept in a shared folder, a link to nothing — and it
+ * refuses while writing, so one such link in a workspace used to fail the
+ * whole backup, late. The daemon now leaves those links out, never follows
+ * them, and names them here; the backup itself finishes. Informational, not
+ * a warning: nothing is wrong with the box, and nothing it holds was lost.
+ */
+function SkippedLinksCard({ status }: { status: ClawKeepStatus }) {
+  const { t } = useT();
+  const count = status.skippedLinkCount ?? 0;
+  if (count <= 0) return null;
+  return (
+    <div
+      className={`${CARD} space-y-2 border-sky-500/20 bg-sky-500/5 text-sky-100/85`}
+      role="status"
+      data-testid="clawkeep-skipped-links"
+    >
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-sky-200">
+        <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">link_off</span>
+        {t("clawkeep.skippedLinks.title")}
+      </h2>
+      <p className="text-sm text-sky-100/90 leading-relaxed">
+        {t("clawkeep.skippedLinks.body", { count })}
+      </p>
+      <SkippedLinkList links={status.skippedLinks ?? []} count={count} />
+      <p className="text-xs text-sky-100/70 leading-relaxed">{t("clawkeep.skippedLinks.hint")}</p>
+    </div>
+  );
+}
+
 /** The one install command this card may print — see the note in SystemCard. */
 const OPENCLAW_INSTALL_COMMAND = "sudo bash ~/clawbox/install.sh --step openclaw_install";
 
@@ -1707,6 +1793,17 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
               `skippedMembers` out of the daemon. */}
           ⚠️ {t("clawkeep.result.skipped", { count: result.skippedMembers!.length })}
         </p>
+      )}
+      {(result.skippedLinkCount ?? 0) > 0 && (
+        <div className="space-y-1 text-[var(--text-muted)]" data-testid="clawkeep-restore-skipped-links">
+          {/* Not a ⚠️: the restore IS complete. The snapshot never had these
+              links — its backup skipped them — so they are named here rather
+              than looked for in the restored folders. */}
+          <p className="text-xs leading-relaxed">
+            {t("clawkeep.result.skippedLinks", { count: result.skippedLinkCount ?? 0 })}
+          </p>
+          <SkippedLinkList links={result.skippedLinks ?? []} count={result.skippedLinkCount ?? 0} />
+        </div>
       )}
     </div>
   );

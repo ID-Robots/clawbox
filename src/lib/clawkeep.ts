@@ -191,6 +191,14 @@ export interface ClawKeepStatus {
   largeArchives: LargeArchive[];
   largeArchiveCount: number;
   largeArchiveBytes: number;
+  /** Symbolic links the last archive build SKIPPED (TASK-1304): the archiver
+   * refuses a link whose target is outside everything the backup contains,
+   * or is gone, so ClawKeep leaves it out and the backup finishes instead of
+   * failing (`clawkeep/backup_guard.py`). The first twenty by path (`~/…`,
+   * with the link's own text as `target`); `skippedLinkCount` counts them
+   * all. The links stay on the box, untouched. 0 on Hermes. */
+  skippedLinks: SkippedLink[];
+  skippedLinkCount: number;
 }
 
 /** One snapshot-sized archive file a backup carries. */
@@ -198,6 +206,16 @@ export interface LargeArchive {
   path: string;
   bytes: number;
 }
+
+/** One symbolic link a backup did not carry: where it is, and its text. */
+export interface SkippedLink {
+  path: string;
+  target: string;
+}
+
+/** As many skipped links as the daemon names in state.json or a restore's
+ * report (`backup_guard.LISTED_SKIPPED_LINKS`). */
+const LISTED_SKIPPED_LINKS = 20;
 
 export class ClawKeepError extends Error {
   constructor(
@@ -874,6 +892,8 @@ interface StateFile {
   last_large_archives?: unknown;
   last_large_archive_count?: number;
   last_large_archive_bytes?: number;
+  last_skipped_links?: unknown;
+  last_skipped_link_count?: number;
   /** When the portal started refusing credentials for quota; 0 once it mints
    * them again. Written by the daemon (`runner._note_credentials`). */
   quota_full_since_ms?: number;
@@ -894,6 +914,20 @@ function stateLargeArchives(value: unknown): LargeArchive[] {
       typeof item === "object" && item !== null && typeof (item as { path?: unknown }).path === "string")
     .slice(0, 5)
     .map((item) => ({ path: item.path, bytes: stateCount(item.bytes) }));
+}
+
+/** At most twenty, as the daemon writes them — in state.json and in a
+ * restore's report alike; anything that does not read as `{path, target}` is
+ * dropped rather than rendered. */
+function readSkippedLinks(value: unknown): SkippedLink[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is SkippedLink =>
+      typeof item === "object" && item !== null
+      && typeof (item as { path?: unknown }).path === "string"
+      && typeof (item as { target?: unknown }).target === "string")
+    .slice(0, LISTED_SKIPPED_LINKS)
+    .map((item) => ({ path: item.path, target: item.target }));
 }
 
 /** Pull just the `server` value out of a config.toml. The Python daemon does
@@ -1228,6 +1262,8 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     largeArchives: stateLargeArchives(stateRaw.last_large_archives),
     largeArchiveCount: stateCount(stateRaw.last_large_archive_count),
     largeArchiveBytes: stateCount(stateRaw.last_large_archive_bytes),
+    skippedLinks: readSkippedLinks(stateRaw.last_skipped_links),
+    skippedLinkCount: stateCount(stateRaw.last_skipped_link_count),
   };
 }
 
@@ -1466,6 +1502,12 @@ interface RestoreOk {
    *  the UI has to say so rather than showing a clean success. Optional
    *  because a daemon predating the field simply omits it. */
   skippedMembers?: string[];
+  /** Symbolic links the BACKUP skipped, so this snapshot never carried them
+   *  (TASK-1304), as its own record names them, and how many there were. The
+   *  restore is complete without them; they are named so nobody looks for
+   *  them in the restored tree. Optional: older daemons omit both. */
+  skippedLinks?: SkippedLink[];
+  skippedLinkCount?: number;
   assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
 }
 
@@ -1779,7 +1821,14 @@ export async function runRestore(
         }
         throw new ClawKeepError(resp.error, 502);
       }
-      return resp;
+      // The daemon's list, as it would be read out of state.json: only what
+      // reads as `{path, target}`, at most twenty, and a count no smaller.
+      const skippedLinks = readSkippedLinks(resp.skippedLinks);
+      return {
+        ...resp,
+        skippedLinks,
+        skippedLinkCount: Math.max(stateCount(resp.skippedLinkCount), skippedLinks.length),
+      };
     };
     // Stage a one-shot passphrase tmpfile when the caller supplied one, so
     // the password is fed via `--passphrase-file` rather than ever entering

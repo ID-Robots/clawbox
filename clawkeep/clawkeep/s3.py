@@ -162,6 +162,13 @@ def upload(
     return key
 
 
+#: A snapshot record's account of the symbolic links the snapshot does not
+#: carry (`runner._skipped_record`): the count in the clear, and the links —
+#: file names — sealed with the backup passphrase (`crypto.seal_text`).
+RECORD_SKIPPED_LINK_COUNT = "skippedLinkCount"
+RECORD_SKIPPED_LINKS = "skippedLinks"
+
+
 def _empty_manifest() -> dict[str, Any]:
     return {"version": MANIFEST_VERSION, "snapshots": {}}
 

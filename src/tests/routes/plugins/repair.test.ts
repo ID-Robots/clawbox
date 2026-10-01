@@ -16,11 +16,18 @@ vi.mock("@/lib/openclaw-deepseek-plugin", () => ({
   // default: most cases here are about a row written against THIS core.
   installedOpenclawRelease: vi.fn(),
 }));
+// The gateway unit the Retry watches around an install (TASK-1302). Not
+// running unless a case says so, so nothing waits.
+vi.mock("@/lib/gateway-health", () => ({
+  readGatewayUnitMoment: vi.fn(),
+  awaitGatewayRestartAfter: vi.fn(),
+}));
 vi.mock("@/lib/plugin-repair", async () => {
   const actual = await vi.importActual<typeof import("@/lib/plugin-repair")>("@/lib/plugin-repair");
   return {
     ...actual,
     readPluginRepairs: vi.fn(),
+    recordPluginRepair: vi.fn(),
     clearPluginRepair: vi.fn(),
     clearPluginRepairUnlessRefiled: vi.fn(),
     setPluginRepairInProgress: vi.fn(),
@@ -55,6 +62,9 @@ let clearPluginRepair: Mock;
 let clearUnlessRefiled: Mock;
 let setInProgress: Mock;
 let claimRepair: Mock;
+let recordRepair: Mock;
+let readUnit: Mock;
+let awaitRestart: Mock;
 
 // `promisify(execFile)` reads the custom symbol at MODULE LOAD, so the symbol
 // has to be on the mock before the route is imported — a stub installed later
@@ -103,17 +113,21 @@ beforeEach(async () => {
     });
   ({
     readPluginRepairs,
+    recordPluginRepair: recordRepair,
     clearPluginRepair,
     clearPluginRepairUnlessRefiled: clearUnlessRefiled,
     setPluginRepairInProgress: setInProgress,
     claimPluginRepair: claimRepair,
   } = (await import("@/lib/plugin-repair")) as unknown as {
     readPluginRepairs: Mock;
+    recordPluginRepair: Mock;
     clearPluginRepair: Mock;
     clearPluginRepairUnlessRefiled: Mock;
     setPluginRepairInProgress: Mock;
     claimPluginRepair: Mock;
   });
+  ({ readGatewayUnitMoment: readUnit, awaitGatewayRestartAfter: awaitRestart } =
+    (await import("@/lib/gateway-health")) as unknown as { readGatewayUnitMoment: Mock; awaitGatewayRestartAfter: Mock });
   execCalls = [];
   execImpl = async () => ({ stdout: "" });
   (execFile as unknown as Record<symbol, unknown>)[Symbol.for("nodejs.util.promisify.custom")] =
@@ -129,6 +143,9 @@ beforeEach(async () => {
   clearUnlessRefiled.mockResolvedValue("cleared");
   setInProgress.mockResolvedValue(true);
   claimRepair.mockResolvedValue("claimed");
+  recordRepair.mockResolvedValue(undefined);
+  readUnit.mockResolvedValue(null);
+  awaitRestart.mockResolvedValue("unknown");
   installedRelease.mockResolvedValue(null);
   readPluginRepairs.mockResolvedValue(marker());
   ({ GET, POST } = await import("@/app/setup-api/plugins/repair/route"));
@@ -519,7 +536,23 @@ describe("plugins/repair — a row an older core left (TASK-1088)", () => {
     await post({ pluginId: "codex" });
 
     expect(claimRepair.mock.calls).toEqual([["codex"]]);
+    // The failure is filed on the row (TASK-1302), and a re-file drops the
+    // stamp itself — so the press does not reach for the row again after it,
+    // where it may already be another press's.
+    expect(recordRepair).toHaveBeenCalledTimes(1);
+    expect(setInProgress).not.toHaveBeenCalled();
+  });
+
+  it("still ends the stamp when the failure could not be filed on the row", async () => {
+    stubExec(async () => ({ stdout: DISCOVERED_ONLY }));
+    recordRepair.mockRejectedValue(new Error("EROFS"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const r = await post({ pluginId: "codex" });
+
+    expect(await r.json()).toMatchObject({ ok: false, code: "repair_failed" });
     expect(setInProgress.mock.calls).toEqual([["codex", false]]);
+    warn.mockRestore();
   });
 
   // TASK-1198. The stamp is what makes the NEXT press a 409, so a press that
@@ -688,6 +721,198 @@ describe("plugins/repair — ClawBox AI on a core ClawHub has no build for (TASK
     expect(await r.json()).toMatchObject({ ok: false, code: "repair_failed" });
     expect(restartGateway).not.toHaveBeenCalled();
     expect(clearUnlessRefiled).not.toHaveBeenCalled();
+    // The row stays, saying the refusal of THIS press — the last one tried —
+    // and the re-file is what ends the press's stamp.
+    expect(recordRepair).toHaveBeenCalledWith(expect.objectContaining({
+      id: "deepseek",
+      stage: "install",
+      disabled: true,
+      reason: "The DeepSeek provider plugin, which ClawBox AI runs on, was retried from Settings and could not be "
+        + "reinstalled. openclaw plugins install failed: three",
+    }));
+    expect(setInProgress).not.toHaveBeenCalled();
+  });
+});
+
+// TASK-1302, hardware validation. The board's TEST 2: the row a 4.1 boot filed
+// (`disabled: false`, the pinned ClawHub spec, "Version not found"), NO payload
+// on disk, and `plugins.entries.deepseek` an explicit `{"enabled": false}` —
+// what `openclaw plugins uninstall deepseek --force` leaves behind, measured
+// against the real 2026.9.4 CLI. The Retry installed the npm build, the
+// install kept the explicit `false`, the verify answered `status: disabled`,
+// and the press came back 502 `repair_failed` after ~24 s with the row
+// unchanged; the gateway restarted itself on `plugins.installs.deepseek`
+// (SIGUSR1) in the middle of it. A second press failed the same way.
+describe("plugins/repair — the board's TEST 2: installed, and left switched off (TASK-1302)", () => {
+  const VERSION_NOT_FOUND_REASON = "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed. "
+    + "The device may be offline, or the package registry unreachable. openclaw plugins install exited 1: "
+    + "Version not found on ClawHub: @openclaw/deepseek-provider@2026.9.4.";
+  const BOARD_ROW = {
+    id: "deepseek",
+    stage: "install",
+    reason: VERSION_NOT_FOUND_REASON,
+    atMs: 1790685915162,
+    disabled: false,
+    spec: "clawhub:@openclaw/deepseek-provider@2026.9.4",
+  };
+  const RUNNING = { activeState: "active", invocationId: "a".repeat(32), mainPid: "46592" };
+  const DISABLED = JSON.stringify({
+    plugin: { id: "deepseek", status: "disabled", activated: false, enabled: false },
+    diagnostics: [],
+  });
+  const LOADED_DS = JSON.stringify({ plugin: { id: "deepseek", status: "loaded", activated: true } });
+
+  /** The box: the entry the config holds, and the order things happened in. */
+  let entry: boolean;
+  let events: string[];
+
+  beforeEach(() => {
+    entry = false;
+    events = [];
+    readPluginRepairs.mockResolvedValue({ deepseek: BOARD_ROW });
+    installedRelease.mockResolvedValue("2026.9.4");
+    readUnit.mockResolvedValue(RUNNING);
+    installDeepseek.mockImplementation(async () => {
+      events.push("install");
+      // `plugins install` keeps an explicit `false` exactly as it finds it.
+      return {
+        installed: "npm:@openclaw/deepseek-provider@2026.9.4",
+        failures: ["clawhub:@openclaw/deepseek-provider@2026.9.4: Version not found on ClawHub: @openclaw/deepseek-provider@2026.9.4."],
+      };
+    });
+    awaitRestart.mockImplementation(async (before: unknown) => {
+      events.push(`restart-waited:${before === RUNNING ? "from-running" : "?"}`);
+      return "settled";
+    });
+    runOpenclawConfigSet.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'plugins.entries["deepseek"].enabled') {
+        entry = args[1] === "true";
+        events.push(`entry:${args[1]}`);
+      }
+    });
+    restartGateway.mockImplementation(async () => { events.push("restart"); });
+  });
+
+  it("switches ClawBox AI's plugin on after installing it, although the row says ClawBox never switched it off", async () => {
+    stubExec(async (_cmd, args) => {
+      if (args[1] === "inspect") {
+        events.push("inspect");
+        return { stdout: entry ? LOADED_DS : DISABLED };
+      }
+      return { stdout: "" };
+    });
+
+    const r = await post({ pluginId: "deepseek" });
+
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true, pluginId: "deepseek", restarted: true, markerCleared: true });
+    // AND IN THIS ORDER: the gateway's own restart after the install is waited
+    // out (from the unit as it was BEFORE the install) before the entry is
+    // written or the runtime asked — so the verdict is about the box after that
+    // restart's pre-start, not a box about to change under it.
+    expect(events).toEqual(["install", "restart-waited:from-running", "entry:true", "inspect", "restart"]);
+    expect(readUnit).toHaveBeenCalledTimes(1);
+    expect(clearUnlessRefiled).toHaveBeenCalledWith("deepseek", 1790685915162);
+    expect(recordRepair).not.toHaveBeenCalled();
+  });
+
+  it("is the same on the SECOND press, over the payload the first one left", async () => {
+    // What the board's second press met: payload on disk, entry still false.
+    stubExec(async (_cmd, args) => ({ stdout: args[1] === "inspect" ? (entry ? LOADED_DS : DISABLED) : "" }));
+
+    expect((await post({ pluginId: "deepseek" })).status).toBe(200);
+    entry = false;
+    expect((await post({ pluginId: "deepseek" })).status).toBe(200);
+    expect(installDeepseek).toHaveBeenCalledTimes(2);
+  });
+
+  it("files what is wrong NOW when it still does not load — never an empty cause, never the old refusal", async () => {
+    stubExec(async (_cmd, args) => ({
+      stdout: args[1] === "inspect"
+        ? JSON.stringify({
+          plugin: { id: "deepseek", status: "error", activated: false },
+          diagnostics: [
+            { level: "error", pluginId: "deepseek", message: "failed to load plugin: Cannot find module './dist/index.js'" },
+            { level: "warn", pluginId: "discord", message: "unrelated" },
+          ],
+        })
+        : "",
+    }));
+
+    const r = await post({ pluginId: "deepseek" });
+
+    expect(r.status).toBe(502);
+    expect(await r.json()).toEqual({ ok: false, code: "repair_failed" });
+    const filed = recordRepair.mock.calls[0]?.[0] as { reason: string; disabled: boolean; stage: string; spec: string };
+    expect(filed.reason).toBe(
+      "The DeepSeek provider plugin, which ClawBox AI runs on, was retried from Settings and was reinstalled but the "
+        + "core does not report it loaded. openclaw plugins inspect --runtime says status error, activated false: "
+        + "failed to load plugin: Cannot find module './dist/index.js'",
+    );
+    expect(filed.reason).not.toContain("Version not found");
+    // This press switched it on and, since it demonstrably does not load, off
+    // again — so the switch-off on record is ClawBox's now.
+    expect(events.filter((event) => event.startsWith("entry:"))).toEqual(["entry:true", "entry:false"]);
+    expect(filed.disabled).toBe(true);
+    expect(filed.stage).toBe("install");
+    expect(filed.spec).toBe("npm:@openclaw/deepseek-provider@2026.9.4");
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(clearUnlessRefiled).not.toHaveBeenCalled();
+  });
+
+  it("says the device could not confirm it, and leaves the plugin on, when the inspection cannot be run", async () => {
+    stubExec(async (_cmd, args) => {
+      if (args[1] === "inspect") throw Object.assign(new Error(""), { killed: true, signal: "SIGTERM" });
+      return { stdout: "" };
+    });
+
+    const r = await post({ pluginId: "deepseek" });
+
+    expect(await r.json()).toEqual({ ok: false, code: "unverified" });
+    const filed = recordRepair.mock.calls[0]?.[0] as { reason: string; disabled: boolean };
+    expect(filed.reason).toBe(
+      "The DeepSeek provider plugin, which ClawBox AI runs on, was retried from Settings and was reinstalled but the "
+        + "device could not confirm that it loads. openclaw plugins inspect --runtime was killed at its deadline and said nothing.",
+    );
+    expect(entry).toBe(true);
+    expect(filed.disabled).toBe(false);
+  });
+
+  it("does not bring back a row the restart's own boot script has already cleared", async () => {
+    stubExec(async (_cmd, args) => ({ stdout: args[1] === "inspect" ? DISABLED : "" }));
+    // Read once to find the row; gone by the time the failure would be filed.
+    readPluginRepairs.mockResolvedValueOnce({ deepseek: BOARD_ROW }).mockResolvedValue({});
+
+    const r = await post({ pluginId: "deepseek" });
+
+    expect(r.status).toBe(502);
+    expect(recordRepair).not.toHaveBeenCalled();
     expect(setInProgress).toHaveBeenCalledWith("deepseek", false);
+  });
+
+  it("does not wait on a gateway that is not running", async () => {
+    readUnit.mockResolvedValue({ activeState: "inactive", invocationId: null, mainPid: null });
+    awaitRestart.mockResolvedValue("none");
+    stubExec(async (_cmd, args) => ({ stdout: args[1] === "inspect" ? (entry ? LOADED_DS : DISABLED) : "" }));
+
+    expect((await post({ pluginId: "deepseek" })).status).toBe(200);
+    // Asked, and it answers at once for a unit that was not active — see
+    // gateway-health.test.ts.
+    expect(awaitRestart).toHaveBeenCalledWith({ activeState: "inactive", invocationId: null, mainPid: null });
+  });
+
+  it("still leaves another plugin's entry the owner switched off alone", async () => {
+    // Only ClawBox AI's own plugin is switched on for its row: a Codex row that
+    // says ClawBox changed nothing leaves the owner's entry as it is.
+    readPluginRepairs.mockResolvedValue(marker({ disabled: false }));
+    stubExec(async (_cmd, args) => ({
+      stdout: args[1] === "inspect" ? JSON.stringify({ plugin: { id: "codex", status: "disabled", activated: false } }) : "",
+    }));
+
+    const r = await post({ pluginId: "codex" });
+
+    expect(r.status).toBe(502);
+    expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    expect(recordRepair).toHaveBeenCalledWith(expect.objectContaining({ id: "codex", disabled: false }));
   });
 });

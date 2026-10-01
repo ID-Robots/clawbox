@@ -30,8 +30,10 @@ import {
   HARNESS_FAULT_CONFIG_KEY,
   HARNESS_FAULT_TTL_MS,
   HARNESS_NOT_READY_SENTENCE,
+  classifyHarnessFailure,
   harnessFaultMessage,
   isHarnessFault,
+  modelAnswered,
   parseHarnessFault,
 } from "@/lib/coding-harness-fault";
 
@@ -91,6 +93,47 @@ function installWrapper(body: string): void {
  */
 function installFailingWrapper(message = UNRECOGNIZED): void {
   installWrapper([`printf '%s\\n' '${INIT}' '${resultError(message).replace(/'/g, "'\\''")}'`, "exit 1"].join("\n"));
+}
+
+/** A wrapper that prints these stream lines, one each, and exits with `code`. */
+function installEmittingWrapper(lines: string[], code = 1): void {
+  const quoted = lines.map((l) => `'${l.replace(/'/g, "'\\''")}'`).join(" ");
+  installWrapper([`printf '%s\\n' ${quoted}`, `exit ${code}`].join("\n"));
+}
+
+/** A real model answer: what a run that is working streams. */
+function answer(content: unknown[], usage: Record<string, number> | null, id = "msg_1"): string {
+  return JSON.stringify({
+    type: "assistant",
+    message: { id, model: "deepseek-v4-pro", role: "assistant", content, ...(usage ? { usage } : {}) },
+    parent_tool_use_id: null,
+    session_id: "sess-abc-123",
+  });
+}
+
+/**
+ * The message the CLI writes ITSELF when the API refuses the very first
+ * request: model "<synthetic>", no usage worth the name, and it still counts
+ * as a turn on the result that follows.
+ */
+function syntheticError(text: string): string {
+  return JSON.stringify({
+    type: "assistant",
+    message: {
+      id: "msg_synthetic",
+      model: "<synthetic>",
+      role: "assistant",
+      content: [{ type: "text", text }],
+      usage: { input_tokens: 0, output_tokens: 0 },
+    },
+    parent_tool_use_id: null,
+    session_id: "sess-abc-123",
+  });
+}
+
+/** The result a run that had been working ends on when the model error lands. */
+function midRunResultError(message: string, numTurns: number): string {
+  return JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: message, num_turns: numTurns });
 }
 
 function makeProject(id: string): string {
@@ -270,6 +313,175 @@ describe("a run that dies because the harness is not ready", () => {
     expect(run.error).not.toContain(HARNESS_NOT_READY_SENTENCE);
     // And nothing is remembered, so the next run is not refused.
     expect(readConfig()[HARNESS_FAULT_CONFIG_KEY]).toBeFalsy();
+  });
+});
+
+/**
+ * TASK-1320. On a bench (nano-lab2, beta ea6222d1, 2026-09-30) a team worker
+ * ran 347 s and used 563,595 tokens, then hit a model error and was filed as
+ * "the harness is not ready". The fault was stored and every run for the next
+ * fifteen minutes was refused in ~35 ms: 16 team goals lost, all with nothing
+ * run, on a box that had answered fine seconds before. A run a model has
+ * already answered is proof the harness CAN get one to answer.
+ */
+describe("a model error after the model has answered", () => {
+  it("is a harness fault only before the first answer", () => {
+    const atStart = { tokensUsed: 0, sawModelAnswer: false };
+    expect(classifyHarnessFailure(UNRECOGNIZED, atStart)).toBe("harness_not_ready");
+    expect(classifyHarnessFailure("API Error: 401 Unauthorized", atStart)).toBe("harness_not_ready");
+  });
+
+  it("is the run's own failure once tokens were billed", () => {
+    expect(classifyHarnessFailure(UNRECOGNIZED, { tokensUsed: 563_595, sawModelAnswer: false })).toBe("run_failure");
+    expect(classifyHarnessFailure("authentication_error", { tokensUsed: 1, sawModelAnswer: false })).toBe("run_failure");
+  });
+
+  it("is the run's own failure once a real answer arrived, even with no usage reported", () => {
+    // Through a proxy that bills nothing on its assistant events, the answer
+    // itself is the evidence.
+    expect(classifyHarnessFailure(UNRECOGNIZED, { tokensUsed: 0, sawModelAnswer: true })).toBe("run_failure");
+    expect(modelAnswered({ tokensUsed: 0, sawModelAnswer: true })).toBe(true);
+    expect(modelAnswered({ tokensUsed: 0, sawModelAnswer: false })).toBe(false);
+  });
+
+  it("says nothing about an error that was never a harness fault", () => {
+    for (const evidence of [{ tokensUsed: 0, sawModelAnswer: false }, { tokensUsed: 10, sawModelAnswer: true }]) {
+      expect(classifyHarnessFailure("The task refers to a file that does not exist.", evidence)).toBeNull();
+      expect(classifyHarnessFailure(null, evidence)).toBeNull();
+    }
+  });
+
+  it("fails that run with the CLI's own line and records no fault", async () => {
+    // The bench's shape: real work streamed, a write asked for (so no silent
+    // retry — the second attempt would start from the first one's edits),
+    // then the model error many turns in.
+    installEmittingWrapper([
+      INIT,
+      answer([
+        { type: "text", text: "Writing the page." },
+        { type: "tool_use", id: "tu_1", name: "Write", input: { file_path: path.join(root, "data", "code-projects", "site", "index.html"), content: "<html>hi</html>" } },
+      ], { input_tokens: 562_000, output_tokens: 1_595 }),
+      midRunResultError(UNRECOGNIZED, 23),
+    ]);
+    enableAgent();
+    makeProject("site");
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+    expect(run.tokensUsed).toBeGreaterThan(0);
+    // Its own error, whole — not the device sentence.
+    expect(run.failureKind).toBeNull();
+    expect(run.error).toContain(UNRECOGNIZED);
+    expect(run.error).not.toContain(HARNESS_NOT_READY_SENTENCE);
+    // And no lockout: nothing stored, the box still reads healthy, and the
+    // next run is accepted rather than refused in milliseconds.
+    expect(readConfig()[HARNESS_FAULT_CONFIG_KEY]).toBeFalsy();
+    const readiness = await lib.checkReadiness();
+    expect(readiness.harnessHealthy).toBe(true);
+    expect(readiness.problems.join(" ")).not.toContain(HARNESS_NOT_READY_SENTENCE);
+    const next = await lib.startRun({ task: "build again", projectId: "site", source: "owner" });
+    await settled(next.id);
+  });
+
+  it("counts the first attempt's answers when the automatic retry is what fails", async () => {
+    // Answered, then the model error with nothing changed: the one automatic
+    // retry runs and is refused on its first request, with no answer of its
+    // own. The model answered THIS run seconds earlier, and the retry carries
+    // that evidence rather than starting from nothing.
+    const attempted = path.join(base, "attempted");
+    const lines = (ls: string[]) => ls.map((l) => `'${l.replace(/'/g, "'\\''")}'`).join(" ");
+    installWrapper([
+      `if [ -f "${attempted}" ]; then`,
+      `  printf '%s\\n' ${lines([INIT, resultError(UNRECOGNIZED)])}`,
+      "else",
+      `  touch "${attempted}"`,
+      `  printf '%s\\n' ${lines([
+        INIT,
+        answer([{ type: "text", text: "Looking around first." }], { input_tokens: 4_000, output_tokens: 120 }),
+        midRunResultError(UNRECOGNIZED, 2),
+      ])}`,
+      "fi",
+      "exit 1",
+    ].join("\n"));
+    enableAgent();
+    makeProject("site");
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner" })).id);
+
+    expect(fs.existsSync(attempted)).toBe(true);
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(1);
+    expect(run.failureKind).toBeNull();
+    expect(run.error).toContain(UNRECOGNIZED);
+    expect(readConfig()[HARNESS_FAULT_CONFIG_KEY]).toBeFalsy();
+    expect((await lib.checkReadiness()).harnessHealthy).toBe(true);
+  });
+
+  it("takes a real answer with no usage on it as the model answering", async () => {
+    installEmittingWrapper([
+      INIT,
+      answer([{ type: "text", text: "On it." }], null),
+      answer([{ type: "tool_use", id: "tu_1", name: "Bash", input: { command: "echo draft > notes.txt" } }], null, "msg_2"),
+      midRunResultError(UNRECOGNIZED, 3),
+    ]);
+    enableAgent();
+    makeProject("site");
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.tokensUsed).toBe(0);
+    expect(run.failureKind).toBeNull();
+    expect(readConfig()[HARNESS_FAULT_CONFIG_KEY]).toBeFalsy();
+    expect((await lib.checkReadiness()).harnessHealthy).toBe(true);
+  });
+
+  it("still locks out when a RESUMED run is refused on its first request", async () => {
+    // The record carries the tokens of the spawn before the pause; the resumed
+    // spawn never got a model to answer. That is the startup case again, and
+    // the record's old bill must not talk the box out of the lockout.
+    const never = path.join(base, "never");
+    installWrapper([
+      `printf '%s\\n' '${INIT}' '${answer([{ type: "text", text: "Starting." }], { input_tokens: 5_000, output_tokens: 200 })}'`,
+      `while [ ! -f "${never}" ]; do sleep 0.05; done`,
+      "exit 0",
+    ].join("\n"));
+    enableAgent();
+    makeProject("site");
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.tokensUsed).toBeGreaterThan(0); }, { timeout: 5_000 });
+    lib.pauseRun(started.id);
+    expect((await settled(started.id)).status).toBe("paused");
+
+    installFailingWrapper();
+    await lib.resumeRun(started.id);
+    const run = await settled(started.id);
+
+    expect(run.status).toBe("failed");
+    expect(run.tokensUsed).toBeGreaterThan(0);
+    expect(run.failureKind).toBe("harness_not_ready");
+    expect(run.error).toContain(HARNESS_NOT_READY_SENTENCE);
+    expect((await lib.checkReadiness()).harnessHealthy).toBe(false);
+  });
+
+  it("still locks out when the only 'answer' is the CLI's own error message at turn one", async () => {
+    // The startup case the lockout was built for, as the CLI really prints
+    // it: a synthetic assistant message carrying the API error, and a result
+    // that counts it as a turn. Neither is a model answering.
+    const refused = "API Error: 401 Unauthorized";
+    installEmittingWrapper([INIT, syntheticError(refused), midRunResultError(refused, 1)]);
+    enableAgent();
+    makeProject("site");
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.numTurns).toBeGreaterThan(0);
+    expect(run.tokensUsed).toBe(0);
+    expect(run.failureKind).toBe("harness_not_ready");
+    expect(run.error).toContain(HARNESS_NOT_READY_SENTENCE);
+    expect(run.error).toContain(refused);
+    expect((await lib.checkReadiness()).harnessHealthy).toBe(false);
+    await expect(lib.startRun({ task: "build again", projectId: "site", source: "owner" }))
+      .rejects.toThrow(/not ready/i);
   });
 });
 
