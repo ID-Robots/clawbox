@@ -436,6 +436,12 @@ bun run test:e2e         # End-to-end tests (Playwright)
 bun run check:mcp-tools  # Assert the MCP tool matrix matches mcp/README.md
 ```
 
+**On real hardware:** add the label `nano-test` to a pull request into `beta` and
+[Nano hardware tests](.github/workflows/nano-hardware-tests.yml) runs the
+on-device suite on one free Jetson from the nano lab, then cleans the board up
+and releases it. What it checks, how cleanup works and how to add a test:
+[docs/nano-hardware-tests.md](docs/nano-hardware-tests.md).
+
 ### Environment Variables
 
 | Variable | Default | Description |
