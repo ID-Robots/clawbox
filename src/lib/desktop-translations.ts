@@ -1081,7 +1081,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "files.zipPreparing": "Preparing {name}…",
     "files.zipStarted": "Downloading {name} — {count} file(s), {size}",
     "files.zipTooMany": "Too many files for one ZIP (limit {max}) — download a subfolder instead.",
-    "files.zipLeftOut": "node_modules and cache folders are left out",
+    "files.zipLeftOut": "node_modules, cache folders and local AI models are left out",
     "files.selectAll": "Select all",
     "files.clearSelection": "Clear selection",
     "files.selectedCount": "{count} selected",

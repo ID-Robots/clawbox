@@ -94,6 +94,26 @@ describe("/setup-api/project-folders", () => {
     expect(junk.status).toBe(400);
   });
 
+  it("refuses the box's data directory and the checkout above it with protected/403; a public subtree of it can still be pinned", async () => {
+    fs.mkdirSync(path.join(HOME, "clawbox", "data", "code-projects", "hello"), { recursive: true });
+    try {
+      for (const typed of ["~/clawbox/data", path.join(HOME, "clawbox", "data"), "clawbox/data/", "~/clawbox"]) {
+        const res = await route.POST(req("/setup-api/project-folders", { method: "POST", body: { path: typed } }));
+        expect(res.status, typed).toBe(403);
+        expect(await res.json(), typed).toEqual({
+          error: "That folder holds the box's private data and cannot be shown here",
+          code: "protected",
+        });
+      }
+      expect((await (await route.GET()).json()).folders).toEqual([]);
+      const ok = await route.POST(req("/setup-api/project-folders", { method: "POST", body: { path: "~/clawbox/data/code-projects" } }));
+      expect(ok.status).toBe(200);
+      expect((await ok.json()).folder).toEqual({ path: "clawbox/data/code-projects", name: "code-projects" });
+    } finally {
+      fs.rmSync(path.join(HOME, "clawbox", "data", "code-projects"), { recursive: true, force: true });
+    }
+  });
+
   it("unpins by ?path=, and a folder that has gone can still be unpinned", async () => {
     fs.mkdirSync(path.join(HOME, "site"));
     await route.POST(req("/setup-api/project-folders", { method: "POST", body: { path: "site" } }));

@@ -88,6 +88,53 @@ describe("GET /setup-api/files/<folder>?zip=1", () => {
   });
 });
 
+describe("the local models stay out of a folder ZIP", () => {
+  // CLAWBOX_ROOT is the test root, so the data directory is `<root>/data`.
+  const DATA = path.join(TEST_ROOT, "data");
+  const SPARSE_BIG = 256 * 1024 * 1024 + 1;
+
+  beforeAll(() => {
+    fs.mkdirSync(path.join(DATA, "llamacpp", "models"), { recursive: true });
+    fs.writeFileSync(path.join(DATA, "llamacpp", "models", "gemma-4-E2B_q4_0-it.gguf"), "GGUF weights");
+    fs.writeFileSync(path.join(DATA, "llamacpp", "llama-server.log"), "started\n");
+    fs.writeFileSync(path.join(DATA, "config.json"), "{}");
+    fs.mkdirSync(path.join(TEST_ROOT, "Modell", "weights"), { recursive: true });
+    fs.writeFileSync(path.join(TEST_ROOT, "Modell", "weights", "tiny.gguf"), "GGUF");
+    // Sparse: past the size line without writing 256 MiB to the disk.
+    fs.closeSync(fs.openSync(path.join(TEST_ROOT, "Modell", "weights", "big.gguf"), "w"));
+    fs.truncateSync(path.join(TEST_ROOT, "Modell", "weights", "big.gguf"), SPARSE_BIG);
+  });
+
+  it("a .gguf model under data/llamacpp/models is left out, the rest of the public subtree is not", async () => {
+    const check = await get(["data"], "?zip=1&check=1");
+    expect(check.status).toBe(200);
+    // data/, llamacpp/, llama-server.log — no models/ folder, no config.json.
+    expect(await check.json()).toMatchObject({ entries: 3, files: 1, bytes: "started\n".length });
+
+    const res = await get(["data"], "?zip=1");
+    expect(res.status).toBe(200);
+    const body = Buffer.from(await res.arrayBuffer()).toString("latin1");
+    expect(body).toContain("data/llamacpp/llama-server.log");
+    expect(body).not.toContain("models");
+    expect(body).not.toContain(".gguf");
+    expect(body).not.toContain("config.json");
+  });
+
+  it("a .gguf past 256 MiB anywhere else is left out; a small one stays", async () => {
+    const res = await get(["Modell"], "?zip=1&check=1");
+    expect(await res.json()).toMatchObject({ entries: 3, files: 1, bytes: "GGUF".length });
+  });
+
+  it("a selection ZIP walks folders by the same rule", async () => {
+    const { summarizeSelectionForZip } = await import("@/lib/zip-stream");
+    const summary = await summarizeSelectionForZip([
+      { abs: path.join(DATA, "llamacpp"), name: "llamacpp" },
+      { abs: path.join(TEST_ROOT, "Modell"), name: "Modell" },
+    ]);
+    expect(summary).toMatchObject({ files: 2, bytes: "started\n".length + "GGUF".length });
+  });
+});
+
 describe("GET ?zip=1&check=1 past the entry cap", () => {
   it("answers 413 too_many_entries, so the Files app can say so before a download starts", async () => {
     vi.resetModules();
