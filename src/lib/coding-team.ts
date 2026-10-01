@@ -1081,7 +1081,8 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
  * rule. The re-ask continues the reviewer's own session with
  * `REVIEWER_NUDGE`, under the same budget as the review (`settle`), and is a
  * note on the board, never an alert; only a second answer without the
- * object is the alert, quoting how that answer began. An object that is
+ * object is the alert, quoting how that answer began — or, when the re-ask
+ * could not start or did not finish, how the first one did. An object that is
  * there but wrong is what the reviewer said: the alert at once, as before.
  *
  * `who` names the reviewer the way the board does; `reask` starts the
@@ -1103,13 +1104,19 @@ async function verdictOf(
   bus.send(SYSTEM, { type: "note", ...(taskId ? { task_id: taskId } : {}), text: `${who} answered without a JSON verdict; asking it once more for the verdict alone. It answered: ${answerHead(first)}` });
   const again = await reask(settled.id);
   if (again === null) return null;
-  if (!("id" in again)) return { ok: false, reason: parsed.reason, alert: `${who} gave no verdict: ${parsed.reason} Asked once more, it could not start: ${again.reason}` };
+  // A re-ask that came to nothing leaves the first answer as the only clue, so
+  // the alert quotes it too — last, so the board's cut of a long alert takes
+  // the quote's tail, never what became of the re-ask.
+  const said = first?.trim() ? ` It had answered: ${answerHead(first)}` : "";
+  if (!("id" in again)) {
+    return { ok: false, reason: parsed.reason, alert: `${who} gave no verdict: ${parsed.reason} Asked once more, it could not start: ${again.reason.trim().replace(/\.+$/, "")}.${said}` };
+  }
   board.runs.push({ id: again.id, role: "reviewer", taskId });
   saveBoard(board);
   const resettled = await settle(team, again.id);
   if (team.stopRequested) return null;
   if (resettled?.status !== "completed") {
-    return { ok: false, reason: parsed.reason, alert: `${who} gave no verdict: ${parsed.reason} Asked once more, it (${again.id}) ended ${resettled?.status ?? "without a record"}.` };
+    return { ok: false, reason: parsed.reason, alert: `${who} gave no verdict: ${parsed.reason} Asked once more, it (${again.id}) ended ${resettled?.status ?? "without a record"}.${said}` };
   }
   const second = resettled.resultText ?? resettled.summary;
   const reparsed = parseVerdict(second);
