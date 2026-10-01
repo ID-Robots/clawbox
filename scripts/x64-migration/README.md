@@ -158,8 +158,10 @@ The three pieces that then work together:
   opens, activates and closes the kiosk Chrome's tabs over the loopback CDP
   port (`CLAWBOX_KIOSK_CDP_PORT`, default 18801). The kiosk URL is read from
   `/etc/clawbox/kiosk.env` (`CLAWBOX_KIOSK_URL`, default
-  `http://localhost:3005/`). On a box with nothing on the port it answers
-  `{ available: false }` and the desktop draws nothing.
+  `http://localhost:3005/`). A box without that file (every Jetson) never
+  dials the port — OpenClaw's own browsers use 18800 and up there — and on a
+  box with nothing on the port it answers `{ available: false }` and the
+  desktop draws nothing.
 - The desktop shelf shows the kiosk's pages as ONE app, Web (`web` in
   `src/lib/desktop-apps.ts`), drawn like any other open app: its icon joins
   the shelf while a page is open, with a dot per page (up to four); a click
@@ -168,7 +170,8 @@ The three pieces that then work together:
   Close, which closes every page. `openInKiosk(url)` routes the desktop's
   "open an external page" clicks (Anthropic sign-in, the store, VNC) through
   the kiosk API; elsewhere it is the plain `window.open` it always was.
-- `kiosk/extension` — an MV3 extension (permission: `tabs` only) that draws a
+- `kiosk/extension` — an MV3 extension (permissions: `tabs`, `debugger`, and
+  the host `http://127.0.0.1/*` for the kiosk's CDP port) that draws a
   40 px ClawBox bar on every page the desktop opens, in the desktop's own
   tokens (`--ground`, coral, Satoshi/system-ui): back to ClawBox (its first
   tab wears the desktop's crab, `logo.png` = `public/clawbox-icon.png`, and
@@ -196,7 +199,11 @@ The three pieces that then work together:
   The bar is `bar.js`, mounted by `content.js` on web pages, by `newtab.html`
   on the start page (content scripts do not run on `chrome-extension://`
   pages, so the start page loads it with a script tag) and by `desktop.js` on
-  the desktop page itself — there always, as the kiosk's tab strip: the
+  localhost and 127.0.0.1 (which the web-page script leaves out, Chrome
+  ignoring the port): a page the desktop opened there — `/app/<id>`,
+  `/apps/<id>/`, the Hermes dashboard, a dev server — gets the same web-page
+  bar, the shell's own pages (login, setup, updating, portal) get none, and
+  the desktop page itself gets it always, as the kiosk's tab strip: the
   ClawBox chip is the current page, the chips switch to the others and `+`
   opens a new tab on the start page; the address box, back / forward / reload
   and Close are left out there. On the desktop it wears the shelf's glass (the same

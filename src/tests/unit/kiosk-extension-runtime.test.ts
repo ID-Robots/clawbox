@@ -417,3 +417,50 @@ describe("newtab.js", () => {
     }
   });
 });
+
+describe("desktop.js", () => {
+  // Chrome ignores the port in a match pattern, so this runs on every server
+  // on localhost and 127.0.0.1. Only the desktop's own "/" is the desktop;
+  // a page the desktop OPENED there needs the web-page bar, or a --kiosk tab
+  // has no way back.
+  let saved: { bar: Globals["clawboxKioskBar"]; offset: Globals["clawboxKioskOffset"] };
+  beforeEach(() => { saved = { bar: g.clawboxKioskBar, offset: g.clawboxKioskOffset }; });
+  afterEach(() => { g.clawboxKioskBar = saved.bar; g.clawboxKioskOffset = saved.offset; });
+
+  function run(href: string) {
+    const url = new URL(href);
+    const mount = vi.fn(() => true);
+    const start = vi.fn();
+    g.clawboxKioskBar = { BAR_H, mount } as unknown as Globals["clawboxKioskBar"];
+    g.clawboxKioskOffset = { start };
+    new Function("location", source("desktop.js"))({ origin: url.origin, pathname: url.pathname });
+    return { mount, start };
+  }
+
+  it("is the desktop's tab strip on the desktop itself", () => {
+    for (const href of ["http://localhost:3005/", "http://127.0.0.1:3005/?x=1", "http://localhost/"]) {
+      const { mount, start } = run(href);
+      expect(mount, href).toHaveBeenCalledWith({ desktop: true });
+      expect(start, href).not.toHaveBeenCalled();
+    }
+  });
+
+  it("leaves the shell's own pages alone", () => {
+    for (const href of ["http://localhost:3005/login", "http://localhost:3005/setup/wifi", "http://127.0.0.1/updating", "http://localhost:3005/portal"]) {
+      const { mount, start } = run(href);
+      expect(mount, href).not.toHaveBeenCalled();
+      expect(start, href).not.toHaveBeenCalled();
+    }
+  });
+
+  it("gives a page the desktop opened the web-page bar, laid out below it", () => {
+    for (const href of [
+      "http://localhost:3005/app/vnc", "http://localhost:3005/apps/shop/", "http://localhost:3005/chat",
+      "http://localhost:8090/", "http://127.0.0.1:5173/",
+    ]) {
+      const { mount, start } = run(href);
+      expect(mount, href).toHaveBeenCalledWith({ startPage: false });
+      expect(start, href).toHaveBeenCalledWith(BAR_H);
+    }
+  });
+});

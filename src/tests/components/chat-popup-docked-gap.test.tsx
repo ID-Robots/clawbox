@@ -4,6 +4,7 @@ import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import ChatPopup, { CHAT_PANEL_GAP } from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { DESKTOP_GAP } from "@/lib/window-snap";
+import { KIOSK_BAR_VAR } from "@/lib/kiosk-bar-inset";
 
 // A jsdom mount of `ChatPopup` — the fake gateway handshake, the model seed,
 // the transcript — costs seconds under a full parallel run, and a case does it
@@ -109,5 +110,27 @@ describe("the docked chat's margins", () => {
     // because page.tsx persists what it is told and hands it back as the width.
     expect(onPanelModeChange).toHaveBeenCalledWith(DEFAULT_PANEL_WIDTH);
     expect(screen.getByTestId("chat-popup").style.right).toBe(`${DESKTOP_GAP}px`);
+  });
+});
+
+describe("under the kiosk bar", () => {
+  // The internal kiosk draws a 40 px bar over the top of the screen; every
+  // other box has none, and nothing about the chat may change there.
+  afterEach(() => { document.documentElement.style.removeProperty(KIOSK_BAR_VAR); });
+
+  it("keeps the floating chat's header below the screen's top, exactly as before, with no bar", () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    expect(screen.getByTestId("chat-popup").style.maxHeight).toBe("calc(100vh - 182px)");
+  });
+
+  it("keeps the floating chat's header and the docked panel below the bar", () => {
+    document.documentElement.style.setProperty(KIOSK_BAR_VAR, "40px");
+    const { unmount } = render(<ChatPopup isOpen onClose={() => {}} />);
+    // Anchored 170 px from the bottom: at its tallest the header would sit
+    // 12 px from the top, under the bar.
+    expect(screen.getByTestId("chat-popup").style.maxHeight).toBe("calc(100vh - 222px)");
+    unmount();
+    render(<ChatPopup isOpen onClose={() => {}} initialPanelWidth={DEFAULT_PANEL_WIDTH} />);
+    expect(screen.getByTestId("chat-popup").style.top).toBe(`${40 + DESKTOP_GAP}px`);
   });
 });

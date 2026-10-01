@@ -95,17 +95,25 @@ type KioskCommand =
   | { action: "activate"; id: string }
   | { action: "close"; id: string };
 
-/** One command to the kiosk. True when Chrome did it. */
-async function kioskCommand(body: KioskCommand): Promise<boolean> {
+/**
+ * One command to the kiosk: `done` when Chrome did it, `refused` when the box
+ * said no to the request itself (a 4xx: an invalid URL or id, a session that
+ * is not the owner's), `unavailable` when the kiosk could not do it (no
+ * answer, its port dark — 503 — or Chrome refusing over CDP — 502).
+ */
+type KioskCommandResult = "done" | "refused" | "unavailable";
+
+async function kioskCommand(body: KioskCommand): Promise<KioskCommandResult> {
   try {
     const res = await fetch(KIOSK_TABS_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    return res.ok;
+    if (res.ok) return "done";
+    return res.status >= 400 && res.status < 500 ? "refused" : "unavailable";
   } catch {
-    return false;
+    return "unavailable";
   }
 }
 
@@ -114,9 +122,11 @@ async function kioskCommand(body: KioskCommand): Promise<boolean> {
  *
  * On the kiosk the page is opened THROUGH the kiosk API, and the taskbar is
  * told at once (`KIOSK_TABS_CHANGED_EVENT`) rather than at its next tick. If
- * that fails — the kiosk Chrome's port went dark — the old `window.open`
- * runs, which in the kiosk is still a new tab (a localhost round trip is well
- * inside the click's activation window, so the popup is still allowed).
+ * the kiosk could not do it — its port went dark, or Chrome refused — the old
+ * `window.open` runs, which in the kiosk is still a new tab (a localhost round
+ * trip is well inside the click's activation window, so the popup is still
+ * allowed). A request the box REFUSED (a 4xx) opens nothing: going round the
+ * refusal would do exactly what it said no to.
  *
  * Everywhere else this IS `window.open(url, "_blank", features)`, called in the
  * same tick as the click: nothing a browser allowed before is blocked now.
@@ -136,9 +146,9 @@ export function openInKiosk(url: string, features = "noopener,noreferrer"): void
     window.open(url, "_blank", features);
     return;
   }
-  void kioskCommand({ action: "open", url: absolute }).then((done) => {
-    if (done) window.dispatchEvent(new Event(KIOSK_TABS_CHANGED_EVENT));
-    else window.open(url, "_blank", features);
+  void kioskCommand({ action: "open", url: absolute }).then((result) => {
+    if (result === "done") window.dispatchEvent(new Event(KIOSK_TABS_CHANGED_EVENT));
+    else if (result === "unavailable") window.open(url, "_blank", features);
   });
 }
 

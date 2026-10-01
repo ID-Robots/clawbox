@@ -63,11 +63,21 @@ add_flag() {
 
 # A stale remote-debugging line for another port or an old extension path
 # would otherwise sit beside the new one; Chrome takes the last, but the file
-# should say one thing.
+# should say one thing. Removed from a copy first, so the backup is the
+# launcher as it was before ANY edit, and a removal alone still counts as a
+# change (the reboot below is what makes the session drop the old flag).
+orig="$(mktemp)"
+cp -a "$LAUNCHER" "$orig"
 sed -i "/^  --remote-debugging-port=/{/=$PORT\$/!d}" "$LAUNCHER"
 sed -i "/^  --load-extension=/{\|=$EXT\$|!d}" "$LAUNCHER"
 sed -i "/^  --disable-extensions-except=/{\|=$EXT\$|!d}" "$LAUNCHER"
 sed -i "/^  --remote-allow-origins=/{\|=chrome-extension://$EXT_ID\$|!d}" "$LAUNCHER"
+if ! cmp -s "$orig" "$LAUNCHER"; then
+  cp -a "$orig" "$LAUNCHER.bak"
+  changed=1
+  echo "removed stale kiosk flags"
+fi
+rm -f "$orig"
 
 add_flag "--remote-debugging-address=127.0.0.1"
 add_flag "--remote-debugging-port=$PORT"

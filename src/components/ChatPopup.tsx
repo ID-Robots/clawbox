@@ -6687,12 +6687,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 // budget must subtract that anchor too — the old flat
                 // `100vh - 60px` let a 500px-tall popup shove its header (pills,
                 // close button) off the TOP of short/zoomed viewports, which
-                // looked completely broken. Reserve anchor + 12px top margin.
+                // looked completely broken. Reserve anchor + 12px top margin,
+                // and the kiosk bar's height on the laptop (0 everywhere
+                // else), which covers the top of the screen there.
                 maxHeight: pos
                   ? 'calc(100vh - 60px)'
                   : trayMode
-                    ? 'calc(100vh - 77px)'
-                    : 'calc(100vh - 182px)',
+                    ? `calc(100vh - ${77 + barInset}px)`
+                    : `calc(100vh - ${182 + barInset}px)`,
                 borderRadius: 16,
               }),
         // The docked panel owns its strip and stays above the windows beside

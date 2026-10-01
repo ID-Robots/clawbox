@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ClawBox Kiosk Tabs",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "A slim ClawBox bar on every page the ClawBox desktop opens in the kiosk Chrome — back to ClawBox, switch between open pages, back/forward/reload, a centred address bar, a new tab on a ClawBox start page, close this one, open DevTools on it — with the page laid out below it, and on the desktop itself as its tab strip. The kiosk runs --kiosk and has no tab strip of its own.",
   "permissions": [
     "tabs",
@@ -48,7 +48,11 @@
       ],
       "js": [
         "bar.js",
+        "offset.js",
         "desktop.js"
+      ],
+      "css": [
+        "content.css"
       ],
       "run_at": "document_idle",
       "all_frames": false

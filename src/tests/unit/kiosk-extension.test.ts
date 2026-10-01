@@ -89,28 +89,35 @@ describe("kiosk extension", () => {
     // bar.js and offset.js first: content.js is one call into each.
     expect(web.js).toEqual(["bar.js", "offset.js", "content.js"]);
     expect(web.css).toEqual(["content.css"]);
-    // The desktop's origins, exactly what the web-page script leaves out, with
-    // no stylesheet: content.css pushes a page down, which the desktop's fixed
-    // layout cannot take — it makes room itself.
+    // The desktop's hosts, exactly what the web-page script leaves out. The
+    // pages the desktop opened there get the web-page bar and its offset, so
+    // the same two files and the same stylesheet — which keys on the class a
+    // web-page mount adds, never on the desktop (it makes its own room).
     expect([...desk.matches].sort()).toEqual([...web.exclude_matches].sort());
-    expect(desk.js).toEqual(["bar.js", "desktop.js"]);
-    expect(desk.css).toBeUndefined();
+    expect(desk.js).toEqual(["bar.js", "offset.js", "desktop.js"]);
+    expect(desk.css).toEqual(["content.css"]);
+    expect(read("content.css")).toMatch(/^html\.clawbox-kiosk-bar-shown \{/m);
     expect(desk.all_frames).toBe(false);
   });
 
-  it("desktop.js mounts on the desktop page of the desktop's origins only", () => {
+  it("desktop.js: the desktop bar on the desktop, nothing on the shell, the web bar everywhere else", () => {
     const desk = read("desktop.js");
+    const bg = read("background.js");
     const origins = (src: string) => {
       const m = /const DESKTOP_ORIGINS = \[([\s\S]*?)\];/.exec(src);
       if (!m) throw new Error("DESKTOP_ORIGINS not found");
       return [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
     };
-    // One list of desktop origins, in the worker and in the content script.
-    expect(origins(desk)).toEqual(origins(read("background.js")));
+    const shellPath = (src: string) => /const SHELL_PATH = (\/.*\/);/.exec(src)?.[1];
+    // One list of desktop origins and one shell rule, in the worker and here.
+    expect(origins(desk)).toEqual(origins(bg));
+    expect(shellPath(desk)).toBeTruthy();
+    expect(shellPath(desk)).toBe(shellPath(bg));
     // Chrome ignores the port in a match pattern, so the script checks the
-    // origin itself — a dev server's "/" on localhost must not get the bar.
-    expect(desk).toContain('location.pathname === "/" && DESKTOP_ORIGINS.includes(here)');
-    expect(desk).toContain("clawboxKioskBar.mount({ desktop: true })");
+    // origin itself: only the desktop's "/" gets the desktop bar.
+    expect(desk).toMatch(/if \(DESKTOP_ORIGINS\.includes\(here\)\) \{\s*if \(location\.pathname === "\/"\) \{\s*clawboxKioskBar\.mount\(\{ desktop: true \}\);\s*return;\s*\}\s*if \(SHELL_PATH\.test\(location\.pathname\)\) return;\s*\}/);
+    // A page the desktop opened there gets what content.js gives a web page.
+    expect(desk).toMatch(/if \(clawboxKioskBar\.mount\(\{ startPage: false \}\)\) \{\s*clawboxKioskOffset\.start\(clawboxKioskBar\.BAR_H\);\s*\}/);
   });
 
   it("on the desktop, the bar is always up and tells the desktop its height", () => {

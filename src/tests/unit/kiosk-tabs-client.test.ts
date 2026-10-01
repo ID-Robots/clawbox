@@ -124,12 +124,38 @@ describe("openInKiosk", () => {
     window.removeEventListener(KIOSK_TABS_CHANGED_EVENT, changed);
   });
 
-  it("falls back to window.open when the kiosk refuses", async () => {
+  it("falls back to window.open when the kiosk could not do it: its port dark, or Chrome refusing", async () => {
     onKiosk(true);
-    postStatus = 503;
+    for (const status of [503, 502]) {
+      postStatus = status;
+      openInKiosk("https://claude.ai/oauth");
+      await flush();
+      expect(window.open, String(status)).toHaveBeenLastCalledWith("https://claude.ai/oauth", "_blank", "noopener,noreferrer");
+    }
+    expect(window.open).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back when the request never got an answer", async () => {
+    onKiosk(true);
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("fetch failed"));
     openInKiosk("https://claude.ai/oauth");
     await flush();
     expect(window.open).toHaveBeenCalledWith("https://claude.ai/oauth", "_blank", "noopener,noreferrer");
+  });
+
+  it("opens nothing when the box refused the request itself — going round it would do what it refused", async () => {
+    onKiosk(true);
+    const changed = vi.fn();
+    window.addEventListener(KIOSK_TABS_CHANGED_EVENT, changed);
+    for (const status of [400, 403]) {
+      postStatus = status;
+      openInKiosk("https://claude.ai/oauth");
+      await flush();
+    }
+    expect(reqs.filter((r) => r.method === "POST")).toHaveLength(2);
+    expect(window.open).not.toHaveBeenCalled();
+    expect(changed).not.toHaveBeenCalled();
+    window.removeEventListener(KIOSK_TABS_CHANGED_EVENT, changed);
   });
 });
 
