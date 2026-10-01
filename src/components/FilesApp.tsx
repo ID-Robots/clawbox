@@ -7,6 +7,13 @@ import { useTr } from "@/lib/i18n-floor";
 import { fileExtension, fileIcon, formatSize, Icon } from "./file-icons";
 import CodeEditor from "./CodeEditor";
 import { languageForFile } from "@/lib/code-language";
+import { useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
+import {
+  shouldShowBackupSuggestion,
+  type BackupOverview,
+  type FolderBackupSummary,
+} from "@/lib/project-backup-shared";
+import { BackupSuggestionCard, GitHubHelpDialog, ProjectBackupPanel, backupRowText } from "./ProjectBackup";
 import {
   EMPTY_SELECTION,
   canMoveInto,
@@ -502,6 +509,64 @@ export default function FilesApp({ initialPath = "", initialPlace }: { initialPa
     } catch (e) {
       showStatus(t("files.errorPrefix", { message: e instanceof Error ? e.message : String(e) }));
     }
+  };
+
+  // ─── GitHub backup of project folders (TASK-1358) ──────────────────────────
+
+  // Who is signed in: the suggestion card is the OWNER's alone, and a session
+  // the box has said is someone else's never asks the owner's routes at all.
+  const sessionUser = useSessionUser();
+  const mayUseOwnerApis = useMayUseOwnerApis();
+  const [backupOverview, setBackupOverview] = useState<BackupOverview | null>(null);
+  const [backupFor, setBackupFor] = useState<ProjectFolder | null>(null);
+  const [backupHelpOpen, setBackupHelpOpen] = useState(false);
+  const [backupClock, setBackupClock] = useState(() => Date.now());
+
+  // Read when the Projects view is on screen (it asks GitHub whether the box
+  // is connected, so not on every folder a window opens), and again after the
+  // panel changed something.
+  const loadBackupOverview = useCallback(async () => {
+    try {
+      const res = await fetch("/setup-api/project-backup", { cache: "no-store" });
+      const data = await res.json().catch(() => null) as Partial<BackupOverview> | null;
+      if (!res.ok || !data || !data.github || typeof data.github.connected !== "boolean" || !Array.isArray(data.folders)) return;
+      setBackupOverview({
+        github: data.github,
+        folders: data.folders.filter((f): f is FolderBackupSummary => !!f && typeof f.path === "string" && typeof f.state === "string"),
+        suggestionDismissedAt: typeof data.suggestionDismissedAt === "number" ? data.suggestionDismissedAt : null,
+      });
+      setBackupClock(Date.now());
+    } catch { /* no badges and no card — the Projects view itself is unaffected */ }
+  }, []);
+  useEffect(() => {
+    if (place === "projects" && mayUseOwnerApis === true) void loadBackupOverview();
+  }, [place, mayUseOwnerApis, loadBackupOverview]);
+
+  const backupSummaries: Record<string, FolderBackupSummary> = {};
+  for (const f of backupOverview?.folders ?? []) backupSummaries[f.path] = f;
+  const presentProjects = projects.filter((f) => !f.missing);
+  const showBackupSuggestion = shouldShowBackupSuggestion({
+    isOwner: sessionUser?.isOwner,
+    github: backupOverview?.github ?? null,
+    folders: (backupOverview?.folders ?? []).filter((f) => presentProjects.some((p) => p.path === f.path)),
+    dismissedAt: backupOverview?.suggestionDismissedAt ?? null,
+    now: backupClock,
+  });
+
+  const dismissBackupSuggestion = () => {
+    const at = Date.now();
+    setBackupOverview((o) => (o ? { ...o, suggestionDismissedAt: at } : o));
+    void fetch("/setup-api/project-backup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "dismiss_suggestion" }),
+    }).catch(() => { /* shown again next time; nothing lost */ });
+  };
+
+  /** "Set up backup": the first pinned folder with no online copy, else the first one. */
+  const setUpBackup = () => {
+    const first = presentProjects.find((p) => backupSummaries[p.path]?.state === "none") ?? presentProjects[0];
+    if (first) setBackupFor(first);
   };
 
   /** The pin for exactly this folder, if it has one. */
@@ -1373,6 +1438,18 @@ export default function FilesApp({ initialPath = "", initialPlace }: { initialPa
             </div>
           ) : (
           <div className="flex items-center gap-1 shrink-0">
+            {projectRoot && !error && (
+              <button
+                onClick={() => setBackupFor(projectRoot)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm transition-colors bg-white/[0.06] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.1] cursor-pointer"
+                title={t("files.backup.buttonTitle", { name: projectRoot.name })}
+                aria-label={t("files.backup.buttonTitle", { name: projectRoot.name })}
+                data-testid="files-backup-toolbar"
+              >
+                <Icon name="cloud_upload" size={16} />
+                {!narrow && <span>{t("files.backup.button")}</span>}
+              </button>
+            )}
             {currentPath && !error && (() => {
               const pinned = !!pinFor(currentPath);
               const label = pinned ? t("files.unpinFolder") : t("files.pinFolder");
@@ -1518,6 +1595,16 @@ export default function FilesApp({ initialPath = "", initialPlace }: { initialPa
               onRemove={(folder) => void unpinFolder(folder)}
               onAdd={pinFolder}
               onRetry={() => void loadProjects()}
+              backup={backupSummaries}
+              backupClock={backupClock}
+              onBackup={(folder) => setBackupFor(folder)}
+              suggestion={showBackupSuggestion ? (
+                <BackupSuggestionCard
+                  onSetUp={setUpBackup}
+                  onDismiss={dismissBackupSuggestion}
+                  onLearnMore={() => setBackupHelpOpen(true)}
+                />
+              ) : null}
             />
           </div>
         ) : (
@@ -1713,6 +1800,16 @@ export default function FilesApp({ initialPath = "", initialPlace }: { initialPa
         />
       )}
 
+      {backupFor && (
+        <ProjectBackupPanel
+          folder={backupFor}
+          onClose={() => setBackupFor(null)}
+          onChanged={() => void loadBackupOverview()}
+        />
+      )}
+
+      {backupHelpOpen && <GitHubHelpDialog onClose={() => setBackupHelpOpen(false)} />}
+
       {uploadOpen && (
         <UploadDialog
           initialDir={currentPath}
@@ -1734,7 +1831,10 @@ export default function FilesApp({ initialPath = "", initialPlace }: { initialPa
 // The owner's pinned folders, what this box already keeps projects in, and a
 // path box for anything else. Every folder opens as an ordinary Files folder;
 // this view only decides which ones are a click away.
-function ProjectsView({ folders, suggestions, state, narrow, onOpen, onDownload, onRemove, onAdd, onRetry }: {
+function ProjectsView({
+  folders, suggestions, state, narrow, onOpen, onDownload, onRemove, onAdd, onRetry,
+  backup = {}, backupClock = 0, onBackup, suggestion = null,
+}: {
   folders: ProjectFolder[];
   suggestions: ProjectFolder[];
   state: "loading" | "ready" | "error";
@@ -1745,8 +1845,15 @@ function ProjectsView({ folders, suggestions, state, narrow, onOpen, onDownload,
   /** Pin by path; answers the refusal it showed, or null once it landed. */
   onAdd: (path: string) => Promise<string | null>;
   onRetry: () => void;
+  /** Each pinned folder's GitHub backup state, by path (TASK-1358). */
+  backup?: Record<string, FolderBackupSummary>;
+  /** The clock the "Backed up 2 hours ago" lines are measured against. */
+  backupClock?: number;
+  onBackup?: (folder: ProjectFolder) => void;
+  /** The "keep a safe copy on GitHub" card, when it should show. */
+  suggestion?: React.ReactNode;
 }) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const inputId = useId();
   const [typed, setTyped] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
@@ -1780,6 +1887,8 @@ function ProjectsView({ folders, suggestions, state, narrow, onOpen, onDownload,
           <p className="text-xs mt-0.5 leading-relaxed text-[var(--text-muted)]">{t("files.projectsIntro")}</p>
         </div>
       </div>
+
+      {suggestion}
 
       {folders.length === 0 ? (
         state === "loading" ? (
@@ -1820,6 +1929,20 @@ function ProjectsView({ folders, suggestions, state, narrow, onOpen, onDownload,
                   <span className="truncate text-[11px] text-[var(--text-muted)]">
                     {folder.missing ? t("files.projectMissing") : `~/${folder.path}`}
                   </span>
+                  {!folder.missing && (() => {
+                    const line = backupRowText(backup[folder.path], t, locale, backupClock);
+                    if (!line) return null;
+                    const state = backup[folder.path]?.state;
+                    return (
+                      <span
+                        className={`truncate text-[11px] flex items-center gap-1 ${state === "backed_up" ? "text-emerald-400/90" : "text-[var(--text-muted)]"}`}
+                        data-testid="files-project-backup-state"
+                      >
+                        <Icon name={state === "backed_up" ? "cloud_done" : state === "existing_git" ? "account_tree" : "cloud_off"} size={12} />
+                        {line}
+                      </span>
+                    );
+                  })()}
                 </span>
               </button>
               <div className="flex items-center gap-1.5 shrink-0">
@@ -1838,6 +1961,18 @@ function ProjectsView({ folders, suggestions, state, narrow, onOpen, onDownload,
                       <Icon name="folder_zip" size={15} />
                       {!narrow && <span>{t("files.downloadZip")}</span>}
                     </button>
+                    {onBackup && (
+                      <button
+                        onClick={() => onBackup(folder)}
+                        className={action}
+                        title={t("files.backup.buttonTitle", { name: folder.name })}
+                        aria-label={t("files.backup.buttonTitle", { name: folder.name })}
+                        data-testid="files-project-backup"
+                      >
+                        <Icon name="cloud_upload" size={15} />
+                        {!narrow && <span>{t("files.backup.button")}</span>}
+                      </button>
+                    )}
                   </>
                 )}
                 <button
