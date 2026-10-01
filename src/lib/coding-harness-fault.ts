@@ -30,6 +30,11 @@
  * harness fault is only declared on the FINAL failure — the retry is what
  * tells a flap apart from a fault, and only then is anything recorded.
  *
+ * ONLY BEFORE THE FIRST ANSWER. The same line arriving after a model has
+ * answered the run is not proof of anything about the harness — it plainly
+ * could get a model to answer — so that run fails with its own error and
+ * nothing is recorded. See `classifyHarnessFailure`.
+ *
  * WHY IT IS REMEMBERED, AND WHY NOT FOR EVER. Recorded, the next run can be
  * refused before it spawns, which is the difference between one clear message
  * and a column of identical dead runs. Given a TTL, because the same evidence
@@ -53,6 +58,54 @@ const HARNESS_FAULT_RE =
 /** Does this failure mean the harness itself is not ready? */
 export function isHarnessFault(error: string | null | undefined): boolean {
   return typeof error === "string" && HARNESS_FAULT_RE.test(error);
+}
+
+/**
+ * What a run showed of a model before it failed.
+ *
+ * Two signals, and deliberately not a third. `tokensUsed` is billed from the
+ * model's own usage reports, counted from the start of the current spawn and
+ * across its one automatic retry — NOT the record's whole bill, which a resume
+ * carries over from spawns long past. `sawModelAnswer` covers a backend that reports no
+ * usage on its assistant events. `numTurns` is NOT one of them: the CLI counts
+ * the message it writes ITSELF for an API error (model "<synthetic>", "API
+ * Error: 401 …") as a turn, so a harness refused on its very first request can
+ * finish with one turn and no model answer at all.
+ */
+export interface ModelAnswerEvidence {
+  /** Tokens billed since this spawn began, its automatic retry included. */
+  tokensUsed: number;
+  /** A real assistant message arrived — not one the CLI synthesised. */
+  sawModelAnswer: boolean;
+}
+
+/** Did a model answer this run at least once? */
+export function modelAnswered(evidence: ModelAnswerEvidence): boolean {
+  return evidence.tokensUsed > 0 || evidence.sawModelAnswer;
+}
+
+/**
+ * What a failed run's error says about the BOX.
+ *
+ *  - `"harness_not_ready"`: a harness-fault shape before any model answered —
+ *    the startup case the lockout was built for. Recorded, and the next runs
+ *    are refused until it clears.
+ *  - `"run_failure"`: the same shape AFTER a model had answered. The harness
+ *    demonstrably could get a model to answer, so this is the run's own
+ *    failure, kept with its own error and never recorded. Seen on a bench
+ *    (run-dazazpqx, 2026-09-30): a worker 347 s and 563,595 tokens into its
+ *    task hit a model error, was stored as a fault, and the 15-minute lockout
+ *    that followed refused 16 team goals on a box that was answering fine.
+ *  - `null`: not a harness-fault shape at all.
+ */
+export type HarnessFailureVerdict = "harness_not_ready" | "run_failure" | null;
+
+export function classifyHarnessFailure(
+  error: string | null | undefined,
+  evidence: ModelAnswerEvidence,
+): HarnessFailureVerdict {
+  if (!isHarnessFault(error)) return null;
+  return modelAnswered(evidence) ? "run_failure" : "harness_not_ready";
 }
 
 /**

@@ -32,7 +32,11 @@
  * The team's SHAPE is the planner's to choose per goal (TASK-1099): how many
  * workers run side by side (never more than the box's own slots) and how the
  * work is reviewed — a reviewer per task, one over the merged result, or the
- * rule alone. Every worker reads a bounded digest of the whole board. With
+ * rule alone. Whatever the shape, a team whose project has its own test suite
+ * is never "done" while that suite is red on the merged result (TASK-1321,
+ * `suiteGate`): the failing tests go back as a rejection, the tasks they point
+ * at are offered once more, and a suite still red after that fails the team.
+ * Every worker reads a bounded digest of the whole board. With
  * the owner's `coding_team_dynamic` switch on, the planner comes back as the
  * LEAD once per batch of settled workers — only when there is something to
  * decide — and may add or retire a few tasks; with it off, no lead run is
@@ -46,10 +50,13 @@
  */
 
 import { randomUUID } from "crypto";
+import fs from "fs";
+import path from "@/lib/runtime-path";
 import {
   CodingAgentError,
   getRun,
   getTeamDynamic,
+  harnessStateDir,
   isCodingAgentEnabled,
   MAX_TASK_CHARS,
   MAX_TEAM_WORKERS,
@@ -58,6 +65,7 @@ import {
   resolveWorkingDirectory,
   startRun,
   stopRun,
+  suiteSandbox,
   teamSpawnSlot,
   waitForRun,
   type CodingRun,
@@ -82,6 +90,7 @@ import {
 import { addWorkerWorktree, changedFiles, ensureTeamBranch, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
 import { hintInFolder, toFolderPaths } from "@/lib/coding-worktree-paths";
 import { FINAL_REVIEWER_BRIEF, finalReviewerTask, finalReviewRoom, parseVerdict, REVIEWER_BRIEF, reviewerTask } from "@/lib/coding-team-reviewer";
+import { runProjectSuite, suiteFailure, suiteNote, suiteRejection } from "@/lib/coding-team-suite";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
   allComplete,
@@ -95,6 +104,7 @@ import {
   loadBoard,
   MAX_DIGEST_CHARS,
   outsideFolderWriteDenial,
+  ownHarnessStateDenial,
   readOnlyDenial,
   readyTasks,
   saveBoard,
@@ -320,7 +330,9 @@ export interface TeamMessageSent {
  *
  * Every refusal of the SENDER's (the text, the claim, the target, the caps) is
  * logged on the board as an alert through the bus, like any message the bus
- * would not take, and throws a TeamMessageError with its code. A message the
+ * would not take, and throws a TeamMessageError with its code. A sibling that
+ * had already finished (SETTLED — a late answer racing its end) is logged as a
+ * note and counted as undelivered, never an alert, and throws too. A message the
  * BOX could not hand on (no chat session, the Hermes edition, a gateway that
  * refused it) is logged as an undelivered message instead — never an alert —
  * and throws its code too. A delivered message is a `message` entry on the
@@ -361,12 +373,14 @@ export async function sendTeamMessage(input: TeamMessageInput): Promise<TeamMess
     text: typeof input.text === "string" ? input.text : "",
   };
   // The sender's refusals: on the board as an alert — the bus's own words for
-  // a message it would not take — then the code to the caller.
+  // a message it would not take — then the code to the caller. A sibling that
+  // had already finished (SETTLED) is the bus's to log as a note instead: a
+  // late answer is a race, not the sender's fault. The caller hears either way.
   const refused = (code: TeamMessageRefusal, reason: string, nextAllowedAt: number | null = null): TeamMessageError => {
     try {
-      bus.refuse(actor, draft, `${code}: ${reason}`);
+      bus.refuse(actor, draft, `${code}: ${reason}`, code);
     } catch {
-      // refuse() always throws once the alert is logged; the caller gets the code.
+      // refuse() always throws once the entry is logged; the caller gets the code.
     }
     return new TeamMessageError(code, reason, nextAllowedAt);
   };
@@ -387,15 +401,21 @@ export async function sendTeamMessage(input: TeamMessageInput): Promise<TeamMess
   if (target === "sibling") {
     if (toRunId === fromRunId) throw refused("SELF", "A run does not send a message to itself.");
     if (!board.runs.some((r) => r.id === toRunId)) throw refused("NOT_IN_TEAM", `${toRunId} is not a run of team ${teamId}. ${reachable(board, fromRunId)}`);
-    const receiver = getRun(toRunId!);
-    if (!receiver || isSettled(receiver.status)) throw refused("SETTLED", `${toRunId} has finished; there is nothing left to tell it.`);
   }
+  // The caps before the receiver's state: a message to a sibling that has
+  // finished is a note that counts against them (TeamBus.refuse), so a run
+  // that keeps sending there meets RATE_LIMITED — an alert — instead of
+  // writing notes until the log's oldest entries fall off.
   const now = Date.now();
   const pending = team.pendingMessages.get(fromRunId) ?? 0;
   const allowance = teamMessageAllowance([...(ref.sentAt ?? []), ...Array.from({ length: pending }, () => now)], now);
   if (!allowance.ok) {
     const limited = rateLimitedError(allowance);
     throw refused("RATE_LIMITED", limited.message, limited.nextAllowedAt);
+  }
+  if (target === "sibling") {
+    const receiver = getRun(toRunId!);
+    if (!receiver || isSettled(receiver.status)) throw refused("SETTLED", `${toRunId} has finished; there is nothing left to tell it.`);
   }
 
   // The delivery.
@@ -612,6 +632,12 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // Tasks whose worker settled and that the lead has not looked at yet —
   // only ever filled while the owner's switch was on when the team started.
   const leadAfter: string[] = [];
+  // The project's own tests on the merged result (TASK-1321, `suiteGate`):
+  // how many times they ran, the words the team fails with when they are
+  // still red after the one re-attempt, and what they said when they passed.
+  let suiteRounds = 0;
+  let suiteFailed: string | null = null;
+  let suitePassed: string | null = null;
   while (!team.stopRequested) {
     const counted = board.alerts - team.uncountedAlerts;
     if (counted >= MAX_ALERTS) {
@@ -658,7 +684,24 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
       inFlight.set(task.task_id, work);
     }
     if (inFlight.size === 0) {
-      if (isExhausted(board)) break;
+      if (isExhausted(board)) {
+        // Every task is in. Before the team may say "done", the project's
+        // own tests on the merged result: red, the tasks the failure points
+        // at go back for their normal re-attempt — once — and the loop goes
+        // on (the lead, when there is one, looks first); red again, the team
+        // fails with the failing tests named.
+        if (allComplete(board)) {
+          const gate = await suiteGate(team, suiteRounds++ === 0);
+          if (team.stopRequested) break;
+          if (gate.reoffered.length) {
+            if (board.dynamic) leadAfter.push(...gate.reoffered);
+            continue;
+          }
+          suiteFailed = gate.failed;
+          suitePassed = gate.passed;
+        }
+        break;
+      }
       if (!waitingForRoom) break;
       await sleep(SLOT_WAIT_MS);
       continue;
@@ -670,11 +713,16 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   await Promise.allSettled([...inFlight.values()]);
   if (team.stopRequested) return;
   if (isSettledStatus(board.status)) return;
+  if (suiteFailed) {
+    setTeamStatus(board, SYSTEM, "failed", suiteFailed);
+    saveBoard(board);
+    return;
+  }
 
   // 3. The review over the merged result, when the planner asked for ONE
   //    rather than one per task — and only for work that is all there.
   if (allComplete(board) && board.shape?.review === "final") {
-    const verdict = await finalReview(team, source);
+    const verdict = await finalReview(team, source, suitePassed);
     if (team.stopRequested || isSettledStatus(board.status)) return;
     if (verdict?.verdict === "rejected") {
       setTeamStatus(board, SYSTEM, "failed", `The final review rejected the merged work: ${verdict.notes}`);
@@ -753,10 +801,16 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   const ok = settled?.status === "completed";
   let result = settled?.summary?.trim() || settled?.error || (ok ? "(no summary)" : `The run ended ${settled?.status ?? "without a record"}.`);
 
+  // What the worker wrote and removed again before it settled — a probe page a
+  // verifier made and deleted (bench, 2026-09-26) — is looked for now, while
+  // its worktree is still there to look in.
+  const vanished = settled ? vanishedFiles(settled.directory, settled.filesTouched) : new Set<string>();
+
   // The worker's commits come home. A merge git cannot do alone is not
   // guessed at: the task is REJECTED with the conflict named and offered
   // once more, and the next attempt starts from the merged state.
   let files: string[] = settled?.filesTouched ?? [];
+  let fromBranch = false;
   let mergeRefusal: string | null = null;
   if (ok && settled?.commitError) {
     // The runner could not commit the worker's work — in a worktree there
@@ -775,7 +829,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
       // What the branch changed; a worker that committed nothing has no
       // branch diff, and what it touched uncommitted is still what it touched.
       const diffed = await changedFiles(board.directory, worktree.branch);
-      if (diffed.length) files = diffed;
+      if (diffed.length) { files = diffed; fromBranch = true; }
       const merged = await mergeWorkerBranch(board.directory, worktree.branch, `Coding team ${board.id}: ${task.task_id} — ${firstLine(task.task_description, 72)}`);
       if (!merged.ok) {
         mergeRefusal = `${merged.conflict ? "MERGE CONFLICT" : "MERGE FAILED"}: ${firstLine(merged.detail, 300)}`;
@@ -804,37 +858,48 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   // with every deliverable on disk): the write stays refused, the worker was
   // told where to retry, and the review judges what it made. A refused write
   // inside the worktree or the project is still an alert, and so is a refused
-  // look into the harness's own state. Only when every refusal is judged: the
-  // run keeps the first few, and one it did not keep may have been a write —
-  // unless the runner counted it among the hinted ones.
+  // look into — or write to — the harness's own state, except the run's OWN
+  // corner of it: its project's memory folder, which the harness itself
+  // points it at (bench, 2026-09-26: a worker's `ls` there rejected correct,
+  // verified work). Every refusal is judged by its whole text where the record
+  // keeps one, so a long read-only probe is not an alert for its length. Only
+  // when every refusal is judged: the run keeps the first few, and one it did
+  // not keep may have been a write — unless the runner counted it among the
+  // hinted ones.
   let refusedWrite = false;
+  // A file it removed again merged nothing: judged by what it left. The
+  // branch's own diff is what merged, a deletion it names included.
+  const leftBehind = fromBranch ? files : files.filter((f) => !vanished.has(f));
+  const strayed = settled ? outsideHint(leftBehind, task.files_hint) : [];
   if (settled) {
     if (settled.permissionDenials > 0) {
       const n = settled.permissionDenials;
       const folders = worktree ? [worktree.path, board.directory] : [board.directory];
       const outsideWrite = (a: string) => outsideFolderWriteDenial(a, folders);
+      const own = { stateDir: harnessStateDir(settled.provider), folders: [settled.directory, ...folders], sessionId: settled.sessionId };
       // Each refusal on the record, with where the runner pointed the worker
       // instead; a record from before the structured list has its strings.
-      const kept: Array<{ text: string; worktreePath?: string }> = settled.denials?.length ? settled.denials : settled.deniedActions.map((text) => ({ text }));
+      const kept: Array<{ text: string; fullText?: string; worktreePath?: string }> = settled.denials?.length ? settled.denials : settled.deniedActions.map((text) => ({ text }));
+      // Judged by all of it; named, below, by the cut the owner reads.
+      const whole = (d: { text: string; fullText?: string }) => d.fullText ?? d.text;
       const hinted = kept.filter((d) => d.worktreePath);
-      const others = kept.filter((d) => !d.worktreePath).map((d) => d.text);
+      const others = kept.filter((d) => !d.worktreePath);
       const hintedCount = Math.max(settled.worktreeHints ?? 0, hinted.length);
       const judged = kept.length + (hintedCount - hinted.length) >= n;
-      const harness = kept.some((d) => readOnlyDenial(d.text) && harnessStateDenial(d.text));
-      if (judged && !harness && others.every((a) => readOnlyDenial(a) || outsideWrite(a))) {
-        const rest = others.length === 0 ? "" : others.every(readOnlyDenial) ? "read-only" : "reads, or writes";
+      const harness = kept.some((d) => harnessStateDenial(whole(d)) && !ownHarnessStateDenial(whole(d), own));
+      if (judged && !harness && others.every((d) => readOnlyDenial(whole(d)) || outsideWrite(whole(d)))) {
+        const rest = others.length === 0 ? "" : others.every((d) => readOnlyDenial(whole(d))) ? "read-only" : "reads, or writes";
         const what = hintedCount > 0
           ? `action(s) that changed nothing — ${hintedCount} aimed at the project instead of its worktree, each answered with a retry hint at the worktree path${rest ? `; the rest ${rest} outside its folder` : ""}`
           : rest === "read-only" ? "read-only action(s) outside its folder" : "action(s) that changed nothing — reads, or writes outside its folder";
-        const named = [...others, ...hinted.map((d) => `${d.text} → ${d.worktreePath}`)].slice(0, 3).join("; ");
+        const named = [...others.map((d) => d.text), ...hinted.map((d) => `${d.text} → ${d.worktreePath}`)].slice(0, 3).join("; ");
         bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Worker ${run.id} was refused ${n} ${what}: ${named}`, read_only_refusals: n });
       } else {
         refusedWrite = true;
-        const named = [...others, ...hinted.map((d) => d.text)].slice(0, 3).join("; ");
+        const named = [...others.map((d) => d.text), ...hinted.map((d) => d.text)].slice(0, 3).join("; ");
         bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} was refused ${n} action(s): ${named}` });
       }
     }
-    const strayed = outsideHint(files, task.files_hint);
     if (strayed.length) {
       bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Worker ${run.id} touched files outside its task: ${strayed.slice(0, 5).join(", ")}` });
     }
@@ -847,7 +912,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   // The planner's shape may ask for no reviewer here: `final` has one look
   // at the merged whole at the end, `none` trusts the rule alone.
   if (ok) {
-    const clean = settled && !refusedWrite && outsideHint(files, task.files_hint).length === 0;
+    const clean = settled && !refusedWrite && strayed.length === 0;
     if (!clean) {
       bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes: "The worker was refused an action or strayed outside its files; the task is offered once more." });
       return true;
@@ -952,9 +1017,11 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
  * Review mode `final`: ONE read-only reviewer over the merged result, once
  * every task passed the rule. Its verdict goes on the board either way; a
  * review that could not be done falls back to the rule with an alert, as a
- * task's reviewer does. Null when the team was stopped meanwhile.
+ * task's reviewer does. Null when the team was stopped meanwhile. `tests` is
+ * what the project's own suite said when the harness ran it green on this
+ * tree (`suiteGate`) — the reviewer may not run it.
  */
-async function finalReview(team: LiveTeam, source: CodingRunSource): Promise<{ verdict: "accepted" | "rejected"; notes: string } | null> {
+async function finalReview(team: LiveTeam, source: CodingRunSource, tests: string | null): Promise<{ verdict: "accepted" | "rejected"; notes: string } | null> {
   const { board, bus } = team;
   setTeamStatus(board, SYSTEM, "reviewing");
   saveBoard(board);
@@ -965,7 +1032,7 @@ async function finalReview(team: LiveTeam, source: CodingRunSource): Promise<{ v
     return verdict;
   };
   const files = [...new Set(board.tasks.filter((t) => t.status === "complete").flatMap((t) => t.files_hint))];
-  const where = { goal: board.goal, branch: board.branch, base: board.base, files };
+  const where = { goal: board.goal, branch: board.branch, base: board.base, files, tests };
   let run: CodingRun;
   try {
     run = await startRun({
@@ -992,6 +1059,40 @@ async function finalReview(team: LiveTeam, source: CodingRunSource): Promise<{ v
   if (!parsed.ok) return byRule(parsed.reason, `The final reviewer gave no verdict: ${parsed.reason}`);
   bus.send(REVIEWER, { type: "final_review", ...parsed.verdict });
   return parsed.verdict;
+}
+
+/**
+ * The project's own test suite on the merged result, once every task is in
+ * (TASK-1321; detection and reading in `coding-team-suite.ts`). A team signed
+ * off "done" with its own suite red — 11 of 56 failing — because its workers
+ * were accepted by rule "since the final review checks the merged result" and
+ * the final reviewer is read-only: nobody ran the tests (team-59631zvn,
+ * nano-lab1, 2026-09-30). So the harness runs them itself, in the checkout the
+ * merges landed in, before the final review and before "done".
+ *
+ * No suite: nothing on the board, and the team finishes as it always did. A
+ * suite that passed, or that could not be judged: one note. A RED suite is a
+ * rejection by rule, the failing tests named — while `mayReoffer`, of every
+ * task the failure points at (`suiteSuspects`), each offered once more through
+ * the ordinary review loop and returned in `reoffered`; after that, or with no
+ * task left to offer it to, `failed` holds the words the team fails with.
+ * `passed` is what a green suite said, for the final reviewer.
+ */
+async function suiteGate(team: LiveTeam, mayReoffer: boolean): Promise<{ reoffered: string[]; failed: string | null; passed: string | null }> {
+  const { board, bus } = team;
+  const nothing = { reoffered: [], failed: null, passed: null };
+  const suite = await runProjectSuite(board.directory, suiteSandbox);
+  if (team.stopRequested || suite.kind === "none") return nothing;
+  if (suite.kind !== "fail") {
+    bus.send(SYSTEM, { type: "note", text: suiteNote(suite) });
+    return { ...nothing, passed: suite.kind === "pass" ? `${suite.command} — ${suite.summary}` : null };
+  }
+  const suspects = mayReoffer ? suiteSuspects(board.tasks, suite.files) : [];
+  bus.send(SYSTEM, { type: "note", text: suiteNote(suite, suspects.map((t) => t.task_id)) });
+  if (!suspects.length) return { ...nothing, failed: suiteFailure(suite) };
+  const notes = suiteRejection(suite);
+  for (const task of suspects) bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes });
+  return { ...nothing, reoffered: suspects.map((t) => t.task_id) };
 }
 
 /**
@@ -1214,8 +1315,12 @@ export function workerTask(board: TeamBoard, task: TeamTask, folder: string | nu
   return text;
 }
 
-/** Files a worker touched that its task's hint does not cover (a hint names files or folders). */
-export function outsideHint(touched: string[], hint: string[]): string[] {
+/**
+ * Files a worker touched that its task's hint does not cover (a hint names
+ * files or folders). `scratch: false` counts a scratch-named file like any
+ * other, for a caller that is not judging what a worker left behind.
+ */
+export function outsideHint(touched: string[], hint: string[], { scratch = true }: { scratch?: boolean } = {}): string[] {
   if (hint.length === 0) return [];
   const norm = (p: string) => p.replace(/^\.\//, "").replace(/\/+$/, "");
   const hints = hint.map(norm);
@@ -1223,11 +1328,60 @@ export function outsideHint(touched: string[], hint: string[]): string[] {
   // pointed at — a worker asked to edit calc.py cannot help CPython leaving
   // __pycache__/calc.cpython-310.pyc there. Counting that as straying failed
   // three correct tasks and killed a run on the alert ceiling (team-6rgz8cyx,
-  // team-5oxkp7a9, 2026-09-06). It is noise, not a trespass.
+  // team-5oxkp7a9, 2026-09-06). It is noise, not a trespass. So is a scratch
+  // file a worker made to check its work (`isScratchFile`).
   return touched
     .map(norm)
-    .filter((f) => !isGeneratedArtifact(f))
+    .filter((f) => !isGeneratedArtifact(f) && !(scratch && isScratchFile(f)))
     .filter((f) => !hints.some((h) => f === h || f.startsWith(`${h}/`)));
+}
+
+/**
+ * A name nobody gives a deliverable: `__verify_probe.html`, `check.tmp`,
+ * `.probe-1` — what a worker writes to try something and means to remove
+ * (bench, 2026-09-26: a verifier's probe page counted as straying and cost a
+ * correct task a second attempt). By the file's own name; a dunder name such
+ * as `__init__.py` is source, not scratch.
+ */
+export function isScratchFile(file: string): boolean {
+  const name = file.replace(/\/+$/, "").split("/").pop() ?? "";
+  if (/^__\w+__(?:\.\w+)?$/.test(name)) return false;
+  return name.startsWith("__") || name.endsWith(".tmp") || name.startsWith(".probe");
+}
+
+/**
+ * The files of `touched` (relative to `dir`, as the runner records them) that
+ * are no longer there. None when `dir` itself is not: a folder that is gone
+ * says nothing about what the worker left in it.
+ */
+export function vanishedFiles(dir: string, touched: readonly string[]): Set<string> {
+  const gone = new Set<string>();
+  if (!path.isAbsolute(dir) || !fs.existsSync(dir)) return gone;
+  for (const file of touched) {
+    try {
+      // lstat: a link the worker left is there, wherever it points.
+      fs.lstatSync(path.resolve(dir, file));
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") gone.add(file);
+    }
+  }
+  return gone;
+}
+
+/**
+ * The tasks a red suite goes back to: the complete tasks with an attempt left
+ * (a rejection on the second one would end the task rather than retry it)
+ * whose files the failure names — a traceback's frame, a failing spec's path —
+ * or, when it names none of theirs, every one of them: a suite broken between
+ * tasks is not any one task's to fix alone. A named file whose name says
+ * scratch is still judged by the hints: a left-over probe that fails the suite
+ * is not every task's.
+ */
+export function suiteSuspects(tasks: TeamTask[], named: string[]): TeamTask[] {
+  const open = tasks.filter((t) => t.status === "complete" && t.attempts < 2);
+  const pointed = open.filter((t) => named.some((f) => outsideHint([f], t.files_hint, { scratch: false }).length === 0));
+  return pointed.length ? pointed : open;
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────

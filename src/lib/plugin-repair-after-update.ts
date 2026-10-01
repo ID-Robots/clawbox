@@ -10,7 +10,12 @@ import {
   type PluginRepairEntry,
   type PluginRepairs,
 } from "@/lib/plugin-repair";
-import { runPluginRepair, type PluginRepairVerdict } from "@/lib/plugin-repair-run";
+import {
+  pluginRepairFailureWhat as whatFailed,
+  pluginRepairLabel as pluginLabel,
+  runPluginRepair,
+  type PluginRepairVerdict,
+} from "@/lib/plugin-repair-run";
 
 // The repair a CORE UPDATE owes the rows it stranded (TASK-1088).
 //
@@ -91,29 +96,6 @@ export interface AfterCoreUpdateRetryResult {
   repaired: string[];
   /** Canonical ids retried and re-filed with the cause. */
   failed: string[];
-}
-
-/** How the owner reads the plugin's name in a reason. */
-function pluginLabel(id: string): string {
-  switch (canonicalPluginId(id)) {
-    case "codex": return "The ChatGPT (Codex) plugin";
-    case "deepseek": return "The DeepSeek provider plugin, which ClawBox AI runs on,";
-    default: return `The ${id} plugin`;
-  }
-}
-
-/** What went wrong, in the words the row keeps — see `PluginRepairStep`. */
-function whatFailed(verdict: Extract<PluginRepairVerdict, { ok: false }>): string {
-  switch (verdict.step) {
-    case "spec": return "could not be reinstalled because its record names no package";
-    case "enable": return "still could not have its capabilities accepted";
-    case "install": return "could not be reinstalled";
-    case "reenable": return "was reinstalled but could not be switched back on";
-    case "verify":
-      return verdict.code === "unverified"
-        ? "was reinstalled but the device could not confirm that it loads"
-        : "was reinstalled but the core does not report it loaded";
-  }
 }
 
 /**

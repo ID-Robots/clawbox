@@ -14,6 +14,8 @@ import { render, screen } from "@/tests/helpers/test-utils";
 import SystemTray from "@/components/SystemTray";
 import { translations } from "@/lib/translations";
 import type { Locale } from "@/lib/i18n";
+import { _resetSessionUserForTest } from "@/lib/use-session-user";
+import { nonOwnerVerdict } from "@/lib/non-owner-scope";
 
 vi.mock("next/image", () => ({ default: () => null }));
 
@@ -49,6 +51,37 @@ describe("SystemTray — the internet line", () => {
     renderTray();
     expect(await screen.findByText("tray.noInternet")).toBeInTheDocument();
     expect(screen.queryByText("No internet")).toBeNull();
+  });
+
+  // Multi-user ClawBox OS (TASK-1256): on lab1 every user but the owner saw
+  // "No internet" on a box that had it, because the probe was refused them
+  // (403 → offline). The route is open to every signed-in user now; the tray
+  // must show them the real reading, and ask nothing else the server refuses.
+  it("shows a user who is not the owner the box's real connectivity", async () => {
+    _resetSessionUserForTest();
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      const body = url.includes("/setup-api/users/me")
+        ? { username: "alice", isOwner: false, multiUser: true }
+        : url.includes("/setup-api/network/internet")
+          ? { online: true, latencyMs: 21, checkedAt: 1 }
+          : {};
+      return { ok: true, json: async () => body };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderTray();
+    expect(await screen.findByText('tray.internet{"ms":21}')).toBeInTheDocument();
+    expect(screen.queryByText("tray.noInternet")).toBeNull();
+    expect(await screen.findByTestId("tray-session-user")).toBeInTheDocument();
+    for (const [input, init] of fetchMock.mock.calls as unknown as [unknown, RequestInit | undefined][]) {
+      const url = new URL(String(input), "http://clawbox.local");
+      const method = init?.method ?? "GET";
+      expect(
+        nonOwnerVerdict({ pathname: url.pathname, method, searchParams: url.searchParams, intent: "fetch" }),
+        `${method} ${url.pathname}`,
+      ).toBe("allow");
+    }
+    _resetSessionUserForTest();
   });
 });
 

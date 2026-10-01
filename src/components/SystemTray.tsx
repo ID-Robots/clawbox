@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
+import { useSessionUser } from "@/lib/use-session-user";
 import CrabWaitMark from "./CrabWaitMark";
 
 const BRAND_ORANGE = "#fe6e00";
@@ -27,6 +28,11 @@ export default function SystemTray({
   time,
 }: SystemTrayProps) {
   const { t } = useT();
+  // Multi-user ClawBox OS (TASK-1256): who is signed in, and whether they may
+  // restart or shut down the box (the owner only — the power route says so too).
+  const sessionUser = useSessionUser();
+  const isOwner = sessionUser?.isOwner !== false;
+  const showUser = !!sessionUser && (sessionUser.multiUser || !sessionUser.isOwner);
   const [closing, setClosing] = useState(false);
   const [confirmAction, setConfirmAction] = useState<"shutdown" | "restart" | null>(null);
   const [internet, setInternet] = useState<{ online: boolean; latencyMs: number | null } | null>(null);
@@ -299,9 +305,32 @@ export default function SystemTray({
             </div>
           )}
 
+          {/* Who is signed in — only on a box with more than one user, so a
+              single-user box's tray looks exactly as it always did. */}
+          {showUser && sessionUser && (
+            <div className="px-4 py-3 border-b border-white/10 flex items-center gap-3" data-testid="tray-session-user">
+              <span
+                aria-hidden="true"
+                className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold text-white shrink-0"
+                style={{ backgroundColor: isOwner ? BRAND_ORANGE : "#6366f1" }}
+              >
+                {sessionUser.username.charAt(0).toUpperCase()}
+              </span>
+              <div className="min-w-0 flex flex-col">
+                <span className="text-[11px] text-white/50">{t("tray.signedInAs")}</span>
+                <span className="text-sm text-white/90 font-medium truncate">
+                  {sessionUser.username}
+                  {isOwner && <span className="ml-2 text-[10px] uppercase tracking-wider text-[var(--coral-bright)]">{t("users.ownerBadge")}</span>}
+                </span>
+                {!isOwner && <span className="text-[11px] text-white/50 mt-0.5">{t("tray.nonOwnerHint")}</span>}
+              </div>
+            </div>
+          )}
+
           {/* Bottom actions */}
           <div className="p-4 flex flex-col gap-2">
             {powerError && <p role="alert" className="text-xs text-red-400">{powerError}</p>}
+            {isOwner && (
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => handlePower("restart")}
@@ -322,6 +351,7 @@ export default function SystemTray({
                 <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "shutdown" ? t("tray.confirm") : t("tray.shutDown")}</span>
               </button>
             </div>
+            )}
             <button
               onClick={async () => {
                 await fetch("/login-api/logout", { method: "POST" }).catch(() => {});
@@ -329,8 +359,8 @@ export default function SystemTray({
               }}
               className="flex items-center justify-center gap-2 h-10 rounded-lg transition-colors cursor-pointer bg-white/10 hover:bg-white/15 w-full"
             >
-              <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>lock</span>
-              <span className="text-sm text-white/80">{t("tray.lock")}</span>
+              <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>{showUser ? "switch_account" : "lock"}</span>
+              <span className="text-sm text-white/80">{showUser ? t("tray.switchUser") : t("tray.lock")}</span>
             </button>
           </div>
         </div>

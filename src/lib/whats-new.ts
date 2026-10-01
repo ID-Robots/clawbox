@@ -26,6 +26,22 @@ import { PORTAL_PLANS_URL } from "@/lib/clawai-usage";
 export const WHATS_NEW_RELEASE = "4.1";
 
 /**
+ * The highlights of the release {@link WHATS_NEW_RELEASE} names, in the order
+ * its release notes list them — catalogue keys, so they read in the owner's
+ * language. The copy is taken from RELEASE-NOTES-4.1.0.md, so this list should
+ * only change when the release notes do.
+ *
+ * Two surfaces draw it: the desktop card, and the /updating screen's "What's
+ * new" panel when the target release's own notes cannot be read (TASK-1205).
+ */
+export const WHATS_NEW_HIGHLIGHTS = [
+  { icon: "fullscreen", title: "whatsNew.phoneFullscreenTitle", body: "whatsNew.phoneFullscreenBody" },
+  { icon: "history", title: "whatsNew.chatRestoreTitle", body: "whatsNew.chatRestoreBody" },
+  { icon: "web", title: "whatsNew.webappDataTitle", body: "whatsNew.webappDataBody" },
+  { icon: "merge", title: "whatsNew.autoMergeTitle", body: "whatsNew.autoMergeBody" },
+] as const;
+
+/**
  * The docs page the card links to: `docs-site/whats-new.mdx`, whose newest
  * section is "ClawBox 4.1". ONE constant, so a page that moves is one edit.
  */

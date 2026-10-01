@@ -164,4 +164,35 @@ describe("ClawKeep's restore result card", () => {
     );
     expect(screen.queryByTestId("clawkeep-restart-pending")).toBeNull();
   });
+
+  it("names the links the snapshot never carried, as a complete restore", async () => {
+    // TASK-1304: the backup skipped these links, so the restored folders do
+    // not have them. Said — with no ⚠️, because the restore is complete.
+    restoreBody = {
+      ok: true,
+      archive: SNAPSHOT,
+      archiveBytes: 4096,
+      assets: [],
+      skippedMembers: [],
+      skippedLinks: [
+        { path: "~/.openclaw/workspace/docs/catalogue", target: "/home/clawbox/Shared/Exports/catalogue" },
+      ],
+      skippedLinkCount: 2,
+      restartErrors: [],
+      restartPending: [],
+    };
+
+    await restore();
+
+    const block = await screen.findByTestId("clawkeep-restore-skipped-links", {}, { timeout: 5000 });
+    await waitFor(
+      () => expect(block).toHaveTextContent("This snapshot does not include 2 symbolic link(s)"),
+      { timeout: 5000 },
+    );
+    expect(block).toHaveTextContent("~/.openclaw/workspace/docs/catalogue");
+    expect(block).toHaveTextContent("/home/clawbox/Shared/Exports/catalogue");
+    expect(block).toHaveTextContent("…and 1 more.");
+    expect(block.textContent).not.toContain("⚠️");
+    expect(screen.queryByText(/could not be restored/)).toBeNull();
+  });
 });

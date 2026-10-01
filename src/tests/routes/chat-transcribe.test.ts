@@ -29,6 +29,18 @@ vi.mock("@/lib/stt-local", async (importOriginal) => {
   };
 });
 
+// The cloud leg's remux (src/lib/stt-remux.ts, TASK-1214) is mocked at its
+// boundary for the same reason: these fixtures are not real WebM and the real
+// remux would leave them alone anyway, but a test here must never depend on
+// whether the machine running it has ffmpeg. It passes the recording through
+// untouched unless a test says otherwise.
+// src/tests/routes/chat-transcribe-webm.test.ts runs the real remux end to end.
+const remux = vi.hoisted(() => ({ audioForCloud: vi.fn() }));
+vi.mock("@/lib/stt-remux", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/stt-remux")>();
+  return { ...actual, audioForCloud: (...a: unknown[]) => remux.audioForCloud(...a) };
+});
+
 let tmpHome: string;
 let openclawHome: string;
 let originalHome: string | undefined;
@@ -154,6 +166,7 @@ describe("/setup-api/chat/transcribe", () => {
     writeHermesToken(null);
     localStt.installed.mockResolvedValue({ installed: false, detail: "The on-box transcriber is not installed." });
     localStt.transcribe.mockResolvedValue({ ok: false, error: "not installed" });
+    remux.audioForCloud.mockImplementation(async (audio: { file: Blob; name: string }) => ({ ...audio, prepared: "as-is" }));
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     vi.resetModules();
@@ -641,6 +654,225 @@ describe("/setup-api/chat/transcribe", () => {
 
       expect(res.status).toBe(503);
       expect((await res.json()).error).toContain("not linked");
+    });
+  });
+
+  // TASK-1214. Chrome's MediaRecorder WebM carries no duration, and the proxy
+  // refused every such recording with the 400 below (reproduced from a
+  // customer box 2026-09-25 with the device's own token). Meanwhile the box's
+  // own engine, which decodes that file fine, was never asked.
+  describe("a MediaRecorder recording the proxy cannot read (TASK-1214)", () => {
+    /** The proxy's answer to a duration-less WebM, byte for byte. */
+    const UNSUPPORTED_AUDIO = {
+      error: {
+        message: "Could not read the audio duration. Supported formats: wav, mp3, m4a, mp4, ogg, opus, flac, webm.",
+        type: "invalid_request_error",
+        code: "unsupported_audio",
+      },
+    };
+    /** A live.webm's first bytes: the EBML magic MediaRecorder output starts with. */
+    const LIVE_WEBM = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from("no-duration-in-this-header")]);
+    const REMUXED_WEBM = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from("same-audio-with-a-duration")]);
+
+    function remuxes(): void {
+      remux.audioForCloud.mockImplementation(async (audio: { file: Blob; name: string }) => ({
+        file: new Blob([new Uint8Array(REMUXED_WEBM)], { type: "audio/webm" }),
+        name: audio.name,
+        prepared: "remuxed",
+      }));
+    }
+
+    it("uploads the remuxed recording, in the request shape the proxy answered 200 to", async () => {
+      remuxes();
+      fetchMock.mockResolvedValue(jsonResponse({ text: "Guten Tag, das ist ein Test.", usage: { seconds: 3 } }));
+
+      const res = await POST(audioRequest(LIVE_WEBM, "recording.webm"));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, text: "Guten Tag, das ist ein Test.", engine: "cloud" });
+      // What the report's working curl sent: POST, bearer, model, file.
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(String(url)).toBe("https://clawbox.com/api/ai/audio/transcriptions");
+      expect(init.method).toBe("POST");
+      expect(init.headers.Authorization).toBe("Bearer claw_testtoken0000000000000000000");
+      const form = init.body as FormData;
+      expect(form.get("model")).toBe("gpt-4o-mini-transcribe");
+      const sent = form.get("file") as File;
+      expect(sent.name).toBe("recording.webm");
+      expect(Buffer.from(await sent.arrayBuffer()).equals(REMUXED_WEBM)).toBe(true);
+      // The remux was handed exactly what the browser posted, and the
+      // request's signal, so it starts no ffmpeg for a caller who has left.
+      const [given, signal] = remux.audioForCloud.mock.calls[0];
+      expect(Buffer.from(await given.file.arrayBuffer()).equals(LIVE_WEBM)).toBe(true);
+      expect(signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it("falls back to the box on the exact 400 unsupported_audio, and logs why", async () => {
+      boxHasWhisper();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      fetchMock.mockResolvedValue(jsonResponse(UNSUPPORTED_AUDIO, 400));
+      localStt.transcribe.mockResolvedValue({ ok: true, text: "Guten Tag vom Kasten." });
+
+      const res = await POST(audioRequest(LIVE_WEBM, "recording.webm"));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, text: "Guten Tag vom Kasten.", engine: "local" });
+      // The box's engine gets the browser's own bytes: faster-whisper reads a
+      // duration-less WebM, so it needs no remux.
+      const [bytes, name] = localStt.transcribe.mock.calls[0];
+      expect(Buffer.from(bytes).equals(LIVE_WEBM)).toBe(true);
+      expect(name).toBe("recording.webm");
+      const logged = warn.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(logged).toContain("cloud engine failed (400: upstream 400 unsupported_audio");
+      expect(logged).toContain("trying the other engine");
+    });
+
+    it.each([
+      ["a 400 with no body", () => new Response(null, { status: 400 })],
+      ["a 404", () => jsonResponse({ error: { code: "not_found" } }, 404)],
+      ["a 413 for a long recording", () => jsonResponse({ error: { code: "payload_too_large" } }, 413)],
+      ["a 422", () => jsonResponse({ error: { code: "unprocessable" } }, 422)],
+      ["a 429 rate limit", () => jsonResponse({ error: { code: "rate_limited" } }, 429)],
+      ["a 500", () => new Response("boom", { status: 500 })],
+      ["a 502 from the edge", () => new Response("<html>bad gateway</html>", { status: 502 })],
+      ["a 503", () => jsonResponse({ error: { code: "overloaded" } }, 503)],
+      ["a 401 that is an edge rule, not the proxy's verdict", () => jsonResponse({ error: "blocked" }, 401)],
+    ])("falls back to the box on %s from the cloud", async (_label, respond) => {
+      boxHasWhisper();
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      fetchMock.mockImplementation(async () => respond());
+      localStt.transcribe.mockResolvedValue({ ok: true, text: "from the box" });
+
+      const res = await POST(audioRequest(LIVE_WEBM));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, text: "from the box", engine: "local" });
+      expect(localStt.transcribe).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["the network is down", () => new TypeError("fetch failed")],
+      ["the upload timed out", () => Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" })],
+    ])("falls back to the box when %s", async (_label, error) => {
+      boxHasWhisper();
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      fetchMock.mockRejectedValue(error());
+      localStt.transcribe.mockResolvedValue({ ok: true, text: "offline dictation" });
+
+      const res = await POST(audioRequest(LIVE_WEBM));
+
+      expect(await res.json()).toEqual({ ok: true, text: "offline dictation", engine: "local" });
+    });
+
+    it("falls back to the box when the credential was refused before, without uploading", async () => {
+      boxHasWhisper();
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      fetchMock.mockResolvedValue(jsonResponse({ error: { code: "invalid_token", message: "bad token" } }, 401));
+      localStt.transcribe.mockResolvedValue({ ok: true, text: "from the box" });
+
+      // The first refusal is the proxy's own verdict and is remembered...
+      expect((await (await POST(audioRequest(LIVE_WEBM))).json()).engine).toBe("local");
+      // ...so the second never uploads, and the box still answers.
+      fetchMock.mockClear();
+      expect((await (await POST(audioRequest(LIVE_WEBM))).json()).engine).toBe("local");
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the box when the cloud leg throws instead of answering", async () => {
+      // Anything under the cloud leg can throw. It used to escape the engine
+      // loop as a bare 500, and the box's engine was never asked.
+      boxHasWhisper();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      remux.audioForCloud.mockRejectedValue(new Error("claw_testtoken0000000000000000000 in a message"));
+      localStt.transcribe.mockResolvedValue({ ok: true, text: "still heard" });
+
+      const res = await POST(audioRequest(LIVE_WEBM));
+
+      expect(await res.json()).toEqual({ ok: true, text: "still heard", engine: "local" });
+      expect(fetchMock).not.toHaveBeenCalled();
+      // Only the error's name reaches the journal from the cloud leg.
+      const logged = warn.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(logged).toContain("cloud leg threw Error");
+      expect(logged).not.toContain("claw_testtoken");
+    });
+
+    it("answers with a status, not a crash, when the cloud leg throws and there is no box engine", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      remux.audioForCloud.mockRejectedValue(new Error("boom"));
+
+      const res = await POST(audioRequest(LIVE_WEBM));
+
+      expect(res.status).toBe(502);
+      expect((await res.json()).error).toBe("Transcription failed.");
+    });
+
+    it("falls back to the cloud when the box's leg throws, with the box first", async () => {
+      boxHasWhisper();
+      writePrimary("local");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      localStt.transcribe.mockRejectedValue(new Error("EMFILE: too many open files"));
+      fetchMock.mockResolvedValue(jsonResponse({ text: "from the cloud" }));
+
+      const body = await (await POST(audioRequest(LIVE_WEBM))).json();
+
+      expect(body).toEqual({ ok: true, text: "from the cloud", engine: "cloud" });
+    });
+
+    it("still tells the caller the cloud's answer when the box has no engine, and logs that nothing was there", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      fetchMock.mockResolvedValue(jsonResponse(UNSUPPORTED_AUDIO, 400));
+
+      const res = await POST(audioRequest(LIVE_WEBM));
+
+      expect(res.status).toBe(400);
+      const text = await res.text();
+      expect(JSON.parse(text).error).toBe("Transcription failed (upstream 400).");
+      // The proxy's wording stays out of the response: only the status crosses.
+      expect(text).not.toContain("duration");
+      const logged = warn.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(logged).toContain("no local engine to fall back to: The on-box transcriber is not installed.");
+    });
+
+    it("logs the proxy's error code but nothing else of an upstream body", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      fetchMock.mockResolvedValue(jsonResponse({
+        error: { code: "unsupported_audio", message: "request had Authorization: Bearer claw_testtoken0000000000000000000" },
+      }, 400));
+
+      await POST(audioRequest(LIVE_WEBM));
+
+      const logged = warn.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(logged).toContain("unsupported_audio");
+      expect(logged).not.toContain("claw_testtoken");
+    });
+
+    it("does not log a code that is not a short identifier, or an oversized body", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      fetchMock.mockResolvedValueOnce(jsonResponse({ error: { code: "Bearer claw_testtoken0000000000000000000" } }, 400));
+      await POST(audioRequest(LIVE_WEBM));
+      fetchMock.mockResolvedValueOnce(jsonResponse({ error: { code: "unsupported_audio" }, pad: "x".repeat(8192) }, 400));
+      await POST(audioRequest(LIVE_WEBM));
+
+      const logged = warn.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(logged).not.toContain("claw_testtoken");
+      expect(logged).not.toContain("unsupported_audio");
+      expect(logged).toContain("upstream 400, recording sent as-is");
+    });
+
+    it("does not remux for a box that is not going to upload", async () => {
+      writeConfig({ models: { providers: {} } });
+      await POST(audioRequest(LIVE_WEBM));
+      expect(remux.audioForCloud).not.toHaveBeenCalled();
+    });
+
+    it("does not remux for the box's own engine", async () => {
+      boxHasWhisper();
+      writePrimary("local");
+      localStt.transcribe.mockResolvedValue({ ok: true, text: "heard on the box" });
+
+      await POST(audioRequest(LIVE_WEBM));
+
+      expect(remux.audioForCloud).not.toHaveBeenCalled();
     });
   });
 });

@@ -246,6 +246,12 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // left on four would carry four `claude -p` processes past a "start
       // over" that has just presented a freshly configured agent.
       "coding_agent_max_parallel_runs",
+      // What the box keeps of finished runs (TASK-1178). Back to standard, so
+      // a reset box trims its history the way every box did before the
+      // setting — and the reset itself hands Claude Code back its transcript
+      // period. The archive is kept data with a Clear of its own, not a key.
+      "coding_agent_history_retention",
+      "coding_agent_history_limit",
       // The two media switches are ON when absent, so clearing them is what
       // puts a reset box back to "yes, draw and speak for my projects".
       "coding_agent_generate_images",

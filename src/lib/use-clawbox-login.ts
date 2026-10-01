@@ -69,7 +69,12 @@ function sameIds(a: string[] | null, b: string[] | null): boolean {
   return a.every((id, i) => id === b[i]);
 }
 
-export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): ClawboxLoginState {
+/**
+ * `enabled: false` asks nothing and stays `loading` — the desktop passes it for
+ * a signed-in ClawBox user who is not the owner (TASK-1256), whose session the
+ * route refuses with 403: ClawBox AI is the owner's account.
+ */
+export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS, enabled: boolean = true): ClawboxLoginState {
   const [state, setState] = useState<ClawboxLoginState>({
     loggedIn: false,
     tier: null,
@@ -78,6 +83,7 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): Clawb
   });
 
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -151,7 +157,7 @@ export function useClawboxLogin(intervalMs: number = DEFAULT_INTERVAL_MS): Clawb
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [intervalMs]);
+  }, [intervalMs, enabled]);
 
   return state;
 }

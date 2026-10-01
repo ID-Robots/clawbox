@@ -51,6 +51,7 @@ const APP_DESCRIPTIONS: Record<string, Omit<DesktopApp, "id">> = {
   terminal: { name: "Terminal", description: "Shell" },
   coding: { name: "Coding Agent", description: "The owner's switch for delegated coding runs, what a run needs, and recent runs" },
   files: { name: "Files", description: "File manager" },
+  projects: { name: "Projects", description: "The owner's pinned project folders, opened in the Files app — browse, open and download them (a folder downloads as a ZIP)" },
   clawkeep: { name: "ClawKeep", description: "Backups: what is protected, run one now, restore" },
   "memory-shard": { name: "Memory Shard", description: "The memory index: embedding health, reindex, schedule" },
   system_update: { name: "System Update", description: "The installed ClawBox version and the update button" },

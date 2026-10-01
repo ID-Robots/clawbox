@@ -163,6 +163,48 @@ git_with_retry() {
   return "$rc"
 }
 
+# ── Local edits survive an update ────────────────────────────────────────────
+#
+# `preserve_local_edits <dir holding scripts/> <checkout>` — save the checkout's
+# tracked modifications and untracked, non-ignored files OUTSIDE the tree before
+# anything here resets it (scripts/preserve-local-edits.sh says where and how).
+# Every reset in this file used to discard them without a word: the bootstrap
+# block below, sync_repo_to_update_target, and then src/lib/updater.ts's own
+# `reset --hard` + `clean -fd`. TASK-1316.
+#
+# Run as whoever owns the checkout, like git (use_tree_owner_for_git must have
+# set GIT_RUNNER for it first): it writes into that account's home, where root
+# writing would be the symlink primitive, and it reads the script out of $1 —
+# the root-owned mirror on a dispatched step, the tree root is already running
+# on every other path — never out of the tree it is about to hand to the owner.
+#
+# Non-zero means there ARE local edits and they could not be saved, and the
+# caller must not reset. Defined above the bootstrap block, which calls it.
+preserve_local_edits() {
+  local src="$1" dir="$2" script
+  script="$src/scripts/preserve-local-edits.sh"
+  if [ ! -f "$script" ]; then
+    # A copy of install.sh that shipped without the helper (`bash <(curl …)`
+    # has no scripts/ beside it). A missing helper never stops an update: the
+    # edits go into the checkout's own stash — the helper's own fallback, and
+    # said the same way — and only edits the stash cannot take either refuse.
+    local runner=(${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -c safe.directory="$dir" -C "$dir") stamp
+    [ -n "$("${runner[@]}" status --porcelain --untracked-files=all 2>/dev/null)" ] || return 0
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    if "${runner[@]}" -c user.name="ClawBox updater" -c user.email="updater@clawbox.invalid" \
+         stash push --include-untracked \
+         --message "clawbox-update $stamp: local edits saved without $script" >/dev/null 2>&1; then
+      echo "  $script is missing; kept the local code changes in the checkout's git stash instead"
+      echo "CLAWBOX-WARN[local-edits-saved]: This box had local changes to its code. They were kept in the code's git stash (\"clawbox-update $stamp\") — run: git -C $dir stash list"
+      echo "CLAWBOX-LOCAL-EDITS: git-stash"
+      return 0
+    fi
+    echo "Error: $dir has local changes, $script is missing and git stash could not take them, so they cannot be saved before the reset" >&2
+    return 1
+  fi
+  ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} bash "$script" "$dir"
+}
+
 # ── Bootstrap: pull latest install.sh and re-exec before parsing constants ───
 # Fixes the race where a stale install.sh (e.g. rsync'd from an out-of-date
 # checkout by flash.sh) parses old EXPECTED_*_SERVICES while step_git_pull
@@ -277,7 +319,14 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
       printf '%s\n' "$_fetchout" | tail -n 3
     fi
     unset _fetchout
-    if ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
+    # The FIRST reset of an update, so the owner's edits are saved here or not
+    # at all: by the time step_bootstrap_updater's sync asks, this has already
+    # discarded them. Unsaveable edits keep the tree as it is — the step that
+    # follows refuses with the reason. TASK-1316.
+    _keep_tree=0
+    preserve_local_edits "$_self" "$_b" || _keep_tree=1
+    if [ "$_keep_tree" = "0" ] \
+      && ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
       chown -R clawbox:clawbox "$_b" 2>/dev/null || true
       # Re-record what root is allowed to run, BEFORE re-exec'ing into it. The
       # reset just replaced install.sh, scripts/ and config/ wholesale, so the
@@ -407,7 +456,11 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
         CLAWBOX_ROOT_MANIFEST_STALE="${CLAWBOX_ROOT_MANIFEST_STALE:-0}" \
         bash "$_self/install.sh" "$@"
     fi
-    echo "[bootstrap] WARN: couldn't reset to origin/${_br}; continuing with on-disk copy."
+    if [ "$_keep_tree" = "1" ]; then
+      echo "[bootstrap] WARN: $_b has local changes that could not be saved; not resetting it — continuing with on-disk copy."
+    else
+      echo "[bootstrap] WARN: couldn't reset to origin/${_br}; continuing with on-disk copy."
+    fi
   fi
 fi
 
@@ -1112,6 +1165,9 @@ EXPECTED_INSTALLED_SERVICES=(
   "clawbox-root-update@.service"
   clawbox-ap-watchdog.service
   clawbox-codex-auth-sync.service
+  # A oneshot at boot that exits when there is nothing to heal — which is every
+  # boot of a healthy box — so it is never "active". TASK-1316.
+  clawbox-build-heal.service
 )
 
 # Units that ship in config/ on EVERY edition but are only installed on the
@@ -3778,11 +3834,21 @@ sync_repo_to_update_target() {
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
 
   git_with_retry -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
-  # Discard local working-tree changes before switching branches. The later
-  # `reset --hard` would blow them away anyway; doing it up-front avoids
-  # `git checkout` aborting with "local changes would be overwritten" when
-  # the user (or test seeding) has uncommitted edits. This is by design —
-  # the updater's whole purpose is to align the device with upstream.
+  # SAVE, then discard. The resets below align the device with upstream, which
+  # is the updater's whole purpose — but "discard" used to mean "lose": an
+  # owner's edited file went with no trace and no word. It is copied out of the
+  # tree first (preserve_local_edits; the owner is told where on the update's
+  # result card), and the update then carries on over a clean tree whatever the
+  # edits were. The one refusal is edits that could not be saved anywhere —
+  # a stopped update is recoverable, reset-away work is not. TASK-1316.
+  if ! preserve_local_edits "$SRC_DIR" "$PROJECT_DIR"; then
+    echo "Error: this ClawBox has local changes to its code that could not be saved (is the disk full?), so the update did not reset them away. Free some space and run the update again." >&2
+    GIT_RUNNER=()
+    exit 1
+  fi
+  # Discard local working-tree changes before switching branches. Doing it
+  # up-front avoids `git checkout` aborting with "local changes would be
+  # overwritten" when the tree has uncommitted edits — saved just above.
   "${run_git[@]}" reset --hard HEAD 2>/dev/null || true
   if ! "${run_git[@]}" checkout "$target_branch" 2>/dev/null; then
     if ! "${run_git[@]}" checkout -b "$target_branch" "$upstream_branch" 2>/dev/null; then
@@ -3792,6 +3858,15 @@ sync_repo_to_update_target() {
     fi
   fi
   "${run_git[@]}" reset --hard "$upstream_branch"
+  # ...and the untracked, non-ignored files, which `reset --hard` leaves behind:
+  # a clean tree, the one src/lib/updater.ts's own `clean -fd` produces — and
+  # it is what makes the About screen's "the code on disk has uncommitted
+  # changes" go away after an update. `-fd`, never `-x`: data/, .env,
+  # node_modules and .next are ignored and stay. Everything it removes was
+  # copied out above. Never fatal: a file it cannot remove is a stray, not a
+  # reason to stop an update that has already synced.
+  "${run_git[@]}" clean -fdq 2>/dev/null \
+    || echo "  Warning: could not remove every untracked file from $PROJECT_DIR (they were saved before the reset)" >&2
 
   # ANCHOR FIRST, chown after.
   #
@@ -7826,7 +7901,12 @@ install_root_libexec() {
   local src failed=0
   # The integrity helper first: the dispatcher installed at the END of this
   # function refuses to run any step unless the manifest this writes verifies.
-  for src in clawbox-root-manifest.sh clawbox-run-root-step.sh clawbox-gateway-maintenance.sh; do
+  # clawbox-user-helper.sh is the multi-user sign-in check and Terminal shell
+  # (TASK-1256), granted NOPASSWD in config/clawbox-sudoers.
+  # clawbox-build-heal.sh is what clawbox-build-heal.service runs as root at
+  # boot (TASK-1316); it is granted to nobody.
+  for src in clawbox-root-manifest.sh clawbox-run-root-step.sh clawbox-gateway-maintenance.sh \
+             clawbox-user-helper.sh clawbox-build-heal.sh; do
     if [ -f "$SRC_DIR/config/$src" ]; then
       install_root_file "$SRC_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src" || {
         echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
@@ -8537,6 +8617,12 @@ step_post_update() {
   # sudoers change the same way. The step is idempotent — cp, daemon-reload,
   # enable — and is exactly what fresh installs already run.
   optional_step systemd_services step_systemd_services
+  # The polkit narrowing, again. step_rebuild_reboot removes the old grant right
+  # after its verified rebuild, but a box can reach this step by another road —
+  # a hand-run force-update.sh, a heal, an update that stopped after the rebuild
+  # — and still carry it. step_polkit_rules keeps it only while the build on disk
+  # needs it, so asking here is safe whichever build runs. TASK-1316.
+  optional_step polkit_rules step_polkit_rules
   # Refresh the device-side ClawKeep CLI from the repo. The Python package
   # has the same version string ("0.1.0") across releases, so a plain
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
@@ -8986,14 +9072,51 @@ except Exception: print("")' 2>/dev/null || echo "")
   return "$SMOKE_FINDINGS"
 }
 
+# Does the web build a server on this box would run start its root steps through
+# the root-owned launcher (TASK-539), rather than through the polkit
+# `manage-units` grant it replaced? Also yes when there is no build at all:
+# nothing then depends on the old path. Asked of config/clawbox-build-heal.sh,
+# the one copy of the probe (the boot-time heal asks it the same question), out
+# of $SRC_DIR like every other script root runs.
+#
+# A copy of install.sh with no probe beside it (`bash <(curl …)`) answers yes,
+# which is exactly how step_polkit_rules behaved before it asked. TASK-1316.
+web_build_uses_root_step_launcher() {
+  local probe="$SRC_DIR/config/clawbox-build-heal.sh"
+  [ -f "$probe" ] || return 0
+  bash "$probe" --build-uses-launcher "$PROJECT_DIR"
+}
+
 step_polkit_rules() {
   local POLKIT_PKLA_DIR="/etc/polkit-1/localauthority/50-local.d"
   mkdir -p "$POLKIT_PKLA_DIR"
-  cp "$SRC_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
-  # Remove the manage-units authorisation from devices that already have it.
-  # The .pkla shipped above no longer contains that stanza, but `cp` only
-  # replaces the file — a box provisioned before TASK-539 keeps whatever polkit
-  # already cached until this runs, and there is no other remover.
+  # NOT WHILE THE WEB BUILD STILL NEEDS IT. A build from before TASK-539 starts
+  # every root step — the updater's "Refreshing updater scripts" first of all —
+  # with a plain `systemctl start clawbox-root-update@<step>.service`, which
+  # only this grant authorises. Removing it while that build is the one on disk
+  # left a box whose rebuild then failed (step_rebuild_reboot used to call this
+  # BEFORE do_rebuild) running the old server with no way to start any root
+  # step: every update died at step 1 with polkit's "Interactive authentication
+  # required", and no update could ever fix it, because the update is what that
+  # server can no longer start (TASK-1316, a customer's box).
+  #
+  # So the removal waits for the build that no longer needs it: every caller
+  # reaches this again once a new build is verified on disk (step_rebuild_reboot
+  # right after do_rebuild, the legacy handover, post_update, heal_build). The
+  # grant is only ever KEPT on a box that already has it — never re-added.
+  local installed_pkla="$POLKIT_PKLA_DIR/49-clawbox-updates.pkla" deferred=0
+  if grep -qs 'org.freedesktop.systemd1.manage-units' "$installed_pkla" \
+     && ! web_build_uses_root_step_launcher; then
+    deferred=1
+    echo "  Keeping the old polkit manage-units grant for now: the web build on this box predates the root-step launcher and still starts its root steps through it."
+    echo "  It is removed by the first root step that runs after a newer build is in place (rebuild_reboot, post_update, heal_build)."
+  else
+    # Remove the manage-units authorisation from devices that already have it.
+    # The .pkla shipped here no longer contains that stanza, but `cp` only
+    # replaces the file — a box provisioned before TASK-539 keeps whatever
+    # polkit already cached until this runs, and there is no other remover.
+    cp "$SRC_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
+  fi
   #
   # The scoped .rules twin is INSTALLED now rather than deleted. polkit 0.105
   # (JetPack's) ignores rules.d entirely, so on the appliance it is inert
@@ -9004,7 +9127,11 @@ step_polkit_rules() {
     install_root_file "$SRC_DIR/config/49-clawbox-updates.rules" \
       "$POLKIT_RULES_DIR/49-clawbox-updates.rules" 0644
   fi
-  echo "  Polkit rules installed (NetworkManager only; root steps go through sudo)"
+  if [ "$deferred" = "1" ]; then
+    echo "  Polkit rules installed (NetworkManager, plus the old manage-units grant until the web build moves to the launcher)"
+  else
+    echo "  Polkit rules installed (NetworkManager only; root steps go through sudo)"
+  fi
 }
 
 step_start_services() {
@@ -9756,6 +9883,169 @@ step_chpasswd() {
   printf '%s\n' "$record" | /usr/sbin/chpasswd
 }
 
+# ── ClawBox users (TASK-1256) ────────────────────────────────────────────────
+#
+# Every ClawBox user other than the owner is a real Linux account, created and
+# removed from Settings → Users through these two steps. They are fed like
+# step_chpasswd — ONE record in a 0600 file under data/ that is read once,
+# validated, and deleted — and they never let the web server name an account
+# it could use to reach root:
+#
+#   * the name must match src/lib/username-rules.ts's USERNAME_RE and must not
+#     be root or $CLAWBOX_USER;
+#   * user_add refuses a name any account or group already has, and puts the
+#     new account in exactly one supplementary group, clawbox-users — never
+#     sudo, never adm;
+#   * user_remove removes ONLY a member of clawbox-users with uid >= 1000 that
+#     is not in an administrator group, so it cannot delete the owner, root or
+#     any account the box itself runs as, whatever the web server writes.
+#
+# config/clawbox-user-helper.sh (sign-in and the Terminal) holds itself to the
+# same membership rule.
+CLAWBOX_USERS_GROUP="clawbox-users"
+
+# 1-32 characters, carried by a length test rather than a `{0,31}` bound in
+# the regex (shell-regex-hygiene.test.ts: glibc expands a bounded repeat into
+# one NFA state per repetition).
+clawbox_user_name_ok() {
+  [ "${#1}" -ge 1 ] && [ "${#1}" -le 32 ] && [[ "$1" =~ ^[a-z_][a-z0-9_-]*$ ]]
+}
+
+# Read the one record a user step was handed, refusing a symlink, a missing
+# file and a second record. Prints the record; exits on refusal.
+read_user_step_input() {
+  local input_file="$1" record
+  if [ -L "$input_file" ]; then
+    rm -f "$input_file"
+    echo "Error: user input file is a symlink; refusing" >&2
+    exit 64
+  fi
+  if [ ! -f "$input_file" ]; then
+    echo "Error: user input file not found" >&2
+    exit 1
+  fi
+  record="$(cat "$input_file")"
+  rm -f "$input_file"
+  case "$record" in
+    *$'\n'*)
+      echo "Error: user input must be exactly one record" >&2
+      exit 64
+      ;;
+    *$'\r'*)
+      echo "Error: user input contains a carriage return" >&2
+      exit 64
+      ;;
+  esac
+  printf '%s' "$record"
+}
+
+step_user_add() {
+  local record user password home owner_home
+  record="$(read_user_step_input "$PROJECT_DIR/data/.user-add-input")" || exit $?
+  user="${record%%:*}"
+  password="${record#*:}"
+  if ! clawbox_user_name_ok "$user"; then
+    echo "Error: '$user' is not a valid username" >&2
+    exit 64
+  fi
+  if [ "$user" = "root" ] || [ "$user" = "$CLAWBOX_USER" ]; then
+    echo "Error: '$user' cannot be created here" >&2
+    exit 64
+  fi
+  if [ "$record" = "$user" ] || [ -z "$password" ]; then
+    echo "Error: user input has no password" >&2
+    exit 64
+  fi
+  if getent passwd "$user" >/dev/null 2>&1 || getent group "$user" >/dev/null 2>&1; then
+    echo "Error: an account or group named '$user' already exists" >&2
+    exit 65
+  fi
+
+  if ! getent group "$CLAWBOX_USERS_GROUP" >/dev/null 2>&1; then
+    groupadd --system "$CLAWBOX_USERS_GROUP" || {
+      echo "Error: could not create the $CLAWBOX_USERS_GROUP group" >&2
+      exit 1
+    }
+  fi
+  useradd --create-home --shell /bin/bash --user-group \
+    --groups "$CLAWBOX_USERS_GROUP" "$user" || {
+    echo "Error: useradd could not create '$user'" >&2
+    exit 1
+  }
+  if ! printf '%s:%s\n' "$user" "$password" | /usr/sbin/chpasswd; then
+    userdel --remove "$user" >/dev/null 2>&1 || true
+    echo "Error: could not set the password for '$user'; the account was removed again" >&2
+    exit 1
+  fi
+
+  # Each user's home is theirs alone, and the owner's stops being readable by
+  # the accounts this step creates: /home/<owner> holds data/, the assistant's
+  # state and every credential store. Nothing on the box that runs as another
+  # user reads from it (the gateway, the embedder, Chromium and the terminal
+  # server all run as $CLAWBOX_USER). Only the "other" bits are dropped, so the
+  # owner's own group access is untouched.
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  if [ -n "$home" ] && [ -d "$home" ]; then
+    chmod 0750 "$home" || true
+  fi
+  owner_home="$(getent passwd "$CLAWBOX_USER" | cut -d: -f6)"
+  if [ -n "$owner_home" ] && [ -d "$owner_home" ] && [ "$owner_home" != "/" ]; then
+    chmod o-rwx "$owner_home" || echo "  Warning: could not restrict $owner_home" >&2
+  fi
+  echo "Created ClawBox user '$user'"
+}
+
+step_user_remove() {
+  local user uid groups
+  user="$(read_user_step_input "$PROJECT_DIR/data/.user-remove-input")" || exit $?
+  if ! clawbox_user_name_ok "$user"; then
+    echo "Error: '$user' is not a valid username" >&2
+    exit 64
+  fi
+  if [ "$user" = "root" ] || [ "$user" = "$CLAWBOX_USER" ]; then
+    echo "Error: '$user' cannot be removed here" >&2
+    exit 64
+  fi
+  if ! getent passwd "$user" >/dev/null 2>&1; then
+    # Already gone (removed by hand, or a retry after a partial run): the
+    # registry entry is what the owner is asking to clear, and it has been.
+    echo "ClawBox user '$user' has no account; nothing to remove"
+    return 0
+  fi
+  uid="$(getent passwd "$user" | cut -d: -f3)"
+  groups=" $(id -nG "$user" 2>/dev/null || true) "
+  case "$groups" in
+    *" $CLAWBOX_USERS_GROUP "*) ;;
+    *)
+      echo "Error: '$user' is not a ClawBox user (not in $CLAWBOX_USERS_GROUP); refusing" >&2
+      exit 64
+      ;;
+  esac
+  case "$groups" in
+    *" sudo "*|*" admin "*|*" wheel "*|*" root "*|*" adm "*)
+      echo "Error: '$user' is an administrator account; refusing" >&2
+      exit 64
+      ;;
+  esac
+  if ! [[ "$uid" =~ ^[0-9]+$ ]] || [ "$uid" -lt 1000 ] || [ "$uid" -eq 65534 ]; then
+    echo "Error: '$user' is a system account; refusing" >&2
+    exit 64
+  fi
+
+  # End everything the user is running first — a Terminal session is a login
+  # shell under their uid — or userdel refuses with "user is currently used".
+  pkill -KILL -u "$uid" >/dev/null 2>&1 || true
+  sleep 1
+  local rc=0
+  userdel --remove "$user" || rc=$?
+  # 12: the account is gone but its home or mail spool could not be removed.
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 12 ]; then
+    echo "Error: userdel could not remove '$user' (exit $rc)" >&2
+    exit 1
+  fi
+  echo "Removed ClawBox user '$user'"
+}
+
 step_rebuild() {
   do_rebuild
   # `restart`, not `start`, for the reason spelled out in
@@ -9771,6 +10061,79 @@ step_rebuild() {
   # would turn this restart into a failure over a build that is fine.
   systemctl reset-failed clawbox-setup.service 2>/dev/null || true
   systemctl restart clawbox-setup.service
+}
+
+# ── Heal a web build an interrupted update left behind (TASK-1316) ───────────
+#
+# Started at boot by config/clawbox-build-heal.service (through
+# config/clawbox-build-heal.sh, which bounds the attempts and records each one),
+# or by an operator: `sudo bash install.sh --step heal_build`. Never by the web
+# server — it is on no launcher list — because the case it exists for is a web
+# server that cannot start root steps at all.
+#
+# Two states, both "the web build and the root side of the box disagree about
+# how a root step is started", and both of which the web server cannot leave by
+# itself:
+#
+#   stale-build            the build on disk predates the root-step launcher
+#                          while the code on disk uses it — an update that
+#                          moved the tree and never landed its rebuild. The
+#                          build starts root steps through the polkit grant
+#                          step_polkit_rules removes, so on a box where that
+#                          grant is gone every update fails at step 1.
+#   root-contract-missing  the build uses the launcher, but the launcher or its
+#                          sudoers grant is not installed.
+#
+# PINNED, deliberately — not in the self-updating family: it rebuilds from the
+# tree ON DISK, with no fetch and no reset, so it never moves the code under an
+# owner and needs no network for git. And being pinned, the dispatcher runs it
+# only while the tree still matches the root-exec record, out of the mirror, the
+# same as chpasswd: the heal adds no way for root to run something it did not
+# record.
+step_heal_build() {
+  local probe="$SRC_DIR/config/clawbox-build-heal.sh" verdict
+  if [ ! -f "$probe" ]; then
+    echo "Error: $probe is missing — cannot tell whether this box needs healing" >&2
+    return 1
+  fi
+  if ! verdict="$(bash "$probe" --check "$PROJECT_DIR")"; then
+    echo "  Nothing to heal: $verdict"
+    return 0
+  fi
+  echo "  Healing: $verdict"
+  local rc=0
+  case "$verdict" in
+    stale-build*)
+      # Rebuilt from the tree on disk, owner's local edits and all: the heal
+      # discards nothing. do_rebuild stops the dashboard, restores the previous
+      # build and restarts it on failure, and returns non-zero — errexit then
+      # ends this step with the old grant, if the box still has one, intact.
+      do_rebuild
+      # The root side of the contract the new build speaks — launcher,
+      # dispatcher, mirror, sudoers, units — out of the mirror this step runs
+      # from, BEFORE that build is started: the first thing an owner does on it
+      # is start an update. A subshell, because the step exits on a drift it
+      # finds; the dashboard is stopped here and must come back regardless.
+      ( step_systemd_services ) || rc=$?
+      systemctl reset-failed clawbox-setup.service 2>/dev/null || true
+      systemctl restart clawbox-setup.service || rc=$?
+      ;;
+    *)
+      ( step_systemd_services ) || rc=$?
+      ;;
+  esac
+  # Only now, with the server on a build that uses the launcher, may the grant
+  # the old one needed go — step_polkit_rules asks the build before it removes it.
+  ( step_polkit_rules ) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "Error: the heal did not finish (exit $rc) — see the lines above" >&2
+    return "$rc"
+  fi
+  if verdict="$(bash "$probe" --check "$PROJECT_DIR")"; then
+    echo "Error: the box still needs healing after the heal ran: $verdict" >&2
+    return 1
+  fi
+  echo "  Healed: $verdict"
 }
 
 step_restart() {
@@ -10705,10 +11068,17 @@ step_fix_git_perms() {
 }
 
 step_rebuild_reboot() {
-  # Redeploy config files and scripts that may have changed after git pull
+  # Redeploy config files and scripts that may have changed after git pull.
+  #
+  # step_polkit_rules is NOT here any more. It removes the polkit grant a
+  # pre-TASK-539 web build starts its root steps through, and it ran here —
+  # before do_rebuild — so a rebuild that then failed (bun install, the swap
+  # gate, an OOM kill: do_rebuild restores the previous build and returns
+  # non-zero) left the OLD server running with that grant gone and the box
+  # unable to start any root step ever again, the update included. It runs
+  # below, once a new build is verified on disk. TASK-1316.
   step_directories_permissions
   step_systemd_services
-  step_polkit_rules
   step_ollama_install
   step_openclaw_patch
   step_openclaw_config
@@ -10723,6 +11093,14 @@ step_rebuild_reboot() {
   else
     do_rebuild --reboot-follows
   fi
+  # Reached only with a new build verified on disk: do_rebuild returns non-zero
+  # on every other outcome and errexit ends this step there. The server that
+  # comes up next — the restart below, or the boot after the reboot — is that
+  # build, so the old build's polkit grant can go now (step_polkit_rules asks
+  # the build itself before it removes anything). Never fatal HERE: the
+  # dashboard is stopped until the restart or reboot below, and a polkit file
+  # that could not be written must not keep it down; post_update asks again.
+  step_polkit_rules || echo "  Warning: polkit rules not refreshed after the rebuild (post_update tries again)" >&2
   if is_test_mode; then
     echo "CLAWBOX_TEST_MODE=1, restarting clawbox-setup.service in lieu of reboot"
     # `reset-failed` first, as the other two rebuild-ending restarts already do
@@ -11136,7 +11514,12 @@ DISPATCH_STEPS=(
   harness_swap
   network_setup set_hostname set_timezone setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
+  # The boot-time heal of TASK-1316: config/clawbox-build-heal.service. Pinned,
+  # and on no web or UI list — the web server it heals cannot start it.
+  heal_build
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
+  # Settings → Users, multi-user ClawBox OS: TASK-1256. On WEB_ROOT_STEPS, never on the UI list.
+  user_add user_remove
   directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch cloudflared_install
   nm_dispatcher sysctl_linkdown persistent_journal resource_limits desktop_mode

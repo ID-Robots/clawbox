@@ -46,6 +46,29 @@ describe("/setup-api/network/internet", () => {
     expect(body.latencyMs).toBeNull();
   });
 
+  // Every signed-in ClawBox user reads this route, not just the owner — the
+  // tray's online dot (src/lib/non-owner-scope.ts). So it must stay a bare
+  // connectivity reading: no interface, SSID, address or credential. A new
+  // field here is a new thing every user on the box can read.
+  it("answers connectivity and nothing of the network's configuration", async () => {
+    for (const result of [{ stdout: "ok" }, { error: new Error("down") }]) {
+      vi.resetModules();
+      execFileMock.mockReset();
+      execFileMock.mockReturnValue(result);
+      const mod = await import("@/app/setup-api/network/internet/route");
+      const body = await (await mod.GET()).json();
+      expect(Object.keys(body).sort()).toEqual(["checkedAt", "latencyMs", "online"]);
+    }
+  });
+
+  it("probes a fixed public address, never one taken from the request", async () => {
+    execFileMock.mockReturnValue({ stdout: "ok" });
+    const mod = await import("@/app/setup-api/network/internet/route");
+    expect(mod.GET.length).toBe(0);
+    await mod.GET();
+    expect(execFileMock).toHaveBeenCalledWith("ping", expect.arrayContaining(["1.1.1.1"]));
+  });
+
   it("caches the result for the TTL window (5s)", async () => {
     execFileMock.mockReturnValue({ stdout: "ok" });
     const mod = await import("@/app/setup-api/network/internet/route");
