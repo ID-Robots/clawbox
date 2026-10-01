@@ -499,7 +499,9 @@ describe("the review loop", () => {
 
   it("accepts by rule, with an alert, when the reviewer gives no verdict or does not finish", async () => {
     outcomes = [{ summary: PLAN }, { summary: "a", filesTouched: ["index.html"] }, { summary: "b", filesTouched: ["app.js"] }];
-    reviews = [{ summary: "Looks fine to me!" }, { status: "failed", error: "boom" }];
+    // t1's reviewer answers prose twice — the first answer and the one re-ask
+    // (TASK-1323) — so t2's reviewer is the sixth run, not the fifth.
+    reviews = [{ summary: "Looks fine to me!" }, { summary: "Still fine by me." }, { status: "failed", error: "boom" }];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
@@ -511,9 +513,103 @@ describe("the review loop", () => {
     const alerts = done.log.filter((e) => e.type === "alert").map((e) => e.message);
     expect(alerts).toEqual([
       expect.stringMatching(/reviewer of t1 gave no verdict/),
-      expect.stringMatching(/reviewer of t2 \(run-00000005\) ended failed/),
+      expect.stringMatching(/reviewer of t2 \(run-00000006\) ended failed/),
     ]);
     expect(done.alerts).toBe(2);
+  });
+});
+
+/**
+ * Bench, 2026-09-30: three "answer holds no JSON object" alerts in one bench
+ * — the reviewers had reviewed, only their closing words lacked the object.
+ * Such an answer is asked for once more in the reviewer's own session; only a
+ * second miss is the alert, and it quotes how that answer began.
+ */
+describe("a reviewer that answered without a JSON verdict (TASK-1323)", () => {
+  const reviewerStarts = () => starts.filter((s) => (s.team as { role: string }).role === "reviewer");
+
+  it("is asked once more in its own session, with the short nudge, and its second answer is the verdict — a note, no alert", async () => {
+    const { REVIEWER_BRIEF, REVIEWER_NUDGE } = await import("@/lib/coding-team-reviewer");
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    reviews = [
+      { summary: "I read index.html against the task.\n\nIt has the heading and the form the task asked for, and nothing else changed. Accepting." },
+      { summary: JSON.stringify({ verdict: "accepted", notes: "Heading and form are there." }) },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // The first answer's reviewer, its re-ask, then t2's reviewer: ONE re-ask.
+    expect(reviewerStarts().map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t1", "t2"]);
+    expect(starts[3]).toEqual({
+      task: REVIEWER_NUDGE,
+      resumeRunId: "run-00000003",
+      source: "owner",
+      team: { id: board.id, role: "reviewer", taskId: "t1" },
+      readOnly: true,
+      extraBrief: REVIEWER_BRIEF,
+    });
+    expect(REVIEWER_NUDGE).toContain("Answer with the JSON verdict object only, nothing else");
+    expect(done.tasks[0].review).toMatchObject({ verdict: "accepted", notes: "Heading and form are there." });
+    // The card's reviewer link stays on the run that did the review.
+    expect(done.tasks[0].reviewRunId).toBe("run-00000003");
+    expect(done.runs.filter((r) => r.role === "reviewer").map((r) => [r.id, r.taskId])).toEqual([["run-00000003", "t1"], ["run-00000004", "t1"], ["run-00000006", "t2"]]);
+    expect(done.alerts).toBe(0);
+    expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
+    const notes = done.log.filter((e) => e.type === "note");
+    expect(notes).toEqual([expect.objectContaining({
+      task_id: "t1",
+      message: 'The reviewer of t1 answered without a JSON verdict; asking it once more for the verdict alone. It answered: "I read index.html against the task. It has the heading and the form the task asked for, and nothing else changed. Accepting."',
+    })]);
+  });
+
+  it("raises the alert only after a second answer without the object, quoting how that answer began", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const second = `I already gave my verdict above: the work is fine.\n${"The task is done as asked and nothing beside it broke. ".repeat(8)}`;
+    reviews = [{ summary: "Reviewed; all good." }, { summary: second }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(reviewerStarts().map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t1", "t2"]);
+    expect(done.tasks[0].review).toMatchObject({ verdict: "accepted", notes: "Accepted by rule: The reviewer's answer holds no JSON object." });
+    const head = second.replace(/\s+/g, " ").slice(0, 199);
+    const alerts = done.log.filter((e) => e.type === "alert").map((e) => e.message);
+    expect(alerts).toEqual([`ALERT: The reviewer of t1 gave no verdict: asked twice, it answered no JSON object — "${head}…"`]);
+    expect(done.alerts).toBe(1);
+  });
+
+  it("says why when the re-ask itself does not finish, and never asks a third time", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    reviews = [{ summary: "" }, { status: "failed", error: "boom" }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(reviewerStarts()).toHaveLength(3);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+      "ALERT: The reviewer of t1 gave no verdict: The reviewer answered nothing. Asked once more, it (run-00000004) ended failed.",
+    ]);
+    expect(done.tasks[0].review?.notes).toBe("Accepted by rule: The reviewer answered nothing.");
+  });
+
+  it("reads a fenced ```json block after prose at once — no re-ask, no note", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    reviews = [{ summary: 'Checked index.html on a 5" phone width and the "Send" button.\n\n```json\n{"verdict": "accepted", "notes": "One nit: spacing."}\n```' }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(reviewerStarts()).toHaveLength(2);
+    expect(done.tasks[0].review).toMatchObject({ verdict: "accepted", notes: "One nit: spacing." });
+    expect(done.log.filter((e) => e.type === "note" || e.type === "alert")).toEqual([]);
+  });
+
+  it("does not re-ask an answer whose object is there but wrong: that is what the reviewer said", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    reviews = [{ summary: '{"verdict": "maybe", "notes": "not sure"}' }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(reviewerStarts()).toHaveLength(2);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+      'ALERT: The reviewer of t1 gave no verdict: The reviewer\'s verdict is not accepted or rejected ("maybe").',
+    ]);
   });
 });
 
@@ -1718,12 +1814,29 @@ describe("the planner's shape", () => {
 
   it("accepts by rule, with an alert, when the final reviewer gives no verdict", async () => {
     outcomes = [{ summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) }, { summary: "index", filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }];
-    reviews = [{ summary: "Looks great." }];
+    // No verdict in the answer nor in the one re-ask (TASK-1323).
+    reviews = [{ summary: "Looks great." }, { summary: "Still looks great." }];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
     expect(done.finalReview).toMatchObject({ verdict: "accepted", notes: expect.stringMatching(/^Accepted by rule/) });
     expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([expect.stringMatching(/final reviewer gave no verdict/)]);
+  });
+
+  it("asks the final reviewer once more, in its own session, when its answer holds no JSON object (TASK-1323)", async () => {
+    const { FINAL_REVIEWER_BRIEF, REVIEWER_NUDGE } = await import("@/lib/coding-team-reviewer");
+    outcomes = [{ summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) }, { summary: "index", filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }];
+    reviews = [{ summary: "The goal is met: index.html and app.js work together." }, { summary: 'Sorry.\n{"verdict": "rejected", "notes": "app.js never loads the form."}' }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer", "reviewer"]);
+    expect(starts[4]).toEqual({ task: REVIEWER_NUDGE, resumeRunId: "run-00000004", source: "owner", team: { id: board.id, role: "reviewer", taskId: null }, readOnly: true, extraBrief: FINAL_REVIEWER_BRIEF });
+    expect(done.finalReview).toMatchObject({ verdict: "rejected", notes: "app.js never loads the form." });
+    expect(done.status).toBe("failed");
+    expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([
+      'The final reviewer answered without a JSON verdict; asking it once more for the verdict alone. It answered: "The goal is met: index.html and app.js work together."',
+    ]);
   });
 
   it("trusts the rule alone when the plan asks for review \"none\" — no reviewer run at all", async () => {
