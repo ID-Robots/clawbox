@@ -1,0 +1,14 @@
+/* ClawBox Kiosk Tabs: push the page down by the bar's height so nothing sits
+   under it. The bar itself is styled inside its shadow root (bar.js). Must
+   equal BAR_H in bar.js and the padding in newtab.css. The margin moves the
+   normal flow only: fixed and sticky headers, viewport-tall shells and
+   absolute boxes on the canvas are moved by offset.js.
+
+   No ::-webkit-scrollbar rule here on purpose: a content stylesheet applies
+   to every scroller on the page, not just the document's, and would fight
+   pages that style their own. The kiosk's --force-dark-mode flag
+   (scripts/x64-migration/kiosk/install-kiosk-tabs.sh) darkens Chrome's
+   scrollbars instead. */
+html.clawbox-kiosk-bar-shown {
+  margin-top: 40px !important;
+}

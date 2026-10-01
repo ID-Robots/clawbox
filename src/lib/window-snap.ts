@@ -10,6 +10,8 @@
  * different edge than a window snapped to the same half.
  */
 
+import { kioskBarInset } from "./kiosk-bar-inset";
+
 export type SnapZone =
   | "left" | "right" | "top"
   | "top-left" | "top-right" | "bottom-left" | "bottom-right"
@@ -20,15 +22,21 @@ export const SNAP_THRESHOLD = 12;
 
 /**
  * The margin the desktop's floating surfaces keep from the screen edges and
- * from each other — a MAXIMIZED window and the DOCKED chat alike.
+ * from each other: the DOCKED chat's own margin, and the room a window opened
+ * or centred beside it keeps from the panel (`fitWindowSize`,
+ * `getInitialPosition`).
  *
- * One number, and it lives here, because the two are measured against each
- * other: `page.tsx` adds this gap to the panel's width to build the strip
- * windows reserve, so a maximized window's right-hand margin IS this gap while
- * the chat keeps the same one on its far side. Kept apart they drifted — the
- * window sat 10px inside the desktop and the chat 12px, which is exactly the
- * lopsidedness that is visible when both are on screen. (A SNAPPED window is
- * deliberately flush and takes no gap at all; see `getSnapRect`.)
+ * One number, and it lives here, because the surfaces are measured against
+ * each other: `page.tsx` adds this gap to the panel's width to build the strip
+ * windows reserve, so the strip ends one gap short of the chat while the chat
+ * keeps the same one on its far side. Kept apart they drifted — the window sat
+ * 10px inside the desktop and the chat 12px, which is exactly the lopsidedness
+ * that is visible when both are on screen.
+ *
+ * A window that fills the desktop takes NO gap: a SNAPPED window is flush by
+ * design (`getSnapRect`), and since 2026-09-30 a MAXIMIZED window is too — it
+ * used to sit this gap inside the desktop on every side, with its corners, and
+ * the owner asked for the small paddings around the windows to go.
  */
 export const DESKTOP_GAP = 6;
 
@@ -90,12 +98,26 @@ export function shelfHeight(): number {
   return h > 0 ? h : SHELF_HEIGHT;
 }
 
+/**
+ * The top of the desktop: 0, or the height of the kiosk bar the laptop's
+ * kiosk extension draws over the page while other tabs are open
+ * (`kiosk-bar-inset.ts`). Everything that lays a surface against the top edge
+ * starts here, or the title bar it puts there is under the bar and cannot be
+ * grabbed.
+ */
+export function desktopTop(): number {
+  return kioskBarInset();
+}
+
 export function getSnapZone(clientX: number, clientY: number, rInset = 0): SnapZone {
   const w = window.innerWidth - rInset;
   const h = window.innerHeight - shelfHeight();
   const nearLeft = clientX <= SNAP_THRESHOLD;
   const nearRight = clientX >= w - SNAP_THRESHOLD;
-  const nearTop = clientY <= SNAP_THRESHOLD;
+  // Measured from the desktop's top, not the screen's: with the kiosk bar up
+  // the screen's top 12px are the bar, which a drag can cross but which is
+  // not where a window is being dropped against the desktop's top edge.
+  const nearTop = clientY <= desktopTop() + SNAP_THRESHOLD;
   const nearBottom = clientY >= h - SNAP_THRESHOLD;
 
   if (nearTop && nearLeft) return "top-left";
@@ -132,11 +154,13 @@ export function clampWindowPosition(
 ): { x: number; y: number } {
   if (typeof window === "undefined") return { x: rect.x, y: rect.y };
   const spare = window.innerWidth - rect.width;
+  const top = desktopTop();
   const availH = window.innerHeight - shelfHeight();
   // A window that FITS may sit anywhere in [0, spare]; one too wide for the
   // screen may stay where it is on the left but is never pushed further right.
   const x = Math.min(Math.max(rect.x, Math.min(0, spare)), Math.max(0, spare));
-  const y = Math.min(Math.max(rect.y, 0), Math.max(0, availH - TITLE_BAR_HEIGHT));
+  // Below the kiosk bar (0 without one) and with the title bar above the shelf.
+  const y = Math.min(Math.max(rect.y, top), Math.max(top, availH - TITLE_BAR_HEIGHT));
   return { x, y };
 }
 
@@ -165,7 +189,7 @@ export function fitWindowSize(
 ): { width: number; height: number } {
   if (typeof window === "undefined") return { width: size.width, height: size.height };
   const availW = rInset > 0 ? window.innerWidth - rInset - DESKTOP_GAP * 2 : window.innerWidth;
-  const availH = window.innerHeight - shelfHeight();
+  const availH = window.innerHeight - shelfHeight() - desktopTop();
   return {
     width: Math.max(MIN_WINDOW_WIDTH, Math.min(size.width, availW)),
     height: Math.max(MIN_WINDOW_HEIGHT, Math.min(size.height, availH)),
@@ -177,15 +201,17 @@ export interface SnapRect { x: number; y: number; width: number; height: number 
 export function getSnapRect(zone: SnapZone, rInset = 0): SnapRect | null {
   if (!zone) return null;
   const w = window.innerWidth - rInset;
-  const h = window.innerHeight - shelfHeight();
+  // The strip between the kiosk bar (0 without one) and the shelf.
+  const t = desktopTop();
+  const h = window.innerHeight - shelfHeight() - t;
   switch (zone) {
-    case "left": return { x: 0, y: 0, width: w / 2, height: h };
-    case "right": return { x: w / 2, y: 0, width: w / 2, height: h };
-    case "top": return { x: 0, y: 0, width: w, height: h };
-    case "top-left": return { x: 0, y: 0, width: w / 2, height: h / 2 };
-    case "top-right": return { x: w / 2, y: 0, width: w / 2, height: h / 2 };
-    case "bottom-left": return { x: 0, y: h / 2, width: w / 2, height: h / 2 };
-    case "bottom-right": return { x: w / 2, y: h / 2, width: w / 2, height: h / 2 };
+    case "left": return { x: 0, y: t, width: w / 2, height: h };
+    case "right": return { x: w / 2, y: t, width: w / 2, height: h };
+    case "top": return { x: 0, y: t, width: w, height: h };
+    case "top-left": return { x: 0, y: t, width: w / 2, height: h / 2 };
+    case "top-right": return { x: w / 2, y: t, width: w / 2, height: h / 2 };
+    case "bottom-left": return { x: 0, y: t + h / 2, width: w / 2, height: h / 2 };
+    case "bottom-right": return { x: w / 2, y: t + h / 2, width: w / 2, height: h / 2 };
     default: return null;
   }
 }

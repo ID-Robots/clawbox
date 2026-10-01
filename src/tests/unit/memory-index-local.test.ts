@@ -736,9 +736,15 @@ describe("the ClawBox AI cloud embedder", () => {
     try {
       let settled = false;
       const pass = runLocalIndexPass("full").finally(() => { settled = true; });
-      // Let the pass get as far as arming its retry pause. Bounded, so a pass
-      // that never arms one fails on the assertion below rather than hanging.
-      for (let i = 0; i < 200 && vi.getTimerCount() === 0 && !settled; i += 1) {
+      // Let the pass get as far as arming its retry pause. Bounded by the WALL
+      // clock (only setTimeout is fake), so a pass that never arms one fails on
+      // the assertion below rather than hanging. A count of event-loop turns
+      // was the bound before, and under a loaded parallel run the real sqlite
+      // and filesystem work ahead of the pause outlasted 200 of them — the
+      // assertion saw no timer yet, and the pass, left running, armed its
+      // pause on the REAL clock and spilled into the next case.
+      const deadline = Date.now() + 10_000;
+      while (vi.getTimerCount() === 0 && !settled && Date.now() < deadline) {
         await new Promise<void>((resolve) => { setImmediate(resolve); });
       }
       expect(vi.getTimerCount()).toBe(1);

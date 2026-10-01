@@ -1,0 +1,121 @@
+/* ClawBox Kiosk Tabs — the start page, in the desktop's own tokens
+   (src/app/globals.css). The ClawBox bar (bar.js) sits on top; the page is
+   padded down by its height, the same 40 px content.css gives web pages. */
+:root {
+  --bg-deep: #111827;
+  --bg-surface: #172030;
+  --bg-elevated: #1e2939;
+  --ground: #0a0f1a;
+  --coral-bright: #f97316;
+  --coral-mid: #ea580c;
+  --cyan-bright: #00e5cc;
+  --text-primary: #f9fafb;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+  --border-subtle: rgba(54, 65, 83, 0.6);
+  --coral-ring: rgba(249, 115, 22, 0.6);
+  --font-display: "Clash Display", system-ui, sans-serif;
+  --font-body: "Satoshi", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+html.clawbox-kiosk-bar-shown body { padding-top: 40px; }
+body {
+  background: var(--ground) radial-gradient(ellipse 60% 50% at 50% 35%, rgba(249, 115, 22, 0.10), transparent 70%);
+  color: var(--text-primary);
+  font: 400 15px/1.4 var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+.start {
+  min-height: calc(100% - 40px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 24px 16px 80px;
+}
+.wordmark {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0;
+  font: 600 40px/1 var(--font-display);
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+/* The crab and the wordmark in the desktop's brand gradient (.title-gradient
+   in globals.css). */
+.wordmark img { width: 64px; height: 64px; object-fit: contain; filter: drop-shadow(0 8px 20px rgba(249, 115, 22, 0.35)); }
+.wordmark span {
+  background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.search {
+  display: flex;
+  align-items: center;
+  width: min(640px, 100%);
+  height: 52px;
+  padding: 0 6px 0 16px;
+  border-radius: 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  transition: border-color .12s, box-shadow .12s, background-color .12s;
+}
+.search:hover { background: var(--bg-elevated); }
+.search:focus-within { border-color: var(--coral-ring); box-shadow: 0 0 0 2px var(--coral-ring); background: var(--bg-elevated); }
+.search .lens { color: var(--text-muted); display: inline-flex; margin-right: 10px; }
+.search input {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: 400 17px/1 var(--font-body);
+}
+.search input::placeholder { color: var(--text-muted); }
+.search button {
+  flex: none;
+  height: 40px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--coral-bright), var(--coral-mid));
+  color: #fff;
+  font: 600 14px/1 var(--font-body);
+  cursor: pointer;
+  transition: filter .12s, transform .06s;
+}
+.search button:hover { filter: brightness(1.08); }
+.search button:active { transform: translateY(1px); }
+.search button:focus-visible { outline: 2px solid var(--coral-ring); outline-offset: 2px; }
+
+.quick {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+.quick a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 13px;
+  transition: background-color .12s, color .12s;
+}
+.quick a:hover { background: rgba(255, 255, 255, 0.10); color: var(--text-primary); }
+.quick a:active { background: rgba(255, 255, 255, 0.15); }
+.quick a:focus-visible { outline: 2px solid var(--coral-ring); outline-offset: -2px; }
+.quick .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c, var(--text-muted)); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08); }

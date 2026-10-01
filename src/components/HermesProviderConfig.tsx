@@ -14,6 +14,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { notifyHermesModelState, useHermesModelOptions } from "@/hooks/useHermesModelOptions";
 import { notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
+import { openInKiosk } from "@/lib/kiosk-tabs-client";
 import {
   HERMES_PANEL_PROVIDERS,
   CLAWAI_PROVIDER,
@@ -741,7 +742,7 @@ export default function HermesProviderConfig({
         // back here (Anthropic's redirect_uri is its own console) — nothing
         // ever redirects back to this origin, which is why the flow survives
         // any tunnel.
-        window.open(data.auth_url, "_blank", "noopener,noreferrer");
+        openInKiosk(data.auth_url);
         setSignin({ stage: "pkce", providerId, sessionId, authUrl: data.auth_url });
       } else if (data.flow === "device_code" && sessionId) {
         const interval =
@@ -970,7 +971,7 @@ export default function HermesProviderConfig({
     if (typeof window === "undefined") return;
     const url = `${window.location.protocol}//${window.location.hostname}:8090/env`;
     oauthTabOpenedRef.current = true;
-    window.open(url, "_blank", "noopener,noreferrer");
+    openInKiosk(url);
   }
 
   const selectedDef = useMemo(

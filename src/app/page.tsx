@@ -54,6 +54,8 @@ import { apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
 import { fetchSessionUser, mayUseOwnerApis, useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
 import { useFollowSessionSwitch } from "@/lib/session-switch";
+import { KIOSK_PAGES_APP_ID, kioskPageTabs, openInKiosk, useKioskTabs } from "@/lib/kiosk-tabs-client";
+import { useKioskBarInset } from "@/lib/kiosk-bar-inset";
 import { NON_OWNER_APP_IDS, OWNER_ONLY_NOTICE, installedAppIdsFor } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
@@ -321,6 +323,8 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     "memory-shard": "diamond",
     system_update: "system_update",
     vnc: "desktop_windows",
+    // The globe: the open web, as opposed to `browser`'s Chrome roundel.
+    web: "language",
     camera: "photo_camera",
     store: "storefront",
     chat: "chat_bubble",
@@ -385,6 +389,23 @@ function ChromeDesktopInner() {
   // that opens AI Settings instead of ClawKeep.
   const clawboxLogin = useClawboxLogin(undefined, ownerApis);
   const clawAiAuthenticated = clawboxLogin.loggedIn;
+  // The kiosk bar's height while the x64 laptop's kiosk extension draws it
+  // over this page, 0 on every other browser: top-anchored surfaces start
+  // under it, and it is how this page knows it IS the kiosk.
+  const kioskBarInset = useKioskBarInset();
+  const onKiosk = kioskBarInset > 0;
+  // The tabs of the kiosk Chrome on the laptop's own display, for the shelf
+  // (src/lib/kiosk-tabs.ts). Owner-gated like every other poll here, and
+  // polled only on the kiosk itself: every other box — every Jetson — sends
+  // nothing.
+  const kiosk = useKioskTabs(ownerApis && onKiosk);
+  // A stable callback on its own, so the shelf's click handler can depend on
+  // it rather than on the whole `kiosk` object, a new one every render.
+  const activateKioskTab = kiosk.activate;
+  // The pages the desktop opened in the kiosk, most recently used first. The
+  // shelf shows them as ONE app — Web — like any other open app; the kiosk
+  // bar across the top is where each of them is named and switched to.
+  const kioskPages = useMemo(() => kioskPageTabs(kiosk.tabs), [kiosk.tabs]);
 
   const syncSetupStatus = useCallback(async () => {
     const data = await fetch("/setup-api/setup/status").then((r) => r.json());
@@ -518,9 +539,10 @@ function ChromeDesktopInner() {
   const isOwner = sessionUser?.isOwner !== false;
   const harnessHiddenAppIds = useMemo<string[]>(
     () => isOwner
-      ? hiddenAppIdsForHarness(activeHarness)
+      // A kiosk-only app (Web) exists on the laptop's kiosk desktop alone.
+      ? [...hiddenAppIdsForHarness(activeHarness), ...(onKiosk ? [] : apps.filter((a) => a.kioskOnly).map((a) => a.id))]
       : apps.map((a) => a.id).filter((id) => !NON_OWNER_APP_IDS.includes(id)),
-    [activeHarness, isOwner],
+    [activeHarness, isOwner, onKiosk],
   );
 
   // ─── Desktop shortcuts for built-in apps ───
@@ -1037,12 +1059,15 @@ function ChromeDesktopInner() {
   // column count (a width derivative) could trigger an arrange, so shrinking a
   // window vertically left the icons laid out for the old height.
   const [gridDims, setGridDims] = useState({ cols: 10, cellW: 100, mobile: false, rowsPerColumn: 6 });
+  // The kiosk bar's room above the icons (0 without one).
+  const kioskIconReserve = kioskBarInset;
   useEffect(() => {
     const update = () => {
       const w = window.innerWidth;
       const cellW = w < 500 ? 85 : 100;
       const cols = Math.max(3, Math.floor(w / cellW));
-      const rowsPerColumn = Math.max(1, Math.floor((window.innerHeight - TASKBAR_RESERVE) / CELL_H));
+      // On the laptop's kiosk the rows fit under the kiosk bar.
+      const rowsPerColumn = Math.max(1, Math.floor((window.innerHeight - TASKBAR_RESERVE - kioskIconReserve) / CELL_H));
       setGridDims((prev) =>
         prev.cols === cols && prev.cellW === cellW && prev.mobile === w < 768 && prev.rowsPerColumn === rowsPerColumn
           ? prev
@@ -1052,7 +1077,7 @@ function ChromeDesktopInner() {
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
-  }, []);
+  }, [kioskIconReserve]);
   const GRID_COLS = gridDims.cols;
   const isMobile = gridDims.mobile;
   const GRID_ROWS = 6;
@@ -1725,7 +1750,9 @@ function ChromeDesktopInner() {
       const url = app.url === "hermes-dashboard"
         ? `${window.location.protocol}//${window.location.hostname}:${HERMES_DASH_PROXY_PORT}/`
         : app.url;
-      window.open(url, "_blank", "noopener,noreferrer");
+      // Through the kiosk API on the laptop's kiosk Chrome (the shelf then
+      // lists the tab at once); plain window.open everywhere else.
+      openInKiosk(url);
       return;
     }
 
@@ -1739,7 +1766,7 @@ function ChromeDesktopInner() {
       try {
         const u = new URL(app.url, window.location.origin);
         if (["http:", "https:"].includes(u.protocol)) {
-          window.open(u.href, "_blank", "noopener,noreferrer");
+          openInKiosk(u.href);
           return;
         }
       } catch {}
@@ -2374,6 +2401,12 @@ function ChromeDesktopInner() {
 
   const handleShelfAppClick = useCallback((appId: string) => {
     vibrate(10);
+    // Web on the laptop's kiosk: back to the page the owner was last on. Only
+    // with none open does it open a new one, the way the desktop icon does.
+    if (appId === KIOSK_PAGES_APP_ID && kioskPages.length > 0) {
+      activateKioskTab(kioskPages[0].id);
+      return;
+    }
     const appWindows = openWindows.filter((w) => w.appId === appId);
     if (appWindows.length === 0) {
       openApp(appId);
@@ -2409,7 +2442,7 @@ function ChromeDesktopInner() {
       );
       setNextZIndex((z) => z + appWindows.length + 1);
     }
-  }, [openWindows, openApp, minimizeWindow, getActiveWindowId, nextZIndex]);
+  }, [openWindows, openApp, minimizeWindow, getActiveWindowId, nextZIndex, kioskPages, activateKioskTab, vibrate]);
 
   const pinnedApps = getAllApps().filter((a) => isAppPinned(a.id));
 
@@ -2730,7 +2763,7 @@ function ChromeDesktopInner() {
       )}
       {/* Upload status toast */}
       {uploadStatus && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 min-w-[220px] rounded-lg bg-[var(--bg-elevated)] border border-white/10 text-sm text-white shadow-lg overflow-hidden" style={{ zIndex: DESKTOP_LAYERS.notice }}>
+        <div className="fixed left-1/2 -translate-x-1/2 min-w-[220px] rounded-lg bg-[var(--bg-elevated)] border border-white/10 text-sm text-white shadow-lg overflow-hidden" style={{ zIndex: DESKTOP_LAYERS.notice, top: 16 + kioskBarInset }}>
           <div className="px-4 py-2">{uploadStatus}</div>
           {uploadProgress < 100 && (
             <div className="h-1 bg-white/5">
@@ -2746,13 +2779,14 @@ function ChromeDesktopInner() {
       {ownerApis && <PowerApprovalPrompt />}
       {noticesUp && (
         <div
-          className="desktop-notice-stack pointer-events-none fixed top-4 flex w-[320px] flex-col gap-3"
+          className="desktop-notice-stack pointer-events-none fixed flex w-[320px] flex-col gap-3"
           // Beside the chat — docked or floating — never on top of it. Both are
           // anchored to the top-right corner, and a notice at the top of the
           // stacking order covered the chat's tab row and its +, dock and close
           // buttons for the 30 s a card takes to hide itself. See
           // `noticeRightInset`.
-          style={{ zIndex: DESKTOP_LAYERS.notice, right: NOTICE_MARGIN + noticeRightInset }}
+          // Under the kiosk bar on the laptop while it is up (0 elsewhere).
+          style={{ zIndex: DESKTOP_LAYERS.notice, right: NOTICE_MARGIN + noticeRightInset, top: NOTICE_MARGIN + kioskBarInset }}
         >
           {/* New version available notification */}
           {updateAvailable && !updateNoticeHidden && (() => {
@@ -3002,7 +3036,7 @@ function ChromeDesktopInner() {
       {/* Hidden file input for wallpaper upload */}
       <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
       {/* Desktop icon grid — draggable + right-click surface */}
-      <div data-testid="desktop-surface" className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24, overflowY: isMobile ? "auto" : "visible" }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
+      <div data-testid="desktop-surface" className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24 + kioskIconReserve, overflowY: isMobile ? "auto" : "visible" }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
       <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%", height: isMobile && allIconIds.length > 0 ? `${(Math.floor((allIconIds.length - 1) / GRID_COLS) + 1) * CELL_H}px` : undefined }}>
         {installedAppDefs.map((app) => {
           const pos = getIconPosition(app.id);
@@ -3374,8 +3408,16 @@ function ChromeDesktopInner() {
             .filter((a): a is AppDef => !!a)
             // Deduplicate
             .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i);
+          // The kiosk's pages are "open" the way a window is: Web joins the
+          // open apps while any is up, with a dot per page (up to four).
+          const webApp = allApps.find(a => a.id === KIOSK_PAGES_APP_ID);
+          if (webApp && kioskPages.length > 0 && !pinnedIds.has(webApp.id)) unpinnedOpenApps.push(webApp);
 
           const mapApp = (app: AppDef) => {
+            // Web on the kiosk counts the kiosk's pages as its windows. It is
+            // never the active one: the desktop is what is showing whenever
+            // this shelf is.
+            const kioskPageCount = app.id === KIOSK_PAGES_APP_ID && kiosk.available ? kioskPages.length : null;
             const appWindows = openWindows.filter((w) => w.appId === app.id);
             const topWin = appWindows.length > 0
               ? appWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b))
@@ -3394,15 +3436,17 @@ function ChromeDesktopInner() {
                 </div>
               );
             };
+            const count = kioskPageCount ?? appWindows.length;
             return {
               id: app.id,
               name: resolveAppName(app),
               icon: renderIcon(),
-              isOpen: appWindows.length > 0,
-              isActive: topWin?.id === activeWindowId && !topWin?.minimized,
+              isOpen: count > 0,
+              isActive: kioskPageCount === null && topWin?.id === activeWindowId && !topWin?.minimized,
               isPinned: pinnedIds.has(app.id),
-              windowCount: appWindows.length,
+              windowCount: count,
               url: app.url,
+              ...(kioskPageCount !== null ? { external: true } : {}),
             };
           };
 
@@ -3436,6 +3480,11 @@ function ChromeDesktopInner() {
         onPinApp={handlePinApp}
         onUnpinApp={handleUnpinApp}
         onCloseApp={(appId) => {
+          // Web's "Close" closes the kiosk's pages it stands for.
+          if (appId === KIOSK_PAGES_APP_ID && kioskPages.length > 0) {
+            for (const tab of kioskPages) kiosk.close(tab.id);
+            return;
+          }
           setOpenWindows(prev => prev.filter(w => w.appId !== appId));
         }}
         onShelfSettings={() => openApp("settings")}
@@ -3525,7 +3574,7 @@ function ChromeDesktopInner() {
               )}
               {!isSkill && (
                 <button onClick={() => {
-                  window.open(`/app/${encodeURIComponent(resolvedAppId)}`, "_blank");
+                  openInKiosk(`/app/${encodeURIComponent(resolvedAppId)}`, "");
                 }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                   <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.openNewTab")}
                 </button>

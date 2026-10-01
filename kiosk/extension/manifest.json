@@ -1,0 +1,77 @@
+{
+  "manifest_version": 3,
+  "name": "ClawBox Kiosk Tabs",
+  "version": "1.5.2",
+  "description": "A slim ClawBox bar on every page the ClawBox desktop opens in the kiosk Chrome — back to ClawBox, switch between open pages, back/forward/reload, a centred address bar, a new tab on a ClawBox start page, close this one, open DevTools on it — with the page laid out below it, and on the desktop itself as its tab strip. The kiosk runs --kiosk and has no tab strip of its own.",
+  "permissions": [
+    "tabs",
+    "debugger"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "chrome_url_overrides": {
+    "newtab": "newtab.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "exclude_matches": [
+        "http://localhost:3005/*",
+        "http://127.0.0.1:3005/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "bar.js",
+        "offset.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "http://localhost:3005/*",
+        "http://127.0.0.1:3005/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "bar.js",
+        "offset.js",
+        "desktop.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "logo.png"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
+    }
+  ],
+  "icons": {
+    "16": "logo.png",
+    "48": "logo.png",
+    "128": "logo.png"
+  }
+}

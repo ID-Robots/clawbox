@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatAccountReset } from "@/lib/anthropic-chat-swap";
 import { useT } from "@/lib/i18n";
+import { openInKiosk } from "@/lib/kiosk-tabs-client";
 
 /**
  * Settings → Providers → Anthropic accounts (TASK-902, TASK-1260).
@@ -253,7 +254,10 @@ export default function AnthropicAccountsCard() {
       if (!res.ok) throw new Error(await readError(res));
       const { url } = await res.json() as { url?: unknown };
       if (typeof url !== "string" || !url.startsWith("https://")) throw new Error(t("settings.anthropicAccounts.actionFailed"));
-      window.open(url, "_blank", "noopener,noreferrer");
+      // On the laptop's kiosk Chrome this goes through the kiosk API, so the
+      // desktop's shelf lists the sign-in tab and can bring the owner back to
+      // paste the code; everywhere else it is the same window.open as before.
+      openInKiosk(url);
       setSignInOpened(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("settings.anthropicAccounts.actionFailed"));

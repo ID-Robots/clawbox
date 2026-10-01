@@ -102,6 +102,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "app.systemUpdate": "System Update",
     "app.browser": "Browser",
     "app.remoteDesktop": "Remote Desktop",
+    "app.web": "Web",
     "app.chat": "Chat",
     "app.skills": "Skills",
     "app.setup": "Setup",

@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import ChromeWindow, { type WindowMode } from "@/components/ChromeWindow";
-import { DESKTOP_GAP } from "@/lib/window-snap";
 
 vi.mock("@/lib/i18n", () => ({
   useT: () => ({ locale: "en", t: (key: string) => key }),
@@ -54,7 +53,12 @@ describe("a window restored maximized", () => {
     const el = screen.getByTestId("chrome-window-files");
     expect(el).toHaveAttribute("data-maximized", "true");
     expect(el).toHaveAttribute("data-window-id", "files-1");
-    expect(el.style.left).toBe(`${DESKTOP_GAP}px`);
+    // Edge to edge with square corners, the maximize every device has had
+    // since 2026-09-30.
+    expect(el.style.left).toBe("0px");
+    expect(el.style.top).toBe("0px");
+    expect(el.style.width).toBe("100%");
+    expect(el.style.borderRadius).toBe("0px");
     // Mounting reports nothing: the desktop already knows how it started.
     expect(onModeChange).not.toHaveBeenCalled();
 

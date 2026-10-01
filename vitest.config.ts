@@ -33,6 +33,11 @@ export default defineConfig({
       // turned 76 chat-model assertions into 409s. Tests that mean to be on
       // another edition set their own value or mock `@/lib/harness`.
       CLAWBOX_EDITION: "openclaw",
+      // The same for the x64 laptop's kiosk (src/lib/kiosk-tabs.ts): run on
+      // that laptop, the suite would otherwise find its real
+      // /etc/clawbox/kiosk.env and see a kiosk CI never has. Tests that want
+      // one set CLAWBOX_KIOSK_URL.
+      CLAWBOX_KIOSK_ENV_FILE: "/nonexistent/clawbox-test-kiosk.env",
       // The same hermetic principle for device STATE: config-store falls back
       // to the real /home/clawbox/clawbox when CLAWBOX_ROOT is unset, so a
       // test that imports the real modules without re-pointing the root reads

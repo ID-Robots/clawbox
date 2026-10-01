@@ -4,6 +4,7 @@ import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
 import { useT } from "@/lib/i18n";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import type { Protection, ProtectionReason } from "@/lib/clawkeep-protection";
+import { openInKiosk } from "@/lib/kiosk-tabs-client";
 
 /** The reasons that put a shield in an at-risk state. `ok` is not among them. */
 type AtRiskReason = Exclude<ProtectionReason, "ok">;
@@ -36,6 +37,13 @@ interface ShelfApp {
   isPinned?: boolean;
   windowCount?: number;
   url?: string;
+  /**
+   * The app is a web page opened in the browser rather than a window here —
+   * on the laptop's kiosk, the Web app standing for every page the desktop
+   * opened. Its menu offers a new tab in place of a new window, and not the
+   * "open in new tab" that means this app's own /app/<id> page.
+   */
+  external?: boolean;
 }
 
 interface ChromeShelfProps {
@@ -559,8 +567,9 @@ export default function ChromeShelf({
             <span className="text-base">▶️</span> {ctxMenu.app.isOpen ? t("shelf.focus") : t("shelf.open")}
           </button>
 
-          {/* New Window — only if app is already open */}
-          {ctxMenu.app.isOpen && onNewWindow && (
+          {/* New Window — only if app is already open, and never for a web
+              page, whose "new window" is the new tab below. */}
+          {!ctxMenu.app.external && ctxMenu.app.isOpen && onNewWindow && (
             <button
               onClick={() => { onNewWindow(ctxMenu.app.id); setCtxMenu(null); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
@@ -569,13 +578,21 @@ export default function ChromeShelf({
             </button>
           )}
 
-          {/* Open in new tab */}
-          <button
-            onClick={() => { window.open(`/app/${encodeURIComponent(ctxMenu.app.id)}`, "_blank"); setCtxMenu(null); }}
-            className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.openNewTab")}
-          </button>
+          {/* Open in new tab: this app's own /app/<id> page — or, for a web
+              page, one more tab of it, open or not. */}
+          {(!ctxMenu.app.external || onNewWindow) && (
+            <button
+              onClick={() => {
+                if (ctxMenu.app.external) onNewWindow?.(ctxMenu.app.id);
+                else openInKiosk(`/app/${encodeURIComponent(ctxMenu.app.id)}`, "");
+                setCtxMenu(null);
+              }}
+              className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
+              data-testid={ctxMenu.app.external ? "shelf-ctx-new-tab" : undefined}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.openNewTab")}
+            </button>
+          )}
 
           {/* Pin / Unpin */}
           {ctxMenu.app.isPinned ? (

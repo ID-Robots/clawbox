@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, ReactNode, useCallback } from "react";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
+import { openInKiosk } from "@/lib/kiosk-tabs-client";
 
 interface LauncherApp {
   id: string;
@@ -261,7 +262,7 @@ export default function ChromeLauncher({
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && searchQuery.trim()) {
-                    window.open(`https://clawbox.com/store?q=${encodeURIComponent(searchQuery.trim())}`, "_blank", "noopener,noreferrer");
+                    openInKiosk(`https://clawbox.com/store?q=${encodeURIComponent(searchQuery.trim())}`);
                   }
                 }}
                 className="w-full h-11 pl-10 pr-4 bg-white/5 border border-white/10 rounded-full text-white placeholder-white/40 text-sm focus:outline-none focus:border-white/20 focus:bg-white/10 transition-colors"
