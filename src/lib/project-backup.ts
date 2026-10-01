@@ -403,19 +403,40 @@ async function pendingFor(abs: string): Promise<PendingChanges> {
   return { files: safe.length, leftOut };
 }
 
-/** Merge the safe patterns into a file — `.gitignore`, or `.git/info/exclude` for a folder with its own remote. */
+/**
+ * Merge the safe patterns into a file — `.gitignore`, or `.git/info/exclude`
+ * for a folder with its own remote.
+ *
+ * One open, then everything on that fd: O_NOFOLLOW so a symlink fails to open
+ * at all (ELOOP — a link could point anywhere, and is not ours to write), and
+ * fstat on the same fd so a folder or device is left alone. Checking the path
+ * and then reading and writing it by name was a race: the path could be
+ * swapped for a link in between.
+ */
 function mergeIgnoreFile(file: string): void {
-  let existing: string | null = null;
-  try {
-    const st = fs.lstatSync(/* turbopackIgnore: true */ file);
-    // A link could point anywhere; a folder is not a list. Neither is ours to write.
-    if (!st.isFile()) return;
-    existing = fs.readFileSync(/* turbopackIgnore: true */ file, "utf-8");
-  } catch { /* none yet */ }
-  const { text, added } = mergeGitignore(existing);
-  if (added.length === 0) return;
   fs.mkdirSync(/* turbopackIgnore: true */ path.dirname(file), { recursive: true });
-  fs.writeFileSync(/* turbopackIgnore: true */ file, text);
+  let fd: number;
+  try {
+    fd = fs.openSync(
+      /* turbopackIgnore: true */ file,
+      fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW,
+      0o644,
+    );
+  } catch {
+    // ELOOP (a symlink), EISDIR (a folder), or nothing we may open: leave it.
+    return;
+  }
+  try {
+    if (!fs.fstatSync(fd).isFile()) return;
+    // A file just created by the open reads as "", which merges like no file at all.
+    const existing = fs.readFileSync(fd, "utf-8");
+    const { text, added } = mergeGitignore(existing);
+    if (added.length === 0) return;
+    fs.ftruncateSync(fd, 0);
+    fs.writeSync(fd, text, 0, "utf-8");
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
