@@ -6253,7 +6253,17 @@ fi
 # call costs tens of seconds on an Orin because it loads every enabled plugin,
 # which a person waiting on a button can afford and an ExecStartPre cannot.
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  # Asked here, with the install block's own guard, so the reader below agrees
+  # with that block about where a DeepSeek payload counts as present (see the
+  # deepseek arm in it). Only while the record mentions deepseek at all, under
+  # any spelling: a healthy box pays one grep.
+  CLAWBOX_REPAIR_DEEPSEEK_ON_DISK=0
+  if grep -q 'deepseek' "$CLAWBOX_PLUGIN_REPAIR_FILE" 2>/dev/null \
+    && clawbox_deepseek_plugin_on_disk "$OPENCLAW_HOME_DIR"; then
+    CLAWBOX_REPAIR_DEEPSEEK_ON_DISK=1
+  fi
   CLAWBOX_REPAIR_REATTEMPT="$(CLAWBOX_REPAIR_MARKED_THIS_RUN="$CLAWBOX_REPAIR_MARKED_THIS_RUN" \
+    CLAWBOX_REPAIR_DEEPSEEK_ON_DISK="$CLAWBOX_REPAIR_DEEPSEEK_ON_DISK" \
     python3 - "$OPENCLAW_CONFIG" "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'REATTEMPTPY' || true
 import json, os, sys
 
@@ -6314,6 +6324,18 @@ for key, row in rows.items():
     if not isinstance(plugin_id, str) or canonical(plugin_id) not in REATTEMPTABLE:
         continue
     if canonical(plugin_id) in marked_this_run:
+        continue
+    # A DEEPSEEK ROW WITH NO PAYLOAD ON DISK IS THE INSTALL BLOCK'S (TASK-1206).
+    # `plugins enable` cannot load a plugin that is not there — the core answers
+    # "Plugin not found" every time — and it writes `enabled: true` before it
+    # finds that out, so a box whose install kept failing (offline, or both
+    # registries down) switched ClawBox AI's plugin on, watched it fail and
+    # switched it off again on every start, a CLI cold start for nothing. The
+    # deepseek install block further down is what brings the payload back, and
+    # its success switches the entry on and clears this row itself (TASK-1302).
+    # "On disk" is that block's own guard, `clawbox_deepseek_plugin_on_disk`:
+    # a ClawHub payload, or an npm one of the running core's release.
+    if canonical(plugin_id) == "deepseek" and os.environ.get("CLAWBOX_REPAIR_DEEPSEEK_ON_DISK") != "1":
         continue
     if row.get("disabled") is not True:
         continue
