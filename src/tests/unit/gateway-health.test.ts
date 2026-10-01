@@ -8,10 +8,14 @@ vi.mock("child_process", () => ({ execFile: vi.fn() }));
 
 import {
   GATEWAY_SHOW_PROPERTIES,
+  GATEWAY_UNIT_MOMENT_PROPERTIES,
+  awaitGatewayRestartAfter,
   gatewayJournalArgs,
   getGatewayServiceHealth,
   lastUsefulJournalLine,
   parseGatewaySystemctlProperties,
+  readGatewayUnitMoment,
+  type GatewayUnitMoment,
 } from "@/lib/gateway-health";
 
 describe("gateway service health", () => {
@@ -174,6 +178,95 @@ describe("gateway service health", () => {
 
       expect(health.unitLoaded).toBeNull();
       expect(health.loadState).toBeNull();
+    });
+  });
+
+  // TASK-1302. On the board the Retry's `plugins install` made the RUNNING
+  // gateway restart itself (SIGUSR1 on `plugins.installs.deepseek`), and the
+  // repair's verdict was taken in the middle of that restart, its pre-start
+  // writing the same config and rows.
+  describe("readGatewayUnitMoment", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    function answer(stdout: string | Error) {
+      vi.mocked(childProcess.execFile).mockImplementation(((
+        _cmd: string,
+        _args: string[],
+        optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+        maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+      ) => {
+        const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+        if (stdout instanceof Error) callback?.(stdout, { stdout: "", stderr: "" });
+        else callback?.(null, { stdout, stderr: "" });
+        return {} as unknown as ReturnType<typeof childProcess.execFile>;
+      }) as unknown as typeof childProcess.execFile);
+    }
+
+    it("reads the activation, the state and the main process, asking for exactly those", async () => {
+      answer("ActiveState=active\nInvocationID=aa11\nMainPID=4242\n");
+      expect(await readGatewayUnitMoment()).toEqual({ activeState: "active", invocationId: "aa11", mainPid: "4242" });
+      const args = vi.mocked(childProcess.execFile).mock.calls[0][1] as string[];
+      expect(args).toContain(`--property=${GATEWAY_UNIT_MOMENT_PROPERTIES.join(",")}`);
+    });
+
+    it("reads a main PID of 0 as none — the unit between two activations", async () => {
+      answer("ActiveState=activating\nInvocationID=\nMainPID=0\n");
+      expect(await readGatewayUnitMoment()).toEqual({ activeState: "activating", invocationId: null, mainPid: null });
+    });
+
+    it("answers null when systemctl cannot be asked or says nothing", async () => {
+      answer(new Error("systemctl: command not found"));
+      expect(await readGatewayUnitMoment()).toBeNull();
+      answer("");
+      expect(await readGatewayUnitMoment()).toBeNull();
+    });
+  });
+
+  describe("awaitGatewayRestartAfter", () => {
+    const RUNNING: GatewayUnitMoment = { activeState: "active", invocationId: "old", mainPid: "100" };
+    const script = (...moments: (GatewayUnitMoment | null)[]) => {
+      const reads = vi.fn(async () => (moments.length > 1 ? moments.shift()! : moments[0]));
+      return { read: reads, sleep: vi.fn(async () => undefined), pollMs: 1_000, noticeMs: 5_000, settleMs: 10_000 };
+    };
+
+    it("waits for the restart the install asked for to come back on a new activation", async () => {
+      // The shape the board's journal shows: still up for a moment, the old
+      // process gone (auto-restart), the pre-start running, then up again.
+      const watch = script(
+        RUNNING,
+        { activeState: "activating", invocationId: "old", mainPid: null },
+        { activeState: "activating", invocationId: "new", mainPid: "200" },
+        { activeState: "active", invocationId: "new", mainPid: "300" },
+      );
+      expect(await awaitGatewayRestartAfter(RUNNING, watch)).toBe("settled");
+      expect(watch.read).toHaveBeenCalledTimes(4);
+    });
+
+    it("goes on after the notice window when no restart begins", async () => {
+      const watch = script(RUNNING);
+      expect(await awaitGatewayRestartAfter(RUNNING, watch)).toBe("none");
+      expect(watch.read).toHaveBeenCalledTimes(5);
+    });
+
+    it("does not wait at all on a gateway that was not running", async () => {
+      const watch = script(RUNNING);
+      expect(await awaitGatewayRestartAfter({ activeState: "inactive", invocationId: null, mainPid: null }, watch))
+        .toBe("none");
+      expect(await awaitGatewayRestartAfter(null, watch)).toBe("unknown");
+      expect(watch.read).not.toHaveBeenCalled();
+    });
+
+    it("says so when the restart failed, never came back, or systemd stopped answering", async () => {
+      expect(await awaitGatewayRestartAfter(RUNNING, script(
+        { activeState: "activating", invocationId: "new", mainPid: null },
+        { activeState: "failed", invocationId: "new", mainPid: null },
+      ))).toBe("failed");
+      const stuck = script({ activeState: "activating", invocationId: "new", mainPid: null });
+      expect(await awaitGatewayRestartAfter(RUNNING, stuck)).toBe("timeout");
+      expect(stuck.read).toHaveBeenCalledTimes(11);
+      expect(await awaitGatewayRestartAfter(RUNNING, script(null))).toBe("unknown");
     });
   });
 

@@ -4664,21 +4664,46 @@ clawbox_plugin_repair_clear() {
   # `disabled: false` means ClawBox recorded a failure and changed nothing —
   # an entry the OWNER turned off is his, and stays off.
   #
+  # EXCEPT CLAWBOX AI'S OWN PLUGIN WHILE ITS ROW IS ON FILE (TASK-1302, from the
+  # board). The row a 4.1 boot filed for `deepseek` says `disabled: false` —
+  # there was no entry to switch off yet — and the entry can still end up
+  # explicitly `false` before the install that finally works: `openclaw plugins
+  # uninstall deepseek` leaves exactly `{"enabled": false}` behind (measured,
+  # 2026.9.4, although it prints "Removed: plugin settings"). The install keeps
+  # that `false`, so clearing here removed the badge over ClawBox AI switched
+  # off, with nothing left on screen to say so. The ROW is the reason to put it
+  # on: it records that ClawBox AI needs this plugin and does not have it. With
+  # no row, an entry that is off stays the owner's, as above. Only while the
+  # entry is not already on, so the consent loop's clears cost no extra write.
+  #
   # WHAT THIS COSTS, because this runs inside a blocking ExecStartPre: one
   # python read per clear, and on a row we did switch off one `openclaw config
   # set` cold start (`timeout -k 5 60`) plus the read-back. Only on a box that
   # is actually recovering from a failed plugin — a healthy box has no rows and
   # pays the `[ -f ]` above — but a new call site added to this helper inherits
   # that, so count it against the same budget the managed loop rations.
-  if [ "$(CLAWBOX_REPAIR_ID="$1" python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null || echo 0
+  if [ "$(CLAWBOX_REPAIR_ID="$1" python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" "$OPENCLAW_CONFIG" <<'PY' 2>/dev/null || echo 0
 import json, os, sys
+plugin_id = os.environ["CLAWBOX_REPAIR_ID"]
 try:
     with open(sys.argv[1], encoding="utf-8") as fh:
         rows = json.load(fh)
 except (OSError, json.JSONDecodeError):
     print("0"); raise SystemExit(0)
-row = rows.get(os.environ["CLAWBOX_REPAIR_ID"]) if isinstance(rows, dict) else None
-print("1" if isinstance(row, dict) and row.get("disabled") is True else "0")
+row = rows.get(plugin_id) if isinstance(rows, dict) else None
+if not isinstance(row, dict):
+    print("0"); raise SystemExit(0)
+if row.get("disabled") is True:
+    print("1"); raise SystemExit(0)
+if plugin_id != "deepseek":
+    print("0"); raise SystemExit(0)
+try:
+    with open(sys.argv[2], encoding="utf-8") as fh:
+        entries = (json.load(fh).get("plugins") or {}).get("entries") or {}
+except (OSError, ValueError, AttributeError):
+    entries = {}
+entry = entries.get(plugin_id) if isinstance(entries, dict) else None
+print("0" if isinstance(entry, dict) and entry.get("enabled") is True else "1")
 PY
 )" = "1" ]; then
     if ! clawbox_plugin_reenable "$1"; then
@@ -5253,6 +5278,102 @@ clawbox_plugin_consent_outcome() {
       ;;
   esac
   return 1
+}
+
+# ── ClawBox AI's own plugin, on disk, off, and still "Repair needed" ────────
+#
+# TASK-1302, found on the board. A Retry (or a boot) installs the DeepSeek
+# provider for the running core, and the entry stays `enabled: false`: `plugins
+# install` keeps an explicit `false` exactly as it finds it, and `plugins
+# uninstall deepseek` leaves one behind (measured, 2026.9.4). From then on NO
+# block here looked at it again. The install block's guard sees the payload and
+# skips, the managed consent loop visits only entries that are already on, and
+# the re-attempt block takes only rows that say `disabled: true`, which the row
+# a 4.1 boot filed does not. So the gateway came up with ClawBox AI off, under
+# the row's old "Version not found on ClawHub", on every boot, for good.
+#
+# The ROW is the reason to switch it on, as in `clawbox_plugin_repair_clear`:
+# it says ClawBox AI needs this plugin and does not have it. No row, no
+# change: an entry that is off without one is the owner's.
+#
+# `plugins enable --accept-capabilities` rather than a bare `config set`,
+# because nobody here knows how this payload got onto the disk or whether its
+# surface was ever accepted. Then proven against a report taken AFTER the
+# write, exactly like the re-attempt block, because this turns a plugin ON and
+# must never leave one the core refuses enabled. A failure puts the entry back
+# where it was found and files the row again with what is wrong NOW, so Settings
+# stops showing a refusal that is no longer in the way.
+#
+# Its own bound, like the re-attempt block's: at most one `plugins enable`
+# (60 s) and one `plugins inspect --all --json` (60 s) per start, and only on a
+# box whose row is on file and whose entry is off. A healthy box pays the
+# `[ -f ]` and one python read. Nothing for a row this run has just filed.
+
+# Answers 1 when a `deepseek` row is on file and its entry is not `enabled:
+# true`; 0 for anything else, including a file or a config it cannot read.
+clawbox_deepseek_row_needs_switch_on() {
+  # The file outlives its last row as `{}`: a healthy box answers here, without
+  # starting python.
+  grep -q '"deepseek"' "$CLAWBOX_PLUGIN_REPAIR_FILE" 2>/dev/null || { echo 0; return 0; }
+  python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" "$OPENCLAW_CONFIG" <<'PY' 2>/dev/null || echo 0
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        rows = json.load(fh)
+    with open(sys.argv[2], encoding="utf-8") as fh:
+        entries = (json.load(fh).get("plugins") or {}).get("entries") or {}
+except (OSError, ValueError, AttributeError):
+    print("0"); raise SystemExit(0)
+row = rows.get("deepseek") if isinstance(rows, dict) else None
+entry = entries.get("deepseek") if isinstance(entries, dict) else None
+print("1" if isinstance(row, dict) and not (isinstance(entry, dict) and entry.get("enabled") is True) else "0")
+PY
+}
+
+clawbox_deepseek_switch_on_for_row() {
+  local rc=0 verdict=0 state=0 out="" detail="" stage="consent" lead=""
+  case " $CLAWBOX_REPAIR_MARKED_THIS_RUN " in
+    *" deepseek "*) return 0 ;;
+  esac
+  echo "  Switching the deepseek plugin on: its payload for this core is on disk and ClawBox AI's repair record is still open"
+  # The report any earlier block took predates this write.
+  CLAWBOX_CONSENT_STATES=""
+  CLAWBOX_CONSENT_STATES_READY=0
+  CLAWBOX_CONSENT_POSTWRITE_READY=0
+  CLAWBOX_CONSENT_DETAIL=""
+  clawbox_run_openclaw_capture 60 plugins enable deepseek --accept-capabilities || rc=$?
+  out="$CLAWBOX_CLI_OUT"
+  clawbox_plugin_consent_outcome deepseek "$rc" || verdict=$?
+  if [ "$verdict" = "0" ]; then
+    CLAWBOX_CONSENT_STATES=""
+    CLAWBOX_CONSENT_STATES_READY=0
+    clawbox_plugin_consent_state deepseek || state=$?
+    if [ "$state" = "0" ]; then
+      echo "  deepseek plugin switched on and its capabilities accepted$CLAWBOX_CONSENT_DETAIL"
+      clawbox_plugin_repair_clear deepseek
+      return 0
+    fi
+    if [ "$state" = "1" ]; then
+      detail=" The core still reports it as requiring capability consent after it was switched on."
+    else
+      detail=" The core could not confirm that it loads after it was switched on."
+    fi
+  else
+    detail="$(clawbox_plugin_cli_cause "openclaw plugins enable" "$rc" "$out")"
+  fi
+  case "$out" in
+    *"Plugin not found"*)
+      stage="install"
+      lead="The DeepSeek provider plugin, which ClawBox AI runs on, is on disk but the core cannot find it, so it has to be installed again."
+      ;;
+    *)
+      lead="The DeepSeek provider plugin, which ClawBox AI runs on, is installed but could not be switched on."
+      ;;
+  esac
+  echo "  WARN: could not switch the deepseek plugin on for its repair record" >&2
+  # Off again if the verb had switched it on (it writes the entry first), and
+  # the row's own `disabled` otherwise — `boot_without` reads which it is.
+  clawbox_plugin_boot_without deepseek "$stage" "$lead$detail"
 }
 
 # A `.openclaw` INSIDE the state directory is what the CLI leaves behind when
@@ -7574,7 +7695,23 @@ PY
     done
     if [ -n "$DEEPSEEK_INSTALLED" ]; then
       echo "  DeepSeek provider plugin installed ($DEEPSEEK_INSTALLED)"
+      # Switches the entry on first while a row is on file, whatever its
+      # `disabled` says (TASK-1302): the install kept an explicit `false`, and
+      # its `--accept-capabilities` already recorded the consent — measured on
+      # 2026.9.4, `config set` on then answers loaded, activated, and no consent
+      # diagnostic. With no row, an entry that is off is the owner's.
       clawbox_plugin_repair_clear deepseek
+      if [ "$(clawbox_plugin_entry_enabled deepseek)" != "1" ]; then
+        if [ "$(clawbox_deepseek_row_needs_switch_on)" = "1" ]; then
+          # The clear kept the row because the entry could not be switched on.
+          # Say THAT, not the refusal this install has just got past; a
+          # `consent` row, because `plugins enable` is the repair it needs.
+          clawbox_plugin_boot_without deepseek consent \
+            "The DeepSeek provider plugin, which ClawBox AI runs on, is installed ($DEEPSEEK_INSTALLED) but could not be switched on."
+        else
+          echo "  The deepseek plugin entry is switched off and no repair record asks for it; leaving it as the owner set it"
+        fi
+      fi
     else
       DEEPSEEK_INSTALL_CAUSE="$(clawbox_plugin_cli_cause "openclaw plugins install" "${DEEPSEEK_INSTALL_RC:-1}" "$DEEPSEEK_INSTALL_OUT")"
       # STATED PRECISELY, because this one is not fully repairable from here.
@@ -7591,6 +7728,11 @@ PY
         "${DEEPSEEK_PLUGIN_PINNED:-$DEEPSEEK_PLUGIN_SPEC}"
     fi
   fi
+elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$(clawbox_deepseek_row_needs_switch_on)" = "1" ]; then
+  # The payload for this core is on disk, the entry is off, and the row is
+  # still open: the state a Retry's install left on the board (TASK-1302).
+  # See `clawbox_deepseek_switch_on_for_row`.
+  clawbox_deepseek_switch_on_for_row
 fi
 # Resolve the workspace from agents.defaults.workspace in openclaw.json,
 # matching the same logic getSkillsDir() uses on the ClawBox API side —
