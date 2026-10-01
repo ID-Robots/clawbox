@@ -45,6 +45,10 @@ export const apps: AppDef[] = [
   // `claude-ds` away in the Terminal app.)
   { id: "coding", name: "app.codingAgent", color: "#14304d", type: "coding" as const, pinned: true, defaultWidth: 960, defaultHeight: 640 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
+  // The owner's pinned project folders: the Files app itself, opened on its
+  // Projects view (src/lib/project-folders.ts) — a door into Files, not a
+  // second file manager. On the desktop, off the shelf.
+  { id: "projects", name: "app.projects", color: "#0d9488", type: "files", pinned: false, defaultWidth: 900, defaultHeight: 620 },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
   // The memory index — health, "Index now", the schedule — as its own window.
   // It used to be a card inside ClawKeep and borrowed its green; it has its own

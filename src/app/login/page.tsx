@@ -4,6 +4,30 @@ import { useState, useEffect } from "react";
 import Image from "next/image";
 import { I18nProvider, useT } from "@/lib/i18n";
 
+/**
+ * Who may sign in here (GET /login-api/users, TASK-1256). `multiUser: false`
+ * is a box with only its owner: the page is the single password field it has
+ * always been. On a multi-user box the LAN gets the list for a picker, while
+ * the remote-access tunnel gets `users: null` and a username field instead.
+ */
+interface LoginUsers {
+  multiUser: boolean;
+  users: Array<{ username: string; owner: boolean }> | null;
+}
+
+function parseLoginUsers(data: unknown): LoginUsers {
+  if (typeof data !== "object" || data === null || (data as { multiUser?: unknown }).multiUser !== true) {
+    return { multiUser: false, users: null };
+  }
+  const raw = (data as { users?: unknown }).users;
+  if (!Array.isArray(raw)) return { multiUser: true, users: null };
+  const users = raw.filter(
+    (u): u is { username: string; owner: boolean } =>
+      typeof u === "object" && u !== null && typeof (u as { username?: unknown }).username === "string",
+  ).map((u) => ({ username: u.username, owner: u.owner === true }));
+  return { multiUser: true, users: users.length ? users : null };
+}
+
 const DURATION_OPTIONS = [
   { value: 1200, labelKey: "login.20min" },
   { value: 21600, labelKey: "login.6h" },
@@ -11,15 +35,45 @@ const DURATION_OPTIONS = [
   { value: 86400, labelKey: "login.24h" },
 ];
 
+/**
+ * The error line: a catalogue key, translated when it is DRAWN, or the
+ * server's own text. Never a string translated when it was SET — the
+ * catalogue is a lazy chunk, and a password submitted before it arrived froze
+ * the raw key ("login.incorrectPassword") on screen for good, while every
+ * other line re-rendered in English around it.
+ */
+type LoginError = { key: string } | { text: string } | null;
+
 function LoginForm() {
   const { t } = useT();
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [duration, setDuration] = useState(43200);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<LoginError>(null);
   const [loading, setLoading] = useState(false);
   const [ready, setReady] = useState(false);
   const [now, setNow] = useState(() => new Date());
+  const [loginUsers, setLoginUsers] = useState<LoginUsers>({ multiUser: false, users: null });
+  // The picked (or typed) user. Empty means the owner, which is also what a
+  // single-user box sends by sending no name at all.
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    let live = true;
+    fetch("/login-api/users", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!live) return;
+        const parsed = parseLoginUsers(data);
+        setLoginUsers(parsed);
+        const owner = parsed.users?.find((u) => u.owner);
+        if (owner) setUsername(owner.username);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 30_000);
@@ -49,28 +103,38 @@ function LoginForm() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!password.trim()) {
-      setError(t("login.passwordRequired"));
+      setError({ key: "login.passwordRequired" });
       return;
     }
 
     setLoading(true);
-    setError("");
+    setError(null);
 
     try {
       const res = await fetch("/login-api", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password, duration }),
+        body: JSON.stringify(
+          loginUsers.multiUser && username.trim()
+            ? { username: username.trim(), password, duration }
+            : { password, duration },
+        ),
       });
 
       if (!res.ok) {
-        let message = `Login failed (${res.status})`;
+        let message: LoginError = { text: `Login failed (${res.status})` };
         try {
           const data = await res.json();
-          if (typeof data?.error === "string") message = data.error;
+          if (data?.code === "bad_credentials") {
+            message = { key: loginUsers.multiUser ? "login.incorrectCredentials" : "login.incorrectPassword" };
+          } else if (data?.code === "locked") {
+            message = { key: "login.tooManyAttempts" };
+          } else if (typeof data?.error === "string") {
+            message = { text: data.error };
+          }
         } catch {
           const text = await res.text().catch(() => "");
-          if (text) message = text;
+          if (text) message = { text };
         }
         setError(message);
         setLoading(false);
@@ -97,7 +161,7 @@ function LoginForm() {
       }
       window.location.href = target;
     } catch {
-      setError(t("login.connectionFailed"));
+      setError({ key: "login.connectionFailed" });
       setLoading(false);
     }
   };
@@ -135,6 +199,63 @@ function LoginForm() {
         </div>
 
         <form onSubmit={handleSubmit} className="w-full flex flex-col gap-4">
+          {loginUsers.multiUser && loginUsers.users && (
+            <div>
+              <span className="block text-[11px] font-semibold text-white/40 uppercase tracking-widest mb-2">
+                {t("login.chooseUser")}
+              </span>
+              <div className="flex flex-wrap gap-2" role="radiogroup" aria-label={t("login.chooseUser")} data-testid="login-user-picker">
+                {loginUsers.users.map((u) => {
+                  const active = username === u.username;
+                  return (
+                    <button
+                      key={u.username}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      onClick={() => {
+                        setUsername(u.username);
+                        setError(null);
+                      }}
+                      className={`flex items-center gap-2 h-11 pl-1.5 pr-3.5 rounded-full text-sm transition-colors cursor-pointer border ${
+                        active
+                          ? "bg-[var(--coral-bright)]/20 text-white border-[var(--coral-bright)]/50"
+                          : "bg-white/[0.04] text-white/70 border-white/[0.08] hover:bg-white/[0.08] hover:text-white"
+                      }`}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold text-white"
+                        style={{ backgroundColor: u.owner ? "#fe6e00" : "#6366f1" }}
+                      >
+                        {u.username.charAt(0).toUpperCase()}
+                      </span>
+                      <span className="font-medium">{u.username}</span>
+                      {u.owner && (
+                        <span className="text-[10px] uppercase tracking-wider text-white/50">{t("users.ownerBadge")}</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {loginUsers.multiUser && !loginUsers.users && (
+            <div>
+              <label htmlFor="login-username" className="sr-only">{t("login.username")}</label>
+              <input
+                id="login-username"
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder={t("login.usernamePlaceholder")}
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck={false}
+                className="w-full h-12 px-4 bg-white/[0.06] border border-white/10 rounded-xl text-base text-white outline-none focus:border-[var(--coral-bright)] focus:bg-white/[0.08] transition-colors placeholder-white/30"
+              />
+            </div>
+          )}
           <div>
             <label htmlFor="login-password" className="sr-only">{t("login.password")}</label>
             <div className="relative">
@@ -190,7 +311,7 @@ function LoginForm() {
 
           {error && (
             <div className="px-3.5 py-2.5 rounded-lg text-xs bg-red-500/10 text-red-400 border border-red-500/20">
-              {error}
+              {"key" in error ? t(error.key) : error.text}
             </div>
           )}
 

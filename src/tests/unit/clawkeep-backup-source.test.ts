@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 
 import { backupSourceFor } from "@/lib/harness/backup-source";
+import { clawkeepTranslations } from "@/lib/clawkeep-translations";
 
 /**
  * The UI's description of a backup and the archiver that makes it live in two
@@ -50,6 +51,68 @@ describe("what the Hermes archiver actually collects", () => {
   it("agrees with the card that a Hermes snapshot carries credentials", () => {
     expect(assetsBlock()).toContain("credential_bearing=True");
     expect(backupSourceFor("hermes").containsCredentials).toBe(true);
+  });
+});
+
+describe("what an OpenClaw snapshot leaves out", () => {
+  // TASK-1301. The core carries the whole state directory; ClawKeep's own rule
+  // (`clawkeep/own_backups.py`) is what leaves the box's backups out, and the
+  // "Not included" line is that rule in the customer's words.
+  const rule = fs.readFileSync(path.join(process.cwd(), "clawkeep", "clawkeep", "own_backups.py"), "utf-8");
+
+  it("names the folder the rule actually leaves out", () => {
+    expect(rule).toContain('BACKUPS_DIRNAME = "backups"');
+    expect(backupSourceFor("openclaw").excludesKeys).toContain("clawkeep.contents.openclaw.excludeBackups");
+    const en = clawkeepTranslations.en["clawkeep.contents.openclaw.excludeBackups"];
+    expect(en).toContain(`${backupSourceFor("openclaw").stateDir}/backups`);
+    expect(en).toMatch(/OpenClaw's own backup files/);
+  });
+
+  it("is said in every locale the catalogue carries, naming the same folder", () => {
+    for (const [locale, table] of Object.entries(clawkeepTranslations)) {
+      for (const key of [
+        "clawkeep.contents.openclaw.excludeBackups",
+        "clawkeep.contents.leftOutLast",
+        "clawkeep.leftOut.summary",
+        "clawkeep.largeArchives.title",
+        "clawkeep.largeArchives.body",
+        "clawkeep.largeArchives.more",
+        "clawkeep.largeArchives.hint",
+        "clawkeep.contents.openclaw.excludeLinks",
+        "clawkeep.skippedLinks.summary",
+        "clawkeep.skippedLinks.title",
+        "clawkeep.skippedLinks.body",
+        "clawkeep.skippedLinks.more",
+        "clawkeep.skippedLinks.hint",
+        "clawkeep.result.skippedLinks",
+      ]) {
+        expect(table[key], `${locale} ${key}`).toBeTruthy();
+        for (const param of clawkeepTranslations.en[key].match(/\{\w+\}/g) ?? []) {
+          expect(table[key], `${locale} ${key} keeps ${param}`).toContain(param);
+        }
+      }
+      expect(table["clawkeep.contents.openclaw.excludeBackups"], locale).toContain("~/.openclaw/backups");
+      expect(table["clawkeep.largeArchives.hint"], locale).toContain("~/.openclaw/backups");
+    }
+  });
+});
+
+describe("what an OpenClaw snapshot skips", () => {
+  // TASK-1304. The archiver refuses a link out of the backup; ClawKeep's pre-
+  // flight (`clawkeep/backup_guard.py`) leaves every such link out instead of
+  // letting one fail the run, and this "Not included" line is that rule.
+  const guard = fs.readFileSync(path.join(process.cwd(), "clawkeep", "clawkeep", "backup_guard.py"), "utf-8");
+
+  it("says the links the guard leaves out are never followed", () => {
+    expect(guard).toContain("def skipped_report(");
+    expect(backupSourceFor("openclaw").excludesKeys).toEqual([
+      "clawkeep.contents.openclaw.excludeBackups",
+      "clawkeep.contents.openclaw.excludeLinks",
+    ]);
+    expect(backupSourceFor("hermes").excludesKeys).not.toContain("clawkeep.contents.openclaw.excludeLinks");
+    const en = clawkeepTranslations.en["clawkeep.contents.openclaw.excludeLinks"];
+    expect(en).toMatch(/symbolic links that point outside these folders/);
+    expect(en).toMatch(/never followed/);
   });
 });
 

@@ -48,6 +48,76 @@ describe("GET /setup-api/clawkeep", () => {
     expect(body.server.length).toBeGreaterThan(0);
   });
 
+  it("carries what the last archive left out and the snapshot-sized archives it carried", async () => {
+    // Written by the daemon (clawkeep/state.py) once the archive is built and
+    // before the upload, read by the dashboard and by `backup_status`.
+    const statePath = path.join(DATA_DIR, "state.json");
+    await fs.writeFile(statePath, JSON.stringify({
+      last_left_out_count: 8,
+      last_left_out_bytes: 20_400_000_000,
+      last_large_archives: [
+        { path: "~/.openclaw/workspace/dump.tar.gz", bytes: 1_900_000_000 },
+        { path: 7 },
+        "not an entry",
+        ...Array.from({ length: 6 }, (_, i) => ({ path: `~/x${i}.zip`, bytes: 300_000_000 })),
+      ],
+      last_large_archive_count: 9,
+      last_large_archive_bytes: 3_700_000_000,
+    }));
+    let body = await (await GET()).json();
+    expect(body).toMatchObject({
+      leftOutCount: 8,
+      leftOutBytes: 20_400_000_000,
+      largeArchiveCount: 9,
+      largeArchiveBytes: 3_700_000_000,
+    });
+    // What does not read as {path, bytes} is dropped; at most five are named.
+    expect(body.largeArchives).toHaveLength(5);
+    expect(body.largeArchives[0]).toEqual({ path: "~/.openclaw/workspace/dump.tar.gz", bytes: 1_900_000_000 });
+
+    // A state.json from before this existed, or a garbled one, says nothing.
+    await fs.writeFile(statePath, JSON.stringify({
+      last_left_out_count: "lots", last_left_out_bytes: -5, last_large_archives: { path: "~/a.zip" },
+    }));
+    body = await (await GET()).json();
+    expect(body).toMatchObject({
+      leftOutCount: 0, leftOutBytes: 0, largeArchives: [], largeArchiveCount: 0, largeArchiveBytes: 0,
+    });
+  });
+
+  it("carries the symbolic links the last archive skipped (TASK-1304)", async () => {
+    // Written by the daemon beside the fields above: the archiver refuses a
+    // link out of the backup, so ClawKeep leaves it out and the run finishes.
+    const statePath = path.join(DATA_DIR, "state.json");
+    await fs.writeFile(statePath, JSON.stringify({
+      last_heartbeat_status: "ok",
+      last_skipped_links: [
+        { path: "~/.openclaw/workspace/docs/catalogue", target: "/home/clawbox/Shared/Exports/catalogue" },
+        { path: "~/.openclaw/workspace/docs/gone.pdf" },
+        { path: 7, target: "/x" },
+        "not an entry",
+        ...Array.from({ length: 25 }, (_, i) => ({ path: `~/l${i}`, target: `../../out${i}` })),
+      ],
+      last_skipped_link_count: 31,
+    }));
+    let body = await (await GET()).json();
+    expect(body.lastHeartbeatStatus).toBe("ok");
+    expect(body.skippedLinkCount).toBe(31);
+    // What does not read as {path, target} is dropped; at most twenty are named.
+    expect(body.skippedLinks).toHaveLength(20);
+    expect(body.skippedLinks[0]).toEqual({
+      path: "~/.openclaw/workspace/docs/catalogue", target: "/home/clawbox/Shared/Exports/catalogue",
+    });
+    expect(body.skippedLinks[1]).toEqual({ path: "~/l0", target: "../../out0" });
+
+    // A state.json from before this existed, or a garbled one, says nothing.
+    await fs.writeFile(statePath, JSON.stringify({
+      last_skipped_links: { path: "~/a", target: "/b" }, last_skipped_link_count: "lots",
+    }));
+    body = await (await GET()).json();
+    expect(body).toMatchObject({ skippedLinks: [], skippedLinkCount: 0 });
+  });
+
   it("returns 500 with a structured error when getStatus throws", async () => {
     const spy = vi.spyOn(clawkeep, "getStatus").mockRejectedValueOnce(new Error("disk full"));
     const res = await GET();

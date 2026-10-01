@@ -442,3 +442,175 @@ describe("the ClawKeep backup scheduler", () => {
     warn.mockRestore();
   });
 });
+
+/**
+ * TASK-1211: a box reported `schedule.enabled=false, nextRunAtMs=0` and
+ * nothing ran after the account's quota error cleared.
+ *
+ * Two halves. A failed run — the account refusing credentials for quota
+ * included — never switches auto-backup off: the scheduler re-arms the next
+ * slot whatever the exit code. And a switch-off made WHILE the account refused
+ * is a quota hold, which this module ends by itself the first time the account
+ * issues credentials again.
+ */
+describe("the ClawKeep backup scheduler through a full account", () => {
+  const SCHEDULE: ClawKeepSchedule = {
+    enabled: true,
+    frequency: "daily",
+    timeOfDay: "06:00",
+    weekday: 0,
+    retentionKeepLast: 10,
+  };
+  const HELD = { schedule: { ...SCHEDULE, enabled: false }, armedAtMs: 1, unreadable: false, quotaHoldSinceMs: 1_000 };
+  const MINUTE = 60_000;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-22T05:00:00"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.doUnmock("@/lib/clawkeep");
+    vi.restoreAllMocks();
+  });
+
+  function mockClawkeep(opts: {
+    snapshot: unknown;
+    runBackup?: ReturnType<typeof vi.fn>;
+    release?: ReturnType<typeof vi.fn>;
+  }) {
+    const runBackup = opts.runBackup ?? vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const release = opts.release ?? vi.fn(async () => ({ outcome: "held" }));
+    vi.doMock("@/lib/clawkeep", async () => {
+      const actual = await vi.importActual<typeof import("@/lib/clawkeep")>("@/lib/clawkeep");
+      return {
+        ...actual,
+        runBackup,
+        readScheduleSnapshot: vi.fn(async () => opts.snapshot),
+        releaseQuotaHoldIfCredentialsWork: release,
+      };
+    });
+    return { runBackup, release };
+  }
+
+  it("keeps auto-backup on through a run the account refuses for quota, and runs the next slot", async () => {
+    // EXIT_QUOTA_FULL: the portal answered 402 to POST /credentials.
+    const runBackup = vi.fn(async () => ({ exitCode: 2, stdout: "", stderr: "quota_full: Cloud backup quota reached." }));
+    const snapshot = { schedule: SCHEDULE, armedAtMs: 1, unreadable: false, quotaHoldSinceMs: 0 };
+    const { release } = mockClawkeep({ snapshot, runBackup });
+    const sched = await import("@/lib/clawkeep-scheduler");
+    await sched.start();
+
+    await vi.advanceTimersByTimeAsync(61 * MINUTE);
+    expect(runBackup).toHaveBeenCalledTimes(1);
+    // Still armed — for tomorrow's slot, not disarmed.
+    expect(sched.nextRunAtMs()).toBeGreaterThan(Date.now());
+
+    // The counter is corrected overnight; the next slot is simply taken.
+    runBackup.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    await vi.advanceTimersByTimeAsync(24 * 60 * MINUTE);
+    expect(runBackup).toHaveBeenCalledTimes(2);
+    // Nothing was paused, so nothing needed releasing.
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("boots on a quota hold: arms no backup, looks at the account soon after boot and hourly after", async () => {
+    const { runBackup, release } = mockClawkeep({ snapshot: HELD });
+    const sched = await import("@/lib/clawkeep-scheduler");
+    await sched.start();
+
+    expect(sched.nextRunAtMs()).toBe(0);
+    await vi.advanceTimersByTimeAsync(sched.QUOTA_HOLD_BOOT_PROBE_MS - MINUTE);
+    expect(release).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(MINUTE);
+    expect(release).toHaveBeenCalledTimes(1);
+
+    // Still full: it asks again an hour later, and keeps asking.
+    await vi.advanceTimersByTimeAsync(sched.QUOTA_HOLD_PROBE_MS);
+    expect(release).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(sched.QUOTA_HOLD_PROBE_MS);
+    expect(release).toHaveBeenCalledTimes(3);
+    // A paused schedule backs nothing up while it is paused.
+    expect(runBackup).not.toHaveBeenCalled();
+  });
+
+  it("switches auto-backup back on the first time the account issues credentials", async () => {
+    const release = vi.fn()
+      .mockResolvedValueOnce({ outcome: "held" })
+      .mockResolvedValueOnce({ outcome: "released", schedule: SCHEDULE, armedAtMs: 1 });
+    const { runBackup } = mockClawkeep({ snapshot: HELD, release });
+    const sched = await import("@/lib/clawkeep-scheduler");
+    await sched.start();
+
+    await vi.advanceTimersByTimeAsync(sched.QUOTA_HOLD_BOOT_PROBE_MS + sched.QUOTA_HOLD_PROBE_MS);
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(sched.nextRunAtMs()).toBeGreaterThan(Date.now());
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("auto-backup is back on"));
+
+    // The next slot backs the box up, and the probing stops.
+    await vi.advanceTimersByTimeAsync(24 * 60 * MINUTE);
+    expect(runBackup).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the hold when the look itself fails", async () => {
+    const release = vi.fn(async () => { throw new Error("EIO"); });
+    mockClawkeep({ snapshot: HELD, release });
+    const sched = await import("@/lib/clawkeep-scheduler");
+    await sched.start();
+
+    await vi.advanceTimersByTimeAsync(sched.QUOTA_HOLD_BOOT_PROBE_MS + sched.QUOTA_HOLD_PROBE_MS);
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(sched.nextRunAtMs()).toBe(0);
+  });
+
+  it("starts looking when a save pauses auto-backup for a full account, and not for a plain off", async () => {
+    const snapshot = { schedule: SCHEDULE, armedAtMs: 1, unreadable: false, quotaHoldSinceMs: 0 };
+    const { release } = mockClawkeep({ snapshot });
+    const sched = await import("@/lib/clawkeep-scheduler");
+    await sched.start();
+
+    // Switched off with room in the account: off, and nothing asks again.
+    await sched.refresh({ ...SCHEDULE, enabled: false }, 0);
+    await vi.advanceTimersByTimeAsync(2 * sched.QUOTA_HOLD_PROBE_MS);
+    expect(release).not.toHaveBeenCalled();
+
+    // Switched off while the account refused credentials: a pause.
+    await sched.refresh({ ...SCHEDULE, enabled: false }, Date.now());
+    await vi.advanceTimersByTimeAsync(sched.QUOTA_HOLD_PROBE_MS);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops looking when the owner switches auto-backup back on by hand", async () => {
+    const snapshot = { ...HELD };
+    const { release } = mockClawkeep({ snapshot });
+    const sched = await import("@/lib/clawkeep-scheduler");
+    await sched.start();
+
+    // What the route's write leaves on disk, and then hands to refresh().
+    Object.assign(snapshot, { schedule: SCHEDULE, quotaHoldSinceMs: 0 });
+    await sched.refresh(SCHEDULE, 0);
+    await vi.advanceTimersByTimeAsync(2 * sched.QUOTA_HOLD_PROBE_MS);
+
+    expect(release).not.toHaveBeenCalled();
+    expect(sched.nextRunAtMs()).toBeGreaterThan(Date.now());
+  });
+
+  it("looks at once after a backup by hand succeeds, and only when a hold is known", async () => {
+    const release = vi.fn(async () => ({ outcome: "released", schedule: SCHEDULE, armedAtMs: 1 }));
+    mockClawkeep({ snapshot: HELD, release });
+    const sched = await import("@/lib/clawkeep-scheduler");
+    await sched.start();
+
+    await sched.recheckQuotaHold();
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(sched.nextRunAtMs()).toBeGreaterThan(Date.now());
+
+    // Released: there is nothing left to look at.
+    await sched.recheckQuotaHold();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+});

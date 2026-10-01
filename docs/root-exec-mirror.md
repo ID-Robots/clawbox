@@ -110,6 +110,12 @@ as root: it touches neither the index nor the working tree, so it reaches none o
 
 ## Rollout ordering — read this before shipping
 
+The same rule applies to the web build: a privilege path the web build on disk
+still uses is not removed before its replacement is built. The polkit grant a
+pre-TASK-539 build needs, the boot-time heal for a box that was stranded anyway,
+and the local-edits save before every reset are covered in
+`docs/update-launcher-transition.md` (TASK-1316).
+
 The dispatcher that needs the mirror must never be installed on a box that has
 no mirror, and the new dispatcher does **not** fall back to the tree. Get that
 order wrong and a fleet box refuses every root step, on an appliance with no
