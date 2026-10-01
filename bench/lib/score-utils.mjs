@@ -98,14 +98,14 @@ export async function nodeCheck(workdir, rel) {
 /**
  * `node --test` in the workdir; returns {passCount, failCount, check}.
  *
- * --test-force-exit (Node >= 20.14 / 22): the run ends once its tests have
- * settled. Without it a timer or handle the code under test leaves open — a
- * refresh loop started at import — keeps the process alive until timeoutMs,
- * and tests that all finished in milliseconds score as a timeout. timeoutMs
- * stays the bound for tests that never settle, and then the detail says so.
+ * No --test-force-exit: it ends the run once the tests known SO FAR have
+ * finished, so a failing test registered after an await or from a timer is
+ * dropped and the check passes. A timer the code under test leaves open (a
+ * refresh loop started at import) therefore holds the run to timeoutMs — and
+ * the detail then says it timed out rather than showing bare -1 counts.
  */
 export async function nodeTest(workdir, { timeoutMs = 120_000 } = {}) {
-  const res = await run("node", ["--test", "--test-force-exit"], { cwd: workdir, timeoutMs });
+  const res = await run("node", ["--test"], { cwd: workdir, timeoutMs });
   const tap = res.stdout + res.stderr;
   const passCount = Number(tap.match(/^# pass (\d+)/m)?.[1] ?? -1);
   const failCount = Number(tap.match(/^# fail (\d+)/m)?.[1] ?? -1);
