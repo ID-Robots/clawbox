@@ -796,6 +796,43 @@ describe("a reviewer that answered without a JSON verdict (TASK-1323)", () => {
     expect(done.tasks[0].review?.notes).toBe("Accepted by rule: The reviewer answered nothing.");
   });
 
+  it("quotes the first answer in the alert when the re-ask does not finish — after what became of the re-ask, so the board's cut takes only the quote's tail", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const first = `I read index.html against the task.\n\n${"The heading and the form are there, as the task asked. ".repeat(6)}`;
+    reviews = [{ summary: first }, { status: "failed", error: "boom" }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(reviewerStarts()).toHaveLength(3);
+    const alerts = done.log.filter((e) => e.type === "alert").map((e) => e.message);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatch(/^ALERT: The reviewer of t1 gave no verdict: The reviewer's answer holds no JSON object\. Asked once more, it \(run-00000004\) ended failed\. It had answered: "I read index\.html against the task\. The heading and the form are there, as the task asked\. /);
+    // One line of 300 characters on the board: the quote is what gives way.
+    expect(alerts[0]).toHaveLength("ALERT: ".length + 300);
+    expect(alerts[0].endsWith("…")).toBe(true);
+    expect(done.tasks[0].review?.notes).toBe("Accepted by rule: The reviewer's answer holds no JSON object.");
+    expect(done.alerts).toBe(1);
+  });
+
+  it("quotes the first answer in the alert when the re-ask could not start", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    reviews = [{ summary: "Reviewed; all good." }];
+    let t1Asks = 0;
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string; taskId: string | null }) => {
+      if (who.role === "reviewer" && who.taskId === "t1" && ++t1Asks === 2) return { ok: false, wait: false, reason: "The coding agent is switched off." };
+      return { ok: true };
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // The review ran; its re-ask never did; t2's reviewer is next.
+    expect(reviewerStarts().map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2"]);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+      'ALERT: The reviewer of t1 gave no verdict: The reviewer\'s answer holds no JSON object. Asked once more, it could not start: The coding agent is switched off. It had answered: "Reviewed; all good."',
+    ]);
+    expect(done.tasks[0].review?.notes).toBe("Accepted by rule: The reviewer's answer holds no JSON object.");
+  });
+
   it("reads a fenced ```json block after prose at once — no re-ask, no note", async () => {
     outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
     reviews = [{ summary: 'Checked index.html on a 5" phone width and the "Send" button.\n\n```json\n{"verdict": "accepted", "notes": "One nit: spacing."}\n```' }];
