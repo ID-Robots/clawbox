@@ -91,6 +91,8 @@ import {
   type ChatAttachment,
   type StagingFailure,
 } from '@/lib/chat-attachments'
+import { useChatFileDrop, useChatUploads } from '@/lib/use-chat-drop'
+import { ChatDropOverlay, ChatUploadChips } from './ChatDropUploads'
 import {
   gatewayFrameError,
   isGatewayStartingRefusal,
@@ -237,6 +239,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   // Staged ON THE BOX, never held as base64 in the page — see the import note.
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([])
   const [attachmentError, setAttachmentError] = useState<(StagingFailure & { file: string }) | null>(null)
+  // What is still on its way to the box: a chip per file or dropped folder.
+  const uploadTracker = useChatUploads()
+  const beginUpload = uploadTracker.begin
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
 
@@ -980,6 +985,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         if (!isCurrent()) return
         setAttachmentError({ ...classifyStagingFailure(status, payload), file: filename })
       }
+      const chip = beginUpload(filename, 'file')
       try {
         const res = await fetch('/setup-api/chat/attachments', { method: 'POST', body: formData })
         const json = await res.json().catch(() => ({} as { name?: string; path?: string }))
@@ -1011,9 +1017,26 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         // rather than the file's. The thrown error itself is never shown — it
         // can carry the request URL.
         fail(undefined, null)
+      } finally {
+        chip.end()
       }
     }))
-  }, [caps])
+  }, [caps, beginUpload])
+
+  // Files and whole folders dragged onto the chat — the mascot chat's own
+  // drop, shared through use-chat-drop so the two surfaces take the same drop.
+  const addFolderAttachment = useCallback((folder: ChatAttachment) => {
+    setPendingAttachments(prev => [...prev, folder])
+  }, [])
+  const drop = useChatFileDrop({
+    enabled: status === 'connected' && (caps.canAttachImages || caps.canAttachDocuments),
+    caps,
+    stageFiles,
+    onFolderStaged: addFolderAttachment,
+    onError: setAttachmentError,
+    generationRef: uploadGenerationRef,
+    tracker: uploadTracker,
+  })
 
   // <input type=file> change handler.
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1412,14 +1435,21 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   const tuckable = phone && attachControls !== null
 
   return (
-    <div style={{
-      width: '100%',
-      height: '100%',
-      display: 'flex',
-      flexDirection: 'column',
-      background: '#0d1117',
-      overflow: 'hidden',
-    }}>
+    <div
+      data-testid="chatapp"
+      {...drop.dropHandlers}
+      style={{
+        width: '100%',
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        background: '#0d1117',
+        overflow: 'hidden',
+        // The drop target is drawn over the whole chat.
+        position: 'relative',
+      }}
+    >
+      <ChatDropOverlay active={drop.dragActive} t={t} />
       {/* Fullscreen chat on a phone: the header folds into this strip, whose
           toggle opens it again underneath — see ChatPhoneChrome. */}
       {fullscreenChat && (
@@ -1809,10 +1839,13 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
             color: '#f59e0b', fontSize: 12, lineHeight: 1.4, flexShrink: 0,
           }}
         >
-          {t(`chat.attachment.error.${attachmentError.reason}`, { name: attachmentError.file })}
+          {t(`chat.attachment.error.${attachmentError.reason}`, { ...attachmentError.params, name: attachmentError.file })}
           {attachmentError.detail ? ` ${attachmentError.detail}` : ''}
         </div>
       )}
+
+      {/* Still on its way to the box. */}
+      <ChatUploadChips uploads={uploadTracker.uploads} onCancel={uploadTracker.cancel} t={t} />
 
       {/* Staged attachments */}
       {pendingAttachments.length > 0 && (
@@ -1832,6 +1865,25 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
                 // that says WHICH file is attached, and a decorative image tells
                 // a screen-reader user nothing at all.
                 <img src={item.previewUrl} alt={t('chat.attachment.previewAlt', { name: item.name })} style={{ width: 56, height: 56, borderRadius: 8, objectFit: 'cover', border: '1px solid rgba(255,255,255,0.1)' }} />
+              ) : item.kind === 'folder' ? (
+                // A dropped folder: its name and how many files it carries.
+                <div
+                  title={item.name}
+                  style={{
+                    width: 56, height: 56, borderRadius: 8,
+                    border: '1px solid rgba(249,115,22,0.35)',
+                    background: 'rgba(249,115,22,0.08)',
+                    color: 'rgba(255,255,255,0.7)', fontSize: 9, lineHeight: 1.2,
+                    padding: 4, overflow: 'hidden', wordBreak: 'break-all',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1,
+                  }}
+                >
+                  <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18, color: '#f97316' }}>folder</span>
+                  <span style={{ maxHeight: 20, overflow: 'hidden' }}>{item.name}</span>
+                  {typeof item.fileCount === 'number' && (
+                    <span style={{ color: 'rgba(255,255,255,0.45)' }}>{t('chat.attachment.folderFiles', { count: item.fileCount })}</span>
+                  )}
+                </div>
               ) : (
                 <div style={{
                   width: 56, height: 56, borderRadius: 8,

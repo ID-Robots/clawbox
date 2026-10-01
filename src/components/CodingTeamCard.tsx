@@ -53,8 +53,23 @@ export interface TeamLogEntryView {
   /** The task the entry is about — for a message, the sender's task. */
   task_id?: string;
   message: string;
-  /** A `message` entry's payload (coding-team-board.ts TeamMessagePayload); other entries' payloads are not read here. */
+  /** A `message` entry's payload (coding-team-board.ts TeamMessagePayload), or a `note`'s `undelivered` (UndeliveredNote); other payloads are not read here. */
   payload?: Record<string, unknown>;
+}
+
+const RUN_ID = /^run-[a-z0-9]{8}$/;
+
+/**
+ * A team message that never reached its sibling because the sibling had
+ * already finished — a `note` on the board, not an alert — or null for any
+ * other entry. Only the sender and the receiver are read, both run ids.
+ */
+function unreachedOf(entry: TeamLogEntryView): { role: string; from: string; toRunId: string } | null {
+  if (entry.type !== "note" || !entry.payload) return null;
+  const u = entry.payload.undelivered as Record<string, unknown> | undefined;
+  if (!u || typeof u !== "object" || u.to !== "sibling") return null;
+  if (typeof u.role !== "string" || typeof u.from !== "string" || !RUN_ID.test(u.from) || typeof u.toRunId !== "string" || !RUN_ID.test(u.toRunId)) return null;
+  return { role: u.role, from: u.from, toRunId: u.toRunId };
 }
 
 /** A run of the team speaking, as the board recorded it — or null for any other entry, or a payload that is not one. */
@@ -492,6 +507,17 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
               {team.log.slice(-LOG_SHOWN).map((e, i) => {
                 const m = teamMessageOf(e);
                 if (m) return <li key={i} className="break-words text-sky-200/90">{messageLine(e, m)}</li>;
+                const u = unreachedOf(e);
+                if (u) {
+                  return (
+                    <li key={i} className="break-words" data-testid="coding-team-log-unreached">
+                      <span className="opacity-60">{new Date(e.ts).toLocaleTimeString()}</span>{" "}
+                      <span className="material-symbols-rounded align-[-2px]" style={{ fontSize: 12 }} aria-hidden="true">forum</span>{" "}
+                      <span className="text-[var(--text-secondary)]">{u.role} {u.from}</span>{" "}
+                      {t("codingAgent.team.messageToRun", { run: u.toRunId })} · {t("codingAgent.team.messageUndelivered")}: {t("codingAgent.team.messageReceiverFinished", { run: u.toRunId })}
+                    </li>
+                  );
+                }
                 return (
                   <li key={i} className={`break-words ${e.type === "alert" ? "text-amber-400" : ""}`}>
                     <span className="opacity-60">{new Date(e.ts).toLocaleTimeString()}</span>{" "}

@@ -19,14 +19,26 @@
 //
 // This is a second, narrower check INSIDE a route middleware has already let
 // through — never a replacement for it.
+//
+// And since TASK-1256 (multi-user ClawBox OS) "the person" means THE OWNER: a
+// box can have other users, each a real Linux account with a session of their
+// own, and none of them may approve the owner's mail, switch the coding agent
+// on or reach any other route that asks this question. Who a cookie speaks for
+// is decided by src/lib/session-identity.ts; this check only needs to know
+// whether that is the owner, which the cookie alone answers — a non-owner is
+// refused here whether or not the registry still lists them.
 
-import { getSessionGeneration, getSessionSigningSecret, verifySessionCookie } from "@/lib/auth";
+import { getSessionGeneration, getSessionSigningSecret, getSystemUsername, readSessionClaims } from "@/lib/auth";
+import { identityFromClaims } from "@/lib/session-identity";
+
+const NO_USERS: ReadonlyMap<string, string> = new Map();
 
 const SESSION_COOKIE_RE = /(?:^|;\s*)clawbox_session=([^;]+)/;
 
 /**
  * True only when the request carries a valid, unexpired, un-revoked session
- * cookie — i.e. a browser someone logged into.
+ * cookie issued to the OWNER — i.e. a browser the owner logged into. A cookie
+ * from before multi-user (no `u` claim) is the owner's.
  *
  * Returns false, never throws: a caller failing this check must get a 403, not
  * a 500 that a client might read as "try again".
@@ -47,7 +59,9 @@ export async function hasOwnerSession(request: Request): Promise<boolean> {
     if (!secret) return false;
     // The generation check is what makes "change the password" revoke a
     // stolen cookie here too, exactly as it does in middleware.
-    return verifySessionCookie(cookie, secret, await getSessionGeneration());
+    const claims = readSessionClaims(cookie, secret, await getSessionGeneration());
+    if (!claims) return false;
+    return identityFromClaims(claims, getSystemUsername(), NO_USERS)?.isOwner === true;
   } catch {
     return false;
   }

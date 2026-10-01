@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ClawKeepApp from "@/components/ClawKeepApp";
+import { I18nProvider } from "@/lib/i18n";
 
 /**
  * "What's in a backup" lives behind a question mark beside the title now,
@@ -29,13 +30,13 @@ function status(over: Record<string, unknown> = {}) {
   };
 }
 
-function stubFetch() {
+function stubFetch(over: Record<string, unknown> = {}) {
   const json = (body: unknown, code = 200) =>
     new Response(JSON.stringify(body), { status: code, headers: { "content-type": "application/json" } });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
     const url = input.toString();
     if (url.startsWith("/setup-api/clawkeep/memory")) return json({ supportedOnEdition: false });
-    if (url.startsWith("/setup-api/clawkeep")) return json(status());
+    if (url.startsWith("/setup-api/clawkeep")) return json(status(over));
     return json({});
   }));
 }
@@ -69,5 +70,120 @@ describe("ClawKeep's backup contents", () => {
     await screen.findByTestId("clawkeep-contents-popover");
     fireEvent.pointerDown(document.body);
     await waitFor(() => expect(screen.queryByTestId("clawkeep-contents-popover")).not.toBeInTheDocument());
+  });
+});
+
+/**
+ * TASK-1301: the box's own backup archives are left out of every OpenClaw
+ * snapshot, and the snapshot-sized archives a backup still carried are named
+ * before the upload. Pinned: the rule is on the "Not included" line, what the
+ * last run left out is said with its size, and the warning card lists what it
+ * carried — and none of it is drawn when there is nothing to say.
+ */
+describe("what a backup leaves out, and what it carried", () => {
+  // The catalogue arrives after the first paint, so every sentence is waited for.
+  const app = () => render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+  const said = (id: string, text: string | RegExp) =>
+    waitFor(() => expect(screen.getByTestId(id)).toHaveTextContent(text), { timeout: 5000 });
+
+  it("lists the box's own backups under Not included", async () => {
+    stubFetch();
+    app();
+    fireEvent.click(await screen.findByTestId("clawkeep-contents-toggle"));
+    await said("clawkeep-contents-popover", /Not included:.*~\/\.openclaw\/backups/);
+    expect(screen.getByTestId("clawkeep-contents-popover")).toHaveTextContent(/never contains older backups/);
+    // Nothing was left out yet: no count to report.
+    expect(screen.queryByTestId("clawkeep-contents-left-out")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("clawkeep-left-out")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("clawkeep-large-archives")).not.toBeInTheDocument();
+  });
+
+  it("says how much the last backup left out, on the card and in the popover", async () => {
+    stubFetch({ leftOutCount: 8, leftOutBytes: 20 * 1024 ** 3 });
+    app();
+    await said(
+      "clawkeep-left-out",
+      "Left out of the last backup: 8 backup archive(s) kept on this box, 20.0 GB in all.",
+    );
+    expect(screen.getByTestId("clawkeep-left-out")).toHaveTextContent("untouched");
+
+    fireEvent.click(screen.getByTestId("clawkeep-contents-toggle"));
+    await said("clawkeep-contents-left-out", "The last backup left out 8 such file(s), 20.0 GB in all.");
+  });
+
+  it("warns about the snapshot-sized archives the last backup carried", async () => {
+    stubFetch({
+      largeArchives: [
+        { path: "~/.openclaw/workspace/exports/dump.tar.gz", bytes: 1.9 * 1024 ** 3 },
+        { path: "~/.openclaw/workspace/photos.zip", bytes: 300 * 1024 ** 2 },
+      ],
+      largeArchiveCount: 4,
+      largeArchiveBytes: 3 * 1024 ** 3,
+    });
+    app();
+    await said("clawkeep-large-archives", "The last backup carried 4 archive file(s), 3.0 GB in all");
+    const card = screen.getByTestId("clawkeep-large-archives");
+    expect(card).toHaveAttribute("role", "status");
+    const rows = card.querySelectorAll("li");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("~/.openclaw/workspace/exports/dump.tar.gz");
+    expect(rows[0]).toHaveTextContent("1.9 GB");
+    expect(rows[1]).toHaveTextContent("300 MB");
+    expect(card).toHaveTextContent("…and 2 more.");
+    expect(card).toHaveTextContent(/into ~\/\.openclaw\/backups, which ClawKeep leaves out/);
+  });
+});
+
+/**
+ * TASK-1304: a symbolic link out of the backup used to fail the whole run.
+ * ClawKeep now skips it and the backup finishes — and the screen says both:
+ * "backup finished, N links skipped" beside the verdict, the links themselves
+ * on a card of their own, and the rule on the "Not included" line.
+ */
+describe("the links a backup skipped", () => {
+  const app = () => render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+  const said = (id: string, text: string | RegExp) =>
+    waitFor(() => expect(screen.getByTestId(id)).toHaveTextContent(text), { timeout: 5000 });
+  const skipped = {
+    lastHeartbeatStatus: "ok",
+    skippedLinks: [
+      { path: "~/.openclaw/workspace/docs/catalogue", target: "/home/clawbox/Shared/Exports/catalogue" },
+      { path: "~/.openclaw/workspace/docs/notes.txt", target: "../../../../Shared/notes.txt" },
+    ],
+    skippedLinkCount: 3,
+  };
+
+  it("says the backup finished, and lists the links it skipped", async () => {
+    stubFetch(skipped);
+    app();
+    await said("clawkeep-skipped-links-summary", "Backup finished · 3 symbolic link(s) skipped");
+    await said("clawkeep-skipped-links", "3 symbolic link(s) point outside the backed-up folders");
+    const card = screen.getByTestId("clawkeep-skipped-links");
+    // Informational, not an error: the box is fine and the backup finished.
+    expect(card).toHaveAttribute("role", "status");
+    expect(card).toHaveTextContent("still on this box, untouched");
+    const rows = card.querySelectorAll("li");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent("~/.openclaw/workspace/docs/catalogue");
+    expect(rows[0]).toHaveTextContent("/home/clawbox/Shared/Exports/catalogue");
+    expect(rows[1]).toHaveTextContent("../../../../Shared/notes.txt");
+    expect(card).toHaveTextContent("…and 1 more.");
+    expect(card).toHaveTextContent(/keep the file itself inside the backed-up folders/);
+  });
+
+  it("does not call a backup finished while it is still uploading", async () => {
+    stubFetch({ ...skipped, lastHeartbeatStatus: "running" });
+    app();
+    await said("clawkeep-skipped-links", "3 symbolic link(s)");
+    expect(screen.queryByTestId("clawkeep-skipped-links-summary")).not.toBeInTheDocument();
+  });
+
+  it("names the rule under Not included, and draws nothing when nothing was skipped", async () => {
+    stubFetch();
+    app();
+    fireEvent.click(await screen.findByTestId("clawkeep-contents-toggle"));
+    await said("clawkeep-contents-popover", /symbolic links that point outside these folders, or at nothing/);
+    expect(screen.queryByTestId("clawkeep-skipped-links")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("clawkeep-skipped-links-summary")).not.toBeInTheDocument();
   });
 });

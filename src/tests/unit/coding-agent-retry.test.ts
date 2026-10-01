@@ -170,6 +170,22 @@ describe("what a run records about being refused", () => {
       expect(typeof lib.describeDenialForTests(junk)).toBe("string");
     }
   });
+
+  // Bench, 2026-09-26: a read-only probe of several statements was judged by
+  // its first 160 characters, and past a cut anything may follow.
+  it("keeps a long refused action's whole text beside the cut the owner reads — within the bound the team reads it by", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const board = await import("@/lib/coding-team-board");
+    const command = `M="$CLAWBOX_RUN_ARTIFACTS_DIR/mutation"; ${"ls -la /home/clawbox/Projects/site; ".repeat(8)}`;
+    const [long] = lib.denialsFromForTests([{ tool_name: "Bash", tool_input: { command } }]);
+    expect(long.text).toBe(`Bash: ${command}`.slice(0, board.DENIAL_TEXT_CUT));
+    expect(long.fullText).toBe(`Bash: ${command}`);
+    expect(lib.describeDenialForTests({ tool_name: "Bash", tool_input: { command } })).toBe(long.text);
+    // Whole already: nothing beside it.
+    expect(lib.denialsFromForTests([{ tool_name: "Bash", tool_input: { command: "ls" } }])).toEqual([{ text: "Bash: ls", rule: null, refusal: null }]);
+    const [huge] = lib.denialsFromForTests([{ tool_name: "Bash", tool_input: { command: "x".repeat(5_000) } }]);
+    expect(huge.fullText).toHaveLength(board.DENIAL_FULL_TEXT_CUT);
+  });
 });
 
 describe("finding a run's transcript", () => {

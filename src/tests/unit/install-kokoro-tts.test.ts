@@ -720,6 +720,9 @@ describe.skipIf(!hasBash)("install-voice.sh --whisper, the speech-to-text instal
     expect(res.status, res.stderr).toBe(0);
     const pip = res.su.filter((c) => c.includes("pip3 install"));
     expect(pip.some((c) => c.includes("faster-whisper"))).toBe(true);
+    // The quoted cap reaches su intact: apt's pip 22.0.2 cannot resolve the
+    // huggingface-hub 1.x graph (install-whisper-stt.test.ts).
+    expect(pip.find((c) => c.includes("faster-whisper"))).toContain("'huggingface-hub<1'");
     // No Kokoro wheel, no Kokoro probe, no Kokoro warm-up — the resident
     // server's `try-restart` (and this fixture's own temp path) are the only
     // places the name may appear.
@@ -758,10 +761,16 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only on a fresh CUDA box", () 
     expect(pip.some((c) => c.includes(torchUrl)), "the Jetson CUDA torch wheel is never installed").toBe(true);
     expect(pip.some((c) => c.includes("nvidia-cusparselt-cu12"))).toBe(true);
     expect(pip.some((c) => c.includes("kokoro"))).toBe(true);
-    // transformers<5 must stay its OWN pip step: pip 22's resolver will not
-    // downgrade huggingface-hub inside a single command and silently picks 5.x.
-    const combined = pip.find((c) => c.includes("kokoro"));
-    expect(combined).not.toContain("transformers<5");
+    // Both ceilings ride in the kokoro command itself. Unpinned, it resolves
+    // transformers 5.x with huggingface-hub 1.x, and apt's pip 22.0.2 dies on
+    // that graph (get_topological_weights) before installing anything. With the
+    // hub ceiling alone it downloads every transformers 5.x wheel on its way
+    // down to 4.x. The hub ceiling is also what downgrades a hub 1.x an older
+    // faster-whisper left behind, which the separate transformers<5 step
+    // below was once added for.
+    const combined = pip.find((c) => c.includes("kokoro soundfile"));
+    expect(combined).toContain("'transformers<5'");
+    expect(combined).toContain("'huggingface-hub<1'");
     expect(pip.some((c) => c.includes("transformers<5"))).toBe(true);
 
     // Warm the cache here, or the first spoken reply is a 300 MB download.

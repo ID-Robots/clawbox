@@ -25,12 +25,13 @@
 // Isolated in its own process (its own systemd unit) so a bug here can never
 // take down the main ClawBox web server.
 
+/* eslint-disable @typescript-eslint/no-require-imports */
 const http = require("http");
 const net = require("net");
 const os = require("os");
-const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { ownerUsername, sessionIdentityFromCookieHeader } = require("./session-cookie.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // script is standalone CommonJS and cannot import the TypeScript helper: an
@@ -368,28 +369,21 @@ function readSessionGeneration() {
   }
 }
 
+// The OWNER's session, and nobody else's (TASK-1256): the Hermes dashboard is
+// the owner's assistant, running as their Linux account with the box's device
+// tools, and other ClawBox users are never let into it. A cookie from before
+// multi-user (no `u` claim) is the owner's. The rule is scripts/session-cookie.js,
+// the same one production-server.js applies to its WebSocket upgrades.
 function hasValidSession(req) {
   try {
-    const secret = sessionSecret();
-    if (!secret) return false;
-    const m = /(?:^|;\s*)clawbox_session=([^;]+)/.exec(req.headers.cookie || "");
-    if (!m) return false;
-    const cookie = decodeURIComponent(m[1]);
-    const dot = cookie.indexOf(".");
-    if (dot < 0) return false;
-    const payload = cookie.slice(0, dot);
-    const sig = cookie.slice(dot + 1);
-    if (!payload || !sig) return false;
-    const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-    const sigBuf = Buffer.from(sig);
-    const expBuf = Buffer.from(expected);
-    if (sigBuf.length !== expBuf.length) return false;
-    if (!crypto.timingSafeEqual(sigBuf, expBuf)) return false;
-    const decoded = Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
-    const data = JSON.parse(decoded);
-    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return false;
-    if ((typeof data.gen === "number" ? data.gen : 0) !== readSessionGeneration()) return false;
-    return true;
+    const identity = sessionIdentityFromCookieHeader(req.headers.cookie, {
+      secret: sessionSecret(),
+      sessionGen: readSessionGeneration(),
+      // Only "is this the owner" is asked here, which needs no registry.
+      users: new Map(),
+      owner: ownerUsername(),
+    });
+    return identity !== null && identity.isOwner === true;
   } catch {
     return false;
   }

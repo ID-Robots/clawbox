@@ -76,10 +76,33 @@ interface ClawKeepStatus {
   /** When auto-backup was last armed or tightened. Optional so a status from
    *  an older server still renders; see deriveProtection() for what it guards. */
   scheduleArmedAtMs?: number;
+  /** Auto-backup was switched off while the account was full, and the box
+   *  switches it back on by itself once backups can run again. 0 or absent
+   *  for any other "off", and from older servers. */
+  scheduleQuotaHoldSinceMs?: number;
   /** True when the device has a stored backup-encryption passphrase. The
    * "Run a backup now" button is gated on this; without it the runner
    * refuses to run since unencrypted backups would leak to the operator. */
   encryptionConfigured: boolean;
+  /** The box's own backup archives the last archive build left out, and
+   *  their size. Optional, like every field an older server did not send. */
+  leftOutCount?: number;
+  leftOutBytes?: number;
+  /** Snapshot-sized archive files the last archive still carried: the five
+   *  largest named, all of them counted. */
+  largeArchives?: { path: string; bytes: number }[];
+  largeArchiveCount?: number;
+  largeArchiveBytes?: number;
+  /** Symbolic links the last archive build skipped — pointing outside the
+   *  backed-up folders, or at nothing — the first twenty named, all counted. */
+  skippedLinks?: SkippedLink[];
+  skippedLinkCount?: number;
+}
+
+/** One symbolic link a backup did not carry: where it is, and its text. */
+interface SkippedLink {
+  path: string;
+  target: string;
 }
 
 // Map the daemon's phase id to an i18n key for the progress panel.
@@ -124,6 +147,10 @@ interface RestoreResponse {
   restartPending?: string[];
   /** Members the daemon could not recreate. Absent from older servers. */
   skippedMembers?: string[];
+  /** Symbolic links the BACKUP skipped, so this snapshot never carried them.
+   *  Absent from older servers. */
+  skippedLinks?: SkippedLink[];
+  skippedLinkCount?: number;
 }
 
 
@@ -726,9 +753,15 @@ export default function ClawKeepApp() {
                     : null
                 }
               />
+              {/* Outside the dashboard card on purpose: the daemon writes this
+                  before the upload starts, and the card is the progress panel
+                  for exactly that stretch. */}
+              <LargeArchivesCard status={status} />
+              <SkippedLinksCard status={status} />
               <ScheduleCard
                 schedule={status.schedule}
                 nextRunAtMs={status.nextRunAtMs}
+                quotaHoldSinceMs={status.scheduleQuotaHoldSinceMs ?? 0}
                 onSaved={(next) => {
                   setStatus((prev) => prev
                     ? {
@@ -742,6 +775,8 @@ export default function ClawKeepApp() {
                       // same clock, and a save that armed nothing returns the
                       // OLD stamp — which is the point.
                       scheduleArmedAtMs: next.scheduleArmedAtMs,
+                      // Absent from an older server's answer: no hold.
+                      scheduleQuotaHoldSinceMs: next.scheduleQuotaHoldSinceMs ?? 0,
                     }
                     : prev);
                 }}
@@ -829,6 +864,8 @@ interface ScheduleSaveResponse {
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
   scheduleArmedAtMs: number;
+  /** Optional: an older server does not send it. */
+  scheduleQuotaHoldSinceMs?: number;
 }
 
 function sameSchedule(a: ClawKeepSchedule, b: ClawKeepSchedule): boolean {
@@ -840,11 +877,13 @@ function sameSchedule(a: ClawKeepSchedule, b: ClawKeepSchedule): boolean {
 function ScheduleCard({
   schedule,
   nextRunAtMs,
+  quotaHoldSinceMs,
   onSaved,
   onError,
 }: {
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
+  quotaHoldSinceMs: number;
   onSaved: (next: ScheduleSaveResponse) => void;
   onError: (msg: string) => void;
 }) {
@@ -891,10 +930,16 @@ function ScheduleCard({
       <div className="flex items-center justify-between">
         <div>
           <h3 className="text-sm font-semibold text-[var(--text-primary)]">{t("clawkeep.schedule.title")}</h3>
-          <p className="text-xs text-[var(--text-muted)] mt-0.5">
+          <p className="text-xs text-[var(--text-muted)] mt-0.5" data-testid="clawkeep-schedule-summary">
             {draft.enabled
               ? t("clawkeep.schedule.nextRun", { when: formatNextRun(nextRunAtMs, t) })
-              : t("clawkeep.schedule.off")}
+              // Off BECAUSE the account was full is a pause the box ends by
+              // itself — said here, so switching it off is not read as "for
+              // good". Only while the saved schedule is off, too: a draft
+              // the owner has not saved is not what the box is doing.
+              : quotaHoldSinceMs > 0 && !schedule.enabled
+                ? t("clawkeep.schedule.quotaHold")
+                : t("clawkeep.schedule.off")}
           </p>
         </div>
         <label className="relative inline-flex items-center cursor-pointer">
@@ -1349,6 +1394,34 @@ function DashboardCard({
         <Stat label={t("clawkeep.stat.snapshots")} value={status.snapshotCount.toString()} />
       </div>
 
+      {/* The box's own backups the last archive left out — said here because
+          the owner who wonders why a snapshot is smaller than ~/.openclaw is
+          reading exactly this card. */}
+      {(status.leftOutCount ?? 0) > 0 && (
+        <p
+          className="relative mt-3 max-w-md text-xs text-[var(--text-muted)] leading-relaxed"
+          data-testid="clawkeep-left-out"
+        >
+          {t("clawkeep.leftOut.summary", {
+            count: status.leftOutCount ?? 0,
+            size: formatBytes(status.leftOutBytes ?? 0),
+          })}
+        </p>
+      )}
+
+      {/* A backup that skipped links FINISHED — said as such, beside the
+          verdict it did not spoil. Only once the run ended ok: the daemon
+          writes the list before the upload, and "finished" is not true yet
+          while that runs. The links themselves are on SkippedLinksCard. */}
+      {(status.skippedLinkCount ?? 0) > 0 && status.lastHeartbeatStatus === "ok" && (
+        <p
+          className="relative mt-3 max-w-md text-xs text-[var(--text-muted)] leading-relaxed"
+          data-testid="clawkeep-skipped-links-summary"
+        >
+          {t("clawkeep.skippedLinks.summary", { count: status.skippedLinkCount ?? 0 })}
+        </p>
+      )}
+
       {/* Optional name for this backup → becomes the snapshot's label */}
       {!disabled && (
         <div className="relative mt-5 w-full max-w-xs">
@@ -1468,6 +1541,14 @@ function BackupContentsInfo({ status }: { status: ClawKeepStatus }) {
               {source.excludesKeys.map((key) => t(key)).join("; ")}.
             </p>
           )}
+          {(status.leftOutCount ?? 0) > 0 && (
+            <p className="text-xs text-[var(--text-muted)] leading-relaxed" data-testid="clawkeep-contents-left-out">
+              {t("clawkeep.contents.leftOutLast", {
+                count: status.leftOutCount ?? 0,
+                size: formatBytes(status.leftOutBytes ?? 0),
+              })}
+            </p>
+          )}
           {status.backupContainsCredentials !== false && (
             <p className="text-xs text-amber-200/90 leading-relaxed">
               🔒 {t("clawkeep.contents.credentialWarning")}
@@ -1475,6 +1556,116 @@ function BackupContentsInfo({ status }: { status: ClawKeepStatus }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Snapshot-sized archive files the last backup still CARRIED.
+ *
+ * The box's own backups are left out by the daemon (`clawkeep/own_backups.py`);
+ * what is named here is everything else of that size in the backed-up folders
+ * — an export zip in the workspace, or one of the box's own archives that could
+ * not be set aside because nothing outside the backup shares its disk. Each one
+ * is uploaded again with every snapshot, which is how a 2.5 GB box reached
+ * 13 GB snapshots and a full quota without anyone being told. The daemon writes
+ * it before the upload, so the card can be up while the upload runs.
+ */
+function LargeArchivesCard({ status }: { status: ClawKeepStatus }) {
+  const { t } = useT();
+  const count = status.largeArchiveCount ?? 0;
+  if (count <= 0) return null;
+  const named = status.largeArchives ?? [];
+  return (
+    <div
+      className={`${CARD} space-y-2 border-amber-500/20 bg-amber-500/5`}
+      role="status"
+      data-testid="clawkeep-large-archives"
+    >
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-amber-200">
+        <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">folder_zip</span>
+        {t("clawkeep.largeArchives.title")}
+      </h2>
+      <p className="text-sm text-amber-100/90 leading-relaxed">
+        {t("clawkeep.largeArchives.body", {
+          count,
+          size: formatBytes(status.largeArchiveBytes ?? 0),
+        })}
+      </p>
+      {named.length > 0 && (
+        <ul className="space-y-1 text-xs text-amber-100/85">
+          {named.map((archive) => (
+            <li key={archive.path} className="flex items-baseline justify-between gap-3">
+              <code className="min-w-0 break-all font-mono">{archive.path}</code>
+              <span className="shrink-0 tabular-nums">{formatBytes(archive.bytes)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {count > named.length && (
+        <p className="text-xs text-amber-100/70">
+          {t("clawkeep.largeArchives.more", { count: count - named.length })}
+        </p>
+      )}
+      <p className="text-xs text-amber-100/70 leading-relaxed">{t("clawkeep.largeArchives.hint")}</p>
+    </div>
+  );
+}
+
+/** `path → target` per link, and how many more there were than are named. */
+function SkippedLinkList({ links, count }: { links: SkippedLink[]; count: number }) {
+  const { t } = useT();
+  return (
+    <>
+      {links.length > 0 && (
+        <ul className="space-y-1 text-xs">
+          {links.map((link) => (
+            <li key={link.path} className="min-w-0 wrap-anywhere">
+              <code className="font-mono">{link.path}</code>
+              <span className="mx-1.5 opacity-60" aria-hidden="true">→</span>
+              <code className="font-mono opacity-80">{link.target}</code>
+            </li>
+          ))}
+        </ul>
+      )}
+      {count > links.length && (
+        <p className="text-xs opacity-70">
+          {t("clawkeep.skippedLinks.more", { count: count - links.length })}
+        </p>
+      )}
+    </>
+  );
+}
+
+/**
+ * Symbolic links the last backup SKIPPED (TASK-1304).
+ *
+ * The archiver refuses a link whose target is outside everything the backup
+ * contains — a file kept in a shared folder, a link to nothing — and it
+ * refuses while writing, so one such link in a workspace used to fail the
+ * whole backup, late. The daemon now leaves those links out, never follows
+ * them, and names them here; the backup itself finishes. Informational, not
+ * a warning: nothing is wrong with the box, and nothing it holds was lost.
+ */
+function SkippedLinksCard({ status }: { status: ClawKeepStatus }) {
+  const { t } = useT();
+  const count = status.skippedLinkCount ?? 0;
+  if (count <= 0) return null;
+  return (
+    <div
+      className={`${CARD} space-y-2 border-sky-500/20 bg-sky-500/5 text-sky-100/85`}
+      role="status"
+      data-testid="clawkeep-skipped-links"
+    >
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-sky-200">
+        <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">link_off</span>
+        {t("clawkeep.skippedLinks.title")}
+      </h2>
+      <p className="text-sm text-sky-100/90 leading-relaxed">
+        {t("clawkeep.skippedLinks.body", { count })}
+      </p>
+      <SkippedLinkList links={status.skippedLinks ?? []} count={count} />
+      <p className="text-xs text-sky-100/70 leading-relaxed">{t("clawkeep.skippedLinks.hint")}</p>
     </div>
   );
 }
@@ -1602,6 +1793,17 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
               `skippedMembers` out of the daemon. */}
           ⚠️ {t("clawkeep.result.skipped", { count: result.skippedMembers!.length })}
         </p>
+      )}
+      {(result.skippedLinkCount ?? 0) > 0 && (
+        <div className="space-y-1 text-[var(--text-muted)]" data-testid="clawkeep-restore-skipped-links">
+          {/* Not a ⚠️: the restore IS complete. The snapshot never had these
+              links — its backup skipped them — so they are named here rather
+              than looked for in the restored folders. */}
+          <p className="text-xs leading-relaxed">
+            {t("clawkeep.result.skippedLinks", { count: result.skippedLinkCount ?? 0 })}
+          </p>
+          <SkippedLinkList links={result.skippedLinks ?? []} count={result.skippedLinkCount ?? 0} />
+        </div>
       )}
     </div>
   );

@@ -132,6 +132,120 @@ def test_happy_path(isolate_state: Path, tmp_path: Path) -> None:
     assert final_state.last_heartbeat_status == "ok"
 
 
+def test_the_links_the_archive_skipped_are_on_disk_before_the_upload_and_the_run_is_ok(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """TASK-1304: a backup that skipped links is a FINISHED backup — the
+    heartbeats say running then ok, never error, the portal gets its
+    `lastBackupAt` — and state.json names the links while the upload runs."""
+    import dataclasses
+
+    cfg = _cfg(tmp_path)
+    links = (
+        ("~/.openclaw/workspace/docs/catalogue", "/home/clawbox/Shared/Exports/catalogue"),
+        ("~/.openclaw/workspace/docs/notes.txt", "../../../../Shared/notes.txt"),
+    )
+    archive = dataclasses.replace(
+        _archive(tmp_path), skipped_links=links, skipped_link_count=7,
+    )
+    during: list[state.State] = []
+    heartbeats: list[dict] = []
+    written: list[dict] = []
+
+    def upload(creds, *, archive_path, object_name, progress_cb=None):
+        during.append(state.load(isolate_state))
+
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat",
+              side_effect=lambda server, token, **kw: heartbeats.append(kw)),
+        patch("clawkeep.runner.agent.create_archive", return_value=archive),
+        patch("clawkeep.runner.s3.upload", side_effect=upload),
+        patch("clawkeep.runner.s3.stats", return_value=CloudStats(0, 1)),
+        patch("clawkeep.runner.s3.write_manifest",
+              side_effect=lambda creds, manifest: written.append(manifest)),
+    ):
+        assert runner.run_once(cfg, "claw_x") == runner.EXIT_OK
+
+    assert [hb["status"] for hb in heartbeats] == ["running", "ok"]
+    assert "error" not in heartbeats[-1] and "last_backup_at" in heartbeats[-1]
+    for st in (during[0], state.load(isolate_state)):
+        assert st.last_skipped_link_count == 7
+        assert st.last_skipped_links == [{"path": p, "target": t} for p, t in links]
+    final = state.load(isolate_state)
+    assert final.last_heartbeat_status == "ok" and final.last_backup_at_ms > 0
+    record = written[0]["snapshots"]["snap.tar.gz.enc"]
+    assert record[s3.RECORD_SKIPPED_LINK_COUNT] == 7
+    assert "Shared" not in str(written[0]), "the names go into the manifest sealed"
+
+
+def test_a_seal_that_fails_keeps_the_count_and_the_backup(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    import dataclasses
+
+    from clawkeep import crypto
+
+    archive = dataclasses.replace(
+        _archive(tmp_path), skipped_links=(("~/x", "/y"),), skipped_link_count=1,
+    )
+    written: list[dict] = []
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.agent.create_archive", return_value=archive),
+        patch("clawkeep.runner.s3.upload"),
+        patch("clawkeep.runner.s3.stats", return_value=CloudStats(0, 1)),
+        patch("clawkeep.runner.s3.write_manifest",
+              side_effect=lambda creds, manifest: written.append(manifest)),
+        patch("clawkeep.runner.crypto.seal_text", side_effect=crypto.CryptoError("no openssl")),
+    ):
+        assert runner.run_once(_cfg(tmp_path), "claw_x") == runner.EXIT_OK
+    record = written[0]["snapshots"]["snap.tar.gz.enc"]
+    assert record[s3.RECORD_SKIPPED_LINK_COUNT] == 1
+    assert s3.RECORD_SKIPPED_LINKS not in record
+
+
+def test_a_backup_that_skipped_nothing_writes_the_record_it_always_did(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    written: list[dict] = []
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.agent.create_archive", return_value=_archive(tmp_path)),
+        patch("clawkeep.runner.s3.upload"),
+        patch("clawkeep.runner.s3.stats", return_value=CloudStats(0, 1)),
+        patch("clawkeep.runner.s3.write_manifest",
+              side_effect=lambda creds, manifest: written.append(manifest)),
+    ):
+        assert runner.run_once(_cfg(tmp_path), "claw_x", label="nightly") == runner.EXIT_OK
+    record = written[0]["snapshots"]["snap.tar.gz.enc"]
+    assert set(record) == {"label", "locked", "createdAt"}
+    st = state.load(isolate_state)
+    assert (st.last_skipped_link_count, st.last_skipped_links) == (0, [])
+
+
+def test_state_reads_back_a_garbled_skipped_link_list_as_what_still_reads(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({
+        "last_skipped_links": [
+            {"path": "~/a", "target": "/b"}, {"path": 7, "target": "/c"}, "x",
+            {"path": "~/d"},
+        ],
+        "last_skipped_link_count": "lots",
+    }))
+    st = state.load(path)
+    assert st.last_skipped_links == [{"path": "~/a", "target": "/b"}]
+    assert st.last_skipped_link_count == 0
+    path.write_text(json.dumps({"last_skipped_links": {"path": "~/a"}}))
+    assert state.load(path).last_skipped_links == []
+
+
 def test_step_is_persisted_until_failure(isolate_state: Path, tmp_path: Path) -> None:
     """A reopened window mid-upload should see `last_step == "uploading"`."""
     cfg = _cfg(tmp_path)
@@ -155,6 +269,48 @@ def test_step_is_persisted_until_failure(isolate_state: Path, tmp_path: Path) ->
         runner.run_once(cfg, "claw_x")
 
     assert captured_steps == ["uploading"]
+
+
+def test_what_the_archive_left_out_is_on_disk_before_the_upload(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """The box's own backups the archive left out, and the snapshot-sized
+    archives it carries, are in state.json while the upload runs — the app
+    and `backup_status` read them from there — and stay after it."""
+    import dataclasses
+
+    cfg = _cfg(tmp_path)
+    archive = dataclasses.replace(
+        _archive(tmp_path),
+        left_out_count=3,
+        left_out_bytes=20_000_000_000,
+        large_archives=(("~/.openclaw/workspace/dump.tar.gz", 1_900_000_000),),
+        large_archive_count=1,
+        large_archive_bytes=1_900_000_000,
+    )
+    during: list[state.State] = []
+
+    def upload(creds, *, archive_path, object_name, progress_cb=None):
+        during.append(state.load(isolate_state))
+
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        # One level above the core: the account is the guard's to give.
+        patch("clawkeep.runner.agent.create_archive", return_value=archive),
+        patch("clawkeep.runner.s3.upload", side_effect=upload),
+        patch("clawkeep.runner.s3.stats", return_value=CloudStats(0, 1)),
+    ):
+        assert runner.run_once(cfg, "claw_x") == runner.EXIT_OK
+
+    for st in (during[0], state.load(isolate_state)):
+        assert st.last_left_out_count == 3
+        assert st.last_left_out_bytes == 20_000_000_000
+        assert st.last_large_archives == [
+            {"path": "~/.openclaw/workspace/dump.tar.gz", "bytes": 1_900_000_000},
+        ]
+        assert st.last_large_archive_count == 1
+        assert st.last_large_archive_bytes == 1_900_000_000
 
 
 def test_step_cleared_on_error(isolate_state: Path, tmp_path: Path) -> None:
@@ -203,6 +359,62 @@ def test_quota_full_heartbeats_and_exits(isolate_state: Path, tmp_path: Path) ->
     hb.assert_called_once()
     assert hb.call_args.kwargs["status"] == "error"
     assert "quota" in hb.call_args.kwargs["error"].lower()
+
+
+def test_quota_full_is_recorded_once_and_kept_across_repeats(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """TASK-1211: the bridge re-arms a schedule that was switched off while the
+    account was full, and it needs the daemon's word that it WAS full — and
+    since when, so a nightly repeat does not keep moving the start."""
+    cfg = _cfg(tmp_path)
+    refused = ApiError("quota_full", "quota full", 402)
+    with (
+        patch("clawkeep.runner.api.mint_credentials", side_effect=refused),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.api.now_ms", return_value=1_000),
+    ):
+        assert runner.run_once(cfg, "claw_x") == runner.EXIT_QUOTA_FULL
+    assert state.load(isolate_state).quota_full_since_ms == 1_000
+
+    with (
+        patch("clawkeep.runner.api.mint_credentials", side_effect=refused),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.api.now_ms", return_value=2_000),
+    ):
+        assert runner.run_once(cfg, "claw_x") == runner.EXIT_QUOTA_FULL
+    assert state.load(isolate_state).quota_full_since_ms == 1_000
+
+
+def test_minted_credentials_clear_the_quota_record(isolate_state: Path, tmp_path: Path) -> None:
+    """The moment the portal mints credentials again the refusal is over — even
+    if the run then fails somewhere else, which is no longer a quota problem."""
+    cfg = _cfg(tmp_path)
+    state.save(state.State(quota_full_since_ms=1_000), isolate_state)
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.s3.stats", side_effect=S3Error("list refused")),
+        patch("clawkeep.runner.openclaw.create_archive", side_effect=OpenclawError("boom")),
+    ):
+        assert runner.run_once(cfg, "claw_x") == runner.EXIT_OPENCLAW
+    assert state.load(isolate_state).quota_full_since_ms == 0
+
+
+def test_other_refusals_say_nothing_about_quota(isolate_state: Path, tmp_path: Path) -> None:
+    """Offline is not "no longer full": a network refusal leaves the record as it was."""
+    cfg = _cfg(tmp_path)
+    state.save(state.State(quota_full_since_ms=1_000), isolate_state)
+    with (
+        patch(
+            "clawkeep.runner.api.mint_credentials",
+            side_effect=ApiError("network", "offline"),
+        ),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.time.sleep"),
+    ):
+        assert runner.run_once(cfg, "claw_x") == runner.EXIT_NETWORK
+    assert state.load(isolate_state).quota_full_since_ms == 1_000
 
 
 def test_credentials_retried_on_network_failure(isolate_state: Path, tmp_path: Path) -> None:
@@ -572,6 +784,44 @@ def test_idle_still_heartbeats_when_credentials_are_refused(
     assert kwargs["cloud_bytes"] is None
     assert kwargs["snapshot_count"] is None
     assert state.load(isolate_state).last_cloud_bytes == 9_800_000_000
+
+
+def test_idle_records_a_quota_refusal_even_when_the_heartbeat_fails(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """The idle tick is the only thing that mints credentials on a box whose
+    schedule is off, so it is where "the account is full" gets recorded — and
+    kept, whether or not the portal then took the heartbeat."""
+    cfg = _cfg(tmp_path)
+    state.save(state.State(last_heartbeat_at_ms=1_000), isolate_state)
+    with (
+        patch("clawkeep.runner.api.heartbeat", side_effect=ApiError("network", "offline")),
+        patch("clawkeep.runner.api.now_ms", return_value=10_000_000_000_000),
+        patch(
+            "clawkeep.runner.api.mint_credentials",
+            side_effect=ApiError("quota_full", "quota full", 402),
+        ),
+    ):
+        runner.run_idle(cfg, "claw_x")
+    assert state.load(isolate_state).quota_full_since_ms == 10_000_000_000_000
+
+
+def test_idle_clears_the_quota_record_when_credentials_mint(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    cfg = _cfg(tmp_path)
+    state.save(state.State(last_heartbeat_at_ms=1_000, quota_full_since_ms=5), isolate_state)
+    with (
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.api.now_ms", return_value=10_000_000_000_000),
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch(
+            "clawkeep.runner.s3.stats",
+            return_value=CloudStats(cloud_bytes=512, snapshot_count=1),
+        ),
+    ):
+        assert runner.run_idle(cfg, "claw_x") == runner.EXIT_OK
+    assert state.load(isolate_state).quota_full_since_ms == 0
 
 
 def test_idle_keeps_a_recount_the_portal_never_heard(

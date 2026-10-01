@@ -64,6 +64,12 @@ interface ChromeShelfProps {
   showChatButton?: boolean;
   time: string;
   clawAiAuthenticated?: boolean;
+  /**
+   * Who is signed in (TASK-1256). Drawn as an avatar beside the power button
+   * only when given — page.tsx passes it on a box with more than one user, so
+   * a single-user shelf is unchanged. Opens the tray, where "Switch user" is.
+   */
+  sessionUser?: { username: string; isOwner: boolean } | null;
 }
 
 export default function ChromeShelf({
@@ -83,6 +89,7 @@ export default function ChromeShelf({
   showChatButton,
   time,
   clawAiAuthenticated = false,
+  sessionUser = null,
 }: ChromeShelfProps) {
   const { t } = useT();
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
@@ -163,6 +170,28 @@ export default function ChromeShelf({
   // > never-protected (red) > ok.
   // Restore is the rarer, longer, more user-blocking operation, so it wins
   // even if a backup heartbeat happens to be in flight at the same time.
+  const renderUserBadge = (size: number) => sessionUser && (
+    <button
+      onClick={onPowerClick}
+      className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+      title={t("tray.signedInAsName", { name: sessionUser.username })}
+      aria-label={t("tray.signedInAsName", { name: sessionUser.username })}
+      data-testid="shelf-user-badge"
+    >
+      <span
+        aria-hidden="true"
+        className="rounded-full flex items-center justify-center font-semibold text-white"
+        style={{
+          width: size,
+          height: size,
+          fontSize: Math.round(size * 0.5),
+          backgroundColor: sessionUser.isOwner ? "#fe6e00" : "#6366f1",
+        }}
+      >
+        {sessionUser.username.charAt(0).toUpperCase()}
+      </span>
+    </button>
+  );
   const protection = clawkeepStatus.protection;
   const atRisk = clawAiAuthenticated
     && !!protection && protection.state !== "protected" && protection.reason !== "ok";
@@ -408,6 +437,7 @@ export default function ChromeShelf({
                   {isFullscreen ? "fullscreen_exit" : "fullscreen"}
                 </span>
               </button>
+              {renderUserBadge(22)}
               <button
                 onClick={onPowerClick}
                 className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
@@ -489,6 +519,7 @@ export default function ChromeShelf({
               {isFullscreen ? "fullscreen_exit" : "fullscreen"}
             </span>
           </button>
+          {renderUserBadge(22)}
           <button
             onClick={onPowerClick}
             className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"

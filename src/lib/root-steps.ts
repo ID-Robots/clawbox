@@ -96,6 +96,14 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   // Off UI_ROOT_STEPS, like set_hostname, so `install/run-step` — the endpoint
   // the agent's bearer reaches with a step NAME — cannot start it. TASK-514.
   "set_timezone",
+  // Settings → Users (TASK-1256): create / remove a ClawBox user's Linux
+  // account. Each reads ONE record from a 0600 file under data/, like
+  // chpasswd, and install.sh holds them to accounts in `clawbox-users` — never
+  // root, never the owner. Owner-cookie-only routes start them
+  // (src/app/setup-api/users/route.ts); off UI_ROOT_STEPS so
+  // `install/run-step`, which the agent's bearer reaches, cannot.
+  "user_add",
+  "user_remove",
   "vnc_install",
   "vnc_refresh",
   // The Local AI tab's two engine installs (2026-09-15): Kokoro through

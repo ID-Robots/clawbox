@@ -133,4 +133,26 @@ describe("a worktree run's hinted refusals, through the route", () => {
     expect(before.worktreeHints).toBe(0);
     expect((before.denials as Array<Record<string, unknown>>)[0]).not.toHaveProperty("worktreePath");
   });
+
+  it("keeps a refusal's whole text off disk only as the rest of its text, within its bound", async () => {
+    const whole = `Bash: ls -la ${project}; ${"cat index.html; ".repeat(20)}`;
+    const text = whole.slice(0, 160);
+    const huge = `${text}${"x".repeat(3_000)}`;
+    fs.writeFileSync(runsFile(), JSON.stringify([settledRecord("run-whole001", {
+      permissionDenials: 4,
+      deniedActions: [text, text, "Read: /etc/hostname", text],
+      denials: [
+        { text, rule: null, refusal: null, fullText: whole },
+        // Not the rest of its own text, and not a string: dropped.
+        { text, rule: null, refusal: null, fullText: "Bash: rm -rf /" },
+        { text: "Read: /etc/hostname", rule: null, refusal: null, fullText: 7 },
+        { text, rule: null, refusal: null, fullText: huge },
+      ],
+    })]));
+    const denials = (await readRun("run-whole001")).denials as Array<Record<string, unknown>>;
+    expect(denials[0]).toEqual({ text, rule: null, refusal: null, fullText: whole });
+    expect(denials[1]).not.toHaveProperty("fullText");
+    expect(denials[2]).not.toHaveProperty("fullText");
+    expect(denials[3].fullText).toBe(huge.slice(0, 2_000));
+  });
 });
