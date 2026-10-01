@@ -75,6 +75,9 @@ function pool(accounts: AnthropicAccountView[]): AnthropicPoolView {
     },
     activeAccountId: accounts.find((a) => a.active)?.id ?? null,
     loginAvailable: false,
+    returnToPrimary: false,
+    lastSwap: null,
+    gateway: { following: false, accountId: null, label: null, since: null },
     now: NOW,
   };
 }

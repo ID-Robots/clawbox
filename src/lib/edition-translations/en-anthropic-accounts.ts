@@ -1,13 +1,17 @@
 /**
  * Settings → AI providers → Anthropic accounts (TASK-902): more than one
  * Anthropic account on the box, in the owner's order, with automatic fallback
- * when one hits its usage limit. English source; every other locale carries its
- * own copy in its edition-translations file.
+ * when one hits its usage limit — and, since TASK-1260, one ACTIVE account for
+ * every Claude consumer on the box (coding runs, the chat, its scheduled
+ * tasks), the owner's "return to the first account" preference, the last swap
+ * and what each consumer did about it, and the lines the chat adds when one of
+ * its turns hit the limit. English source; every other locale carries its own
+ * copy in its edition-translations file.
  */
 export const anthropicAccountsEn: Record<string, string> = {
   "settings.anthropicAccounts.title": "Anthropic accounts",
   "settings.anthropicAccounts.intro":
-    "Coding runs use the first account in this list that can answer. When it hits its usage limit, the run moves to the next account and carries on where it was; the first account is used again as soon as its limit resets.",
+    "Coding runs start on one account from this list, and so do the chat and its scheduled tasks once the box has had to switch accounts. When that account hits its usage limit or Anthropic refuses it, everything on it moves to the next account together and carries on where it was.",
   "settings.anthropicAccounts.summaryReady": "{ready} of {total} ready",
   "settings.anthropicAccounts.summaryAllLimited": "All limited · back at {time}",
   "settings.anthropicAccounts.summaryNone": "Not connected",
@@ -58,4 +62,42 @@ export const anthropicAccountsEn: Record<string, string> = {
   "settings.anthropicAccounts.actionFailed": "The accounts could not be changed.",
   "settings.anthropicAccounts.refusedWrongAccount": "That sign-in is {signedIn}, not {expected}. Sign in as {expected} to renew {label}, or connect {signedIn} as an account of its own.",
   "settings.anthropicAccounts.refusedDuplicate": "That sign-in is {signedIn}, which is already on the list as {label}.",
+  // TASK-1260: one active account for the whole box, and what a swap did.
+  "settings.anthropicAccounts.activeNow": "New coding runs start on {label}.",
+  "settings.anthropicAccounts.activeChatOn": "The chat and its scheduled tasks run on {label}.",
+  "settings.anthropicAccounts.activeChatOwn": "The chat follows once the box first has to switch accounts, when it runs on a Claude subscription.",
+  "settings.anthropicAccounts.allLimitedBanner": "All accounts limited, earliest reset {time}. Waiting work carries on by itself then.",
+  "settings.anthropicAccounts.noneCanAnswer": "No account can answer, and none comes back by itself. Re-authenticate one to carry on.",
+  "settings.anthropicAccounts.returnToPrimary": "Return to the first account once its limit resets",
+  "settings.anthropicAccounts.returnToPrimaryHint":
+    "Off: the box stays on the account it moved to until that one runs out too. To switch now, move an account to the top.",
+  "settings.anthropicAccounts.lastSwapTitle": "Last swap",
+  "settings.anthropicAccounts.swapNoAccount": "no account",
+  "settings.anthropicAccounts.reasonLimit": "Usage limit, back at {time}",
+  "settings.anthropicAccounts.reasonLimitNoTime": "Usage limit",
+  "settings.anthropicAccounts.reasonAuth": "Anthropic refused the sign-in",
+  "settings.anthropicAccounts.reasonReset": "A limit reset",
+  "settings.anthropicAccounts.reasonOwner": "Your change",
+  "settings.anthropicAccounts.reasonRemoved": "Account removed",
+  "settings.anthropicAccounts.reasonAdded": "Account added",
+  "settings.anthropicAccounts.reasonRenewed": "Signed in again",
+  "settings.anthropicAccounts.consumerCoding": "Coding runs",
+  "settings.anthropicAccounts.consumerGateway": "Chat and scheduled tasks",
+  "settings.anthropicAccounts.consumerRetries": "Failed turns",
+  "settings.anthropicAccounts.outcomeMoved": "{count} carried on",
+  "settings.anthropicAccounts.outcomeNothing": "nothing to move",
+  "settings.anthropicAccounts.outcomeSwitched": "switched",
+  "settings.anthropicAccounts.outcomeNotAffected": "not affected",
+  "settings.anthropicAccounts.outcomeNotTransferable": "kept their own sign-in: the chat can only use a Claude account signed in here",
+  "settings.anthropicAccounts.outcomeFailed": "could not be switched, see the box's log",
+  "settings.anthropicAccounts.outcomePending": "switching…",
+  "settings.anthropicAccounts.outcomeRetried": "{count} sent again",
+  "settings.anthropicAccounts.outcomeHeld": "{count} waiting for the reset",
+  "settings.anthropicAccounts.chatSwitched": "That Claude account could not answer, so ClawBox moved everything that uses Claude to {label} and sent your message again.",
+  "settings.anthropicAccounts.chatSwitchedResend": "That Claude account could not answer, so ClawBox moved everything that uses Claude to {label}. Send your message again to carry on.",
+  "settings.anthropicAccounts.chatAllLimited": "Every Claude account on this box is at its limit. ClawBox sends your message again by itself at {time}.",
+  "settings.anthropicAccounts.chatAllLimitedNoRetry": "Every Claude account on this box is at its limit until {time}.",
+  "settings.anthropicAccounts.chatNoAccount": "No Claude account on this box can answer. Re-authenticate one in Settings → Providers.",
+  "settings.anthropicAccounts.chatThrottled": "Anthropic is briefly rate-limiting this Claude account. ClawBox sends your message again in a minute.",
+  "settings.anthropicAccounts.chatSwitching": "That Claude account could not answer. ClawBox is moving to the next account and will send your message again.",
 };

@@ -171,7 +171,7 @@ describe("the order and the limits", () => {
     return [a.id, b.id];
   }
 
-  it("hands a run the first account, then the next while the first is limited, then the first again after its reset", async () => {
+  it("hands a run the first account, then the next while the first is limited — and STAYS on it after the reset (TASK-1260)", async () => {
     const [work, personal] = await twoAccounts();
     expect((await pool.prepareAccount()).prepared?.account.id).toBe(work);
 
@@ -184,7 +184,21 @@ describe("the order and the limits", () => {
 
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(until + 1);
+    // Sticky: the box does not swap back (and restart the gateway) for nothing.
+    expect((await pool.prepareAccount()).prepared?.account.id).toBe(personal);
+    expect((await pool.describePool()).activeAccountId).toBe(personal);
+  });
+
+  it("goes back to the first account after its reset when the owner prefers that", async () => {
+    const [work, personal] = await twoAccounts();
+    await pool.setReturnToPrimary(true);
+    const until = Date.now() + 60_000;
+    await pool.markLimited(work, until, "session");
+    expect((await pool.prepareAccount()).prepared?.account.id).toBe(personal);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(until + 1);
     expect((await pool.prepareAccount()).prepared?.account.id).toBe(work);
+    expect((await pool.describePool())).toMatchObject({ activeAccountId: work, returnToPrimary: true });
   });
 
   it("says when the LAST healthy account is limited, once", async () => {
@@ -378,5 +392,245 @@ describe("the handoff file", () => {
 
   it("refuses a run id that could name a path", () => {
     expect(() => pool.writeCredentialHandoff("../x", { kind: "login", secret: null })).toThrow();
+  });
+});
+
+// ── TASK-1260: one active account for the whole box ─────────────────────────
+
+describe("the active account and its moves", () => {
+  type Change = import("@/lib/anthropic-accounts").ActiveChange;
+
+  /** Every move the pool announces, in order — emitted once the write has landed. */
+  function recordMoves(): Change[] {
+    const moves: Change[] = [];
+    pool.onActiveChange((change) => moves.push(change));
+    return moves;
+  }
+
+  const settleMicrotasks = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  it("adopts the first account of a pool written before TASK-1260 without calling it a swap", async () => {
+    // A 4.1 pool on disk: no version 2, no activeId.
+    const a = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const b = await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    const legacy = readConfig().anthropic_accounts as Record<string, unknown>;
+    writeConfig({ anthropic_accounts: { ...legacy, version: 1, activeId: undefined } });
+    pool._resetAnthropicAccountsForTests();
+    const moves = recordMoves();
+    const state = await pool.readPoolState();
+    await settleMicrotasks();
+    expect(state.activeId).toBe(a.id);
+    expect(state.returnToPrimary).toBe(false);
+    expect(moves).toEqual([]);
+    expect((readConfig().anthropic_accounts as { version: number; activeId: string }).version).toBe(2);
+    expect(b.id).not.toBe(a.id);
+  });
+
+  it("moves on a limit, says which run saw it and until when, and moves to NONE when the last one goes", async () => {
+    const a = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const b = await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    const moves = recordMoves();
+    const until = Date.now() + 60_000;
+    await pool.markLimited(a.id, until, "weekly", { source: "coding", runId: "run-abc12345" });
+    await settleMicrotasks();
+    expect(moves).toHaveLength(1);
+    expect(moves[0]).toMatchObject({
+      fromId: a.id, fromLabel: "Work", toId: b.id, toLabel: "Personal",
+      cause: "limit", source: "coding", runId: "run-abc12345", limitKind: "weekly", limitedUntil: until,
+    });
+    // The same limit reported again moves nothing.
+    await pool.markLimited(a.id, until, "weekly", { source: "chat" });
+    await settleMicrotasks();
+    expect(moves).toHaveLength(1);
+
+    await pool.markLimited(b.id, Date.now() + 30_000, "session", { source: "cron" });
+    await settleMicrotasks();
+    expect(moves).toHaveLength(2);
+    expect(moves[1]).toMatchObject({ fromId: b.id, toId: null, cause: "limit", source: "cron" });
+    expect(moves[1].health).toMatchObject({ allLimited: true });
+    expect((await pool.readPoolState()).activeId).toBeNull();
+  });
+
+  it("comes back from NONE at the first reset, on the account that is back — a move with cause `reset`", async () => {
+    const a = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const b = await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    const soon = Date.now() + 5_000;
+    await pool.markLimited(a.id, Date.now() + 60_000, "session");
+    await pool.markLimited(b.id, soon, "session");
+    const moves = recordMoves();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(soon + 1);
+    const state = await pool.readPoolState();
+    await settleMicrotasks();
+    expect(state.activeId).toBe(b.id);
+    expect(moves).toEqual([expect.objectContaining({ fromId: null, toId: b.id, cause: "reset" })]);
+  });
+
+  it("treats a 401 as its own cause and records when it happened", async () => {
+    const a = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const b = await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    const moves = recordMoves();
+    await pool.markCredentialProblem(a.id, "revoked", { source: "chat" });
+    await settleMicrotasks();
+    expect(moves).toEqual([expect.objectContaining({ fromId: a.id, toId: b.id, cause: "auth", source: "chat" })]);
+    const row = (await pool.readAccounts()).find((x) => x.id === a.id);
+    expect(row).toMatchObject({ status: "revoked" });
+    expect(row?.authFailedAt).toEqual(expect.any(Number));
+    // Signing it in again brings it back, and clears the refusal.
+    await pool.replaceCredential(a.id, { kind: "api_key", key: "sk-ant-api03-renewed-key-0000000000000" });
+    expect((await pool.readAccounts()).find((x) => x.id === a.id)).toMatchObject({ status: "ok", authFailedAt: null });
+    // …without moving the sticky active account off the one that worked.
+    expect((await pool.readPoolState()).activeId).toBe(b.id);
+  });
+
+  it("makes the first usable account of the owner's new order the active one", async () => {
+    const a = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const b = await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    const moves = recordMoves();
+    await pool.reorderAccounts([b.id, a.id]);
+    await settleMicrotasks();
+    expect(moves).toEqual([expect.objectContaining({ fromId: a.id, toId: b.id, cause: "owner", source: "owner" })]);
+    // A reorder that keeps the same account first moves nothing.
+    await pool.reorderAccounts([b.id, a.id]);
+    await settleMicrotasks();
+    expect(moves).toHaveLength(1);
+  });
+
+  it("says `removed`, with the removed account's label, when the active account is taken off the list", async () => {
+    const a = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const b = await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    const moves = recordMoves();
+    await pool.removeAccount(a.id);
+    await settleMicrotasks();
+    expect(moves).toEqual([expect.objectContaining({ fromId: a.id, fromLabel: "Work", toId: b.id, cause: "removed" })]);
+  });
+
+  it("does not move a sticky active account when a spare is connected, but names the first one `added`", async () => {
+    const moves = recordMoves();
+    const a = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    await settleMicrotasks();
+    expect(moves).toEqual([expect.objectContaining({ fromId: null, toId: a.id, cause: "added" })]);
+  });
+
+  it("files the last swap and each consumer's outcome, and ignores an outcome for a swap that is no longer the last", async () => {
+    await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const event = {
+      id: "0123456789ab", at: Date.now(), fromId: null, fromLabel: "Work", toId: null, toLabel: null,
+      cause: "limit" as const, source: "coding" as const, limitKind: "session" as const, limitedUntil: Date.now() + 1000, nextResetAt: Date.now() + 1000,
+      consumers: { coding: { status: "pending" as const, code: null, count: null } },
+    };
+    await pool.recordSwapEvent(event);
+    await pool.updateSwapConsumer(event.id, "coding", { status: "ok", code: "moved", count: 2 });
+    await pool.updateSwapConsumer("ffffffffffff", "gateway", { status: "ok", code: "switched", count: 1 });
+    const view = await pool.describePool();
+    expect(view.lastSwap).toMatchObject({ id: event.id, cause: "limit", fromLabel: "Work", consumers: { coding: { status: "ok", code: "moved", count: 2 } } });
+    expect(view.lastSwap?.consumers.gateway).toBeUndefined();
+  });
+
+  it("drops a hand-edited last swap or gateway mirror it cannot trust", async () => {
+    const a = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    const raw = readConfig().anthropic_accounts as Record<string, unknown>;
+    writeConfig({ anthropic_accounts: { ...raw, lastSwap: { at: "yesterday", cause: "limit" }, gateway: { accountId: a.id, fingerprint: "not-hex" } } });
+    pool._resetAnthropicAccountsForTests();
+    const state = await pool.readPoolState();
+    expect(state.lastSwap).toBeNull();
+    expect(state.gateway).toBeNull();
+  });
+
+  it("keeps ONE state per process, however many copies of the module a bundler made", async () => {
+    // The boot hook and a route are two module copies in one web server
+    // (src/lib/process-store.ts): a listener on one must hear a move the other made.
+    const a = await pool.addApiKeyAccount({ label: "Work", key: LEGACY_KEY });
+    await pool.addApiKeyAccount({ label: "Personal", key: SECOND_KEY });
+    const moves = recordMoves();
+    vi.resetModules();
+    const otherCopy = await import("@/lib/anthropic-accounts");
+    expect(otherCopy).not.toBe(pool);
+    await otherCopy.markLimited(a.id, Date.now() + 60_000, "session");
+    await settleMicrotasks();
+    expect(moves).toHaveLength(1);
+  });
+});
+
+describe("asking Anthropic whether a refused credential is really dead", () => {
+  const tokens = (access: string, expiresIn: number) => ({ access, refresh: `refresh-${access}`, expires: Date.now() + expiresIn });
+
+  it("renews a Claude account whose token was only stale, and keeps it in", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("stale-access", 8 * 3_600_000) });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: "fresh-access", refresh_token: "fresh-refresh", expires_in: 28_800 }), { status: 200 })));
+    expect(await pool.probeAccountCredential(account.id, async () => "ok")).toBe("ok");
+    expect((await pool.readAccounts())[0].status).toBe("ok");
+    expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "fresh-access" });
+  });
+
+  it("marks a grant Anthropic refuses to renew as revoked", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("dead-access", 8 * 3_600_000) });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{\"error\":\"invalid_grant\"}", { status: 400 })));
+    expect(await pool.probeAccountCredential(account.id, async () => "ok", { source: "coding", runId: "run-x" })).toBe("dead");
+    expect((await pool.readAccounts())[0]).toMatchObject({ status: "revoked" });
+  });
+
+  it("marks nothing when Anthropic cannot be asked", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("live-access", 8 * 3_600_000) });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ENOTFOUND")));
+    expect(await pool.probeAccountCredential(account.id, async () => "ok")).toBe("unknown");
+    expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+
+  it("checks an API key the way the key form does", async () => {
+    const account = await pool.addApiKeyAccount({ label: "Key", key: LEGACY_KEY });
+    const verify = vi.fn(async () => "rejected" as const);
+    expect(await pool.probeAccountCredential(account.id, verify)).toBe("dead");
+    expect(verify).toHaveBeenCalledWith(LEGACY_KEY);
+    expect((await pool.readAccounts())[0].status).toBe("revoked");
+  });
+
+  it("takes the Terminal sign-in out until the owner signs in again", async () => {
+    signInWithClaude();
+    const [login] = await pool.readAccounts();
+    expect(await pool.probeAccountCredential(login.id, async () => "ok")).toBe("dead");
+    expect((await pool.readAccounts())[0].status).toBe("revoked");
+    // Claude Code writing the credential file again is the owner signing in again.
+    const credentials = path.join(home, ".claude", ".credentials.json");
+    const later = new Date(Date.now() + 5_000);
+    fs.utimesSync(credentials, later, later);
+    expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+});
+
+describe("the gateway's copy of an account", () => {
+  it("hands out a Claude account's access token and its end — never the refresh token — and nothing for other kinds", async () => {
+    const expires = Date.now() + 8 * 3_600_000;
+    const max = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: { access: "gw-access", refresh: "gw-refresh", expires } });
+    const key = await pool.addApiKeyAccount({ label: "Key", key: LEGACY_KEY });
+    expect(await pool.gatewayCredentialFor(max.id)).toEqual({ access: "gw-access", expires });
+    expect(JSON.stringify(await pool.gatewayCredentialFor(max.id))).not.toContain("gw-refresh");
+    expect(await pool.gatewayCredentialFor(key.id)).toBeNull();
+    expect(await pool.gatewayCredentialFor("ffffffff")).toBeNull();
+  });
+
+  it("forgets a mirror of an account that is no longer on the list", async () => {
+    const max = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: { access: "a", refresh: "r", expires: Date.now() + 3_600_000 } });
+    await pool.setGatewayMirror({ accountId: max.id, fingerprint: "0123456789abcdef", expiresAt: null, at: Date.now(), pending: false });
+    expect((await pool.describePool()).gateway).toMatchObject({ following: true, accountId: max.id, label: "Max" });
+    await pool.removeAccount(max.id);
+    expect((await pool.describePool()).gateway).toMatchObject({ following: false, accountId: null });
+  });
+});
+
+describe("a refused Terminal sign-in with no time on record", () => {
+  it("stays refused until the credential file is written AGAIN", async () => {
+    signInWithClaude();
+    const [login] = await pool.readAccounts();
+    const raw = readConfig().anthropic_accounts as { accounts: Record<string, unknown>[] };
+    writeConfig({ anthropic_accounts: { ...raw, accounts: raw.accounts.map((a) => (a.id === login.id ? { ...a, status: "revoked", authFailedAt: null } : a)) } });
+    pool._resetAnthropicAccountsForTests();
+    expect((await pool.readAccounts())[0].status).toBe("revoked");
+    expect((await pool.readAccounts())[0].status).toBe("revoked");
+    const credentials = path.join(home, ".claude", ".credentials.json");
+    const later = new Date(Date.now() + 5_000);
+    fs.utimesSync(credentials, later, later);
+    expect((await pool.readAccounts())[0].status).toBe("ok");
   });
 });

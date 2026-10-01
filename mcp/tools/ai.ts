@@ -229,7 +229,20 @@ interface AnthropicPoolBody {
     active?: boolean;
   }[];
   health?: { total?: number; healthy?: number; limited?: number; needsAttention?: number; allLimited?: boolean; nextResetAt?: number | null };
+  /** TASK-1260: the most recent move of the box-wide active account. Labels and times only. */
+  lastSwap?: { at?: number; fromLabel?: string | null; toLabel?: string | null; cause?: string; nextResetAt?: number | null } | null;
 }
+
+/** Why the active account moved, in the words the agent is told. */
+const SWAP_CAUSE_NOUN: Record<string, string> = {
+  limit: "usage limit",
+  auth: "credential refused by Anthropic",
+  reset: "a limit reset",
+  owner: "the owner's change",
+  removed: "account removed",
+  added: "account added",
+  renewed: "account signed in again",
+};
 
 const ACCOUNT_KIND_NOUN: Record<string, string> = {
   oauth: "Claude account",
@@ -274,6 +287,18 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
         all_limited: health.allLimited === true,
         ...(nextReset ? { next_reset: nextReset } : {}),
         accounts,
+        // Every Claude consumer on the box — coding runs, the chat, its crons —
+        // moves together (TASK-1260); the last move says why a queue paused.
+        ...(body.lastSwap && isoOrNull(body.lastSwap.at)
+          ? {
+            last_swap: {
+              at: isoOrNull(body.lastSwap.at),
+              from: body.lastSwap.fromLabel ?? null,
+              to: body.lastSwap.toLabel ?? null,
+              why: SWAP_CAUSE_NOUN[body.lastSwap.cause ?? ""] ?? body.lastSwap.cause ?? null,
+            },
+          }
+          : {}),
         ...(health.allLimited
           ? {
             advice: nextReset

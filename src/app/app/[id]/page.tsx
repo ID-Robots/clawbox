@@ -7,6 +7,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { resolveHarnessProbe } from "@/lib/harness-probe";
 import { mayUseOwnerApis } from "@/lib/use-session-user";
+import { useFollowSessionSwitch } from "@/lib/session-switch";
 import { customWallpaperId, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
   brandingHarness,
@@ -349,6 +350,10 @@ function BackToDesktopLabel() {
 
 export default function StandaloneAppPage() {
   const { id } = useParams<{ id: string }>();
+  // A tab opened with "Open in new tab" — /app/terminal above all — follows a
+  // sign-in or sign-out made in another tab, reopening this same app on the
+  // session that now holds (TASK-1247).
+  useFollowSessionSwitch();
   // Only /app/settings reads the appearance preferences — every other page
   // here would be paying for a request it never renders.
   // null while unresolved — a harness-only app must not paint before we know

@@ -99,6 +99,8 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   secretsUnreadable: "codingAgent.stepSecretsUnreadable",
   anthropicAccount: "codingAgent.stepAnthropicAccount",
   accountSwitched: "codingAgent.stepAccountSwitched",
+  accountRefused: "codingAgent.stepAccountRefused",
+  accountMoved: "codingAgent.stepAccountMoved",
   accountsWaiting: "codingAgent.stepAccountsWaiting",
   resumedAfterLimit: "codingAgent.stepResumedAfterLimit",
   teamMessageToRun: "codingAgent.stepTeamMessageToRun",

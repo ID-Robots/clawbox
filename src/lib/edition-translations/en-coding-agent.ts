@@ -835,6 +835,8 @@ export const codingAgentEn: Record<string, string> = {
   // the owner's own account names; {time} is the reset in the box's clock.
   "codingAgent.stepAnthropicAccount": "On Anthropic account \"{label}\"",
   "codingAgent.stepAccountSwitched": "Anthropic account \"{from}\" hit its usage limit (back at {time}); carrying on with \"{to}\" in the same session",
+  "codingAgent.stepAccountRefused": "Anthropic refused the credential of account \"{from}\"; carrying on with \"{to}\" in the same session",
+  "codingAgent.stepAccountMoved": "Anthropic account \"{from}\" can no longer answer; carrying on with \"{to}\" in the same session",
   "codingAgent.stepAccountsWaiting": "Every Anthropic account is at its usage limit; waiting for the reset at {time}",
   "codingAgent.stepResumedAfterLimit": "The usage limit reset; carrying on where it left off",
   "codingAgent.stepTeamMessageToRun": "Team message to {run}: {text}",

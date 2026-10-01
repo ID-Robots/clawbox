@@ -122,3 +122,18 @@ export function hasAnthropicLogin(): boolean {
 export function anthropicLoginEmail(): string | null {
   return configAccount().email;
 }
+
+/**
+ * When the sign-in's credential file last changed (ms), or null when there is
+ * none — a `stat`, never a read. What tells a sign-in Anthropic refused
+ * (TASK-1260) from the owner having signed in again since: the file is
+ * rewritten by `claude /login`, and not by anything that merely uses it.
+ */
+export function anthropicLoginChangedAt(): number | null {
+  try {
+    const stat = fs.statSync(credentialsPath());
+    return stat.isFile() ? stat.mtimeMs : null;
+  } catch {
+    return null;
+  }
+}
