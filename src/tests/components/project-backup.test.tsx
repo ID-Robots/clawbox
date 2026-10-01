@@ -193,6 +193,19 @@ describe("the backup panel — the first backup", () => {
     expect(posted("auto")[0].body).toEqual({ action: "auto", path: "projects/site", enabled: true });
   });
 
+  it("shows the name the box will really use when the owner types one under Advanced", async () => {
+    on(isStatusRead, { status: 200, body: status({ suggestedName: "site" }) });
+    on((c) => c.body?.action === "first_backup", { status: 409, body: { code: "gh_unreachable" } });
+    render(<ProjectBackupPanel folder={FOLDER} onClose={() => {}} />);
+    fireEvent.click(await screen.findByTestId("project-backup-advanced-toggle"));
+    fireEvent.change(screen.getByTestId("project-backup-name"), { target: { value: "My Cool Site!" } });
+    expect(screen.getByTestId("project-backup-name-line")).toHaveTextContent("On GitHub it will be called “My-Cool-Site”.");
+    fireEvent.click(screen.getByTestId("project-backup-first"));
+    await waitFor(() => expect(posted("first_backup")).toHaveLength(1));
+    // The server applies the same sanitiser to what it is sent.
+    expect(posted("first_backup")[0].body?.name).toBe("My Cool Site!");
+  });
+
   it("a clash found only at the last moment shows the next free name and waits for the owner", async () => {
     on(isStatusRead, { status: 200, body: status({ suggestedName: "site" }) });
     on((c) => c.body?.action === "first_backup", { status: 409, body: { code: "name_taken", takenName: "site", suggestedName: "site-2" } });
@@ -242,6 +255,40 @@ describe("the backup panel — backed up", () => {
     fireEvent.click(screen.getByText(t("files.backup.disconnectYes")));
     await waitFor(() => expect(posted("disconnect")).toHaveLength(1));
     expect(await screen.findByText(t("files.backup.disconnected"))).toBeTruthy();
+  });
+
+  it("a folder whose GitHub sign-in has gone since offers the sign-in, then backs up by itself", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    let connected = false;
+    const backedUp = () => status({
+      state: "backed_up",
+      github: connected ? { installed: true, connected: true, login: "demo-owner" } : { installed: true, connected: false, login: null },
+      repo: { fullName: "demo-owner/site", webUrl: "https://github.com/demo-owner/site", branch: "main" },
+      lastBackupAt: Date.now() - 30 * HOUR,
+      lastAutoError: { at: Date.now(), code: "not_connected" },
+      auto: true,
+    });
+    on(isStatusRead, () => ({ status: 200, body: backedUp() }));
+    on((c) => c.url === "/setup-api/coding-agent/github-login" && c.body?.action === "start", { status: 200, body: { userCode: "WXYZ-9876", verificationUri: "https://github.com/login/device", expiresIn: 900, interval: 5 } });
+    on((c) => c.url === "/setup-api/coding-agent/github-login" && c.body?.action === "poll", () => {
+      connected = true;
+      return { status: 200, body: { status: "connected", login: "demo-owner" } };
+    });
+    on((c) => c.body?.action === "backup_now", { status: 200, body: { ok: true, nothingChanged: false, files: 2, commit: "abc1234", leftOut: [] } });
+
+    render(<ProjectBackupPanel folder={FOLDER} onClose={() => {}} />);
+    const connectButton = await screen.findByTestId("project-backup-connect");
+    // Not the first-time "You need a free GitHub account": this owner has one.
+    expect(screen.getByTestId("project-backup-panel")).toHaveTextContent(t("files.backup.reconnect"));
+    expect(screen.getByTestId("project-backup-panel")).not.toHaveTextContent(t("files.backup.notConnected"));
+    fireEvent.click(connectButton);
+    // Back up now could only fail while signed out, so it waits for the sign-in.
+    expect(screen.queryByTestId("project-backup-now")).toBeNull();
+    expect(await screen.findByText("WXYZ-9876")).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    await waitFor(() => expect(posted("backup_now")).toHaveLength(1));
+    expect(await screen.findByText(t("files.backup.doneFilesMany", { count: 2 }))).toBeTruthy();
+    expect(screen.getByTestId("project-backup-now")).toBeTruthy();
   });
 
   it("says why the last daily backup did not run", async () => {

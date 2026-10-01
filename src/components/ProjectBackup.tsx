@@ -10,6 +10,7 @@ import {
   type FolderBackupSummary,
   type LeftOutFile,
   type LeftOutReason,
+  sanitizeRepoName,
 } from "@/lib/project-backup-shared";
 import { Icon } from "./file-icons";
 import DeviceCodeCard from "./DeviceCodeCard";
@@ -409,7 +410,12 @@ export function ProjectBackupPanel({ folder, onClose, onChanged }: {
   afterConnect.current = () => {
     notifyCodingAgentChanged();
     void load().then((s) => {
-      if (!s || s.state !== "not_set_up" || !s.github.connected) return;
+      if (!s || !s.github.connected) return;
+      if (s.state === "backed_up") {
+        void runBackup("now");
+        return;
+      }
+      if (s.state !== "not_set_up") return;
       // A clash is the owner's call: the new name is shown and waits for them.
       if (s.takenName) {
         setNotice({ kind: "ok", text: t("files.backup.connected") });
@@ -600,6 +606,35 @@ export function ProjectBackupPanel({ folder, onClose, onChanged }: {
     </a>
   );
 
+  /**
+   * GitHub not connected: the Coding Agent's own sign-in, and then the
+   * backup carries on by itself. The first-backup face and a backed-up
+   * folder whose GitHub sign-in has since gone both use it.
+   */
+  const connectBlock = (message: string) => deviceLogin ? (
+    <div className="flex flex-col gap-2" data-testid="project-backup-device">
+      <p className="text-xs text-[var(--text-secondary)]">{t("files.backup.deviceIntro")}</p>
+      <DeviceCodeCard
+        code={deviceLogin.userCode}
+        verificationUrl={deviceLogin.verificationUri}
+        polling
+        onNewCode={() => void connect()}
+        testId="project-backup-device-code"
+        actions={(
+          <button type="button" onClick={cancelConnect} className={LINK}>{t("cancel")}</button>
+        )}
+      />
+    </div>
+  ) : (
+    <div className="flex flex-col gap-2 items-start">
+      <p className="text-sm text-[var(--text-secondary)]">{message}</p>
+      <button type="button" onClick={() => void connect()} disabled={working} className={PRIMARY} data-testid="project-backup-connect">
+        <Icon name="link" size={18} />
+        {t("files.backup.connectAndBackUp")}
+      </button>
+    </div>
+  );
+
   // ── The faces ──
 
   const notSetUp = (s: FolderBackupStatus) => {
@@ -617,31 +652,11 @@ export function ProjectBackupPanel({ folder, onClose, onChanged }: {
     } else if (!gh.installed) {
       action = <p className="text-sm text-red-300">{t("files.backup.errNoGh")}</p>;
     } else if (!gh.connected) {
-      action = deviceLogin ? (
-        <div className="flex flex-col gap-2" data-testid="project-backup-device">
-          <p className="text-xs text-[var(--text-secondary)]">{t("files.backup.deviceIntro")}</p>
-          <DeviceCodeCard
-            code={deviceLogin.userCode}
-            verificationUrl={deviceLogin.verificationUri}
-            polling
-            onNewCode={() => void connect()}
-            testId="project-backup-device-code"
-            actions={(
-              <button type="button" onClick={cancelConnect} className={LINK}>{t("cancel")}</button>
-            )}
-          />
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2 items-start">
-          <p className="text-sm text-[var(--text-secondary)]">{t("files.backup.notConnected")}</p>
-          <button type="button" onClick={() => void connect()} disabled={working} className={PRIMARY} data-testid="project-backup-connect">
-            <Icon name="link" size={18} />
-            {t("files.backup.connectAndBackUp")}
-          </button>
-        </div>
-      );
+      action = connectBlock(t("files.backup.notConnected"));
     } else {
-      const repo = name.trim() || s.suggestedName || folder.name;
+      // The name the box will really create — what the owner typed under
+      // Advanced goes through the same sanitiser the server applies.
+      const repo = name.trim() ? sanitizeRepoName(name) : s.suggestedName || sanitizeRepoName(folder.name);
       action = (
         <div className="flex flex-col gap-2 items-start">
           <p className="text-xs text-[var(--text-muted)] flex items-center gap-1.5">
@@ -705,8 +720,11 @@ export function ProjectBackupPanel({ folder, onClose, onChanged }: {
         </span>
       </div>
       {statusLine(s)}
+      {/* Signed out of GitHub since (in the Coding Agent, say): Back up now
+          could only fail, so the panel offers the sign-in and carries on. */}
+      {s.github.installed && !s.github.connected && !s.github.reason && !stage ? connectBlock(t("files.backup.reconnect")) : null}
       <div className="flex flex-wrap gap-2">
-        {backUpNowButton}
+        {(s.github.connected || !s.github.installed || s.github.reason) && backUpNowButton}
         {s.repo && openOnGithub(s.repo.webUrl)}
       </div>
       <div className="flex items-start justify-between gap-3 rounded-xl border border-[var(--border-subtle)] bg-white/[0.02] px-3 py-2.5">

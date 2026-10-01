@@ -18,6 +18,29 @@ export const BACKUP_SUGGESTION_SNOOZE_MS = 30 * 24 * 60 * 60 * 1000;
 /** Auto-backup runs at most this often per folder, and only when something changed. */
 export const AUTO_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+/** GitHub's own limit is 100; this leaves room for a "-20". */
+const REPO_NAME_MAX = 90;
+export const FALLBACK_REPO_NAME = "clawbox-project";
+
+/**
+ * A repository name GitHub accepts, from a folder name or what the owner
+ * typed: accents folded ("Café" → "Cafe"), anything outside `A-Za-z0-9._-`
+ * turned into one dash, no leading or trailing dash or dot, no `.git` ending.
+ * A name with nothing usable left (all Cyrillic, all symbols) becomes
+ * `clawbox-project`. Here, not in project-backup-safety.ts, so the backup
+ * panel shows the name the box will really create rather than what was typed.
+ */
+export function sanitizeRepoName(input: string): string {
+  const folded = String(input).normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+  let name = folded
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  name = name.replace(/\.git$/i, "").replace(/[-.]+$/g, "");
+  name = name.slice(0, REPO_NAME_MAX).replace(/[-.]+$/g, "");
+  return name || FALLBACK_REPO_NAME;
+}
+
 /** Why the check before a commit kept a file out of it. */
 export type LeftOutReason =
   /** The name is a key, certificate, `.env`, `credentials*`, `secrets*`… */

@@ -209,29 +209,11 @@ export function preflight(dir: string, entries: readonly PreflightEntry[]): Pref
 
 // ── Names on GitHub ──────────────────────────────────────────────────────────
 
-/** GitHub's own limit is 100; this leaves room for a "-20". */
-const REPO_NAME_MAX = 90;
 /** How far "-2", "-3"… goes before the owner is asked to choose a name. */
 export const REPO_NAME_TRIES = 20;
-export const FALLBACK_REPO_NAME = "clawbox-project";
-
-/**
- * A repository name GitHub accepts, from a folder name or what the owner
- * typed: accents folded ("Café" → "Cafe"), anything outside `A-Za-z0-9._-`
- * turned into one dash, no leading or trailing dash or dot, no `.git` ending.
- * A name with nothing usable left (all Cyrillic, all symbols) becomes
- * `clawbox-project`.
- */
-export function sanitizeRepoName(input: string): string {
-  const folded = String(input).normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
-  let name = folded
-    .replace(/[^A-Za-z0-9._-]+/g, "-")
-    .replace(/-{2,}/g, "-")
-    .replace(/^[-.]+|[-.]+$/g, "");
-  name = name.replace(/\.git$/i, "").replace(/[-.]+$/g, "");
-  name = name.slice(0, REPO_NAME_MAX).replace(/[-.]+$/g, "");
-  return name || FALLBACK_REPO_NAME;
-}
+// The sanitiser is pure and lives in the client-safe module, so the panel can
+// show the name the box will really use; re-exported here for the server side.
+export { FALLBACK_REPO_NAME, sanitizeRepoName } from "@/lib/project-backup-shared";
 
 /** `name`, `name-2`, `name-3` … `name-20`. */
 export function repoNameCandidates(base: string, tries = REPO_NAME_TRIES): string[] {
