@@ -26,6 +26,9 @@
  */
 import fs from "fs";
 import { envPort } from "./port-probe";
+import { kioskConfigured, kioskEnvFile, type EnvLike } from "./kiosk-env";
+
+export { KIOSK_ENV_FILE, kioskConfigured, kioskEnvFile, type EnvLike } from "./kiosk-env";
 
 export interface KioskTab {
   id: string;
@@ -43,8 +46,6 @@ export interface KioskTabs {
 
 export const DEFAULT_KIOSK_URL = "http://localhost:3005/";
 export const DEFAULT_KIOSK_CDP_PORT = 18801;
-/** Where the launcher reads its URL from (`CLAWBOX_KIOSK_URL`). Root-owned; may be absent. */
-export const KIOSK_ENV_FILE = "/etc/clawbox/kiosk.env";
 /**
  * Each HTTP call's ceiling. A live Chrome answers these in single-digit
  * milliseconds; a closed port refuses at once. The timeout is for the one case
@@ -58,37 +59,12 @@ const TAB_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 /** The kiosk extension's start page: `chrome-extension://<id>/newtab.html`, with or without a query/hash. */
 const START_PAGE_RE = /^chrome-extension:\/\/[a-p]{32}\/newtab\.html(?:[?#]|$)/;
 
-export type EnvLike = Record<string, string | undefined>;
-
 export function kioskCdpPort(env: EnvLike = process.env): number {
   return envPort(env.CLAWBOX_KIOSK_CDP_PORT, DEFAULT_KIOSK_CDP_PORT);
 }
 
 function cdpEndpoint(): string {
   return `http://127.0.0.1:${kioskCdpPort()}`;
-}
-
-/**
- * Does this box have a kiosk at all? Only the x64 laptop's migration writes
- * `/etc/clawbox/kiosk.env` (its launcher sources it); a Jetson never has one.
- * `CLAWBOX_KIOSK_URL` in the environment counts too (the tests, a hand run).
- *
- * Without one the CDP port is never dialled. OpenClaw's own managed browser
- * profiles take CDP ports from 18800 up, so on a box with no kiosk 18801 can
- * be one of THEM — and a desktop that took that browser for the kiosk would
- * list its tabs and send the owner's sign-in pages to a screen nobody sees.
- */
-export function kioskConfigured(env: EnvLike = process.env): boolean {
-  return !!env.CLAWBOX_KIOSK_URL || fs.existsSync(/* turbopackIgnore: true */ kioskEnvFile(env));
-}
-
-/**
- * `KIOSK_ENV_FILE`, unless `CLAWBOX_KIOSK_ENV_FILE` points elsewhere — the
- * suite points it at nowhere (vitest.config.ts, the CLAWBOX_EDITION_FILE
- * way), or a run on the kiosk laptop itself would see that box's kiosk.
- */
-export function kioskEnvFile(env: EnvLike = process.env): string {
-  return env.CLAWBOX_KIOSK_ENV_FILE || KIOSK_ENV_FILE;
 }
 
 const KIOSK_URL_LINE_RE = /^\s*(?:export\s+)?CLAWBOX_KIOSK_URL\s*=\s*(.*)$/;

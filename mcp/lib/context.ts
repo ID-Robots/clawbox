@@ -13,7 +13,7 @@
 
 import { capabilitiesFor, type HarnessFacts } from "../../src/lib/harness/capabilities";
 import { appExistsOnEdition } from "../../src/lib/desktop-app-editions";
-import { kioskConfigured } from "../../src/lib/kiosk-tabs";
+import { kioskConfigured } from "../../src/lib/kiosk-env";
 import type { HarnessId } from "../../src/lib/harness/transport";
 import { hasBinary, spawnArgv } from "./guard";
 import { apiTry } from "./api";

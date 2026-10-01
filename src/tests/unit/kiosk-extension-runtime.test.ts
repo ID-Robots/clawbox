@@ -387,3 +387,33 @@ describe("background.js", () => {
     expect(w.broadcasts()).toBeLessThanOrEqual(7);
   });
 });
+
+describe("newtab.js", () => {
+  // The start page's box navigates to what the bar's Enter rule answers, and
+  // to nothing but a web address whatever that rule returns: typed text must
+  // never become a javascript: or data: URL on a page the kiosk opens.
+  let saved: Globals["clawboxKioskBar"];
+  beforeEach(() => { saved = g.clawboxKioskBar; });
+  afterEach(() => { g.clawboxKioskBar = saved; document.body.innerHTML = ""; });
+
+  function submit(destination: string | null) {
+    document.body.innerHTML = '<form class="search"><input id="q" value="typed"></form>';
+    const assign = vi.fn();
+    g.clawboxKioskBar = { mount: vi.fn(), destinationFor: vi.fn(() => destination) } as unknown as Globals["clawboxKioskBar"];
+    new Function("location", source("newtab.js"))({ assign });
+    document.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+    return assign;
+  }
+
+  it("goes to an http(s) address as the bar's rule answered it", () => {
+    for (const to of ["https://duckduckgo.com/?q=claw%20box", "http://localhost:3005/app/vnc#x", "https://example.com/a/b?c=d"]) {
+      expect(submit(to)).toHaveBeenCalledWith(to);
+    }
+  });
+
+  it("never navigates to anything that is not a web address", () => {
+    for (const to of [null, "", "javascript:alert(1)", "JavaScript:alert(1)", "data:text/html,<script>1</script>", "file:///etc/passwd", "chrome://settings", "not a url"]) {
+      expect(submit(to), String(to)).not.toHaveBeenCalled();
+    }
+  });
+});

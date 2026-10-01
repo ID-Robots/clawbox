@@ -94,8 +94,22 @@ function drop(entries: Array<{ entry: FakeEntry; file?: File }>) {
 }
 const text = (name: string, size = 4) => new File([new Uint8Array(size)], name, { type: "text/plain" });
 
-async function connected() {
+/**
+ * Connected, AND taking drops. The chat.history frame goes out in the same
+ * tick as the handshake's `setStatus("connected")`, ahead of the render that
+ * applies it — and the drop is taken only once that render (and the harness's
+ * attachment capabilities) has landed. On a loaded runner a drop fired in that
+ * gap was ignored outright, and no wait after it could bring the chip back.
+ * The drop target itself says when it is ready: its dragover answers "copy"
+ * exactly when a drop would be taken, and changes nothing.
+ */
+async function connected(target = "chat-popup") {
   await waitFor(() => expect(sentFrames.some((f) => f.method === "chat.history")).toBe(true));
+  await waitFor(() => {
+    const dataTransfer = { types: ["Files"], dropEffect: "" };
+    fireEvent.dragOver(screen.getByTestId(target), { dataTransfer });
+    expect(dataTransfer.dropEffect).toBe("copy");
+  });
 }
 
 beforeEach(() => {
@@ -203,7 +217,7 @@ describe("dropping files and folders on the chat", () => {
 
   it("the full-page chat takes the same drop", async () => {
     render(<I18nProvider><ChatApp /></I18nProvider>);
-    await connected();
+    await connected("chatapp");
     const tree = dirEntry("docs", [fileEntry(text("a.md")), fileEntry(text("b.md"))]);
     fireEvent.drop(screen.getByTestId("chatapp"), { dataTransfer: drop([{ entry: tree }]) });
     await waitFor(() => expect(staged).toHaveLength(2));
