@@ -12,10 +12,17 @@ import {
   clearPluginRepairUnlessRefiled,
   pluginRepairInProgress,
   readPluginRepairs,
+  recordPluginRepair,
   setPluginRepairInProgress,
   type PluginRepairEntry,
 } from "@/lib/plugin-repair";
-import { currentCoreRelease, runPluginRepair } from "@/lib/plugin-repair-run";
+import {
+  currentCoreRelease,
+  pluginRepairFailureWhat,
+  pluginRepairLabel,
+  runPluginRepair,
+  type PluginRepairVerdict,
+} from "@/lib/plugin-repair-run";
 
 /**
  * The Retry behind Settings → "Needs repair" (TASK-606).
@@ -180,13 +187,13 @@ export async function POST(req: Request) {
  */
 async function repairClaimedRow(entry: PluginRepairEntry, settle: () => void): Promise<NextResponse> {
   // The core that is on the box NOW, so a row written against an older one
-  // installs the package built for this one (`rebaseCorePinnedSpec`). A press
-  // is a person asking the registry again, so a "no build for this core" on
-  // record is re-checked rather than believed (TASK-1206).
-  const verdict = await runPluginRepair(entry, {
-    release: await currentCoreRelease(),
-    recheckUnavailable: true,
-  });
+  // installs the package built for this one (`rebaseCorePinnedSpec`). And the
+  // restart the install asks the running gateway for is waited out before the
+  // runner switches anything on or asks whether it loaded (TASK-1302: on the
+  // board the gateway restarted itself on the install's `plugins.installs`
+  // write in the middle of the repair, its pre-start writing the same config
+  // and rows).
+  const verdict = await runPluginRepair(entry, { release: await currentCoreRelease(), awaitInstallRestart: true });
   if (!verdict.ok) {
     // Deliberately not returned as the reason: the CLI's stderr on this path
     // carries registry URLs and package specs, and the owner's next move is the
@@ -199,6 +206,13 @@ async function repairClaimedRow(entry: PluginRepairEntry, settle: () => void): P
     // the entry ON for that one here; switching it off would take a working
     // plugin down on a click that changed nothing, and for deepseek and the
     // channels no boot path puts it back.
+    //
+    // BUT THE ROW SAYS WHAT IS WRONG NOW (TASK-1302). The HTTP answer stays a
+    // code; the row is where the boot script already puts the core's words,
+    // and the panel re-reads it after a failed press. The board's row went on
+    // reading "Version not found on ClawHub" over a plugin the Retry had just
+    // installed, so the owner saw no change at all on either press.
+    if (verdict.code !== "no_spec" && await refileWithCause(entry, verdict)) settle();
     return NextResponse.json(
       { ok: false, code: verdict.code },
       { status: verdict.code === "no_spec" ? 409 : 502 },
@@ -254,4 +268,39 @@ async function repairClaimedRow(entry: PluginRepairEntry, settle: () => void): P
     return NextResponse.json({ ok: false, code: "refused_at_start" }, { status: 502 });
   }
   return NextResponse.json({ ok: true, pluginId: entry.id, restarted, markerCleared: cleared !== null });
+}
+
+/**
+ * File the row again with this press's own failure, in the words the updater's
+ * after-update retry uses. True when the row now carries it — a re-file drops
+ * the in-progress stamp, so the press is over for the row as well.
+ *
+ * ONLY WHILE THE ROW IS STILL ON FILE: the restart the install asked for runs
+ * the boot script, which can clear the row itself, and filing it again then
+ * would bring back a badge the box had just removed. The switch-off is
+ * recorded as ClawBox's when this press made it, the row's own otherwise.
+ */
+async function refileWithCause(
+  entry: PluginRepairEntry,
+  verdict: Extract<PluginRepairVerdict, { ok: false }>,
+): Promise<boolean> {
+  try {
+    const still = Object.values(await readPluginRepairs())
+      .some((row) => canonicalPluginId(row.id) === canonicalPluginId(entry.id));
+    if (!still) return false;
+    await recordPluginRepair({
+      id: entry.id,
+      stage: verdict.stage,
+      reason: `${pluginRepairLabel(entry.id)} was retried from Settings and ${pluginRepairFailureWhat(verdict)}.${verdict.cause}`,
+      disabled: entry.disabled || verdict.switchedOff,
+      spec: verdict.spec,
+    });
+    return true;
+  } catch (err) {
+    console.warn(
+      `[plugins/repair] could not record why the ${entry.id} repair failed:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return false;
+  }
 }

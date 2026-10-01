@@ -1,24 +1,13 @@
+import fs from "fs/promises";
+
+import path from "@/lib/runtime-path";
+
 import { spawnOpenclawCli } from "./openclaw-config";
-import {
-  forgetPluginInstallUnavailable,
-  readPluginInstallUnavailable,
-  recordPluginInstallUnavailable,
-  saysNoInstallableBuild,
-} from "./plugin-install-unavailable";
 
 /**
  * The DeepSeek provider plugin ClawBox AI rides on. OpenClaw 2 unbundled it
  * (`@openclaw/deepseek-provider` on ClawHub) and refuses gateway readiness
  * while a configured deepseek provider has no consented plugin behind it.
- *
- * NOT WHAT CARRIES ClawBox AI's TURNS (TASK-1206). The configure route writes
- * the `deepseek` provider as a full `api: "openai-completions"` definition —
- * base URL, key, models, reasoning efforts — so the core's own OpenAI-compatible
- * transport sends every turn, and a box whose plugin is switched off still
- * chats. What the plugin adds is DeepSeek's native hooks: the V4 thinking
- * wrapper and profile, reasoning replay, tool compatibility, usage. Worth
- * installing, never worth a gateway start that waits on a build the registry
- * does not have — see `plugin-install-unavailable.ts`.
  *
  * Installed PINNED to the running core, never `@latest`. The plugin is cut
  * from the openclaw/openclaw tree with the core's own version number, and
@@ -27,13 +16,20 @@ import {
  * 2026.8.1 runtime refused it ("requires plugin API >=2026.8.2, but this
  * OpenClaw runtime exposes 2026.8.1") and every fresh install parked at a
  * gateway that would not report ready. `scripts/gateway-pre-start.sh` pins
- * the same way on the boot path; this is the copy the configure route uses
- * when it creates the deepseek provider in the first place.
+ * the same way on the boot path; this is the copy the configure route and the
+ * Settings Retry use.
  */
 export const DEEPSEEK_PROVIDER_PLUGIN_SPEC = "clawhub:@openclaw/deepseek-provider";
 
-/** The plugin's id — the key its repair row and its unavailability record are filed under. */
-export const DEEPSEEK_PLUGIN_ID = "deepseek";
+/**
+ * The same package on npm (TASK-1302). ClawHub does not carry every release
+ * npm does: it has no `@openclaw/deepseek-provider@2026.9.4` — the build the
+ * 4.1 core needs — while npm has 2026.9.1 through 2026.9.6, and the package's
+ * own `openclaw.install` names npm its `defaultChoice`. The unpinned ClawHub
+ * fallback could not stand in for it either: it resolves `latest` (2026.9.6,
+ * `pluginApi >=2026.9.6`), which the 2026.9.4 runtime refuses.
+ */
+export const DEEPSEEK_PROVIDER_NPM_SPEC = "npm:@openclaw/deepseek-provider";
 
 /** ClawHub resolve + install runs well past the 30 s default; the e2e container measured it. */
 const INSTALL_TIMEOUT_MS = 180_000;
@@ -53,14 +49,82 @@ export async function installedOpenclawRelease(): Promise<string | null> {
 }
 
 /**
- * The specs to try, in order: the build matching the core first, then the
- * unpinned spec as the fallback for a core with no plugin build of its own
- * version (so an unknown release still gets the old behaviour).
+ * The specs to try, in order — the same order `scripts/gateway-pre-start.sh`
+ * walks: the build matching the core from ClawHub, the same build from npm
+ * (for a release ClawHub never received), and only then the unpinned spec, for
+ * a core with no plugin build of its own version anywhere (so an unknown
+ * release still gets the old behaviour).
  */
 export function deepseekPluginSpecs(release: string | null): string[] {
   return release
-    ? [`${DEEPSEEK_PROVIDER_PLUGIN_SPEC}@${release}`, DEEPSEEK_PROVIDER_PLUGIN_SPEC]
+    ? [
+      `${DEEPSEEK_PROVIDER_PLUGIN_SPEC}@${release}`,
+      `${DEEPSEEK_PROVIDER_NPM_SPEC}@${release}`,
+      DEEPSEEK_PROVIDER_PLUGIN_SPEC,
+    ]
     : [DEEPSEEK_PROVIDER_PLUGIN_SPEC];
+}
+
+/**
+ * Is a DeepSeek plugin payload the running core can load already on disk?
+ *
+ * The two registries install to different places, measured with the 2026.9.4
+ * CLI against a scratch state directory: a ClawHub install writes
+ * `<home>/extensions/deepseek/`, an npm one
+ * `<home>/npm/projects/<package>-<hash>[__openclaw-generation__g-<gen>]/node_modules/@openclaw/deepseek-provider/`.
+ * Looking only at the first made an npm-installed plugin read as missing, so
+ * every configure — and every boot, in the script's twin of this — would
+ * reinstall it.
+ *
+ * An npm payload counts only when it is the running core's own release: those
+ * directories are keyed to the core generation, and one an older core left
+ * behind is on disk yet unreachable (TASK-602). The ClawHub directory keeps
+ * the rule it always had — present is present.
+ *
+ * Never throws; "could not tell" is `false`, which costs an install and
+ * nothing worse.
+ */
+export async function deepseekPluginOnDisk(openclawHome: string): Promise<boolean> {
+  try {
+    await fs.access(path.join(openclawHome, "extensions", "deepseek", "openclaw.plugin.json"));
+    return true;
+  } catch {
+    /* not from ClawHub — maybe from npm */
+  }
+  const candidates = [path.join(openclawHome, "npm", "node_modules", "@openclaw", "deepseek-provider")];
+  try {
+    const projects = await fs.readdir(path.join(openclawHome, "npm", "projects"));
+    if (Array.isArray(projects)) {
+      for (const project of projects) {
+        if (typeof project !== "string") continue;
+        candidates.push(path.join(openclawHome, "npm", "projects", project, "node_modules", "@openclaw", "deepseek-provider"));
+      }
+    }
+  } catch {
+    /* no npm projects at all */
+  }
+  let wanted: string | null | undefined;
+  for (const dir of candidates) {
+    let version: unknown;
+    try {
+      await fs.access(path.join(dir, "openclaw.plugin.json"));
+      version = (JSON.parse(String(await fs.readFile(path.join(dir, "package.json"), "utf-8"))) as { version?: unknown })
+        ?.version;
+    } catch {
+      continue;
+    }
+    // Asked once, and only when there is an npm payload to hold it against.
+    if (wanted === undefined) wanted = await installedOpenclawRelease();
+    if (!wanted || isBuildOf(version, wanted)) return true;
+  }
+  return false;
+}
+
+/** `2026.9.4`, or a republish of it (`2026.9.4-1`), for a `2026.9.4` core. */
+function isBuildOf(version: unknown, release: string): boolean {
+  if (typeof version !== "string" || !version.startsWith(release)) return false;
+  const rest = version.slice(release.length);
+  return rest === "" || rest.startsWith("-") || rest.startsWith("+");
 }
 
 export interface DeepseekPluginInstallResult {
@@ -68,12 +132,6 @@ export interface DeepseekPluginInstallResult {
   installed: string | null;
   /** One line per spec that failed, in the order they were tried. */
   failures: string[];
-  /**
-   * True when no build this core can load exists — every spec was refused in
-   * the registry's own words, now or at an attempt still on record — as
-   * opposed to an install that failed for a reason a retry could change.
-   */
-  unavailable: boolean;
 }
 
 /**
@@ -82,64 +140,35 @@ export interface DeepseekPluginInstallResult {
  * `force` is for a REPAIR (TASK-1088): after a core bump the old payload is
  * usually still on disk, and `plugins install` refuses to write over it
  * ("plugin already exists") without the flag. The configure route installs
- * only when the payload is absent, so it has no use for it.
- *
- * `recheckUnavailable` is the owner's Retry (TASK-1206). Everything else — the
- * configure route a person is waiting on, the updater — believes a "no build
- * for this core" still on record and asks nothing, because the registry would
- * answer the same thing a minute or more later.
+ * only when the payload is absent, so it has no use for it — except on the npm
+ * spec, which always carries it: the CLI reads `--force` there as the consent
+ * to a non-ClawHub source as well, and this spec is only reached when no
+ * payload for the running core is on disk, so whatever it replaces is stale.
  */
 export async function installDeepseekProviderPlugin(
-  options: { force?: boolean; recheckUnavailable?: boolean } = {},
+  options: { force?: boolean } = {},
 ): Promise<DeepseekPluginInstallResult> {
-  const release = await installedOpenclawRelease();
-  if (release && !options.recheckUnavailable) {
-    const known = await readPluginInstallUnavailable(DEEPSEEK_PLUGIN_ID, release);
-    if (known) {
-      console.log(
-        `[plugins] @openclaw/deepseek-provider has no installable build for OpenClaw ${release} on record; not asking the registry again`,
-      );
-      return {
-        installed: null,
-        failures: [`${known.specs[0] ?? DEEPSEEK_PROVIDER_PLUGIN_SPEC}: ${known.cause || "no installable build for this core"}`],
-        unavailable: true,
-      };
-    }
-  }
-  const specs = deepseekPluginSpecs(release);
   const failures: string[] = [];
-  let everyRefusalDefinitive = true;
-  for (const spec of specs) {
+  let clawhubTimedOut = false;
+  for (const spec of deepseekPluginSpecs(await installedOpenclawRelease())) {
+    const fromNpm = spec.startsWith(`${DEEPSEEK_PROVIDER_NPM_SPEC}@`);
+    // A ClawHub that let one spec run into its deadline will not answer the
+    // next either: skipping it keeps the wait to the two attempts it was
+    // before the npm step existed (the 2026-09-01 clawhub.dev outage burned the
+    // full timeout on every one). The boot script skips the same way.
+    if (!fromNpm && clawhubTimedOut) continue;
     try {
       await spawnOpenclawCli(
-        ["plugins", "install", spec, ...(options.force ? ["--force"] : []), "--accept-capabilities"],
+        ["plugins", "install", spec, ...(options.force || fromNpm ? ["--force"] : []), "--accept-capabilities"],
         { timeoutMs: INSTALL_TIMEOUT_MS },
       );
-      await forgetPluginInstallUnavailable(DEEPSEEK_PLUGIN_ID);
-      return { installed: spec, failures, unavailable: false };
+      return { installed: spec, failures };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (!saysNoInstallableBuild(message)) everyRefusalDefinitive = false;
-      failures.push(`${spec}: ${message}`);
+      // By name, not `instanceof`: suites that mock `./openclaw-config` leave
+      // the class out, and a throw here would break "never throws".
+      if (!fromNpm && err instanceof Error && err.name === "OpenclawSpawnTimeoutError") clawhubTimedOut = true;
+      failures.push(`${spec}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  // Only a PINNED ask can be recorded: without the core's release there is
-  // nothing to key the answer to, and the next core would inherit it.
-  const unavailable = everyRefusalDefinitive && failures.length > 0;
-  if (unavailable && release) {
-    await recordPluginInstallUnavailable(DEEPSEEK_PLUGIN_ID, {
-      core: release,
-      atMs: Date.now(),
-      specs,
-      cause: oneLine(failures[0].slice(failures[0].indexOf(": ") + 2)),
-    });
-  }
-  return { installed: null, failures, unavailable };
-}
-
-/** The last line that reads like a verdict, trimmed for a log line. */
-function oneLine(text: string): string {
-  const lines = text.split(/\r?\n/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
-  const picked = [...lines].reverse().find((line) => saysNoInstallableBuild(line)) ?? lines[lines.length - 1] ?? "";
-  return picked.length > 160 ? `${picked.slice(0, 159).trimEnd()}…` : picked;
+  return { installed: null, failures };
 }

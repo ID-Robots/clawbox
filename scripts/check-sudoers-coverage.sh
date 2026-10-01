@@ -266,6 +266,25 @@ my %DECLARED_ARGV = (
             . 'which src/tests/unit/root-steps.test.ts pins to src/lib/root-steps.ts.',
     },
   },
+  # scripts/terminal-server.mjs — a ClawBox user other than the owner gets a
+  # shell AS themselves (TASK-1256): `sudo -n clawbox-user-helper.sh shell
+  # <user>`. The username is not enumerable (the owner creates users at run
+  # time), and it is the reason the grant carries no argument spec: the
+  # root-owned helper checks the name against the useradd rule AND its
+  # membership of `clawbox-users` before it starts anything, which is a
+  # stronger check than any string match sudoers could make.
+  'scripts/terminal-server.mjs :: "-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "shell", asUser' => {
+    argv => [
+      ['-n', '/usr/local/libexec/clawbox/clawbox-user-helper.sh', 'shell', 'alice'],
+    ],
+    unverified => {
+      asUser => 'A username production-server.js vouched for after verifying the session '
+              . 'cookie against the clawbox_users registry, re-checked by the PTY server '
+              . '(USERNAME_RE) and again, as root, by config/clawbox-user-helper.sh, which '
+              . 'refuses anyone outside clawbox-users, root, uid < 1000 and administrators. '
+              . 'Users are created at run time from Settings -> Users, so there is no list.',
+    },
+  },
 );
 
 # ── Sudo calls that are deliberately NOT in the allow-list ──────────────────

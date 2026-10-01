@@ -12,12 +12,21 @@
  * was off across a scheduled slot, the next slot is the upcoming one — we
  * don't backfill (a single missed run is preferable to a thundering herd
  * if the device boots after a long outage).
+ *
+ * A failed run never switches auto-backup off — a quota refusal included: the
+ * `.finally()` below re-arms the next slot whatever the exit code, so the
+ * first slot after the account has room again backs the box up. What CAN turn
+ * it off is a save, and a save made while the account was refusing
+ * credentials for quota is recorded as a quota hold (`quotaHoldSinceMs`): this
+ * module then probes the account and switches auto-backup back on the first
+ * time credentials mint again (TASK-1211).
  */
 
 import {
   backupExitError,
   computeNextRunMs,
   readScheduleSnapshot,
+  releaseQuotaHoldIfCredentialsWork,
   runBackup,
   type ClawKeepSchedule,
 } from "@/lib/clawkeep";
@@ -26,6 +35,10 @@ let armed: NodeJS.Timeout | null = null;
 let armedFor: number = 0;
 /** Re-read timer for an unreadable `schedule.json`. Never a backup slot. */
 let retry: NodeJS.Timeout | null = null;
+/** Next look at whether a quota-held account issues credentials again. */
+let holdProbe: NodeJS.Timeout | null = null;
+/** The quota hold on `lastGood`, or 0. */
+let lastGoodHold = 0;
 /** Serialises overlapping rearms so the older read cannot arm last. */
 let rearmGeneration = 0;
 /**
@@ -49,6 +62,22 @@ let lastGood: ClawKeepSchedule | null = null;
  */
 const UNREADABLE_RETRY_MS = 15 * 60 * 1000;
 
+/**
+ * How often a quota-held box asks whether the account issues credentials
+ * again. Each look is one credentials mint and one listing — no archive, no
+ * upload — so hourly costs the portal little and means a box whose owner
+ * freed space in the portal is backing up again within the hour.
+ */
+export const QUOTA_HOLD_PROBE_MS = 60 * 60 * 1000;
+
+/**
+ * The first look after boot comes sooner: the counter may well have been
+ * corrected while the box was off, and restarting the box is the obvious thing
+ * for an owner (or support) to try. Not immediate, so the listing does not
+ * compete with everything else a Jetson is starting.
+ */
+export const QUOTA_HOLD_BOOT_PROBE_MS = 5 * 60 * 1000;
+
 function clear() {
   if (armed) {
     clearTimeout(armed);
@@ -62,6 +91,61 @@ function clearRetry() {
     clearTimeout(retry);
     retry = null;
   }
+}
+
+function clearHoldProbe() {
+  if (holdProbe) {
+    clearTimeout(holdProbe);
+    holdProbe = null;
+  }
+}
+
+/** Arm the next quota-hold probe — only for a schedule that is off AND held. */
+function armHoldProbe(schedule: ClawKeepSchedule, quotaHoldSinceMs: number, delayMs: number): void {
+  clearHoldProbe();
+  // `!(x > 0)` rather than `x <= 0`: a snapshot from an older shape has no
+  // hold at all, and `undefined <= 0` is false.
+  if (schedule.enabled || !(quotaHoldSinceMs > 0)) return;
+  holdProbe = setTimeout(() => { void probeQuotaHold(); }, delayMs);
+  // A probe must not be a reason for the process to stay alive.
+  holdProbe.unref?.();
+}
+
+/**
+ * Look once at a quota hold, and either switch auto-backup back on or look
+ * again later. Never throws: a probe that fails is evidence of nothing, and
+ * the hold stays.
+ */
+async function probeQuotaHold(): Promise<void> {
+  clearHoldProbe();
+  const generation = rearmGeneration;
+  let check: Awaited<ReturnType<typeof releaseQuotaHoldIfCredentialsWork>>;
+  try {
+    check = await releaseQuotaHoldIfCredentialsWork();
+  } catch (err) {
+    console.warn(
+      "[clawkeep-scheduler] quota-hold check failed (auto-backup stays paused):",
+      err instanceof Error ? err.message : err,
+    );
+    check = { outcome: "held" };
+  }
+  if (check.outcome === "released") {
+    // The file now says "on", and the answer is newer than anything read
+    // before it — so it wins over an in-flight rearm, like a save does.
+    ++rearmGeneration;
+    clearRetry();
+    lastGood = check.schedule;
+    lastGoodHold = 0;
+    applySchedule(check.schedule, 0);
+    console.warn(
+      "[clawkeep-scheduler] the ClawKeep account issues credentials again — auto-backup is back on"
+        + (armedFor > 0 ? ` (next run ${new Date(armedFor).toISOString()})` : ""),
+    );
+    return;
+  }
+  // A save or a rearm while this probe ran has armed whatever it needed.
+  if (generation !== rearmGeneration) return;
+  if (check.outcome === "held" && lastGood) armHoldProbe(lastGood, lastGoodHold, QUOTA_HOLD_PROBE_MS);
 }
 
 function fireBackup(): void {
@@ -90,7 +174,8 @@ function fireBackup(): void {
     .then((result) => {
       // `runBackup` rejects only for an unpaired box; every other failure —
       // the daemon missing from PATH (127), a bad config (64), a token error
-      // (65), the kill-timer (124), a revoked pairing (3) — RESOLVES carrying
+      // (65), the kill-timer (124), a revoked pairing (3), a full account
+      // (2) — RESOLVES carrying
       // the exit code, so the `.catch` below never sees it, and unlogged those
       // were a nightly no-op. For the missing-daemon case this is the ONLY
       // thing that can report it at all: the Settings card's backup button is
@@ -138,7 +223,7 @@ function fireBackup(): void {
  * through to a card state is a change with its own copy in ten locales; this
  * one keeps the backups running.
  */
-async function rearm(): Promise<void> {
+async function rearm(holdProbeDelayMs: number = QUOTA_HOLD_PROBE_MS): Promise<void> {
   const generation = ++rearmGeneration;
   const snapshot = await readScheduleSnapshot();
   // A concurrent rearm — a save landing during boot, or two saves in quick
@@ -150,14 +235,15 @@ async function rearm(): Promise<void> {
   }
   clearRetry();
   lastGood = snapshot.schedule;
-  applySchedule(snapshot.schedule);
+  lastGoodHold = snapshot.quotaHoldSinceMs;
+  applySchedule(snapshot.schedule, snapshot.quotaHoldSinceMs, holdProbeDelayMs);
 }
 
 function onUnreadableSchedule(): void {
   // Keep backing the box up on the last schedule that WAS readable. At boot
   // there is none, and then there is nothing to arm — but the retry below is
   // what stops that being permanent.
-  if (lastGood) applySchedule(lastGood);
+  if (lastGood) applySchedule(lastGood, lastGoodHold);
   console.warn(
     "[clawkeep-scheduler] schedule.json could not be read — "
       + (armedFor > 0
@@ -176,9 +262,14 @@ function onUnreadableSchedule(): void {
   retry.unref?.();
 }
 
-function applySchedule(schedule: ClawKeepSchedule): void {
+function applySchedule(
+  schedule: ClawKeepSchedule,
+  quotaHoldSinceMs: number,
+  holdProbeDelayMs: number = QUOTA_HOLD_PROBE_MS,
+): void {
   clear();
   arm(schedule);
+  armHoldProbe(schedule, quotaHoldSinceMs, holdProbeDelayMs);
   // The one choke point every arm path goes through, and the last place this
   // card's own symptom can still hide: `arm()` returns silently when the
   // schedule is enabled and `computeNextRunMs()` answers 0. The range check on
@@ -215,7 +306,7 @@ function arm(schedule: ClawKeepSchedule): void {
 
 /** Boot hook — call once at process start. Idempotent. */
 export async function start(): Promise<void> {
-  await rearm();
+  await rearm(QUOTA_HOLD_BOOT_PROBE_MS);
 }
 
 /**
@@ -226,9 +317,11 @@ export async function start(): Promise<void> {
  * fail: a transient error on the save path would otherwise leave the OLD
  * cadence armed while the PUT answered 200, so a box would keep backing up
  * after the owner switched auto-backup off. Falls back to a read when no
- * schedule is supplied.
+ * schedule is supplied. `quotaHoldSinceMs` is the hold that same write
+ * returned: a save that paused auto-backup for a full account starts the probe
+ * that switches it back on, and any other save stops it.
  */
-export async function refresh(schedule?: ClawKeepSchedule): Promise<void> {
+export async function refresh(schedule?: ClawKeepSchedule, quotaHoldSinceMs: number = 0): Promise<void> {
   if (!schedule) {
     await rearm();
     return;
@@ -236,7 +329,19 @@ export async function refresh(schedule?: ClawKeepSchedule): Promise<void> {
   ++rearmGeneration;
   clearRetry();
   lastGood = schedule;
-  applySchedule(schedule);
+  lastGoodHold = quotaHoldSinceMs;
+  applySchedule(schedule, quotaHoldSinceMs);
+}
+
+/**
+ * Look at a quota hold now rather than at the next hourly probe. Called after
+ * a backup succeeded by hand — the owner freed space and pressed "Back up
+ * now" — so auto-backup comes back with the run that proved it can. A no-op
+ * when no hold is known.
+ */
+export async function recheckQuotaHold(): Promise<void> {
+  if (!(lastGoodHold > 0)) return;
+  await probeQuotaHold();
 }
 
 /** When the next scheduled fire is, in unix ms. 0 means disarmed. Useful

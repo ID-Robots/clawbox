@@ -1,6 +1,7 @@
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 
+import { awaitGatewayRestartAfter, readGatewayUnitMoment, type GatewayUnitMoment } from "@/lib/gateway-health";
 import { installDeepseekProviderPlugin, installedOpenclawRelease } from "@/lib/openclaw-deepseek-plugin";
 import { findOpenclawBin, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { canonicalPluginId, type PluginRepairEntry, type PluginRepairStage } from "@/lib/plugin-repair";
@@ -137,6 +138,33 @@ function saysPluginNotFound(err: unknown): boolean {
 
 interface RuntimeInspection {
   plugin?: { id?: unknown; status?: unknown; activated?: unknown };
+  diagnostics?: unknown;
+}
+
+/** What `plugins inspect --runtime` said, and — when it is not "loaded" — why, as one line. */
+export interface RuntimeVerdict {
+  /** See `harnessSaysLoaded`: null when the CLI could not be asked or read. */
+  loaded: boolean | null;
+  /** Empty only when `loaded` is true; otherwise one line led by a space, like `cliFailureCause`. */
+  cause: string;
+}
+
+/**
+ * The inspection's own account of a plugin that did not load: its status, its
+ * activation, and the last diagnostic the core raised against it. What the row
+ * says after a failed verify (TASK-1302): the board's row went on saying
+ * "Version not found on ClawHub" over a plugin that had installed fine and was
+ * merely switched off, because this step reported nothing at all.
+ */
+function inspectionCause(verb: string, parsed: RuntimeInspection, pluginId: string): string {
+  const plugin = parsed.plugin ?? {};
+  const head = `${verb} says status ${String(plugin.status ?? "unknown")}, activated ${String(plugin.activated ?? "unknown")}`;
+  const messages = (Array.isArray(parsed.diagnostics) ? parsed.diagnostics : [])
+    .filter((d): d is { pluginId?: unknown; message: string } =>
+      !!d && typeof d === "object" && typeof (d as { message?: unknown }).message === "string")
+    .filter((d) => d.pluginId === undefined || d.pluginId === pluginId)
+    .map((d) => d.message);
+  return messages.length > 0 ? causeLine(head, messages.join("\n")) : ` ${head}.`;
 }
 
 /**
@@ -163,32 +191,40 @@ interface RuntimeInspection {
  * words on screen and only one of them should clear a badge.
  */
 export async function harnessSaysLoaded(pluginId: string): Promise<boolean | null> {
+  return (await inspectPluginRuntime(pluginId)).loaded;
+}
+
+/** `harnessSaysLoaded`, with the inspection's own words when the answer is not yes. */
+export async function inspectPluginRuntime(pluginId: string): Promise<RuntimeVerdict> {
+  const verb = "openclaw plugins inspect --runtime";
+  const unreadable: RuntimeVerdict = { loaded: null, cause: ` ${verb} answered nothing this device could read.` };
   let stdout: string;
   try {
     ({ stdout } = await execFile(openclawBin(), ["plugins", "inspect", pluginId, "--runtime", "--json"], {
       timeout: INSPECT_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
     }));
-  } catch {
-    return null;
+  } catch (err) {
+    return { loaded: null, cause: cliFailureCause(verb, err) };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
   } catch {
-    return null;
+    return unreadable;
   }
   // `JSON.parse("null")` succeeds and the cast changes nothing at runtime, so
   // reading `.plugin` off it threw — where "the box could not be asked"
   // already has an answer the panel renders.
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return unreadable;
   const plugin = (parsed as RuntimeInspection).plugin;
-  if (!plugin || typeof plugin !== "object") return null;
-  if (plugin.status === undefined && plugin.activated === undefined) return null;
+  if (!plugin || typeof plugin !== "object") return unreadable;
+  if (plugin.status === undefined && plugin.activated === undefined) return unreadable;
   // BOTH, and neither inferred from the other: a plugin can be discovered
   // (`status: "loaded"`) and still refuse to activate on an unaccepted surface,
   // which is precisely the state that refuses gateway readiness.
-  return plugin.status === "loaded" && plugin.activated === true;
+  if (plugin.status === "loaded" && plugin.activated === true) return { loaded: true, cause: "" };
+  return { loaded: false, cause: inspectionCause(verb, parsed as RuntimeInspection, pluginId) };
 }
 
 export type PluginRepairFailureCode = "no_spec" | "repair_failed" | "reenable_failed" | "unverified";
@@ -210,9 +246,43 @@ export type PluginRepairVerdict =
     step: PluginRepairStep;
     stage: PluginRepairStage;
     spec: string;
-    /** One line in the core's words, led by a space — see `cliFailureCause`. Empty when there is none. */
+    /**
+     * One line in the core's words, led by a space — see `cliFailureCause`.
+     * Empty only for `no_spec`, where nothing ran; a failed verify always
+     * carries the inspection's own account (TASK-1302).
+     */
     cause: string;
+    /** This repair switched the entry on and then back off, so the switch-off is ClawBox's. */
+    switchedOff: boolean;
   };
+
+/** How the owner reads the plugin's name in a reason. */
+export function pluginRepairLabel(id: string): string {
+  switch (canonicalPluginId(id)) {
+    case "codex": return "The ChatGPT (Codex) plugin";
+    case "deepseek": return "The DeepSeek provider plugin, which ClawBox AI runs on,";
+    default: return `The ${id} plugin`;
+  }
+}
+
+/**
+ * What went wrong, in the words the row keeps — see `PluginRepairStep`. Shared
+ * by the Retry and the updater, so a row reads the same whichever re-filed it.
+ */
+export function pluginRepairFailureWhat(verdict: Extract<PluginRepairVerdict, { ok: false }>): string {
+  // A consent row that stayed a consent row installed nothing.
+  const redone = verdict.stage === "consent" ? "had its capabilities accepted" : "was reinstalled";
+  switch (verdict.step) {
+    case "spec": return "could not be reinstalled because its record names no package";
+    case "enable": return "still could not have its capabilities accepted";
+    case "install": return "could not be reinstalled";
+    case "reenable": return `${redone} but could not be switched back on`;
+    case "verify":
+      return verdict.code === "unverified"
+        ? `${redone} but the device could not confirm that it loads`
+        : `${redone} but the core does not report it loaded`;
+  }
+}
 
 export interface RunPluginRepairOptions {
   /** The installed core's release: a spec pinned to another core is moved onto this one. */
@@ -226,12 +296,14 @@ export interface RunPluginRepairOptions {
    */
   switchOffWhenUnverified?: boolean;
   /**
-   * Ask the registry again even when this core's DeepSeek build is on record
-   * as not existing (TASK-1206). The owner's Retry does — a person pressed a
-   * button to ask exactly that — while the updater believes the record, which
-   * is why it does not reach this function for such a row at all.
+   * After an install, wait out the restart it asks the RUNNING gateway for
+   * before anything is switched on or asked (TASK-1302). The Retry sets it: the
+   * gateway is up, and on the board it restarted itself on the install's
+   * `plugins.installs` write in the middle of the repair, its pre-start writing
+   * the same config and rows. The updater does not — it quiesces the gateway
+   * around its installs, so there is no running gateway to restart.
    */
-  recheckUnavailable?: boolean;
+  awaitInstallRestart?: boolean;
 }
 
 /**
@@ -258,8 +330,15 @@ export async function runPluginRepair(
   const registryId = canonicalPluginId(entry.id);
   let spec = entry.spec ? rebaseCorePinnedSpec(entry.spec, options.release) : "";
   let stage: PluginRepairStage = entry.stage;
+  let switchedOff = false;
   const fail = (code: PluginRepairFailureCode, step: PluginRepairStep, cause: string): PluginRepairVerdict =>
-    ({ ok: false, code, step, stage, spec, cause });
+    ({ ok: false, code, step, stage, spec, cause, switchedOff });
+  // Taken BEFORE the install, so a restart the install itself asks for is told
+  // apart from the gateway that was already running.
+  const gatewayBeforeInstall = async () => (options.awaitInstallRestart ? readGatewayUnitMoment() : null);
+  const afterInstall = async (before: GatewayUnitMoment | null) => {
+    if (options.awaitInstallRestart) await awaitGatewayRestartAfter(before);
+  };
 
   // MATCHED ON `consent`, not on "anything that is not an install". The third
   // stage (`not-installed`, TASK-738) records an entry the core has no package
@@ -283,10 +362,16 @@ export async function runPluginRepair(
         // can then fail, so an entry ClawBox had switched off may be ON now over
         // a plugin that does not load — the readiness refusal it was switched
         // off to avoid. Put it back where it was found.
-        if (entry.disabled) await switchOff(entry.id);
+        if (entry.disabled) {
+          await switchOff(entry.id);
+          switchedOff = true;
+        }
         return fail("repair_failed", "enable", cliFailureCause("openclaw plugins enable", err));
       }
-      if (entry.disabled) await switchOff(entry.id);
+      if (entry.disabled) {
+        await switchOff(entry.id);
+        switchedOff = true;
+      }
       stage = "install";
     }
   }
@@ -294,27 +379,33 @@ export async function runPluginRepair(
   if (stage !== "consent") {
     if (registryId === "deepseek") {
       // The DeepSeek provider has its own installer, and it is the one that
-      // knows the `clawhub:` scheme and the pinned-then-unpinned order — pinned
-      // to the core that is on the box NOW, so it needs no rebase. `--force`,
-      // because after a core bump the old payload is usually still on disk and
-      // the CLI refuses to install over it otherwise.
-      const result = await installDeepseekProviderPlugin({
-        force: true,
-        ...(options.recheckUnavailable ? { recheckUnavailable: true } : {}),
-      });
+      // knows the registries and their order — pinned ClawHub, pinned npm, then
+      // unpinned ClawHub, exactly as the boot script walks them — pinned to the
+      // core that is on the box NOW, so it needs no rebase. `--force`, because
+      // after a core bump the old payload is usually still on disk and the CLI
+      // refuses to install over it otherwise.
+      const before = await gatewayBeforeInstall();
+      const result = await installDeepseekProviderPlugin({ force: true });
       if (!result.installed) {
+        // The LAST attempt's refusal (TASK-1302). Each spec is tried because
+        // the one before it failed, so the earlier refusals are already
+        // answered: the 4.1 row kept saying "Version not found on ClawHub" for
+        // a pinned build no Retry could ever fetch, over the fallback's own
+        // refusal — the one that was actually still in the way.
         return fail("repair_failed", "install", causeLine(
           "openclaw plugins install failed",
-          result.failures[0]?.replace(/^\S+:\s*/, "") ?? "",
+          (result.failures[result.failures.length - 1] ?? "").replace(/^\S+:\s*/, ""),
         ));
       }
       spec = result.installed;
+      await afterInstall(before);
     } else {
       // THE SPEC THE BOOT SCRIPT USED, never the short id: `codex` resolves
       // `@latest`, drifts ahead of the pinned runtime and crashes every Codex
       // chat. A marker written before the field existed has no spec, and this
       // refuses rather than guessing one — the next boot writes a full row.
       if (!spec) return fail("no_spec", "spec", "");
+      const before = await gatewayBeforeInstall();
       try {
         // `--force` because the boot path uses it and because the CLI exits 1
         // with "plugin already exists (delete it first)" otherwise.
@@ -326,6 +417,7 @@ export async function runPluginRepair(
       } catch (err) {
         return fail("repair_failed", "install", cliFailureCause("openclaw plugins install", err));
       }
+      await afterInstall(before);
     }
   }
 
@@ -336,9 +428,20 @@ export async function runPluginRepair(
   // `plugins inspect --runtime` answers `status: "disabled"`. `plugins enable`
   // does flip it, so writing `true` over `true` is a no-op there.
   //
+  // AND CLAWBOX AI'S OWN PLUGIN WHATEVER THE ROW'S `disabled` SAYS, once this
+  // press has installed it (TASK-1302). The row a 4.1 boot filed says
+  // `disabled: false` — there was no entry to switch off yet — and on the board
+  // the entry was an explicit `false` all the same (`plugins uninstall
+  // deepseek` leaves exactly that), so the Retry installed the plugin, left it
+  // off, and answered `repair_failed` on every press. The press is the reason:
+  // the owner asked for ClawBox AI's plugin back. The installer ran with
+  // `--accept-capabilities`, so this write is all that is missing — measured on
+  // 2026.9.4, the runtime then answers loaded and activated.
+  //
   // `runOpenclawConfigSet` verifies the write against the file, so an
   // unwritable config is a failure rather than a green answer.
-  if (entry.disabled) {
+  const switchOn = entry.disabled || (registryId === "deepseek" && stage !== "consent");
+  if (switchOn) {
     try {
       await runOpenclawConfigSet([`plugins.entries["${entry.id}"].enabled`, "true", "--strict-json"]);
     } catch (err) {
@@ -346,15 +449,18 @@ export async function runPluginRepair(
     }
   }
 
-  const loaded = await harnessSaysLoaded(registryId);
-  if (loaded === true) return { ok: true, stage, spec };
+  const runtime = await inspectPluginRuntime(registryId);
+  if (runtime.loaded === true) return { ok: true, stage, spec };
   // The re-enable is a STEP of the repair, not its verdict — and only a plugin
   // that DEMONSTRABLY does not load is switched back off unless the caller
   // says otherwise (see `switchOffWhenUnverified`).
-  if (entry.disabled && (loaded === false || options.switchOffWhenUnverified)) await switchOff(entry.id);
-  return loaded === null
-    ? fail("unverified", "verify", "")
-    : fail("repair_failed", "verify", "");
+  if (switchOn && (runtime.loaded === false || options.switchOffWhenUnverified)) {
+    await switchOff(entry.id);
+    switchedOff = true;
+  }
+  return runtime.loaded === null
+    ? fail("unverified", "verify", runtime.cause)
+    : fail("repair_failed", "verify", runtime.cause);
 }
 
 /**

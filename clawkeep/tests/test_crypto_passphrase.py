@@ -57,6 +57,27 @@ def test_encrypt_decrypt_roundtrip(tmp_path: Path) -> None:
     assert recovered.read_bytes() == payload
 
 
+def test_sealed_text_opens_with_the_passphrase_and_only_with_it(tmp_path: Path) -> None:
+    """A snapshot record's file names go into the plaintext manifest sealed
+    exactly as a snapshot is: base64 of openssl's `Salted__` format."""
+    import base64
+
+    pw_file = _write_pw(tmp_path, "correct horse battery staple")
+    text = '[{"path": "~/.openclaw/workspace/order-form.pdf", "target": "/srv/x"}]'
+    sealed = crypto.seal_text(text, password_file=pw_file)
+    assert "order-form" not in sealed
+    assert base64.b64decode(sealed)[:8] == b"Salted__"
+    assert crypto.open_sealed(sealed, password_file=pw_file) == text
+    assert list(tmp_path.iterdir()) == [pw_file], "nothing left beside the passphrase"
+
+    (tmp_path / "other").mkdir()
+    with pytest.raises(crypto.CryptoError) as info:
+        crypto.open_sealed(sealed, password_file=_write_pw(tmp_path / "other", "wrong"))
+    assert crypto.is_bad_password_error(info.value)
+    with pytest.raises(crypto.CryptoError, match="not base64"):
+        crypto.open_sealed("%%% not base64 %%%", password_file=pw_file)
+
+
 def test_encrypt_rejects_empty_password_file(tmp_path: Path) -> None:
     plaintext = tmp_path / "plain.tar.gz"
     plaintext.write_bytes(b"data")

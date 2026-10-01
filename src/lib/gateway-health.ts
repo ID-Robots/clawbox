@@ -120,6 +120,130 @@ export function gatewayJournalArgs(systemctlOutput: string): string[] | null {
   ];
 }
 
+/** One moment of the gateway unit: enough to tell a restart happened since. */
+export interface GatewayUnitMoment {
+  activeState: string;
+  /** systemd's id for one activation; a new one per start. */
+  invocationId: string | null;
+  mainPid: string | null;
+}
+
+/** What `readGatewayUnitMoment` asks `systemctl show` for — its own query, and its own list. */
+export const GATEWAY_UNIT_MOMENT_PROPERTIES = ["ActiveState", "InvocationID", "MainPID"] as const;
+
+/** The gateway unit as systemd sees it now, or null when systemctl cannot be asked. */
+export async function readGatewayUnitMoment(): Promise<GatewayUnitMoment | null> {
+  try {
+    const { stdout } = await exec(
+      "/usr/bin/systemctl",
+      ["show", GATEWAY_UNIT, `--property=${GATEWAY_UNIT_MOMENT_PROPERTIES.join(",")}`, "--no-pager"],
+      { timeout: 2_000 },
+    );
+    const shown: Partial<Record<(typeof GATEWAY_UNIT_MOMENT_PROPERTIES)[number], string>> = {};
+    for (const line of String(stdout ?? "").split(/\r?\n/)) {
+      const split = line.indexOf("=");
+      const key = line.slice(0, split).trim() as (typeof GATEWAY_UNIT_MOMENT_PROPERTIES)[number];
+      if (split > 0 && GATEWAY_UNIT_MOMENT_PROPERTIES.includes(key)) shown[key] = line.slice(split + 1).trim();
+    }
+    if (!shown.ActiveState) return null;
+    return {
+      activeState: shown.ActiveState,
+      invocationId: shown.InvocationID || null,
+      // systemd answers 0 for "no main process" — between two activations, say.
+      mainPid: shown.MainPID && shown.MainPID !== "0" ? shown.MainPID : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export interface GatewayRestartWatch {
+  /** How long a restart gets to BEGIN after the change that asks for one. */
+  noticeMs: number;
+  /** How long a begun restart gets to come back active — its pre-start included. */
+  settleMs: number;
+  pollMs: number;
+  read: () => Promise<GatewayUnitMoment | null>;
+  sleep: (ms: number) => Promise<void>;
+}
+
+const DEFAULT_RESTART_WATCH: GatewayRestartWatch = {
+  // Measured on the board (TASK-1302): the gateway noticed the install's
+  // `plugins.installs` write within a second, took SIGUSR1 a second later and
+  // was back in its pre-start six seconds after that.
+  noticeMs: 20_000,
+  // The pre-start is a blocking ExecStartPre (up to `TimeoutStartSec`); on
+  // the board it took seventeen seconds with nothing to install.
+  settleMs: 240_000,
+  pollMs: 1_000,
+  read: readGatewayUnitMoment,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/**
+ * Wait out the gateway restart a config change has just asked the RUNNING
+ * gateway for, and answer how it went.
+ *
+ * OpenClaw watches its own config: a `plugins install` writes
+ * `plugins.installs.<id>`, and a gateway with config reload on answers that
+ * with "config change requires gateway restart" and SIGUSR1. systemd then runs
+ * the whole unit again — `scripts/gateway-pre-start.sh` included, which reads
+ * and writes the same openclaw.json and the same repair rows. Anything that
+ * checks the result of the install before that restart is over is checking a
+ * box that is about to change under it (TASK-1302: the Retry's verdict raced
+ * exactly this restart on the board).
+ *
+ *   * `"none"`     — the gateway was not running, or no restart began within
+ *                    `noticeMs` (config reload off, or nothing to reload);
+ *   * `"settled"`  — a restart began and the unit is active again, on a new
+ *                    activation;
+ *   * `"failed"`   — a restart began and the unit ended up failed;
+ *   * `"timeout"`  — a restart began and had not finished within `settleMs`;
+ *   * `"unknown"`  — systemd could not be asked.
+ *
+ * Never throws. The caller goes on whatever the answer: waiting is only ever
+ * about WHEN to look, and the look itself is what decides.
+ */
+export async function awaitGatewayRestartAfter(
+  before: GatewayUnitMoment | null,
+  overrides: Partial<GatewayRestartWatch> = {},
+): Promise<"none" | "settled" | "failed" | "timeout" | "unknown"> {
+  const watch = { ...DEFAULT_RESTART_WATCH, ...overrides };
+  if (!before) return "unknown";
+  if (before.activeState !== "active") return "none";
+  const moved = (now: GatewayUnitMoment) => now.activeState !== "active"
+    || now.invocationId !== before.invocationId
+    || now.mainPid !== before.mainPid;
+  const cameBack = (now: GatewayUnitMoment) => now.activeState === "active"
+    && (now.invocationId !== before.invocationId || now.mainPid !== before.mainPid);
+
+  let waited = 0;
+  let began = false;
+  while (waited < watch.noticeMs) {
+    await watch.sleep(watch.pollMs);
+    waited += watch.pollMs;
+    const now = await watch.read();
+    if (!now) return "unknown";
+    if (moved(now)) {
+      began = true;
+      if (cameBack(now)) return "settled";
+      break;
+    }
+  }
+  if (!began) return "none";
+
+  waited = 0;
+  while (waited < watch.settleMs) {
+    await watch.sleep(watch.pollMs);
+    waited += watch.pollMs;
+    const now = await watch.read();
+    if (!now) return "unknown";
+    if (cameBack(now)) return "settled";
+    if (now.activeState === "failed") return "failed";
+  }
+  return "timeout";
+}
+
 export async function getGatewayServiceHealth(): Promise<GatewayServiceHealth> {
   try {
     const { stdout } = await exec(

@@ -38,6 +38,13 @@ next-env.d.ts
 # itself `dirty: true` (hwtest-round1, 2026-08-24). Ignored here so the artifact
 # cannot fake drift; the updater deletes any it finds.
 .deployed-sha
+# The first-boot installer's "install still to run" marker (e2e-install's
+# entrypoint drops it; clawbox-bootstrap.service removes it only once install.sh
+# has finished). Untracked, it was an owner edit to the local-edits save and a
+# stray to sync_repo_to_update_target's `git clean -fd`, which deleted it at the
+# START of the install — so the harness read "marker gone, HTTP up" as a
+# finished install while install.sh was still at its VNC step (TASK-1316).
+.needs-install
 claude-code-source-code/
 code-source-code/
 .omx/
