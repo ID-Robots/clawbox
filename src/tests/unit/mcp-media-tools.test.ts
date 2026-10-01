@@ -10,6 +10,8 @@
  *     discards and asks the same question again;
  *   - a spent allowance and a busy voice come back as CONFLICT with "carry on
  *     without", never as a retryable outage;
+ *   - a box busy DRAWING is not a spent allowance: the tool waits, asks once
+ *     more, and says "busy" rather than "spent" if it still is (TASK-1355);
  *   - every success says how many are left, which is what stops the loop
  *     before the per-run cap has to.
  */
@@ -20,7 +22,12 @@ import path from "path";
 import { saveEnv } from "../helpers/env";
 import { captureRegistrar, type CaptureHarness } from "../helpers/mcp-registrar";
 import { ApiError } from "../../../mcp/lib/errors";
-import { AUDIO_CALL_TIMEOUT_MS, IMAGE_CALL_TIMEOUT_MS, registerMediaTools } from "../../../mcp/tools/media";
+import {
+  AUDIO_CALL_TIMEOUT_MS,
+  IMAGE_BUSY_RETRY_MS,
+  IMAGE_CALL_TIMEOUT_MS,
+  registerMediaTools,
+} from "../../../mcp/tools/media";
 
 const { apiPost } = vi.hoisted(() => ({ apiPost: vi.fn() }));
 
@@ -77,9 +84,19 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   restore();
   fs.rmSync(base, { recursive: true, force: true });
 });
+
+/** The image route's own refusals, exactly as mediaError writes them. */
+const BUSY = () => new ApiError(429, JSON.stringify({ error: "This ClawBox is already drawing as many pictures as it can queue.", code: "busy" }));
+const ALLOWANCE = () => new ApiError(429, JSON.stringify({ error: "You have used up today's ClawBox AI pictures.", code: "allowance" }));
+
+/** How many times the tool asked the image route. */
+function imageAsks(): number {
+  return apiPost.mock.calls.filter(([r]) => r === "/setup-api/coding-agent/media/image").length;
+}
 
 describe("when they exist at all", () => {
   it("registers nothing outside a run, whatever the media variable says", () => {
@@ -106,6 +123,17 @@ describe("waiting longer than the backend", () => {
     expect(IMAGE_CALL_TIMEOUT_MS).toBeGreaterThan(120_000);
     expect(AUDIO_CALL_TIMEOUT_MS).toBeGreaterThan(90_000);
     void mediaTools();
+  });
+
+  it("waits out a busy box and asks once more inside the time Hermes gives a tool call", () => {
+    // scripts/register-mcp.sh's `"timeout": N` is how long Hermes lets one
+    // tool call run. The wait plus one full call must fit in it, or the
+    // retry would be cut off and the picture paid for with nobody to receive it.
+    const registration = fs.readFileSync(path.resolve(process.cwd(), "scripts/register-mcp.sh"), "utf-8");
+    const seconds = Number(/"timeout":\s*(\d+)/.exec(registration)?.[1]);
+    expect(seconds).toBeGreaterThan(0);
+    expect(IMAGE_BUSY_RETRY_MS).toBeGreaterThanOrEqual(15_000);
+    expect(IMAGE_BUSY_RETRY_MS + IMAGE_CALL_TIMEOUT_MS).toBeLessThan(seconds * 1000);
   });
 
   it("passes that timeout on the call it actually makes", async () => {
@@ -160,6 +188,82 @@ describe("what a refusal tells it to do next", () => {
     if (!out.isError) throw new Error("unreachable");
     expect(out.error.code).toBe("CONFLICT");
     expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("reads the proxy's own allowance refusal as a stop, without waiting or asking again", async () => {
+    apiPost.mockRejectedValue(ALLOWANCE());
+    const h = mediaTools();
+    const out = await h.call("generate_image", { prompt: "x", path: "hero.png" });
+    if (!out.isError) throw new Error("unreachable");
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/picture allowance is spent/i);
+    expect(out.error.next).toMatch(/do not retry/i);
+    expect(imageAsks()).toBe(1);
+  });
+
+  it("waits out a busy box and asks once more, instead of calling it a spent allowance", async () => {
+    // TASK-1352 on lab2: the run's first picture met the box drawing its own
+    // project icon, the route answered 429 "busy" in 30 ms, and the tool told
+    // the run its allowance for the day was spent — with 1171 of 100000 used.
+    vi.useFakeTimers();
+    apiPost.mockRejectedValueOnce(BUSY());
+    const h = mediaTools();
+    const pending = h.call("generate_image", { prompt: "a crab", path: "assets/hero.png" });
+
+    await vi.advanceTimersByTimeAsync(IMAGE_BUSY_RETRY_MS - 1_000);
+    expect(imageAsks()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const out = await pending;
+
+    expect(imageAsks()).toBe(2);
+    expect(out.isError).toBe(false);
+    if (out.isError) throw new Error("unreachable");
+    expect(out.text).toContain("Wrote assets/hero.png");
+    // The second ask is the same picture, on the same budget.
+    const [first, second] = apiPost.mock.calls;
+    expect(second[1]).toEqual(first[1]);
+    expect(second[2]?.timeoutMs).toBe(IMAGE_CALL_TIMEOUT_MS);
+  });
+
+  it("says busy, not spent, when the box is still drawing after the wait — and asks no third time", async () => {
+    vi.useFakeTimers();
+    apiPost.mockRejectedValue(BUSY());
+    const h = mediaTools();
+    const pending = h.call("generate_image", { prompt: "x", path: "hero.png" });
+    await vi.advanceTimersByTimeAsync(IMAGE_BUSY_RETRY_MS);
+    const out = await pending;
+
+    expect(imageAsks()).toBe(2);
+    if (!out.isError) throw new Error("unreachable");
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/busy drawing/i);
+    expect(out.error.message).toMatch(/allowance is not spent/i);
+    expect(out.error.next).toMatch(/once more later/i);
+    expect(out.error.next).not.toMatch(/do not retry/i);
+  });
+
+  it("stops at once when the second ask meets a spent allowance", async () => {
+    vi.useFakeTimers();
+    apiPost.mockRejectedValueOnce(BUSY()).mockRejectedValueOnce(ALLOWANCE());
+    const h = mediaTools();
+    const pending = h.call("generate_image", { prompt: "x", path: "hero.png" });
+    await vi.advanceTimersByTimeAsync(IMAGE_BUSY_RETRY_MS);
+    const out = await pending;
+    if (!out.isError) throw new Error("unreachable");
+    expect(out.error.message).toMatch(/picture allowance is spent/i);
+    expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("does not wait on the voice: a busy voice is still one ask and a stop", async () => {
+    // The voice queue waits its turn inside the route already; its 429s keep
+    // their own wording, which no longer mentions pictures.
+    apiPost.mockRejectedValue(new ApiError(429, JSON.stringify({ error: "speaking", code: "busy" })));
+    const h = mediaTools();
+    const out = await h.call("generate_audio", { text: "x", path: "a.wav" });
+    if (!out.isError) throw new Error("unreachable");
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).not.toMatch(/picture/i);
+    expect(apiPost).toHaveBeenCalledTimes(1);
   });
 
   it("reads an unlinked box as a reason to stop asking for the rest of the run", async () => {
