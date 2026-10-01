@@ -94,6 +94,21 @@ describe("resolveProjectFolder — what may be pinned", () => {
     expect(code(() => lib.resolveProjectFolder("~/keys"))).toBe("protected");
   });
 
+  it("refuses a folder that HOLDS a store — the data directory, the checkout, ~/.openclaw, ~/.config — even through a link", () => {
+    mk(".openclaw/workspace");
+    mk(".config/gh");
+    fs.symlinkSync(CHECKOUT, path.join(HOME, "box"));
+    expect(code(() => lib.resolveProjectFolder("~/clawbox/data"))).toBe("protected");
+    expect(code(() => lib.resolveProjectFolder("~/clawbox"))).toBe("protected");
+    expect(code(() => lib.resolveProjectFolder("~/box/data"))).toBe("protected");
+    expect(code(() => lib.resolveProjectFolder("~/.openclaw"))).toBe("protected");
+    expect(code(() => lib.resolveProjectFolder("~/.config"))).toBe("protected");
+    // What sits beside or below them is still the owner's to pin.
+    mk("clawbox/data/code-projects/hello");
+    expect(lib.resolveProjectFolder("~/clawbox/data/code-projects").rel).toBe("clawbox/data/code-projects");
+    expect(lib.resolveProjectFolder("~/.openclaw/workspace").rel).toBe(".openclaw/workspace");
+  });
+
   it("refuses what is not a folder, and nothing at all", () => {
     mk("docs", "a.txt");
     expect(code(() => lib.resolveProjectFolder("~/docs/a.txt"))).toBe("not_directory");
@@ -136,6 +151,14 @@ describe("the pinned list", () => {
     expect(await lib.listProjectFolders()).toEqual([]);
     // …and it still comes off the list when asked.
     expect((await lib.removeProjectFolder("notes")).removed).toBe(true);
+  });
+
+  it("stops showing a data-directory pin stored before such pins were refused, and still unpins it", async () => {
+    mk("site");
+    await config.set(lib.PROJECT_FOLDERS_CONFIG_KEY, [{ path: "clawbox/data" }, { path: "site" }]);
+    expect(await lib.listProjectFolders()).toEqual([{ path: "site", name: "site" }]);
+    expect((await lib.removeProjectFolder("~/clawbox/data")).removed).toBe(true);
+    expect(await config.get(lib.PROJECT_FOLDERS_CONFIG_KEY)).toEqual([{ path: "site" }]);
   });
 
   it("unpins by any spelling that resolves to the pin, and says so when there was none", async () => {
@@ -195,6 +218,13 @@ describe("suggestedProjectFolders — where this box already keeps projects", ()
     ].sort());
     expect(suggested).not.toContain("projects");
     expect(suggested.some((p) => p.includes("agents"))).toBe(false);
+  });
+
+  it("does not offer a Coding Agent folder that holds the box's state", async () => {
+    codingDefaultDir = CHECKOUT;
+    expect(await lib.suggestedProjectFolders()).toEqual([]);
+    codingDefaultDir = DATA;
+    expect(await lib.suggestedProjectFolders()).toEqual([]);
   });
 
   it("leaves out what is pinned already (by any link to it), and a Coding Agent folder outside the home", async () => {
