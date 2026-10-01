@@ -14,6 +14,7 @@ import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGeneratio
 import { useCodingAgentActivity, isCodingAgentTool, type CodingAgentActivity } from '@/lib/use-coding-agent-activity'
 import { useCodingRunAutoHide } from '@/lib/use-coding-run-auto-hide'
 import { pickSpinnerVerb } from '@/lib/spinner-verbs'
+import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { gatewayFrameError, isGatewayStartingRefusal } from '@/lib/chat-gateway-starting'
@@ -6156,11 +6157,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [failPending])
 
-  // Focus input when opened
+  // Focus input when opened — on a big screen with a mouse only. On a phone or
+  // a touch screen a focused input is an open soft keyboard, and the chat
+  // jumped up under one before the owner had touched anything (and again on
+  // every session switch or reconnect); there the keyboard waits for a tap on
+  // the input.
   useEffect(() => {
-    if (isOpen && visible && status === 'connected') {
-      setTimeout(() => inputRef.current?.focus(), 100)
-    }
+    if (!(isOpen && visible && status === 'connected')) return
+    if (!shouldAutoFocusChatInput(readChatFirstEnvironment(window))) return
+    setTimeout(() => inputRef.current?.focus(), 100)
   }, [isOpen, visible, status])
 
   // Close on Escape — but only when nothing is open ON TOP of the chat, since
