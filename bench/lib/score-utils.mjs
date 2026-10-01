@@ -72,13 +72,15 @@ export async function run(cmd, args, { cwd, timeoutMs = 60_000, env } = {}) {
       env: env ? { ...process.env, ...env } : process.env,
       maxBuffer: 8 * 1024 * 1024,
     });
-    return { ok: true, code: 0, stdout, stderr };
+    return { ok: true, code: 0, stdout, stderr, timedOut: false };
   } catch (err) {
     return {
       ok: false,
       code: err.code ?? -1,
       stdout: err.stdout ?? "",
       stderr: err.stderr ?? String(err),
+      // execFile's own kill: the limit ran out (maxBuffer kills too, and says so).
+      timedOut: err.killed === true && err.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
     };
   }
 }
@@ -93,19 +95,28 @@ export async function nodeCheck(workdir, rel) {
   );
 }
 
-/** `node --test` in the workdir; returns {passCount, failCount, check}. */
+/**
+ * `node --test` in the workdir; returns {passCount, failCount, check}.
+ *
+ * --test-force-exit (Node >= 20.14 / 22): the run ends once its tests have
+ * settled. Without it a timer or handle the code under test leaves open — a
+ * refresh loop started at import — keeps the process alive until timeoutMs,
+ * and tests that all finished in milliseconds score as a timeout. timeoutMs
+ * stays the bound for tests that never settle, and then the detail says so.
+ */
 export async function nodeTest(workdir, { timeoutMs = 120_000 } = {}) {
-  const res = await run("node", ["--test"], { cwd: workdir, timeoutMs });
+  const res = await run("node", ["--test", "--test-force-exit"], { cwd: workdir, timeoutMs });
   const tap = res.stdout + res.stderr;
   const passCount = Number(tap.match(/^# pass (\d+)/m)?.[1] ?? -1);
   const failCount = Number(tap.match(/^# fail (\d+)/m)?.[1] ?? -1);
+  const counts = `pass=${passCount} fail=${failCount}`;
   return {
     passCount,
     failCount,
     check: check(
       "node --test passes",
       res.ok && failCount === 0 && passCount > 0,
-      `pass=${passCount} fail=${failCount}`,
+      res.timedOut ? `timed out after ${Math.round(timeoutMs / 1000)} s (${counts})` : counts,
       3,
     ),
   };
