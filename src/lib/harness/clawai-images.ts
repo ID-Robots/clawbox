@@ -432,8 +432,16 @@ export async function generateClawaiImageBytes(
  * Mapped from the codes the proxy actually answers with rather than invented:
  * 401/403 are the credential (`missing_token` / `invalid_token`), other 4xx is
  * the request, 5xx is the far side. The 429 arm names the daily allowance
- * because that is the only 429 this endpoint has — every plan carries a
- * per-UTC-day image cap and the proxy's own counter is what enforces it.
+ * because that is the 429 the PROXY sends: every plan carries a per-UTC-day
+ * image cap and the proxy's own counter is what enforces it.
+ *
+ * That is a claim about the upstream's status only, never about "a 429" on
+ * this box. The coding agent's media route also answers 429 when its local
+ * generation queue is full (code "busy"), and that one does not touch the
+ * allowance at all. Reading every 429 as "allowance spent" told runs to stop
+ * drawing for the day when the box was only busy for a few seconds, while the
+ * account had used 1171 of 100000 (TASK-1355). Callers branch on the code the
+ * route sends back with the status, not on the status alone.
  */
 function messageForStatus(status: number): [number, string] {
   if (status === 401 || status === 403) {

@@ -13,7 +13,10 @@
 //      device bearer, and so does a prompt-injected run.
 //   3. Every refusal is worded so the model's next step is obvious. A spent
 //      allowance and a busy voice are not faults and must not be retried —
-//      "carry on without" is the answer, and the reply says so.
+//      "carry on without" is the answer, and the reply says so. A box busy
+//      DRAWING is the exception: it answers the same 429 in 30 ms while the
+//      allowance is untouched, so generate_image waits and asks once more
+//      itself, and never reports it as a spent allowance (TASK-1355).
 //
 // No "@/" imports: this process is stdio and alias-free (mcp/lib/guard.ts), so
 // the generator and the voice are reached through their routes, never directly.
@@ -21,7 +24,7 @@
 import path from "path";
 import { isInside } from "../../src/lib/file-guard";
 import { apiPost } from "../lib/api";
-import { ToolError, type ErrorRule } from "../lib/errors";
+import { ApiError, matchRule, ToolError, type ErrorRule } from "../lib/errors";
 import { text, type Registrar } from "../lib/register";
 import { runContext, runMedia } from "../lib/run-context";
 import { zEnumOf, zText } from "../lib/schema";
@@ -41,12 +44,29 @@ import { zEnumOf, zText } from "../lib/schema";
 export const IMAGE_CALL_TIMEOUT_MS = 180_000;
 export const AUDIO_CALL_TIMEOUT_MS = 150_000;
 
+/**
+ * How long generate_image waits before its one more ask, when the device
+ * answered "busy".
+ *
+ * Busy means other requests are already drawing or queued ahead of this one
+ * (icon jobs no longer count — see withGenerationSlot), and a picture takes
+ * 5-15 s, so half a minute usually clears it. Waited HERE rather than left to
+ * the model: a small model told "try again later" either retries at once or
+ * never does. Short enough that the wait plus one full call
+ * (IMAGE_CALL_TIMEOUT_MS) stays inside the 300 s Hermes gives a tool call
+ * (scripts/register-mcp.sh); src/tests/unit/mcp-media-tools.test.ts pins that.
+ */
+export const IMAGE_BUSY_RETRY_MS = 30_000;
+
+/** The media routes' own "the box is busy" body (mediaError's code). */
+const BUSY_BODY = /"code"\s*:\s*"busy"/;
+
 /** The device's answers, turned into a next step. Order matters: first match wins. */
 const MEDIA_RULES: ErrorRule[] = [
   {
     status: 429,
     code: "CONFLICT",
-    message: "This ClawBox has spent what it can spend on this right now — today's picture allowance, or a voice that is already speaking.",
+    message: "This ClawBox cannot speak this right now — its voice allowance is spent, or the voice is already speaking.",
     next: "Do not retry this call. Finish the task without it and say in your report which asset is missing.",
   },
   {
@@ -80,6 +100,60 @@ const MEDIA_RULES: ErrorRule[] = [
     next: "Check the file name's extension and that the text or prompt is not empty, then call once more.",
   },
 ];
+
+/**
+ * generate_image's own 429s, ahead of the shared rules. Both arrive as 429 and
+ * only the body's code tells them apart, so they are matched on it: reading
+ * every 429 as a spent allowance told runs to stop drawing for the day when
+ * the box was only busy for a few seconds (TASK-1355).
+ */
+const IMAGE_RULES: ErrorRule[] = [
+  {
+    // Only reached after the tool has already waited and asked once more.
+    status: 429,
+    match: BUSY_BODY,
+    code: "CONFLICT",
+    message: "This ClawBox is still busy drawing other pictures, even after waiting. Your picture allowance is not spent; nothing was charged for this call.",
+    next: "Carry on with the rest of the task and call generate_image for this picture once more later. If it is still busy then, finish without it and say in your report which picture is missing.",
+  },
+  {
+    // "allowance" from the proxy's own daily cap, and any 429 this tool does
+    // not recognise: stopping is the safe reading of a refusal nobody named.
+    status: 429,
+    code: "CONFLICT",
+    message: "Today's ClawBox AI picture allowance is spent.",
+    next: "Do not retry this call and do not ask for more pictures in this run. Finish the task without it and say in your report which picture is missing.",
+  },
+  ...MEDIA_RULES,
+];
+
+/** Is this the image route saying the box is drawing — not a spent allowance? */
+function isBusy(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.status === 429 && BUSY_BODY.test(err.body);
+}
+
+/**
+ * Ask the device for the picture, waiting and asking once more if it is busy.
+ *
+ * The first ask carries no rules, so a refusal comes back as the raw ApiError
+ * and "busy" can be told from "allowance" before anything is said to the
+ * model. Exactly one more ask: a box still busy after the wait gets the busy
+ * rule, never a third call from here.
+ */
+async function drawPicture(body: Record<string, unknown>): Promise<MediaReply> {
+  const ask = (rules?: ErrorRule[]) => apiPost<MediaReply>(
+    "/setup-api/coding-agent/media/image",
+    body,
+    { timeoutMs: IMAGE_CALL_TIMEOUT_MS, rules },
+  );
+  try {
+    return await ask();
+  } catch (err) {
+    if (!isBusy(err)) throw err instanceof ApiError ? matchRule(err, IMAGE_RULES) ?? err : err;
+  }
+  await new Promise((resolve) => setTimeout(resolve, IMAGE_BUSY_RETRY_MS));
+  return ask(IMAGE_RULES);
+}
 
 interface MediaReply {
   path?: string;
@@ -145,11 +219,7 @@ export function registerMediaTools(reg: Registrar): void {
       { editions: ["openclaw", "hermes"], family: "browser", readOnly: false, openWorld: true, maxChars: 2_000 },
       async ({ prompt, path: given, size }: { prompt: string; path: string; size: string }) => {
         const abs = resolveInRun(given, run);
-        const reply = await apiPost<MediaReply>(
-          "/setup-api/coding-agent/media/image",
-          { path: abs, prompt, size },
-          { timeoutMs: IMAGE_CALL_TIMEOUT_MS, rules: MEDIA_RULES },
-        );
+        const reply = await drawPicture({ path: abs, prompt, size });
         // The DEVICE's size, not the argument: a box whose sharp will not load
         // writes the picture at whatever the proxy drew, and a run told
         // "256x256" would lay its page out around a number nothing produced.
