@@ -3,7 +3,10 @@ name: Nano hardware tests
 # The on-device suite (scripts/nano-tests/, TASK-1324) on ONE real Jetson from
 # the nano lab: reserve a free board, rebuild it to the commit under test, prove
 # it runs that commit, run the suite, and then — whatever happened, a failure or
-# a cancel included — clean the board back to beta and release it.
+# a cancel included — hand the board to the reflash queue for a clean golden
+# restore (recycle); release is the fallback. Every board `nano-ci reserve`
+# hands out was restored from the golden image and provisioned to beta's head
+# by the lab host's reflash service since its last run (TASK-1365).
 #
 # Everything that needs the real hardware and nothing that the container CI
 # already covers: see docs/nano-hardware-tests.md.
@@ -33,9 +36,9 @@ name: Nano hardware tests
 #
 # In parallel: one board job at a time PER PULL REQUEST, never cancelled once
 # it runs. Different PRs run side by side, as many as there are `nano-lab`
-# runner instances on the lab host and FREE boards in the lab. A job that finds
-# no free board asks again every minute for 20 minutes, then fails with
-# "No free nano-lab board".
+# runner instances on the lab host and FREE, freshly reflashed boards in the
+# lab. A job that finds no free board asks again every minute for 20 minutes,
+# then fails with "No free nano-lab board".
 #
 # Never fork code on the lab host — two layers, both documented in
 # docs/nano-hardware-tests.md:
@@ -179,22 +182,23 @@ jobs:
     runs-on: [self-hosted, nano-lab]
     # One board job at a time PER PULL REQUEST (a dispatch: per ref it was
     # dispatched from), and a running job is never cancelled by the next one:
-    # its cleanup and release must run. A push to the PR queues behind the PR's
-    # own running job; GitHub keeps ONE pending job per group, so a third push
-    # replaces the second, which then shows as cancelled before it ever took a
-    # board — only ever an older commit of the same PR. Different PRs are
-    # different groups and run side by side, bounded by the number of
-    # `nano-lab` runner instances on the lab host (one job each) and by the
-    # FREE boards `nano-ci reserve` finds.
+    # its recycle (or the release fallback) must run. A push to the PR queues
+    # behind the PR's own running job; GitHub keeps ONE pending job per group,
+    # so a third push replaces the second, which then shows as cancelled before
+    # it ever took a board — only ever an older commit of the same PR.
+    # Different PRs are different groups and run side by side, bounded by the
+    # number of `nano-lab` runner instances on the lab host (one job each) and
+    # by the FREE boards `nano-ci reserve` finds — only freshly reflashed ones.
     concurrency:
       group: nano-lab-pr-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
-    # The budget, so that cleanup always has room: waiting for a free board 20
-    # + rebuild 20 + health 10 + suite 40 at the very worst — but the suite's
-    # cap shrinks by every minute spent waiting (never below 20), so the steps
-    # before cleanup take at most ~70 and cleanup keeps at least ~20. A normal
-    # run spends ~25 of the 90 before cleanup, leaving a reflash (~40 min) time
-    # to finish.
+    # The budget: waiting for a free board 20 + rebuild 20 + health 10 + suite
+    # 40 at the very worst — but the suite's cap shrinks by every minute spent
+    # waiting (never below 20), so the steps before the recycle take at most
+    # ~70 of the 90. The recycle takes seconds: the reflash (~40 min) runs on
+    # the lab host after the job, not inside it, so no room is kept for a
+    # cleanup any more and the rest is headroom for the upload, the summary,
+    # the recycle and the release fallback. A normal run spends ~25.
     timeout-minutes: 90
     defaults:
       run:
@@ -211,7 +215,7 @@ jobs:
       board_sha: ${{ steps.verify.outputs.board_sha }}
       branch_sha: ${{ steps.verify.outputs.branch_sha }}
       suite: ${{ steps.suite.outcome }}
-      cleanup: ${{ steps.cleanup.outcome }}
+      recycle: ${{ steps.recycle.outcome }}
       release: ${{ steps.release.outcome }}
       report: ${{ steps.summary.outputs.report }}
     steps:
@@ -378,7 +382,7 @@ jobs:
             [ "$rc" -eq 3 ] || break
             waited=$((SECONDS - start))
             if [ "$waited" -ge "$WAIT_S" ]; then
-              echo "note=**No free nano-lab board:** every board stayed leased for $((waited / 60)) min ($tries tries of \`nano-ci reserve\`, one a minute). Re-run the job when \`nano-lease list\` shows a FREE board." >> "$GITHUB_OUTPUT"
+              echo "note=**No free nano-lab board:** every board stayed leased for $((waited / 60)) min ($tries tries of \`nano-ci reserve\`, one a minute). Re-run the job when \`nano-ci status\` shows a clean board." >> "$GITHUB_OUTPUT"
               echo "::error title=No free nano-lab board::every board in the lab stayed leased for $((waited / 60)) min ($tries tries); re-run this job when one is free"
               exit 1
             fi
@@ -393,7 +397,7 @@ jobs:
           fi
           # "SERIAL IP LAB": the first line of exactly three fields whose second
           # is an address. A status line the helper prints around it ("leased
-          # until …") must not be read as a serial: every later step, cleanup
+          # until …") must not be read as a serial: every later step, recycle
           # and release included, would then act on a board that is not ours.
           line=$(printf '%s\n' "$out" | awk 'NF == 3 && ($2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ || $2 ~ /^[0-9A-Fa-f:]+:[0-9A-Fa-f:]*$/) { print; exit }')
           read -r serial ip lab <<<"$line"
@@ -402,11 +406,13 @@ jobs:
             echo "::error title=Unreadable reservation::nano-ci reserve printed no 'SERIAL IP LAB' line (above); if it leased a board, release it by hand"
             exit 1
           fi
-          # The wait comes out of the suite's 40 minutes, never out of
-          # cleanup's room: every started minute of it, down to 20.
+          # The wait comes out of the suite's 40 minutes, never out of the
+          # room the always() steps keep: every started minute of it, down to
+          # 20.
           suite_minutes=$((40 - (waited + 59) / 60))
           [ "$suite_minutes" -ge 20 ] || suite_minutes=20
-          # Once `serial` is an output, the cleanup and release steps run.
+          # Once `serial` is an output, the recycle step runs (and the release
+          # step, when the recycle did not succeed).
           {
             echo "serial=$serial"
             echo "ip=$ip"
@@ -591,24 +597,34 @@ jobs:
             echo "$eof"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Clean the board up
-        id: cleanup
+      # `nano-ci recycle` hands the board from the CI lease to the lab host's
+      # reflash service within seconds and returns 0; it never waits for the
+      # reflash. The service restores the board from the golden image,
+      # provisions it to beta's head, verifies it and releases it FREE with
+      # the "clean" marker that `nano-ci reserve` asks for — or quarantines
+      # it. Once this step succeeds the board is no longer ours.
+      - name: Recycle the board for a clean reflash
+        id: recycle
         if: always() && steps.reserve.outputs.serial != ''
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
         run: |
-          if nano-ci cleanup "$SERIAL"; then
-            echo "- Cleanup: \`$SERIAL\` rebuilt back to beta and its test projects wiped." >> "$GITHUB_STEP_SUMMARY"
+          if nano-ci recycle "$SERIAL"; then
+            echo "- Recycled \`$SERIAL\`: handed to the reflash queue for a clean golden restore + beta provision." >> "$GITHUB_STEP_SUMMARY"
           else
             rc=$?
-            echo "::error title=Board cleanup failed::nano-ci cleanup $SERIAL exited $rc; the board needs a look before its next job"
-            echo "- **Cleanup FAILED** for \`$SERIAL\` (exit $rc): the board needs a look before its next job." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=Board recycle failed::nano-ci recycle $SERIAL exited $rc; the board stays leased and is released below"
+            echo "- **Recycle FAILED** for \`$SERIAL\` (exit $rc): the board stays leased and is released below." >> "$GITHUB_STEP_SUMMARY"
             exit "$rc"
           fi
 
+      # The fallback path, only when the recycle did not succeed (it failed,
+      # or never finished): the board is still leased to `ci` and must not
+      # stay so. After a recycle that succeeded it belongs to the reflash
+      # service, no longer to `ci`, and the broker would refuse the release.
       - name: Release the board
         id: release
-        if: always() && steps.reserve.outputs.serial != ''
+        if: always() && steps.reserve.outputs.serial != '' && steps.recycle.outcome != 'success'
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
         run: |
@@ -659,7 +675,7 @@ jobs:
           BOARD_SHA: ${{ needs.nano-hardware-tests.outputs.board_sha }}
           BRANCH_SHA: ${{ needs.nano-hardware-tests.outputs.branch_sha }}
           SUITE: ${{ needs.nano-hardware-tests.outputs.suite }}
-          CLEANUP: ${{ needs.nano-hardware-tests.outputs.cleanup }}
+          RECYCLE: ${{ needs.nano-hardware-tests.outputs.recycle }}
           RELEASE: ${{ needs.nano-hardware-tests.outputs.release }}
           REPORT: ${{ needs.nano-hardware-tests.outputs.report }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -696,11 +712,14 @@ jobs:
               }
               if (env.SERIAL) {
                 const suite = superseded ? 'not run' : env.SUITE === 'success' ? 'passed' : env.SUITE === 'failure' ? 'failed' : 'did not run to the end';
-                const cleanup = env.CLEANUP === 'success' ? 'cleaned back to beta'
-                  : env.CLEANUP === 'failure' ? '**cleanup FAILED** — the board needs a look'
-                  : '**cleanup did not finish** — the board needs a look';
-                const release = env.RELEASE === 'success' ? 'released' : '**not released** (its lease expires in 24 h)';
-                lines.push(`- Board \`${env.SERIAL}\`: suite ${suite}; ${cleanup}; ${release}.`);
+                // Release is only the fallback: after a recycle that succeeded
+                // it is skipped, because the board is the reflash service's.
+                const recycle = env.RECYCLE === 'failure' ? '**recycle FAILED**' : '**recycle did not finish**';
+                const fate = env.RECYCLE === 'success' ? 'recycled for a clean reflash'
+                  : env.RELEASE === 'success' ? `${recycle}, released`
+                  : env.RELEASE === 'failure' ? `${recycle} and **release FAILED**: board needs a look`
+                  : `${recycle} and **not released**: board needs a look (it stays leased to \`ci\`)`;
+                lines.push(`- Board \`${env.SERIAL}\`: suite ${suite}; ${fate}.`);
               } else {
                 lines.push('- No board was reserved.');
               }
