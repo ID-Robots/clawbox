@@ -206,6 +206,10 @@ jobs:
     # the lab host, never holds a token that can write.
     outputs:
       serial: ${{ steps.reserve.outputs.serial }}
+      # The reserve step's outcome — `cancelled` when the job was cancelled
+      # while it waited for a free board, `skipped` when the job ended before
+      # the step — and empty only when the job never started at all.
+      reserve: ${{ steps.reserve.outcome }}
       branch: ${{ steps.ref.outputs.branch }}
       superseded: ${{ steps.verify.outputs.superseded }}
       board_sha: ${{ steps.verify.outputs.board_sha }}
@@ -627,14 +631,18 @@ jobs:
     # saying "passed" (pr-tests-coverage.yml has the history). Not for a fork
     # (its token cannot write; no fork run gets this far anyway), not when the
     # gate kept `plan` from running (nothing ran), and not for a board job
-    # cancelled before it ever held a board — a newer push to the PR took its
-    # place in the queue, and that run reports.
+    # cancelled while still pending — a newer push to the PR took its place in
+    # the PR's concurrency group, and that run reports. Such a job never ran a
+    # step, so its `reserve` outcome is empty. An empty `serial` is not that
+    # test: a job a person cancelled while it waited for a free board, or one
+    # that timed out before reserving, has none either, and must still report,
+    # or the section would keep an older commit's result.
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       needs.plan.result != 'skipped' &&
-      !(needs.nano-hardware-tests.result == 'cancelled' && needs.nano-hardware-tests.outputs.serial == '')
+      !(needs.nano-hardware-tests.result == 'cancelled' && needs.nano-hardware-tests.outputs.reserve == '')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Two runs of one PR never rewrite the section at the same time, and do it

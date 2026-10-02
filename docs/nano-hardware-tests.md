@@ -22,6 +22,9 @@ reopened and again on every push to it, as long as:
 | The PR does **not** carry the label `skip-nano` | The only opt-out. |
 | The PR changes something besides documentation | See [Docs-only pull requests](#docs-only-pull-requests). |
 
+Since 2 Oct 2026 **On-device tests (nano-lab)** is a **required** check on
+`beta`, and a skipped run (a docs-only PR, `skip-nano`) counts as passing.
+
 A **draft** runs like any other PR: the coding agent opens most of our PRs as
 drafts, and the board run is part of the checks it waits for. Marking a draft
 ready for review starts no second run — its head commit has already been
@@ -116,12 +119,15 @@ from>`), with `cancel-in-progress: false`:
   own running job. GitHub keeps only ONE pending job per group, so when a third
   push arrives the second one is cancelled before it starts: it never had a
   board, nothing needs cleaning, and it was an older commit of the same PR.
-  That cancelled job does not touch the PR comment.
+  That cancelled job does not touch the PR comment. A job cancelled after it
+  started — by a person while it waited for a free board, or by its timeout —
+  does: the section then says *cancelled* for that commit.
 - **Different PRs run side by side.** Two limits bound how many: the number of
-  runner instances with the `nano-lab` label on the lab host (each runs one job
-  at a time; on 2 Oct 2026 nexus0 runs four: `nexus0-nano-lab`, `-2`, `-3` and
-  `-4`), and the number of boards that `nano-ci reserve` finds FREE. A job waiting for a runner instance waits on
-  GitHub, before its 90 minutes start.
+  runner instances with the `nano-lab` label on the lab host, and the number of
+  boards that `nano-ci reserve` finds FREE. Each runner instance runs one job
+  at a time, and on 2 Oct 2026 nexus0 runs four — `nexus0-nano-lab`, `-2`,
+  `-3` and `-4` — so **at most four PRs' board jobs run at once**. A fifth
+  waits on GitHub for a free runner instance, before its 90 minutes start.
 
 ### Superseded by a newer push
 
@@ -218,8 +224,11 @@ and **PR comment** reports it.
    PR's one **CI Summary** comment — the comment `Tests`, `E2E` and
    `E2E Install` already edit in place — is rewritten with the verdict, the
    commit, the board and its cleanup, and the job summary. One comment per PR,
-   never one per push. A skipped docs-only run says so there too; a board job
-   cancelled before it held a board leaves the section alone.
+   never one per push. A skipped docs-only run says so there too. Only a board
+   job cancelled while still pending — replaced by a newer push in the PR's
+   concurrency group, so it never ran a step and its `reserve` output is empty
+   — leaves the section alone; a cancelled job that started reports
+   *cancelled*, with or without a board.
 
 The board job on the lab host holds only a read token (`contents: read`, not
 persisted by the checkout). The comment is written by the separate job on
