@@ -227,7 +227,7 @@ export function allowReason(line) {
   const m = MARKER_RE.exec(line);
   if (!m) return null;
   return m[1]
-    .replace(/\s*(?:-->|\*\/|%>|#\}|\}\})\s*$/, "")
+    .replace(/\s*(?:--!?>|\*\/|%>|#\}|\}\})\s*$/, "")
     .replace(/^[\s:=,;()—–-]+/, "")
     .trim();
 }
