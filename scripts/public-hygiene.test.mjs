@@ -193,6 +193,15 @@ describe("redactText", () => {
     assert.equal(redactText("nothing", { masks: [{ value: "", placeholder: "<board-ip>" }] }), "nothing");
   });
 
+  it("masks and redacts an address glued to a word", () => {
+    const board = ip(192, 168, 50, 18);
+    const masks = [{ value: board, placeholder: "<board-ip>" }];
+    assert.equal(redactText(`known_hosts_${board} host${board}x`, { masks }), "known_hosts_<board-ip> host<board-ip>x");
+    assert.equal(redactText(`eth0_${ip(10, 9, 8, 7)} up`), "eth0_<private-ip> up");
+    // A scan stays strict: a word glued to digits is not taken for an address.
+    assert.deepEqual(categories(`v${ip(10, 1, 2, 3)}`), []);
+  });
+
   it("honours no allow marker", () => {
     assert.equal(redactText(`${ip(10, 9, 8, 7)} # public-hygiene: allow a reason`), "<private-ip> # public-hygiene: allow a reason");
   });
@@ -341,12 +350,31 @@ describe("the CLI", () => {
     fs.writeFileSync(path.join(dir, "summary.json"), JSON.stringify({ reason: `failed on ${ip(192, 168, 50, 9)}` }));
     fs.writeFileSync(path.join(dir, "sub", "10-x.log"), `log in ${home("station1")}/w\n`);
     fs.writeFileSync(path.join(dir, "core.bin"), Buffer.from([1, 0, 2]));
+    const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "public-hygiene-outside-")), "host.txt");
+    fs.writeFileSync(outside, `host ${ip(10, 9, 8, 7)}\n`);
+    fs.symlinkSync(outside, path.join(dir, "linked.log"));
     const r = run(["redact-files", dir]);
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, "summary.json"), "utf8")), { reason: "failed on <private-ip>" });
     assert.equal(fs.readFileSync(path.join(dir, "sub", "10-x.log"), "utf8"), "log in /home/<user>/w\n");
     assert.equal(fs.existsSync(path.join(dir, "core.bin")), false);
+    // A link would be uploaded as what it points at: it goes, its target stays as it was.
+    assert.equal(fs.existsSync(path.join(dir, "linked.log")), false);
+    assert.equal(fs.readFileSync(outside, "utf8"), `host ${ip(10, 9, 8, 7)}\n`);
+    assert.match(r.stderr, /removed linked\.log: not a regular file/);
     assert.match(r.stderr, /redacted 1 private-ip, 1 home-path in 2 files/);
+  });
+
+  it("works when run through a linked folder", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "public-hygiene-link-"));
+    fs.symlinkSync(path.dirname(SCRIPT), path.join(dir, "linked"));
+    const linked = path.join(dir, "linked", path.basename(SCRIPT));
+    fs.writeFileSync(path.join(dir, "notes.md"), `board ${ip(10, 9, 8, 7)}\n`);
+    const scan = spawnSync(process.execPath, [linked, "scan-files", path.join(dir, "notes.md")], { encoding: "utf8", env: { ...process.env, GITHUB_ACTIONS: "", GITHUB_STEP_SUMMARY: "" } });
+    assert.equal(scan.status, 1, scan.stdout + scan.stderr);
+    assert.match(scan.stdout, /notes\.md:1: private-ip/);
+    const redact = spawnSync(process.execPath, [linked, "redact"], { input: `x ${ip(10, 9, 8, 7)}\n`, encoding: "utf8" });
+    assert.equal(redact.stdout, "x <private-ip>\n");
   });
 
   it("refuses bad usage", () => {

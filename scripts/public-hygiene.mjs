@@ -52,7 +52,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const SUPPORT_CONTACT = "yanko@idrobots.com";
 const STAFF_DOMAINS = ["idrobots.com", "clawbox.com"];
@@ -111,6 +111,9 @@ const EMAIL_RE = /(?<![\w.%+-])[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2
 // The account name ends before a trailing dot: `/home/clawbox.` ends a sentence.
 const HOME_RE = /(?<![\w.~$-])\/(home|Users)\/([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)/g;
 const IPV4_RE = /(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?!\w|\.\d)/g;
+// Redaction also takes an address glued to a word (`host_10.1.2.3`): what is
+// published may lose a version string, but never keeps an address.
+const IPV4_LOOSE_RE = /(?<![\d.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?!\d|\.\d)/g;
 const IPV6_RE = /(?<![\w:.])(?:f[cd][0-9a-f]{2}|fe[89ab][0-9a-f]):[0-9a-f:]*/gi;
 const WORDS_RE = /[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*/g;
 // A private range named by its base address, e.g. in a firewall rule.
@@ -155,8 +158,14 @@ function redactCompound(compound, names, hit) {
   return out.join("");
 }
 
-const looksLikeAddress = (value) => /^[0-9A-Fa-f.:]+$/.test(value);
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// A masked address is replaced wherever it is not part of a longer one, even
+// glued to a word: `known_hosts_<it>`.
+function maskPattern(value) {
+  if (/^[0-9.]+$/.test(value)) return new RegExp(`(?<![0-9.])${escapeRe(value)}(?![0-9]|\\.[0-9])`, "g");
+  if (/^[0-9A-Fa-f.:]+$/.test(value)) return new RegExp(`(?<![0-9A-Fa-f:.])${escapeRe(value)}(?![0-9A-Fa-f:]|\\.[0-9])`, "g");
+  return null;
+}
 
 /**
  * Every finding in `text` replaced by its placeholder. `hit(category,
@@ -164,15 +173,12 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
  * Options: `names` (a Set of SHA-256 hex, default INTERNAL_NAME_SHA256) and
  * `masks` ([{ value, placeholder }], replaced first).
  */
-function rewrite(text, hit, { names = INTERNAL_NAME_SHA256, masks = [] } = {}) {
+function rewrite(text, hit, { names = INTERNAL_NAME_SHA256, masks = [], loose = false } = {}) {
   let out = text;
   for (const { value, placeholder } of masks) {
     if (!value || value.length < 3) continue;
-    if (looksLikeAddress(value)) {
-      out = out.replace(new RegExp(`(?<![\\w.])${escapeRe(value)}(?!\\w|\\.\\d)`, "g"), () => hit("masked", placeholder));
-    } else {
-      out = out.split(value).join(placeholder);
-    }
+    const pattern = maskPattern(value);
+    out = pattern ? out.replace(pattern, () => hit("masked", placeholder)) : out.split(value).join(placeholder);
   }
   for (const re of TOKEN_RES) out = out.replace(re, () => hit("token", "<token>"));
   out = out.replace(EMAIL_RE, (match, domain) => {
@@ -187,7 +193,7 @@ function rewrite(text, hit, { names = INTERNAL_NAME_SHA256, masks = [] } = {}) {
     if (dir === "Users" && user === "Shared") return match;
     return hit("home-path", `/${dir}/<user>`);
   });
-  out = out.replace(IPV4_RE, (match, a, b, c, d, offset, whole) => {
+  out = out.replace(loose ? IPV4_LOOSE_RE : IPV4_RE, (match, a, b, c, d, offset, whole) => {
     const octets = [a, b, c, d].map(Number);
     if (octets.some((o) => o > 255) || !isPrivateV4(octets) || isProductHotspot(octets)) return match;
     const prefix = /^\/\d{1,2}(?!\d)/.exec(whole.slice(offset + match.length));
@@ -210,7 +216,7 @@ export function redactText(text, options = {}, counts = {}) {
       counts[category] = (counts[category] || 0) + 1;
       return placeholder;
     },
-    options,
+    { ...options, loose: true },
   );
 }
 
@@ -404,15 +410,17 @@ async function scanDiff(base, head) {
   return findings.length === 0 ? 0 : 1;
 }
 
-function* walk(target) {
-  const stat = fs.lstatSync(target);
+// Every entry under `target`, with whether it is a regular file. A symlink
+// below the top is reported as one, not followed.
+function* walk(target, top = true) {
+  const stat = top ? fs.statSync(target) : fs.lstatSync(target);
   if (stat.isDirectory()) {
     for (const entry of fs.readdirSync(target).sort()) {
       if (entry === ".git" || entry === "node_modules") continue;
-      yield* walk(path.join(target, entry));
+      yield* walk(path.join(target, entry), false);
     }
-  } else if (stat.isFile()) {
-    yield target;
+  } else {
+    yield { file: target, regular: stat.isFile() };
   }
 }
 
@@ -422,8 +430,8 @@ function scanFiles(targets) {
   const findings = [];
   let checked = 0;
   for (const target of targets) {
-    for (const file of walk(target)) {
-      if (isLockfile(file)) continue;
+    for (const { file, regular } of walk(target)) {
+      if (!regular || isLockfile(file)) continue;
       const buffer = fs.readFileSync(file);
       if (isBinary(buffer)) continue;
       buffer
@@ -484,7 +492,13 @@ function redactFiles(targets, options) {
   const counts = {};
   let changed = 0;
   for (const target of targets) {
-    for (const file of walk(target)) {
+    for (const { file, regular } of walk(target)) {
+      // A link or a device would be published as whatever it points at.
+      if (!regular) {
+        fs.rmSync(file, { force: true });
+        console.error(`public-hygiene: removed ${printable(path.basename(file))}: not a regular file, so it cannot be redacted`);
+        continue;
+      }
       const buffer = fs.readFileSync(file);
       if (isBinary(buffer)) {
         fs.rmSync(file);
@@ -542,6 +556,16 @@ export async function main(argv) {
   return 2;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+// Run as a command, not imported. Both sides with symlinks resolved: Node
+// resolves them for the module's own URL, and a path through a linked folder
+// must not turn the scanner into a silent no-op.
+const invokedAs = (arg) => {
+  try {
+    return pathToFileURL(fs.realpathSync(path.resolve(arg))).href;
+  } catch {
+    return null;
+  }
+};
+if (process.argv[1] && invokedAs(process.argv[1]) === pathToFileURL(fs.realpathSync(fileURLToPath(import.meta.url))).href) {
   process.exitCode = await main(process.argv.slice(2));
 }

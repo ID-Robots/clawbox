@@ -79,7 +79,7 @@ SERIAL=$1
 
 NANO_CI=${NANO_CI:-nano-ci}
 HYGIENE=$HERE/../public-hygiene.mjs
-[ -f "$HYGIENE" ] || die "missing $HYGIENE, which redacts every log"
+[ -f "$HYGIENE" ] || die "missing scripts/public-hygiene.mjs, which redacts every log"
 missing=()
 for tool in jq timeout base64 sed node "$NANO_CI"; do
   command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
