@@ -8,20 +8,34 @@ name: Nano hardware tests
 # Everything that needs the real hardware and nothing that the container CI
 # already covers: see docs/nano-hardware-tests.md.
 #
-# Opt-in, per pull request: add the label `nano-test` to a PR into beta. The job
-# then runs on that labelling and again on every push to the PR while the label
-# stays. `workflow_dispatch` runs it on any branch, tag or commit of this
-# repository.
+# Automatic on every pull request (TASK-1362), no label needed:
+#   - every NON-DRAFT pull request into beta or main whose branch is in this
+#     repository, when it is opened, reopened or marked ready for review and on
+#     every push to it;
+#   - a DRAFT pull request only while it carries the label `nano-test` — adding
+#     that label starts a run; adding any other label never does;
+#   - never while the PR carries the label `skip-nano` (the opt-out);
+#   - not when the PR changes nothing but documentation (docs/**, docs-site/**,
+#     **/*.md; config/** never counts as documentation): the cheap `plan` job
+#     reads the changed files, and the board job is then skipped with the reason
+#     in plan's job summary and in the PR comment.
+# `workflow_dispatch` runs it on any branch, tag or commit of this repository.
 #
-# Never fork code on the lab host. The `if:` below admits a pull_request only
+# In parallel: one board job at a time PER PULL REQUEST, never cancelled once
+# it runs. Different PRs run side by side, as many as there are `nano-lab`
+# runner instances on the lab host and FREE boards in the lab. A job that finds
+# no free board asks again every minute for 20 minutes, then fails with
+# "No free nano-lab board".
+#
+# Never fork code on the lab host. Both `if:`s below admit a pull_request only
 # when its head is in THIS repository; since a pull_request run takes its
 # workflow file from the PR, the real fence for a fork is the repository setting
 # that makes fork PRs wait for a maintainer's approval — approve no fork run of
 # this workflow. A dispatch refuses refs/pull/* for the same reason.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
-    branches: [beta]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    branches: [beta, main]
   workflow_dispatch:
     inputs:
       ref:
@@ -34,27 +48,134 @@ permissions:
   contents: read
 
 jobs:
-  nano-hardware-tests:
-    name: On-device tests (nano-lab)
-    # A `labeled` event for some OTHER label on a PR that already carries
-    # nano-test is not a reason to take a board for another hour.
+  # Cheap, on GitHub's own runners, and the gate for everything after it: a
+  # draft, a `skip-nano` PR, an unrelated label or a fork never even starts it.
+  # It answers one question — does this commit need a board? — from the files
+  # the PR changes.
+  plan:
+    name: Needs a board?
+    # The gate. A pull_request runs only when ALL of these hold:
+    #   - its head is in this repository (the fork fence, as strict as before);
+    #   - it is not a draft, or it carries `nano-test` (how a draft opts in);
+    #   - it does not carry `skip-nano` (the opt-out wins over `nano-test`);
+    #   - a `labeled` event is for `nano-test` itself: any other label — a
+    #     review bot's, or `skip-nano` — is no reason to take a board for
+    #     another hour.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.head.repo.full_name == github.repository &&
-       contains(github.event.pull_request.labels.*.name, 'nano-test') &&
+       (!github.event.pull_request.draft || contains(github.event.pull_request.labels.*.name, 'nano-test')) &&
+       !contains(github.event.pull_request.labels.*.name, 'skip-nano') &&
        (github.event.action != 'labeled' || github.event.label.name == 'nano-test'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      hardware: ${{ steps.classify.outputs.hardware }}
+      reason: ${{ steps.classify.outputs.reason }}
+    steps:
+      - name: Check out the classifier
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/nano-tests/needs-board.sh
+          sparse-checkout-cone-mode: false
+
+      # The changed files AT THE COMMIT UNDER TEST: GitHub's compare of this
+      # event's base and head is the PR's "Files changed" (a three-dot diff from
+      # the merge base), pinned to these SHAs rather than to wherever the PR has
+      # moved since. Both sides of a rename are judged, so code moved into docs/
+      # still needs a board. A compare lists at most 300 files; at 300, or when
+      # the call fails, the list is partial and the PR gets a board — every
+      # doubt does (scripts/nano-tests/needs-board.sh).
+      - name: Classify the changed files
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            hardware=true
+            reason="dispatched by hand for $INPUT_REF"
+          else
+            compare="$RUNNER_TEMP/compare.json"
+            files="$RUNNER_TEMP/changed-files.txt"
+            partial=()
+            if gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" > "$compare" &&
+               count=$(jq '(.files // []) | length' "$compare") &&
+               jq -r '(.files // [])[] | .filename, (.previous_filename // empty) | gsub("[\r\n]"; "?")' "$compare" > "$files"; then
+              echo "$count changed files between ${BASE_SHA:0:12} and ${HEAD_SHA:0:12}"
+              [ "$count" -lt 300 ] || partial=(--partial)
+            else
+              echo "::warning title=Changed files unknown::could not list the PR's changed files, so it gets a board"
+              : > "$files"
+              partial=(--partial)
+            fi
+            verdict=$(bash scripts/nano-tests/needs-board.sh "${partial[@]}" < "$files") || verdict=""
+            hardware=$(sed -n 's/^hardware=//p' <<<"$verdict")
+            reason=$(sed -n 's/^reason=//p' <<<"$verdict")
+          fi
+          case "$hardware" in
+            true | false) ;;
+            *)
+              hardware=true
+              reason="the classifier gave no verdict, so the PR gets a board"
+              ;;
+          esac
+          {
+            echo "hardware=$hardware"
+            echo "reason=$reason"
+          } >> "$GITHUB_OUTPUT"
+          echo "Needs a board: $hardware ($reason)"
+          if [ "$hardware" = true ]; then
+            echo "**Needs a board:** $reason." >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Nano hardware tests — skipped"
+              echo
+              echo "**No board was taken: $reason.** A pull request that changes nothing but \`docs/**\`, \`docs-site/**\` or \`**/*.md\` (\`config/**\` excepted) skips the on-device suite."
+              echo
+              echo "To test this commit on a board anyway: \`gh workflow run nano-hardware-tests.yml -f ref=$HEAD_SHA\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  nano-hardware-tests:
+    name: On-device tests (nano-lab)
+    needs: plan
+    # `plan` carries the gate and the docs-only verdict. The fork fence is
+    # repeated here so the job that runs on the lab host never rests on another
+    # job's `if:` alone.
+    if: >-
+      needs.plan.outputs.hardware == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, nano-lab]
-    # One board job at a time across the repository, and a running job is never
-    # cancelled by the next one — a push to the PR queues behind it instead.
-    # GitHub keeps ONE pending job per group: a third queued job replaces the
-    # second, which then shows as cancelled (before it took a board) and needs
-    # a re-run.
+    # One board job at a time PER PULL REQUEST (a dispatch: per ref it was
+    # dispatched from), and a running job is never cancelled by the next one:
+    # its cleanup and release must run. A push to the PR queues behind the PR's
+    # own running job; GitHub keeps ONE pending job per group, so a third push
+    # replaces the second, which then shows as cancelled before it ever took a
+    # board — only ever an older commit of the same PR. Different PRs are
+    # different groups and run side by side, bounded by the number of
+    # `nano-lab` runner instances on the lab host (one job each) and by the
+    # FREE boards `nano-ci reserve` finds.
     concurrency:
-      group: nano-lab-board
+      group: nano-lab-pr-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: false
-    # The budget, so that cleanup always has room: rebuild 20 + health 10 +
-    # suite 40 min at the very worst; a normal run spends ~25 of the 90 before
-    # cleanup, leaving a reflash (~40 min) time to finish.
+    # The budget, so that cleanup always has room: waiting for a free board 20
+    # + rebuild 20 + health 10 + suite 40 at the very worst — but the suite's
+    # cap shrinks by every minute spent waiting (never below 20), so the steps
+    # before cleanup take at most ~70 and cleanup keeps at least ~20. A normal
+    # run spends ~25 of the 90 before cleanup, leaving a reflash (~40 min) time
+    # to finish.
     timeout-minutes: 90
     defaults:
       run:
@@ -62,6 +183,14 @@ jobs:
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       NANO_RESULTS_DIR: ${{ github.workspace }}/results
+    # For the PR comment, which runs on GitHub's runners so that this job, on
+    # the lab host, never holds a token that can write.
+    outputs:
+      serial: ${{ steps.reserve.outputs.serial }}
+      suite: ${{ steps.suite.outcome }}
+      cleanup: ${{ steps.cleanup.outcome }}
+      release: ${{ steps.release.outcome }}
+      report: ${{ steps.summary.outputs.report }}
     steps:
       # Before the checkout: a pull-request ref names code from a fork, and the
       # steps after the checkout run the code they checked out.
@@ -116,17 +245,36 @@ jobs:
           echo "purpose=$purpose" >> "$GITHUB_OUTPUT"
           echo "Testing $sha on a nano-lab board ($purpose)"
 
+      # With other PRs' jobs holding boards, none may be FREE for a while:
+      # `nano-ci reserve` exits 3 then, and is asked again every minute for up
+      # to 20 minutes before the job gives up. The step's own cap is only a
+      # backstop behind that deadline.
       - name: Reserve a free nano-lab board
         id: reserve
+        timeout-minutes: 25
         env:
           PURPOSE: ${{ steps.target.outputs.purpose }}
+          WAIT_S: "1200"
+          EVERY_S: "60"
         run: |
-          rc=0
-          out=$(nano-ci reserve "$PURPOSE") || rc=$?
-          if [ "$rc" -eq 3 ]; then
-            echo "::error title=No free nano-lab board::every board in the lab is leased right now; re-run this job when one is free"
-            exit 1
-          fi
+          start=$SECONDS
+          tries=0
+          while :; do
+            tries=$((tries + 1))
+            rc=0
+            out=$(nano-ci reserve "$PURPOSE") || rc=$?
+            [ "$rc" -eq 3 ] || break
+            waited=$((SECONDS - start))
+            if [ "$waited" -ge "$WAIT_S" ]; then
+              echo "note=**No free nano-lab board:** every board stayed leased for $((waited / 60)) min ($tries tries of \`nano-ci reserve\`, one a minute). Re-run the job when \`nano-lease list\` shows a FREE board." >> "$GITHUB_OUTPUT"
+              echo "::error title=No free nano-lab board::every board in the lab stayed leased for $((waited / 60)) min ($tries tries); re-run this job when one is free"
+              exit 1
+            fi
+            left=$((WAIT_S - waited))
+            echo "No FREE board yet (try $tries, $((waited / 60)) min waited); asking again for up to $(((left + 59) / 60)) more min"
+            sleep $((left < EVERY_S ? left : EVERY_S))
+          done
+          waited=$((SECONDS - start))
           if [ "$rc" -ne 0 ]; then
             echo "::error title=nano-ci reserve failed::exit $rc"
             exit 1
@@ -142,12 +290,20 @@ jobs:
             echo "::error title=Unreadable reservation::nano-ci reserve printed no 'SERIAL IP LAB' line (above); if it leased a board, release it by hand"
             exit 1
           fi
+          # The wait comes out of the suite's 40 minutes, never out of
+          # cleanup's room: every started minute of it, down to 20.
+          suite_minutes=$((40 - (waited + 59) / 60))
+          [ "$suite_minutes" -ge 20 ] || suite_minutes=20
           # Once `serial` is an output, the cleanup and release steps run.
           {
             echo "serial=$serial"
             echo "ip=$ip"
             echo "lab=$lab"
+            echo "suite_minutes=$suite_minutes"
           } >> "$GITHUB_OUTPUT"
+          if [ "$tries" -gt 1 ]; then
+            echo "note=Waited $((waited / 60)) min ($tries tries) for a free board, so the suite had $suite_minutes min instead of 40." >> "$GITHUB_OUTPUT"
+          fi
           echo "Reserved $serial ($ip) in $lab"
 
       - name: Rebuild the board at the commit under test
@@ -190,7 +346,7 @@ jobs:
 
       - name: Run the on-device suite
         id: suite
-        timeout-minutes: 40
+        timeout-minutes: ${{ fromJSON(steps.reserve.outputs.suite_minutes || '40') }}
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
           NANO_IP: ${{ steps.reserve.outputs.ip }}
@@ -199,6 +355,8 @@ jobs:
           NANO_RUN_ID: gh${{ github.run_id }}-${{ github.run_attempt }}
         run: bash scripts/nano-tests/run.sh "$SERIAL"
 
+      # From here on every step is `always()`, which also runs on a cancel —
+      # the run cancelled by hand, or the job's own timeout.
       - name: Upload the suite's results
         if: always() && steps.reserve.outputs.serial != ''
         uses: actions/upload-artifact@v4
@@ -208,20 +366,37 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # The job summary, and the same text as an output for the PR comment.
       - name: Job summary
+        id: summary
         if: always()
         env:
           NANO_SERIAL: ${{ steps.reserve.outputs.serial }}
           NANO_IP: ${{ steps.reserve.outputs.ip }}
           NANO_LAB: ${{ steps.reserve.outputs.lab }}
           NANO_SHA: ${{ steps.target.outputs.sha || github.event.pull_request.head.sha || inputs.ref }}
-          NANO_OUTCOME: "Steps: reserve ${{ steps.reserve.outcome || 'not run' }} · rebuild ${{ steps.rebuild.outcome || 'not run' }} · back up ${{ steps.healthy.outcome || 'not run' }} · commit verified ${{ steps.verify.outcome || 'not run' }} · suite ${{ steps.suite.outcome || 'not run' }}"
+          NANO_OUTCOME: "${{ job.status == 'cancelled' && 'The job was cancelled. ' || '' }}Steps: reserve ${{ steps.reserve.outcome || 'not run' }} · rebuild ${{ steps.rebuild.outcome || 'not run' }} · back up ${{ steps.healthy.outcome || 'not run' }} · commit verified ${{ steps.verify.outcome || 'not run' }} · suite ${{ steps.suite.outcome || 'not run' }}"
+          RESERVE_NOTE: ${{ steps.reserve.outputs.note }}
         run: |
+          report="$RUNNER_TEMP/nano-report.md"
+          : > "$report"
           if [ -f scripts/nano-tests/summary.sh ]; then
-            bash scripts/nano-tests/summary.sh "$NANO_RESULTS_DIR/summary.json" >> "$GITHUB_STEP_SUMMARY"
+            bash scripts/nano-tests/summary.sh "$NANO_RESULTS_DIR/summary.json" > "$report"
           fi
+          if [ -n "$RESERVE_NOTE" ]; then
+            printf '\n%s\n' "$RESERVE_NOTE" >> "$report"
+          fi
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          eof="NANO_REPORT_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          {
+            echo "report<<$eof"
+            head -c 50000 "$report"
+            echo
+            echo "$eof"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Clean the board up
+        id: cleanup
         if: always() && steps.reserve.outputs.serial != ''
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
@@ -236,9 +411,119 @@ jobs:
           fi
 
       - name: Release the board
+        id: release
         if: always() && steps.reserve.outputs.serial != ''
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
         run: |
           nano-ci release "$SERIAL"
           echo "- Released \`$SERIAL\`." >> "$GITHUB_STEP_SUMMARY"
+
+  # The results comment: a "Nano hardware tests" section of the one CI Summary
+  # comment the other workflows here edit in place (marker
+  # <!-- clawbox-ci-summary -->) — one comment per PR, rewritten on every run,
+  # never a new one per push.
+  comment:
+    name: PR comment
+    needs: [plan, nano-hardware-tests]
+    # `always()` is load-bearing: without a status function GitHub adds the
+    # implicit `success()`, and a failed board run would leave the section
+    # saying "passed" (pr-tests-coverage.yml has the history). Not for a fork
+    # (its token cannot write; no fork run gets this far anyway), not when the
+    # gate kept `plan` from running (nothing ran), and not for a board job
+    # cancelled before it ever held a board — a newer push to the PR took its
+    # place in the queue, and that run reports.
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.plan.result != 'skipped' &&
+      !(needs.nano-hardware-tests.result == 'cancelled' && needs.nano-hardware-tests.outputs.serial == '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Two runs of one PR never rewrite the section at the same time, and do it
+    # in the order they ran.
+    concurrency:
+      group: nano-lab-comment-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      # PR comments go through the issues API; on a PR `pull-requests: write`
+      # is enough.
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          HARDWARE: ${{ needs.plan.outputs.hardware }}
+          REASON: ${{ needs.plan.outputs.reason }}
+          BOARD_RESULT: ${{ needs.nano-hardware-tests.result }}
+          SERIAL: ${{ needs.nano-hardware-tests.outputs.serial }}
+          SUITE: ${{ needs.nano-hardware-tests.outputs.suite }}
+          CLEANUP: ${{ needs.nano-hardware-tests.outputs.cleanup }}
+          RELEASE: ${{ needs.nano-hardware-tests.outputs.release }}
+          REPORT: ${{ needs.nano-hardware-tests.outputs.report }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const marker = '<!-- clawbox-ci-summary -->';
+            const sectionStart = '<!-- clawbox-ci-nano:start -->';
+            const sectionEnd = '<!-- clawbox-ci-nano:end -->';
+            const env = process.env;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const commit = `\`${(env.HEAD_SHA || '').slice(0, 12)}\``;
+            const board = env.BOARD_RESULT;
+            const lines = [];
+            let icon;
+            if (env.PLAN_RESULT !== 'success') {
+              icon = '⚠️';
+              lines.push(`- Result: **did not run** at ${commit} — deciding whether this PR needs a board ended \`${env.PLAN_RESULT}\`. See the run.`);
+            } else if (env.HARDWARE !== 'true') {
+              icon = '⏭️';
+              lines.push(`- Result: **skipped** at ${commit} — ${env.REASON || 'no board needed'}. No board was taken.`);
+            } else {
+              // The job's verdict, as e2e-install.yml words it: only a failure
+              // gets ❌, and a cancel is not one.
+              icon = board === 'success' ? '✅' : board === 'failure' ? '❌' : board === 'cancelled' ? '⏹️' : '⚠️';
+              const verdict = board === 'success' ? 'passed' : board === 'failure' ? 'failed' : (board || 'unknown');
+              lines.push(`- Result: **${verdict}** at ${commit}`);
+              if (env.SERIAL) {
+                const suite = env.SUITE === 'success' ? 'passed' : env.SUITE === 'failure' ? 'failed' : 'did not run to the end';
+                const cleanup = env.CLEANUP === 'success' ? 'cleaned back to beta'
+                  : env.CLEANUP === 'failure' ? '**cleanup FAILED** — the board needs a look'
+                  : '**cleanup did not finish** — the board needs a look';
+                const release = env.RELEASE === 'success' ? 'released' : '**not released** (its lease expires in 24 h)';
+                lines.push(`- Board \`${env.SERIAL}\`: suite ${suite}; ${cleanup}; ${release}.`);
+              } else {
+                lines.push('- No board was reserved.');
+              }
+            }
+            lines.push(`- [View run](${runUrl})`);
+            // The board job's summary, minus its own heading; bounded so the
+            // shared comment stays well inside GitHub's 65 536 characters.
+            const report = (env.REPORT || '').replace(/^## Nano hardware tests\s*\n/, '').trim().slice(0, 20000);
+            if (report) {
+              lines.push('', '<details><summary>Board, commit and every test</summary>', '', report, '', '</details>');
+            }
+            const section = `${sectionStart}\n## ${icon} Nano hardware tests\n${lines.join('\n')}\n${sectionEnd}`;
+
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: context.issue.number, per_page: 100,
+            });
+            const existing = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+
+            // A function replacement: the report may hold `$&` or `$1`, which a
+            // replacement STRING would expand.
+            const updateSection = (body, start, end, replacement) => {
+              const pattern = new RegExp(`${start}[\\s\\S]*?${end}`);
+              return pattern.test(body) ? body.replace(pattern, () => replacement) : `${body}\n\n${replacement}`;
+            };
+
+            if (existing) {
+              const body = updateSection(existing.body ?? '', sectionStart, sectionEnd, section);
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: context.issue.number, body: `${marker}\n# CI Summary\n\n${section}`,
+              });
+            }
