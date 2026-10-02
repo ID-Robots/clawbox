@@ -132,7 +132,8 @@ step then sees the board on another commit, and asks `git ls-remote` where the
 branch is now:
 
 - the board **moved** during the rebuild (it is not on the commit it had
-  before) **and** the branch is no longer at the commit under test → the run
+  before — or, if that commit could not be read, it is exactly the branch's
+  head now) **and** the branch is no longer at the commit under test → the run
   is **superseded**: a `Superseded by a newer push` warning, the suite is not
   run, the job **passes**, and the job summary and PR comment say
   *superseded, not tested*. It is not a hardware failure and does not fail the

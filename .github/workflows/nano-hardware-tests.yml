@@ -318,7 +318,7 @@ jobs:
           {
             echo "branch=$branch"
             echo "sha=$sha"
-            echo "note=**Branch:** \`$branch\` ($how), rebuilt on the board and verified at \`${sha:0:12}\`."
+            echo "note=**Branch:** \`$branch\` ($how); the commit under test is \`${sha:0:12}\`."
           } >> "$GITHUB_OUTPUT"
           echo "Testing $sha from $how"
 
@@ -464,8 +464,10 @@ jobs:
       # commit goes untested and the step passes with a warning, because the
       # newer push has its own run, queued behind this one in the PR's
       # concurrency group. It counts as superseded only when the board did move
-      # (it is not on the commit it had before the rebuild) and the branch is
-      # no longer at the commit under test. Anything else is a wrong commit.
+      # (it is not on the commit it had before the rebuild — or, when that
+      # commit could not be read, it is exactly the branch's head now) and the
+      # branch is no longer at the commit under test. Anything else is a wrong
+      # commit.
       - name: Verify the board runs the commit under test
         id: verify
         env:
@@ -490,7 +492,10 @@ jobs:
             [[ $branch_sha =~ ^[0-9a-f]{40}$ ]] || branch_sha=""
             echo "branch_sha=$branch_sha" >> "$GITHUB_OUTPUT"
           fi
-          if [ -n "$branch_sha" ] && [ "$branch_sha" != "$SHA" ]; then
+          # Without the commit from before the rebuild, "the board moved" is
+          # only proven when the board is exactly where the branch is now.
+          if [ -n "$branch_sha" ] && [ "$branch_sha" != "$SHA" ] &&
+             { [ -n "$BEFORE" ] || [ "$board_sha" = "$branch_sha" ]; }; then
             if [ "$EVENT" = pull_request ]; then
               next="the newer push has its own run, queued behind this one"
             else
@@ -510,8 +515,10 @@ jobs:
             why="the rebuild left it on the commit it had before"
           elif [ -z "$branch_sha" ]; then
             why="the head of $BRANCH could not be read, so this cannot be told from a wrong build"
-          else
+          elif [ "$branch_sha" = "$SHA" ]; then
             why="$BRANCH is still at ${SHA:0:12}, so no newer push explains it"
+          else
+            why="its commit before the rebuild could not be read and it is not the head of $BRANCH (${branch_sha:0:12}) either, so this cannot be told from a rebuild that never moved it"
           fi
           echo "::error title=Wrong commit on the board::$SERIAL is at '${board_sha:-nothing}', expected $SHA: $why"
           echo "note=**Wrong commit on the board:** \`$SERIAL\` is at \`${board_sha:-nothing}\`, expected \`$SHA\` ($why)." >> "$GITHUB_OUTPUT"
