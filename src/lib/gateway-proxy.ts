@@ -397,6 +397,56 @@ export function gatewayProxyHeaders(source: Headers): Headers {
   return headers;
 }
 
+// ─── Chat media the agent sends ───
+//
+// A file the agent sends in the web chat arrives as a root-relative gateway URL,
+//
+//   /api/chat/media/outgoing/<session-key>/<id>/full
+//
+// which the chat card links to and the browser fetches through this proxy. The
+// gateway answers that route only with its bearer token, and the browser has
+// none: the dashboard authenticates the person with the session cookie, and the
+// gateway credential is deliberately kept off the wire (see serveGatewayHTML).
+// So every download the agent offered came back 401 (TASK-892).
+//
+// The proxy attaches the bearer itself, and only when ALL of these hold:
+//   - the request is a GET or HEAD (a read — nothing is created or changed);
+//   - the path is inside the outgoing chat-media tree, judged segment by
+//     segment so no dot-segment, encoded separator or empty segment can point
+//     the credential at any other gateway endpoint;
+//   - the caller holds the OWNER's session (hasOwnerSession — the same check
+//     that guards the token in serveGatewayHTML). Middleware already refuses a
+//     caller with no session, and refuses a non-owner user (TASK-1256) the
+//     whole /api tree; this check stands on its own anyway, because this
+//     function owns the secret and must not depend on a gate upstream.
+// Every other /api path is proxied exactly as before, without a bearer.
+const CHAT_MEDIA_OUTGOING_PREFIX = "/api/chat/media/outgoing/";
+const CHAT_MEDIA_SEGMENT_RE = /^[A-Za-z0-9._~%:@-]+$/;
+const UNSAFE_DECODED_SEGMENT_RE = /[\\/\u0000-\u001f\u007f]/;
+
+/**
+ * True when `pathname` names a file in the gateway's outgoing chat-media tree
+ * and nothing else. Exported for the unit test.
+ */
+export function isChatMediaOutgoingPath(pathname: string): boolean {
+  if (!pathname.startsWith(CHAT_MEDIA_OUTGOING_PREFIX)) return false;
+  const segments = pathname.slice(CHAT_MEDIA_OUTGOING_PREFIX.length).split("/");
+  if (segments.length < 2) return false;
+  for (const segment of segments) {
+    if (!CHAT_MEDIA_SEGMENT_RE.test(segment)) return false;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return false;
+    }
+    if (decoded === "." || decoded === ".." || UNSAFE_DECODED_SEGMENT_RE.test(decoded)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Reverse-proxy one request to the OpenClaw gateway with client attribution
  * stripped. Path and query come from the request itself, so the caller does not
@@ -409,12 +459,22 @@ export async function proxyGatewayRequest(request: NextRequest): Promise<NextRes
   const upstream = `http://127.0.0.1:${GATEWAY_PORT}${request.nextUrl.pathname}${request.nextUrl.search}`;
   const method = request.method.toUpperCase();
   const hasBody = method !== "GET" && method !== "HEAD";
+  const chatMedia = !hasBody && isChatMediaOutgoingPath(request.nextUrl.pathname);
+
+  const upstreamHeaders = gatewayProxyHeaders(request.headers);
+  if (chatMedia) {
+    // Never pass on a credential the browser chose: the owner's request gets
+    // the gateway's own token, anyone else's gets none at all.
+    upstreamHeaders.delete("authorization");
+    const token = (await hasOwnerSession(request)) ? await getGatewayToken() : "";
+    if (token) upstreamHeaders.set("authorization", `Bearer ${token}`);
+  }
 
   let res: Response;
   try {
     res = await fetch(upstream, {
       method,
-      headers: gatewayProxyHeaders(request.headers),
+      headers: upstreamHeaders,
       body: hasBody ? request.body : undefined,
       // Streaming request bodies need the half-duplex opt-in; it is not in the
       // DOM RequestInit type Next ships, hence the cast.
@@ -430,8 +490,13 @@ export async function proxyGatewayRequest(request: NextRequest): Promise<NextRes
   }
 
   const headers = new Headers(res.headers);
+  // A chat-media download keeps its Content-Length (the card can show the
+  // size, the browser shows progress) — but only when the gateway sent the
+  // bytes unencoded, so the length describes exactly what is forwarded.
+  // Content-Type and Content-Disposition are copied with the rest.
+  const keepLength = chatMedia && !res.headers.get("content-encoding");
   headers.delete("content-encoding");
-  headers.delete("content-length");
+  if (!keepLength) headers.delete("content-length");
   for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
 
   return new NextResponse(BODILESS_STATUSES.has(res.status) ? null : res.body, {
