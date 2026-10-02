@@ -3,7 +3,7 @@
 set -u
 IP=$1; LABEL=$2
 HERE=$(cd "$(dirname "$0")" && pwd)
-ML=/home/nexus0/.openclaw/workspace/release/coding-agent-harness-loop/media-loop
+ML=${ML:-$HOME/.openclaw/workspace/release/coding-agent-harness-loop/media-loop}
 export SSHPASS=$(cat "${BENCH_PASSWORD_FILE:?path to the bench box owner password file}")
 SSH="sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ServerAliveInterval=30"
 SCP="sshpass -e scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"

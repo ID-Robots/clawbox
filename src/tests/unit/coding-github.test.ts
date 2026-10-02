@@ -12,13 +12,13 @@ import { GH_LOGIN_COMMAND, parseLogin, repoNameFor } from "@/lib/coding-github";
 describe("reading the connection", () => {
   it("finds the account in gh's own wording", () => {
     // gh writes this to STDERR; the real line from this box:
-    const real = "github.com\n  ✓ Logged in to github.com as yalexx (/home/clawbox/.config/gh/hosts.yml)\n  ✓ Git operations for github.com configured to use https protocol.";
-    expect(parseLogin(real)).toBe("yalexx");
+    const real = "github.com\n  ✓ Logged in to github.com as octocat (/home/clawbox/.config/gh/hosts.yml)\n  ✓ Git operations for github.com configured to use https protocol.";
+    expect(parseLogin(real)).toBe("octocat");
   });
 
   it("reads the account from gh 2.40+ status output", () => {
-    const real = "github.com\n  ✓ Logged in to github.com account yalexx (/home/nexus0/.config/gh/hosts.yml)\n  - Active account: true";
-    expect(parseLogin(real)).toBe("yalexx");
+    const real = "github.com\n  ✓ Logged in to github.com account octocat (/home/clawbox/.config/gh/hosts.yml)\n  - Active account: true";
+    expect(parseLogin(real)).toBe("octocat");
   });
 
   it("reports nobody when gh is not logged in", () => {

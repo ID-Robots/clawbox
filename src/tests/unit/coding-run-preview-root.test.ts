@@ -26,7 +26,7 @@ async function load() {
 
 describe("livePreviewCommand root", () => {
   it("uses the inlined NEXT_PUBLIC_CLAWBOX_ROOT when the app is not at the default path", async () => {
-    process.env.NEXT_PUBLIC_CLAWBOX_ROOT = "/home/nexus0/clawbox";
+    process.env.NEXT_PUBLIC_CLAWBOX_ROOT = "/opt/clawbox";
     const { livePreviewCommand } = await load();
     const cmd = livePreviewCommand({
       transcriptPath: "/tmp/run.jsonl",
@@ -34,7 +34,7 @@ describe("livePreviewCommand root", () => {
       directory: null,
       live: true,
     });
-    expect(cmd).toBe("/home/nexus0/clawbox/scripts/coding-run-preview '/tmp/run.jsonl'");
+    expect(cmd).toBe("/opt/clawbox/scripts/coding-run-preview '/tmp/run.jsonl'");
     expect(cmd).not.toContain("/home/clawbox/clawbox");
   });
 
@@ -56,25 +56,25 @@ describe("livePreviewCommand root", () => {
     const cmd = livePreviewCommand({
       transcriptPath: null,
       sessionId: "61400ab6-0da9-4feb-8ad5-b547239c1367",
-      directory: "/home/nexus0/Projects/x",
+      directory: "/home/clawbox/Projects/x",
       live: false,
     });
-    expect(cmd).toBe("cd '/home/nexus0/Projects/x' && claude-ds --resume '61400ab6-0da9-4feb-8ad5-b547239c1367'");
+    expect(cmd).toBe("cd '/home/clawbox/Projects/x' && claude-ds --resume '61400ab6-0da9-4feb-8ad5-b547239c1367'");
   });
 });
 
 describe("resuming a settled run on its own provider", () => {
-  const settled = { transcriptPath: null, sessionId: "1dd8db8b-5c1e-4f0a-9d2b-3e4f5a6b7c8d", directory: "/home/nexus0/Projects/x", live: false };
+  const settled = { transcriptPath: null, sessionId: "1dd8db8b-5c1e-4f0a-9d2b-3e4f5a6b7c8d", directory: "/home/clawbox/Projects/x", live: false };
 
   it("tells the wrapper an Anthropic run is one, so it opens ~/.claude where the session is", async () => {
     const { livePreviewCommand } = await load();
     expect(livePreviewCommand({ ...settled, provider: "anthropic" }))
-      .toBe("cd '/home/nexus0/Projects/x' && CLAUDE_DS_PROVIDER=anthropic claude-ds --resume '1dd8db8b-5c1e-4f0a-9d2b-3e4f5a6b7c8d'");
+      .toBe("cd '/home/clawbox/Projects/x' && CLAUDE_DS_PROVIDER=anthropic claude-ds --resume '1dd8db8b-5c1e-4f0a-9d2b-3e4f5a6b7c8d'");
   });
 
   it("leaves a ClawBox AI run, or one whose record names no provider, on the wrapper's default", async () => {
     const { livePreviewCommand } = await load();
-    const plain = "cd '/home/nexus0/Projects/x' && claude-ds --resume '1dd8db8b-5c1e-4f0a-9d2b-3e4f5a6b7c8d'";
+    const plain = "cd '/home/clawbox/Projects/x' && claude-ds --resume '1dd8db8b-5c1e-4f0a-9d2b-3e4f5a6b7c8d'";
     expect(livePreviewCommand({ ...settled, provider: "clawbox-ai" })).toBe(plain);
     expect(livePreviewCommand({ ...settled, provider: null })).toBe(plain);
     expect(livePreviewCommand(settled)).toBe(plain);
@@ -90,7 +90,7 @@ describe("resuming a settled run on its own provider", () => {
   it("tails a live run's transcript whatever its provider — the path already names the folder", async () => {
     delete process.env.NEXT_PUBLIC_CLAWBOX_ROOT;
     const { livePreviewCommand } = await load();
-    expect(livePreviewCommand({ ...settled, transcriptPath: "/home/nexus0/.claude/projects/-x/s.jsonl", live: true, provider: "anthropic" }))
-      .toBe("/home/clawbox/clawbox/scripts/coding-run-preview '/home/nexus0/.claude/projects/-x/s.jsonl'");
+    expect(livePreviewCommand({ ...settled, transcriptPath: "/home/clawbox/.claude/projects/-x/s.jsonl", live: true, provider: "anthropic" }))
+      .toBe("/home/clawbox/clawbox/scripts/coding-run-preview '/home/clawbox/.claude/projects/-x/s.jsonl'");
   });
 });

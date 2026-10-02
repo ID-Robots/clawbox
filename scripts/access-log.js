@@ -149,7 +149,7 @@ function requestHost(req) {
 /**
  * One access line. Stable, greppable, fixed field order:
  *
- *   [access] 200 GET /setup-api/system/stats 9ms ip=192.168.50.10 host=clawbox.local
+ *   [access] 200 GET /setup-api/system/stats 9ms ip=192.0.2.10 host=clawbox.local
  *   [access] 404 GET /probe 1ms ip=203.0.113.7 host=abc.trycloudflare.com aborted
  */
 function formatAccessLine(entry) {

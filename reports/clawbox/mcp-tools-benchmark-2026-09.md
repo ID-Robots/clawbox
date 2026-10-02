@@ -2,10 +2,10 @@
 
 Measured on real Jetson Orin Nano ClawBoxes from the flash rig, OpenClaw edition, ClawBox v4.0.0 (main 7f511dd1), OpenClaw core 2026.9.3. Raw data and the scripts are under `bench/mcp-2026-09/` next to this file.
 
-| Box | Serial | Model | Result |
-|---|---|---|---|
-| 192.168.50.183 | 1791626087021 | ClawBox AI cloud (deepseek-v4-pro, served as flash) | full run |
-| 192.168.50.145 | 1791626120943 | llamacpp/gemma4-e2b-it-q4_0 (local) | **blocked**: every turn fails before the model runs (see §6) |
+| Board | Model | Result |
+|---|---|---|
+| board-A | ClawBox AI cloud (deepseek-v4-pro, served as flash) | full run |
+| board-B | llamacpp/gemma4-e2b-it-q4_0 (local) | **blocked**: every turn fails before the model runs (see §6) |
 
 Method: `openclaw agent --agent main --session-key <fresh> -m <prompt> --json` through the box's own gateway, ten prompts, once with the ClawBox MCP registered and once switched off through the product switch (`clawbox_mcp_enabled=false` + gateway restart, which `gateway-pre-start.sh` honours). Direct MCP measurements use a stdio client (`mcp-direct.ts`) spawning the server exactly as `openclaw.json` registers it.
 
@@ -57,7 +57,7 @@ Direct calls: `list_directory ~/.openclaw/workspace`, `read_file ~/.openclaw/wor
 
 ## 6. Local model: blocked by two defects, no numbers
 
-Both rebuilt boards (.145, .183 before the cloud switch; .57 untouched) fail every local-model turn:
+Both rebuilt boards (board-B, and board-A before the cloud switch; a third board untouched) fail every local-model turn:
 
 1. **Token drift.** `data/.local-ai-token` is regenerated at first boot (09:59:34) but `openclaw.json` `models.providers.llamacpp.apiKey` still holds the token the image was built with, so the proxy answers 401 to every chat completion. Re-saving the provider (`POST /setup-api/ai-models/configure {provider:"llamacpp", model:"llamacpp/gemma4-e2b-it-q4_0"}`) rewrites the key correctly.
 2. **After the re-save** the core fails with `Unable to rematerialize llamacpp/gemma4-e2b-it-q4_0 for its resolved auth profile.` on both the gateway path and `openclaw agent exec`, with or without the `auth.profiles` block. The proxy itself works (`/v1/chat/completions` with the token returns 200) and `openclaw models status` shows the profile and `models.json` key in agreement. Filed separately.

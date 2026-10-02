@@ -231,7 +231,7 @@ where it came from:
 
 ```bash
 journalctl -u clawbox-setup --no-pager | grep '\[access\]'
-# [access] 200 GET /setup-api/system/stats 9ms ip=192.168.50.10 host=clawbox.local
+# [access] 200 GET /setup-api/system/stats 9ms ip=192.0.2.10 host=clawbox.local
 ```
 
 `ip=` is the real client address (it reads Cloudflare's `CF-Connecting-IP`, so

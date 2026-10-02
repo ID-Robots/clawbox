@@ -37,7 +37,7 @@ function fakeReq(overrides: Record<string, unknown> = {}) {
     method: "GET",
     url: "/setup-api/system/stats",
     headers: { host: "clawbox.local" },
-    socket: { remoteAddress: "192.168.50.10" },
+    socket: { remoteAddress: "192.0.2.10" },
     ...overrides,
   };
 }
@@ -59,10 +59,10 @@ describe("access log — line format", () => {
         method: "GET",
         path: "/setup-api/system/stats",
         durationMs: 9.4,
-        ip: "192.168.50.10",
+        ip: "192.0.2.10",
         host: "clawbox.local",
       }),
-    ).toBe("[access] 200 GET /setup-api/system/stats 9ms ip=192.168.50.10 host=clawbox.local");
+    ).toBe("[access] 200 GET /setup-api/system/stats 9ms ip=192.0.2.10 host=clawbox.local");
   });
 
   it("marks an aborted response instead of silently reporting 200", () => {
@@ -151,22 +151,22 @@ describe("access log — client ip", () => {
       "198.51.100.4",
     );
     expect(clientIp(fakeReq({ headers: { "x-real-ip": "198.51.100.9" } }))).toBe("198.51.100.9");
-    expect(clientIp(fakeReq({ headers: {} }))).toBe("192.168.50.10");
+    expect(clientIp(fakeReq({ headers: {} }))).toBe("192.0.2.10");
   });
 
   it("unwraps an IPv4-mapped IPv6 socket address", () => {
-    expect(clientIp(fakeReq({ headers: {}, socket: { remoteAddress: "::ffff:192.168.50.10" } }))).toBe(
-      "192.168.50.10",
+    expect(clientIp(fakeReq({ headers: {}, socket: { remoteAddress: "::ffff:192.0.2.10" } }))).toBe(
+      "192.0.2.10",
     );
   });
 
   it("drops a forwarding header that is not IP-shaped instead of echoing it", () => {
     // These headers are client-settable on a direct LAN request.
     expect(clientIp(fakeReq({ headers: { "cf-connecting-ip": "not an ip <script>" } }))).toBe(
-      "192.168.50.10",
+      "192.0.2.10",
     );
     expect(clientIp(fakeReq({ headers: { "x-forwarded-for": "a".repeat(100) } }))).toBe(
-      "192.168.50.10",
+      "192.0.2.10",
     );
   });
 
@@ -238,7 +238,7 @@ describe("access log — attachAccessLog", () => {
     res.statusCode = 200;
     finish();
     expect(lines).toEqual([
-      "[access] 200 GET /setup-api/system/stats 12ms ip=192.168.50.10 host=clawbox.local",
+      "[access] 200 GET /setup-api/system/stats 12ms ip=192.0.2.10 host=clawbox.local",
     ]);
   });
 

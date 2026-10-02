@@ -191,12 +191,19 @@ fi
     subprocess.run(['dpkg-deb','--root-owner-group','--build',str(root),str(Path(args.output).resolve())],check=True)
 
 
+def desktop_owner():
+    """The account the package is for by default: whoever runs the builder, or ran sudo for it."""
+    name = os.environ.get('SUDO_USER') if os.getuid() == 0 else None
+    return pwd.getpwnam(name) if name else pwd.getpwuid(os.getuid())
+
+
 if __name__=='__main__':
+    owner=desktop_owner()
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--user',default='nexus0')
-    parser.add_argument('--project',default='/home/nexus0/clawbox')
+    parser.add_argument('--user',default=owner.pw_name)
+    parser.add_argument('--project',default=os.path.join(owner.pw_dir,'clawbox'))
     parser.add_argument('--node-dir',default='/usr/bin')
-    parser.add_argument('--npm-prefix',default='/home/nexus0/.nvm/versions/node/v24.0.0')
+    parser.add_argument('--npm-prefix',default=os.path.join(owner.pw_dir,'.nvm/versions/node/v24.0.0'))
     parser.add_argument('--version',default='1.0.4')
     parser.add_argument('--staging',required=True)
     parser.add_argument('--output',required=True)

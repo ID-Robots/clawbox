@@ -28,7 +28,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * rather than asserting on source text: the two surfaces have separate
  * `loadHistory` implementations and could drift.
  *
- * The history payload is the one captured from the beta box 192.168.50.65 via
+ * The history payload is the one captured from a beta lab box via
  * the gateway's own `chat.history` — user role, provenance projected through,
  * `[Inter-session message]` header second-to-last rather than first.
  */

@@ -49,6 +49,16 @@ name: Nano hardware tests
 #   2. In this file: `plan` and the board job admit a pull_request only when
 #      its head is in THIS repository, and a dispatch only resolves to a branch
 #      of this repository.
+#
+# Everything this workflow writes is public, like the repository (TASK-1366):
+# the log, the job summary, the PR comment and the results artifact. The board
+# is named by its serial and its lab only. Its address is masked in the log
+# the moment the reservation is read and is never printed; everything
+# `nano-ci` prints passes through scripts/public-hygiene.mjs in redact mode,
+# and so do the job summary, the PR comment and the results before they are
+# written or uploaded. Nothing printed names the runner's home folder either:
+# the results folder is relative, and the board job checks out with plain git
+# rather than actions/checkout, which logs the workspace's absolute path.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -201,7 +211,10 @@ jobs:
         shell: bash
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
-      NANO_RESULTS_DIR: ${{ github.workspace }}/results
+      # Relative to the workspace: the job's env is printed at the head of
+      # every step's log, and the workspace's absolute path names the runner
+      # host's home folder.
+      NANO_RESULTS_DIR: results
     # For the PR comment, which runs on GitHub's runners so that this job, on
     # the lab host, never holds a token that can write.
     outputs:
@@ -326,12 +339,34 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Testing $sha from $how"
 
+      # Plain git, not actions/checkout: that logs the workspace's absolute
+      # path, which names the runner host's home folder, and this log is
+      # public. The workspace outlives a job, so it is emptied first and the
+      # job reads nothing another job left there. No token: the repository is
+      # public (and the job's own token is never persisted on the lab host).
       - name: Check out the commit under test
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ steps.ref.outputs.sha }}
-          persist-credentials: false
+        env:
+          SHA: ${{ steps.ref.outputs.sha }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          if [ "$PWD" != "$GITHUB_WORKSPACE" ] || [ "$PWD" = / ]; then
+            echo "::error title=Checkout refused::not in the job's workspace"
+            exit 1
+          fi
+          find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          git init -q .
+          if ! timeout 600 git -c protocol.version=2 fetch -q --no-tags --depth=1 "$REPO_URL" "$SHA"; then
+            echo "::error title=Checkout failed::could not fetch ${SHA:0:12} from $REPO_URL"
+            exit 1
+          fi
+          git -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          echo "Checked out ${SHA:0:12}"
 
+      # The redactor every later step prints through comes from here — the
+      # commit under test carries it (scripts/public-hygiene.mjs) — and is
+      # copied out of the workspace so that nothing the suite does to the
+      # checkout can take it away from cleanup and release.
       - name: Resolve the commit and check the lab host
         id: target
         env:
@@ -345,13 +380,26 @@ jobs:
             exit 1
           fi
           missing=""
-          for tool in nano-ci jq timeout base64; do
+          for tool in nano-ci jq timeout base64 node; do
             command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
           done
           if [ -n "$missing" ]; then
             echo "::error title=Lab host not ready::missing on the runner host:$missing"
             exit 1
           fi
+          if [ ! -f scripts/public-hygiene.mjs ]; then
+            echo "::error title=No redactor::${sha:0:12} has no scripts/public-hygiene.mjs, which keeps the lab out of this public log; rebase $BRANCH on beta"
+            exit 1
+          fi
+          cp scripts/public-hygiene.mjs "$RUNNER_TEMP/public-hygiene.mjs"
+          # Everything `nano-ci` prints goes through this; the board's address
+          # becomes <board-ip> even where the lab is not on a private range.
+          cat > "$RUNNER_TEMP/nano-redact" <<'EOF'
+          #!/usr/bin/env bash
+          exec node "$RUNNER_TEMP/public-hygiene.mjs" redact --mask-env "NANO_IP=<board-ip>"
+          EOF
+          chmod +x "$RUNNER_TEMP/nano-redact"
+          "$RUNNER_TEMP/nano-redact" < /dev/null
           if [ "$EVENT" = pull_request ]; then
             purpose="clawbox PR #$PR_NUMBER $sha"
           else
@@ -372,13 +420,16 @@ jobs:
           PURPOSE: ${{ steps.target.outputs.purpose }}
           WAIT_S: "1200"
           EVERY_S: "60"
+        # What `nano-ci reserve` prints, the board's address among it, reaches
+        # the log only through the redactor, and only when something failed.
         run: |
           start=$SECONDS
           tries=0
+          err="$RUNNER_TEMP/reserve.err"
           while :; do
             tries=$((tries + 1))
             rc=0
-            out=$(nano-ci reserve "$PURPOSE") || rc=$?
+            out=$(nano-ci reserve "$PURPOSE" 2>"$err") || rc=$?
             [ "$rc" -eq 3 ] || break
             waited=$((SECONDS - start))
             if [ "$waited" -ge "$WAIT_S" ]; then
@@ -392,6 +443,7 @@ jobs:
           done
           waited=$((SECONDS - start))
           if [ "$rc" -ne 0 ]; then
+            { printf '%s\n' "$out"; cat "$err"; } | "$RUNNER_TEMP/nano-redact"
             echo "::error title=nano-ci reserve failed::exit $rc"
             exit 1
           fi
@@ -401,9 +453,14 @@ jobs:
           # and release included, would then act on a board that is not ours.
           line=$(printf '%s\n' "$out" | awk 'NF == 3 && ($2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ || $2 ~ /^[0-9A-Fa-f:]+:[0-9A-Fa-f:]*$/) { print; exit }')
           read -r serial ip lab <<<"$line"
+          # Masked before anything else is printed: from here on GitHub shows
+          # *** wherever the address would appear in this job's log.
+          if [ -n "${ip:-}" ]; then
+            echo "::add-mask::$ip"
+          fi
           if ! [[ ${serial:-} =~ ^[A-Za-z0-9._:-]+$ ]]; then
-            printf '%s\n' "$out"
-            echo "::error title=Unreadable reservation::nano-ci reserve printed no 'SERIAL IP LAB' line (above); if it leased a board, release it by hand"
+            { printf '%s\n' "$out"; cat "$err"; } | NANO_IP=${ip:-} "$RUNNER_TEMP/nano-redact"
+            echo "::error title=Unreadable reservation::nano-ci reserve printed no 'SERIAL IP LAB' line (above, redacted); if it leased a board, release it by hand"
             exit 1
           fi
           # The wait comes out of the suite's 40 minutes, never out of
@@ -420,7 +477,7 @@ jobs:
           if [ "$tries" -gt 1 ]; then
             echo "note=Waited $((waited / 60)) min ($tries tries) for a free board, so the suite had $suite_minutes min instead of 40." >> "$GITHUB_OUTPUT"
           fi
-          echo "Reserved $serial ($ip) in $lab"
+          echo "Reserved $serial in $lab"
 
       # From the BRANCH, never the SHA: the board's force-update.sh checks out
       # origin/<branch>, and there is no origin/<sha>. Whether that put the
@@ -430,6 +487,7 @@ jobs:
         timeout-minutes: 20
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
           BRANCH: ${{ steps.ref.outputs.branch }}
           SHA: ${{ steps.target.outputs.sha }}
         run: |
@@ -439,11 +497,17 @@ jobs:
           fi
           # Where the board is now: a board still there after the rebuild was
           # never moved, and that is a failure even if the branch moved too.
-          before=$(nano-ci ssh "$SERIAL" 'git -C /home/clawbox/clawbox rev-parse HEAD' | tail -n 1 | tr -d '[:space:]') || true
-          [[ $before =~ ^[0-9a-f]{40}$ ]] || before=""
+          # What ssh says besides (a known-hosts line names the address) is
+          # shown, redacted, only when the commit could not be read.
+          err="$RUNNER_TEMP/ssh.err"
+          before=$(nano-ci ssh "$SERIAL" 'git -C /home/clawbox/clawbox rev-parse HEAD' 2>"$err" | tail -n 1 | tr -d '[:space:]') || true
+          if ! [[ $before =~ ^[0-9a-f]{40}$ ]]; then
+            before=""
+            "$RUNNER_TEMP/nano-redact" < "$err"
+          fi
           echo "before=$before" >> "$GITHUB_OUTPUT"
           echo "$SERIAL is at ${before:-an unreadable commit}; rebuilding it from branch $BRANCH, whose head is $SHA"
-          nano-ci rebuild "$SERIAL" "$BRANCH"
+          nano-ci rebuild "$SERIAL" "$BRANCH" 2>&1 | "$RUNNER_TEMP/nano-redact"
 
       # The rebuild restarts the web server (and the gateway, twice).
       - name: Wait for the board to come back
@@ -451,9 +515,10 @@ jobs:
         timeout-minutes: 10
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
         run: |
           for attempt in $(seq 1 60); do
-            if nano-ci health "$SERIAL"; then
+            if nano-ci health "$SERIAL" 2>&1 | "$RUNNER_TEMP/nano-redact"; then
               echo "healthy (check $attempt)"
               exit 0
             fi
@@ -477,14 +542,19 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
           BRANCH: ${{ steps.ref.outputs.branch }}
           SHA: ${{ steps.target.outputs.sha }}
           BEFORE: ${{ steps.rebuild.outputs.before }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
-          board_sha=$(nano-ci ssh "$SERIAL" 'git -C /home/clawbox/clawbox rev-parse HEAD' | tail -n 1 | tr -d '[:space:]') || true
-          [[ $board_sha =~ ^[0-9a-f]{40}$ ]] || board_sha=""
+          err="$RUNNER_TEMP/ssh.err"
+          board_sha=$(nano-ci ssh "$SERIAL" 'git -C /home/clawbox/clawbox rev-parse HEAD' 2>"$err" | tail -n 1 | tr -d '[:space:]') || true
+          if ! [[ $board_sha =~ ^[0-9a-f]{40}$ ]]; then
+            board_sha=""
+            "$RUNNER_TEMP/nano-redact" < "$err"
+          fi
           echo "board_sha=$board_sha" >> "$GITHUB_OUTPUT"
           if [ "$board_sha" = "$SHA" ]; then
             echo "$SERIAL is at $SHA"
@@ -529,6 +599,8 @@ jobs:
           exit 1
 
       # Not on a superseded run: the board runs another commit than this one.
+      # NANO_IP is handed to the tests but never printed: run.sh passes every
+      # test's output through the redactor, which turns it into <board-ip>.
       - name: Run the on-device suite
         id: suite
         if: steps.verify.outputs.superseded != 'true'
@@ -543,8 +615,23 @@ jobs:
 
       # From here on every step is `always()`, which also runs on a cancel —
       # the run cancelled by hand, or the job's own timeout.
-      - name: Upload the suite's results
+      #
+      # The artifact is public: every file in results/ goes through the
+      # redactor first (run.sh already redacted the logs as it wrote them;
+      # this is the second line, and it covers summary.json too). Results that
+      # could not be redacted are not uploaded.
+      - name: Redact the suite's results
+        id: redact
         if: always() && steps.reserve.outputs.serial != ''
+        env:
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+        run: |
+          if [ -d "$NANO_RESULTS_DIR" ]; then
+            node "$RUNNER_TEMP/public-hygiene.mjs" redact-files --mask-env "NANO_IP=<board-ip>" "$NANO_RESULTS_DIR"
+          fi
+
+      - name: Upload the suite's results
+        if: always() && steps.redact.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: nano-results-${{ github.run_id }}-${{ github.run_attempt }}
@@ -568,6 +655,7 @@ jobs:
           CHECKED_OUT: ${{ steps.target.outcome }}
           SUITE_OUTCOME: ${{ steps.suite.outcome }}
         run: |
+          raw="$RUNNER_TEMP/nano-report.raw.md"
           report="$RUNNER_TEMP/nano-report.md"
           # The runner's workspace outlives a job: before this job's own
           # checkout it holds another job's files, so neither its summary.sh
@@ -577,15 +665,25 @@ jobs:
             success | failure | cancelled) results="$NANO_RESULTS_DIR/summary.json" ;;
           esac
           if [ "$CHECKED_OUT" = success ] && [ -f scripts/nano-tests/summary.sh ]; then
-            bash scripts/nano-tests/summary.sh "$results" > "$report"
+            bash scripts/nano-tests/summary.sh "$results" > "$raw"
           else
-            printf '## Nano hardware tests\n\n**The on-device suite did not run.** %s\n' "$NANO_OUTCOME" > "$report"
+            printf '## Nano hardware tests\n\n**The on-device suite did not run.** %s\n' "$NANO_OUTCOME" > "$raw"
           fi
           for note in "$REF_NOTE" "$RESERVE_NOTE" "$VERIFY_NOTE"; do
             if [ -n "$note" ]; then
-              printf '\n%s\n' "$note" >> "$report"
+              printf '\n%s\n' "$note" >> "$raw"
             fi
           done
+          # Public, here and in the PR comment: through the redactor before it
+          # is written anywhere. There is no redactor only when the job
+          # stopped before it was set up — before any board was reserved — and
+          # the text is then this step's own.
+          redactor="$RUNNER_TEMP/public-hygiene.mjs"
+          if [ ! -f "$redactor" ]; then
+            cp "$raw" "$report"
+          elif ! node "$redactor" redact --mask-env "NANO_IP=<board-ip>" < "$raw" > "$report"; then
+            printf '## Nano hardware tests\n\n**The job summary was withheld: the redactor failed.** %s\n' "$NANO_OUTCOME" > "$report"
+          fi
           cat "$report" >> "$GITHUB_STEP_SUMMARY"
           eof="NANO_REPORT_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
           {
@@ -600,11 +698,16 @@ jobs:
         if: always() && steps.reserve.outputs.serial != ''
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+        # The verdict is nano-ci's exit status, not the redactor's.
         run: |
-          if nano-ci cleanup "$SERIAL"; then
+          set +e
+          nano-ci cleanup "$SERIAL" 2>&1 | "$RUNNER_TEMP/nano-redact"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -eq 0 ]; then
             echo "- Cleanup: \`$SERIAL\` rebuilt back to beta and its test projects wiped." >> "$GITHUB_STEP_SUMMARY"
           else
-            rc=$?
             echo "::error title=Board cleanup failed::nano-ci cleanup $SERIAL exited $rc; the board needs a look before its next job"
             echo "- **Cleanup FAILED** for \`$SERIAL\` (exit $rc): the board needs a look before its next job." >> "$GITHUB_STEP_SUMMARY"
             exit "$rc"
@@ -615,8 +718,16 @@ jobs:
         if: always() && steps.reserve.outputs.serial != ''
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
         run: |
-          nano-ci release "$SERIAL"
+          set +e
+          nano-ci release "$SERIAL" 2>&1 | "$RUNNER_TEMP/nano-redact"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=Board release failed::nano-ci release $SERIAL exited $rc"
+            exit "$rc"
+          fi
           echo "- Released \`$SERIAL\`." >> "$GITHUB_STEP_SUMMARY"
 
   # The results comment: a "Nano hardware tests" section of the one CI Summary
@@ -654,9 +765,22 @@ jobs:
       cancel-in-progress: false
     permissions:
       # PR comments go through the issues API; on a PR `pull-requests: write`
-      # is enough.
+      # is enough. `contents: read` checks out the redactor.
+      contents: read
       pull-requests: write
     steps:
+      # The comment is public: it goes through the same redactor as the job
+      # summary, scripts/public-hygiene.mjs, and that one file is all this job
+      # takes from the PR's tree. (The workflow file itself comes from the PR
+      # too, on a pull_request — the fork fence above is what keeps that ours.)
+      - name: Check out the redactor
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/public-hygiene.mjs
+          sparse-checkout-cone-mode: false
+
       - uses: actions/github-script@v7
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
@@ -722,7 +846,12 @@ jobs:
             if (report) {
               lines.push('', '<details><summary>Board, commit and every test</summary>', '', report, '', '</details>');
             }
-            const section = `${sectionStart}\n## ${icon} Nano hardware tests\n${lines.join('\n')}\n${sectionEnd}`;
+            // Through the redactor before it is written: a section it cannot
+            // redact is not posted (the job fails instead).
+            const { execFileSync } = require('child_process');
+            const redactor = require('path').join(process.env.GITHUB_WORKSPACE, 'scripts', 'public-hygiene.mjs');
+            const raw = `${sectionStart}\n## ${icon} Nano hardware tests\n${lines.join('\n')}\n${sectionEnd}`;
+            const section = execFileSync(process.execPath, [redactor, 'redact'], { input: raw, encoding: 'utf8' });
 
             const { owner, repo } = context.repo;
             const comments = await github.paginate(github.rest.issues.listComments, {
