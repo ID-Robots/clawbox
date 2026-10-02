@@ -350,7 +350,8 @@ jobs:
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
-          if [ "$PWD" != "$GITHUB_WORKSPACE" ] || [ "$PWD" = / ]; then
+          here=$(pwd -P)
+          if [ "$here" != "$(cd "$GITHUB_WORKSPACE" && pwd -P)" ] || [ "$here" = / ]; then
             echo "::error title=Checkout refused::not in the job's workspace"
             exit 1
           fi
