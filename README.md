@@ -436,12 +436,12 @@ bun run test:e2e         # End-to-end tests (Playwright)
 bun run check:mcp-tools  # Assert the MCP tool matrix matches mcp/README.md
 ```
 
-**On real hardware:** every non-draft pull request into `beta` or `main` runs
-[Nano hardware tests](.github/workflows/nano-hardware-tests.yml): the on-device
-suite on one free Jetson from the nano lab, after which the board is cleaned up
-and released. A draft opts in with the label `nano-test`, `skip-nano` opts out,
-and a docs-only PR is skipped. What it checks, how cleanup works and how to add
-a test: [docs/nano-hardware-tests.md](docs/nano-hardware-tests.md).
+**On real hardware:** every pull request of ours into `beta` or `main`, drafts
+included, runs [Nano hardware tests](.github/workflows/nano-hardware-tests.yml):
+the on-device suite on one free Jetson from the nano lab, after which the board
+is cleaned up and released. `skip-nano` opts a PR out, a docs-only PR is
+skipped, and a fork's PR never reaches the lab. What it checks, how cleanup
+works and how to add a test: [docs/nano-hardware-tests.md](docs/nano-hardware-tests.md).
 
 ### Environment Variables
 

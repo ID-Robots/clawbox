@@ -10,29 +10,35 @@ Everything that does not need the hardware already runs in the container CI
 
 ## When it runs
 
-**Every pull request into `beta` or `main`, automatically** — no label needed.
-The workflow (`.github/workflows/nano-hardware-tests.yml`) runs when a PR is
-opened, reopened or marked ready for review, and again on every push to it, as
-long as:
+**Every pull request of ours into `beta` or `main`, drafts included,
+automatically** — no label needed. It is part of the PR's suite like `Tests`
+or `E2E`: the check is **On-device tests (nano-lab)**. The workflow
+(`.github/workflows/nano-hardware-tests.yml`) runs when a PR is opened or
+reopened and again on every push to it, as long as:
 
 | Condition | Why |
 |---|---|
 | The PR's branch lives in **this** repository | A fork's code never runs on the lab host (see [Safety](#safety)). |
-| The PR is **not a draft**, or it carries the label `nano-test` | A draft opts in with `nano-test`. |
-| The PR does **not** carry the label `skip-nano` | The opt-out. It wins over `nano-test`. |
-| A `labeled` event is for `nano-test` itself | Adding any other label (a review bot's, or `skip-nano`) never starts a run. |
+| The PR does **not** carry the label `skip-nano` | The only opt-out. |
 | The PR changes something besides documentation | See [Docs-only pull requests](#docs-only-pull-requests). |
 
+A **draft** runs like any other PR: the coding agent opens most of our PRs as
+drafts, and the board run is part of the checks it waits for. Marking a draft
+ready for review starts no second run — its head commit has already been
+tested, and the check stays on that commit. Labels start nothing either: the
+review bots' and auto-triage labels never cost a board.
+
 ```bash
-gh pr edit <PR number> --add-label nano-test     # a draft: run it on a board
-gh pr edit <PR number> --add-label skip-nano     # any PR: no more board runs
+gh pr edit <PR number> --add-label skip-nano     # this PR: no more board runs
 ```
 
-Labels count from the next event: adding `nano-test` starts a run at once
-(on a non-draft PR that is simply one more run of the same commit), but adding
-`skip-nano` or removing either label does not stop or start anything by
-itself — the next push, reopen or ready-for-review is judged with the labels
-the PR has then. A run already going always finishes, cleanup included.
+`skip-nano` counts from the next event: adding it does not stop a run already
+going (that always finishes, cleanup included), and removing it does not start
+one — the next push or reopen is judged with the labels the PR has then. On a
+`skip-nano` PR the check shows as skipped.
+
+The `nano-test` label of the first version (opt-in) is gone; it does nothing
+any more.
 
 `skip-nano` is not created by the workflow. A maintainer creates it once:
 
@@ -61,23 +67,43 @@ path filters, and every doubt gets a board: no file listed, more than GitHub's
 `paths-ignore` on the trigger, because `paths-ignore` would hide the check
 entirely instead of reporting it as skipped.
 
-To put a docs-only commit on a board anyway, dispatch it (below) with the
-commit's SHA — `plan`'s summary prints the exact command.
+To put a docs-only PR on a board anyway, dispatch its branch (below) —
+`plan`'s summary prints the exact command.
 
-**On any branch, tag or commit** — dispatch it:
+### Dispatching a branch
+
+**On a branch of this repository** — dispatch it:
 
 ```bash
-gh workflow run nano-hardware-tests.yml -f ref=<branch, tag or commit sha>
+gh workflow run nano-hardware-tests.yml --ref beta -f ref=<branch>
 ```
 
-`refs/pull/*` is refused, so a fork's PR head is never picked up by name. A
-dispatch needs write access and runs whatever commit it is given — GitHub also
-serves a fork PR's commits by SHA from this repository — so dispatch only
-commits that are on a branch or tag of this repository.
+`--ref` names where the workflow file is read from: without it `gh` uses the
+default branch, `main`, which has no copy of this workflow yet.
+
+The board is always rebuilt from a **branch**: `nano-ci rebuild` hands its ref
+to the board's `scripts/force-update.sh`, which checks out `origin/<branch>`
+and has no way to check out a bare commit or a tag. So the dispatch input is:
+
+| `ref=` | What runs |
+|---|---|
+| a branch (`beta`, `refs/heads/beta`) | that branch at its head now |
+| a tag (`v2.2.2`, `refs/tags/v2.2.2`) | only if a branch's head is exactly the tag's commit — then that branch; otherwise refused with the `git push` that makes one |
+| a commit SHA (7–40 hex digits) | only if a branch's head is exactly that commit — then that branch; otherwise refused |
+| `refs/pull/*`, `pull/*`, `refs/remotes/*`, anything else | refused |
+
+The job resolves the input with `git ls-remote` against this repository, and
+the branch must pass the same character check as `force-update.sh`
+(`^[A-Za-z0-9._/-]+$`, no leading `-`) before it reaches `nano-ci`. Since only
+a branch of this repository is ever used, a fork's commit — GitHub serves
+those by SHA from this repository too — cannot be dispatched onto a board.
+A dispatch needs write access.
 
 **Re-running** a finished or failed job is the Actions page's *Re-run jobs*, or
 `gh run rerun <run id>`. It reserves a board afresh. A re-run judges the event
-it re-runs, labels included, as they were then.
+it re-runs, labels included, as they were then — and rebuilds the board from
+the PR's branch as it is now, so re-running an older commit's run after newer
+pushes ends as [superseded](#superseded-by-a-newer-push).
 
 ## Parallel runs
 
@@ -96,6 +122,26 @@ from>`), with `cancel-in-progress: false`:
   at a time; on 2 Oct 2026 nexus0 runs four: `nexus0-nano-lab`, `-2`, `-3` and
   `-4`), and the number of boards that `nano-ci reserve` finds FREE. A job waiting for a runner instance waits on
   GitHub, before its 90 minutes start.
+
+### Superseded by a newer push
+
+The board is rebuilt from the PR's **branch**, so it gets whatever the branch
+points at when the rebuild fetches it. When someone pushed to the PR after the
+run was queued, that is a newer commit than the one under test. The verify
+step then sees the board on another commit, and asks `git ls-remote` where the
+branch is now:
+
+- the board **moved** during the rebuild (it is not on the commit it had
+  before) **and** the branch is no longer at the commit under test → the run
+  is **superseded**: a `Superseded by a newer push` warning, the suite is not
+  run, the job **passes**, and the job summary and PR comment say
+  *superseded, not tested*. It is not a hardware failure and does not fail the
+  PR: the newer push has its own run, queued behind this one in the PR's
+  concurrency group, and that run reports on the commit that is now the PR's
+  head. Cleanup and release run as always.
+- anything else → `Wrong commit on the board`, which fails the job: the
+  rebuild left the board where it was, its commit could not be read, or it is
+  on some commit although the branch never moved.
 
 ### No free board
 
@@ -126,7 +172,7 @@ repository holds no board address, key or password:
 | `nano-ci …` | Does |
 |---|---|
 | `reserve "<purpose>"` | leases one FREE board and prints `SERIAL IP LAB` (exit 3: none free — the job asks again every minute for 20 minutes) |
-| `rebuild <serial> <ref>` | force-updates the board's checkout to the ref and rebuilds it (5–10 min) |
+| `rebuild <serial> <branch>` | force-updates the board's checkout to `origin/<branch>` (`scripts/force-update.sh`) and rebuilds it (5–10 min); fails when force-update does. A **branch** only: there is no `origin/<sha>` or `origin/<tag>`, so a SHA or a tag fails |
 | `health <serial>` | exit 0 when `clawbox-gateway` and `clawbox-setup` are active and the dashboard answers |
 | `ssh <serial> <cmd…>` / `scp <serial> <src> <dst>` | runs a command on / copies a file to the board as `clawbox` |
 | `cleanup <serial>` | rebuilds the board back to `beta` and wipes test projects; reflashes it from the golden image if it is still unhealthy (~40 min) |
@@ -142,19 +188,25 @@ and **PR comment** reports it.
 
 0. **Needs a board?** (`ubuntu-latest`): the gate above, then the docs-only
    verdict. `false` skips the board job, with the reason in this job's summary.
-1. **Refuse fork refs** (dispatch only), then **check out** the commit under
+1. **Resolve the branch under test**: a PR's head branch and head commit; a
+   dispatch's input resolved to a branch (see
+   [Dispatching a branch](#dispatching-a-branch)). The branch must pass
+   `force-update.sh`'s character check. Then **check out** the commit under
    test — the PR's head commit, not the merge commit.
 2. **Resolve the commit** and check the runner host has `nano-ci`, `jq`,
    `timeout` and `base64`.
 3. **Reserve** a board: `nano-ci reserve "clawbox PR #<n> <sha>"`, asked again
    every minute for up to 20 minutes while no board is free; then the job fails
    with *No free nano-lab board* (see [No free board](#no-free-board)).
-4. **Rebuild** the board at the head commit (≤ 20 min), **wait** for
-   `nano-ci health` (≤ 10 min), and **verify** that the board's
-   `git rev-parse HEAD` is the head commit. A board on any other commit fails
-   the job before a single test runs.
+4. **Rebuild** the board from the PR's branch, `nano-ci rebuild <serial>
+   <branch>` (≤ 20 min), **wait** for `nano-ci health` (≤ 10 min), and
+   **verify** that the board's `git rev-parse HEAD` is the head commit. A board
+   on a newer commit of the branch is
+   [superseded](#superseded-by-a-newer-push) — the job passes without testing,
+   the newer push has its own run. A board on any other commit fails the job
+   before a single test runs.
 5. **Run the suite** (≤ 40 min, less any time spent waiting for a board, never
-   less than 20): `scripts/nano-tests/run.sh <serial>`.
+   less than 20; not on a superseded run): `scripts/nano-tests/run.sh <serial>`.
 6. Upload `results/` as the artifact `nano-results-<run id>-<attempt>` and write
    the **job summary**: board serial, IP and lab, the commit, one row per test
    with its result, duration and reason, what each step did, whether the job
@@ -268,7 +320,7 @@ On the lab host, with a board you reserved yourself:
 
 ```bash
 read -r SERIAL IP LAB <<<"$(nano-ci reserve "TASK-NNN: nano tests by hand")"
-nano-ci rebuild "$SERIAL" <branch or sha>          # only if you need a specific commit
+nano-ci rebuild "$SERIAL" <branch>                  # a branch, never a SHA or tag
 NANO_SHA=<the commit the board runs> scripts/nano-tests/run.sh "$SERIAL"
 scripts/nano-tests/run.sh --only 30-chat "$SERIAL"  # one test
 nano-ci cleanup "$SERIAL"
@@ -316,17 +368,37 @@ commit your checkout is on — `10-build-identity` compares the board with it.
 
 ## Safety
 
-- The job runs only for `workflow_dispatch` (write access) and for pull requests
-  whose head repository **is** this repository — the same fence as before the
-  suite ran on every PR, written into both the `plan` job's `if:` and the board
-  job's own. A `pull_request` run takes its workflow file from the PR, so for a
-  fork that `if:` is not the fence — the repository setting that makes fork PR
-  workflows wait for a maintainer's approval is. Keep it on, and approve no fork
-  run of this workflow.
+**External contributors never trigger the lab Nanos.** Two layers enforce it,
+and a team rule backs them:
+
+1. **On the lab host (the real fence).** Every `nano-lab` runner instance on
+   nexus0 (`nexus0-nano-lab`, `-2`, `-3`, `-4`) has a job-started hook
+   (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) that refuses every job that is not a
+   same-repo pull request, a push or a dispatch of `ID-Robots/clawbox`. It
+   runs before any step of the job, outside anything a PR can change. That
+   matters because a `pull_request` run takes its workflow file **from the
+   PR**: a fork could rewrite every `if:` in it.
+2. **In the workflow (the second layer).** The `plan` job's `if:` and the board
+   job's own both admit a `pull_request` only when its head repository **is**
+   this repository, and the board job checks it again before it uses the PR's
+   branch. A dispatch is only ever resolved to a branch of this repository
+   (see [Dispatching a branch](#dispatching-a-branch)), so neither a
+   `refs/pull/*` ref nor a fork commit's SHA reaches a board.
+
+On top of both, the repository requires a maintainer's approval before any
+workflow runs for an outside contributor. **Team rule: never "Approve and run"
+a fork PR's workflows.** Approving runs the fork's own copy of the workflow,
+which can aim any job at the lab runners: the hook refuses those, and the rule
+means the hook never has to. If a contributor's change needs the lab, review
+it, push it to a branch of this repository and open the PR from there.
+
+The rest:
+
 - `permissions: contents: read`, and the checkout does not persist its token on
   the lab host. Only the **PR comment** job, on GitHub's runners, may write
   (`pull-requests: write`); it runs no code from the PR.
 - Every value from the event reaches a shell through `env:`, never spliced into
-  a script; the board serial is validated before it is used.
+  a script; the board serial and the branch are validated before `nano-ci`
+  sees them.
 - No credential for the lab or a board is in this repository. The lab host's
   `nano-ci` owns them.
