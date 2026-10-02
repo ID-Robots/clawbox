@@ -15,6 +15,11 @@
 #   T1316_LEASE_OWNER  nano-lease owner that must hold the board
 #   T1316_LEASE_TAG    text the lease purpose must contain (default TASK-1316)
 #   NANO_LEASE         the nano-lease command (default: nano-lease)
+#   EVIDENCE           directory for the logs — outside this repository: they
+#                      carry lab addresses and lease details
+#
+# Exit status: the remote script's own, so `box.sh root X < s && next` stops
+# on a failed step; 3 = lease changed/expired, 4 = upload refused, 2 = usage.
 #
 # The board's password never leaves the lab station: it is read there from
 # T1316_PWFILE and handed to ssh (sshpass -f) and to sudo -S on stdin. Root
@@ -33,8 +38,7 @@ LEASE_OWNER=${T1316_LEASE_OWNER:?nano-lease owner}
 LEASE_TAG=${T1316_LEASE_TAG:-TASK-1316}
 BOX_USER=clawbox
 NANO_LEASE=${NANO_LEASE:-nano-lease}
-HERE=$(cd "$(dirname "$0")" && pwd)
-EVIDENCE=${EVIDENCE:-$HERE/../evidence}
+EVIDENCE=${EVIDENCE:?directory for the logs, outside this repository}
 mkdir -p "$EVIDENCE"
 
 station() {
@@ -69,21 +73,26 @@ lease_or_stop() {
 }
 
 cmd=${1:-}; name=${2:-}
+# NAME becomes a log file here and a path inside the remote shell commands
+# below, unquoted: keep it to a plain file name.
+case "$cmd" in user|root|api)
+	[[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+		|| { echo "usage: box.sh $cmd NAME < script   (NAME: letters, digits, . _ -)" >&2; exit 2; } ;;
+esac
 case "$cmd" in
 lease)
 	check_lease
 	;;
 user)
-	[ -n "$name" ] || { echo "usage: box.sh user NAME < script" >&2; exit 2; }
 	lease_or_stop "$name"
 	{
 		echo "##### $(stamp) [user] $name"
 		{ echo "BOX_SERIAL=$BOX_SERIAL"; cat; } | station "$BOXSSH 'bash -s'" 2>&1 && rc=0 || rc=$?
 		echo "##### rc=$rc"
+		exit "$rc"   # pipefail carries it past tee: box.sh exits with the remote status
 	} | tee -a "$EVIDENCE/$name.log"
 	;;
 root)
-	[ -n "$name" ] || { echo "usage: box.sh root NAME < script" >&2; exit 2; }
 	lease_or_stop "$name"
 	remote=/home/$BOX_USER/t1316-acceptance/$name.sh
 	script=$(cat)
@@ -95,10 +104,10 @@ root)
 		echo "##### $(stamp) [root] $name"
 		station "$BOXSSH \"sudo -k -S -p '' bash $remote\" < $PWFILE" 2>&1 && rc=0 || rc=$?
 		echo "##### rc=$rc"
+		exit "$rc"   # pipefail carries it past tee: box.sh exits with the remote status
 	} | tee -a "$EVIDENCE/$name.log"
 	;;
 api)
-	[ -n "$name" ] || { echo "usage: box.sh api NAME < script" >&2; exit 2; }
 	# Runs on the station with BOX_URL and PWFILE exported. Scripts send the
 	# password straight from PWFILE into the request body and never echo it.
 	lease_or_stop "$name"
@@ -106,6 +115,7 @@ api)
 		echo "##### $(stamp) [api] $name"
 		{ echo "export BOX_URL=http://$BOX_IP PWFILE=$PWFILE"; cat; } | station 'bash -s' 2>&1 && rc=0 || rc=$?
 		echo "##### rc=$rc"
+		exit "$rc"   # pipefail carries it past tee: box.sh exits with the remote status
 	} | tee -a "$EVIDENCE/$name.log"
 	;;
 *)
