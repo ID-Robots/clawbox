@@ -18,9 +18,9 @@
  *   - CREDENTIALS BY SHAPE → `<redacted>`. The shapes are the shared inventory
  *     in ./incident-sanitize (`redactCredentialShapes`: `sk-…`, `ghp_…`,
  *     `github_pat_…`, `xox?-…`, `AKIA…`, JWTs, the value after `token=` or
- *     `password=`), plus three this surface adds: a long hex or base64 secret
- *     after a `…key=`, the password in `scheme://user:password@host`, and a PEM
- *     private key.
+ *     `password=`), plus what this surface adds: the value after a prefixed
+ *     name (`…KEY=`, `…_TOKEN=`, `…_SECRET=`, `…_PASSWORD=`), the password in
+ *     `scheme://user:password@host`, and a PEM private key.
  *   - PRIVATE ADDRESSES → `<private-ip>`: 10/8, 172.16/12, 192.168/16,
  *     100.64/10 (carrier-grade NAT, where Tailscale puts a box), fc00::/7 and
  *     fe80::/10. EXACT ranges, on purpose: a public address is nobody's secret,
@@ -73,14 +73,26 @@ export interface PublishRedactionOptions {
 const PRIVATE_KEY_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g;
 
 /**
- * A long secret after a name that ends in `key` — `key=`, `api_key:`,
- * `SSH_KEY=`. The shared inventory covers `token`, `password`, `secret` and
- * `api_key` on any value of six characters; a bare `key` is this surface's, and
- * held to a stricter value: sixteen or more characters of hex or base64 with a
- * letter AND a digit in them, so `key=codingAgent.autoPrLabel` and
- * `hotkey: Ctrl+Shift+K` stay the sentences they were.
+ * A long secret after a name that ends in `key`, `token` or `secret` — `key=`,
+ * `SSH_KEY=`, `DEPLOY_TOKEN:`, `APP_SECRET=`. The shared inventory covers the
+ * bare words (`token`, `secret`, `api_key`) on any value of six characters, but
+ * only as whole words: `\btoken\b` never matches inside `DEPLOY_TOKEN`, which is
+ * how a token is written in every `.env` a task quotes. These are this
+ * surface's, held to a stricter value: sixteen or more characters of hex or
+ * base64 with a letter AND a digit in them, so `key=codingAgent.autoPrLabel`,
+ * `hotkey: Ctrl+Shift+K` and `max_token: 4096` stay the sentences they were.
  */
-const KEY_VALUE_RE = /\b([A-Za-z0-9_-]*key)(\s*[=:]\s*)(["']?)([A-Za-z0-9+/_-]{16,}={0,2})\3(?![A-Za-z0-9+/_=-])/gi;
+const KEY_VALUE_RE = /\b([A-Za-z0-9_-]*(?:key|token|secret))(\s*[=:]\s*)(["']?)([A-Za-z0-9+/_-]{16,}={0,2})\3(?![A-Za-z0-9+/_=-])/gi;
+
+/**
+ * A password after a name that ends in one — `DB_PASSWORD=`, `smtpPasswd:`,
+ * `ADMIN_PWD=` — for the same whole-word reason as above. A password is not
+ * long or hex, so the value is six or more characters with something other
+ * than a letter in it: `dbPassword: string` is a type, not a secret. A
+ * reference (`${DB_PASSWORD}`, `%PASS%`) is not one either. `pwd` only after a
+ * separator: a bare `pwd:` is the shell's working directory.
+ */
+const PASSWORD_VALUE_RE = /\b([A-Za-z0-9_-]*(?:password|passwd|[_-]pwd))(\s*[=:]\s*)(["']?)([^\s"'`&,;)\]}<>]{6,})\3/gi;
 
 /** The password half of `scheme://user:password@host`. The user name stays:
  *  `x-access-token` or `git` says what kind of URL it was. */
@@ -230,6 +242,8 @@ export function redactForPublishing(text: string, options: PublishRedactionOptio
   out = redactCredentialShapes(out, SECRET_PLACEHOLDER);
   out = out.replace(KEY_VALUE_RE, (match, name: string, separator: string, quote: string, value: string) =>
     /\d/.test(value) && /[A-Za-z]/.test(value) ? `${name}${separator}${quote}${SECRET_PLACEHOLDER}${quote}` : match);
+  out = out.replace(PASSWORD_VALUE_RE, (match, name: string, separator: string, quote: string, value: string) =>
+    /[^A-Za-z]/.test(value) && !/^[${%]/.test(value) ? `${name}${separator}${quote}${SECRET_PLACEHOLDER}${quote}` : match);
   out = out.replace(URL_PASSWORD_RE, (match, prefix: string, password: string) =>
     password === SECRET_PLACEHOLDER ? match : `${prefix}:${SECRET_PLACEHOLDER}@`);
 

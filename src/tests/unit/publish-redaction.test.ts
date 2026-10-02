@@ -170,6 +170,27 @@ describe("token-shaped strings", () => {
     expect(r(`API_KEY="${B64}"`)).toBe(`API_KEY="${SECRET}"`);
   });
 
+  it("replaces the value after a PREFIXED name, the way a .env writes it", () => {
+    // `\btoken\b` never matches inside DEPLOY_TOKEN: these survived the shared rule.
+    expect(r(`DEPLOY_TOKEN=${HEX40}`)).toBe(`DEPLOY_TOKEN=${SECRET}`);
+    expect(r(`NPM_TOKEN: "${B64}"`)).toBe(`NPM_TOKEN: "${SECRET}"`);
+    expect(r(`APP_SECRET=${HEX40}`)).toBe(`APP_SECRET=${SECRET}`);
+    expect(r("DB_PASSWORD=hunter22")).toBe(`DB_PASSWORD=${SECRET}`);
+    expect(r("smtpPasswd: 'S3cret!pass'")).toBe(`smtpPasswd: '${SECRET}'`);
+    expect(r("ADMIN_PWD=s3cret!x")).toBe(`ADMIN_PWD=${SECRET}`);
+  });
+
+  it("leaves prefixed names alone when what follows is code, a count or a reference", () => {
+    for (const text of [
+      "max_token: 4096",
+      "tokens: 5",
+      "dbPassword: string",
+      "DB_PASSWORD=${DB_PASSWORD}",
+      "pwd: /srv/www",
+      "password_field: required",
+    ]) expect(r(text)).toBe(text);
+  });
+
   it("keeps the Markdown around a secret: a closing backtick is not part of the value", () => {
     expect(r("set `password=hunter2hunter2` there")).toBe(`set \`password=${SECRET}\` there`);
     expect(r(`send \`Authorization: Bearer ${HEX40}\` with it`)).toBe(`send \`Authorization: Bearer ${SECRET}\` with it`);
