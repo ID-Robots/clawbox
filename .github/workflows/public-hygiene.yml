@@ -1,0 +1,53 @@
+name: Public hygiene
+
+# This repository is PUBLIC, and so is everything about it: its files, pull
+# requests and comments, Actions logs, job summaries and artifacts (TASK-1366).
+# The `public-hygiene` check fails a pull request whose ADDED lines name what
+# must not be public — a private address (the lab network, someone's LAN), a
+# /home/<user> path, an internal host or user name, a staff email other than
+# the published support contact, or a credential. See the header of
+# scripts/public-hygiene.mjs for exactly what counts and what does not.
+#
+# Fix a finding with a placeholder (<lab-host>, <board-ip>, ~, an address from
+# 192.0.2.0/24). A line that has to keep it ends with a comment
+# `public-hygiene: allow <why>` — the reason is required.
+#
+# The check's own log is public too: it prints file:line and the category of a
+# finding, never the text that matched. It runs on GitHub's runners only, never
+# on the lab's.
+on:
+  pull_request:
+    branches: [beta, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-hygiene-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  public-hygiene:
+    name: public-hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The PR's head, with history: the added lines are `git diff
+      # base...head`, from the merge base, which a shallow clone cannot find.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scanner unit tests
+        run: node --test scripts/public-hygiene.test.mjs
+
+      - name: Scan the lines this PR adds
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/public-hygiene.mjs scan-diff "$BASE_SHA" "$HEAD_SHA"

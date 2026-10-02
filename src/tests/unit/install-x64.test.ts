@@ -205,25 +205,25 @@ describe("install-x64.sh shared-host preflight", () => {
     const home = mkdtempSync(path.join(tmpdir(), "clawbox-x64-foreign-home-"));
     try {
       writeFileSync(path.join(home, "openclaw.json"), "{}\n");
-      const r = runPreflight(["stat() { echo nexus0; }"], { OPENCLAW_HOME: home });
+      const r = runPreflight(["stat() { echo ada; }"], { OPENCLAW_HOME: home });
       expect(r.status).toBe(1);
-      expect(r.out).toContain("owned by 'nexus0', not 'clawbox'");
+      expect(r.out).toContain("owned by 'ada', not 'clawbox'");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
   });
 
   it("refuses to re-point a unit that runs as another user, and lets the desktop units be skipped", () => {
-    const owned = 'unit_user() { case "$1" in clawbox-vnc.service|clawbox-setup.service) echo nexus0 ;; esac; }';
+    const owned = 'unit_user() { case "$1" in clawbox-vnc.service|clawbox-setup.service) echo ada ;; esac; }';
     const managed = runPreflight([owned]);
     expect(managed.status).toBe(1);
-    expect(managed.out).toContain("clawbox-setup.service currently runs as 'nexus0'");
-    expect(managed.out).toContain("clawbox-vnc.service runs as 'nexus0'");
+    expect(managed.out).toContain("clawbox-setup.service currently runs as 'ada'");
+    expect(managed.out).toContain("clawbox-vnc.service runs as 'ada'");
     expect(managed.out).toContain("CLAWBOX_SKIP_DESKTOP_SERVICES=1");
 
     const skipped = runPreflight([owned], { SKIP_DESKTOP_SERVICES: "1" });
     expect(skipped.status).toBe(1);
-    expect(skipped.out).toContain("clawbox-setup.service currently runs as 'nexus0'");
+    expect(skipped.out).toContain("clawbox-setup.service currently runs as 'ada'");
     expect(skipped.out).not.toContain("clawbox-vnc.service runs as");
   });
 
@@ -262,7 +262,7 @@ describe("install-x64.sh shared-host preflight", () => {
           default-root.service:--property=LoadState|owned.service:--property=LoadState|drop-in-override.service:--property=LoadState) echo loaded ;;
           default-root.service:--property=User) : ;;
           owned.service:--property=User) echo clawbox ;;
-          drop-in-override.service:--property=User) echo nexus0 ;;
+          drop-in-override.service:--property=User) echo ada ;;
           *) return 1 ;;
         esac
       }`,
@@ -272,7 +272,7 @@ describe("install-x64.sh shared-host preflight", () => {
       "unit_user drop-in-override.service",
     ].join("\n")], { encoding: "utf-8", timeout: 30_000 });
     expect(r.status).toBe(0);
-    expect(r.stdout).toBe("root\nclawbox\nnexus0\n");
+    expect(r.stdout).toBe("root\nclawbox\nada\n");
   });
 
   it("refuses to replace existing root-run and drop-in-overridden units", () => {
@@ -280,9 +280,9 @@ describe("install-x64.sh shared-host preflight", () => {
     expect(rootRun.status).toBe(1);
     expect(rootRun.out).toContain("clawbox-setup.service currently runs as 'root'");
 
-    const overridden = runPreflight(['unit_user() { if [ "$1" = "clawbox-setup.service" ]; then echo nexus0; fi; }']);
+    const overridden = runPreflight(['unit_user() { if [ "$1" = "clawbox-setup.service" ]; then echo ada; fi; }']);
     expect(overridden.status).toBe(1);
-    expect(overridden.out).toContain("clawbox-setup.service currently runs as 'nexus0'");
+    expect(overridden.out).toContain("clawbox-setup.service currently runs as 'ada'");
   });
 
   it("fails closed when systemd cannot resolve a unit's effective user", () => {

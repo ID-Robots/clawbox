@@ -5,10 +5,12 @@
 # Usage:
 #   scripts/nano-tests/summary.sh [results/summary.json] >> "$GITHUB_STEP_SUMMARY"
 #
-# The board and commit come from the environment — NANO_SERIAL, NANO_IP,
-# NANO_LAB, NANO_SHA — so a job whose suite never ran (no free board, a failed
-# rebuild, the wrong commit on the board) still says which board and commit it
-# was about. NANO_OUTCOME, when set, is printed as the job's own verdict line
+# The board and commit come from the environment — NANO_SERIAL, NANO_LAB,
+# NANO_SHA — so a job whose suite never ran (no free board, a failed rebuild,
+# the wrong commit on the board) still says which board and commit it was
+# about. The summary is public: the board is named by its serial and lab, never
+# its address, and the workflow passes the whole text through
+# scripts/public-hygiene.mjs before it is written. NANO_OUTCOME, when set, is printed as the job's own verdict line
 # for that case. Always exits 0: a summary must never be what fails a job.
 set -uo pipefail
 
@@ -19,9 +21,9 @@ cell() { printf '%s' "$1" | tr '\r\n' '  ' | sed -e 's/|/\\|/g' -e 's/</\&lt;/g'
 
 echo "## Nano hardware tests"
 echo
-echo "| Board | IP | Lab | Commit |"
-echo "|---|---|---|---|"
-echo "| \`$(cell "${NANO_SERIAL:-none}")\` | $(cell "${NANO_IP:--}") | $(cell "${NANO_LAB:--}") | \`$(cell "${NANO_SHA:-unknown}")\` |"
+echo "| Board | Lab | Commit |"
+echo "|---|---|---|"
+echo "| \`$(cell "${NANO_SERIAL:-none}")\` | $(cell "${NANO_LAB:--}") | \`$(cell "${NANO_SHA:-unknown}")\` |"
 echo
 
 if [ ! -s "$SUMMARY" ] || ! jq -e 'type == "object"' "$SUMMARY" >/dev/null 2>&1; then

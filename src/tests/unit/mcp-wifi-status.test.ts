@@ -26,7 +26,7 @@ vi.mock("../../../mcp/lib/api", () => ({
 import { captureRegistrar } from "../helpers/mcp-registrar";
 import { registerSystemTools } from "../../../mcp/tools/system";
 
-const WIFI_UP = { connected: true, ssid: "Home", ip: "192.168.50.65" };
+const WIFI_UP = { connected: true, ssid: "Home", ip: "192.0.2.65" };
 const WIFI_DOWN = { connected: false, ssid: null, ip: null };
 const ETH_UP = { connected: true, cable: true, iface: "enP8p1s0" };
 const ETH_DOWN = { connected: false, cable: false, iface: null };

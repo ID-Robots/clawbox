@@ -215,7 +215,7 @@ describe("ensureChannelPlugin", () => {
   });
 
   it("treats OpenClaw's 'plugin already exists' refusal as installed, not as a failure", async () => {
-    // Live on 192.168.50.82. `plugins list` reads a PERSISTED registry
+    // Live on a lab box. `plugins list` reads a PERSISTED registry
     // snapshot, so a plugin that is in OpenClaw's own store but missing from
     // that snapshot is invisible to the pre-check above. The install then hits
     //
@@ -361,7 +361,7 @@ describe("readChannelStatus", () => {
   it("reads the account row the gateway publishes, and nothing a probe would add", async () => {
     // The `bot` key below is what `channels status --probe` adds; a plain
     // `channels status` never emits it. Verified against a live connected bot
-    // (192.168.50.71), whose un-probed account row carries exactly:
+    // (a lab box), whose un-probed account row carries exactly:
     //   accountId, configured, connected, enabled, lastConnectedAt,
     //   lastDisconnect, lastError, lastEventAt, lastInboundAt, lastOutboundAt,
     //   lastStartAt, lastStopAt, lastTransportActivityAt, reconnectAttempts,

@@ -23,6 +23,9 @@ reopened and again on every push to it, as long as:
 | The PR does **not** carry the label `skip-nano` | The only opt-out. |
 | The PR changes something besides documentation | See [Docs-only pull requests](#docs-only-pull-requests). |
 
+Since 2 Oct 2026 **On-device tests (nano-lab)** is a **required** check on
+`beta`, and a skipped run (a docs-only PR, `skip-nano`) counts as passing.
+
 A **draft** runs like any other PR: the coding agent opens most of our PRs as
 drafts, and the board run is part of the checks it waits for. Marking a draft
 ready for review starts no second run — its head commit has already been
@@ -117,13 +120,16 @@ from>`), with `cancel-in-progress: false`:
   behind the PR's own running job. GitHub keeps only ONE pending job per group,
   so when a third push arrives the second one is cancelled before it starts: it
   never had a board, nothing needs recycling, and it was an older commit of the
-  same PR. That cancelled job does not touch the PR comment.
+  same PR. That cancelled job does not touch the PR comment. A job cancelled
+  after it started — by a person while it waited for a free board, or by its
+  timeout — does: the section then says *cancelled* for that commit.
 - **Different PRs run side by side.** Two limits bound how many: the number of
   runner instances with the `nano-lab` label on the lab host (each runs one job
-  at a time; on 2 Oct 2026 nexus0 runs four: `nexus0-nano-lab`, `-2`, `-3` and
-  `-4`), and the number of clean boards that `nano-ci reserve` finds FREE (see
-  [Throughput and waiting](#throughput-and-waiting)). A job waiting for a runner
-  instance waits on GitHub, before its 90 minutes start.
+  at a time; on 2 Oct 2026 the lab host runs four — `lab-runner-1` …
+  `lab-runner-4` — so **at most four PRs' board jobs run at once**), and the
+  number of clean boards that `nano-ci reserve` finds FREE (see
+  [Throughput and waiting](#throughput-and-waiting)). A fifth waits on GitHub
+  for a free runner instance, before its 90 minutes start.
 
 ### Superseded by a newer push
 
@@ -198,12 +204,16 @@ and **PR comment** reports it.
    dispatch's input resolved to a branch (see
    [Dispatching a branch](#dispatching-a-branch)). The branch must pass
    `force-update.sh`'s character check. Then **check out** the commit under
-   test — the PR's head commit, not the merge commit.
+   test — the PR's head commit, not the merge commit — with plain `git` into an
+   emptied workspace (see [What is published](#what-is-published)).
 2. **Resolve the commit** and check the runner host has `nano-ci`, `jq`,
-   `timeout` and `base64`.
+   `timeout`, `base64` and `node`, and that the commit carries
+   `scripts/public-hygiene.mjs` — the redactor the rest of the job prints
+   through. A branch from before it was added is refused: rebase it on `beta`.
 3. **Reserve** a board: `nano-ci reserve "clawbox PR #<n> <sha>"`, asked again
    every minute for up to 20 minutes while no board is free; then the job fails
-   with *No free nano-lab board* (see [No free board](#no-free-board)).
+   with *No free nano-lab board* (see [No free board](#no-free-board)). The
+   board's address is masked in the log as soon as the reservation is read.
 4. **Rebuild** the board from the PR's branch, `nano-ci rebuild <serial>
    <branch>` (≤ 20 min), **wait** for `nano-ci health` (≤ 10 min), and
    **verify** that the board's `git rev-parse HEAD` is the head commit. A board
@@ -213,10 +223,11 @@ and **PR comment** reports it.
    before a single test runs.
 5. **Run the suite** (≤ 40 min, less any time spent waiting for a board, never
    less than 20; not on a superseded run): `scripts/nano-tests/run.sh <serial>`.
-6. Upload `results/` as the artifact `nano-results-<run id>-<attempt>` and write
-   the **job summary**: board serial, IP and lab, the commit, one row per test
-   with its result, duration and reason, what each step did, whether the job
-   was cancelled, and how long it waited for a board.
+6. **Redact** `results/` and upload it as the artifact
+   `nano-results-<run id>-<attempt>`, and write the redacted **job summary**:
+   board serial and lab, the commit, one row per test with its result,
+   duration and reason, what each step did, whether the job was cancelled, and
+   how long it waited for a board.
 7. **Recycle** (`if: always()`): `nano-ci recycle <serial>` hands the board to
    the reflash queue within seconds; from then on it is not the job's. A
    recycle that fails fails the job.
@@ -228,12 +239,53 @@ and **PR comment** reports it.
    commit, the board and what became of it (*recycled for a clean reflash*,
    *recycle FAILED, released* or *recycle FAILED and release FAILED: board
    needs a look*), and the job summary. One comment per PR,
-   never one per push. A skipped docs-only run says so there too; a board job
-   cancelled before it held a board leaves the section alone.
+   never one per push. A skipped docs-only run says so there too. Only a board
+   job cancelled before it ever started — the pending job a newer push
+   replaced in the PR's concurrency group, or one a person cancelled while it
+   still waited for a runner instance — leaves the section alone: it never ran
+   a step, so its `reserve` output is empty. A cancelled job that started
+   reports *cancelled*, with or without a board.
 
-The board job on the lab host holds only a read token (`contents: read`, not
-persisted by the checkout). The comment is written by the separate job on
-GitHub's runners, the only one with `pull-requests: write`.
+The board job on the lab host holds only a read token (`contents: read`, never
+handed to its `git` checkout). The comment is written by the separate job on
+GitHub's runners, the only one with `pull-requests: write`; it takes nothing
+from the PR's tree but the redactor the comment passes through.
+
+## What is published
+
+This repository is public, and so is everything the workflow writes: the job
+log, the job summary, the PR comment and the results artifact. None of it may
+name the lab — no board address, no private address of any kind, no host or
+user name of the lab, no home folder (TASK-1366). So:
+
+- The board is named by its **serial and lab** only — in the log, the summary,
+  `summary.json` and the comment.
+- The reserve step masks the board's address (`::add-mask::`) the moment it
+  reads the reservation and never prints it; GitHub then shows `***` wherever
+  it would appear in the job's log.
+- Everything `nano-ci` prints (rebuild, health, recycle, release, and what ssh
+  says when a commit cannot be read) passes through
+  `scripts/public-hygiene.mjs redact`, which turns the board's address into
+  `<board-ip>` and any other private address, home folder, internal name or
+  credential into a placeholder. `run.sh` passes every test's output through it
+  before the log is written, so the suite's output and its logs are redacted
+  at the source.
+- The job summary, the PR comment and every file in `results/` go through the
+  same redactor before they are written or uploaded. A summary the redactor
+  cannot process is withheld, results it cannot process are not uploaded, and
+  a comment it cannot process is not posted.
+- The results folder is relative to the workspace, and the board job checks
+  out with plain `git` rather than `actions/checkout`, which logs the
+  workspace's absolute path — that path names the runner host's home folder.
+
+What the workflow cannot change: GitHub prints the runner's name and machine
+name at the top of every job's log, before any step runs. Those are set on the
+lab host (the runner registration and the host name), and must be neutral
+there.
+
+Every pull request's added lines are checked for the same things by the
+`public-hygiene` check (`.github/workflows/public-hygiene.yml`, on GitHub's
+runners).
 
 ## How recycling works
 
@@ -341,7 +393,8 @@ Tests that call `/setup-api` authenticate with the board's MCP bearer
 command line, never printed, never copied to the runner. On top of that,
 `run.sh` redacts bearer tokens, the session cookie and any
 `token`/`password`/`secret`/`api key`/`cookie` value from every log before it is
-written. Each coding run is a fresh folder with a run-id name; the folder is
+written, and then passes it through `scripts/public-hygiene.mjs` (see
+[What is published](#what-is-published)). Each coding run is a fresh folder with a run-id name; the folder is
 removed at the end, and the board is reflashed from the golden image after the
 run anyway.
 
@@ -352,7 +405,7 @@ redacted) and `summary.json`:
 
 ```json
 {
-  "serial": "…", "ip": "…", "lab": "…", "sha": "…", "run_id": "gh123-1",
+  "serial": "…", "lab": "…", "sha": "…", "run_id": "gh123-1",
   "started_at": "2026-09-30T10:00:00Z", "finished_at": "2026-09-30T10:14:12Z",
   "planned": 7, "total": 7, "passed": 5, "failed": 1, "skipped": 1,
   "interrupted": false, "ok": false,
@@ -427,7 +480,7 @@ with it.
 and a team rule backs them:
 
 1. **On the lab host (the real fence).** Every `nano-lab` runner instance on
-   nexus0 (`nexus0-nano-lab`, `-2`, `-3`, `-4`) has a job-started hook
+   the lab host (`lab-runner-1` … `lab-runner-4`) has a job-started hook
    (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) that refuses every job that is not a
    same-repo pull request, a push or a dispatch of `ID-Robots/clawbox`. It
    runs before any step of the job, outside anything a PR can change. That
@@ -449,9 +502,10 @@ it, push it to a branch of this repository and open the PR from there.
 
 The rest:
 
-- `permissions: contents: read`, and the checkout does not persist its token on
-  the lab host. Only the **PR comment** job, on GitHub's runners, may write
-  (`pull-requests: write`); it runs no code from the PR.
+- `permissions: contents: read`, and the checkout on the lab host uses no
+  token at all. Only the **PR comment** job, on GitHub's runners, may write
+  (`pull-requests: write`); of the PR's tree it runs only the redactor,
+  `scripts/public-hygiene.mjs`.
 - Every value from the event reaches a shell through `env:`, never spliced into
   a script; the board serial and the branch are validated before `nano-ci`
   sees them.

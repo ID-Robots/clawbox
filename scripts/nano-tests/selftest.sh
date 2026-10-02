@@ -85,6 +85,7 @@ fixture "$A" 70-noise.sh 'echo "ok gateway ready" >&2; echo "not ok: retrying"; 
 fixture "$A" 80-secret.sh 'echo "Authorization: Bearer abc.DEF-123"
 echo "{\"token\":\"s3cr3t\",\"password\": \"hunter2\",\"promptTokens\": 5}"
 echo "Cookie: clawbox_session=xyz987; Path=/"
+echo "board at $NANO_IP, gateway at $(printf "%s.%s.%s.%s" 10 9 8 7), log in /$(printf home)/station1/x.log"
 echo "ok - printed secrets"'
 fixture "$A" 90-env.sh '# timeout: 7
 [ "$1" = SERIAL-1 ] && [ "$NANO_SERIAL" = SERIAL-1 ] && [ "$NANO_TEST_NAME" = 90-env ] \
@@ -125,7 +126,7 @@ fi
 check "output printed before the deadline is kept" contains "$WORK/res-mixed/40-timeout.log" "ok - started"
 
 jq_check "summary.json has the run's facts" "$S" '
-  .serial == "SERIAL-1" and .ip == "192.0.2.10" and .lab == "lab-x"
+  .serial == "SERIAL-1" and has("ip") == false and .lab == "lab-x"
   and .sha == "0123456789abcdef0123456789abcdef01234567"
   and (.run_id | type == "string" and length > 0)
   and (.started_at | test("^[0-9-]+T[0-9:]+Z$")) and (.finished_at | test("^[0-9-]+T[0-9:]+Z$"))'
@@ -155,6 +156,9 @@ check "token values are redacted" lacks "$L" "s3cr3t"
 check "passwords are redacted" lacks "$L" "hunter2"
 check "the session cookie is redacted" lacks "$L" "xyz987"
 check "redaction leaves the rest readable" contains "$L" '"promptTokens": 5'
+check "the board's address is redacted" contains "$L" "board at <board-ip>, gateway at <private-ip>, log in /home/<user>/x.log"
+check "...from the run's output too" lacks "$OUT" "192.0.2.10"
+check "the run names the board by serial and lab" line_matches "$OUT" '^# board SERIAL-1 in lab-x, commit 0123456789ab'
 check "run.sh never reserves, cleans or releases a board" bash -c '! grep -qE "^(reserve|cleanup|release|rebuild) " "$1"' _ "$NANO_STUB_LOG"
 
 # ---- suite B: passes and skips only ----------------------------------------
@@ -251,7 +255,8 @@ check "...and says so as a not ok" contains "$WORK/lib-noserial.out" "not ok - n
 NANO_SERIAL=SERIAL-1 NANO_IP=192.0.2.10 NANO_LAB=lab-x NANO_SHA=abc1234 \
   bash "$HERE/summary.sh" "$S" > "$WORK/summary.md" 2>&1
 check "the job summary exits 0" test $? -eq 0
-check "it names the board and commit" contains "$WORK/summary.md" '| `SERIAL-1` | 192.0.2.10 | lab-x | `abc1234` |'
+check "it names the board by serial and lab, and the commit" contains "$WORK/summary.md" '| `SERIAL-1` | lab-x | `abc1234` |'
+check "it never names the board's address" lacks "$WORK/summary.md" "192.0.2.10"
 check "it counts the results" contains "$WORK/summary.md" "**4 passed, 5 failed, 1 skipped** of 10"
 check "it has one row per test" test "$(grep -c '^| [0-9][0-9]* | `' "$WORK/summary.md")" -eq 10
 check "a failure row carries its reason" contains "$WORK/summary.md" "| ❌ fail | "

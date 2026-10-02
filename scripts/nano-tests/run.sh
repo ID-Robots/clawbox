@@ -30,11 +30,17 @@
 #   printed neither                           -> not ok: a test that asserted
 #                                                nothing proved nothing
 #
-# Writes DIR/<test>.log (the test's output, tokens and passwords redacted) and
-# DIR/summary.json. DIR is --results, else $NANO_RESULTS_DIR, else ./results.
+# Writes DIR/<test>.log (the test's output, redacted) and DIR/summary.json.
+# DIR is --results, else $NANO_RESULTS_DIR, else ./results.
 #
-# Environment handed to every test: NANO_SERIAL, NANO_IP, NANO_LAB, NANO_SHA
-# (the commit the board must be running; default: this checkout's HEAD),
+# What it prints and writes is published (the repository is public), so the
+# board is named by its serial and lab only, and every test's output passes
+# through scripts/public-hygiene.mjs: tokens and passwords, the board's address
+# (<board-ip>), any other private address, home folder or internal name.
+#
+# Environment handed to every test: NANO_SERIAL, NANO_IP (never printed),
+# NANO_LAB, NANO_SHA (the commit the board must be running; default: this
+# checkout's HEAD),
 # NANO_RUN_ID (names the folders a test creates on the board), NANO_CI (the
 # helper, default `nano-ci`), NANO_RESULTS_DIR, NANO_TEST_NAME, NANO_TEST_TIMEOUT.
 # NANO_TESTS_DIR and NANO_DEFAULT_TIMEOUT override the test folder and the 600 s
@@ -72,8 +78,10 @@ SERIAL=$1
 [[ $DEFAULT_TIMEOUT =~ ^[1-9][0-9]*$ ]] || die "NANO_DEFAULT_TIMEOUT must be a number of seconds"
 
 NANO_CI=${NANO_CI:-nano-ci}
+HYGIENE=$HERE/../public-hygiene.mjs
+[ -f "$HYGIENE" ] || die "missing scripts/public-hygiene.mjs, which redacts every log"
 missing=()
-for tool in jq timeout base64 sed "$NANO_CI"; do
+for tool in jq timeout base64 sed node "$NANO_CI"; do
   command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
 [ ${#missing[@]} -eq 0 ] || die "missing on this host: ${missing[*]}"
@@ -92,6 +100,8 @@ if [ ${#TESTS[@]} -eq 0 ]; then
 fi
 
 mkdir -p "$RESULTS_DIR" || die "cannot create $RESULTS_DIR"
+# Printed as given: the absolute path may name the host's home folder.
+RESULTS_SHOWN=$RESULTS_DIR
 RESULTS_DIR=$(cd "$RESULTS_DIR" && pwd)
 # A reused folder must not carry a previous run's logs into this run's artifact.
 rm -f "$RESULTS_DIR"/[0-9][0-9]-*.log "$RESULTS_DIR/summary.json"
@@ -110,11 +120,14 @@ STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # the session cookie, and any token/password/secret/key value in JSON, a
 # query string or an env-style line. The tests never fetch a secret to this
 # host in the first place (lib.sh); this is the second line, not the first.
+# Then the public-hygiene redactor: the board's address, any other private
+# address, a home folder, an internal name or a credential's shape.
 redact() {
   sed -E \
     -e 's/(bearer[[:space:]]+)[A-Za-z0-9._~+\/=-]+/\1[REDACTED]/Ig' \
     -e 's/(clawbox_session=)[^;[:space:]"]+/\1[REDACTED]/g' \
-    -e 's/((token|password|passwd|secret|api[_-]?key|authorization|cookie)"?[[:space:]]*[:=][[:space:]]*"?)[^"[:space:],;}&]+/\1[REDACTED]/Ig'
+    -e 's/((token|password|passwd|secret|api[_-]?key|authorization|cookie)"?[[:space:]]*[:=][[:space:]]*"?)[^"[:space:],;}&]+/\1[REDACTED]/Ig' |
+    node "$HYGIENE" redact --mask-env "NANO_IP=<board-ip>"
 }
 
 # The `# timeout: NNN` header, looked for in the first 20 lines.
@@ -176,12 +189,12 @@ record() { # NAME STATUS REASON DURATION TIMEOUT EXIT
 INTERRUPTED=false
 write_summary() {
   jq -s \
-    --arg serial "$SERIAL" --arg ip "$NANO_IP" --arg lab "$NANO_LAB" --arg sha "$NANO_SHA" \
+    --arg serial "$SERIAL" --arg lab "$NANO_LAB" --arg sha "$NANO_SHA" \
     --arg run_id "$NANO_RUN_ID" --arg started "$STARTED_AT" \
     --arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson planned "${#TESTS[@]}" --argjson interrupted "$INTERRUPTED" '
     {
-      serial: $serial, ip: $ip, lab: $lab, sha: $sha, run_id: $run_id,
+      serial: $serial, lab: $lab, sha: $sha, run_id: $run_id,
       started_at: $started, finished_at: $finished,
       planned: $planned,
       total: length,
@@ -231,7 +244,7 @@ trap on_signal INT TERM
 
 echo "TAP version 13"
 echo "1..${#TESTS[@]}"
-echo "# board $SERIAL${NANO_IP:+ ($NANO_IP${NANO_LAB:+, $NANO_LAB})}, commit ${NANO_SHA:-unknown}, run $NANO_RUN_ID"
+echo "# board $SERIAL${NANO_LAB:+ in $NANO_LAB}, commit ${NANO_SHA:-unknown}, run $NANO_RUN_ID"
 
 index=0
 FAILED=0
@@ -275,5 +288,5 @@ done
 
 write_summary
 rm -rf "$WORK"
-echo "# $((index - FAILED)) of $index passed or skipped; summary: $RESULTS_DIR/summary.json"
+echo "# $((index - FAILED)) of $index passed or skipped; summary: $RESULTS_SHOWN/summary.json"
 [ "$FAILED" -eq 0 ]

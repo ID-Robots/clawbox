@@ -16,10 +16,10 @@ dpkg-deb --contents /tmp/clawbox-x64-integration_1.0.4_amd64.deb
 sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.4_amd64.deb
 ```
 
-The default host is `nexus0`, project `/home/nexus0/clawbox`, interpreter
-`/usr/bin/node`, and package prefix
-`/home/nexus0/.nvm/versions/node/v24.0.0`. Override the builder arguments for
-another desktop. These non-secret paths live in root-owned
+By default the package is for the account that runs the builder (under `sudo`,
+the one that ran `sudo`): project `~/clawbox`, interpreter `/usr/bin/node`, and
+package prefix `~/.nvm/versions/node/v24.0.0`. Override the builder arguments
+for another desktop. These non-secret paths live in root-owned
 `/etc/clawbox/x64-integration.env`. The CLI wrapper checks that it runs as the
 configured desktop owner before loading the owner-writable OpenClaw package.
 

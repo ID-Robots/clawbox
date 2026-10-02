@@ -488,10 +488,10 @@ describe("kiosk extension", () => {
     expect(sh).toContain(`EXT_ID="$(printf '%s' "$EXT" | sha256sum | cut -c1-32 | tr '0-9a-f' 'a-p')"`);
     expect(sh).toContain('add_flag "--remote-allow-origins=chrome-extension://$EXT_ID"');
     expect(sh).toMatch(/sed -i "\/\^  --remote-allow-origins=\/\{\\\|=chrome-extension:\/\/\$EXT_ID/);
-    // The rule, checked against the id this kiosk's Chrome gave the
-    // extension at /home/yanko/clawbox/kiosk/extension.
+    // The rule, as Chrome applies it to the extension of a box's kiosk at
+    // /home/clawbox/clawbox/kiosk/extension.
     const idFor = (p: string) =>
       [...crypto.createHash("sha256").update(p).digest("hex").slice(0, 32)].map((c) => "abcdefghijklmnop"[parseInt(c, 16)]).join("");
-    expect(idFor("/home/yanko/clawbox/kiosk/extension")).toBe("fcoiapdnhdgpcacpppgdhhokmiedaoik");
+    expect(idFor("/home/clawbox/clawbox/kiosk/extension")).toBe("nehkanofolimmnmadochopjangeomkhk");
   });
 });

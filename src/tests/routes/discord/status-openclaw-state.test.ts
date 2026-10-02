@@ -156,7 +156,7 @@ describe("GET /setup-api/discord/status — OpenClaw connection state", () => {
     // account row carries `bot`/`application` only when `channels status` is
     // run with `--probe`, and that probe is the gateway calling Discord — so it
     // answers only in the case where this route could have asked Discord
-    // itself. Verified on a live connected bot (192.168.50.71): without
+    // itself. Verified on a live connected bot (a lab box): without
     // `--probe` the account row's keys are accountId, configured, connected,
     // enabled, lastError, running, tokenStatus … and no `bot`.
     //
