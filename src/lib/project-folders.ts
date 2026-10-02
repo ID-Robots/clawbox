@@ -3,6 +3,7 @@ import path from "@/lib/runtime-path";
 import * as config from "@/lib/config-store";
 import { DATA_DIR } from "@/lib/config-store";
 import { filesBrowseRoot, isProtectedContainer, isProtectedFilePath, OPENCLAW_AGENT_SUBTREE_RE } from "@/lib/file-guard";
+import { followMovedBackupRecords } from "@/lib/project-backup-store";
 
 // ── The owner's project folders, in the Files app ───────────────────────────
 //
@@ -232,6 +233,15 @@ export function followMovedProjectFolders(moves: readonly { from: string; to: st
     const norm = (rel: string) => toRel(root, path.resolve(root, rel));
     const pairs = moves.map((m) => ({ from: norm(m.from), to: norm(m.to) })).filter((m) => m.from && m.from !== m.to);
     if (pairs.length === 0) return false;
+    // A project's GitHub backup (TASK-1358) is keyed by the same path: it
+    // moves with the folder, history and daily switch included. Its own key,
+    // its own queue; a record that could not follow is the folder's own
+    // repository still, and "Back up now" finds it again from git.
+    try {
+      await followMovedBackupRecords(pairs);
+    } catch (err) {
+      console.warn("[project-folders] could not carry a backup record through a move:", err instanceof Error ? err.message : err);
+    }
     const pinned = await readPinned();
     let changed = false;
     const next = pinned.map((rel) => {

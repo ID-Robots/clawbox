@@ -332,6 +332,17 @@ export async function register() {
     console.error('[instrumentation] Could not load ClawKeep scheduler:', err instanceof Error ? err.message : err)
   }
   try {
+    // Projects → GitHub daily auto-backup (TASK-1358). Off for every folder
+    // until its owner turns it on; the timer only asks an hourly question.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const projectBackupScheduler = require('./lib/project-backup-scheduler')
+    void projectBackupScheduler.start().catch((err: unknown) => {
+      console.error('[instrumentation] Project backup scheduler boot failed:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not load the project backup scheduler:', err instanceof Error ? err.message : err)
+  }
+  try {
     // Old chat transcripts. Age is the only thing left to bound here -- the
     // per-conversation caps already decide how big any ONE of them gets, so
     // what accumulates is stale ones. Boot is the right moment because these
