@@ -1,9 +1,10 @@
 # Nano hardware tests
 
 The on-device test suite: a handful of checks that only mean something on a real
-Jetson, run automatically on **one** free board from the nano lab for every pull
-request, after which the board is cleaned back to `beta` and released — whether
-the tests passed, failed or were cancelled.
+Jetson, run automatically on **one** freshly reflashed board from the nano lab
+for every pull request, after which the board is recycled — handed to the lab
+host's reflash queue for a clean golden restore — whether the tests passed,
+failed or were cancelled (see [How recycling works](#how-recycling-works)).
 
 Everything that does not need the hardware already runs in the container CI
 (`Tests`, `E2E`, `E2E Install`, `Build identity`). This suite is only the rest.
@@ -33,7 +34,7 @@ gh pr edit <PR number> --add-label skip-nano     # this PR: no more board runs
 ```
 
 `skip-nano` counts from the next event: adding it does not stop a run already
-going (that always finishes, cleanup included), and removing it does not start
+going (that always finishes, its recycle included), and removing it does not start
 one — the next push or reopen is judged with the labels the PR has then. On a
 `skip-nano` PR the check shows as skipped.
 
@@ -112,16 +113,17 @@ Each pull request has its own concurrency group,
 from>`), with `cancel-in-progress: false`:
 
 - **Within one PR, one board job at a time, and a running one is never
-  cancelled** — its cleanup and release must run. A push queues behind the PR's
-  own running job. GitHub keeps only ONE pending job per group, so when a third
-  push arrives the second one is cancelled before it starts: it never had a
-  board, nothing needs cleaning, and it was an older commit of the same PR.
-  That cancelled job does not touch the PR comment.
+  cancelled** — its recycle (or the release fallback) must run. A push queues
+  behind the PR's own running job. GitHub keeps only ONE pending job per group,
+  so when a third push arrives the second one is cancelled before it starts: it
+  never had a board, nothing needs recycling, and it was an older commit of the
+  same PR. That cancelled job does not touch the PR comment.
 - **Different PRs run side by side.** Two limits bound how many: the number of
   runner instances with the `nano-lab` label on the lab host (each runs one job
   at a time; on 2 Oct 2026 nexus0 runs four: `nexus0-nano-lab`, `-2`, `-3` and
-  `-4`), and the number of boards that `nano-ci reserve` finds FREE. A job waiting for a runner instance waits on
-  GitHub, before its 90 minutes start.
+  `-4`), and the number of clean boards that `nano-ci reserve` finds FREE (see
+  [Throughput and waiting](#throughput-and-waiting)). A job waiting for a runner
+  instance waits on GitHub, before its 90 minutes start.
 
 ### Superseded by a newer push
 
@@ -139,24 +141,26 @@ branch is now:
   *superseded, not tested*. It is not a hardware failure and does not fail the
   PR: the newer push has its own run, queued behind this one in the PR's
   concurrency group, and that run reports on the commit that is now the PR's
-  head. Cleanup and release run as always.
+  head. The board is recycled as always.
 - anything else → `Wrong commit on the board`, which fails the job: the
   rebuild left the board where it was, its commit could not be read, or it is
   on some commit although the branch never moved.
 
 ### No free board
 
-When every board is leased — by other PRs' jobs or by people (`nano-lease
-list`) — `nano-ci reserve` exits 3. The job asks again every minute for up to
+When no clean board is free — the boards are leased by other PRs' jobs, by
+people (`nano-lease list`) or by the reflash service that is still restoring
+them — `nano-ci reserve` exits 3. The job asks again every minute for up to
 **20 minutes**, logging each try. If a board frees up it carries on, and its
 summary says how long it waited. If none does, it fails with
 `No free nano-lab board` (as an annotation and in the job summary) — re-run the
-job when `nano-lease list` shows a FREE board. It never held a board, so
-there is nothing to clean up.
+job when `nano-ci status` shows a clean board. It never held a board, so
+there is nothing to recycle. How many clean boards the lab returns an hour:
+[Throughput and waiting](#throughput-and-waiting).
 
-The wait comes out of the suite's 40 minutes, never out of cleanup's room: the
-suite's cap is 40 minutes less every started minute spent waiting, and never
-less than 20.
+The wait comes out of the suite's 40 minutes, never out of the room the
+`always()` steps keep at the end: the suite's cap is 40 minutes less every
+started minute spent waiting, and never less than 20.
 
 ## What runs where
 
@@ -172,12 +176,13 @@ repository holds no board address, key or password:
 
 | `nano-ci …` | Does |
 |---|---|
-| `reserve "<purpose>"` | leases one FREE board and prints `SERIAL IP LAB` (exit 3: none free — the job asks again every minute for 20 minutes) |
+| `reserve "<purpose>"` | leases one FREE board with the **clean** marker (freshly reflashed, see [How recycling works](#how-recycling-works)) and prints `SERIAL IP LAB` (exit 3: none free — the job asks again every minute for 20 minutes) |
 | `rebuild <serial> <branch>` | force-updates the board's checkout to `origin/<branch>` (`scripts/force-update.sh`) and rebuilds it (5–10 min); fails when force-update does. A **branch** only: there is no `origin/<sha>` or `origin/<tag>`, so a SHA or a tag fails |
 | `health <serial>` | exit 0 when `clawbox-gateway` and `clawbox-setup` are active and the dashboard answers |
 | `ssh <serial> <cmd…>` / `scp <serial> <src> <dst>` | runs a command on / copies a file to the board as `clawbox` |
-| `cleanup <serial>` | rebuilds the board back to `beta` and wipes test projects; reflashes it from the golden image if it is still unhealthy (~40 min) |
-| `release <serial>` | releases the lease |
+| `recycle <serial>` | hands the board to the reflash queue (seconds; never waits for the reflash). The board is no longer yours once it returns 0 — the job's step 7 |
+| `cleanup <serial>` | **legacy, by hand only** — the workflow no longer calls it: rebuilds the board back to `beta` and wipes test projects; reflashes it from the golden image if it is still unhealthy (~40 min) |
+| `release <serial>` | releases the lease — in the job only the **fallback** when `recycle` failed (step 8) |
 
 A reserved board shows as leased in `nano-lease list` like any board a person
 has locked.
@@ -212,12 +217,17 @@ and **PR comment** reports it.
    the **job summary**: board serial, IP and lab, the commit, one row per test
    with its result, duration and reason, what each step did, whether the job
    was cancelled, and how long it waited for a board.
-7. **Clean up** (`if: always()`): `nano-ci cleanup <serial>`.
-8. **Release** (`if: always()`): `nano-ci release <serial>`.
+7. **Recycle** (`if: always()`): `nano-ci recycle <serial>` hands the board to
+   the reflash queue within seconds; from then on it is not the job's. A
+   recycle that fails fails the job.
+8. **Release — fallback only** (`if: always()` and the recycle did not
+   succeed): `nano-ci release <serial>`. Skipped after a successful recycle.
 9. **PR comment** (`ubuntu-latest`): the *Nano hardware tests* section of the
    PR's one **CI Summary** comment — the comment `Tests`, `E2E` and
    `E2E Install` already edit in place — is rewritten with the verdict, the
-   commit, the board and its cleanup, and the job summary. One comment per PR,
+   commit, the board and what became of it (*recycled for a clean reflash*,
+   *recycle FAILED, released* or *recycle FAILED and release FAILED: board
+   needs a look*), and the job summary. One comment per PR,
    never one per push. A skipped docs-only run says so there too; a board job
    cancelled before it held a board leaves the section alone.
 
@@ -225,31 +235,73 @@ The board job on the lab host holds only a read token (`contents: read`, not
 persisted by the checkout). The comment is written by the separate job on
 GitHub's runners, the only one with `pull-requests: write`.
 
-## How cleanup works
+## How recycling works
 
-Steps 7 and 8 run whenever a board was reserved — after a failed test, a failed
-rebuild, a wrong commit, a timeout or a cancel (`always()` covers a cancel too,
-and the summary then says the job was cancelled) — and always in that order:
-the board is rebuilt to `beta` (or reflashed) **before** anyone else can lease
-it. A cleanup that fails fails the job, says so in the summary and the PR
-comment, and the board is still released.
+Every board a run gets was **restored from the golden image and provisioned to
+the current `beta` head** since the last time anyone used it.
 
-The budget is what keeps that promise. The job has 90 minutes; the steps before
-cleanup are capped at 20 (waiting for a board) + 20 + 10 + 40, but the suite's
-cap shrinks by the wait, so they never take more than about 70 and cleanup
-keeps at least 20. A normal run spends about 25 before cleanup — 45 after the
-longest wait — so a cleanup that has to reflash (~40 min) still fits. Each test
-also has its own deadline (below), so one stuck test cannot eat the suite's.
+Step 7 runs whenever a board was reserved — after a pass, a failed test, a
+failed rebuild, a wrong commit, a timeout or a cancel (`always()` covers a
+cancel too, and the summary then says the job was cancelled). `nano-ci recycle
+<serial>` hands the board from the CI lease to the **reflash service** on the
+lab host (outside this repository) and returns 0 within seconds: the job never
+waits for the reflash, and the board is no longer the job's. The service then
+
+1. restores the board from the golden image (~20 min);
+2. provisions it to the current `beta` head — claimed, ClawBox AI and the
+   coding agent on — and verifies it: the build identity is the `beta` head,
+   `clawbox-gateway` and `clawbox-setup` are active, and a real chat turn
+   answers (~15 min);
+3. releases it FREE with a **clean** marker.
+
+`nano-ci reserve` hands out only boards with that marker, so every run gets a
+freshly reflashed board, never one another run or a person has touched since.
+A board whose reflash fails is **quarantined** by the service and never handed
+out. The service reflashes one board per lab at a time, `nano-lab1` and
+`nano-lab2` in parallel.
+
+A recycle that fails fails the job with `Board recycle failed`, says so in the
+summary and the PR comment, and only then does step 8, the **fallback**,
+release the board: it is still leased to `ci` and must not stay so. After a
+recycle that succeeded the release is skipped — the board belongs to the
+reflash service, and the broker would refuse to release it for `ci`. A board
+the fallback released carries no clean marker, so `nano-ci reserve` does not
+hand it to a run again until it has been reflashed.
+
+The budget: the job has 90 minutes; the steps before the recycle are capped at
+20 (waiting for a board) + 20 + 10 + 40, but the suite's cap shrinks by the
+wait, so they never take more than about 70. The recycle takes seconds — the
+reflash runs on the lab host after the job, not inside it — so the job no
+longer keeps room for a ~40-minute cleanup, and the rest of the 90 is headroom
+for the upload, the summary, the recycle and the fallback release. A normal run
+spends about 25 minutes. Each test also has its own deadline (below), so one
+stuck test cannot eat the suite's.
+
+### Throughput and waiting
+
+A reflash takes about 35–40 minutes per board, one per lab at a time, so the
+lab returns **about 2–4 clean boards per hour across both labs**. When fewer
+than 2 clean boards are free, a PR waits for one with the existing 20-minute
+board wait (one `nano-ci reserve` try a minute, see
+[No free board](#no-free-board)) and then fails with `No free nano-lab board` —
+re-run the job when `nano-ci status` shows a clean board. Boards whose reflash
+fails are quarantined and never handed out.
+
+### Cancelled, or the runner died
 
 Nothing in the workflow cancels a running board job: the per-PR concurrency
 group does not cancel in progress (see [Parallel runs](#parallel-runs)). A
-person can still cancel a run; cleanup and release then run as above. If the
-job is stopped outright before cleanup finishes, the release step never runs
-and the board stays leased to this job — nobody else gets a board that was not
-cleaned. Find it in `nano-lease list`, then clean and release it by hand.
+person can still cancel a run; the recycle (and, if it fails, the release)
+then runs as above. If the job is stopped outright before the recycle step
+finishes, neither step runs and the board stays leased to `ci` — nobody else
+gets a board that was not reflashed. Find it in `nano-lease list` and recycle
+it by hand on the lab host: `nano-ci recycle <serial>`.
 
-If the runner host itself dies mid-job, nothing on GitHub can clean up: the
-lease expires after 24 hours, and `nano-lease list` shows who held the board.
+If the runner host itself dies mid-job, nothing on GitHub can recycle the
+board: `nano-lease list` shows it still leased to `ci`, and it is recycled by
+hand the same way, `nano-ci recycle <serial>`. Its lease would expire after 24
+hours, but only a reflashed board is ever handed to a run again, so recycle it
+rather than wait.
 
 ## The tests
 
@@ -290,7 +342,8 @@ command line, never printed, never copied to the runner. On top of that,
 `run.sh` redacts bearer tokens, the session cookie and any
 `token`/`password`/`secret`/`api key`/`cookie` value from every log before it is
 written. Each coding run is a fresh folder with a run-id name; the folder is
-removed at the end and `nano-ci cleanup` wipes test projects anyway.
+removed at the end, and the board is reflashed from the golden image after the
+run anyway.
 
 ## Results
 
@@ -324,12 +377,13 @@ read -r SERIAL IP LAB <<<"$(nano-ci reserve "TASK-NNN: nano tests by hand")"
 nano-ci rebuild "$SERIAL" <branch>                  # a branch, never a SHA or tag
 NANO_SHA=<the commit the board runs> scripts/nano-tests/run.sh "$SERIAL"
 scripts/nano-tests/run.sh --only 30-chat "$SERIAL"  # one test
-nano-ci cleanup "$SERIAL"
-nano-ci release "$SERIAL"
+nano-ci recycle "$SERIAL"                           # to the reflash queue; no longer yours
 ```
 
-Always clean up and release, also when it fails. `NANO_SHA` defaults to the
-commit your checkout is on — `10-build-identity` compares the board with it.
+Always recycle, also when the tests fail; only when `nano-ci recycle` itself
+fails, release the board with `nano-ci release "$SERIAL"`. `NANO_SHA` defaults
+to the commit your checkout is on — `10-build-identity` compares the board
+with it.
 
 ## Adding a test
 
@@ -361,8 +415,8 @@ commit your checkout is on — `10-build-identity` compares the board with it.
    (`fresh_project_dir`, `start_coding_run`, `wait_coding_run`,
    `expect_completed`, `remove_project_dir`).
 5. Keep it self-contained: no state shared with another test except
-   `results/`, and nothing left on the board that `nano-ci cleanup` would not
-   remove.
+   `results/`, and nothing left on the board for the tests after it — the
+   board is reflashed only once the whole run is over.
 6. Check it: `shellcheck -x scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh`
    and `bash scripts/nano-tests/selftest.sh` (both run in CI), then on a
    reserved board with `--only`.
