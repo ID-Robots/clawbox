@@ -93,9 +93,8 @@ from>`), with `cancel-in-progress: false`:
   That cancelled job does not touch the PR comment.
 - **Different PRs run side by side.** Two limits bound how many: the number of
   runner instances with the `nano-lab` label on the lab host (each runs one job
-  at a time: `nexus0-nano-lab` today, and ops is adding 3–4 on nexus0 — until
-  then PRs take turns), and the number of boards that `nano-ci reserve` finds
-  FREE. A job waiting for a runner instance waits on
+  at a time; on 2 Oct 2026 nexus0 runs four: `nexus0-nano-lab`, `-2`, `-3` and
+  `-4`), and the number of boards that `nano-ci reserve` finds FREE. A job waiting for a runner instance waits on
   GitHub, before its 90 minutes start.
 
 ### No free board
