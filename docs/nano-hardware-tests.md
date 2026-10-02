@@ -260,9 +260,8 @@ deadline. A failed test does not stop the next one.
 |---|---|---|---|
 | `10-build-identity` | 5 min | `/setup-api/system/build-identity?force=1` names the head commit for both the checkout and the build, `dirty` false for both, `drift.buildVsCheckout` `match`, the stamped build is the deployed `BUILD_ID`; `clawbox-setup.service` started **after** that build was deployed (so it serves it); `scripts/verify-build-identity.sh` passes on the board | — |
 | `20-services` | 5 min | `clawbox-gateway` and `clawbox-setup` active, `clawbox-vnc` too when the board enables it; `nano-ci health`; `/setup-api/gateway/health` 200 with `available: true`; the dashboard serves `/login`; `~/.npm-global/bin/openclaw --version` works as `clawbox` | — |
-| `30-chat-turn` | 11 min | `openclaw agent --agent main -m "Reply with exactly this text and nothing else: NANO-CI-OK <serial>" --json` answers `NANO-CI-OK <serial>` within 240 s through the box's configured provider; retried once after 60 s | — |
+| `30-chat-turn` | 11 min | `openclaw agent --agent main -m "Reply with exactly this text and nothing else: NANO-CI-OK <serial>" --json` answers `NANO-CI-OK <serial>` within 240 s through ClawBox AI (the plan every lab board is connected to); retried once after 60 s | — |
 | `40-coding-agent-run` | 10 min | `POST /setup-api/coding-agent/run` in a fresh `~/Projects/nano-ci-<run id>` (or inside the owner's project folder if one is set) asks for `hello.txt` with one given line; `runs?id=` is long-polled until the run settles; it must be `completed` and the file must hold exactly that line | — |
-| `50-local-model` | 7 min | `ollama run <model> "Say OK"` answers OK within 180 s, `<model>` being the first of `OLLAMA_PRESET_MODELS` (`src/lib/local-install.ts`) the board has pulled; a stopped `ollama.service` is started and stopped again | ollama is not installed, or none of those models is pulled |
 | `60-media-tools` | 10 min | a coding run asked to use `generate_image` leaves a PNG of at least 4 KB and 64×64 px (`generate_audio` and a clip of at least 8 KB when only audio is on), and the run's `mediaGenerated` counter shows the tool was used | the coding agent's `generateImages` and `generateAudio` are both off |
 | `70-reboot-survival` | 13 min | restarts the gateway the way the box does (`sudo -n systemctl restart clawbox-gateway.service`, or `systemctl --user` for a legacy user unit); within 120 s it is back as a new process and `/setup-api/gateway/health` reports it available; then the `30-chat-turn` turn passes again | — |
 
@@ -272,9 +271,9 @@ Notes on what the brief asked for and what the box actually offers:
   session-gated and proxied to the gateway, and the MCP bearer opens
   `/setup-api/*` only (`src/middleware.ts`). The suite asks
   `/setup-api/gateway/health` and `nano-ci health` instead.
-- **The local model.** ClawBox ships no ollama model — the model it installs is
-  Gemma on its own llama.cpp. What it ships *for* ollama is the wizard's preset
-  pair, which is what `50-local-model` looks for.
+- **ClawBox AI only.** The suite tests the happy path: a box on the ClawBox
+  AI plan. On-device models (Gemma on llama.cpp, the wizard's ollama presets)
+  are not tested for now.
 - **A reboot.** `sudo -n reboot` is not granted to `clawbox`, so
   `70-reboot-survival` restarts the gateway instead, through the sudoers grant
   `restartGateway()` uses.

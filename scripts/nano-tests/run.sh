@@ -18,7 +18,7 @@
 #   ok 1 - 10-build-identity (14s)
 #   not ok 2 - 20-services (3s)
 #   #   clawbox-gateway.service is failed, not active
-#   ok 5 - 50-local-model (1s) # SKIP ollama is not installed on this board
+#   ok 5 - 60-media-tools (1s) # SKIP generateImages and generateAudio are both off
 #
 # A test says what happened by PRINTING `ok - …`, `not ok - …` or
 # `ok # SKIP …` lines (lib.sh). Its verdict is decided in this order:
