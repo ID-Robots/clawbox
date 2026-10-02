@@ -134,6 +134,12 @@ function StoreAppIcon({ appId, name, color, size = "w-12 h-12" }: { appId: strin
           src={`/setup-api/apps/icon/${appId}`}
           alt={name}
           className="w-full h-full object-cover"
+          // The catalogue is ~200 cards: fetched all at once, every icon was a
+          // request to the box (and, for an app not installed, upstream), all
+          // decoded on the main thread as the grid opened. Lazy and async,
+          // only the cards on screen pay.
+          loading="lazy"
+          decoding="async"
           onError={() => setFailed(true)}
         />
       )}
@@ -937,7 +943,11 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
               return (
                 <div
                   key={app.id}
-                  className={`relative rounded-xl border p-3 transition-all duration-300 ${
+                  // Off-screen cards skip layout and paint until scrolled to:
+                  // the whole catalogue laid out at once was a 150 ms task the
+                  // moment the Store opened. The intrinsic size keeps the
+                  // scrollbar honest before a card has been laid out once.
+                  className={`relative rounded-xl border p-3 transition-all duration-300 [content-visibility:auto] [contain-intrinsic-size:auto_132px] ${
                     isInstalling ? "scale-[0.98]" : ""
                   } ${
                     isError

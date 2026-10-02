@@ -3,6 +3,7 @@ import { clawkeepTranslations } from "./clawkeep-translations";
 import { desktopTranslations } from "./desktop-translations";
 import { editionTranslations } from "./edition-translations";
 import { projectBackupTranslations } from "./project-backup-translations";
+import { monitorsTranslations } from "./monitors-translations";
 
 // Merge setup + desktop + clawkeep + edition translations per locale.
 // Order matters: later sources override earlier ones, so a clawkeep-specific
@@ -15,6 +16,7 @@ function mergeTranslations(
   clawkeep: Record<Locale, Record<string, string>>,
   edition: Record<Locale, Record<string, string>>,
   projectBackup: Record<Locale, Record<string, string>>,
+  monitors: Record<Locale, Record<string, string>>,
 ): Record<Locale, Record<string, string>> {
   const merged = {} as Record<Locale, Record<string, string>>;
   for (const locale of Object.keys(setup) as Locale[]) {
@@ -25,6 +27,8 @@ function mergeTranslations(
       ...edition[locale],
       // The Files app's GitHub backup (TASK-1358): one module for the surface.
       ...projectBackup[locale],
+      // Settings → Monitors (monitor mode): one module for the surface.
+      ...monitors[locale],
     };
   }
   return merged;
@@ -8664,4 +8668,5 @@ export const translations = mergeTranslations(
   clawkeepTranslations,
   editionTranslations,
   projectBackupTranslations,
+  monitorsTranslations,
 );

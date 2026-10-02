@@ -41,7 +41,9 @@ describe("the docked chat's layout", () => {
     // narrowed to phone width keeps the width it was docked at, and the strip
     // was still reserved — pushing the notice column off the left edge and
     // insetting a mascot that is not drawn at all.
-    expect(src).toMatch(/const chatPanelInset = !isMobile && chatPanelWidth > 0 \? chatPanelWidth \+ CHAT_PANEL_GAP : 0;/);
+    // The strip is the width the chat is DRAWN at (held to the main monitor
+    // over a row of monitors, the owner's own width on one screen).
+    expect(src).toMatch(/const chatPanelInset = !isMobile && chatPanelWidth > 0 \? dockedChatWidth\(chatPanelWidth, deskScreens !== null\) \+ CHAT_PANEL_GAP : 0;/);
   });
 
   it("brings a docked chat back after a reload, closed or not", () => {
@@ -115,8 +117,18 @@ describe("the top-right notices", () => {
     expect(src).toMatch(/const NOTICE_MARGIN = 16;/);
     expect(src).toMatch(/className="desktop-notice-stack pointer-events-none fixed flex w-\[320px\] flex-col gap-3"/);
     // The column's top is the same margin, below the laptop's kiosk bar while
-    // that bar is up (0 everywhere else).
-    expect(src).toMatch(/top: NOTICE_MARGIN \+ kioskBarInset \}/);
+    // that bar is up (0 everywhere else), and on the main monitor's own top
+    // over a row of monitors (0 everywhere else).
+    expect(src).toMatch(/top: NOTICE_MARGIN \+ kioskBarInset \+ mainIns\.top \}/);
+    expect(src).toMatch(/right: NOTICE_MARGIN \+ noticeRightInset \+ mainIns\.right,/);
+  });
+
+  it("stand exactly where they always did without a monitor layout", () => {
+    // `mainIns` is what monitor mode adds to the column (and the upload
+    // toast): nothing at all on a Jetson or in a browser tab, which have no
+    // layout.
+    expect(src).toMatch(/const mainIns = deskScreens \? mainInsets\(\) : \{ left: 0, top: 0, right: 0, bottom: 0 \};/);
+    expect(src).toMatch(/const mainRect = deskScreens \? mainScreen\(\) : null;/);
   });
 
   it("ask the chat where it is standing only while a card is up", () => {
@@ -250,5 +262,15 @@ describe("the shelf clock", () => {
     expect(regionalTag(["en-US", "en"], "de")).toBe("de");
     // A browser with no list at all (an old WebView) is the bare tag.
     expect(regionalTag(undefined, "en")).toBe("en");
+  });
+});
+
+describe("the file-drop overlay over a row of monitors", () => {
+  it("centres its card on the main monitor, and leaves it to the flex centring without a layout", () => {
+    // `fixed inset-0 … justify-center` alone put the card on the seam
+    // between two equal monitors, half of it on each.
+    const overlay = src.match(/\{desktopDragOver && \([\s\S]{0,1200}?files\.dropToUpload/)?.[0] ?? "";
+    expect(overlay).toMatch(/className="fixed inset-0 flex items-center justify-center bg-black\/60 backdrop-blur-sm pointer-events-none"/);
+    expect(overlay).toMatch(/style=\{mainRect \? \{ position: "absolute", left: mainRect\.x \+ mainRect\.width \/ 2, top: mainRect\.y \+ mainRect\.height \/ 2, transform: "translate\(-50%, -50%\)" \} : undefined\}/);
   });
 });

@@ -10,6 +10,26 @@ import { NEUTRAL_PACK } from '@/lib/mascot-packs'
 import { frenzyQuotesFor } from '@/lib/mascot-frenzy'
 import { fetchUserName, fetchPhraseSet, initialPhraseSet, clearPhraseCache, pickNameGreeting, type MascotLine } from '@/lib/mascot-client'
 import { MASCOT_KEYFRAMES } from '@/lib/mascot-styles'
+import { getDeskScreens, mainInsets, mainScreen } from '@/lib/desktop-screens'
+import { useDeskScreens } from '@/lib/use-desk-screens'
+
+/**
+ * The stretch of screen the mascot lives on: the viewport, or — when the
+ * desktop is spread over a row of monitors — the MAIN monitor, so it walks
+ * the shelf it stands on instead of strolling across the gap onto a monitor
+ * with no shelf. Its x is a share of this width and its floor this bottom.
+ */
+function stage() {
+  const m = mainScreen()
+  return { x: m.x, w: m.width || 1, bottom: m.y + m.height, h: m.height || 1 }
+}
+
+/** The CSS x of the mascot's centre: the `vw` it has always been on one screen. */
+function stageX(pct: number): string {
+  if (!getDeskScreens()) return `${pct}vw`
+  const s = stage()
+  return `${(s.x + (pct / 100) * s.w).toFixed(2)}px`
+}
 import { fetchPetStatus, PET_CHANGED_EVENT, type PetStatus } from '@/lib/pet-client'
 import { PET_NEUTRAL_PACK, petSafePhrasesSync } from '@/lib/mascot-pet-voice'
 import PetSprite from '@/components/PetSprite'
@@ -40,6 +60,42 @@ const MASCOT_ACTIONS: { state: MascotState; dur: [number, number]; weight: numbe
   { state: 'dance',     dur: [3000, 4000],  weight: 3 },
   { state: 'facepalm',  dur: [3000, 4000],  weight: 2 },
 ]
+
+/**
+ * How often the mascot's RESTING animations move: the idle bob, sleep's
+ * breathing and floating z's, the power stance's rings and sparks. They run
+ * paused and a timer steps them (useAmbientSteps), because a CSS animation
+ * left to run makes the browser produce a frame 60 times a second — measured
+ * on the desktop at ~+45% CPU across Chrome's processes and 3x the GPU time for
+ * a 2 px bob, all day, on every box. At 15 steps a second the same moves read
+ * the same. Walking, reacting and thinking are not resting and stay smooth.
+ */
+export const AMBIENT_FPS = 15
+
+/**
+ * Step every PAUSED animation under `root` to the time since `active` turned
+ * on, `fps` times a second — nothing while the desktop is hidden. A paused
+ * animation costs nothing between steps.
+ */
+function useAmbientSteps(rootRef: React.RefObject<HTMLDivElement | null>, active: boolean, fps: number) {
+  useEffect(() => {
+    const root = rootRef.current
+    if (!active || !root || typeof root.getAnimations !== 'function') return
+    const started = performance.now()
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const tick = () => {
+      if (document.visibilityState !== 'hidden') {
+        const now = performance.now() - started
+        for (const a of root.getAnimations({ subtree: true })) {
+          if (a.playState === 'paused') a.currentTime = now
+        }
+      }
+      timer = setTimeout(tick, 1000 / fps)
+    }
+    tick()
+    return () => { if (timer !== null) clearTimeout(timer) }
+  }, [rootRef, active, fps])
+}
 
 const POWER_PARTICLES = [
   { bottom: 24, left: 38, duration: 1.2, delay: 0.15 },
@@ -301,6 +357,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // mirrored into state because the resting `bottom` is a rendered style.
   const groundRef = useRef(CRAB_GROUND_PX)
   const [groundPx, setGroundPx] = useState(CRAB_GROUND_PX)
+  // Over a row of monitors the floor is the MAIN monitor's bottom; `bottom` is
+  // measured from the viewport's, so the gap between the two rides along
+  // (0 with one screen).
+  const deskScreens = useDeskScreens()
+  const groundLift = deskScreens ? mainInsets().bottom : 0
   const walkRangeRef = useRef<Range>({ ...CRAB_WALK_RANGE })
   const boundsRef = useRef<Range>({ ...CRAB_BOUNDS })
   /** The body box currently worn. Read by the physics loop, which used to
@@ -365,7 +426,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       const el = document.querySelector('[data-mascot-ground]') as HTMLElement | null
       if (!el) return false
       const rect = el.getBoundingClientRect()
-      const vw = window.innerWidth || 1
+      const st = stage()
+      const vw = st.w
       if (rect.width <= 0 || rect.height <= 0) return false
       // The shelf can REMOUNT (the dock re-renders when an app is installed),
       // which left the observer holding a detached node and only
@@ -373,7 +435,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       watch(el)
       // The pet's feet sit on the bar's top edge; `bottom` is measured from
       // the viewport bottom, which is what the mascot's `position: fixed` uses.
-      const ground = Math.max(0, Math.round(window.innerHeight - rect.top))
+      const ground = Math.max(0, Math.round(st.bottom - rect.top))
       groundRef.current = ground
       setGroundPx(ground)
 
@@ -400,8 +462,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       // own range — but it is derived from the bar rather than assumed, which
       // is what keeps the pet ON it if the bar is ever inset or centred.
       const onBar: Range = {
-        min: ((usable.lo + half) / vw) * 100,
-        max: ((usable.hi - half) / vw) * 100,
+        min: ((usable.lo - st.x + half) / vw) * 100,
+        max: ((usable.hi - st.x - half) / vw) * 100,
       }
       // Mutated in place, never replaced: an in-flight walk captures the range
       // object once and clamps against it for the next 6-12 s, so handing out
@@ -444,6 +506,12 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       try { observer?.disconnect() } catch { /* same reason as above */ }
     }
   }, [pet])
+
+  // A monitor added, removed or made main moves the stage under the mascot:
+  // measure its lane and floor again and redraw it where it now stands.
+  useEffect(() => {
+    if (!measureRef.current?.()) updateCrabPosRef.current?.()
+  }, [deskScreens])
 
   // Categorized phrase set for the current locale. Starts on whatever can be
   // had synchronously — the locale's pack if it is already in memory, the
@@ -633,7 +701,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (!el) return
     const scaleX = facingRef.current === 'left' ? -1 : 1
     const y = jumpYRef.current - liftRef.current
-    el.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${y.toFixed(2)}px) scaleX(${scaleX})`
+    el.style.transform = `translateX(calc(${stageX(xRef.current)} - 50%)) translateY(${y.toFixed(2)}px) scaleX(${scaleX})`
     positionBubbleRef.current?.()
   }, [])
 
@@ -659,7 +727,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     const el = bubbleElRef.current
     const width = bubbleWRef.current
     if (!el || width <= 0) return
-    const vw = window.innerWidth || 1
+    const st = stage()
+    const vw = st.w
     const centre = (xRef.current / 100) * vw
     const m = BUBBLE_EDGE_MARGIN_PX
     let shift = 0
@@ -796,13 +865,15 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
 
     // Move
-    const vw = window.innerWidth
-    const vh = window.innerHeight
+    const st = stage()
+    const vw = st.w
+    // The floor line in screen coordinates: the main monitor's bottom.
+    const vh = st.bottom
     xRef.current += (p.velX * dt / vw) * 100
     p.posY -= p.velY * dt // posY = height from ground, velY positive = falling
 
     // ─── Collision: platforms (desktop icons with data-crab-platform) ───
-    const crabPxX = (xRef.current / 100) * vw
+    const crabPxX = st.x + (xRef.current / 100) * vw
     const crabBottom = vh - p.posY  // crab's feet in screen coords (from top)
     // Crab hitbox: narrower than the full 150px image — just the body (~60px wide, centered)
     const crabHitW = 60
@@ -881,7 +952,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     }
 
     // ─── Collision: ceiling ───
-    const crabVh = window.innerHeight
+    const crabVh = stage().h
     // The body box, not the crab's 150: a pet's is smaller, and hardcoding the
     // crab's stopped a flung pet nearly 40px short of the ceiling.
     const bodyBox = bodyPxRef.current
@@ -974,7 +1045,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       const pp = physicsRef.current
       pp.lastPointerX = e.clientX; pp.lastPointerY = e.clientY; pp.lastPointerTime = performance.now()
     }
-    const vw = window.innerWidth, vh = window.innerHeight, now = performance.now()
+    const st = stage()
+    const vw = st.w, vh = st.bottom, now = performance.now()
     const p = physicsRef.current
     const dt = (now - p.lastPointerTime) / 1000
     if (dt > 0.005) {
@@ -982,7 +1054,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       p.velY = (e.clientY - p.lastPointerY) / dt
       p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = now
     }
-    xRef.current = clampTo(boundsRef.current, ((e.clientX - dragOffsetRef.current.x) / vw) * 100)
+    xRef.current = clampTo(boundsRef.current, ((e.clientX - st.x - dragOffsetRef.current.x) / vw) * 100)
     onPositionChangeRef.current?.(xRef.current)
     const posY = Math.max(0, vh - e.clientY - 20)
     physicsRef.current.posY = posY
@@ -1214,7 +1286,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       // stroll reads at one speed on every screen. The old `randRange(-18,18)`
       // vw over a fixed 6-12 s covered 345px on a 1920 desktop and 144px on
       // an 800 one — the same pet, sprinting or crawling by viewport width.
-      const vw = window.innerWidth || 1
+      const vw = stage().w
       const distPx = randRange(PET_WALK_DISTANCE_PX.min, PET_WALK_DISTANCE_PX.max)
       const dir = Math.random() < 0.5 ? -1 : 1
       let newTarget = clampTo(walk, startX + ((dir * distPx) / vw) * 100)
@@ -1420,6 +1492,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Resting: what the mascot does most of the day (see AMBIENT_FPS).
+  const ambient = !thinking && !frenzy && (state === 'idle' || state === 'sleep')
+  const restPlay = ambient ? ' paused' : ''
+  useAmbientSteps(crabElRef, ambient, AMBIENT_FPS)
+
   const bodyAnim = (() => {
     // A pet animates by STEPPING THROUGH SPRITESHEET FRAMES, so none of these
     // keyframes apply to it: every one of them transforms a whole image
@@ -1441,6 +1518,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       default: return powerStance ? 'mascot-powerup 1.5s ease-in-out infinite' : 'mascot-idle 3s ease-in-out infinite'
     }
   })()
+  const bodyAnimation = bodyAnim && bodyAnim.endsWith('infinite') ? bodyAnim + restPlay : bodyAnim
 
   // Honor the OS "reduce motion" setting. The global CSS guard neutralizes the
   // crab's keyframe animations, but its autonomous walking/dancing is driven by
@@ -1505,7 +1583,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   useEffect(() => {
     const inset = rightInset ?? 0
     if (inset <= 0) return
-    const vw = window.innerWidth
+    // The docked chat sits at the main monitor's right edge.
+    const vw = stage().w
     // Half the body — a pet's is narrower than the crab's.
     const HALF = (pet ? PET_BODY_PX : CRAB_BODY_PX) / 2
     const GAP = 24       // breathing room between mascot and panel edge
@@ -1627,11 +1706,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         // the element's `bottom` — every vertical offset (drag, throw, hop,
         // perching on an icon) is carried in the transform below, so the
         // imperative and declarative paths cannot contradict each other.
-        bottom: groundPx,
+        bottom: groundPx + groundLift,
         // Written from the same refs, in the same shape, as
         // `writeCrabTransform` — a re-render during a drag or a throw must
         // reproduce the frame the rAF loop just drew, not a different one.
-        transform: `translateX(calc(${xRef.current}vw - 50%)) translateY(${(jumpYRef.current - liftRef.current).toFixed(2)}px) scaleX(${facing === 'left' ? -1 : 1})`,
+        transform: `translateX(calc(${stageX(xRef.current)} - 50%)) translateY(${(jumpYRef.current - liftRef.current).toFixed(2)}px) scaleX(${facing === 'left' ? -1 : 1})`,
         zIndex: pet ? PET_Z_INDEX : CRAB_Z_INDEX,
         // A pet's box is mostly transparent, and at `auto` its 104px square
         // took the click meant for whatever stands behind it — a desktop icon's
@@ -1655,7 +1734,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
             anchored to it — bubble, damage numbers, power effects — is
             measured off `bodyPx` rather than the crab's 150 so the whole
             composition scales together. */}
-        <div data-frenzy={frenzy ? '1' : undefined} style={{ animation: bodyAnim, width: bodyPx, height: bodyPx, position: 'relative', willChange: 'transform' }}>
+        <div data-frenzy={frenzy ? '1' : undefined} style={{ animation: bodyAnimation, width: bodyPx, height: bodyPx, position: 'relative', willChange: 'transform' }}>
           {pet && layout ? (
             <>
               <PetSprite pet={pet} state={state} thinking={thinking} facing={facing} />
@@ -1714,7 +1793,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
                   position: 'absolute', top: '50%', left: '50%',
                   width: 60, height: 60, borderRadius: '50%',
                   border: '2px solid rgba(249,115,22,0.6)',
-                  animation: `power-ring 1.5s ease-out ${delay}s infinite`,
+                  animation: `power-ring 1.5s ease-out ${delay}s infinite${restPlay}`,
                   pointerEvents: 'none',
                 }} />
               ))}
@@ -1727,7 +1806,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
                   left: Math.round(particle.left * bodyPx / CRAB_BODY_PX),
                   width: 4, height: 4, borderRadius: '50%',
                   background: i % 2 === 0 ? '#f97316' : '#fbbf24',
-                  animation: `power-particles ${particle.duration}s ease-out ${particle.delay}s infinite`,
+                  animation: `power-particles ${particle.duration}s ease-out ${particle.delay}s infinite${restPlay}`,
                   pointerEvents: 'none',
                 }} />
               ))}
@@ -1773,7 +1852,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
           if (pet) {
             const bg = frenzy ? 'rgba(41,27,3,0.96)' : 'rgba(17,19,26,0.96)'
-            const vw = typeof window !== 'undefined' ? window.innerWidth : 0
+            const vw = typeof window !== 'undefined' ? stage().w : 0
             return (
               <div ref={bubbleElRef} style={{
                 // Off the top of the DRAWING, so the gap above the head reads
@@ -1869,7 +1948,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
                 fontWeight: 900,
                 color: 'rgba(147,197,253,0.9)',
                 textShadow: '0 0 8px rgba(147,197,253,0.5)',
-                animation: `zzz-float 3s ${delay}s ease-out infinite`,
+                animation: `zzz-float 3s ${delay}s ease-out infinite${restPlay}`,
                 left: i * 6,
                 top: -i * 4,
               }}>Z</div>

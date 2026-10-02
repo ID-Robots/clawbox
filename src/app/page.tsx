@@ -12,7 +12,7 @@ import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, not
 import { toastDetailForNotice } from "@/lib/notify-action";
 import { useAutoHide } from "@/lib/use-auto-hide";
 import { useWhatsNew } from "@/lib/use-whats-new";
-import { DESKTOP_LAYERS, shelfHeight, type SnapZone } from "@/lib/window-snap";
+import { DESKTOP_LAYERS, dockedChatWidth, shelfHeight, type SnapZone } from "@/lib/window-snap";
 import { desktopLayoutKey, restoreDesktopWindows, snapshotDesktop, type SavedRect, type SavedTerminalTabs } from "@/lib/desktop-state";
 import { createDesktopStateSaver, loadDesktopState, type DesktopStateSaver } from "@/lib/desktop-state-client";
 import { endTerminalSession } from "@/lib/terminal-sessions";
@@ -56,6 +56,10 @@ import { fetchSessionUser, mayUseOwnerApis, useMayUseOwnerApis, useSessionUser }
 import { useFollowSessionSwitch } from "@/lib/session-switch";
 import { KIOSK_PAGES_APP_ID, kioskPageTabs, openInKiosk, useKioskTabs } from "@/lib/kiosk-tabs-client";
 import { useKioskBarInset } from "@/lib/kiosk-bar-inset";
+import { mainInsets, mainScreen } from "@/lib/desktop-screens";
+import { useDeskScreens } from "@/lib/use-desk-screens";
+import { useMonitorLayoutSync } from "@/lib/use-monitor-layout";
+import MonitorIdentifyOverlay from "@/components/MonitorIdentifyOverlay";
 import { NON_OWNER_APP_IDS, OWNER_ONLY_NOTICE, installedAppIdsFor } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
@@ -394,6 +398,15 @@ function ChromeDesktopInner() {
   // under it, and it is how this page knows it IS the kiosk.
   const kioskBarInset = useKioskBarInset();
   const onKiosk = kioskBarInset > 0;
+  // Monitor mode: the desktop spread over a row of monitors (null with one
+  // screen — every other desktop). The shelf, the chat, the icons and the
+  // notices live on the MAIN monitor; windows maximize on the one they are on.
+  // Every signed-in user's desktop, once it is known who is signed in: the
+  // route answers another user a positions-only view.
+  useMonitorLayoutSync(ownerApiAccess !== null);
+  const deskScreens = useDeskScreens();
+  const mainRect = deskScreens ? mainScreen() : null;
+  const mainIns = deskScreens ? mainInsets() : { left: 0, top: 0, right: 0, bottom: 0 };
   // The tabs of the kiosk Chrome on the laptop's own display, for the shelf
   // (src/lib/kiosk-tabs.ts). Owner-gated like every other poll here, and
   // polled only on the kiosk itself: every other box — every Jetson — sends
@@ -1063,11 +1076,13 @@ function ChromeDesktopInner() {
   const kioskIconReserve = kioskBarInset;
   useEffect(() => {
     const update = () => {
-      const w = window.innerWidth;
+      // The icons live on the main monitor (the viewport with one screen).
+      const area = mainScreen();
+      const w = area.width;
       const cellW = w < 500 ? 85 : 100;
       const cols = Math.max(3, Math.floor(w / cellW));
       // On the laptop's kiosk the rows fit under the kiosk bar.
-      const rowsPerColumn = Math.max(1, Math.floor((window.innerHeight - TASKBAR_RESERVE - kioskIconReserve) / CELL_H));
+      const rowsPerColumn = Math.max(1, Math.floor((area.height - TASKBAR_RESERVE - kioskIconReserve) / CELL_H));
       setGridDims((prev) =>
         prev.cols === cols && prev.cellW === cellW && prev.mobile === w < 768 && prev.rowsPerColumn === rowsPerColumn
           ? prev
@@ -1077,7 +1092,7 @@ function ChromeDesktopInner() {
     update();
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
-  }, [kioskIconReserve]);
+  }, [kioskIconReserve, deskScreens]);
   const GRID_COLS = gridDims.cols;
   const isMobile = gridDims.mobile;
   const GRID_ROWS = 6;
@@ -1098,7 +1113,9 @@ function ChromeDesktopInner() {
   // widening the window back docks the chat where it was. Read from `isMobile`
   // rather than measured here, so the whole desktop changes its mind at one
   // width.
-  const chatPanelInset = !isMobile && chatPanelWidth > 0 ? chatPanelWidth + CHAT_PANEL_GAP : 0;
+  // Over a row of monitors the strip is the width the chat is DRAWN at, held to
+  // the main monitor (`dockedChatWidth`); the owner's width is what persists.
+  const chatPanelInset = !isMobile && chatPanelWidth > 0 ? dockedChatWidth(chatPanelWidth, deskScreens !== null) + CHAT_PANEL_GAP : 0;
   const [iconPositions, setIconPositions] = useState<IconLayout>({});
   const [draggingIcon, setDraggingIcon] = useState<string | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
@@ -2726,7 +2743,8 @@ function ChromeDesktopInner() {
   // buttons for the 30 s a card takes to hide itself.
   const noticeRightInset = chatPanelInset > 0
     ? chatPanelInset
-    : noticeColumnInset(chatFloatingRect, typeof window !== "undefined" ? window.innerWidth : 0, NOTICE_COLUMN_WIDTH, NOTICE_MARGIN);
+    // Measured against the main monitor's right edge, where the column lives.
+    : noticeColumnInset(chatFloatingRect, mainRect ? mainRect.x + mainRect.width : typeof window !== "undefined" ? window.innerWidth : 0, NOTICE_COLUMN_WIDTH, NOTICE_MARGIN);
 
   if (!setupChecked || setupRequired) {
     return <div className="bg-[var(--bg-deep)]" style={{ height: '100dvh' }} />;
@@ -2754,7 +2772,10 @@ function ChromeDesktopInner() {
       {/* Drop overlay */}
       {desktopDragOver && (
         <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none" style={{ zIndex: DESKTOP_LAYERS.notice }}>
-          <div className="flex flex-col items-center gap-3 p-8 rounded-2xl border-2 border-dashed border-orange-500/60 bg-[#0d1117]/90">
+          {/* Dimmed everywhere — a drop lands wherever it is let go — but
+              the card centred on the MAIN monitor over a row of monitors,
+              not on the seam between two. */}
+          <div className="flex flex-col items-center gap-3 p-8 rounded-2xl border-2 border-dashed border-orange-500/60 bg-[#0d1117]/90" style={mainRect ? { position: "absolute", left: mainRect.x + mainRect.width / 2, top: mainRect.y + mainRect.height / 2, transform: "translate(-50%, -50%)" } : undefined}>
             <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 48 }}>upload_file</span>
             <span className="text-lg font-semibold text-white">{t("files.dropToUpload")}</span>
             <span className="text-sm text-white/50">{t("desktop.dropHint")}</span>
@@ -2763,7 +2784,7 @@ function ChromeDesktopInner() {
       )}
       {/* Upload status toast */}
       {uploadStatus && (
-        <div className="fixed left-1/2 -translate-x-1/2 min-w-[220px] rounded-lg bg-[var(--bg-elevated)] border border-white/10 text-sm text-white shadow-lg overflow-hidden" style={{ zIndex: DESKTOP_LAYERS.notice, top: 16 + kioskBarInset }}>
+        <div className="fixed left-1/2 -translate-x-1/2 min-w-[220px] rounded-lg bg-[var(--bg-elevated)] border border-white/10 text-sm text-white shadow-lg overflow-hidden" style={{ zIndex: DESKTOP_LAYERS.notice, top: 16 + kioskBarInset + mainIns.top, ...(mainRect ? { left: mainRect.x + mainRect.width / 2 } : {}) }}>
           <div className="px-4 py-2">{uploadStatus}</div>
           {uploadProgress < 100 && (
             <div className="h-1 bg-white/5">
@@ -2776,6 +2797,7 @@ function ChromeDesktopInner() {
           the pairing flow dispatch. Without it ui_notify, `clawbox notify`
           and every server-side owner notice were fired and never shown. */}
       <ToastHost />
+      {deskScreens && <MonitorIdentifyOverlay screens={deskScreens} />}
       {ownerApis && <PowerApprovalPrompt />}
       {noticesUp && (
         <div
@@ -2786,7 +2808,7 @@ function ChromeDesktopInner() {
           // buttons for the 30 s a card takes to hide itself. See
           // `noticeRightInset`.
           // Under the kiosk bar on the laptop while it is up (0 elsewhere).
-          style={{ zIndex: DESKTOP_LAYERS.notice, right: NOTICE_MARGIN + noticeRightInset, top: NOTICE_MARGIN + kioskBarInset }}
+          style={{ zIndex: DESKTOP_LAYERS.notice, right: NOTICE_MARGIN + noticeRightInset + mainIns.right, top: NOTICE_MARGIN + kioskBarInset + mainIns.top }}
         >
           {/* New version available notification */}
           {updateAvailable && !updateNoticeHidden && (() => {
@@ -3011,11 +3033,12 @@ function ChromeDesktopInner() {
           })}
         </div>
       )}
-      {/* Desktop wallpaper background */}
+      {/* Desktop wallpaper background — once per monitor over a row of
+          monitors, so each shows the whole picture rather than a slice. */}
       {(() => {
         const customIdx = customWallpaperIndex(renderedWallpaperId);
         const customWp = customIdx === null ? undefined : customWallpapers[customIdx];
-        return customWp ? (
+        const layers = customWp ? (
           <>
             <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />
             <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${customWp})`, ...wpFitStyle, opacity: paintedWpOpacity / 100 }} />
@@ -3032,11 +3055,18 @@ function ChromeDesktopInner() {
           {currentWallpaper.nebula && <div className="absolute inset-0 bg-nebula z-0 pointer-events-none" />}
         </>
       );
+        return deskScreens
+          ? deskScreens.map((sc) => (
+            <div key={sc.id} data-testid="desktop-wallpaper-screen" className="absolute z-0 overflow-hidden pointer-events-none" style={{ left: sc.x, top: sc.y, width: sc.width, height: sc.height }}>
+              {layers}
+            </div>
+          ))
+          : layers;
       })()}
       {/* Hidden file input for wallpaper upload */}
       <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
       {/* Desktop icon grid — draggable + right-click surface */}
-      <div data-testid="desktop-surface" className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24 + kioskIconReserve, overflowY: isMobile ? "auto" : "visible" }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
+      <div data-testid="desktop-surface" className="absolute inset-0 z-[1] flex justify-center" style={{ paddingBottom: 56, paddingTop: 24 + kioskIconReserve, overflowY: isMobile ? "auto" : "visible", ...(mainRect ? { left: mainRect.x, top: mainRect.y, width: mainRect.width, height: mainRect.height, right: "auto", bottom: "auto" } : {}) }} onContextMenu={handleDesktopContextMenu} onPointerDown={handleGridPointerDown}>
       <div ref={gridRef} className="relative" style={{ width: GRID_COLS * CELL_W, maxWidth: "100%", height: isMobile && allIconIds.length > 0 ? `${(Math.floor((allIconIds.length - 1) / GRID_COLS) + 1) * CELL_H}px` : undefined }}>
         {installedAppDefs.map((app) => {
           const pos = getIconPosition(app.id);

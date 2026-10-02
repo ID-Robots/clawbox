@@ -125,43 +125,28 @@ export function petLayout(pet: PetDescriptor, pose: PetPose, bodyPx = PET_BODY_P
   return { rowIndex, mirror, frames, scale, dispW, dispH, offsets, headPx, artInsetPx, loopMs };
 }
 
-/** djb2 — just enough to keep one row's keyframes from colliding with another's. */
-function hash(s: string): string {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
-  return h.toString(36);
-}
-
-export interface PetKeyframes {
-  name: string;
-  css: string;
-}
-
 /**
- * The stepped animation for one row.
+ * The strip's transform for each frame of one row: X selects the frame, Y
+ * carries that frame's own foot offset — one value, so frame selection and
+ * foot alignment can never drift out of phase.
  *
- * Two properties move together: `background-position-x` selects the frame and
- * `bottom` carries that frame's own foot offset. They HAVE to be one animation
- * — a separate transform would not stay in phase with the frame selection, and
- * the whole point is that the drawn feet stay on the bar in every frame.
- *
- * Written as explicit stops under `step-end` rather than `steps(n)`, because
- * `steps()` can only interpolate one from/to pair and the offsets are not a
- * ramp. `step-end` holds each stop's value for its whole interval, which is
- * exactly frame-selection semantics.
+ * A transform, stepped by PetSprite at the row's own frame rate, rather than a
+ * CSS animation over `background-position-x` + `bottom` (what this used to
+ * be): those properties repainted the desktop's root layer on every step —
+ * the whole 5120×1440 page of a desktop spread over two monitors — and ANY
+ * running CSS animation, even a composited `step-end` one, makes the browser
+ * recalculate style 60 times a second although the picture changes six times
+ * a second. A pet is on screen all day; it now costs one composited frame
+ * per step and nothing in between.
  */
-export function petKeyframes(layout: PetLayout): PetKeyframes {
+export function petFrameTransforms(layout: PetLayout): string[] {
   const { frames, dispW, offsets } = layout;
-  const parts: string[] = [];
-  for (let i = 0; i < frames; i++) {
-    const pct = ((i * 100) / frames).toFixed(4).replace(/\.?0+$/, "");
-    parts.push(`${pct || "0"}%{background-position-x:${-i * dispW}px;bottom:${-offsets[i]}px}`);
-  }
-  const last = frames - 1;
-  parts.push(`100%{background-position-x:${-last * dispW}px;bottom:${-offsets[last]}px}`);
-  const body = parts.join("");
-  const name = `pet-frames-${frames}-${hash(body)}`;
-  return { name, css: `@keyframes ${name}{${body}}` };
+  return Array.from({ length: frames }, (_, i) => `translate(${-i * dispW}px, ${offsets[i]}px)`);
+}
+
+/** How long each frame of a row is shown: the row's loop split evenly. */
+export function petFrameMs(layout: PetLayout): number {
+  return Math.max(16, Math.round(layout.loopMs / Math.max(1, layout.frames)));
 }
 
 /** A closed horizontal interval, in viewport px. */

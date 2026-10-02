@@ -58,6 +58,12 @@ const NON_OWNER_API_READS: ReadonlySet<string> = new Set([
   // pins the answer to those three fields, so the route cannot start carrying
   // network configuration without this line being looked at again.
   "/setup-api/network/internet",
+  // Monitor mode: where each monitor of the row is, so another user's desktop
+  // on the spread window lays its shelf and windows out per monitor too. The
+  // route answers a non-owner only that (`desktopViewOf`: positions, labels,
+  // the main monitor, the row's size) — no modes, no physical sizes, no trial
+  // — and every write there stays the owner's.
+  "/setup-api/monitors",
 ]);
 
 /**

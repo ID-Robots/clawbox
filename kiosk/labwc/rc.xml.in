@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<!--
+  labwc config for the "ClawBox Desktop" session (monitor mode).
+
+  The ClawBox desktop is a Chrome app window (no tab strip, no address bar)
+  laid over EVERY monitor, UNDER everything else; every page the desktop
+  opens is an ordinary Chrome window floating above it. clawbox-desktop-session
+  renders this template (through clawbox-desktop-browser): @DESKTOP_APP_ID@ is
+  the app window's Wayland app_id, @SHELF_PX@ the height of the desktop's
+  shelf on screen and @SHELF_OUTPUT@ the monitor it is on (the attribute is
+  dropped when none is recorded, and while the monitors mirror one another —
+  every one of them shows the shelf then): maximized windows stop above the
+  shelf on that monitor, so it stays reachable, and fill any other monitor
+  whole. A template that cannot be read never replaces the config in use.
+-->
+<labwc_config>
+  <core>
+    <gap>0</gap>
+  </core>
+  <placement>
+    <policy>center</policy>
+  </placement>
+  <margin top="0" bottom="@SHELF_PX@" left="0" right="0" output="@SHELF_OUTPUT@" />
+
+  <keyboard>
+    <default />
+    <!-- Show the desktop: put every browser window away. Alt+Tab brings one back. -->
+    <keybind key="W-d">
+      <action name="Execute" command="wlrctl toplevel minimize app_id:chromium-browser" />
+    </keybind>
+    <!-- The way out of the session, back to the login screen. -->
+    <keybind key="C-A-BackSpace">
+      <action name="Exit" />
+    </keybind>
+    <!-- The owner's own keybinds (~/.config/clawbox-desktop/keybinds.xml) go
+         here, last, so a key bound twice keeps the owner's binding. -->
+    <!-- @LOCAL_KEYBINDS@ -->
+  </keyboard>
+
+  <windowRules>
+    <!-- The desktop itself: under every window, not in Alt+Tab, never moved,
+         at the layout's origin. It is NOT full screen — labwc's full screen
+         covers one monitor, and the desktop covers the row: the launcher's
+         watcher (clawbox-desktop-span.mjs) has Chrome size the window to every
+         enabled monitor, and the web server does the same after a layout
+         change. The window keeps its foreign-toplevel handle on purpose: the
+         launcher's watchdog finds it through wlrctl. -->
+    <windowRule identifier="@DESKTOP_APP_ID@" serverDecoration="no" skipWindowSwitcher="yes" fixedPosition="yes">
+      <action name="MoveTo" x="0" y="0" />
+      <action name="ToggleAlwaysOnBottom" />
+    </windowRule>
+  </windowRules>
+</labwc_config>

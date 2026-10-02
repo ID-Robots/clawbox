@@ -6,6 +6,8 @@ import { notifyActionLabel, parseNotifyAction, type NotifyAction } from "@/lib/n
 import { dispatchOpenSettingsSection } from "@/lib/ui-events";
 import { NOTICE_AUTO_HIDE_MS } from "@/lib/use-auto-hide";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
+import { mainInsets } from "@/lib/desktop-screens";
+import { useDeskScreens } from "@/lib/use-desk-screens";
 
 /**
  * The desktop's toast surface.
@@ -45,6 +47,9 @@ const TOAST_MS = 8_000;
 const ACTIONABLE_TOAST_MS = NOTICE_AUTO_HIDE_MS;
 const MAX_TOASTS = 4;
 const MAX_CHARS = 280;
+/** `bottom-20` and `right-4`: where the stack stands from the screen's corner. */
+const TOAST_BOTTOM_PX = 80;
+const TOAST_RIGHT_PX = 16;
 
 interface Toast {
   id: number;
@@ -74,6 +79,11 @@ function openNotifyAction(action: NotifyAction): void {
 export default function ToastHost() {
   const { t } = useT();
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // Over a row of monitors the stack stands in the MAIN monitor's corner,
+  // with the shelf and the notice cards — the viewport's corner is another
+  // monitor's, or page no monitor shows below a shorter one. No layout: the
+  // classes alone, exactly as before.
+  const deskScreens = useDeskScreens();
   const dismiss = useCallback((id: number) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
   }, []);
@@ -103,9 +113,14 @@ export default function ToastHost() {
   }, []);
 
   if (toasts.length === 0) return null;
+  const ins = deskScreens ? mainInsets() : null;
 
   return (
-    <div className="pointer-events-none fixed bottom-20 right-4 flex w-[340px] max-w-[calc(100vw-2rem)] flex-col gap-2" style={{ zIndex: DESKTOP_LAYERS.menu }} data-testid="toast-host">
+    <div
+      className="pointer-events-none fixed bottom-20 right-4 flex w-[340px] max-w-[calc(100vw-2rem)] flex-col gap-2"
+      style={{ zIndex: DESKTOP_LAYERS.menu, ...(ins ? { right: TOAST_RIGHT_PX + ins.right, bottom: TOAST_BOTTOM_PX + ins.bottom } : {}) }}
+      data-testid="toast-host"
+    >
       {toasts.map((toast) => {
         const action = toast.action;
         const body = (

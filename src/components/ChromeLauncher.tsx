@@ -4,6 +4,8 @@ import { useState, useEffect, useRef, ReactNode, useCallback } from "react";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
+import { mainInsets, mainScreen } from "@/lib/desktop-screens";
+import { useDeskScreens } from "@/lib/use-desk-screens";
 import { openInKiosk } from "@/lib/kiosk-tabs-client";
 
 interface LauncherApp {
@@ -59,6 +61,9 @@ export default function ChromeLauncher({
   // handed placeholder substitution to `t`, which the no-provider fallback
   // does not do.
   const tr = useTr();
+  // Above the shelf on the main monitor when the desktop is spread over several.
+  const deskScreens = useDeskScreens();
+  const onMain = deskScreens ? { main: mainScreen(), ins: mainInsets() } : null;
   const { cols: gridCols, rows: gridRows } = useLauncherGrid();
   const appsPerPage = gridCols * gridRows;
   const [searchQuery, setSearchQuery] = useState("");
@@ -230,7 +235,12 @@ export default function ChromeLauncher({
 
       {/* Launcher panel */}
       <div
-        style={{ maxWidth: gridCols * 100 + 32, bottom: 56, zIndex: DESKTOP_LAYERS.overlay + 1 }}
+        style={{
+          maxWidth: gridCols * 100 + 32,
+          bottom: 56 + (onMain?.ins.bottom ?? 0),
+          zIndex: DESKTOP_LAYERS.overlay + 1,
+          ...(onMain ? { left: onMain.main.x + onMain.main.width / 2, maxWidth: Math.min(gridCols * 100 + 32, onMain.main.width) } : {}),
+        }}
         data-testid="app-launcher"
         className={`fixed left-1/2 -translate-x-1/2 w-full transition-all duration-200 ${
           isClosing ? "translate-y-full opacity-0 pointer-events-none" : "translate-y-0 opacity-100"

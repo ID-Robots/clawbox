@@ -1,0 +1,388 @@
+#!/usr/bin/env bash
+# Runs inside labwc (clawbox-desktop-session): wait for the ClawBox web
+# server, then keep Chrome up with the desktop as an APP window.
+#
+# MONITOR MODE. The desktop is `--app=<url>`: a Chrome window with no tab
+# strip and no address bar, laid over EVERY monitor of the session — one
+# desktop across the row, under every other window. labwc's window rule puts
+# it at the layout's origin; clawbox-desktop-span.mjs sizes it to the row of
+# enabled monitors and keeps it so (a monitor plugged in, a layout changed in
+# Settings → Monitors). A page the desktop opens with window.open(url,
+# "_blank") lands in an ordinary Chrome window of the same profile — tabs,
+# address bar, native speed — above the desktop.
+#
+# One Chrome process owns every window, so closing the desktop window alone
+# (Ctrl+W, Alt+F4 while it has the focus) would leave browser windows over
+# nothing: a watchdog asks the running Chrome for the app window again.
+# Crashes are restarted; five quick ones in a row end the session.
+#
+# The launcher belongs to ONE compositor. labwc runs it in a session of its
+# own and does not stop it when it exits, while the next session's labwc takes
+# the same socket name: a launcher that went on starting Chrome after its own
+# labwc was gone put that Chrome on the NEXT session's screen, holding the
+# profile the next launcher needs — whose hand-offs then counted as crashes
+# until it ended its own, new session. So every pass first asks whether the
+# labwc it started under is still there (LABWC_PID, with the start time it had
+# then), and leaves quietly when it is not. A Chrome this launcher did not
+# start that holds the profile is not a crash either: one from an earlier
+# session is ended, one from this session is watched as our own.
+#
+# Maximized windows stop above the desktop's shelf (labwc's <margin>), on the
+# MAIN monitor only — the one the shelf is on (the web server records it in
+# CLAWBOX_MONITORS_FILE as it applies a layout); a window maximized on another
+# monitor fills it. While the monitors MIRROR one another every one of them
+# shows the shelf, so the margin is on all of them. The shelf is 56 CSS px,
+# but the owner zooms the desktop with Ctrl +/-, so its height on screen is
+# 56 x the profile's page zoom for the desktop's host — read from Chrome's
+# Preferences at session start and again by the watchdog, which re-renders
+# the labwc config and reconfigures when the zoom or the main monitor changed.
+# A template it cannot read, or one that renders to nothing well-formed, never
+# replaces the config in use (labwc would run on its bare defaults: no shelf
+# margin, no rule pinning the desktop under everything).
+#
+# The owner's own additions live in ~/.config/clawbox-desktop/, outside every
+# file the installer writes: `keybinds.xml` — <keybind> elements labwc reads
+# after the session's own (left out, with a line in the log, while it is not
+# well-formed XML) — and `autostart`, run once at the start of each session
+# when it is executable.
+#
+# `clawbox-desktop-browser --render-config` only writes the labwc config
+# (the session script calls it before labwc starts).
+# Installed to /usr/local/bin by install-desktop-session.sh.
+set -u
+. /etc/clawbox/kiosk.env
+URL="${CLAWBOX_KIOSK_URL:-http://localhost/}"
+CHROME="${CLAWBOX_KIOSK_CHROME:-/opt/clawbox-kiosk/chrome-linux64/chrome}"
+PROFILE="${CLAWBOX_KIOSK_PROFILE:-$HOME/.config/clawbox-kiosk}"
+PORT="${CLAWBOX_KIOSK_CDP_PORT:-18801}"
+# Native Chrome windows carry their own tabs here: the kiosk extension (the
+# cage session's tab bar) is not loaded unless this names one.
+EXT="${CLAWBOX_DESKTOP_EXTENSION:-}"
+APP_ID="${CLAWBOX_DESKTOP_APP_ID:-chrome-localhost__-Default}"
+LOG="${CLAWBOX_KIOSK_LOG:-$HOME/.cache/clawbox-kiosk.log}"
+NODE="${CLAWBOX_KIOSK_NODE:-/opt/clawbox/node/bin/node}"
+SPAN="${CLAWBOX_DESKTOP_SPAN:-/usr/local/lib/clawbox/clawbox-desktop-span.mjs}"
+MONITORS_FILE="${CLAWBOX_MONITORS_FILE:-}"
+TEMPLATE="${CLAWBOX_LABWC_TEMPLATE:-/etc/clawbox/labwc/rc.xml.in}"
+CONF="${CLAWBOX_LABWC_CONF:-${XDG_RUNTIME_DIR:-/tmp}/clawbox-labwc}"
+LOCAL_DIR="${CLAWBOX_DESKTOP_LOCAL:-$HOME/.config/clawbox-desktop}"
+SHELF_CSS_PX=56
+host="${URL#*://}"; host="${host%%/*}"; host="${host%%:*}"
+
+# The shelf's height on screen: CLAWBOX_DESKTOP_SHELF_PX when the owner fixed
+# it in kiosk.env, else 56 x the page zoom Chrome has stored for the desktop's
+# host (its default zoom when the host has none; 1 when nothing can be read).
+shelf_px() {
+  if [ -n "${CLAWBOX_DESKTOP_SHELF_PX:-}" ]; then echo "$CLAWBOX_DESKTOP_SHELF_PX"; return; fi
+  python3 - "$PROFILE/Default/Preferences" "$host" "$SHELF_CSS_PX" 2>/dev/null <<'PY' || echo "$SHELF_CSS_PX"
+import json, sys
+path, host, css = sys.argv[1], sys.argv[2], float(sys.argv[3])
+level = 0.0
+try:
+    part = json.load(open(path)).get("partition", {})
+    level = float(part.get("default_zoom_level", {}).get("x", 0.0) or 0.0)
+    per_host = part.get("per_host_zoom_levels", {}).get("x", {}).get(host)
+    if isinstance(per_host, dict) and "zoom_level" in per_host:
+        level = float(per_host["zoom_level"])
+except Exception:
+    pass
+print(int(round(css * 1.2 ** level)))
+PY
+}
+
+# The connector of the monitor the shelf is on, as the web server last
+# applied it; empty when there is no record (the margin then applies on every
+# monitor, which is right for one) and while the monitors mirror one another:
+# they all sit at the layout's origin, labwc gives a window whichever of them
+# comes first in its list, and every one of them shows the shelf.
+main_output() {
+  [ -n "$MONITORS_FILE" ] && [ -f "$MONITORS_FILE" ] || return 0
+  python3 - "$MONITORS_FILE" 2>/dev/null <<'PY'
+import json, re, sys
+try:
+    applied = json.load(open(sys.argv[1])).get("applied") or {}
+    out = "" if applied.get("mirror") is True else (applied.get("mainOutput") or "")
+except Exception:
+    out = ""
+print(out if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", out) else "")
+PY
+}
+
+# Is the owner's keybinds.xml there and well-formed? A broken one must not
+# cost the session its whole config, so it is left out until it parses.
+local_keybinds_ok() {
+  [ -r "$LOCAL_DIR/keybinds.xml" ] || return 1
+  python3 - "$LOCAL_DIR/keybinds.xml" 2>/dev/null <<'PY'
+import sys, xml.dom.minidom
+xml.dom.minidom.parseString("<keybinds>" + open(sys.argv[1], encoding="utf-8").read() + "</keybinds>")
+PY
+}
+
+# Is the rendered config one labwc can read? Not empty, and well-formed XML
+# where python3 is there to say so (without it, non-empty is all it can ask).
+config_ok() {
+  [ -s "$1" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$1" 2>/dev/null <<'PY'
+import sys, xml.dom.minidom
+xml.dom.minidom.parse(sys.argv[1])
+PY
+}
+
+# render_config PX — the labwc config from its template. Answers 0 only when
+# the file changed, so the caller knows whether to reconfigure; 1 when it is
+# unchanged; 2 when no config could be rendered — the template missing,
+# unreadable or half-written (the installer's `install` unlinks it before it
+# writes the new one) — and the config in use is kept. Said once per failure,
+# not on every pass of the watchdog.
+render_config() {
+  local px="$1" out tmp
+  local -a local_keys=(-e '/@LOCAL_KEYBINDS@/d')
+  out="$(main_output)"
+  if local_keybinds_ok; then
+    local_keys=(-e "/@LOCAL_KEYBINDS@/{r $LOCAL_DIR/keybinds.xml" -e 'd}')
+  elif [ -e "$LOCAL_DIR/keybinds.xml" ]; then
+    # Said once per version of the file, not on every pass of the watchdog.
+    local stamp
+    stamp="$(stat -c %Y "$LOCAL_DIR/keybinds.xml" 2>/dev/null)"
+    if [ "$stamp" != "${LOCAL_KEYBINDS_REPORTED:-}" ]; then
+      LOCAL_KEYBINDS_REPORTED="$stamp"
+      echo "$(date -Is) $LOCAL_DIR/keybinds.xml is not well-formed XML; left out"
+    fi
+  fi
+  mkdir -p "$CONF" 2>/dev/null
+  # Named in RENDER_TMP while it exists, so a watchdog ended mid-render takes
+  # its half-made file with it (see watch_desktop).
+  RENDER_TMP="$(mktemp "$CONF/rc.xml.XXXXXX" 2>/dev/null)" || { RENDER_TMP=""; render_failed "cannot write to $CONF"; return 2; }
+  tmp="$RENDER_TMP"
+  local -a subst=(-e "s|@DESKTOP_APP_ID@|$APP_ID|g" -e "s|@SHELF_PX@|$px|g")
+  if [ -n "$out" ]; then
+    subst+=(-e "s|@SHELF_OUTPUT@|$out|g")
+  else
+    subst+=(-e 's| output="@SHELF_OUTPUT@"||g')
+  fi
+  local failed=""
+  if ! sed "${subst[@]}" "${local_keys[@]}" "$TEMPLATE" > "$tmp" 2>/dev/null; then
+    failed="cannot read $TEMPLATE"
+  elif cmp -s "$tmp" "$CONF/rc.xml"; then
+    rm -f "$tmp"; RENDER_TMP=""; RENDER_FAILED=""
+    return 1
+  elif ! config_ok "$tmp"; then
+    failed="$TEMPLATE renders to no well-formed config"
+  elif ! mv -f "$tmp" "$CONF/rc.xml" 2>/dev/null; then
+    failed="cannot write $CONF/rc.xml"
+  fi
+  if [ -n "$failed" ]; then
+    rm -f "$tmp"; RENDER_TMP=""
+    render_failed "$failed"
+    return 2
+  fi
+  RENDER_TMP=""; RENDER_FAILED=""
+}
+
+render_failed() {
+  [ -n "${RENDER_FAILED:-}" ] && return 0
+  RENDER_FAILED=1
+  echo "$(date -Is) $1; the labwc config in use is kept" >&2
+}
+
+if [ "${1:-}" = "--render-config" ]; then
+  render_config "$(shelf_px)"
+  [ "$?" -eq 2 ] && exit 1
+  exit 0
+fi
+
+mkdir -p "$PROFILE" "$(dirname "$LOG")"
+[ -f "$LOG" ] && [ "$(stat -c %s "$LOG")" -gt 1048576 ] && mv -f "$LOG" "$LOG.1"
+exec >>"$LOG" 2>&1
+echo "$(date -Is) desktop session start, url=$URL app_id=$APP_ID"
+
+# The owner's own autostart, once per session, beside everything else.
+if [ -x "$LOCAL_DIR/autostart" ]; then
+  echo "$(date -Is) running $LOCAL_DIR/autostart"
+  "$LOCAL_DIR/autostart" &
+fi
+
+# The labwc this launcher runs under: its PID (labwc sets LABWC_PID for what
+# it starts) and that process's start time, so a PID the kernel has handed to
+# something else since is not taken for it. Without a usable LABWC_PID there is
+# nothing to ask, and the compositor counts as there.
+proc_start() {
+  local stat
+  { read -r stat < "/proc/$1/stat"; } 2>/dev/null || return 1
+  stat="${stat##*) }"
+  # shellcheck disable=SC2086 # the fields of /proc/<pid>/stat, split on purpose
+  set -- $stat
+  printf '%s\n' "${20:-}"
+}
+case "${LABWC_PID:-}" in
+  ''|*[!0-9]*) LABWC_PID="" ;;
+esac
+LABWC_START=""
+[ -n "$LABWC_PID" ] && LABWC_START="$(proc_start "$LABWC_PID")"
+compositor_alive() {
+  [ -n "$LABWC_PID" ] || return 0
+  kill -0 "$LABWC_PID" 2>/dev/null || return 1
+  [ -z "$LABWC_START" ] || [ "$(proc_start "$LABWC_PID")" = "$LABWC_START" ]
+}
+# Our labwc is gone: this session is over, and whatever runs on the socket
+# name now is the next session's — start nothing there and end nothing there.
+session_over() {
+  echo "$(date -Is) labwc ($LABWC_PID) is gone; this session is over"
+  exit 0
+}
+
+# At boot the web server may still be starting. Any HTTP answer will do.
+for _ in $(seq 1 120); do
+  compositor_alive || session_over
+  curl -s -o /dev/null -m 2 "$URL" && break
+  sleep 1
+done
+
+FLAGS=(
+  --ozone-platform=wayland
+  --user-data-dir="$PROFILE"
+  --no-first-run
+  --no-default-browser-check
+  --noerrdialogs
+  --disable-infobars
+  --disable-features=Translate,MediaRouter
+  --overscroll-history-navigation=0
+  --password-store=basic
+  --autoplay-policy=no-user-gesture-required
+  --ignore-gpu-blocklist
+  --enable-gpu-rasterization
+  --enable-zero-copy
+  --remote-debugging-address=127.0.0.1
+  --remote-debugging-port="$PORT"
+  --force-dark-mode
+  --enable-features=WebUIDarkMode
+)
+[ -n "$EXT" ] && [ -f "$EXT/manifest.json" ] && FLAGS+=(--load-extension="$EXT" --disable-extensions-except="$EXT")
+
+desktop_window_up() { wlrctl toplevel find "app_id:$APP_ID" >/dev/null 2>&1; }
+# The desktop window spans the row of monitors, whatever Chrome restored it
+# as and whatever F11 did to it since: a long-running watcher asks Chrome over
+# its own DevTools port (see clawbox-desktop-span.mjs) every two seconds, and
+# changes nothing while it already does.
+start_span_watch() {
+  "$NODE" "$SPAN" "$PORT" "$URL" --watch >/dev/null 2>&1 &
+  span_pid=$!
+}
+
+# The watchdog: while THIS Chrome lives, the desktop window must exist. Two
+# misses in a row and the running Chrome is asked for it again — the second
+# invocation hands the request to the first and exits at once. A window is
+# not missed before it has been seen, nor for DESKTOP_GRACE seconds after
+# Chrome started or was asked for it: a cold start at boot, or a fresh
+# profile's first run, takes longer than two passes, and asking then would
+# open a SECOND desktop window beside the first. When our compositor is gone
+# Chrome goes with it (it would hold the profile into the next session).
+DESKTOP_GRACE=20
+watch_desktop() {
+  local chrome_pid="$1" misses=0 seen=0 since=$SECONDS
+  # Ended by the launcher (its Chrome exited): no half-rendered config left.
+  trap 'rm -f "${RENDER_TMP:-}"; exit 0' TERM
+  while kill -0 "$chrome_pid" 2>/dev/null; do
+    if ! compositor_alive; then
+      kill "$chrome_pid" 2>/dev/null
+      return
+    fi
+    if desktop_window_up; then
+      misses=0
+      seen=1
+    elif [ "$seen" -eq 1 ] || [ $((SECONDS - since)) -ge "$DESKTOP_GRACE" ]; then
+      misses=$((misses + 1))
+      if [ "$misses" -ge 2 ]; then
+        echo "$(date -Is) desktop window gone, reopening it"
+        "$CHROME" "${FLAGS[@]}" --app="$URL" >/dev/null 2>&1
+        misses=0
+        seen=0
+        since=$SECONDS
+      fi
+    fi
+    # The owner zoomed the desktop, or another monitor became the main one:
+    # the shelf is somewhere else now.
+    if render_config "$(shelf_px)"; then
+      echo "$(date -Is) shelf margin changed, reconfiguring labwc"
+      labwc --reconfigure 2>/dev/null
+    fi
+    sleep 3
+  done
+}
+
+# The Chrome holding the profile when it is NOT the one this pass started:
+# the PID in Chrome's SingletonLock (<host>-<pid>), on this machine, alive,
+# and started with this profile — a PID reused by anything else is not it.
+# Answers nothing when the lock is stale, foreign or names $1.
+profile_owner() {
+  local target pid
+  target="$(readlink "$PROFILE/SingletonLock" 2>/dev/null)" || return 1
+  [ "${target%-*}" = "$HOSTNAME" ] || return 1
+  pid="${target##*-}"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" != "$1" ] && kill -0 "$pid" 2>/dev/null || return 1
+  tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | grep -qxF -- "--user-data-dir=$PROFILE" || return 1
+  echo "$pid"
+}
+
+# take_over_profile PID — the Chrome just started handed its window to PID,
+# which holds the profile, and exited: that is not a crash. Started before our
+# compositor, PID is left from an earlier session — end it, so the next pass
+# starts our own. Started since, it is on this session's screen: watch it as
+# our own until it exits. Answers 1 only when it could not be ended (the exit
+# then counts like any other).
+take_over_profile() {
+  local owner="$1" start
+  start="$(proc_start "$owner")"
+  if [ -n "$LABWC_START" ] && [ -n "$start" ] && [ "$start" -lt "$LABWC_START" ]; then
+    echo "$(date -Is) Chrome $owner from an earlier session holds the profile; ending it"
+    kill "$owner" 2>/dev/null
+    for _ in $(seq 1 20); do
+      kill -0 "$owner" 2>/dev/null || return 0
+      sleep 0.5
+    done
+    kill -KILL "$owner" 2>/dev/null
+    sleep 0.5
+    ! kill -0 "$owner" 2>/dev/null
+    return
+  fi
+  echo "$(date -Is) Chrome $owner, which this launcher did not start, holds the profile; watching it"
+  watch_desktop "$owner" &
+  watch_pid=$!
+  start_span_watch
+  while kill -0 "$owner" 2>/dev/null && compositor_alive; do sleep 1; done
+  kill "$watch_pid" "$span_pid" 2>/dev/null
+  kill -0 "$owner" 2>/dev/null || echo "$(date -Is) Chrome $owner exited"
+}
+
+quick_crashes=0
+while :; do
+  compositor_alive || session_over
+  # never offer "restore pages?" over the desktop after a crash or power loss
+  sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/; s/"exited_cleanly":false/"exited_cleanly":true/' \
+    "$PROFILE/Default/Preferences" 2>/dev/null
+  started=$SECONDS
+  "$CHROME" "${FLAGS[@]}" --app="$URL" &
+  chrome_pid=$!
+  watch_desktop "$chrome_pid" &
+  watch_pid=$!
+  start_span_watch
+  wait "$chrome_pid"
+  code=$?
+  kill "$watch_pid" "$span_pid" 2>/dev/null
+  ran=$((SECONDS - started))
+  echo "$(date -Is) chromium exited with $code after ${ran}s"
+  # Chrome lost its compositor: not a crash to count, the session ended.
+  compositor_alive || session_over
+  if owner="$(profile_owner "$chrome_pid")" && take_over_profile "$owner"; then
+    sleep 2
+    continue
+  fi
+  if [ "$ran" -lt 30 ]; then quick_crashes=$((quick_crashes + 1)); else quick_crashes=0; fi
+  [ "$quick_crashes" -ge 5 ] && { echo "five quick exits in a row, ending the session"; break; }
+  sleep 2
+done
+# Nothing left to show: end the compositor so GDM takes the screen back —
+# ours, and only while it is still ours.
+compositor_alive && labwc --exit 2>/dev/null

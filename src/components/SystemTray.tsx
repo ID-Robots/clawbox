@@ -5,6 +5,8 @@ import { useT } from "@/lib/i18n";
 import { useSessionUser } from "@/lib/use-session-user";
 import { announceSessionSwitch } from "@/lib/session-switch";
 import CrabWaitMark from "./CrabWaitMark";
+import { mainInsets } from "@/lib/desktop-screens";
+import { useDeskScreens } from "@/lib/use-desk-screens";
 
 const BRAND_ORANGE = "#fe6e00";
 
@@ -35,6 +37,9 @@ export default function SystemTray({
   const isOwner = sessionUser?.isOwner !== false;
   const showUser = !!sessionUser && (sessionUser.multiUser || !sessionUser.isOwner);
   const [closing, setClosing] = useState(false);
+  // Above the power button on the main monitor when the desktop is spread over several.
+  const deskScreens = useDeskScreens();
+  const mainIns = deskScreens ? mainInsets() : null;
   const [confirmAction, setConfirmAction] = useState<"shutdown" | "restart" | null>(null);
   const [internet, setInternet] = useState<{ online: boolean; latencyMs: number | null } | null>(null);
   useEffect(() => {
@@ -279,7 +284,7 @@ export default function SystemTray({
             : "opacity-100 translate-y-0 scale-100"
         }`}
         data-testid="system-tray"
-        style={{ transformOrigin: "bottom right" }}
+        style={{ transformOrigin: "bottom right", ...(mainIns ? { right: 8 + mainIns.right, bottom: 64 + mainIns.bottom } : {}) }}
       >
         <div
           className="rounded-xl overflow-hidden"

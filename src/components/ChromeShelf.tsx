@@ -3,6 +3,8 @@
 import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
 import { useT } from "@/lib/i18n";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
+import { mainInsets } from "@/lib/desktop-screens";
+import { useDeskScreens } from "@/lib/use-desk-screens";
 import type { Protection, ProtectionReason } from "@/lib/clawkeep-protection";
 import { openInKiosk } from "@/lib/kiosk-tabs-client";
 
@@ -109,6 +111,8 @@ export default function ChromeShelf({
   // The chat crab STAYS — a phone lands in the chat and this is its way back
   // from the desktop. Tablet portrait and phone landscape keep the full bar.
   const [isPortraitPhone, setIsPortraitPhone] = useState(false);
+  const deskScreens = useDeskScreens();
+  const mainIns = deskScreens ? mainInsets() : null;
 
   useEffect(() => {
     const checkLayout = () => {
@@ -361,6 +365,8 @@ export default function ChromeShelf({
         data-mascot-ground
         className="fixed bottom-0 left-0 right-0 flex items-center justify-center px-2"
         style={{
+          // On the main monitor when the desktop is spread over several.
+          ...(mainIns ? { left: mainIns.left, right: mainIns.right, bottom: mainIns.bottom } : {}),
           zIndex: DESKTOP_LAYERS.shelf,
           height: "calc(56px + env(safe-area-inset-bottom))",
           paddingBottom: "env(safe-area-inset-bottom)",

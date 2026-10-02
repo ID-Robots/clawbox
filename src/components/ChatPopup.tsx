@@ -416,8 +416,10 @@ import { renderText, audioLabel } from '@/lib/chat-markdown'
 import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
 import { claimSpokenReply, releaseSpokenReply, spokenReplyInterruptions, stopSpokenReply } from '@/lib/spoken-reply-playback'
 import SnapPreviewOverlay from '@/components/SnapPreviewOverlay'
-import { DESKTOP_GAP, DESKTOP_LAYERS, desktopTop, getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
+import { DESKTOP_GAP, DESKTOP_LAYERS, clampFloatingRect, desktopTop, dockedChatMaxWidth, dockedChatWidth, getSnapRect, MIN_DOCKED_CHAT_WIDTH, getSnapZone, snapTargetAt, type SnapTarget } from '@/lib/window-snap'
 import { useKioskBarInset } from '@/lib/kiosk-bar-inset'
+import { mainInsets, mainScreen } from '@/lib/desktop-screens'
+import { useDeskScreens } from '@/lib/use-desk-screens'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import {
   attachmentAcceptAttribute,
@@ -844,7 +846,7 @@ function readStoredSize(): { w: number; h: number } {
 // squeeze past a readable size, so the resize handles (floating + docked panel)
 // and the rendered width all clamp here — the chat simply stops getting
 // narrower instead of smashing the pills.
-const MIN_CHAT_WIDTH = 340
+const MIN_CHAT_WIDTH = MIN_DOCKED_CHAT_WIDTH
 
 // The gutter the floating popup keeps from every screen edge — the same 8px
 // per side `readStoredSize` already reserves when it restores a remembered
@@ -946,6 +948,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // The kiosk bar's height on the laptop (0 everywhere else): the docked panel
   // starts under it.
   const barInset = useKioskBarInset()
+  // The main monitor when the desktop is spread over several (null with one
+  // screen): the chat docks to ITS right edge and floats above the crab on it.
+  const deskScreens = useDeskScreens()
   // The words a failed turn is said in. A ref, because the gateway's event
   // handlers outlive the render that created them and must still speak the
   // owner's current language.
@@ -1554,7 +1559,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Drag-to-edge snapping, the same zones the app windows use — the chat is a
   // draggable surface on the same desktop, and landing it against an edge had
   // no effect at all before.
-  const [snapPreview, setSnapPreview] = useState<SnapZone>(null)
+  // The zone a drop would snap the chat to, and the monitor it would land on.
+  const [snapPreview, setSnapPreview] = useState<SnapTarget | null>(null)
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null)
   const popupRef = useRef<HTMLDivElement>(null)
 
@@ -1817,6 +1823,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [initialPanelWidth]) // eslint-disable-line react-hooks/exhaustive-deps -- panelWidth excluded: one-way sync from parent, must not re-trigger on local resize
 
+  // Over a row of monitors the docked panel is DRAWN no wider than the main
+  // monitor's own cap (`dockedChatMaxWidth`) whatever width it has: one dragged
+  // wider by an older build, or kept while the main monitor changed to a
+  // narrower one. Only drawn: the width stays the owner's, so a main monitor
+  // that is narrow for a while (a trial layout, a monitor off) does not cut it
+  // for good — the desktop reserves its strip with the same cap
+  // (`dockedChatWidth`). Nothing changes with one screen.
+  const drawnPanelWidth = panelWidth !== null ? dockedChatWidth(panelWidth, deskScreens !== null) : null
+
   // The width a CLOSED chat was docked at, or null when it was floating.
   // Closing has to hand the desktop its strip back (a window must not be
   // squeezed for a panel nobody can see), and the only way to say that is
@@ -1903,7 +1918,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const startW = popupRef.current?.getBoundingClientRect().width ?? DEFAULT_PANEL_WIDTH
     const onMove = (ev: MouseEvent | TouchEvent) => {
       const cx = 'touches' in ev ? ev.touches[0].clientX : (ev as MouseEvent).clientX
-      const newW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      // At most 60% of the screen it docks on: the MAIN monitor over a row of
+      // monitors, where 60% of the whole row covered the main one and more.
+      const newW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), dockedChatMaxWidth()))
       // Direct DOM update during drag — no React re-renders
       if (popupRef.current) popupRef.current.style.width = newW + 'px'
     }
@@ -1914,7 +1931,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       window.removeEventListener('touchend', onUp)
       // Commit final width to React state + notify parent
       const cx = 'changedTouches' in ev ? ev.changedTouches[0].clientX : (ev as MouseEvent).clientX
-      const finalW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      const finalW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), dockedChatMaxWidth()))
       setPanelWidth(finalW)
       onPanelModeChange?.(finalW)
     }
@@ -1940,13 +1957,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const x = d.origX + (ev.clientX - d.startX)
       const y = d.origY + (ev.clientY - d.startY)
       // The top gutter starts under the kiosk bar on the laptop (0 elsewhere):
-      // a header dropped under it could not be grabbed again.
-      const top = desktopTop() + VIEWPORT_MARGIN
-      setPos({
-        x: Math.max(VIEWPORT_MARGIN, Math.min(x, window.innerWidth - rect.width - VIEWPORT_MARGIN)),
-        y: Math.max(top, Math.min(y, window.innerHeight - rect.height - VIEWPORT_MARGIN)),
-      })
-      setSnapPreview(getSnapZone(ev.clientX, ev.clientY))
+      // a header dropped under it could not be grabbed again. Over a row of
+      // monitors the bottom is the bottom of the monitor the chat is on.
+      setPos(clampFloatingRect({ x, y, width: rect.width, height: rect.height }, VIEWPORT_MARGIN))
+      setSnapPreview((prev) => snapTargetAt(ev.clientX, ev.clientY, 0, prev))
     }
     const onUp = (ev: PointerEvent) => {
       dragRef.current = null
@@ -1958,7 +1972,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // never reached an edge.
       const zone = getSnapZone(ev.clientX, ev.clientY)
       setSnapPreview(null)
-      const rect = getSnapRect(zone)
+      // On the monitor the chat was dropped on.
+      const rect = getSnapRect(zone, 0, { x: ev.clientX, y: ev.clientY })
       if (!rect) return
       // Honour the chat's own floor. `getSnapRect` divides the screen, and half
       // of a narrow window is narrower than the chat can render.
@@ -6404,32 +6419,37 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // original 400px popup and became a 60px offset when the default grew to
   // 520px (and was wrong for every user-resized width too).
   const winW = typeof window !== 'undefined' ? window.innerWidth : 1000
-  const mascotCenterPx = ((mascotX ?? 85) / 100) * winW
-  const defaultLeft = Math.max(8, Math.min(mascotCenterPx - size.w / 2, winW - size.w - 8))
+  // Over a row of monitors everything below is measured on the MAIN one: the
+  // mascot's place is a share of its width, and the panel and the default
+  // spot keep to its edges (all insets are 0 with one screen).
+  const main = deskScreens ? mainScreen() : { x: 0, y: 0, width: winW, height: typeof window !== 'undefined' ? window.innerHeight : 800 }
+  const ins = deskScreens ? mainInsets() : { left: 0, top: 0, right: 0, bottom: 0 }
+  const mascotCenterPx = main.x + ((mascotX ?? 85) / 100) * main.width
+  const defaultLeft = Math.max(main.x + 8, Math.min(mascotCenterPx - size.w / 2, main.x + main.width - size.w - 8))
   const posStyle: React.CSSProperties = panelMode
     ? {
-        right: DESKTOP_GAP,
+        right: DESKTOP_GAP + ins.right,
         // Under the kiosk bar on the laptop while it is up; the bar's height
         // is 0 everywhere else, so this is the old DESKTOP_GAP there.
-        top: barInset + DESKTOP_GAP,
+        top: barInset + DESKTOP_GAP + ins.top,
         // The safe-area inset rides along because a maximized window subtracts
         // it from its height too; a flat 62 left the panel hanging below the
         // window's bottom edge on a device that has an inset.
-        bottom: `calc(${SHELF_HEIGHT_PX + DESKTOP_GAP}px + env(safe-area-inset-bottom, 0px))`,
+        bottom: `calc(${SHELF_HEIGHT_PX + DESKTOP_GAP + ins.bottom}px + env(safe-area-inset-bottom, 0px))`,
       }
     : mobile
       ? { left: 0, top: 0, right: 0, bottom: 0 }
       : pos
         ? { left: pos.x, top: pos.y, bottom: 'auto' }
         : trayMode
-          ? { right: 8, bottom: 65 }
-          : { left: defaultLeft, bottom: 170 }
+          ? { right: 8 + ins.right, bottom: 65 + ins.bottom }
+          : { left: defaultLeft, bottom: 170 + ins.bottom }
 
   // macOS-style open: grow the popup OUT of the mascot. The transform-origin
   // is pinned to the popup's bottom edge, horizontally aligned with the
   // mascot, so the scale animation emanates from where the user tapped
   // instead of from the popup's centre.
-  const anchorLeft = pos ? pos.x : (trayMode ? winW - size.w - 8 : defaultLeft)
+  const anchorLeft = pos ? pos.x : (trayMode ? main.x + main.width - size.w - 8 : defaultLeft)
   const originX = Math.max(20, Math.min(mascotCenterPx - anchorLeft, size.w - 20))
   const transformOrigin = panelMode ? 'right center' : mobile ? 'center bottom' : `${originX}px bottom`
 
@@ -6671,7 +6691,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         position: 'fixed',
         ...posStyle,
         ...(panelMode
-          ? { width: panelWidth, minWidth: MIN_CHAT_WIDTH, height: 'auto', maxHeight: 'none', borderRadius: 16 }
+          ? { width: drawnPanelWidth ?? panelWidth, minWidth: MIN_CHAT_WIDTH, height: 'auto', maxHeight: 'none', borderRadius: 16 }
           : mobile
             ? {
                 width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0,
@@ -6695,9 +6715,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 // looked completely broken. Reserve anchor + 12px top margin,
                 // and the kiosk bar's height on the laptop (0 everywhere
                 // else), which covers the top of the screen there.
+                // Over a row of monitors the main one's own height, which a
+                // shorter main monitor makes less than the viewport's.
                 maxHeight: pos
                   ? 'calc(100vh - 60px)'
-                  : trayMode
+                  : deskScreens
+                    ? `${main.height - (trayMode ? 77 : 182) - barInset}px`
+                    : trayMode
                     ? `calc(100vh - ${77 + barInset}px)`
                     : `calc(100vh - ${182 + barInset}px)`,
                 borderRadius: 16,
@@ -8396,7 +8420,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           app windows draw, portalled so the popup's own overflow cannot clip
           it. */}
       {!mobile && !panelMode && snapPreview && createPortal(
-        <SnapPreviewOverlay zone={snapPreview} />,
+        <SnapPreviewOverlay zone={snapPreview.zone} at={snapPreview.at} />,
         document.body,
       )}
 
