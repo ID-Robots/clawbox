@@ -13,6 +13,7 @@ import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
 import CodingRunHistoryCard from "./CodingRunHistoryCard";
 import type { HistoryRetentionMode } from "@/lib/coding-run-history";
+import type { PrBodyTaskMode } from "@/lib/coding-pr-body";
 import HelpTip from "./HelpTip";
 import { PaidPlanNotice } from "./PaidFeatureGate";
 import { enableBlockedBy, type PlanGate } from "@/lib/paid-plan-gate";
@@ -90,6 +91,10 @@ export interface AgentStatus {
   /** The owner's switch for branch -> pull request -> wait for checks ->
    *  merge. Optional: an older server does not answer with it. */
   autoPr?: boolean;
+  /** How much of the run's task that pull request carries, always redacted
+   *  (TASK-1366). Optional: an older server answers with none, and the control
+   *  is then not drawn at all. */
+  prBodyIncludesTask?: PrBodyTaskMode;
   /** How many follow-up turns the review loop may hand the harness after the
    *  pull request is opened. 0 is off. Optional: an older server answers with
    *  none, and the card then shows no control rather than inventing a value. */
@@ -198,6 +203,19 @@ type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "completionAttemp
 // outside its range rather than clamping it, and that sentence belongs next to
 // the control that asked for it. The run history's is inside its own card.
 const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds", "completionAttempts", "maxParallelRuns", "gitAuthor", "history"]);
+
+/**
+ * The label of each choice for how much of the task a pull request carries,
+ * in the order the select offers them. A Record over the mode type rather than
+ * an import of the list, so the redactor's code stays out of the browser
+ * bundle — and a mode added in @/lib/coding-pr-body without a label here still
+ * fails the typecheck.
+ */
+const PR_BODY_TASK_LABEL_KEY: Record<PrBodyTaskMode, string> = {
+  summary: "codingAgent.prBodyIncludesTaskSummary",
+  "full-redacted": "codingAgent.prBodyIncludesTaskFullRedacted",
+  none: "codingAgent.prBodyIncludesTaskNone",
+};
 
 /** The slowest cadence GitHub's device flow ever asks for, in seconds. */
 const DEVICE_POLL_FLOOR_S = 5;
@@ -1054,6 +1072,36 @@ export default function CodingAgentSettingsPanel({
             onChange={(next) => void saveSetting({ autoPr: next }, "autoPr", t("codingAgent.autoPrFailed"))}
           />
         </div>
+
+        {/* How much of the task that pull request shows (TASK-1366). Its
+            sentence is on the card rather than behind a help tip: it is the
+            one place the owner learns the box takes their paths, addresses
+            and tokens out before publishing. Hidden on a server that does not
+            answer with the field, like the counted settings below. */}
+        {typeof status?.prBodyIncludesTask === "string" && (
+          <div className="mt-4">
+            <div className="flex items-start justify-between gap-4">
+              <label htmlFor="coding-agent-pr-body-task" className="min-w-0 text-xs font-medium text-[var(--text-secondary)]">
+                {t("codingAgent.prBodyIncludesTaskLabel")}
+              </label>
+              <select
+                id="coding-agent-pr-body-task"
+                value={status.prBodyIncludesTask}
+                disabled={saving}
+                data-testid="coding-agent-pr-body-task"
+                onChange={(e) => void saveSetting({ prBodyIncludesTask: e.target.value }, "prBodyIncludesTask", t("codingAgent.prBodyIncludesTaskFailed"))}
+                className={`text-base sm:text-xs ${FIELD} w-44 shrink-0`}
+              >
+                {(Object.keys(PR_BODY_TASK_LABEL_KEY) as PrBodyTaskMode[]).map((id) => (
+                  <option key={id} value={id}>{t(PR_BODY_TASK_LABEL_KEY[id])}</option>
+                ))}
+              </select>
+            </div>
+            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
+              {t("codingAgent.prBodyIncludesTaskHint")}
+            </p>
+          </div>
+        )}
 
         {/* What happens to that pull request AFTER it is opened: CI going red,
             review comments, a conflict with a sibling merge. Each round is one

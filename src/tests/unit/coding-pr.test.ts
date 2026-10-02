@@ -422,6 +422,56 @@ describe("the pull request across the owner's gestures", () => {
     expect(lib.getRun(started.id)?.pr?.readyAt).toBeNull();
   });
 
+  // TASK-1366. Invented values throughout; what matters is where they end up.
+  const PRIVATE_TASK = [
+    "Deploy the site to 192.168.1.20 for ada@example.com",
+    "",
+    "Read /home/ada/Projects/briefs/site.md first, on ada-desk.",
+    ...Array.from({ length: 14 }, (_, i) => `- Step ${i + 1}: an ordinary line of a long brief, nothing private here.`),
+    "TAIL-SENTINEL past the first six hundred characters.",
+  ].join("\n");
+
+  it("opens the pull request with a redacted title and a summary of the task, and the run keeps its whole task", async () => {
+    // The device's own name is pinned, so no real one can collide with a word below.
+    const host = vi.spyOn(os, "hostname").mockReturnValue("ada-desk");
+    try {
+      installFakeWrapper(finishingBody());
+      const started = await lib.startRun({ task: PRIVATE_TASK, projectId: "site", source: "owner" });
+      await finished(started.id);
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.pr?.phase).toBe("waiting"); }, { timeout: 5000 });
+      const [{ title, body }] = github.openPullRequest.mock.calls[0] as [{ title: string; body: string }];
+      expect(title).toBe("Deploy the site to <private-ip> for <email>");
+      expect(body).toContain("**Task**");
+      expect(body).toContain("> Read ~/Projects/briefs/site.md first, on <host>.");
+      expect(body).toMatch(/_Shortened to its first 600 characters/);
+      for (const value of ["192.168.1.20", "ada@example.com", "/home/ada", "ada-desk", "TAIL-SENTINEL"]) expect(body).not.toContain(value);
+      // What the run was given is untouched: only the published copy is redacted.
+      expect(lib.getRun(started.id)?.task).toBe(PRIVATE_TASK);
+    } finally {
+      host.mockRestore();
+    }
+  });
+
+  it("leaves the task out of the pull request when the owner chose none", async () => {
+    const host = vi.spyOn(os, "hostname").mockReturnValue("ada-desk");
+    try {
+      const config = path.join(root, "data", "config.json");
+      fs.writeFileSync(config, JSON.stringify({ ...JSON.parse(fs.readFileSync(config, "utf-8")), coding_agent_pr_body_includes_task: "none" }));
+      expect((await lib.getCodingAgentStatus()).prBodyIncludesTask).toBe("none");
+      installFakeWrapper(finishingBody());
+      const started = await lib.startRun({ task: PRIVATE_TASK, projectId: "site", source: "owner" });
+      await finished(started.id);
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.pr?.phase).toBe("waiting"); }, { timeout: 5000 });
+      const [{ title, body }] = github.openPullRequest.mock.calls[0] as [{ title: string; body: string }];
+      expect(title).toBe("Deploy the site to <private-ip> for <email>");
+      expect(body).not.toContain("**Task**");
+      expect(body).not.toContain("Step 1");
+      expect(body).toMatch(/^Opened by the ClawBox coding agent\.\n\nRun `/);
+    } finally {
+      host.mockRestore();
+    }
+  });
+
   it("keeps the pull request 'opening' through a pause and opens it when the resumed run completes", async () => {
     // A pause is not the end of the chain: the run resumes IN PLACE, on the
     // same record and branch. Settling the pull request on the pause meant

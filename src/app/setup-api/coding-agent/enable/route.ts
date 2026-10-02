@@ -24,6 +24,7 @@ import {
   setAutoPr,
   setCompletionAttempts,
   setMaxParallelRuns,
+  setPrBodyIncludesTask,
   setGenerateAudio,
   setGenerateImages,
   setHistoryRetention,
@@ -34,6 +35,7 @@ import {
   setTeamDynamic,
   setTokenLimit,
 } from "@/lib/coding-agent";
+import { PR_BODY_TASK_MODES } from "@/lib/coding-pr-body";
 
 export const dynamic = "force-dynamic";
 
@@ -85,6 +87,11 @@ function forbidden() {
  * POST { autoPr: boolean } → branch, open a pull request into the repo's
  * default branch, wait for GitHub Actions, and merge when at least one real
  * check has passed. See @/lib/coding-pr for the guardrails.
+ * POST { prBodyIncludesTask: "summary"|"full-redacted"|"none" } → how much of
+ * the run's task that pull request carries: a one-line summary and the first
+ * ~600 characters (the default), the whole task, or none of it. Whichever, it
+ * is redacted before it is published (@/lib/publish-redaction); a value this
+ * box does not offer is refused before anything is saved.
  * POST { reviewRounds: number } → how many follow-up turns the review loop may
  * hand the harness after the pull request is opened (failing check logs,
  * unresolved review comments, "rebase onto <base>"). 0 switches the loop off
@@ -169,6 +176,7 @@ export async function POST(request: Request) {
     tokenLimit?: unknown;
     reviewPass?: unknown;
     autoPr?: unknown;
+    prBodyIncludesTask?: unknown;
     reviewRounds?: unknown;
     autoMerge?: unknown;
     completionAttempts?: unknown;
@@ -221,7 +229,9 @@ export async function POST(request: Request) {
   // request about the history, and is refused below rather than ignored.
   const hasHistoryRetention = "historyRetention" in fields;
   const hasHistoryLimit = "historyLimit" in fields;
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !clearsFault) {
+  // Presence decides here too, for the same reason as the history setting.
+  const hasPrBodyIncludesTask = "prBodyIncludesTask" in fields;
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -235,6 +245,7 @@ export async function POST(request: Request) {
           + "{ maxParallelRuns: number }, "
           + "{ historyRetention: string, historyLimit?: number }, "
           + "{ gitAuthorName: string | null }, { gitAuthorEmail: string | null }, "
+          + "{ prBodyIncludesTask: string }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
@@ -282,6 +293,12 @@ export async function POST(request: Request) {
   if (hasHistoryLimit && !(HISTORY_EXTENDED_LIMITS as readonly unknown[]).includes(fields.historyLimit)) {
     return NextResponse.json(
       { error: `The number of runs to keep must be one of: ${HISTORY_EXTENDED_LIMITS.join(", ")}.`, kind: "invalid" },
+      { status: 400 },
+    );
+  }
+  if (hasPrBodyIncludesTask && !(PR_BODY_TASK_MODES as readonly unknown[]).includes(fields.prBodyIncludesTask)) {
+    return NextResponse.json(
+      { error: `What a pull request includes of the task must be one of: ${PR_BODY_TASK_MODES.join(", ")}.`, kind: "invalid" },
       { status: 400 },
     );
   }
@@ -351,6 +368,11 @@ export async function POST(request: Request) {
     if (hasAutoPr) {
       const saved = await setAutoPr(fields.autoPr);
       console.error(`[coding-agent] auto pull requests switched ${saved ? "on" : "off"} by the owner`);
+    }
+    if (hasPrBodyIncludesTask) {
+      const saved = await setPrBodyIncludesTask(fields.prBodyIncludesTask);
+      // A value from the setter's own fixed list by now.
+      console.error(`[coding-agent] pull requests will carry the task as ${logSafe(saved)}, by the owner's choice`);
     }
     if (hasReviewRounds) {
       const saved = await setReviewRounds(fields.reviewRounds);
