@@ -50,7 +50,8 @@ jobs:
         run: ./scripts/check-doc-images.sh
 
       # The on-device suite (scripts/nano-tests/, TASK-1324) runs on a lab
-      # board and only when a PR is labelled `nano-test` — but its RUNNER is
+      # board, in its own workflow and only once `plan` there says the PR
+      # needs one (TASK-1362) — but its RUNNER is
       # plain bash that decides what counts as a pass, redacts the logs and
       # writes the verdict the lab job trusts, so it is checked here on every
       # PR: shellcheck over every script under it, then its self-test against
