@@ -268,7 +268,7 @@ check "...and says the suite did not run" contains "$WORK/summary-none.md" "did 
 check "lib.sh parses" bash -n "$LIB"
 check "run.sh parses" bash -n "$RUN"
 check "summary.sh parses" bash -n "$HERE/summary.sh"
-for name in 10-build-identity 20-services 30-chat-turn 40-coding-agent-run 50-local-model 60-media-tools 70-reboot-survival; do
+for name in 10-build-identity 20-services 30-chat-turn 40-coding-agent-run 60-media-tools 70-reboot-survival; do
   check "tests/$name.sh is there" test -f "$HERE/tests/$name.sh"
 done
 for t in "$HERE"/tests/*; do
