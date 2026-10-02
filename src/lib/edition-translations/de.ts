@@ -946,7 +946,7 @@ export const de: Record<string, string> = {
   "codingAgent.autoPrHint": "Jeder Lauf arbeitet auf einem eigenen Branch, öffnet einen Pull Request auf den Standard-Branch des Projekts und wartet auf GitHub Actions. Zusammengeführt wird nur, wenn mindestens eine Prüfung tatsächlich lief und alle bestanden — ein Pull Request ohne Prüfungen oder mit dem Label hold wird nie zusammengeführt. Verlangt der Branch-Schutz Prüfungen, wird außerdem GitHubs Auto-Merge eingeschaltet, sodass er zusammengeführt wird, sobald die erforderlichen Prüfungen bestanden sind. Erfordert ein GitHub-Remote.",
   "codingAgent.autoPrFailed": "Die Pull-Request-Einstellung konnte nicht geändert werden.",
   "codingAgent.prBodyIncludesTaskLabel": "Aufgabentext im Pull Request",
-  "codingAgent.prBodyIncludesTaskHint": "Wie viel von der Aufgabe des Laufs sein Pull Request zeigt — private IP-Adressen, Home-Ordner, E-Mail-Adressen, Tokens und der Name dieser Box werden vorher immer entfernt.",
+  "codingAgent.prBodyIncludesTaskHint": "Wie viel von der Aufgabe des Laufs sein Pull Request zeigt — private IP-Adressen, Home-Ordner, E-Mail-Adressen, erkannte Tokens und der Name dieser Box werden vorher immer entfernt.",
   "codingAgent.prBodyIncludesTaskSummary": "Zusammenfassung und erste 600 Zeichen",
   "codingAgent.prBodyIncludesTaskFullRedacted": "Volltext, bereinigt",
   "codingAgent.prBodyIncludesTaskNone": "Weglassen",

@@ -933,7 +933,7 @@ export const bg: Record<string, string> = {
   "codingAgent.autoPrHint": "Всяко изпълнение работи в собствен клон, отваря pull request към клона по подразбиране на проекта и изчаква GitHub Actions. Слива само когато поне една проверка наистина е била изпълнена и всички са успешни — pull request без проверки или с етикет hold никога не се слива. Когато защитата на клона изисква проверки, се включва и автоматичното сливане на GitHub, така че заявката се слива в момента, в който задължителните проверки минат. Изисква отдалечено хранилище в GitHub.",
   "codingAgent.autoPrFailed": "Настройката за pull request не можа да бъде променена.",
   "codingAgent.prBodyIncludesTaskLabel": "Текст на задачата в pull request",
-  "codingAgent.prBodyIncludesTaskHint": "Колко от задачата на изпълнението показва неговият pull request — частните IP адреси, домашните папки, имейл адресите, токените и името на това устройство винаги се премахват преди това.",
+  "codingAgent.prBodyIncludesTaskHint": "Колко от задачата на изпълнението показва неговият pull request — частните IP адреси, домашните папки, имейл адресите, разпознатите токени и името на това устройство винаги се премахват преди това.",
   "codingAgent.prBodyIncludesTaskSummary": "Резюме и първите 600 знака",
   "codingAgent.prBodyIncludesTaskFullRedacted": "Целият текст, без лични данни",
   "codingAgent.prBodyIncludesTaskNone": "Без текста на задачата",

@@ -948,7 +948,7 @@ export const ja: Record<string, string> = {
   "codingAgent.autoPrHint": "各実行は専用のブランチで作業し、プロジェクトの既定ブランチへプルリクエストを作成して GitHub Actions を待ちます。実際にチェックが 1 つ以上実行され、そのすべてが成功した場合にのみマージします。チェックのないプルリクエストや hold ラベルの付いたプルリクエストは決してマージしません。ブランチ保護で必須チェックが設定されている場合は GitHub の自動マージもオンにするため、必須チェックが通った時点でマージされます。GitHub のリモートが必要です。",
   "codingAgent.autoPrFailed": "プルリクエストの設定を変更できませんでした。",
   "codingAgent.prBodyIncludesTaskLabel": "プルリクエストに載せるタスク本文",
-  "codingAgent.prBodyIncludesTaskHint": "実行のタスクをプルリクエストにどこまで載せるか — プライベート IP、ホームフォルダー、メールアドレス、トークン、この本体の名前は必ず先に取り除かれます。",
+  "codingAgent.prBodyIncludesTaskHint": "実行のタスクをプルリクエストにどこまで載せるか — プライベート IP、ホームフォルダー、メールアドレス、認識されたトークン、この本体の名前は必ず先に取り除かれます。",
   "codingAgent.prBodyIncludesTaskSummary": "要約と先頭 600 文字",
   "codingAgent.prBodyIncludesTaskFullRedacted": "全文（伏せ字済み）",
   "codingAgent.prBodyIncludesTaskNone": "載せない",

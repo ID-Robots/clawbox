@@ -200,6 +200,11 @@ describe("token-shaped strings", () => {
   it("replaces a URL's password and a PEM private key", () => {
     expect(r("git clone https://ada:s3cretPass@git.example.com/r.git"))
       .toBe(`git clone https://ada:${SECRET}@git.example.com/r.git`);
+    // An `@` inside the password: everything up to the LAST `@` before the host goes.
+    expect(r("git clone https://ada:p@ss@git.example.com/r.git"))
+      .toBe(`git clone https://ada:${SECRET}@git.example.com/r.git`);
+    expect(r('push to "https://ada:pa:ss@git.example.com"'))
+      .toBe(`push to "https://ada:${SECRET}@git.example.com"`);
     const pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----";
     expect(r(`key:\n${pem}\ndone`)).toBe(`key:\n${SECRET}\ndone`);
     expect(r("-----BEGIN RSA PRIVATE KEY-----\nMIIEow cut off here")).toBe(SECRET);

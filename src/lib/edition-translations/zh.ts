@@ -957,7 +957,7 @@ export const zh: Record<string, string> = {
   "codingAgent.autoPrHint": "每次运行都在独立分支上工作，向项目的默认分支创建拉取请求，并等待 GitHub Actions。只有在确实至少运行了一项检查且全部通过时才会合并——没有检查或带有 hold 标签的拉取请求永远不会被合并。如果分支保护要求检查，还会开启 GitHub 的自动合并，必需的检查一通过就会合并。需要 GitHub 远程仓库。",
   "codingAgent.autoPrFailed": "无法更改拉取请求设置。",
   "codingAgent.prBodyIncludesTaskLabel": "拉取请求中的任务文本",
-  "codingAgent.prBodyIncludesTaskHint": "拉取请求中显示多少运行任务的内容——私有 IP、主目录、电子邮件地址、令牌和本机名称总会先被移除。",
+  "codingAgent.prBodyIncludesTaskHint": "拉取请求中显示多少运行任务的内容——私有 IP、主目录、电子邮件地址、可识别的令牌和本机名称总会先被移除。",
   "codingAgent.prBodyIncludesTaskSummary": "摘要和前 600 个字符",
   "codingAgent.prBodyIncludesTaskFullRedacted": "全文（已脱敏）",
   "codingAgent.prBodyIncludesTaskNone": "不包含",

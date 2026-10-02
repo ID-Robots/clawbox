@@ -943,7 +943,7 @@ export const sv: Record<string, string> = {
   "codingAgent.autoPrHint": "Varje körning arbetar på en egen gren, öppnar en pull request mot projektets standardgren och väntar på GitHub Actions. Den slås ihop bara om minst en kontroll faktiskt kördes och alla gick igenom — en pull request utan kontroller, eller med etiketten hold, slås aldrig ihop. Kräver grenskyddet kontroller slås även GitHubs automatiska sammanslagning på, så att den slås ihop så fort de obligatoriska kontrollerna går igenom. Kräver en GitHub-fjärr.",
   "codingAgent.autoPrFailed": "Inställningen för pull requests kunde inte ändras.",
   "codingAgent.prBodyIncludesTaskLabel": "Uppgiftstext i pull requesten",
-  "codingAgent.prBodyIncludesTaskHint": "Hur mycket av körningens uppgift dess pull request visar — privata IP-adresser, hemmappar, e-postadresser, tokens och den här boxens namn tas alltid bort först.",
+  "codingAgent.prBodyIncludesTaskHint": "Hur mycket av körningens uppgift dess pull request visar — privata IP-adresser, hemmappar, e-postadresser, igenkända tokens och den här boxens namn tas alltid bort först.",
   "codingAgent.prBodyIncludesTaskSummary": "Sammanfattning och första 600 tecknen",
   "codingAgent.prBodyIncludesTaskFullRedacted": "Hela texten, rensad",
   "codingAgent.prBodyIncludesTaskNone": "Utelämna den",

@@ -942,7 +942,7 @@ export const es: Record<string, string> = {
   "codingAgent.autoPrHint": "Cada ejecución trabaja en su propia rama, abre una pull request hacia la rama predeterminada del proyecto y espera a GitHub Actions. Solo fusiona cuando al menos una comprobación se ejecutó de verdad y todas pasaron: una pull request sin comprobaciones, o con la etiqueta hold, nunca se fusiona. Si la protección de la rama exige comprobaciones, también se activa la fusión automática de GitHub, así que se fusiona en cuanto pasan las obligatorias. Requiere un remoto de GitHub.",
   "codingAgent.autoPrFailed": "No se pudo cambiar el ajuste de pull requests.",
   "codingAgent.prBodyIncludesTaskLabel": "Texto de la tarea en la pull request",
-  "codingAgent.prBodyIncludesTaskHint": "Cuánto de la tarea de la ejecución muestra su pull request: las IP privadas, las carpetas personales, las direcciones de correo, los tokens y el nombre de este dispositivo se eliminan siempre antes.",
+  "codingAgent.prBodyIncludesTaskHint": "Cuánto de la tarea de la ejecución muestra su pull request: las IP privadas, las carpetas personales, las direcciones de correo, los tokens que reconoce y el nombre de este dispositivo se eliminan siempre antes.",
   "codingAgent.prBodyIncludesTaskSummary": "Resumen y primeros 600 caracteres",
   "codingAgent.prBodyIncludesTaskFullRedacted": "Texto completo, depurado",
   "codingAgent.prBodyIncludesTaskNone": "No incluirla",

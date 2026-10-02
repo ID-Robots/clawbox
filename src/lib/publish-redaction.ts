@@ -96,7 +96,7 @@ const PASSWORD_VALUE_RE = /\b([A-Za-z0-9_-]*(?:password|passwd|[_-]pwd))(\s*[=:]
 
 /** The password half of `scheme://user:password@host`. The user name stays:
  *  `x-access-token` or `git` says what kind of URL it was. */
-const URL_PASSWORD_RE = /\b([a-z][a-z0-9+.-]*:\/\/[^\s/?#@:]+):([^\s/?#@]+)@/gi;
+const URL_PASSWORD_RE = /\b([a-z][a-z0-9+.-]*:\/\/[^\s/?#@:]+):([^\s/?#]+)@(?=[^\s@/?#]*(?:[\s/?#]|$))/gi;
 
 /**
  * `/home/<user>` and `/Users/<user>`, as a path of their own — not inside a

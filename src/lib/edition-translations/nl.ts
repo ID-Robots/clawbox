@@ -947,7 +947,7 @@ export const nl: Record<string, string> = {
   "codingAgent.autoPrHint": "Elke run werkt op een eigen branch, opent een pull request naar de standaardbranch van het project en wacht op GitHub Actions. Er wordt alleen samengevoegd als er echt minstens één check liep en alle checks slaagden — een pull request zonder checks, of met het label hold, wordt nooit samengevoegd. Vereist de branchbeveiliging checks, dan wordt ook de automatische merge van GitHub aangezet, zodat hij wordt samengevoegd zodra de verplichte checks slagen. Vereist een GitHub-remote.",
   "codingAgent.autoPrFailed": "De pull-requestinstelling kon niet worden gewijzigd.",
   "codingAgent.prBodyIncludesTaskLabel": "Taaktekst in de pull request",
-  "codingAgent.prBodyIncludesTaskHint": "Hoeveel van de taak van de run zijn pull request toont — privé-IP-adressen, thuismappen, e-mailadressen, tokens en de naam van deze box worden er altijd eerst uit gehaald.",
+  "codingAgent.prBodyIncludesTaskHint": "Hoeveel van de taak van de run zijn pull request toont — privé-IP-adressen, thuismappen, e-mailadressen, herkende tokens en de naam van deze box worden er altijd eerst uit gehaald.",
   "codingAgent.prBodyIncludesTaskSummary": "Samenvatting en eerste 600 tekens",
   "codingAgent.prBodyIncludesTaskFullRedacted": "Volledige tekst, geschoond",
   "codingAgent.prBodyIncludesTaskNone": "Weglaten",

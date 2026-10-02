@@ -517,7 +517,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.autoPrHint": "Each run works on its own branch, opens a pull request into the project's default branch, and waits for GitHub Actions. It merges only when at least one check actually ran and every one passed — a pull request with no checks, or one labelled hold, is never merged. Where the branch's protection requires checks, GitHub's auto-merge is turned on too, so it merges the moment the required ones pass. Needs a GitHub remote.",
   "codingAgent.autoPrFailed": "Could not change the pull-request setting.",
   "codingAgent.prBodyIncludesTaskLabel": "Task text in the pull request",
-  "codingAgent.prBodyIncludesTaskHint": "How much of the run's task its pull request shows — private IPs, home folders, e-mail addresses, tokens and this box's name are always taken out first.",
+  "codingAgent.prBodyIncludesTaskHint": "How much of the run's task its pull request shows — private IPs, home folders, e-mail addresses, the tokens it recognises and this box's name are always taken out first.",
   "codingAgent.prBodyIncludesTaskSummary": "Summary and first 600 characters",
   "codingAgent.prBodyIncludesTaskFullRedacted": "Full text, redacted",
   "codingAgent.prBodyIncludesTaskNone": "Leave it out",

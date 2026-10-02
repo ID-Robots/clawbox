@@ -947,7 +947,7 @@ export const fr: Record<string, string> = {
   "codingAgent.autoPrHint": "Chaque exécution travaille sur sa propre branche, ouvre une pull request vers la branche par défaut du projet et attend GitHub Actions. La fusion n'a lieu que si au moins une vérification a réellement tourné et que toutes sont passées — une pull request sans vérification, ou portant l'étiquette hold, n'est jamais fusionnée. Si la protection de la branche exige des vérifications, la fusion automatique de GitHub est aussi activée : la pull request est fusionnée dès que les vérifications requises passent. Nécessite un dépôt distant GitHub.",
   "codingAgent.autoPrFailed": "Le réglage des pull requests n'a pas pu être modifié.",
   "codingAgent.prBodyIncludesTaskLabel": "Texte de la tâche dans la pull request",
-  "codingAgent.prBodyIncludesTaskHint": "La part de la tâche de l'exécution que montre sa pull request — les IP privées, les dossiers personnels, les adresses e-mail, les jetons et le nom de cette box sont toujours retirés avant.",
+  "codingAgent.prBodyIncludesTaskHint": "La part de la tâche de l'exécution que montre sa pull request — les IP privées, les dossiers personnels, les adresses e-mail, les jetons qu'elle reconnaît et le nom de cette box sont toujours retirés avant.",
   "codingAgent.prBodyIncludesTaskSummary": "Résumé et 600 premiers caractères",
   "codingAgent.prBodyIncludesTaskFullRedacted": "Texte complet, expurgé",
   "codingAgent.prBodyIncludesTaskNone": "Ne pas l'inclure",
