@@ -225,10 +225,11 @@ and **PR comment** reports it.
    `E2E Install` already edit in place — is rewritten with the verdict, the
    commit, the board and its cleanup, and the job summary. One comment per PR,
    never one per push. A skipped docs-only run says so there too. Only a board
-   job cancelled while still pending — replaced by a newer push in the PR's
-   concurrency group, so it never ran a step and its `reserve` output is empty
-   — leaves the section alone; a cancelled job that started reports
-   *cancelled*, with or without a board.
+   job cancelled before it ever started — the pending job a newer push
+   replaced in the PR's concurrency group, or one a person cancelled while it
+   still waited for a runner instance — leaves the section alone: it never ran
+   a step, so its `reserve` output is empty. A cancelled job that started
+   reports *cancelled*, with or without a board.
 
 The board job on the lab host holds only a read token (`contents: read`, not
 persisted by the checkout). The comment is written by the separate job on

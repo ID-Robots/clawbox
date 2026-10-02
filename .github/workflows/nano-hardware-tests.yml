@@ -633,10 +633,12 @@ jobs:
     # gate kept `plan` from running (nothing ran), and not for a board job
     # cancelled while still pending — a newer push to the PR took its place in
     # the PR's concurrency group, and that run reports. Such a job never ran a
-    # step, so its `reserve` outcome is empty. An empty `serial` is not that
-    # test: a job a person cancelled while it waited for a free board, or one
-    # that timed out before reserving, has none either, and must still report,
-    # or the section would keep an older commit's result.
+    # step, so its `reserve` outcome is empty (as is that of a job whose run a
+    # person cancelled while it still waited for a runner instance, which is
+    # skipped here too). An empty `serial` is not that test: a job a person
+    # cancelled while it waited for a free board, or one that timed out before
+    # reserving, has none either, and must still report, or the section would
+    # keep an older commit's result.
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
