@@ -233,6 +233,9 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // The auto-PR switch is standing consent for the box to push and merge
       // the agent's work, so "start over" must take it back too.
       "coding_agent_auto_pr",
+      // How much of the task that pull request carries (TASK-1366): a setting,
+      // so "start over" puts it back to the summary.
+      "coding_agent_pr_body_includes_task",
       // The review loop's budget, and — the one that matters — the standing
       // consent for the box to MERGE what its own rounds cleared. A reset that
       // left that behind would hand a freshly-configured agent the right to

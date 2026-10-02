@@ -236,6 +236,7 @@ import {
 } from "@/lib/coding-review-visual";
 import {
   AUTO_MERGE_RETRY_MS,
+  boxHostNames,
   decideAutoMerge,
   decideMerge,
   disableAutoMerge,
@@ -248,6 +249,7 @@ import {
   mergePullRequest,
   NO_CHECKS_GRACE_MS,
   openPullRequest,
+  redactForGitHub,
   updatePullRequestBody,
   // Aliased: this module's own MAX_WAIT_MS is the 120-second status-request
   // limit, a different ceiling for a different wait.
@@ -261,6 +263,14 @@ import {
   type PrFoundBy,
   type PrState,
 } from "@/lib/coding-pr";
+import {
+  composePullRequestBody,
+  isPrBodyTaskMode,
+  prBodyTaskModeFrom,
+  pullRequestTitle,
+  PR_BODY_TASK_MODES,
+  type PrBodyTaskMode,
+} from "@/lib/coding-pr-body";
 import {
   addRunWorktree,
   commitsAhead,
@@ -535,6 +545,16 @@ export const CODING_AGENT_REVIEW_CONFIG_KEY = "coding_agent_review_pass";
 export const CODING_AGENT_AUTO_PR_CONFIG_KEY = "coding_agent_auto_pr";
 
 /**
+ * How much of the run's TASK the pull request the box opens carries:
+ * "summary" (the default — a long task is cut to a one-line summary and its
+ * first ~600 characters), "full-redacted" or "none". Whatever is chosen is
+ * redacted before it is published (src/lib/coding-pr-body.ts and
+ * src/lib/publish-redaction.ts, TASK-1366); the run itself always sees its
+ * whole task.
+ */
+export const CODING_AGENT_PR_BODY_TASK_CONFIG_KEY = "coding_agent_pr_body_includes_task";
+
+/**
  * How many REVIEW ROUNDS a pull request gets after it is opened.
  *
  * A round is one follow-up turn handed to the harness — failing check logs,
@@ -719,6 +739,7 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_TOKENS_CONFIG_KEY,
   CODING_AGENT_REVIEW_CONFIG_KEY,
   CODING_AGENT_AUTO_PR_CONFIG_KEY,
+  CODING_AGENT_PR_BODY_TASK_CONFIG_KEY,
   CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY,
   CODING_AGENT_AUTO_MERGE_CONFIG_KEY,
   CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY,
@@ -2022,6 +2043,8 @@ export interface CodingAgentStatus {
   reviewPass: boolean;
   /** The owner's switch for branch -> pull request -> wait for checks -> merge. */
   autoPr: boolean;
+  /** How much of the task that pull request carries, always redacted. */
+  prBodyIncludesTask: PrBodyTaskMode;
   /** How many follow-up turns a pull request's review loop gets. 0 = off. */
   reviewRounds: number;
   /** The range the app offers, so it does not have to guess the bounds. */
@@ -2511,6 +2534,19 @@ export async function setAutoPr(on: unknown): Promise<boolean> {
   }
   await configSet(CODING_AGENT_AUTO_PR_CONFIG_KEY, on);
   return on;
+}
+
+/** How much of the task the box's pull request carries. Absent means "summary". */
+export async function getPrBodyIncludesTask(): Promise<PrBodyTaskMode> {
+  return prBodyTaskModeFrom(await configGet(CODING_AGENT_PR_BODY_TASK_CONFIG_KEY));
+}
+
+export async function setPrBodyIncludesTask(mode: unknown): Promise<PrBodyTaskMode> {
+  if (!isPrBodyTaskMode(mode)) {
+    throw new CodingAgentError("invalid", `What a pull request includes of the task must be one of: ${PR_BODY_TASK_MODES.join(", ")}.`);
+  }
+  await configSet(CODING_AGENT_PR_BODY_TASK_CONFIG_KEY, mode);
+  return mode;
 }
 
 /** How many review rounds a pull request gets. Absent means the default. */
@@ -3621,6 +3657,9 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     running: runningCount(),
     reviewPass: config[CODING_AGENT_REVIEW_CONFIG_KEY] === true,
     autoPr: config[CODING_AGENT_AUTO_PR_CONFIG_KEY] === true,
+    // Absent means "summary": a box that predates the setting stops pasting a
+    // whole task into a public pull request the day it updates.
+    prBodyIncludesTask: prBodyTaskModeFrom(config[CODING_AGENT_PR_BODY_TASK_CONFIG_KEY]),
     // Absent means the DEFAULT here, not zero: a box that predates the loop
     // gets it, which is the point of shipping it on.
     reviewRounds: typeof config[CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY] === "number"
@@ -7720,12 +7759,15 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
       base = mine.base ?? prBase;
       foundBy = "adopted";
     } else {
+      // Read at the moment it is opened, like the auto-PR switch above: the
+      // owner who changed it while the run worked meant this pull request.
+      const taskMode = await getPrBodyIncludesTask();
       const created = await openPullRequest({
         directory: origin.directory,
         branch: prBranch,
         base: prBase,
-        title: firstLineOf(origin.task),
-        body: prBody(origin, finished),
+        title: pullRequestTitle(origin.task, { hostNames: boxHostNames() }),
+        body: prBody(origin, finished, taskMode),
         // A draft until its checks pass: the watcher readies it then, and that
         // is when CodeRabbit gives the one review it gives a pull request.
         draft: true,
@@ -7881,26 +7923,35 @@ async function adoptRunPullRequest(
   });
 }
 
-/** First line of the task, trimmed to something a PR title can hold. */
+/** First line of the task, trimmed to a title's length, for what stays on the
+ *  box. A pull request's title is `pullRequestTitle`, which redacts. */
 function firstLineOf(task: string): string {
   return taskTitle(task, 72) || "ClawBox coding agent";
 }
 
-function prBody(origin: CodingRun, last: CodingRun): string {
-  const lines = [
-    "Opened by the ClawBox coding agent.",
-    "",
-    `**Task**`,
-    origin.task,
-    "",
-    `Run \`${origin.id}\`${origin.commit ? ` · commit \`${origin.commit}\`` : ""}`,
-  ];
-  if (last.reviewOf) lines.push(`Reviewed by run \`${last.id}\` (automatic review pass).`);
-  if (origin.summary) lines.push("", "**Summary**", origin.summary);
+/**
+ * The pull request's body: composed and redacted in @/lib/coding-pr-body, so
+ * the task, the summary and the evidence below it reach GitHub without the
+ * owner's paths, addresses, names or tokens (TASK-1366). `origin.task` itself
+ * is not touched — it is what the run was given and what its page shows.
+ */
+function prBody(origin: CodingRun, last: CodingRun, taskMode: PrBodyTaskMode): string {
+  const hostNames = boxHostNames();
+  const body = composePullRequestBody({
+    task: origin.task,
+    runId: origin.id,
+    commit: origin.commit,
+    reviewRunId: last.reviewOf ? last.id : null,
+    summary: origin.summary,
+    taskMode,
+  }, { hostNames });
   // What the review pass actually SAW, when it looked. The reviewing run first,
   // because its screenshots are of the finished work; the origin run's own
-  // verification shots after. A body with nothing to show gains nothing.
-  return withEvidenceSection(lines.join("\n"), visualEvidenceSection(last, origin));
+  // verification shots after. A body with nothing to show gains nothing. The
+  // descriptions are the run's own words about its pages, and a page served on
+  // the LAN is described by its address — so they are redacted too.
+  const evidence = visualEvidenceSection(last, origin);
+  return withEvidenceSection(body, evidence === null ? null : redactForGitHub(evidence));
 }
 
 /**
@@ -8641,8 +8692,11 @@ async function resumeReviewAfterFix(finished: CodingRun, ended: "stop" | "pause"
 async function refreshPrEvidence(origin: CodingRun, last: CodingRun): Promise<void> {
   const number = origin.pr?.number;
   if (typeof number !== "number") return;
-  const section = visualEvidenceSection(last, origin);
-  if (!section) return;
+  const found = visualEvidenceSection(last, origin);
+  if (!found) return;
+  // Only the box's own block is redacted: the rest of the body is whatever is
+  // on GitHub now, a person's edits included, and is put back as it was.
+  const section = redactForGitHub(found);
   try {
     const updated = await updatePullRequestBody({
       directory: origin.directory,
