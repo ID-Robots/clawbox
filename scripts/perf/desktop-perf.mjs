@@ -24,8 +24,9 @@
 // render-engine busy time.
 //
 // Options: --port <cdp port> (default 18801, CLAWBOX_KIOSK_CDP_PORT),
-//          --url-match <regex> for the desktop page (default: a localhost page
-//          at "/"), --gpu, --out <file>, --runs <n> (median of n runs).
+//          --url-match <text> for the desktop page — plain text its address
+//          contains, never a pattern (default: a localhost page at "/"),
+//          --gpu, --out <file>, --runs <n> (median of n runs).
 //
 // It only reads, clicks and drags; it never changes a setting. Leave the
 // desktop alone while it runs — a moving pointer or typing skews the numbers.
@@ -56,7 +57,20 @@ if (compareIdx >= 0) {
 }
 
 const PORT = Number(opt("--port", process.env.CLAWBOX_KIOSK_CDP_PORT || 18801));
-const URL_MATCH = new RegExp(opt("--url-match", "^https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?/(\\?|$)"));
+// Plain text, never a RegExp built from the command line: the page is found by
+// what its address contains, or — by default — by being a localhost page at "/".
+const URL_MATCH = opt("--url-match", null);
+function isDesktopUrl(raw) {
+  if (URL_MATCH !== null) return typeof raw === "string" && raw.includes(URL_MATCH);
+  try {
+    const u = new URL(raw);
+    return (u.protocol === "http:" || u.protocol === "https:")
+      && (u.hostname === "localhost" || u.hostname === "127.0.0.1")
+      && u.pathname === "/";
+  } catch {
+    return false;
+  }
+}
 const OUT = opt("--out", null);
 const RUNS = Math.max(1, Number(opt("--runs", 1)));
 const GPU = flag("--gpu");
@@ -64,9 +78,9 @@ const SCENARIOS = argv.length ? argv : ["idle", "sweep", "drag", "apps"];
 
 // ── CDP ──
 const targets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-const desk = targets.find((t) => t.type === "page" && URL_MATCH.test(t.url));
+const desk = targets.find((t) => t.type === "page" && isDesktopUrl(t.url));
 if (!desk) {
-  console.error(`No desktop page on port ${PORT} matching ${URL_MATCH}`);
+  console.error(`No desktop page on port ${PORT} ${URL_MATCH === null ? "at a localhost \"/\"" : `whose address contains "${URL_MATCH}"`}`);
   process.exit(2);
 }
 const ws = new WebSocket(desk.webSocketDebuggerUrl);
@@ -317,7 +331,10 @@ for (const s of SCENARIOS) {
   results.push(r);
   console.log(JSON.stringify(r));
 }
-const report = { at: new Date().toISOString(), url: desk.url, viewport: await evaluate("[innerWidth, innerHeight]"), results };
+// The saved report holds the measurements and the CDP port they came from —
+// not the page address DevTools listed, which nothing reads back and which
+// would put text from the network into the file.
+const report = { at: new Date().toISOString(), port: PORT, viewport: await evaluate("[innerWidth, innerHeight]"), results };
 if (OUT) fs.writeFileSync(OUT, JSON.stringify(report, null, 2));
 ws.close();
 
