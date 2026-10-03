@@ -90,13 +90,14 @@ as before.
 - Snapshots no longer carry old backup archives along, which had made them grow until the
   account was full.
 - A link that cannot be archived is skipped and named, instead of failing the backup.
-- While the account is full, auto-backup says **Paused while the account is full** and
-  comes back on by itself once there is room.
+- Auto-backup switched off while the ClawKeep account is full is only paused: the ClawKeep
+  card says so, and it switches back on by itself once backups can run again.
 
 ### Fixes from hardware testing
 
 - Voice input works with ClawBox AI's transcription again, and falls back to the box's own
-  Whisper when the cloud cannot answer. **Install speech** works on a freshly set-up box.
+  Whisper when the cloud cannot answer. Installing speech recognition from
+  **Settings → Local AI** works on a freshly set-up box.
 - Spoken replies no longer fail when the voice engine has to start from cold.
 - **Retry** on the ClawBox AI plugin installs it and switches it back on, and the plugin no
   longer loops through a repair on every start.

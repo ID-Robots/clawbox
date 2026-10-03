@@ -91,8 +91,9 @@ fixed the problems it found.
 - On a phone, opening the chat no longer raises the keyboard by itself.
 - Voice input works with ClawBox AI's transcription again, and when the cloud
   cannot answer, the box transcribes on its own with Whisper.
-- **Install speech** in Settings → Local AI works on a freshly set-up box, and
-  spoken replies no longer fail when the voice engine has to start from cold.
+- Installing on-box speech recognition from Settings → Local AI works on a
+  freshly set-up box, and spoken replies no longer fail when the voice engine
+  has to start from cold.
 
 ### Coding Agent
 
@@ -116,9 +117,10 @@ fixed the problems it found.
   the account.
 - A link that cannot be archived is skipped, and the ClawKeep status and
   restore card name it.
-- While the account is full, auto-backup shows **Paused while the account is
-  full** and comes back on by itself once there is room. A schedule change from
-  the assistant or a script no longer switches auto-backup off by accident.
+- Auto-backup switched off while the ClawKeep account is full is paused, not
+  turned off for good: the ClawKeep card says so, and it switches back on by
+  itself once backups can run again. A schedule change from the assistant or a
+  script no longer switches auto-backup off by accident.
 
 ### Updates
 
@@ -135,8 +137,9 @@ fixed the problems it found.
 
 ## Upgrade notes
 
-- Upgrade from 4.1.x or 4.0.x in **Settings → System Update**. On the Hermes
-  edition that is the only route.
+- Upgrade from 4.1.x or 4.0.x in **Settings → System Update**, or over SSH by
+  running `sudo bash install.sh` in the ClawBox checkout. On the Hermes edition
+  System Update is the only route.
 - Updates are release-tag based: a box offers 4.2.0 once the `v4.2.0` tag is
   published.
 - Your data is preserved, as in 4.1, and the edition lock is untouched.
