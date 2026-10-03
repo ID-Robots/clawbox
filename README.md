@@ -77,6 +77,7 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🖥️ **Monitor mode, with a drop-down terminal** | With the ClawBox desktop session, one desktop spans a row of monitors, arranged in **Settings → Monitors**. **Win+Down** drops a terminal down from the top of the screen. |
 | ☁️ **Back up project folders to GitHub** | **Files → Projects → Back up** copies a folder to a private GitHub repository, with an optional daily backup. Likely secrets and very large files are left out, and listed. |
 | 🧭 **Kiosk mode** | When ClawBox shows its desktop full screen, every page the desktop opens gets a ClawBox bar with tabs, back, forward, reload and an address field. |
+| 🔀 **Choose OpenClaw or Hermes at setup** | During first setup, a new ClawBox asks which assistant it should run, and sets up the one you pick. |
 | 🛟 **ClawKeep backups fixed** | Snapshots no longer carry old backup archives along, a link that cannot be archived is skipped instead of failing the backup, and a full account no longer turns auto-backup off for good. |
 | 🛠️ **Fixes from hardware testing** | Testing on real ClawBox hardware found and fixed problems with voice input, spoken replies, the ClawBox AI plugin's **Retry**, and updating a box left on an older build. |
 

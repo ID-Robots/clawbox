@@ -1521,6 +1521,8 @@ export const de: Record<string, string> = {
   "whatsNew.githubBackupBody": "Unter Dateien → Projekte kopiert „Sichern“ einen Ordner in ein privates GitHub-Repository, auf Wunsch mit täglicher Sicherung. Dateien, die nach Passwörtern oder Schlüsseln aussehen, werden ausgelassen, und Sie erfahren, welche.",
   "whatsNew.kioskTitle": "Kioskmodus",
   "whatsNew.kioskBody": "Wenn die ClawBox ihren Desktop im Vollbild zeigt, bekommt jede Seite, die der Desktop öffnet, eine ClawBox-Leiste mit Tabs, Zurück, Vor, Neu laden und einem Adressfeld, sodass der Desktop immer nur einen Klick entfernt ist.",
+  "whatsNew.editionChoiceTitle": "OpenClaw oder Hermes bei der Einrichtung wählen",
+  "whatsNew.editionChoiceBody": "Bei der ersten Einrichtung fragt eine neue ClawBox, welchen Assistenten sie nutzen soll, und richtet den ein, den Sie wählen.",
   "whatsNew.clawkeepTitle": "ClawKeep-Sicherungen repariert",
   "whatsNew.clawkeepBody": "Snapshots schleppen keine alten Sicherungsarchive mehr mit, ein Link, der sich nicht archivieren lässt, wird übersprungen und genannt, statt die Sicherung scheitern zu lassen, und ein volles Konto schaltet die automatische Sicherung nicht mehr dauerhaft ab.",
   "whatsNew.hardwareFixesTitle": "Korrekturen aus Hardwaretests",

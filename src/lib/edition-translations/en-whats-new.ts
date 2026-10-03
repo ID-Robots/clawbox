@@ -27,6 +27,9 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.kioskTitle": "Kiosk mode",
   "whatsNew.kioskBody":
     "When ClawBox shows its desktop full screen, every page the desktop opens gets a ClawBox bar with tabs, back, forward, reload and an address field, so the desktop is always one click away.",
+  "whatsNew.editionChoiceTitle": "Choose OpenClaw or Hermes at setup",
+  "whatsNew.editionChoiceBody":
+    "During first setup, a new ClawBox asks which assistant it should run, and sets up the one you pick.",
   "whatsNew.clawkeepTitle": "ClawKeep backups fixed",
   "whatsNew.clawkeepBody":
     "Snapshots no longer carry old backup archives along, a link that cannot be archived is skipped and named instead of failing the backup, and a full account no longer turns auto-backup off for good.",

@@ -31,17 +31,18 @@ const notes = (version: string) =>
   fs.readFileSync(path.join(process.cwd(), `RELEASE-NOTES-${version}.md`), "utf-8");
 
 describe("parseReleaseHighlights on the releases this repo shipped", () => {
-  it("reads the six 4.2.0 highlights, title and body, in order, all of them within the panel's handful", () => {
+  it("reads the seven 4.2.0 highlights, title and body, in order, all of them within the panel's handful", () => {
     const highlights = parseReleaseHighlights(notes("4.2.0"));
     expect(highlights.map((h) => h.title)).toEqual([
       "Several people, one ClawBox",
       "Monitor mode, with a drop-down terminal",
       "Back up project folders to GitHub",
       "Kiosk mode",
+      "Choose OpenClaw or Hermes at setup",
       "ClawKeep backups fixed",
       "Fixes from hardware testing",
     ]);
-    // Six, and nothing past the panel's cap was cut to get there.
+    // Seven, and nothing past the panel's cap was cut to get there.
     expect(parseReleaseHighlights(notes("4.2.0"), 100)).toEqual(highlights);
     expect(highlights.length).toBeLessThanOrEqual(MAX_HIGHLIGHTS);
     // The arrows of "Settings → Users" are text, not Markdown, and survive.

@@ -1517,6 +1517,8 @@ export const es: Record<string, string> = {
   "whatsNew.githubBackupBody": "En Archivos → Proyectos, Respaldar copia una carpeta en un repositorio privado de GitHub, con una copia diaria si la quieres. Los archivos que parecen contraseñas o claves se dejan fuera, y se te dice cuáles.",
   "whatsNew.kioskTitle": "Modo quiosco",
   "whatsNew.kioskBody": "Cuando ClawBox muestra su escritorio a pantalla completa, cada página que abre el escritorio recibe una barra de ClawBox con pestañas, atrás, adelante, recargar y un campo de dirección, así que el escritorio está siempre a un clic.",
+  "whatsNew.editionChoiceTitle": "Elige OpenClaw o Hermes en la configuración",
+  "whatsNew.editionChoiceBody": "Durante la configuración inicial, una ClawBox nueva pregunta qué asistente debe usar y prepara el que elijas.",
   "whatsNew.clawkeepTitle": "Copias de ClawKeep corregidas",
   "whatsNew.clawkeepBody": "Las instantáneas ya no arrastran archivos de copias antiguas, un enlace que no se puede archivar se omite y se nombra en lugar de hacer fallar la copia, y una cuenta llena ya no desactiva para siempre la copia automática.",
   "whatsNew.hardwareFixesTitle": "Correcciones de las pruebas en hardware",

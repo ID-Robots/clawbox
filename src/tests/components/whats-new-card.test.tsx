@@ -61,7 +61,7 @@ beforeEach(() => {
 });
 
 describe("WhatsNewCard", () => {
-  it("names the six 4.2 highlights from the release notes", () => {
+  it("names the seven 4.2 highlights from the release notes", () => {
     render(<WhatsNewCard state={MAX} onDismiss={() => {}} />);
     const card = screen.getByRole("region", { name: "What's new in 4.2" });
     expect(within(card).getByText("This box now runs ClawBox 4.2.0.")).toBeInTheDocument();
@@ -75,6 +75,7 @@ describe("WhatsNewCard", () => {
       en["whatsNew.monitorModeTitle"] + en["whatsNew.monitorModeBody"],
       en["whatsNew.githubBackupTitle"] + en["whatsNew.githubBackupBody"],
       en["whatsNew.kioskTitle"] + en["whatsNew.kioskBody"],
+      en["whatsNew.editionChoiceTitle"] + en["whatsNew.editionChoiceBody"],
       en["whatsNew.clawkeepTitle"] + en["whatsNew.clawkeepBody"],
       en["whatsNew.hardwareFixesTitle"] + en["whatsNew.hardwareFixesBody"],
     ]);
