@@ -12,6 +12,7 @@ import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
 import {
   type ChatMessage,
+  unechoedUserTurns,
   uuid,
 } from '@/lib/chat-history-cache'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
@@ -108,11 +109,13 @@ import {
   HISTORY_RESTORE_DEADLINE_MS,
   HISTORY_RETRY_DELAYS_MS,
   RESTORE_HANDSHAKE_TIMEOUT_MS,
+  TRANSCRIPT_REFRESH_MS,
   classifyRestoreFailure,
   isRestoreAborted,
   restoreWithRetry,
   type RestoreFailureKind,
 } from '@/lib/chat-session-restore'
+import { CHAT_TABS_ROUTE } from '@/lib/chat-tabs'
 import { useTr } from '@/lib/i18n-floor'
 
 
@@ -256,6 +259,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   // the deferred-reply rationale. Single-flight + cleared on unmount so
   // a burst of acked turns doesn't pile up overlapping fetches.
   const ackOnlyHistoryTimerRef = useRef<number | null>(null)
+  // The coalescing timer for `session.message`: one re-read per burst of
+  // appends, the same 400 ms the mascot chat waits (TASK-1364).
+  const transcriptReconcileTimerRef = useRef<number | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
@@ -516,12 +522,15 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
       setRestoreState(null)
       // Server is canonical for everything it knows about, but a user turn
       // typed between connect-ack and history-arrival ("optimistic local")
-      // hasn't reached the server yet — preserve it by appending any prev
-      // user messages whose timestamp is newer than the last server message.
+      // hasn't reached the server yet — preserve it. Recognised by its run's
+      // idempotency key, the way the mascot chat does, not by timestamp alone:
+      // the local copy carries the browser's clock and the server's the box's,
+      // and now that every push re-reads the conversation (TASK-1364) a
+      // browser running ahead of the box would show each of its turns twice.
       setMessages(prev => {
         if (prev.length === 0) return chatMsgs
         const lastServerTs = chatMsgs.length > 0 ? chatMsgs[chatMsgs.length - 1].timestamp : 0
-        const inFlight = prev.filter(m => m.role === 'user' && m.timestamp > lastServerTs)
+        const inFlight = unechoedUserTurns(prev, chatMsgs, lastServerTs)
         return inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
       })
     } catch (err) {
@@ -626,6 +635,15 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           // The restore itself: bounded, and ended with the reason and Try
           // again rather than an empty conversation when it cannot be done.
           void loadHistory({ restore: true })
+          // Every append to this conversation, pushed (TASK-1364). Without it
+          // this page saw the replies the gateway streams but never a turn the
+          // owner typed on another device — or a reply that lands from a
+          // channel — until a reload. The mascot chat subscribes the same way
+          // (with its approvals, which this page does not draw).
+          void wsRequest('sessions.messages.subscribe', { key: mainSessionKey }).catch(() => {
+            // A gateway without the RPC: replies still stream, and the next
+            // history read reconciles the rest.
+          })
         },
         reject: (err: Error) => {
           clearHandshakeTimer()
@@ -727,6 +745,22 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         // A session's progress card changed; the hook re-reads it when it is ours.
         if (eventName === PROGRESS_CARD_CHANGED_EVENT) {
           progressCardChangedRef.current(data.payload)
+          return
+        }
+
+        // The conversation gained a message — the owner's turn from the phone,
+        // a reply, a channel's. A signal to re-read, not a message to merge:
+        // the read is the one projection both editions share, and merging the
+        // pushed frame would have to dedupe it against the `chat` stream.
+        if (eventName === 'session.message') {
+          const payload = data.payload as Record<string, unknown> | undefined
+          const sk = payload?.sessionKey as string | undefined
+          if (!payload || (sk && sk !== sessionKeyRef.current)) return
+          if (transcriptReconcileTimerRef.current !== null) window.clearTimeout(transcriptReconcileTimerRef.current)
+          transcriptReconcileTimerRef.current = window.setTimeout(() => {
+            transcriptReconcileTimerRef.current = null
+            void loadHistory()
+          }, 400)
           return
         }
 
@@ -1106,6 +1140,14 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   ) => {
     const transport = adapterRef.current
     turnsRef.current.remember(idempotencyKey, text, attachments.length > 0)
+    // The owner is in the main conversation now, on this page: the phone (or
+    // the desktop) they pick up next opens it (TASK-1364). Best effort.
+    void fetch(CHAT_TABS_ROUTE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ activity: { key: null } }),
+      signal: AbortSignal.timeout(10_000),
+    }).catch(() => { /* an older box, or offline: nothing changes here */ })
     let result: TurnResult
     try {
       result = await transport.sendTurn({
@@ -1214,16 +1256,19 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // strip, which this send has just emptied — the bubble above draws the box's
     // own media ref.
     revokePreviews(staged)
+    // Stamped onto the bubble as well as the request: it is how a history
+    // read recognises the server's copy of this exact turn.
+    const idempotencyKey = uuid()
     setMessages(prev => [...prev, {
       role: 'user',
       text: displayText,
       timestamp: Date.now(),
       images,
+      idempotencyKey,
     }])
     setSending(true)
     applyStreaming('')
 
-    const idempotencyKey = uuid()
     runIdRef.current = idempotencyKey
 
     // Queue ONLY where there is a connection that can be down. The user's
@@ -1303,6 +1348,30 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     void loadHistory({ restore: true })
   }, [harnessLoaded, caps.hasLiveConnection, caps.canListHistory, loadHistory])
 
+  // A harness with no live connection pushes nothing, so a turn sent from the
+  // phone stayed off this page until a reload. Re-read when the owner comes
+  // back to the window and on a short tick while it is visible — never under a
+  // turn of this page's own or a restore (TASK-1364; the mascot chat does the
+  // same). The gateway pushes `session.message` instead (above).
+  const sendingRef = useRef(false)
+  useEffect(() => { sendingRef.current = sending }, [sending])
+  useEffect(() => {
+    if (!harnessLoaded || caps.hasLiveConnection || !caps.canListHistory) return
+    const refresh = () => {
+      if (document.visibilityState !== 'visible' || !replayedRef.current) return
+      if (sendingRef.current || restoreAbortRef.current) return
+      void loadHistory()
+    }
+    document.addEventListener('visibilitychange', refresh)
+    window.addEventListener('focus', refresh)
+    const tick = setInterval(refresh, TRANSCRIPT_REFRESH_MS)
+    return () => {
+      document.removeEventListener('visibilitychange', refresh)
+      window.removeEventListener('focus', refresh)
+      clearInterval(tick)
+    }
+  }, [harnessLoaded, caps.hasLiveConnection, caps.canListHistory, loadHistory])
+
   // Tear down on unmount, and only on unmount: `connect` is memoised with no
   // dependencies, so this is where the socket and the deferred refetch were
   // always released.
@@ -1327,6 +1396,10 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
       if (ackOnlyHistoryTimerRef.current !== null) {
         window.clearTimeout(ackOnlyHistoryTimerRef.current)
         ackOnlyHistoryTimerRef.current = null
+      }
+      if (transcriptReconcileTimerRef.current !== null) {
+        window.clearTimeout(transcriptReconcileTimerRef.current)
+        transcriptReconcileTimerRef.current = null
       }
       // The starting-retry ladder: cleared only by the NEXT retry until now, so
       // a window closed inside the three-second wait went on reconnecting.

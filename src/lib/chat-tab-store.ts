@@ -36,6 +36,7 @@ import {
   mergeTabInventory,
   parseTabInventory,
   tabLabelFromText,
+  type ChatActiveRecord,
   type ChatTabInventory,
   type ChatTabRecord,
   type TabInventoryChange,
@@ -160,9 +161,17 @@ export function discoverOpenClawTabs(
   return found;
 }
 
+/** What every device is handed back: the strip, and the conversation the owner was last in. */
+export interface ChatTabSync {
+  tabs: ChatTabRecord[];
+  /** Null until a turn has been recorded (see `ChatActiveRecord`). */
+  active: ChatActiveRecord | null;
+}
+
 /**
  * Apply one device's change, adopt what the box holds that the list does not,
- * and answer the list every device should now show.
+ * and answer the list every device should now show — with the conversation the
+ * owner last sent a turn in, so a device opening the chat can open THAT one.
  *
  * Discovery runs first and is the only thing here that awaits. The read, the
  * merge and the write after it are synchronous, so no other request can land
@@ -170,7 +179,7 @@ export function discoverOpenClawTabs(
  * result instead of writing over it. Discovery never throws: a store that
  * cannot be read is simply not evidence.
  */
-export async function syncChatTabs(change: TabInventoryChange = {}): Promise<ChatTabRecord[]> {
+export async function syncChatTabs(change: TabInventoryChange = {}): Promise<ChatTabSync> {
   const known = knownKeys(readInventory());
   let discovered: ChatTabRecord[] = [];
   try {
@@ -184,7 +193,7 @@ export async function syncChatTabs(change: TabInventoryChange = {}): Promise<Cha
   const own = mergeTabInventory(readInventory(), change);
   const adopted = mergeTabInventory(own.inventory, { upsert: discovered });
   if (own.changed || adopted.changed) writeInventory(adopted.inventory);
-  return adopted.inventory.tabs;
+  return { tabs: adopted.inventory.tabs, active: adopted.inventory.active ?? null };
 }
 
 /** Test seam: where the inventory lives. */

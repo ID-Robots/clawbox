@@ -7,6 +7,7 @@ import { createPortal } from 'react-dom'
 // Connects directly to the OpenClaw gateway, no iframe.
 
 import {
+  unechoedUserTurns,
   uuid,
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
@@ -89,7 +90,7 @@ import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 // and now lives with the rest of the media helpers.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
 import { DESKTOP_TRANSCRIPT_KEY } from '@/lib/harness/transcript-key'
-import { CHAT_TABS_ROUTE, isChatTabKey, nextTabSeq, parseTabList, tabLabelFromText, type ChatTabRecord } from '@/lib/chat-tabs'
+import { CHAT_TABS_ROUTE, conversationToFollow, isChatTabKey, nextTabSeq, parseActiveRecord, parseTabList, sortTabs, tabLabelFromText, type ChatActiveRecord, type ChatTabRecord } from '@/lib/chat-tabs'
 import { HarnessError, type HarnessStatus, type TurnResult, type HarnessAdapter } from '@/lib/harness/transport'
 import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, extractFileAttachments, boundedAudio, boundedFiles } from '@/lib/chat-media'
 import ChatFileCard from '@/components/ChatFileCard'
@@ -123,6 +124,7 @@ import {
   HISTORY_ATTEMPT_TIMEOUT_MS,
   HISTORY_RESTORE_DEADLINE_MS,
   HISTORY_RETRY_DELAYS_MS,
+  TRANSCRIPT_REFRESH_MS,
   RECONNECT_DEADLINE_MS,
   RESTORE_HANDSHAKE_TIMEOUT_MS,
   classifyRestoreFailure,
@@ -529,66 +531,6 @@ function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
   return true
 }
 
-/** The gateway suffixes its stored copy by role; the client holds the bare run id. */
-function runIdOf(key: string | undefined): string | undefined {
-  if (!key) return undefined
-  return key.endsWith(':user') ? key.slice(0, -':user'.length) : key
-}
-
-/**
- * Which locally-appended user turns the server has NOT echoed back yet.
- *
- * A turn is added to the transcript the moment it is sent, so a history read
- * that lands before the write completes must not erase it. Deciding that by
- * timestamp alone is not possible: the local copy is stamped with the browser's
- * clock and the server's with the device's, and a browser running ahead makes
- * every local copy look newer than everything the server returned.
- *
- * Identity settles it — both sides carry the run's idempotency key. Text is
- * kept only as the fallback for turns without one (other harnesses, older
- * gateways), and cannot be the primary test: an attachment turn displays
- * "📎 pic.png\nwhat is this" locally while the gateway stores the prompt alone.
- */
-export function unechoedUserTurns(
-  previous: ChatMessage[],
-  restored: ChatMessage[],
-  lastServerTs: number,
-): ChatMessage[] {
-  const serverRunIds = new Set<string>()
-  // Per-text stock of server copies. Counting rather than a boolean so the
-  // same words sent twice keep the second bubble.
-  const unclaimed = new Map<string, number>()
-  for (const message of restored) {
-    if (message.role !== 'user') continue
-    const runId = runIdOf(message.idempotencyKey)
-    if (runId) serverRunIds.add(runId)
-    unclaimed.set(message.text, (unclaimed.get(message.text) ?? 0) + 1)
-  }
-  const claimText = (text: string): boolean => {
-    const left = unclaimed.get(text) ?? 0
-    if (left <= 0) return false
-    unclaimed.set(text, left - 1)
-    return true
-  }
-  const pending: ChatMessage[] = []
-  for (const message of previous) {
-    if (message.role !== 'user') continue
-    const runId = runIdOf(message.idempotencyKey)
-    if (runId && serverRunIds.has(runId)) {
-      // Also spend this text's stock, so a later identical turn is not matched
-      // against the copy this one already accounted for.
-      claimText(message.text)
-      continue
-    }
-    if (claimText(message.text)) continue
-    // Nothing on the server matches. Keep it only if it is newer than the whole
-    // replay — an older unmatched turn has aged out of the history window and
-    // re-appending it would put it back in the wrong place.
-    if (message.timestamp > lastServerTs) pending.push(message)
-  }
-  return pending
-}
-
 // A live TTS supplement can arrive before an older gateway's history
 // projection learns about it. Carry players across that short reconcile by
 // message occurrence, never by a text->audio map: common replies such as
@@ -785,14 +727,23 @@ interface StoredTabs {
   active: string | null
   /** Closed here, not yet confirmed by the box: sent again with every sync. */
   closed: string[]
+  /**
+   * The newest of the box's "last active conversation" records this browser
+   * has accounted for — its own turns, the record it last followed, the one
+   * that was current when the owner picked a tab here (TASK-1364, see
+   * `conversationToFollow`). The box's clock, compared only with the box's.
+   */
+  seenActiveAt: number
 }
 
+const NO_STORED_TABS: StoredTabs = { tabs: [], active: null, closed: [], seenActiveAt: 0 }
+
 function readStoredTabs(): StoredTabs {
-  if (typeof window === 'undefined') return { tabs: [], active: null, closed: [] }
+  if (typeof window === 'undefined') return NO_STORED_TABS
   try {
     const raw = window.localStorage?.getItem(TABS_STORAGE_KEY)
-    if (!raw) return { tabs: [], active: null, closed: [] }
-    const parsed = JSON.parse(raw) as { tabs?: unknown; active?: unknown; closed?: unknown }
+    if (!raw) return NO_STORED_TABS
+    const parsed = JSON.parse(raw) as { tabs?: unknown; active?: unknown; closed?: unknown; seenActiveAt?: unknown }
     const tabs = (Array.isArray(parsed.tabs) ? parsed.tabs : [])
       .filter((t): t is ChatTab =>
         !!t && typeof t === 'object'
@@ -804,9 +755,12 @@ function readStoredTabs(): StoredTabs {
     const active = typeof parsed.active === 'string' && tabs.some(t => t.key === parsed.active) ? parsed.active : null
     const closed = (Array.isArray(parsed.closed) ? parsed.closed : [])
       .filter((k): k is string => typeof k === 'string' && k.length > 0)
-    return { tabs, active, closed }
+    const seenActiveAt = typeof parsed.seenActiveAt === 'number' && Number.isFinite(parsed.seenActiveAt) && parsed.seenActiveAt > 0
+      ? parsed.seenActiveAt
+      : 0
+    return { tabs, active, closed, seenActiveAt }
   } catch {
-    return { tabs: [], active: null, closed: [] }
+    return NO_STORED_TABS
   }
 }
 
@@ -2069,6 +2023,70 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const tabsRef = useRef<ChatTab[]>(storedTabs.tabs)
   const closedTabsRef = useRef<string[]>(storedTabs.closed)
   const tabSyncSeqRef = useRef(0)
+  // ── Where the owner left off (TASK-1364) ──
+  // The strip was one list on every device, but which tab was OPEN stayed this
+  // browser's own: a conversation started on the desktop sat on the phone's
+  // strip while the phone opened main, so carrying on from the phone meant
+  // finding the right tab by hand. The box now keeps the conversation the owner
+  // last sent a turn in (`active` beside the list, chat-tabs.ts); a device
+  // opens that one when the owner ARRIVES — the chat mounted or opened, its
+  // window or tab come back to — and the record is newer than anything this
+  // browser has accounted for. Never on the minute poll, never under a turn
+  // running here, and never over a tab picked by hand after the record.
+  const seenActiveAtRef = useRef(storedTabs.seenActiveAt)
+  /** The box's latest record, and the tabs it listed with it — what a follow may open. */
+  const boxActiveRef = useRef<ChatActiveRecord | null>(null)
+  const boxListedRef = useRef<ChatTab[]>([])
+  /** Has the box answered once on this mount? Until it has, an arrival waits for it. */
+  const boxAnsweredRef = useRef(false)
+  /** The owner arrived and the box's record has not been weighed since. */
+  const followPendingRef = useRef(true)
+  /** A tab was picked here by hand: the record the next answer carries predates it. */
+  const absorbRecordRef = useRef(false)
+  const statusRef = useRef(status)
+  useEffect(() => { statusRef.current = status }, [status])
+  const markActiveSeen = useCallback((at: number) => {
+    if (!(at > seenActiveAtRef.current)) return
+    seenActiveAtRef.current = at
+    writeStoredTabs({ tabs: tabsRef.current, active: activeTabKeyRef.current, closed: closedTabsRef.current, seenActiveAt: at })
+  }, [])
+  /**
+   * Weigh the box's record for a pending arrival and answer the session to
+   * open instead of `current`, or null. Consumes the arrival once the box has
+   * answered — a record of nothing, or one this browser has seen, is the
+   * answer too — except while a turn of this device's own is running or the
+   * socket is down, when it waits for the next answer rather than moving the
+   * owner out from under a reply they are watching.
+   */
+  const pickFollowTarget = useCallback((current: string, binding = false): string | null => {
+    if (!followPendingRef.current || !boxAnsweredRef.current) return null
+    const main = mainSessionKeyRef.current
+    if (!main) return null
+    if (!binding && (sendingRef.current || statusRef.current !== 'connected')) return null
+    followPendingRef.current = false
+    const owns = (key: string) => adapterRef.current?.ownsSessionKey(key) ?? false
+    const listed = (key: string) => tabsRef.current.some(tb => tb.key === key) || boxListedRef.current.some(tb => tb.key === key)
+    const { follow, seenAt } = conversationToFollow({
+      record: boxActiveRef.current,
+      seenAt: seenActiveAtRef.current,
+      current,
+      main,
+      canOpen: (key) => owns(key) && listed(key),
+    })
+    markActiveSeen(seenAt)
+    if (follow && follow !== main && !tabsRef.current.some(tb => tb.key === follow)) {
+      // On the box's list but not yet this browser's — a phone opening the
+      // chat for the first time. On the strip now, so the header names the
+      // conversation it opened; the sync in flight brings the rest.
+      const record = boxListedRef.current.find(tb => tb.key === follow)
+      if (record) {
+        const next = sortTabs([...tabsRef.current, record])
+        tabsRef.current = next
+        setTabs(next)
+      }
+    }
+    return follow
+  }, [markActiveSeen])
   /** A change made here that the box has not been sent yet: the +, a close, a naming. */
   const tabsDirtyRef = useRef(false)
   const markTabsDirty = useCallback(() => {
@@ -2077,19 +2095,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [])
   // Declared below; a tab closed on another device while it is open here is
   // left through it, exactly as if the owner had clicked another tab.
-  const switchSessionRef = useRef<(key: string) => Promise<void>>(async () => {})
-  const syncTabs = useCallback(async () => {
+  const switchSessionRef = useRef<(key: string, opts?: { auto?: boolean }) => Promise<void>>(async () => {})
+  const syncTabs = useCallback(async (opts?: { activity?: { key: string | null } }) => {
     // Before the main session is bound there is no adapter to say which keys
     // this transport owns; the bind itself syncs.
     if (!mainSessionKeyRef.current) return
     const seq = ++tabSyncSeqRef.current
     const close = [...closedTabsRef.current]
+    const activity = opts?.activity
     let answer: unknown
     try {
       const res = await fetch(CHAT_TABS_ROUTE, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ upsert: tabsRef.current, close }),
+        // `activity`: the owner just sent a turn in this conversation, which
+        // makes it the one every other device opens next (TASK-1364).
+        body: JSON.stringify({ upsert: tabsRef.current, close, ...(activity ? { activity } : {}) }),
         signal: AbortSignal.timeout(TAB_SYNC_TIMEOUT_MS),
       })
       if (!res.ok) return
@@ -2112,27 +2133,45 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     ]
     tabsRef.current = next
     setTabs(prev => sameTabList(prev, next) ? prev : next)
-    writeStoredTabs({ tabs: next, active: activeTabKeyRef.current, closed: closedTabsRef.current })
+    writeStoredTabs({ tabs: next, active: activeTabKeyRef.current, closed: closedTabsRef.current, seenActiveAt: seenActiveAtRef.current })
     // Tabs closed on another device: what this popup held for them goes too.
     const gone = before.filter(tb => !next.some(n => n.key === tb.key)).map(tb => tb.key)
-    if (gone.length === 0) return
-    for (const key of gone) {
-      tabStashRef.current.delete(key)
-      tabErrorsRef.current.delete(key)
-      busyKeysRef.current.delete(key)
+    if (gone.length > 0) {
+      for (const key of gone) {
+        tabStashRef.current.delete(key)
+        tabErrorsRef.current.delete(key)
+        busyKeysRef.current.delete(key)
+      }
+      setBusyKeys(new Set(busyKeysRef.current))
+      setUnreadKeys(prev => gone.some(k => prev.has(k)) ? new Set([...prev].filter(k => !gone.includes(k))) : prev)
     }
-    setBusyKeys(new Set(busyKeysRef.current))
-    setUnreadKeys(prev => gone.some(k => prev.has(k)) ? new Set([...prev].filter(k => !gone.includes(k))) : prev)
-    const active = activeTabKeyRef.current
-    if (active !== null && gone.includes(active)) void switchSessionRef.current(mainSessionKeyRef.current)
-  }, [])
+    // Where the owner was last active. A box too old to say answers no
+    // `active` at all, which reads as "nothing recorded" — the strip above
+    // still synced, and the browser keeps the tab it had.
+    const record = parseActiveRecord((answer as { active?: unknown }).active)
+    boxActiveRef.current = record
+    boxListedRef.current = next
+    boxAnsweredRef.current = true
+    // This browser's own turn, or a record that predates a tab picked here
+    // by hand: neither is somewhere to move the owner to.
+    if (record && ((activity && record.key === activity.key) || absorbRecordRef.current)) markActiveSeen(record.at)
+    absorbRecordRef.current = false
+    // The tab on screen was closed on another device: it is left for main —
+    // or, when the owner has just arrived and carried on elsewhere, straight
+    // for that conversation.
+    const shown = activeTabKeyRef.current
+    const shownGone = shown !== null && gone.includes(shown)
+    const follow = pickFollowTarget(shownGone ? mainSessionKeyRef.current : sessionKeyRef.current)
+    if (follow !== null) void switchSessionRef.current(follow, { auto: true })
+    else if (shownGone) void switchSessionRef.current(mainSessionKeyRef.current, { auto: true })
+  }, [markActiveSeen, pickFollowTarget])
   const syncTabsRef = useRef(syncTabs)
   // An answer still in flight when the popup goes away belongs to nothing: it
   // must not write a list into the localStorage whoever mounts next reads.
   useEffect(() => () => { tabSyncSeqRef.current += 1 }, [])
   useEffect(() => {
     tabsRef.current = tabs
-    writeStoredTabs({ tabs, active: activeTabKey, closed: closedTabsRef.current })
+    writeStoredTabs({ tabs, active: activeTabKey, closed: closedTabsRef.current, seenActiveAt: seenActiveAtRef.current })
     if (!tabsDirtyRef.current) return
     tabsDirtyRef.current = false
     void syncTabs()
@@ -2149,6 +2188,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    *
    * Every bind asks the box for the list, which is how a desktop that has
    * never seen the phone's tabs gets them the moment its chat connects.
+   *
+   * And the first bind of an arrival opens the conversation the owner was
+   * last active in on ANY device, when the box has already said which
+   * (TASK-1364) — the phone lands in the conversation the desktop was in,
+   * rather than painting main first and moving a moment later.
    */
   const bindMainSession = useCallback((main: string): string => {
     mainSessionKeyRef.current = main
@@ -2159,11 +2203,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       activeTabKeyRef.current = null
       setActiveTabKey(null)
     }
+    const followed = pickFollowTarget(activeTabKeyRef.current ?? main, true)
+    if (followed !== null) {
+      const nextActive = followed === main ? null : followed
+      activeTabKeyRef.current = nextActive
+      setActiveTabKey(nextActive)
+    }
     const bound = activeTabKeyRef.current ?? main
     sessionKeyRef.current = bound
     void syncTabsRef.current()
     return bound
-  }, [])
+  }, [pickFollowTarget])
   /**
    * A run on `key` has ended. Its busy mark goes — a tab the owner left
    * mid-run and came back to carries one too — and a tab they are NOT looking
@@ -3440,19 +3490,56 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // screen. A tab opened on the phone reaches a desktop that is already open
   // this way — the connect-time sync in `bindMainSession` only covers a desktop
   // that connects after it.
+  //
+  // The first two are ARRIVALS (TASK-1364): the owner has just come to this
+  // device, so the answer may also move them to the conversation they were
+  // last active in elsewhere — a phone left open on main follows the desktop's
+  // conversation when it is picked up again. The tick never moves anyone: a
+  // screen the owner is reading is not changed under them from another room.
   useEffect(() => {
     if (!isOpen) return
+    followPendingRef.current = true
     void syncTabs()
-    const onVisible = () => { if (document.visibilityState === 'visible') void syncTabs() }
-    document.addEventListener('visibilitychange', onVisible)
-    window.addEventListener('focus', onVisible)
-    const tick = setInterval(onVisible, TAB_SYNC_POLL_MS)
+    const onArrive = () => {
+      if (document.visibilityState !== 'visible') return
+      followPendingRef.current = true
+      void syncTabs()
+    }
+    const onTick = () => { if (document.visibilityState === 'visible') void syncTabs() }
+    document.addEventListener('visibilitychange', onArrive)
+    window.addEventListener('focus', onArrive)
+    const tick = setInterval(onTick, TAB_SYNC_POLL_MS)
     return () => {
-      document.removeEventListener('visibilitychange', onVisible)
-      window.removeEventListener('focus', onVisible)
+      document.removeEventListener('visibilitychange', onArrive)
+      window.removeEventListener('focus', onArrive)
       clearInterval(tick)
     }
   }, [isOpen, syncTabs])
+
+  // Ask the box where the owner was before the socket names main, so the
+  // first bind can open that conversation straight away instead of painting
+  // main and moving a moment later (TASK-1364). A read only: the strip itself
+  // is synced by the bind, which also sends what this browser holds. Whatever
+  // answers later — this or the bind's sync — is weighed the same way.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch(CHAT_TABS_ROUTE, { cache: 'no-store', signal: AbortSignal.timeout(TAB_SYNC_TIMEOUT_MS) })
+        if (!res.ok) return
+        const answer = await res.json() as { tabs?: unknown; active?: unknown }
+        if (cancelled || boxAnsweredRef.current || !Array.isArray(answer?.tabs)) return
+        boxActiveRef.current = parseActiveRecord(answer.active)
+        boxListedRef.current = parseTabList(answer.tabs)
+        boxAnsweredRef.current = true
+        const follow = pickFollowTarget(sessionKeyRef.current)
+        if (follow !== null) void switchSessionRef.current(follow, { auto: true })
+      } catch {
+        // The bind's own sync asks again.
+      }
+    })()
+    return () => { cancelled = true }
+  }, [pickFollowTarget])
 
   // Load chat history, and open the first conversation on a box that has an
   // introduction waiting.
@@ -3736,8 +3823,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * cancelled here: the two history-refetch timers, the picture wait, the
    * queued turns (stashed with the tab, not dropped).
    */
-  const switchSession = useCallback(async (key: string) => {
+  const switchSession = useCallback(async (key: string, opts?: { auto?: boolean }) => {
     if (!key || key === sessionKeyRef.current) return
+    // A tab picked here is the owner's own answer to "where am I": an arrival
+    // still waiting on the box is settled by it, and the box's record as of
+    // now — the one this browser holds, and whatever the next answer carries,
+    // which was written before this click — must not undo it (TASK-1364).
+    // `auto` is a move the owner did not make: following the record, or
+    // leaving a tab closed on another device.
+    if (!opts?.auto) {
+      followPendingRef.current = false
+      markActiveSeen(boxActiveRef.current?.at ?? 0)
+      absorbRecordRef.current = true
+      void syncTabsRef.current()
+    }
     const oldKey = sessionKeyRef.current
     // `runId` rides with the rest: the live-frame gates in `dispatchTurn` ask
     // whether the frame belongs to the run this popup is showing, and a tab
@@ -3857,7 +3956,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         setMessages(prev => [...prev, { role: 'system', text: storedError, timestamp: Date.now() }])
       }
     }
-  }, [input, queuedSends, attachments, clearTranscript, endImageWait, loadHistory, wsRequest])
+  }, [input, queuedSends, attachments, clearTranscript, endImageWait, loadHistory, wsRequest, markActiveSeen])
   useEffect(() => { switchSessionRef.current = switchSession }, [switchSession])
 
   /** The + : a new tab, bound to a fresh session under the same agent. */
@@ -5216,6 +5315,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // owner may be in another tab by the time the reply lands, and painting
     // it there would put one conversation inside another.
     const keyAtSend = sessionKeyRef.current
+    // Tell the box this is where the owner is now, so the phone (or the
+    // desktop) they pick up next opens this conversation (TASK-1364). Best
+    // effort: the turn does not wait on it and a box that cannot answer
+    // changes nothing here.
+    void syncTabsRef.current({ activity: { key: keyAtSend === mainSessionKeyRef.current ? null : keyAtSend } })
     turnsRef.current.remember(idempotencyKey, text, sendAttachments.length > 0)
     // A new turn is the owner's answer to a restore choice left on screen.
     setRestoreState(prev => (prev && prev.key === keyAtSend ? null : prev))
@@ -6085,6 +6189,33 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     replayedRef.current = true
     // The same bounded restore the socket runs on its hello.
     void loadHistory({ restore: true })
+  }, [harnessLoaded, isOpen, caps, loadHistory])
+
+  // …and keep it current while it is on screen (TASK-1364). The gateway pushes
+  // every append to a session (`session.message`), so a turn sent from the
+  // phone shows on the desktop as it lands; a harness with no live connection
+  // pushes nothing, and the other device's turn stayed invisible here until a
+  // reload. So it is re-read when the owner comes back to this window and on a
+  // short tick while the chat is open and visible — never while this device's
+  // own turn is in flight (its reply paints itself) or a restore is running,
+  // and never before the first replay (the bubbles it reconciles are its own).
+  useEffect(() => {
+    if (!harnessLoaded || !isOpen || caps.hasLiveConnection || !caps.canListHistory) return
+    const refresh = () => {
+      if (document.visibilityState !== 'visible' || !replayedRef.current) return
+      if (sendingRef.current || restoreAbortRef.current) return
+      // The first conversation's auto-greet decides on its own read.
+      if (caps.shouldOpenFirstConversation && !greetedRef.current) return
+      void loadHistory()
+    }
+    document.addEventListener('visibilitychange', refresh)
+    window.addEventListener('focus', refresh)
+    const tick = setInterval(refresh, TRANSCRIPT_REFRESH_MS)
+    return () => {
+      document.removeEventListener('visibilitychange', refresh)
+      window.removeEventListener('focus', refresh)
+      clearInterval(tick)
+    }
   }, [harnessLoaded, isOpen, caps, loadHistory])
 
   // Open the first conversation, once both of its inputs are in.

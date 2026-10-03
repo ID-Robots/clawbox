@@ -46,6 +46,66 @@ export interface ChatMessage {
   provider?: string;
 }
 
+/** The gateway suffixes its stored copy by role; the client holds the bare run id. */
+function runIdOf(key: string | undefined): string | undefined {
+  if (!key) return undefined;
+  return key.endsWith(":user") ? key.slice(0, -":user".length) : key;
+}
+
+/**
+ * Which locally-appended user turns the server has NOT echoed back yet.
+ *
+ * A turn is added to the transcript the moment it is sent, so a history read
+ * that lands before the write completes must not erase it. Deciding that by
+ * timestamp alone is not possible: the local copy is stamped with the browser's
+ * clock and the server's with the device's, and a browser running ahead makes
+ * every local copy look newer than everything the server returned.
+ *
+ * Identity settles it — both sides carry the run's idempotency key. Text is
+ * kept only as the fallback for turns without one (other harnesses, older
+ * gateways), and cannot be the primary test: an attachment turn displays
+ * "📎 pic.png\nwhat is this" locally while the gateway stores the prompt alone.
+ */
+export function unechoedUserTurns<T extends ChatMessage>(
+  previous: readonly T[],
+  restored: readonly T[],
+  lastServerTs: number,
+): T[] {
+  const serverRunIds = new Set<string>();
+  // Per-text stock of server copies. Counting rather than a boolean so the
+  // same words sent twice keep the second bubble.
+  const unclaimed = new Map<string, number>();
+  for (const message of restored) {
+    if (message.role !== "user") continue;
+    const runId = runIdOf(message.idempotencyKey);
+    if (runId) serverRunIds.add(runId);
+    unclaimed.set(message.text, (unclaimed.get(message.text) ?? 0) + 1);
+  }
+  const claimText = (text: string): boolean => {
+    const left = unclaimed.get(text) ?? 0;
+    if (left <= 0) return false;
+    unclaimed.set(text, left - 1);
+    return true;
+  };
+  const pending: T[] = [];
+  for (const message of previous) {
+    if (message.role !== "user") continue;
+    const runId = runIdOf(message.idempotencyKey);
+    if (runId && serverRunIds.has(runId)) {
+      // Also spend this text's stock, so a later identical turn is not matched
+      // against the copy this one already accounted for.
+      claimText(message.text);
+      continue;
+    }
+    if (claimText(message.text)) continue;
+    // Nothing on the server matches. Keep it only if it is newer than the whole
+    // replay — an older unmatched turn has aged out of the history window and
+    // re-appending it would put it back in the wrong place.
+    if (message.timestamp > lastServerTs) pending.push(message);
+  }
+  return pending;
+}
+
 export function uuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();

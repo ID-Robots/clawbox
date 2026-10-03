@@ -3,7 +3,7 @@ import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { syncChatTabs } from "@/lib/chat-tab-store";
-import { isChatTabKey, MAX_CLOSED, MAX_TABS, parseTabList } from "@/lib/chat-tabs";
+import { isChatTabKey, MAX_CLOSED, MAX_TABS, parseActivity, parseTabList } from "@/lib/chat-tabs";
 
 export const dynamic = "force-dynamic";
 
@@ -16,12 +16,18 @@ export const dynamic = "force-dynamic";
 // closed — are in `chat-tabs.ts`; the disk and the discovery of conversations
 // the list never heard of are in `chat-tab-store.ts`.
 //
-// GET  /setup-api/chat/tabs                          → { tabs }
-// POST /setup-api/chat/tabs { upsert?: [], close?: [] } → { tabs }
+// GET  /setup-api/chat/tabs                                    → { tabs, active }
+// POST /setup-api/chat/tabs { upsert?: [], close?: [], activity? } → { tabs, active }
 //
 // A POST carries what the device holds, not an edit script: its whole cached
 // list and the keys it closed. The merge is monotonic, so a device can send
 // that on every sync without knowing what the box already has.
+//
+// `active` is the conversation the owner last sent a turn in, on any device —
+// `{ key, at }`, key null for the main one, `at` the box's clock — or null
+// before one has been recorded (TASK-1364). A device opening the chat opens
+// that one, so a conversation started on the desktop is the one the phone
+// lands in. `activity: { key }` on a POST is how a device reports a turn.
 //
 // Session-gated by middleware like the rest of /setup-api/chat, and checked
 // again here. A WRITE also has to come from the owner's own browser: the MCP
@@ -38,7 +44,7 @@ export async function GET(req: NextRequest) {
   const denied = await requireSession(req);
   if (denied) return denied;
   try {
-    return NextResponse.json({ tabs: await syncChatTabs() });
+    return NextResponse.json(await syncChatTabs());
   } catch (err) {
     console.warn("[chat-tabs] could not read the tab list:", err);
     return NextResponse.json({ error: "Could not read the chat tabs" }, { status: 500 });
@@ -72,16 +78,23 @@ export async function POST(req: NextRequest) {
   if ((upsert !== undefined && !Array.isArray(upsert)) || (close !== undefined && !Array.isArray(close))) {
     return NextResponse.json({ error: "upsert and close must be lists" }, { status: 400 });
   }
+  // Main (null) or a key the strip could hold — never a channel's, a cron
+  // job's or a coding run's session, which no device opens from the strip.
+  const activity = parseActivity((body as { activity?: unknown }).activity);
+  if (activity === false) {
+    return NextResponse.json({ error: "activity must be { key } naming main (null) or a chat tab" }, { status: 400 });
+  }
 
   try {
-    const tabs = await syncChatTabs({
+    const synced = await syncChatTabs({
       // Anything that is not a tab this strip could have made is dropped
       // here, before it can reach the file, and no request adds more than the
       // strip may hold (the merge caps the total the same way).
       upsert: parseTabList(upsert).slice(0, MAX_TABS),
       close: (close ?? []).filter(isChatTabKey).slice(0, MAX_CLOSED),
+      ...(activity ? { activity } : {}),
     });
-    return NextResponse.json({ tabs });
+    return NextResponse.json(synced);
   } catch (err) {
     console.warn("[chat-tabs] could not save the tab list:", err);
     return NextResponse.json({ error: "Could not save the chat tabs" }, { status: 500 });

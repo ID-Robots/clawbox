@@ -245,4 +245,72 @@ describe("/setup-api/chat/tabs", () => {
       expect(tabs).toEqual([{ key: HERMES_TAB, label: "Trip", createdAt: 4_000, seq: 2 }]);
     });
   });
+
+  // TASK-1364: the strip was the same everywhere, but the phone still opened
+  // main while the owner's conversation was a side tab on the desktop. The box
+  // now says which conversation the owner last sent a turn in.
+  describe("where the owner left off", () => {
+    const activeOf = async (res: Response) => {
+      expect(res.status).toBe(200);
+      return ((await res.json()) as { active: unknown }).active;
+    };
+
+    it("answers no record on a box nobody has spoken on yet", async () => {
+      const route = await load();
+      const res = await route.GET(get());
+      expect(await res.json()).toEqual({ tabs: [], active: null });
+    });
+
+    it("records the desktop's turn in a new tab, and hands it to the phone", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(1_790_000_000_000);
+      try {
+        const route = await load();
+        // The desktop opens a tab and speaks in it, in one sync.
+        const fromDesktop = await route.POST(post({ upsert: [tab(DESKTOP_TAB, { label: "Plan a trip to Lisbon", autoLabel: false })], activity: { key: DESKTOP_TAB } }));
+        expect(await activeOf(fromDesktop)).toEqual({ key: DESKTOP_TAB, at: 1_790_000_000_000 });
+        // The phone, with nothing cached, reads the box.
+        const onPhone = await (await load()).GET(get());
+        expect(await onPhone.json()).toEqual({
+          tabs: [{ key: DESKTOP_TAB, label: "Plan a trip to Lisbon", createdAt: 1_000, seq: 2 }],
+          active: { key: DESKTOP_TAB, at: 1_790_000_000_000 },
+        });
+        // The phone carries on in main: main is where the owner is now.
+        vi.setSystemTime(1_790_000_060_000);
+        expect(await activeOf(await route.POST(post({ upsert: [], activity: { key: null } })))).toEqual({ key: null, at: 1_790_000_060_000 });
+        expect(JSON.parse(fs.readFileSync(inventoryFile(), "utf8")).active).toEqual({ key: null, at: 1_790_000_060_000 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("forgets the record when its conversation is closed on any device", async () => {
+      const route = await load();
+      await route.POST(post({ upsert: [tab(PHONE_TAB)], activity: { key: PHONE_TAB } }));
+      expect(await activeOf(await route.POST(post({ close: [PHONE_TAB] })))).toBeNull();
+      expect(await activeOf(await route.GET(get()))).toBeNull();
+    });
+
+    it("does not record a key the strip does not hold", async () => {
+      const route = await load();
+      expect(await activeOf(await route.POST(post({ activity: { key: PHONE_TAB } })))).toBeNull();
+      expect(fs.existsSync(inventoryFile())).toBe(false);
+    });
+
+    it("refuses an activity that is not { key } naming main or a tab", async () => {
+      const route = await load();
+      for (const activity of ["main", { key: "agent:main:main" }, { key: "agent:main:telegram:direct:42" }, { key: 7 }, [PHONE_TAB]]) {
+        const res = await route.POST(post({ upsert: [tab(PHONE_TAB)], activity }));
+        expect(res.status, JSON.stringify(activity)).toBe(400);
+      }
+      expect(fs.existsSync(inventoryFile())).toBe(false);
+    });
+
+    it("lets only the owner's own browser move it", async () => {
+      owner = false;
+      const route = await load();
+      expect((await route.POST(post({ activity: { key: null } }))).status).toBe(403);
+      expect(fs.existsSync(inventoryFile())).toBe(false);
+    });
+  });
 });
