@@ -43,10 +43,38 @@ export interface ClosedChatTab {
   at: number;
 }
 
+/**
+ * The conversation the owner last sent a turn in, on any device (TASK-1364).
+ *
+ * The strip was one list everywhere, but which tab was OPEN stayed each
+ * browser's own: a conversation started on the desktop was on the phone's
+ * strip and the phone opened main anyway, so "carry on from the phone" meant
+ * finding the right tab by hand — and nothing said which one it was. This is
+ * the one fact a device needs to open where the owner left off.
+ *
+ * `key` null is the main conversation, whose key each harness names for itself
+ * (the gateway's hello, the transcript store's desktop key). `at` is the BOX's
+ * clock, never a device's: two devices' clocks disagree, and this is only ever
+ * compared with another `at` the box handed out.
+ */
+export interface ChatActiveRecord {
+  key: string | null;
+  at: number;
+}
+
 /** Everything the box keeps about the strip. */
 export interface ChatTabInventory {
   tabs: ChatTabRecord[];
   closed: ClosedChatTab[];
+  /** Absent until the owner has sent a turn from a build that records it. */
+  active?: ChatActiveRecord;
+  /**
+   * The newest `at` ever handed out. Kept apart from `active` because closing
+   * the recorded tab clears the record, and the next one must still come after
+   * every `at` a device has already stored as seen — or, on a box whose clock
+   * is behind, no device would follow it until the clock caught up.
+   */
+  activeAt?: number;
 }
 
 export const CHAT_TABS_ROUTE = "/setup-api/chat/tabs";
@@ -162,6 +190,30 @@ export function parseTabList(value: unknown, now = Date.now()): ChatTabRecord[] 
   return out;
 }
 
+/**
+ * An active record out of an untrusted value — the file, a route's answer — or
+ * null. Main (null) or a tab-shaped key, and a real time.
+ */
+export function parseActiveRecord(value: unknown): ChatActiveRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { key, at } = value as Record<string, unknown>;
+  if (key !== null && !isChatTabKey(key)) return null;
+  if (typeof at !== "number" || !Number.isFinite(at) || at <= 0) return null;
+  return { key, at: Math.floor(at) };
+}
+
+/**
+ * The activity a device reports, out of a request body: `{ key }`, main as
+ * null. `undefined` when there is none; `false` when it is not that shape.
+ */
+export function parseActivity(value: unknown): { key: string | null } | undefined | false {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const { key } = value as Record<string, unknown>;
+  if (key === null || isChatTabKey(key)) return { key };
+  return false;
+}
+
 /** The inventory out of an untrusted value (the file on disk). Never throws. */
 export function parseTabInventory(value: unknown, now = Date.now()): ChatTabInventory {
   if (!value || typeof value !== "object" || Array.isArray(value)) return { tabs: [], closed: [] };
@@ -179,7 +231,17 @@ export function parseTabInventory(value: unknown, now = Date.now()): ChatTabInve
   }
   // A key both open and closed is closed: the close is the later fact.
   const tabs = parseTabList(row.tabs, now).filter((tab) => !seenClosed.has(tab.key));
-  return { tabs: sortTabs(tabs), closed };
+  // And a record naming a conversation the strip no longer has names nothing.
+  const active = parseActiveRecord(row.active);
+  const activeHolds = active !== null && (active.key === null || tabs.some((tab) => tab.key === active.key));
+  const storedAt = typeof row.activeAt === "number" && Number.isFinite(row.activeAt) && row.activeAt > 0 ? Math.floor(row.activeAt) : 0;
+  const activeAt = Math.max(storedAt, active?.at ?? 0);
+  return {
+    tabs: sortTabs(tabs),
+    closed,
+    ...(activeHolds ? { active } : {}),
+    ...(activeAt > 0 ? { activeAt } : {}),
+  };
 }
 
 /** The strip's order: oldest first, which is the order the + appended them in. */
@@ -197,6 +259,8 @@ export interface TabInventoryChange {
   upsert?: readonly ChatTabRecord[];
   /** Keys a device closed. */
   close?: readonly string[];
+  /** The owner just sent a turn in this conversation (null: the main one). */
+  activity?: { key: string | null };
 }
 
 /**
@@ -213,7 +277,14 @@ export interface TabInventoryChange {
  *     N, so two devices that each opened "Chat 2" offline end with a "Chat 2"
  *     and a "Chat 3", not two of one;
  *   - past MAX_TABS nothing new is added; past MAX_CLOSED the oldest closes
- *     are forgotten.
+ *     are forgotten;
+ *   - an activity names the conversation the owner is in now, stamped with
+ *     the box's clock and never earlier than any record before it (a box
+ *     that boots before its clock is set must not send the record back in
+ *     time). It is applied after the upserts, so a tab opened and spoken in
+ *     within one request is listed by the time it is named; a key the strip
+ *     does not hold — closed, or past MAX_TABS — is not recorded. Closing the
+ *     recorded conversation clears the record: nothing is left to carry on.
  */
 export function mergeTabInventory(
   inventory: ChatTabInventory,
@@ -257,10 +328,62 @@ export function mergeTabInventory(
     changed = true;
   }
 
+  let active = inventory.active;
+  // The floor every new record clears, whether or not a record still stands.
+  const floorAt = Math.max(inventory.activeAt ?? 0, inventory.active?.at ?? 0);
+  if (active && active.key !== null && !tabs.some((tab) => tab.key === active?.key)) {
+    active = undefined;
+    changed = true;
+  }
+  const activity = change.activity;
+  if (activity && (activity.key === null || (isChatTabKey(activity.key) && tabs.some((tab) => tab.key === activity.key)))) {
+    active = { key: activity.key, at: Math.max(Math.floor(now), floorAt + 1) };
+    changed = true;
+  }
+
   let closed = [...closedAt].map(([key, at]) => ({ key, at }));
   if (closed.length > MAX_CLOSED) {
     closed = closed.sort((a, b) => b.at - a.at).slice(0, MAX_CLOSED);
     changed = true;
   }
-  return { inventory: { tabs: sortTabs(tabs), closed }, changed };
+  const activeAt = Math.max(floorAt, active?.at ?? 0);
+  return {
+    inventory: { tabs: sortTabs(tabs), closed, ...(active ? { active } : {}), ...(activeAt > 0 ? { activeAt } : {}) },
+    changed,
+  };
+}
+
+/**
+ * Which conversation a device should move to, and what it has now seen of the
+ * box's record — the whole "open where the owner left off" decision, pure.
+ *
+ * A device follows the record only when the record is NEWER than everything
+ * this browser has already accounted for (`seenAt`): its own turns, the record
+ * it last followed, and any record that was current when the owner picked a
+ * tab here by hand. That is what keeps the two devices from fighting — a
+ * desktop the owner is using is never moved by its own last turn, and a tab
+ * chosen on purpose is not undone by an older turn — while a turn sent on the
+ * OTHER device since is exactly a newer record.
+ *
+ * A record this device cannot open (a key its transport does not own: a dual
+ * box that switched harness; a tab it does not list) is counted as seen and
+ * not followed, so it is not asked again. Returns `follow: null` when there is
+ * nothing to do; `seenAt` is what the caller stores either way.
+ */
+export function conversationToFollow(input: {
+  record: ChatActiveRecord | null;
+  seenAt: number;
+  /** The session key on screen now. */
+  current: string;
+  /** The main conversation's session key on this device. */
+  main: string;
+  /** Whether this device can open `key` — listed here or on the box, and minted by its transport. */
+  canOpen: (key: string) => boolean;
+}): { follow: string | null; seenAt: number } {
+  const { record, seenAt } = input;
+  if (!record || record.at <= seenAt || !input.main) return { follow: null, seenAt };
+  const target = record.key ?? input.main;
+  if (record.key !== null && !input.canOpen(record.key)) return { follow: null, seenAt: record.at };
+  if (target === input.current) return { follow: null, seenAt: record.at };
+  return { follow: target, seenAt: record.at };
 }
