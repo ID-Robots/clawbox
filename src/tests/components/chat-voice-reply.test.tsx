@@ -468,6 +468,29 @@ describe("spoken replies in the desktop chat", () => {
     expect(srcs.every((src) => src.includes("/setup-api/chat/media"))).toBe(true);
   });
 
+  it("keeps ONE player when the gateway's clip lands after this chat's own", async () => {
+    // The other side of that race, made certain: the box has already spoken
+    // the reply for this chat and put the clip on the bubble when the
+    // gateway's supplement arrives. Merging the two put both players on one
+    // answer; the gateway's clip takes the bubble instead.
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    // The chat's opening turn, answered with no clip from anyone.
+    await screen.findByText("Fine, thanks.", { exact: false });
+    await waitFor(() => expect(screen.queryByTestId("chat-turn-status")).toBeNull());
+    // The typed one: spoken here first, the gateway's own clip long after.
+    supplementAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000500---bb.wav";
+    supplementDelayMs = 250;
+    await typeIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]));
+    await waitFor(() => expect(screen.queryAllByTestId("chat-audio").map((el) => el.getAttribute("src"))).toEqual(["blob:spoken-reply"]));
+    await waitFor(() => {
+      const srcs = screen.queryAllByTestId("chat-audio").map((el) => el.getAttribute("src") ?? "");
+      expect(srcs).toHaveLength(1);
+      expect(srcs[0]).toContain("/setup-api/chat/media");
+    });
+  });
+
   it("stays silent while the owner's switch is off, and follows the switch live", async () => {
     autoReplyAnswer = false;
     replyText = "Fine, thanks.";

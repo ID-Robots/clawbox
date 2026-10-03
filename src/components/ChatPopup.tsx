@@ -3141,7 +3141,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 const last = prev[prev.length - 1]
                 if (text.length > 0 && audio.length > 0 && !images.length && !files.length && last && last.role === 'assistant'
                     && last.text === text) {
-                  const mergedAudio = boundedAudio(last.audio ?? [], audio)
+                  // A clip THIS chat made for the bubble gives way to the
+                  // gateway's: both are the same words in the same voice, and
+                  // which landed first is a race — merging them put two players
+                  // on one answer whenever the box spoke for the chat first.
+                  // The chat's clip stays in its ring, which releases it.
+                  const own = new Set(spokenUrlsRef.current)
+                  const mergedAudio = boundedAudio((last.audio ?? []).filter(src => !own.has(src)), audio)
                   if (last.audio?.length === mergedAudio.length
                       && last.audio.every((src, index) => src === mergedAudio[index])) return prev
                   return [...prev.slice(0, -1), { ...last, audio: mergedAudio }]
