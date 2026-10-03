@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Installed root services source only their root-owned sibling. Web callers
+# request restart_ap through the root-step launcher, never execute this as root.
+. "$(dirname "${BASH_SOURCE[0]}")/wifi-radio.sh"
+wifi_lock
+wifi_recover || exit 1
 IFACE="${NETWORK_INTERFACE:-wlP1p1s0}"
 DEFAULT_AP_IP="10.42.0.1"
 ALT_AP_IP="10.43.0.1"
@@ -176,19 +181,14 @@ log_name() {
   printf '%s' "${s:0:64}"
 }
 
-# May this saved WiFi profile be joined as a CLIENT? Excluded by identity, not
-# by substring: our own hotspot by its exact name, and any access-point profile
-# by its mode — so a network called "ClawBox-Setup-home" stays a candidate. A
-# mode nmcli cannot report counts as "not a client": skipped, not activated
-# blind.
+# Client identity comes from mode, never display name: even ClawBox-Setup
+# may be an infrastructure profile. Unknown modes are not activated blindly.
 is_client_profile() {
   local uuid="$1" name="$2" mode
-  [ "$name" = "$CON_NAME" ] && return 1
   # </dev/null: callers run this inside `while read` loops fed by nmcli, and
   # nothing here may consume their input.
   mode="$(nmcli -g 802-11-wireless.mode connection show uuid "$uuid" </dev/null 2>/dev/null)" || return 1
-  [ "$mode" = "ap" ] && return 1
-  return 0
+  case "$mode" in infrastructure|"") return 0 ;; *) return 1 ;; esac
 }
 
 # NetworkManager's numeric device state for the radio (100 = connected): the
@@ -247,23 +247,9 @@ CLIENT_UP_WAIT="${CLIENT_UP_WAIT:-45}"
 [[ "$CLIENT_UP_WAIT" =~ ^[0-9]+$ ]] || CLIENT_UP_WAIT=45
 if [ "${#CLIENT_UP_WAIT}" -gt 2 ] || [ "$CLIENT_UP_WAIT" -lt 1 ] || [ "$CLIENT_UP_WAIT" -gt 45 ]; then CLIENT_UP_WAIT=45; fi
 
-# Runtime device inhibition is NOT a profile edit or a disconnect. It prevents
-# new automatic starts while we select a client or admit the fallback AP. NM
-# may already be activating a client: observe it, never cancel it to free the
-# radio. This is not atomic against explicit activations by other processes,
-# nor proof that a target NM version drains invisible queued autoconnect work.
-# SIGKILL cannot run traps; the parent must verify lifecycle/real-NM behaviour.
-original_autoconnect=""
-restore_device_policy() {
-  if [ -n "$original_autoconnect" ]; then
-    if ! nmcli --wait 5 device set "$IFACE" autoconnect "$original_autoconnect" ||
-       [ "$(nmcli -g GENERAL.AUTOCONNECT device show "$IFACE" 2>/dev/null)" != "$original_autoconnect" ]; then
-      echo "[AP] ERROR: could not restore device autoconnect=$original_autoconnect" >&2
-      return 1
-    fi
-    original_autoconnect=""
-  fi
-}
+# Recovery state lives outside this process. EXIT handles ordinary errors;
+# systemd ExecStopPost handles SIGKILL/timeout after killing the worker cgroup.
+restore_device_policy() { wifi_recover; }
 restore_autoconnect() {
   local rc=$?
   trap - EXIT
@@ -297,15 +283,11 @@ client_or_idle() {
 # Explicit connection activation may re-enable device autoconnect. Reassert
 # inhibition before each competing action, retaining the ORIGINAL snapshot.
 ensure_inhibited() {
-  nmcli --wait 5 device set "$IFACE" autoconnect no || exit 1
-  [ "$(nmcli -g GENERAL.AUTOCONNECT device show "$IFACE" 2>/dev/null)" = no ] || exit 1
+  wifi_inhibit || exit 1
   client_or_idle
 }
 
 inhibit_autoconnect() {
-  original_autoconnect="$(nmcli -g GENERAL.AUTOCONNECT device show "$IFACE" 2>/dev/null)" || exit 1
-  case "$original_autoconnect" in yes|no) ;; *) original_autoconnect=""; exit 1 ;; esac
-  # Arm before mutation: even a failed command may have changed NM's state.
   trap restore_autoconnect EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
@@ -401,15 +383,15 @@ wait_for_interface() {
 # manual restart" boot race. We tear those down before claiming the radio.
 #
 # Rows are read with the parser above and acted on by UUID (`IFS=: read` cut a
-# name containing ':' in two and silently skipped that profile). Only our own
-# hotspot, by its exact name, is spared: any other profile on the radio —
-# including another access-point profile — is in the AP's way, as before.
+# name containing ':' in two and silently skipped that profile). Only verified
+# client profiles are modified; other AP profiles are not ours to rewrite.
 release_wifi_for_ap() {
   local line
   while IFS= read -r line; do
     split_row "$line" 3 || continue
     is_wifi_type "${ROW[1]}" || continue
-    [ "${ROW[2]}" = "$CON_NAME" ] && continue
+    # Skip APs by mode, not display name (a client can be ClawBox-Setup).
+    is_client_profile "${ROW[0]}" "${ROW[2]}" || continue
     # Stop these client profiles auto-grabbing the radio back from the AP. We do
     # this pre-setup (the radio must be dedicated to the AP), and also post-setup
     # when an Ethernet uplink means we've deliberately chosen the hotspot over
@@ -518,14 +500,16 @@ keep_late_client "before the hotspot was set up"
 if [ "$prefer_saved_wifi" = true ]; then ensure_inhibited; fi
 
 echo "[AP] Cleaning up any previous AP connection..."
-nmcli connection down "$CON_NAME" 2>/dev/null || true
-nmcli connection delete "$CON_NAME" 2>/dev/null || true
+wifi_stop_ap
+AP_UUID="$(cat /proc/sys/kernel/random/uuid)"
+is_uuid "$AP_UUID" || exit 1
 
 echo "[AP] Creating WiFi access point: $SSID"
 nmcli connection add \
   type wifi \
   ifname "$IFACE" \
   con-name "$CON_NAME" \
+  connection.uuid "$AP_UUID" \
   ssid "$SSID" \
   autoconnect no \
   wifi.mode ap \
@@ -536,12 +520,12 @@ nmcli connection add \
 
 # Configure security: WPA-PSK if password set, open network otherwise
 if [ -n "${HOTSPOT_PASSWORD:-}" ]; then
-  nmcli connection modify "$CON_NAME" \
+  nmcli connection modify uuid "$AP_UUID" \
     802-11-wireless-security.key-mgmt wpa-psk \
     802-11-wireless-security.psk "$HOTSPOT_PASSWORD"
   echo "[AP] WPA-PSK security enabled"
 else
-  nmcli connection modify "$CON_NAME" remove 802-11-wireless-security 2>/dev/null || true
+  nmcli connection modify uuid "$AP_UUID" remove 802-11-wireless-security 2>/dev/null || true
   echo "[AP] Open network (no password)"
 fi
 
@@ -581,7 +565,7 @@ for ap_attempt in $(seq 1 "$AP_UP_RETRIES"); do
   else
     release_wifi_for_ap
   fi
-  if nmcli connection up "$CON_NAME" 2>&1; then
+  if nmcli connection up uuid "$AP_UUID" ifname "$IFACE" 2>&1; then
     wait_for_interface || true
     if iw dev "$IFACE" info 2>/dev/null | grep -q "type AP"; then
       echo "[AP] Access point active (attempt $ap_attempt)"

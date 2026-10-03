@@ -61,6 +61,7 @@ beforeAll(() => {
 });
 
 // Synthetic profiles only — no real network names, no PSKs.
+const HOTSPOT = "a9a9a9a9-0000-4000-8000-0000000000a9";
 const HOME = "11111111-1111-4111-8111-111111111111";
 const OFFICE = "22222222-2222-4222-8222-222222222222";
 const CAFE = "33333333-3333-4333-8333-333333333333";
@@ -210,6 +211,8 @@ EOF
     if [ $# -gt 0 ]; then
       kind=any; case "$1" in uuid|id) kind="$1"; shift ;; esac
       find_profile "$kind" "$1" || { echo "Error: $1 - no such connection profile." >&2; exit 10; }
+      if [ "$fields" = connection.id ]; then echo "$P_ESC"; exit 0; fi
+      if [ "$fields" = connection.interface-name ]; then echo "$IFC"; exit 0; fi
       { [ "$get" = 1 ] && [ "$fields" = 802-11-wireless.mode ]; } || unsupported "$@"
       if [ "$P_MODE" = - ]; then echo ""; else echo "$P_MODE"; fi
       exit 0
@@ -257,10 +260,11 @@ EOF
     if [ "$P_UUID" = "$active" ]; then set_active "" 30; fi ;;
   "connection add")
     shift 2
-    con=""; mode="-"
+    con=""; mode="-"; new_uuid=""
     while [ $# -gt 0 ]; do
-      case "$1" in con-name) con="$2"; shift 2 ;; wifi.mode|802-11-wireless.mode) mode="$2"; shift 2 ;; *) shift ;; esac
+      case "$1" in connection.uuid) new_uuid="$2"; shift 2 ;; con-name) con="$2"; shift 2 ;; wifi.mode|802-11-wireless.mode) mode="$2"; shift 2 ;; *) shift ;; esac
     done
+    [ \"$new_uuid\" = \"${HOTSPOT}\" ] || unsupported add-uuid
     printf 'a9a9a9a9-0000-4000-8000-0000000000a9\\t802-11-wireless\\t0\\t0\\t%s\\tok\\t%s\\t%s\\n' "$mode" "$con" "$con" >> "$NM/profiles"
     echo "Connection '$con' successfully added." ;;
   *) unsupported "$@" ;;
@@ -320,6 +324,9 @@ function makeBox(opts: {
   if (opts.afterFail) writeFileSync(path.join(nm, "after-fail"), opts.afterFail);
   writeFileSync(path.join(nm, "calls"), "");
 
+  writeFileSync(path.join(bin, "cat"), `#!/bin/bash
+if [ "$1" = /proc/sys/kernel/random/uuid ]; then echo a9a9a9a9-0000-4000-8000-0000000000a9; else exec /bin/cat "$@"; fi
+`, { mode: 0o755 });
   writeFileSync(path.join(bin, "nmcli"), NMCLI_STUB, { mode: 0o755 });
   writeFileSync(path.join(bin, "iw"), IW_STUB, { mode: 0o755 });
   // No upstream address (so no subnet collision), no real sleeps, no firewall.
@@ -346,6 +353,8 @@ function runStartAp(): Run {
       ...env,
       PATH: `${path.join(root, "bin")}:${process.env.PATH ?? ""}`,
       CLAWBOX_ROOT: root,
+      CLAWBOX_RADIO_RUN_DIR: path.join(root, "radio-run"),
+      CLAWBOX_AP_SUPERVISED: "1",
       NMSTUB: nm,
       NETWORK_INTERFACE: IFACE,
       NM_READY_TIMEOUT: "2",
@@ -367,7 +376,7 @@ function runStartAp(): Run {
 }
 
 const has = (args: string[], ...words: string[]) => words.every((w) => args.includes(w));
-const isClientUp = (a: string[]) => has(a, "connection", "up") && !a.includes("ClawBox-Setup");
+const isClientUp = (a: string[]) => has(a, "connection", "up") && !a.includes(HOTSPOT);
 /** Anything that builds the hotspot or takes the radio away from a client. */
 const isApActivity = (a: string[]) =>
   a.includes("ClawBox-Setup") || has(a, "device", "disconnect") || has(a, "connection", "down");
@@ -379,7 +388,7 @@ function expectSafeCalls(r: Run) {
     expect(a, "never ask nmcli for secrets").not.toContain("--show-secrets");
     // Saved profiles are acted on by UUID; only the hotspot is addressed by its name.
     if (a[a.indexOf("connection") + 1] && ["up", "down", "modify"].includes(a[a.indexOf("connection") + 1])) {
-      if (!a.includes("ClawBox-Setup")) expect(a, `${a.join(" ")} must select the profile by uuid`).toContain("uuid");
+      if (!a.includes(HOTSPOT)) expect(a, `${a.join(" ")} must select the profile by uuid`).toContain("uuid");
     }
   }
 }
@@ -446,12 +455,11 @@ describe("start-ap.sh keeps a saved WiFi client instead of taking the radio for 
     expectSafeCalls(r);
   });
 
-  it("never tries the hotspot profile or another access-point profile as a client", () => {
+  it("keeps an infrastructure profile named ClawBox-Setup and excludes AP mode", () => {
     makeBox({
       setupComplete: true,
       profiles: [
-        // Each is excluded by one rule alone: this one only by its exact name
-        // (its mode is unset, which reads as infrastructure)...
+        // Unset mode is infrastructure, regardless of display name.
         { uuid: STALE_AP, name: "ClawBox-Setup", mode: "", up: "ok" },
         // ...and this one only by its mode.
         { uuid: GARAGE_AP, name: "Garage-Hotspot", mode: "ap", priority: 50, up: "ok" },
@@ -459,10 +467,8 @@ describe("start-ap.sh keeps a saved WiFi client instead of taking the radio for 
     });
     const r = runStartAp();
     expect(r.status).toBe(0);
-    expect(r.calls.some((a) => has(a, "connection", "up") && (a.includes(STALE_AP) || a.includes(GARAGE_AP)))).toBe(false);
-    expect(r.stdout).toContain("No saved WiFi client profiles");
-    expect(r.lines).toContainEqual(expect.stringMatching(/^connection add .*con-name ClawBox-Setup/));
-    expect(r.lines).toContain("connection up ClawBox-Setup");
+    expect(r.calls.filter(isClientUp).map((a) => a[a.indexOf("uuid") + 1])).toEqual([STALE_AP]);
+    expect(r.calls.filter(isApActivity)).toEqual([]);
     expectSafeCalls(r);
   });
 
@@ -475,7 +481,7 @@ describe("start-ap.sh keeps a saved WiFi client instead of taking the radio for 
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(r.stdout).not.toContain("skipping AP mode");
-    expect(r.lines).toContain("connection up ClawBox-Setup");
+    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     expectSafeCalls(r);
   });
 
@@ -513,7 +519,7 @@ describe("start-ap.sh keeps a saved WiFi client instead of taking the radio for 
     expect(firstAp).toBeGreaterThan(lastClient);
     expect(r.stdout).toContain("returned success but interface not connected");
     expect(r.stdout).toContain("No saved WiFi profiles connected, falling back to AP mode");
-    expect(r.lines).toContain("connection up ClawBox-Setup");
+    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     expectSafeCalls(r);
   });
 
@@ -522,7 +528,7 @@ describe("start-ap.sh keeps a saved WiFi client instead of taking the radio for 
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(r.lines).toContainEqual(expect.stringMatching(/^connection add .*con-name ClawBox-Setup/));
-    expect(r.lines).toContain("connection up ClawBox-Setup");
+    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     // The seam: the caches land under CLAWBOX_ROOT, where the web server reads them.
     expect(readFileSync(path.join(root, "data", "ap-runtime.env"), "utf-8")).toContain('AP_IP="10.42.0.1"');
     expect(readFileSync(path.join(root, "data", "wifi-scan-cache.json"), "utf-8")).toContain("Synthetic-Neighbour");
@@ -575,8 +581,8 @@ describe("start-ap.sh rechecks for a late NetworkManager autoconnect before taki
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("before AP attempt 2");
-    expect(r.lines.filter((l) => l === "connection up ClawBox-Setup")).toHaveLength(1);
-    const busy = r.lines.indexOf("connection up ClawBox-Setup");
+    expect(r.lines.filter((l) => l === `connection up uuid ${HOTSPOT} ifname ${IFACE}`)).toHaveLength(1);
+    const busy = r.lines.indexOf(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     expect(r.calls.slice(busy + 1).filter(isApActivity)).toEqual([]);
     expectSafeCalls(r);
   });
@@ -605,7 +611,7 @@ describe("start-ap.sh keeps the hotspot behaviour it had", () => {
     expect(r.calls.filter(isClientUp)).toEqual([]);
     expect(autoconnectOff(r, HOME, "Example-Home")).toBe(true);
     expect(released(r, HOME, "Example-Home")).toBe(true);
-    expect(r.lines).toContain("connection up ClawBox-Setup");
+    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
   });
 
   it("before setup is complete, the hotspot owns the radio even over a live client", () => {
@@ -619,7 +625,7 @@ describe("start-ap.sh keeps the hotspot behaviour it had", () => {
     expect(r.calls.filter(isClientUp)).toEqual([]);
     expect(autoconnectOff(r, HOME, "Example-Home")).toBe(true);
     expect(released(r, HOME, "Example-Home")).toBe(true);
-    expect(r.lines).toContain("connection up ClawBox-Setup");
+    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
   });
 
   it("before setup is complete, a client that autoconnects during the scan is still released", () => {
@@ -631,7 +637,7 @@ describe("start-ap.sh keeps the hotspot behaviour it had", () => {
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(released(r, HOME, "Example-Home")).toBe(true);
-    expect(r.lines).toContain("connection up ClawBox-Setup");
+    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
   });
 
   it("skips AP mode without touching the radio when the owner disabled the hotspot after setup", () => {
@@ -654,7 +660,7 @@ describe("start-ap.sh keeps the hotspot behaviour it had", () => {
     });
     const r = runStartAp();
     expect(r.status).toBe(0);
-    expect(r.lines).toContain("connection up ClawBox-Setup");
+    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
   });
 });
 
@@ -672,11 +678,11 @@ describe("release_wifi_for_ap reads profiles with the same parser", () => {
     expect(r.status).toBe(0);
     expect(r.lines).toContain(`connection modify uuid ${HOME} connection.autoconnect no`);
     expect(r.lines).toContain(`connection down uuid ${HOME}`);
-    expect(r.lines).toContain("connection up ClawBox-Setup");
+    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     expectSafeCalls(r);
   });
 
-  it("spares only the hotspot itself, by its exact name", () => {
+  it("does not modify other AP profiles when intentionally releasing clients", () => {
     makeBox({
       setupComplete: false,
       profiles: [
@@ -687,12 +693,14 @@ describe("release_wifi_for_ap reads profiles with the same parser", () => {
     });
     const r = runStartAp();
     expect(r.status).toBe(0);
-    for (const u of [HOME, GARAGE_AP]) {
+    for (const u of [HOME]) {
       expect(r.lines).toContain(`connection modify uuid ${u} connection.autoconnect no`);
       expect(r.lines).toContain(`connection down uuid ${u}`);
     }
+    expect(r.lines).not.toContain(`connection modify uuid ${GARAGE_AP} connection.autoconnect no`);
+    expect(r.lines).not.toContain(`connection down uuid ${GARAGE_AP}`);
     // The one it creates is never released.
-    expect(r.lines.filter((l) => /^connection (down|modify) uuid a9a9a9a9-/.test(l))).toEqual([]);
+    expect(r.lines.filter((l) => /^connection down uuid a9a9a9a9-|^connection modify uuid a9a9a9a9-.*connection.autoconnect/.test(l))).toEqual([]);
     expectSafeCalls(r);
   });
 });

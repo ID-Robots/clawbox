@@ -257,6 +257,7 @@ EOF
             echo "Error: synthetic failure reading 802-11-wireless.mode" >&2; exit "$P_MODEFAIL"
           fi
           if [ "$P_MODE" = - ]; then echo ""; else echo "$P_MODE"; fi ;;
+        connection.interface-name) echo "$IFC" ;;
         connection.autoconnect) echo "$P_AC" ;;
         connection.id) printf '%s\\n' "$P_ESC" ;;
         *) unsupported "$@" ;;
@@ -314,9 +315,10 @@ EOF
     if [ "$P_UUID" = "$active" ]; then set_active "" 30; fi ;;
   "connection add")
     shift 2
-    con=""; mode="-"; ac=yes
+    con=""; mode="-"; ac=yes; new_uuid=""
     while [ $# -gt 0 ]; do
       case "$1" in
+        connection.uuid) new_uuid="$2"; shift 2 ;;
         con-name) con="$2"; shift 2 ;;
         wifi.mode|802-11-wireless.mode) mode="$2"; shift 2 ;;
         autoconnect|connection.autoconnect) case "$2" in no|false|off|0) ac=no ;; *) ac=yes ;; esac; shift 2 ;;
@@ -331,6 +333,7 @@ EOF
     done
     d="$(printf '%s/p/%03d' "$NM" "$next")"
     mkdir -p "$d"
+    [ \"$new_uuid\" = \"${HOTSPOT}\" ] || unsupported add-uuid
     printf '${HOTSPOT}\\t802-11-wireless\\t0\\t0\\t%s\\tok\\t%s\\t-\\n' "$mode" "$ac" > "$d/meta"
     printf '%s' "$con" > "$d/name"
     printf '%s' "$con" > "$d/esc"
@@ -406,6 +409,9 @@ function makeBox(opts: {
   writeFileSync(path.join(nm, "calls"), "");
   writeFileSync(path.join(nm, "trace"), "");
 
+  writeFileSync(path.join(bin, "cat"), `#!/bin/bash
+if [ "$1" = /proc/sys/kernel/random/uuid ]; then echo a9a9a9a9-0000-4000-8000-0000000000a9; else exec /bin/cat "$@"; fi
+`, { mode: 0o755 });
   writeFileSync(path.join(bin, "nmcli"), NMCLI_STUB, { mode: 0o755 });
   writeFileSync(path.join(bin, "iw"), IW_STUB, { mode: 0o755 });
   writeFileSync(path.join(bin, "sleep"), SLEEP_STUB, { mode: 0o755 });
@@ -468,6 +474,8 @@ function runStartAp(extraEnv: Record<string, string> = {}): Run {
       ...env,
       PATH: `${path.join(root, "bin")}:${process.env.PATH ?? ""}`,
       CLAWBOX_ROOT: root,
+      CLAWBOX_RADIO_RUN_DIR: path.join(root, "radio-run"),
+      CLAWBOX_AP_SUPERVISED: "1",
       NMSTUB: nm,
       NETWORK_INTERFACE: IFACE,
       NM_READY_TIMEOUT: "2",
@@ -500,14 +508,14 @@ function runStartAp(extraEnv: Record<string, string> = {}): Run {
 
 const has = (args: string[], ...words: string[]) => words.every((w) => args.includes(w));
 const verb = (a: string[]) => (a.includes("connection") ? a[a.indexOf("connection") + 1] : undefined);
-const isHotspotUp = (a: string[]) => has(a, "connection", "up", "ClawBox-Setup");
-const isClientUp = (a: string[]) => verb(a) === "up" && !a.includes("ClawBox-Setup");
+const isHotspotUp = (a: string[]) => has(a, "connection", "up", "uuid", HOTSPOT);
+const isClientUp = (a: string[]) => verb(a) === "up" && !a.includes(HOTSPOT);
 const uuidOf = (a: string[]) => (a.includes("uuid") ? a[a.indexOf("uuid") + 1] : `<not by uuid: ${a.join(" ")}>`);
 const clientUps = (r: Run) => r.calls.filter(isClientUp).map(uuidOf);
 /** Anything that builds the hotspot or takes the radio away from a client. */
 const isApActivity = (a: string[]) =>
   a.includes("ClawBox-Setup") || has(a, "device", "disconnect") || has(a, "connection", "down");
-const targetsOf = (r: Run, v: string) => r.calls.filter((a) => verb(a) === v && !a.includes("ClawBox-Setup")).map(uuidOf);
+const targetsOf = (r: Run, v: string) => r.calls.filter((a) => verb(a) === v && !a.includes(HOTSPOT)).map(uuidOf);
 
 /**
  * What every run must hold: saved profiles are acted on by `uuid <X>`, and
@@ -519,7 +527,7 @@ function expectOnlyRealUuids(r: Run, profiles: Profile[]) {
   for (const a of r.calls) {
     expect(a, "never ask nmcli for secrets").not.toContain("--show-secrets");
     const v = verb(a);
-    if (v && ["up", "down", "modify", "delete"].includes(v) && !a.includes("ClawBox-Setup")) {
+    if (v && ["up", "down", "modify", "delete"].includes(v) && !a.includes(HOTSPOT)) {
       expect(a, `${a.join(" ")} must select the profile by uuid`).toContain("uuid");
     }
     a.forEach((w, i) => {
@@ -592,7 +600,7 @@ describe("N1: a profile whose NAME is a UUID is still acted on by its own UUID",
     expect(targetsOf(r, "down").sort()).toEqual([HOME, OFFICE, CAFE].sort());
     expect(targetsOf(r, "modify").sort()).toEqual([HOME, OFFICE, CAFE].sort());
     for (const u of [HOME, OFFICE, CAFE]) expect(profileState(u).autoconnect).toBe("no");
-    expect(r.lines.filter((l) => l === "connection up ClawBox-Setup")).toHaveLength(1);
+    expect(r.lines.filter((l) => l === `connection up uuid ${HOTSPOT} ifname ${IFACE}`)).toHaveLength(1);
     expect(activeNow()).toBe(HOTSPOT);
     expectOnlyRealUuids(r, profiles);
   });
@@ -722,7 +730,7 @@ describe("N3: the order saved clients are tried in", () => {
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(clientUps(r)).toEqual([LOFT, CAFE, GARAGE, T_C, T_A, OFFICE, HOME]);
-    expect(r.lines).toContain("connection up ClawBox-Setup");
+    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     expectOnlyRealUuids(r, profiles);
   });
 });
@@ -788,7 +796,7 @@ describe("N6: what one run may do, bounded", () => {
     expect(clientUps(r)).toEqual([HOME, OFFICE, CAFE]);
     const lastClient = r.calls.map((a, i) => (isClientUp(a) ? i : -1)).reduce((m, i) => Math.max(m, i), -1);
     expect(lastClient).toBeLessThan(r.calls.findIndex(isApActivity));
-    expect(r.lines.filter((l) => l === "connection up ClawBox-Setup")).toHaveLength(3);
+    expect(r.lines.filter((l) => l === `connection up uuid ${HOTSPOT} ifname ${IFACE}`)).toHaveLength(3);
     expect(r.stderr).toContain("ERROR: access point did not come up after 3 attempts");
     expect(existsSync(path.join(root, "data", "ap-runtime.env")), "a hotspot that never came up was published").toBe(false);
     expectOnlyRealUuids(r, three);
@@ -907,7 +915,7 @@ describe("N5 evidence: a client that autoconnects inside the last AP attempt's w
     console.log(`control trace:\n${show(r)}\nstdout tail:\n${r.stdout.trim().split("\n").slice(-2).join("\n")}`);
     expect(existsSync(path.join(nm, "raced"))).toBe(true);
     expect(activeNow()).toBe(HOME);
-    expect(r.lines).not.toContain("connection up ClawBox-Setup");
+    expect(r.lines).not.toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
   });
 
   it("N5-a: a client that lands before inhibition is acknowledged is kept", () => {
@@ -949,6 +957,14 @@ const DISPATCHER = path.join(REPO, "scripts", "nm-dispatcher-failover.sh");
 function runDispatcher() {
   const bin = path.join(root, "bin");
   const x = { mode: 0o755 };
+  writeFileSync(path.join(bin, "systemctl"), `#!/bin/bash
+case "$*" in
+  "--no-block start clawbox-wifi-failover.service")
+    bash "${path.join(REPO, "scripts/wifi-failover.sh")}" >> "$NMSTUB/journal" 2>&1 ;;
+  "--no-block restart clawbox-ap.service") touch "$NMSTUB/recovery-ap" ;;
+  *) exit 2 ;;
+esac
+`, x);
   writeFileSync(path.join(root, "network.env"), `NETWORK_INTERFACE=${IFACE}\n`);
   const src = readFileSync(DISPATCHER, "utf-8");
   expect(src).toContain("/etc/clawbox/network.env");
@@ -968,6 +984,8 @@ function runDispatcher() {
       ...env,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       NMSTUB: nm,
+      NETWORK_INTERFACE: IFACE,
+      CLAWBOX_RADIO_RUN_DIR: path.join(root, "radio-run"),
       CLAWBOX_ONLINE_WAITER: waiter,
       CLAWBOX_RUN_DIR: path.join(root, "run"),
       CLAWBOX_START_AP: witness,
@@ -1088,7 +1106,7 @@ describe("N5 admission and restoration contracts (synthetic NM barrier)", () => 
 
   it("blocks a NEW automatic start between final state observation and AP up", () => {
     makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home" }] });
-    wrapNm(`if [ "$*" = "connection up ClawBox-Setup" ]; then
+    wrapNm(`if [ "$*" = "connection up uuid ${HOTSPOT} ifname ${IFACE}" ]; then
   : > "$NMSTUB/boundary"
   if [ "$(cat "$NMSTUB/device-ac" 2>/dev/null)" != no ]; then
     printf '${HOME}' > "$NMSTUB/active"; printf 100 > "$NMSTUB/state"
@@ -1135,7 +1153,7 @@ case "$*" in *"connection up uuid"*) printf yes > "$NMSTUB/device-ac" ;; esac`);
     wrapNm(`if [ "$*" = "--wait 5 device set ${IFACE} autoconnect yes" ]; then exit 1; fi`);
     const r = runStartAp();
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain("could not restore device autoconnect=yes");
+    expect(r.stderr).toContain("recovery failed (autoconnect=yes)");
     expect(deviceAc()).toBe("no"); // explicit cleanup failure, never called clean
     expect(existsSync(path.join(root, "data", "ap-runtime.env"))).toBe(false);
   });
@@ -1204,6 +1222,53 @@ describe("N8 fallback and exact identity", () => {
 
 
 describe("N8 AP ownership", () => {
+  it("preserves an inactive infrastructure ClawBox-Setup during fallback", () => {
+    makeBox({ setupComplete: true, profiles: [
+      { uuid: HOME, name: "ClawBox-Setup", up: "fail" },
+    ] });
+    const r = runStartAp();
+    expect(r.status, r.stderr).toBe(0);
+    expect(clientUps(r)).toEqual([HOME]);
+    expect(profileState(HOME).autoconnect).toBe("yes");
+    expect(r.lines).not.toContain(`connection delete uuid ${HOME}`);
+    expect(activeNow()).toBe(HOTSPOT);
+    expect(r.calls.filter(isHotspotUp)).toHaveLength(1);
+    expectOnlyRealUuids(r, [{ uuid: HOME, name: "ClawBox-Setup" }]);
+  });
+
+  it("refuses duplicate owned AP identities without deleting either or leaving inhibition", () => {
+    makeBox({ setupComplete: true, profiles: [
+      { uuid: HOME, name: "ClawBox-Setup", mode: "ap" },
+      { uuid: OFFICE, name: "ClawBox-Setup", mode: "ap" },
+    ] });
+    const r = runStartAp();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("Ambiguous owned AP");
+    expect(r.calls.filter((a) => ["up", "down", "delete", "modify"].includes(verb(a) ?? ""))).toEqual([]);
+    expect(profileState(HOME).autoconnect).toBe("yes");
+    expect(profileState(OFFICE).autoconnect).toBe("yes");
+    expect(deviceAc()).toBe("yes");
+  });
+
+  it.each([
+    `--wait 5 device set ${IFACE} autoconnect no`,
+    `device wifi rescan ifname ${IFACE}`,
+    `connection up uuid ${HOTSPOT} ifname ${IFACE}`,
+  ])("recovers startup SIGKILL at %s before a replacement snapshots policy", (killAt) => {
+    makeBox({ setupComplete: true, profiles: [] });
+    wrapNm("", `if [ "$*" = "${killAt}" ] && [ ! -e "$NMSTUB/killed" ]; then
+      touch "$NMSTUB/killed"
+      kill -KILL "$PPID"
+    fi`);
+    const killed = runStartAp();
+    expect(killed.status).not.toBe(0);
+    expect(deviceAc()).toBe("no");
+    const recovered = runStartAp();
+    expect(recovered.status, recovered.stderr).toBe(0);
+    expect(deviceAc()).toBe("yes");
+    expect(activeNow()).toBe(HOTSPOT);
+  });
+
   it("does not take down an unrelated access point", () => {
     makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Other-AP", mode: "ap" }], active: HOME });
     const d = runDispatcher();

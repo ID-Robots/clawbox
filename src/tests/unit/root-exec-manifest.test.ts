@@ -498,6 +498,10 @@ d("install.sh::install_root_libexec", () => {
     // to be in it — retargeted, because the copies it installs are then RUN
     // (write_root_exec_manifest calls the one it just placed in libexec) and the
     // shipped constants point at /home/clawbox/clawbox.
+    fs.mkdirSync(path.join(project, "scripts"), { recursive: true });
+    for (const name of ["wifi-radio.sh", "wifi-failover.sh"]) {
+      fs.copyFileSync(path.join(process.cwd(), "scripts", name), path.join(project, "scripts", name));
+    }
     retarget(MANIFEST_SRC, path.join(project, "config", "clawbox-root-manifest.sh"), [
       [/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${project}"`],
       [/^MANIFEST_DIR=.*$/m, `MANIFEST_DIR="${etc}"`],

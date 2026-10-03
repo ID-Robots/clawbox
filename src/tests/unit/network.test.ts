@@ -453,7 +453,7 @@ describe("network", () => {
   });
 
   describe("restartAP", () => {
-    it("calls the AP start script", async () => {
+    it("requests the supervised AP service through the narrow root launcher", async () => {
       setupExecFileMock({
         "bash": { stdout: "", stderr: "" },
       });
@@ -461,8 +461,8 @@ describe("network", () => {
       await network.restartAP();
       expect(mockExecFile).toHaveBeenCalled();
       const [cmd, args] = mockExecFile.mock.calls[0];
-      expect(cmd).toBe("bash");
-      expect(args).toEqual(expect.arrayContaining([expect.stringContaining("start-ap.sh")]));
+      expect(cmd).toBe("/usr/bin/sudo");
+      expect(args).toEqual(["-n", "/usr/local/libexec/clawbox/clawbox-run-root-step.sh", "restart_ap"]);
     });
   });
 

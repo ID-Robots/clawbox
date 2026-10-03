@@ -1,7 +1,9 @@
-import { execFile, spawn } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import path from "./runtime-path";
+import { startRootStep } from "./root-step-runner";
+import { execWifiNmcli, spawnWifiScan } from "./wifi-radio";
 
 const exec = promisify(execFile);
 const IFACE = process.env.NETWORK_INTERFACE || "wlP1p1s0";
@@ -14,10 +16,8 @@ const IW_SCAN_TIMEOUT = Number(process.env.IW_SCAN_TIMEOUT) || 15000;
 const TEST_MODE = process.env.CLAWBOX_TEST_MODE === "1";
 const AP_RETRY_COUNT = 3;
 const AP_RETRY_DELAY = 2000;
-const AP_START_SCRIPT =
-  process.env.AP_START_SCRIPT || "/home/clawbox/clawbox/scripts/start-ap.sh";
-const AP_STOP_SCRIPT =
-  process.env.AP_STOP_SCRIPT || "/home/clawbox/clawbox/scripts/stop-ap.sh";
+const AP_STOP_SCRIPT = "/usr/local/libexec/clawbox/stop-ap.sh";
+const startAPService = () => startRootStep("restart_ap", { timeoutMs: 450_000 });
 
 /** Parse one line of nmcli -t output, splitting on unescaped colons and
  *  unescaping `\:` and `\\` per nmcli's terse-output escaping rules. */
@@ -126,7 +126,7 @@ export async function scanWifiLive(): Promise<WifiNetwork[]> {
   if (TEST_MODE) return cloneTestNetworks();
   try {
     const stdout = await new Promise<string>((resolve, reject) => {
-      const proc = spawn("/usr/sbin/iw", ["dev", IFACE, "scan"]);
+      const proc = spawnWifiScan();
       let out = "";
       let err = "";
       const timer = setTimeout(() => { proc.kill(); reject(new Error("iw scan timed out")); }, IW_SCAN_TIMEOUT);
@@ -208,7 +208,7 @@ async function isAPMode(): Promise<boolean> {
 async function bringAPUp(): Promise<void> {
   for (let attempt = 1; attempt <= AP_RETRY_COUNT; attempt++) {
     try {
-      await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
+      await startAPService();
       const apUp = await isAPMode();
       if (apUp) {
         console.log(`[WiFi] AP restored (attempt ${attempt})`);
@@ -283,7 +283,7 @@ async function doScan(): Promise<WifiNetwork[]> {
 
   if (wasAP) {
     // Disconnect AP so the interface can scan in station mode
-    await exec("nmcli", ["connection", "down", "ClawBox-Setup"], { timeout: NETWORK_TIMEOUT }).catch(
+    await exec("bash", [AP_STOP_SCRIPT], { timeout: 240_000 }).catch(
       () => {}
     );
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -291,7 +291,7 @@ async function doScan(): Promise<WifiNetwork[]> {
 
   try {
     // Trigger a fresh scan
-    await exec("nmcli", ["device", "wifi", "rescan", "ifname", IFACE], { timeout: NETWORK_TIMEOUT }).catch(
+    await execWifiNmcli(["device", "wifi", "rescan", "ifname", IFACE], { timeout: NETWORK_TIMEOUT }).catch(
       () => {}
     );
     await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -303,6 +303,8 @@ async function doScan(): Promise<WifiNetwork[]> {
       "device",
       "wifi",
       "list",
+      "--rescan",
+      "no", // The explicit rescan above held radio ownership; this is a read.
       "ifname",
       IFACE,
     ], { timeout: NETWORK_TIMEOUT });
@@ -437,7 +439,7 @@ export async function switchToClient(
   writeConnectLock();
   try {
   // Stop the AP
-  await exec("bash", [AP_STOP_SCRIPT], { timeout: NETWORK_TIMEOUT });
+  await exec("bash", [AP_STOP_SCRIPT], { timeout: 240_000 });
 
   // Build args conditionally instead of splicing. `--wait 20` caps each attempt
   // so a doomed connect (e.g. wrong password) fails in ~20s instead of nmcli's
@@ -453,11 +455,11 @@ export async function switchToClient(
   let lastErr: unknown;
   let wrongKey = false;
   for (let attempt = 1; attempt <= CONNECT_RETRIES; attempt++) {
-    await exec("nmcli", ["device", "wifi", "rescan", "ifname", IFACE], { timeout: NETWORK_TIMEOUT }).catch(() => {});
+    await execWifiNmcli(["device", "wifi", "rescan", "ifname", IFACE], { timeout: NETWORK_TIMEOUT }).catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
     try {
-      const { stdout } = await exec("nmcli", args, { timeout: NETWORK_TIMEOUT });
+      const { stdout } = await execWifiNmcli(args, { timeout: NETWORK_TIMEOUT });
       console.log(`[WiFi] Connected on attempt ${attempt}: ${stdout.trim()}`);
       return { message: stdout.trim() };
     } catch (err) {
@@ -487,7 +489,7 @@ export async function switchToClient(
     // radio out of AP mode — so the ClawBox-Setup hotspot flaps and disappears
     // ("network could not be found") while the user is still on it. Removing it
     // lets the radio stay dedicated to the AP until the user retries.
-    await exec("nmcli", ["connection", "delete", ssid], { timeout: NETWORK_TIMEOUT }).catch(() => {});
+    await execWifiNmcli(["connection", "delete", ssid], { timeout: NETWORK_TIMEOUT }).catch(() => {});
 
     const AP_RESTORE_RETRIES = 3;
     const AP_RESTORE_BACKOFF = 3000;
@@ -500,12 +502,9 @@ export async function switchToClient(
 
     for (let attempt = 1; attempt <= AP_RESTORE_RETRIES; attempt++) {
       try {
-        // SKIP_PRESCAN: we don't need a fresh network scan just to bring the
-        // hotspot back — skip it so the wizard gets the connect verdict sooner.
-        await exec("bash", [AP_START_SCRIPT], {
-          timeout: NETWORK_TIMEOUT,
-          env: { ...process.env, SKIP_PRESCAN: "1" },
-        });
+        // The root service owns recovery, including its scan and cleanup.
+        // Do not pass web-controlled environment into a privileged startup.
+        await startAPService();
         // Verify AP is actually up
         const apUp = await isAPMode();
         if (apUp) {
@@ -527,13 +526,7 @@ export async function switchToClient(
 
     if (!apRestored) {
       console.error("[WiFi] All AP restore attempts failed after connect failure. Device may be unreachable.");
-      // Last resort: try nmcli directly
-      try {
-        await exec("nmcli", ["connection", "up", "ClawBox-Setup"], { timeout: NETWORK_TIMEOUT });
-        console.log("[WiFi] AP restored via direct nmcli fallback");
-      } catch (fallbackErr) {
-        console.error("[WiFi] Direct nmcli fallback also failed:", fallbackErr instanceof Error ? fallbackErr.message : fallbackErr);
-      }
+      // No bare-name or unsupervised fallback: the service owns recovery.
     }
 
     if (wrongKey) {
@@ -554,7 +547,7 @@ export async function restartAP(): Promise<void> {
     console.log("[WiFi] TEST_MODE: skipping AP restart");
     return;
   }
-  await exec("bash", [AP_START_SCRIPT], { timeout: NETWORK_TIMEOUT });
+  await startAPService();
 }
 
 export interface EthernetStatus {
