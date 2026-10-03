@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  classifyAnthropicFailure,
   DEFAULT_LIMIT_MS,
+  detectAnthropicAuthFailure,
   detectAnthropicLimit,
   effectiveStatus,
   formatResetClock,
   limitUntil,
   parseLimitReset,
   pickAccount,
+  pickForSpawn,
   poolHealth,
+  resolveActiveAccount,
   type PoolMember,
 } from "@/lib/anthropic-limit";
 
@@ -151,5 +155,117 @@ describe("rotation", () => {
 
   it("says a reset time as a 24-hour clock in the box's zone", () => {
     expect(formatResetClock(Date.UTC(2026, 8, 18, 19, 50), SOFIA)).toBe("22:50");
+  });
+});
+
+// ── TASK-1260: a refused credential, and the one active account ─────────────
+
+describe("detectAnthropicAuthFailure", () => {
+  it.each([
+    "Invalid API key · Please run /login",
+    "OAuth token revoked · Please run /login",
+    'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}',
+    '401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+    "OAuth token has been revoked",
+  ])("recognises %j as Anthropic refusing the credential", (text) => {
+    expect(detectAnthropicAuthFailure(text)).toBe(true);
+  });
+
+  it.each([
+    "You've hit your session limit · resets 10:50pm",
+    // A package registry's 401 is the run's business, not the account's.
+    "npm ERR! 401 Unauthorized - GET https://registry.npmjs.org/private-pkg",
+    "The build failed.",
+    "",
+  ])("does not take %j for a refused Anthropic credential", (text) => {
+    expect(detectAnthropicAuthFailure(text)).toBe(false);
+  });
+
+  it("reads only the head, like the limit parser: a run writing ABOUT 401s is not refused", () => {
+    expect(detectAnthropicAuthFailure(`${"I added a retry around the login flow. ".repeat(15)}Fixture: Invalid API key · Please run /login`)).toBe(false);
+  });
+});
+
+describe("classifyAnthropicFailure", () => {
+  it("prefers the limit when a line reads as both", () => {
+    expect(classifyAnthropicFailure("You've hit your weekly limit · resets Mon 9am — please run /login to switch", AT_2227_SOFIA, { timeZone: SOFIA }))
+      .toMatchObject({ type: "limit", limit: { kind: "weekly" } });
+  });
+
+  it("answers auth for a refused credential and null for anything else", () => {
+    expect(classifyAnthropicFailure("Invalid API key · Please run /login", AT_2227_SOFIA)).toEqual({ type: "auth" });
+    expect(classifyAnthropicFailure("The agent run failed before producing a reply.", AT_2227_SOFIA)).toBeNull();
+  });
+
+  it("takes the gateway's failover reason when its own copy carries no provider words", () => {
+    expect(classifyAnthropicFailure("⚠️ API rate limit reached. Please try again later.", AT_2227_SOFIA, { reason: "rate_limit" }))
+      .toEqual({ type: "limit", limit: { kind: "rate", resetsAt: null } });
+    expect(classifyAnthropicFailure("Your credit is exhausted", AT_2227_SOFIA, { reason: "billing" }))
+      .toEqual({ type: "limit", limit: { kind: "credit", resetsAt: null } });
+    expect(classifyAnthropicFailure("The provider refused the request.", AT_2227_SOFIA, { reason: "auth" })).toEqual({ type: "auth" });
+  });
+
+  it("never takes Anthropic's OVERLOAD for the account's cap, whatever the reason says", () => {
+    expect(classifyAnthropicFailure('529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', AT_2227_SOFIA, { reason: "rate_limit" })).toBeNull();
+  });
+
+  it("ignores a reason that says nothing about the account", () => {
+    expect(classifyAnthropicFailure("timed out", AT_2227_SOFIA, { reason: "timeout" })).toBeNull();
+  });
+});
+
+describe("the active account", () => {
+  const NOW_A = Date.UTC(2026, 8, 18, 12, 0);
+  const ok = (id: string): PoolMember => ({ id, status: "ok", limitedUntil: null });
+  const limited = (id: string, until: number): PoolMember => ({ id, status: "limited", limitedUntil: until });
+
+  it("stays on the active account while it can answer, even when an earlier one is back (sticky)", () => {
+    const pool = [ok("a"), ok("b"), ok("c")];
+    expect(resolveActiveAccount(pool, "b", NOW_A)?.id).toBe("b");
+  });
+
+  it("moves to the first usable account in order when the active one cannot answer", () => {
+    expect(resolveActiveAccount([limited("a", NOW_A + 60_000), limited("b", NOW_A + 60_000), ok("c")], "b", NOW_A)?.id).toBe("c");
+    expect(resolveActiveAccount([ok("a"), limited("b", NOW_A + 60_000), ok("c")], "b", NOW_A)?.id).toBe("a");
+  });
+
+  it("goes back to the first usable account with returnToPrimary, and after the owner's reorder", () => {
+    const pool = [ok("a"), ok("b")];
+    expect(resolveActiveAccount(pool, "b", NOW_A, { returnToPrimary: true })?.id).toBe("a");
+    expect(resolveActiveAccount(pool, "b", NOW_A, { reselect: true })?.id).toBe("a");
+  });
+
+  it("answers null when no account can answer, and the first one back once its limit is over", () => {
+    const pool = [limited("a", NOW_A + 10_000), limited("b", NOW_A + 5_000)];
+    expect(resolveActiveAccount(pool, "a", NOW_A)).toBeNull();
+    expect(resolveActiveAccount(pool, null, NOW_A + 6_000)?.id).toBe("b");
+  });
+
+  it("hands a spawn the active account, and another usable one when the caller excludes it", () => {
+    const pool = [ok("a"), ok("b"), ok("c")];
+    expect(pickForSpawn(pool, "b", NOW_A)?.id).toBe("b");
+    expect(pickForSpawn(pool, "b", NOW_A, new Set(["b"]))?.id).toBe("a");
+    expect(pickForSpawn(pool, null, NOW_A)?.id).toBe("a");
+  });
+});
+
+describe("a bare rate limit from something that does not retry it (TASK-1260 review)", () => {
+  it("is a throttle, not yet a limit, when neither the words nor the reason give a reset time", () => {
+    expect(classifyAnthropicFailure('HTTP 429: {"type":"error","error":{"type":"rate_limit_error"}}', AT_2227_SOFIA, { transientRate: true }))
+      .toEqual({ type: "throttled" });
+    expect(classifyAnthropicFailure("⚠️ API rate limit reached.", AT_2227_SOFIA, { reason: "rate_limit", transientRate: true }))
+      .toEqual({ type: "throttled" });
+  });
+
+  it("stays a limit when the words say it is the account's cap, or give the time it lifts", () => {
+    expect(classifyAnthropicFailure("429 rate_limit_error: You've hit your weekly limit · resets Mon 9am", AT_2227_SOFIA, { timeZone: SOFIA, transientRate: true }))
+      .toMatchObject({ type: "limit", limit: { kind: "weekly" } });
+    expect(classifyAnthropicFailure("rate limited, resets 10:50pm", AT_2227_SOFIA, { timeZone: SOFIA, reason: "rate_limit", transientRate: true }))
+      .toMatchObject({ type: "limit", limit: { kind: "rate", resetsAt: Date.UTC(2026, 8, 18, 19, 50) } });
+  });
+
+  it("is still a limit for Claude Code, which has already backed off and retried it", () => {
+    expect(classifyAnthropicFailure('HTTP 429: {"type":"error","error":{"type":"rate_limit_error"}}', AT_2227_SOFIA))
+      .toEqual({ type: "limit", limit: { kind: "rate", resetsAt: null } });
   });
 });

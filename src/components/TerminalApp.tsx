@@ -22,6 +22,13 @@
  * on screen holds a WebGL context; a browser allows a page about sixteen.
  * Character widths follow Unicode 11, so an emoji takes the two cells the
  * shell counted for it.
+ *
+ * With `persist` (the desktop's Terminal windows, TASK-1306) the shell is a
+ * SESSION on the box that outlives this page: a refresh, a closed tab or a
+ * dropped connection leaves it running, and the terminal that comes back
+ * reattaches by id and is shown what it missed (scripts/terminal-sessions.mjs).
+ * A session that no longer exists — the box restarted, nobody reattached for
+ * hours — is said as such, never replaced by a fresh shell that looks like it.
  */
 
 import React, {
@@ -33,8 +40,10 @@ import React, {
 import dynamic from "next/dynamic";
 import { createPortal } from "react-dom";
 import { useTr } from "@/lib/i18n-floor";
+import { SESSION_SWITCH_EVENT } from "@/lib/session-switch";
 import { DESKTOP_LAYERS, shelfHeight } from "@/lib/window-snap";
-import { WINDOW_CHROME } from "@/lib/window-chrome";
+import { WINDOW_CHROME, useWindowChrome } from "@/lib/window-chrome";
+import { terminalWsUrl } from "@/lib/terminal-sessions";
 import {
   TERMINAL_FONTS,
   TERMINAL_THEMES,
@@ -77,6 +86,54 @@ export interface TerminalAppProps {
   onOpenSettings?: () => void;
   /** The shell rang the bell (with the visual bell on) — the strip marks a tab behind the front one. */
   onBell?: () => void;
+  /**
+   * The shell is a session on the box that outlives this page (TASK-1306):
+   * closing the socket leaves it running, and a reconnect — this page's after a
+   * dropped network, or the next page's after a refresh — reattaches to it.
+   * Without it the shell ends with its socket, as it always did.
+   */
+  persist?: boolean;
+  /** The session to reattach to when the terminal mounts (a restored tab's); read once. */
+  session?: string;
+  /** Told the id of each session this terminal starts or reattaches to. */
+  onSession?: (id: string) => void;
+}
+
+interface XtermModules {
+  Terminal: typeof import("@xterm/xterm").Terminal;
+  FitAddon: typeof import("@xterm/addon-fit").FitAddon;
+  WebLinksAddon: typeof import("@xterm/addon-web-links").WebLinksAddon;
+  /** Unicode 11 widths; null where the addon would not load (xterm's own tables then). */
+  Unicode11Addon: typeof import("@xterm/addon-unicode11").Unicode11Addon | null;
+}
+
+let xtermModules: Promise<XtermModules> | null = null;
+
+/**
+ * xterm and its addons, loaded ONCE however many terminals ask at the same
+ * moment — a restored desktop mounts every Terminal tab at once (TASK-1306).
+ * A load that fails is not kept: the next Reconnect loads again.
+ */
+function loadXtermModules(): Promise<XtermModules> {
+  if (!xtermModules) {
+    const loading = (async () => {
+      const { Terminal } = await import("@xterm/xterm");
+      const { FitAddon } = await import("@xterm/addon-fit");
+      const { WebLinksAddon } = await import("@xterm/addon-web-links");
+      let Unicode11Addon: XtermModules["Unicode11Addon"] = null;
+      try {
+        ({ Unicode11Addon } = await import("@xterm/addon-unicode11"));
+      } catch {
+        // xterm's own Unicode 6 tables: emoji may count as one cell.
+      }
+      return { Terminal, FitAddon, WebLinksAddon, Unicode11Addon };
+    })();
+    xtermModules = loading;
+    loading.catch(() => {
+      if (xtermModules === loading) xtermModules = null;
+    });
+  }
+  return xtermModules;
 }
 
 /** The default face's stack, as the rest of the desktop has always read it. */
@@ -317,13 +374,116 @@ interface ContextMenuState {
   hasSelection: boolean;
 }
 
+/**
+ * How often, at most, the PTY is told a new size while the grid keeps
+ * changing — under an edge drag the grid follows the pointer frame by frame,
+ * and each size the PTY hears is a SIGWINCH on which a full-screen program
+ * (claude, htop, vim) redraws its whole screen and streams it back: up to
+ * sixty a second. The first change of a burst still goes at once and the size
+ * the grid settles on always goes last, so a single resize — maximize, a tab
+ * coming forward, a font that loaded — is heard exactly as before.
+ */
+export const PTY_RESIZE_INTERVAL_MS = 100;
+
+/**
+ * The clock that interval is measured on: monotonic, because the box has no
+ * RTC and its wall clock jumps at NTP sync (the reason src/lib/visible-interval.ts
+ * keeps one too).
+ */
+function monotonicNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+
+/**
+ * The longest a width or height TRANSITION of the window around a terminal
+ * may hold its fit back (see `watchResizeTransitions`). The window's own
+ * glides are 200 ms; this is only the floor under a transition whose end is
+ * never reported — its element taken off the page mid-glide — so the grid is
+ * never left at the old size for good.
+ */
+export const RESIZE_TRANSITION_WATCHDOG_MS = 1000;
+
+/**
+ * Whether something AROUND `el` — the window it is drawn in, a panel holding
+ * it — is in a CSS transition of its width or height, and `onSettled` when the
+ * last such transition ends.
+ *
+ * A snapped window glides to its zone for 200 ms (ChromeWindow's left / top /
+ * width / height transition), and glides again whenever the desktop changes
+ * shape under it — the docked chat opened, closed or dragged wider, the kiosk
+ * bar, the monitors. Fitted frame by frame, the terminal re-laid its grid and
+ * reflowed its scrollback about twelve times per glide, and told the PTY each
+ * size, on which a full-screen program redrew its whole screen each time. The
+ * grid is fitted once instead, to the size the window comes to rest at.
+ *
+ * Counted per element and property from `transitionrun` to `transitionend` or
+ * `transitioncancel` (the events bubble, so the document hears every one), so
+ * a glide that is retargeted mid-way — the chat dragged wider — stays one
+ * glide whatever order the cancel and the new run arrive in. An end whose run
+ * was never seen (it started before the terminal did) changes nothing.
+ */
+export function watchResizeTransitions(el: HTMLElement, onSettled: () => void): { running: () => boolean; dispose: () => void } {
+  const doc = el.ownerDocument;
+  const inFlight = new Map<EventTarget, Map<string, number>>();
+  let watchdog: ReturnType<typeof setTimeout> | null = null;
+  const settle = () => {
+    if (watchdog !== null) clearTimeout(watchdog);
+    watchdog = null;
+    inFlight.clear();
+    onSettled();
+  };
+  // Only a width or height, and only of something that holds this terminal:
+  // a button's hover colour or a sidebar beside it is none of its business.
+  const resizes = (e: Event): EventTarget | null => {
+    const property = (e as TransitionEvent).propertyName;
+    if (property !== "width" && property !== "height") return null;
+    const target = e.target as Node | null;
+    return target && typeof target.contains === "function" && target.contains(el) ? target : null;
+  };
+  const begin = (e: Event) => {
+    const target = resizes(e);
+    if (!target) return;
+    const property = (e as TransitionEvent).propertyName;
+    let counts = inFlight.get(target);
+    if (!counts) inFlight.set(target, (counts = new Map()));
+    counts.set(property, (counts.get(property) ?? 0) + 1);
+    if (watchdog === null) watchdog = setTimeout(settle, RESIZE_TRANSITION_WATCHDOG_MS);
+  };
+  const end = (e: Event) => {
+    const target = resizes(e);
+    const counts = target ? inFlight.get(target) : undefined;
+    if (!target || !counts) return;
+    const property = (e as TransitionEvent).propertyName;
+    const left = (counts.get(property) ?? 0) - 1;
+    if (left < 0) return;
+    if (left > 0) counts.set(property, left);
+    else counts.delete(property);
+    if (counts.size === 0) inFlight.delete(target);
+    if (inFlight.size === 0) settle();
+  };
+  doc.addEventListener("transitionrun", begin);
+  doc.addEventListener("transitionend", end);
+  doc.addEventListener("transitioncancel", end);
+  return {
+    running: () => inFlight.size > 0,
+    dispose: () => {
+      doc.removeEventListener("transitionrun", begin);
+      doc.removeEventListener("transitionend", end);
+      doc.removeEventListener("transitioncancel", end);
+      if (watchdog !== null) clearTimeout(watchdog);
+      watchdog = null;
+      inFlight.clear();
+    },
+  };
+}
+
 /** The menu's width and height, for keeping it inside the viewport. */
 const MENU_W = 240;
 const MENU_H = 270;
 
 const IS_MAC = isMacPlatform();
 
-function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSettings, onBell }: TerminalAppProps) {
+function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSettings, onBell, persist = false, session, onSession }: TerminalAppProps) {
   const tr = useTr();
   // Read through a ref for the same reason `initialCommand` is: `connect` must
   // not change identity — and with it the live socket's handlers — because the
@@ -346,6 +506,20 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   const onBellRef = useRef(onBell);
   useEffect(() => { onBellRef.current = onBell; }, [onBell]);
   const activeRef = useRef(active);
+  // Whether the WINDOW is the one in front. A restored desktop mounts every
+  // terminal at once; only the focused window's may take the keyboard, or the
+  // last terminal to connect would steal it from whatever had the focus.
+  const windowChrome = useWindowChrome();
+  const windowActive = windowChrome ? windowChrome.active : true;
+  const windowActiveRef = useRef(windowActive);
+  useEffect(() => { windowActiveRef.current = windowActive; }, [windowActive]);
+  // The device session (see `persist`): the one to reattach to on the next
+  // connect, or null to start one. Read once from the prop — afterwards the
+  // server's `started`/`attached` answers are what move it.
+  const persistRef = useRef(persist);
+  const sessionRef = useRef<string | null>(persist && session ? session : null);
+  const onSessionRef = useRef(onSession);
+  useEffect(() => { onSessionRef.current = onSession; }, [onSession]);
   // Read by the key handler xterm calls before it forwards a key to the
   // shell, so an Escape meant for the menu never reaches the PTY.
   const menuOpenRef = useRef(false);
@@ -359,11 +533,18 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   const webglRef = useRef<XWebglAddon | null>(null);
   const webglLoadingRef = useRef(false);
   const fitFrameRef = useRef<number | null>(null);
+  // The window around the terminal is gliding to a new size (see
+  // `watchResizeTransitions`): a fit asked for meanwhile is held, and made
+  // once when the glide ends.
+  const resizeTransitionsRef = useRef<{ running: () => boolean } | null>(null);
+  const fitHeldRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
   // `exited`: the SHELL ended — `exit`, Ctrl+D — as opposed to the connection
   // to it going away. The first is the owner's doing and gets no retry; the
-  // second is a dropped socket and gets one (sweep FT-4).
-  type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error" | "exited";
+  // second is a dropped socket and gets one (sweep FT-4). `gone`: the session
+  // this terminal was to reattach to no longer exists on the box; like an
+  // ended shell, a new one is one Enter or Reconnect away and never automatic.
+  type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error" | "exited" | "gone";
   const statusRef = useRef<ConnectionStatus>("connecting");
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   // The Reconnect button's action, read by the key handler installed once at
@@ -376,6 +557,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   // resize observer, the touch handlers.
   const terminalCleanupRef = useRef<Array<() => void>>([]);
   const connectLockRef = useRef(false);
+  // The page is leaving for another session (TASK-1247): nothing reconnects on
+  // its own any more. Only the Reconnect button — a person asking for a shell
+  // on whatever session this browser now holds — clears it.
+  const sessionLeftRef = useRef(false);
   // Held from connect until the shell's FIRST byte of output. Sending on
   // `onopen` instead would type into a PTY whose shell has not been exec'd
   // yet on a loaded Orin; waiting for output means the shell demonstrably
@@ -393,9 +578,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   // the page — the production server proxies `/terminal-ws` upgrades to
   // 127.0.0.1:3006. Using the same origin means it works on the LAN, through
   // the Cloudflare tunnel, and under HTTPS (mixed-content-safe).
-  const wsUrl = typeof window !== "undefined"
-    ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/terminal-ws`
-    : "ws://localhost/terminal-ws";
+  const wsUrl = terminalWsUrl();
 
   const updateStatus = useCallback((s: typeof status) => {
     statusRef.current = s;
@@ -426,11 +609,17 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   }, [showNotice]);
 
   // One fit per frame, however many things asked for it. A panel that is not
-  // on screen has no size to fit to and is fitted when it comes back.
+  // on screen has no size to fit to and is fitted when it comes back. One
+  // whose window is mid-glide is fitted when the glide ends.
   const scheduleFit = useCallback(() => {
     if (fitFrameRef.current !== null || typeof requestAnimationFrame !== "function") return;
     fitFrameRef.current = requestAnimationFrame(() => {
       fitFrameRef.current = null;
+      if (resizeTransitionsRef.current?.running()) {
+        fitHeldRef.current = true;
+        return;
+      }
+      fitHeldRef.current = false;
       const el = containerRef.current;
       if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
       try { fitAddonRef.current?.fit(); } catch { /* not open yet */ }
@@ -511,12 +700,42 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   /** Everything that lives as long as the xterm instance, wired once after it opens. */
   const wireTerminal = useCallback((term: XTerm, el: HTMLElement) => {
     const cleanup = terminalCleanupRef.current;
-    // xterm's own resize (a fit that changed the grid) is what the PTY hears.
-    const resizeSub = term.onResize?.(({ cols, rows }) => {
+    // xterm's own resize (a fit that changed the grid) is what the PTY hears —
+    // at once, then at most once per PTY_RESIZE_INTERVAL_MS while the grid
+    // keeps changing, the latest size last (see the constant). A socket that
+    // is not open drops it, as before: `onopen` sends the grid's size anyway.
+    // (A window GLIDING to a new size changes the grid once, at its end: see
+    // `watchResizeTransitions` below.)
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    let resizePending: { cols: number; rows: number } | null = null;
+    let resizeSentAt = -Infinity;
+    const sendResize = () => {
+      resizeTimer = null;
+      const size = resizePending;
+      resizePending = null;
       const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      if (!size || !ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
+      resizeSentAt = monotonicNow();
+    };
+    const resizeSub = term.onResize?.(({ cols, rows }) => {
+      resizePending = { cols, rows };
+      // A send is already due: it takes this size with it.
+      if (resizeTimer !== null) return;
+      // On the MONOTONIC clock: the box has no RTC and NTP steps its wall
+      // clock, backwards too. Measured by Date.now(), a step back of an hour
+      // made this wait an hour — the pending size held in a timer, every later
+      // resize joining it, and a full-screen program drawing at the wrong size
+      // all that time.
+      const wait = resizeSentAt + PTY_RESIZE_INTERVAL_MS - monotonicNow();
+      if (wait <= 0) sendResize();
+      else resizeTimer = setTimeout(sendResize, wait);
     });
     if (resizeSub) cleanup.push(() => resizeSub.dispose());
+    cleanup.push(() => {
+      if (resizeTimer !== null) clearTimeout(resizeTimer);
+      resizeTimer = null;
+    });
     const bellSub = term.onBell?.(() => {
       if (settingsRef.current.bell !== "visual") return;
       setBellFlash((n) => n + 1);
@@ -528,6 +747,16 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       ro.observe(el);
       cleanup.push(() => ro.disconnect());
     }
+    // Held through a glide of the window, fitted once at its end — which is
+    // also the one size the PTY hears for it.
+    const transitions = watchResizeTransitions(el, () => {
+      if (fitHeldRef.current) scheduleFit();
+    });
+    resizeTransitionsRef.current = transitions;
+    cleanup.push(() => {
+      transitions.dispose();
+      if (resizeTransitionsRef.current === transitions) resizeTransitionsRef.current = null;
+    });
     // A move to a screen with another pixel ratio (or a browser zoom) changes
     // the cell's size in CSS pixels without changing the element's.
     if (typeof window.matchMedia === "function") {
@@ -554,9 +783,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     if (connectLockRef.current) return;
     connectLockRef.current = true;
 
-    const { Terminal } = await import("@xterm/xterm");
-    const { FitAddon } = await import("@xterm/addon-fit");
-    const { WebLinksAddon } = await import("@xterm/addon-web-links");
+    const { Terminal, FitAddon, WebLinksAddon, Unicode11Addon } = await loadXtermModules();
     // Unmounted while the modules loaded: nothing to draw into, and the
     // lock goes back so a remount can connect.
     if (!mountedRef.current || !containerRef.current) { connectLockRef.current = false; return; }
@@ -602,12 +829,13 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       term.loadAddon(fitAddon);
       term.loadAddon(new WebLinksAddon());
       // Widths are decided as text is written, so before anything is.
-      try {
-        const { Unicode11Addon } = await import("@xterm/addon-unicode11");
-        term.loadAddon(new Unicode11Addon());
-        term.unicode.activeVersion = "11";
-      } catch {
-        // xterm's own Unicode 6 tables: emoji may count as one cell.
+      if (Unicode11Addon) {
+        try {
+          term.loadAddon(new Unicode11Addon());
+          term.unicode.activeVersion = "11";
+        } catch {
+          // xterm's own Unicode 6 tables: emoji may count as one cell.
+        }
       }
       if (!mountedRef.current || !containerRef.current) { term.dispose(); connectLockRef.current = false; return; }
 
@@ -624,7 +852,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
         }
         // The shell is gone and the socket with it: Enter is the offer the
         // status bar makes, and there is nothing else for the key to reach.
-        if (statusRef.current === "exited" && ev.key === "Enter") {
+        if ((statusRef.current === "exited" || statusRef.current === "gone") && ev.key === "Enter") {
           if (ev.type === "keydown") reconnectRef.current();
           return false;
         }
@@ -692,8 +920,14 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     const query = new URLSearchParams();
     if (shell) query.set("shell", shell);
     if (cwd) query.set("cwd", cwd);
+    // A device session: the one this terminal was showing, or a new one.
+    if (persistRef.current) query.set("session", sessionRef.current ?? "new");
     const queryString = query.toString();
     const connectUrl = queryString ? `${wsUrl}?${queryString}` : wsUrl;
+
+    // The session changed while the modules above loaded: the page is on its
+    // way to the new one, so no shell is opened from this one.
+    if (sessionLeftRef.current) { connectLockRef.current = false; return; }
 
     let ws: WebSocket;
     try {
@@ -725,7 +959,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       if (!mountedRef.current) { ws.close(); return; }
       updateStatus("connected");
       term.clear();
-      if (activeRef.current) term.focus();
+      if (activeRef.current && windowActiveRef.current) term.focus();
 
       // Send initial size; later changes go out from xterm's onResize.
       ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
@@ -748,7 +982,30 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
             pendingCommandRef.current = null;
             ws.send(JSON.stringify({ type: "input", data: `${pending}\r` }));
           }
+        } else if (msg.type === "attached") {
+          // Back on the session this terminal was showing: its scrollback
+          // follows as one replay, so the screen starts from nothing rather
+          // than printing it twice after a dropped connection. The shell is
+          // already running whatever it was given — nothing is typed into it.
+          pendingCommandRef.current = null;
+          if (typeof msg.session === "string") {
+            sessionRef.current = msg.session;
+            onSessionRef.current?.(msg.session);
+          }
+          term.reset();
+        } else if (msg.type === "gone") {
+          // The session is not on the box any more: said, and left at that.
+          // The next Enter or Reconnect starts a new shell; until then a
+          // refresh says the same again rather than opening one silently.
+          pendingCommandRef.current = null;
+          sessionRef.current = null;
+          term.writeln(`\r\n\x1b[33m${trRef.current("terminal.sessionGone", "This terminal's session no longer exists on the box — it ended when the box restarted or after it was left unattended. Press Enter or Reconnect to start a new shell")}\x1b[0m`);
+          updateStatus("gone");
         } else if (msg.type === "started") {
+          if (persistRef.current && typeof msg.session === "string") {
+            sessionRef.current = msg.session;
+            onSessionRef.current?.(msg.session);
+          }
           // The server could not honour a chosen shell or folder and started
           // the box's default instead: said once, dimmed, above the prompt.
           if (typeof msg.shellRefused === "string" && typeof msg.shell === "string") {
@@ -758,6 +1015,9 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
             term.writeln(`\x1b[2m${trRef.current("terminal.cwdFallback", "{cwd} is not a folder on this box — started in {fallback}", { cwd: msg.cwdRefused, fallback: msg.cwd })}\x1b[0m`);
           }
         } else if (msg.type === "exit") {
+          // The next Enter starts a new session; the tab keeps naming this one
+          // until then, so a refresh still shows how it ended.
+          sessionRef.current = null;
           term.writeln(`\r\n\x1b[33m[Process exited with code ${msg.code}]\x1b[0m`);
           term.writeln(`\x1b[2m${trRef.current("terminal.shellEnded", "The shell ended — press Enter or Reconnect to start a new one")}\x1b[0m`);
           updateStatus("exited");
@@ -783,7 +1043,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       // reported as one and respawned a shell three seconds later, with the
       // window's own URL in the bar (sweep FT-4). A new shell is one Enter or
       // Reconnect away instead.
-      if (statusRef.current === "exited") return;
+      if (statusRef.current === "exited" || statusRef.current === "gone") return;
       if (statusRef.current !== "error") {
         updateStatus("disconnected");
         if (ev.code !== 1000) {
@@ -823,6 +1083,42 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Session switch (TASK-1247) ────────────────────────────────────────
+  // This page is leaving its session — its own Switch user, or a sign-in or
+  // sign-out another tab announced (src/lib/session-switch.ts). The socket was
+  // authorised ONCE, at upgrade, with the previous cookie, and the proxy never
+  // looks again, so the shell behind it belongs to the previous session: it is
+  // closed now rather than whenever the navigation gets round to it. A clean
+  // close, and no 3 s retry — a retry would reach the new session from a page
+  // that is being replaced. Ordinary drops keep their retry (see `onclose`).
+  useEffect(() => {
+    const leave = () => {
+      sessionLeftRef.current = true;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      inputDisposableRef.current?.dispose();
+      inputDisposableRef.current = null;
+      pendingCommandRef.current = null;
+      const ws = wsRef.current;
+      if (ws) {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        try { ws.close(1000, "session switched"); } catch { /* already closed */ }
+        wsRef.current = null;
+        // A socket still opening held the connect lock; its handlers are gone,
+        // so nothing else would lower it and Reconnect would be a no-op.
+        connectLockRef.current = false;
+      }
+      if (mountedRef.current && statusRef.current !== "exited") updateStatus("disconnected");
+    };
+    window.addEventListener(SESSION_SWITCH_EVENT, leave);
+    return () => window.removeEventListener(SESSION_SWITCH_EVENT, leave);
+  }, [updateStatus]);
 
   // ── Settings, live ────────────────────────────────────────────────────
   useEffect(() => {
@@ -885,7 +1181,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   // Re-focus terminal when the window becomes visible/active
   useEffect(() => {
     const refocus = () => {
-      if (!active) return;
+      if (!active || !windowActiveRef.current) return;
       if (termRef.current && statusRef.current === "connected") {
         termRef.current.focus();
       }
@@ -1015,7 +1311,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     if (xtermTextarea && document.activeElement !== xtermTextarea) {
       // Try to focus xterm first
       termRef.current?.focus();
-      if (statusRef.current === "exited") {
+      if (statusRef.current === "exited" || statusRef.current === "gone") {
         if (e.key === "Enter") { e.preventDefault(); reconnectRef.current(); }
         return;
       }
@@ -1053,6 +1349,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     disconnected: "bg-gray-500",
     error: "bg-red-400",
     exited: "bg-gray-500",
+    gone: "bg-amber-400",
   }[status];
 
   const statusLabel = {
@@ -1064,9 +1361,11 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     // scrollback where Enter is the next keystroke, and the button it names
     // is the next thing in this row.
     exited: tr("terminal.exited", "Shell ended"),
+    gone: tr("terminal.sessionGoneStatus", "Session no longer exists"),
   }[status];
 
   const handleReconnect = useCallback(() => {
+    sessionLeftRef.current = false;
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
     if (wsRef.current) {
       wsRef.current.onclose = null;
@@ -1100,7 +1399,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
           </span>
           {/* The socket's address is a diagnostic for a connection that
               failed; a shell the owner ended has nothing to diagnose. */}
-          {status !== "exited" && (
+          {status !== "exited" && status !== "gone" && (
             <span className="text-xs font-mono ml-1 min-w-0 truncate" style={{ opacity: 0.45 }}>
               — {wsUrl}
             </span>

@@ -219,17 +219,32 @@ export async function announceCodingAgent(run: CodingRun): Promise<void> {
  * id, and this would have taken the place of the run's own finish notice.
  */
 export type AnthropicLimitNotice =
-  | { kind: "switched"; fromLabel: string; toLabel: string; resetAt: number; runId: string | null }
+  | {
+    kind: "switched";
+    /** What took the account out (TASK-1260): its usage limit, or Anthropic refusing its credential. Absent is a limit. */
+    reason?: "limit" | "auth";
+    fromLabel: string;
+    toLabel: string;
+    resetAt: number | null;
+    runId: string | null;
+  }
   | { kind: "all_limited"; resetAt: number | null; runId: string | null };
 
 export function buildAnthropicLimitNotice(notice: AnthropicLimitNotice, timeZone?: string): string {
   if (notice.kind === "switched") {
-    return `Anthropic account "${notice.fromLabel}" hit its usage limit (back at ${formatResetClock(notice.resetAt, timeZone)}).`
-      + ` ClawBox switched to "${notice.toLabel}"${notice.runId ? ` and ${notice.runId} carried on` : ""}.`;
+    const why = notice.reason === "auth"
+      ? `was refused by Anthropic and needs to be signed in again (Settings → Providers)`
+      : notice.resetAt !== null
+        ? `hit its usage limit (back at ${formatResetClock(notice.resetAt, timeZone)})`
+        : "hit its usage limit";
+    // Since TASK-1260 the switch moves every Claude consumer on the box, not
+    // only the run that hit it: the chat and its scheduled tasks too.
+    return `Anthropic account "${notice.fromLabel}" ${why}.`
+      + ` ClawBox switched everything that uses Claude to "${notice.toLabel}"${notice.runId ? ` and ${notice.runId} carried on` : ""}.`;
   }
   const when = notice.resetAt !== null ? `at ${formatResetClock(notice.resetAt, timeZone)}` : "as soon as one is back";
   return `Every Anthropic account on this ClawBox is at its usage limit.`
-    + ` Coding runs are waiting instead of failing, and pick up again ${when}.`;
+    + ` Coding runs and the chat's Claude work are waiting instead of failing, and pick up again ${when}.`;
 }
 
 export async function announceAnthropicLimit(notice: AnthropicLimitNotice): Promise<void> {

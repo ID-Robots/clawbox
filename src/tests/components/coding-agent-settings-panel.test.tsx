@@ -65,6 +65,7 @@ function stubFetch(
     maxParallelRuns?: number;
     gitAuthorName?: string | null;
     gitAuthorEmail?: string | null;
+    prBodyIncludesTask?: string;
   },
   opts: {
     resolveTo?: string;
@@ -93,6 +94,9 @@ function stubFetch(
     noGitAuthor?: boolean;
     /** The route's own refusal of an address that is not one. */
     rejectAuthor?: string;
+    /** A server from before TASK-1366: no field for how much of the task a pull
+     *  request carries, so the select must not be drawn. */
+    noPrBodyTask?: boolean;
   } = {},
 ) {
   posts = [];
@@ -115,6 +119,7 @@ function stubFetch(
   // what every box did before the setting existed.
   let gitAuthorName: string | null = status.gitAuthorName ?? null;
   let gitAuthorEmail: string | null = status.gitAuthorEmail ?? null;
+  let prBodyIncludesTask = status.prBodyIncludesTask ?? "summary";
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -141,6 +146,7 @@ function stubFetch(
     ...(opts.noCompletionAttempts ? {} : { completionAttempts, minCompletionAttempts: 1, maxCompletionAttempts: 6 }),
     ...(opts.noMaxParallelRuns ? {} : { maxParallelRuns, minMaxParallelRuns: 1, maxMaxParallelRuns: 4 }),
     ...(opts.noGitAuthor ? {} : { gitAuthorName, gitAuthorEmail, maxGitAuthorChars: 200 }),
+    ...(opts.noPrBodyTask ? {} : { prBodyIncludesTask }),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -211,6 +217,7 @@ function stubFetch(
         if ("gitAuthorEmail" in body) gitAuthorEmail = body.gitAuthorEmail;
       }
       if (typeof body.autoMerge === "boolean") autoMerge = body.autoMerge;
+      if (typeof body.prBodyIncludesTask === "string") prBodyIncludesTask = body.prBodyIncludesTask;
       if (typeof body.completionAttempts === "number") completionAttempts = body.completionAttempts;
       if (typeof body.maxParallelRuns === "number") {
         if (body.maxParallelRuns < 1 || body.maxParallelRuns > 4) {
@@ -969,6 +976,47 @@ describe("the review loop", () => {
     expect(screen.queryByTestId("coding-agent-review-rounds")).toBeNull();
     expect(screen.queryByRole("switch", { name: MERGE })).toBeNull();
     expect(screen.queryByText(ROUNDS)).toBeNull();
+  });
+});
+
+/**
+ * How much of the run's task the box's pull request carries (TASK-1366). Its
+ * one-line explanation is ON the card, not behind a tip: it is where the owner
+ * learns what the box takes out before publishing.
+ */
+describe("the task text in the pull request", () => {
+  const LABEL = translations.en["codingAgent.prBodyIncludesTaskLabel"];
+  const HINT = translations.en["codingAgent.prBodyIncludesTaskHint"];
+
+  it("shows the stored choice with its explanation, offers the three the route takes, and saves a new one", async () => {
+    stubFetch({ enabled: true, readiness: READY });
+    render(<CodingAgentSettingsPanel />);
+    const select = await screen.findByLabelText(LABEL) as HTMLSelectElement;
+    expect(select.value).toBe("summary");
+    expect(screen.getByText(HINT)).toBeTruthy();
+    expect([...select.querySelectorAll("option")].map((o) => [o.value, o.textContent])).toEqual([
+      ["summary", translations.en["codingAgent.prBodyIncludesTaskSummary"]],
+      ["full-redacted", translations.en["codingAgent.prBodyIncludesTaskFullRedacted"]],
+      ["none", translations.en["codingAgent.prBodyIncludesTaskNone"]],
+    ]);
+
+    fireEvent.change(select, { target: { value: "none" } });
+    await waitFor(() => { expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { prBodyIncludesTask: "none" } }); });
+    await waitFor(() => { expect((screen.getByTestId("coding-agent-pr-body-task") as HTMLSelectElement).value).toBe("none"); });
+  });
+
+  it("shows what the device has stored", async () => {
+    stubFetch({ enabled: true, readiness: READY, prBodyIncludesTask: "full-redacted" });
+    render(<CodingAgentSettingsPanel />);
+    expect((await screen.findByTestId("coding-agent-pr-body-task") as HTMLSelectElement).value).toBe("full-redacted");
+  });
+
+  it("is not drawn on a server that predates the setting", async () => {
+    stubFetch({ enabled: true, readiness: READY }, { noPrBodyTask: true });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByRole("switch", { name: SWITCH });
+    expect(screen.queryByTestId("coding-agent-pr-body-task")).toBeNull();
+    expect(screen.queryByText(HINT)).toBeNull();
   });
 });
 

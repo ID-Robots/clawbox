@@ -38,6 +38,7 @@ import VNCApp, { type VNCHandle } from "./VNCApp";
 import BrowserSetupWizard from "./BrowserSetupWizard";
 import BrowserSettingsPanel, { type BrowserStatus } from "./BrowserSettingsPanel";
 import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY } from "./coding-agent-ui";
+import { openInKiosk } from "@/lib/kiosk-tabs-client";
 
 const BRAND_ORANGE = "#fe6e00";
 
@@ -181,7 +182,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
       onOpenApp("vnc");
       return;
     }
-    window.open("/app/vnc", "_blank");
+    openInKiosk("/app/vnc", "");
   }, [onOpenApp]);
 
   const chromiumInstalled = status?.chromium?.installed ?? false;

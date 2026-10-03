@@ -11,10 +11,12 @@ vi.mock("@/lib/i18n", () => ({
 /**
  * A docked chat narrows the desktop, nothing more: every window keeps its own
  * size and place, can still be dragged, resized and maximized — and the one
- * that IS maximized sits DESKTOP_GAP inside the desktop on every side, the way
- * the chat floats, with the same gap as its right-hand margin — the chat and
- * the window share one number. (For a while every window was forced to fill
- * the pane beside the chat; the owner asked for the windows back.)
+ * that IS maximized fills the strip beside the chat edge to edge, ending where
+ * the desktop's reserve (the panel's width plus DESKTOP_GAP) begins, so the
+ * only margin on screen is the chat's own. (For a while every window was
+ * forced to fill the pane beside the chat; the owner asked for the windows
+ * back. Until 2026-09-30 a maximized window kept DESKTOP_GAP on every side;
+ * the owner asked for those paddings to go.)
  */
 
 // What page.tsx hands over: the docked panel's width plus the one gap.
@@ -56,16 +58,24 @@ describe("a window beside a docked chat", () => {
     expect(screen.getByRole("button", { name: "window.maximize" })).toBeInTheDocument();
   });
 
-  it("sits a margin inside the desktop when maximized, the same margin between it and the chat", () => {
+  it("fills the desktop edge to edge when maximized, ending at the chat's edge", () => {
+    // No margin on any side (the owner's ask, 2026-09-30): it used to keep
+    // DESKTOP_GAP on every side with its corners. The one margin left on screen
+    // beside a docked chat is the chat's own, on the chat's side of `rightInset`.
     win(INSET);
     fireEvent.click(screen.getByRole("button", { name: "window.maximize" }));
     const el = screen.getByTestId("chrome-window-terminal");
-    expect(el.style.left).toBe(`${DESKTOP_GAP}px`);
-    expect(el.style.top).toBe(`${DESKTOP_GAP}px`);
-    expect(el.style.width).toBe(`calc(100% - ${DESKTOP_GAP * 2 + INSET}px)`);
-    expect(el.style.height).toContain(`${DESKTOP_GAP * 2}px`);
-    // Corners kept, like the chat's.
-    expect(el.style.borderRadius).toBe("8px");
+    expect(el.style.left).toBe("0px");
+    expect(el.style.top).toBe("0px");
+    expect(el.style.width).toBe(`calc(100% - ${INSET}px)`);
+    // The viewport less the shelf and the safe-area inset, and nothing else.
+    // Asserted in pieces because jsdom's CSS serializer regroups a `calc()`
+    // and reorders the arguments of an `env()` nested in it.
+    expect(el.style.height).toContain("100vh - 56px");
+    expect(el.style.height).toContain("safe-area-inset-bottom");
+    expect(el.style.height).not.toContain(`- ${DESKTOP_GAP * 2}px`);
+    // Square corners, like a snapped window's.
+    expect(el.style.borderRadius).toBe("0px");
   });
 
   it("is fitted to the strip beside the chat when it is OPENED there, so its controls can be reached", () => {
@@ -138,10 +148,10 @@ describe("a window beside a docked chat", () => {
     expect(el.style.width).toBe("800px");
   });
 
-  it("keeps the same margin on both sides when no chat is docked", () => {
+  it("fills the whole width when no chat is docked", () => {
     win(0);
     fireEvent.click(screen.getByRole("button", { name: "window.maximize" }));
-    expect(screen.getByTestId("chrome-window-terminal").style.width).toBe(`calc(100% - ${DESKTOP_GAP * 2}px)`);
+    expect(screen.getByTestId("chrome-window-terminal").style.width).toBe("100%");
   });
 
   it("maximizes when the desktop asks, once per request", () => {
@@ -157,7 +167,8 @@ describe("a window beside a docked chat", () => {
         <div>body</div>
       </ChromeWindow>,
     );
-    expect(el.style.left).toBe(`${DESKTOP_GAP}px`);
+    expect(el.style.left).toBe("0px");
+    expect(el.style.width).toBe("100%");
     // The owner restores it by hand; the same signal value does not re-maximize.
     fireEvent.click(screen.getByRole("button", { name: "window.restore" }));
     expect(el.style.width).toBe("800px");

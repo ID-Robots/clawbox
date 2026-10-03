@@ -1,0 +1,29 @@
+eDP-1 "BOE 0x06DF (eDP-1)"
+  Make: BOE
+  Model: 0x06DF
+  Serial: (null)
+  Physical size: 310x170 mm
+  Enabled: yes
+  Modes:
+    1920x1080 px, 60.012001 Hz (preferred, current)
+    1920x1080 px, 48.009998 Hz
+  Position: 0,0
+  Transform: normal
+  Scale: 1.250000
+  Adaptive Sync: disabled
+DP-1 "Dell Inc. DELL U2720Q 7XYZ123 (DP-1)"
+  Make: Dell Inc.
+  Model: DELL U2720Q
+  Serial: 7XYZ123
+  Physical size: 600x340 mm
+  Enabled: yes
+  Modes:
+    3840x2160 px, 60.000000 Hz (preferred)
+    3840x2160 px, 29.981001 Hz
+    2560x1440 px, 59.951000 Hz
+    1920x1080 px, 60.000000 Hz (current)
+    1920x1080 px, 59.939999 Hz
+  Position: 1536,0
+  Transform: 90
+  Scale: 1.500000
+  Adaptive Sync: enabled

@@ -11,7 +11,8 @@ import {
   resolveClawaiToken,
 } from "@/lib/harness/credentials";
 import { localSttInstalled, transcribeLocally } from "@/lib/stt-local";
-import { getSttPrimary, sttEngineOrder, TRANSCRIBE_MODEL } from "@/lib/stt-preference";
+import { getSttPrimary, sttEngineOrder, TRANSCRIBE_MODEL, type SttEngine } from "@/lib/stt-preference";
+import { audioForCloud } from "@/lib/stt-remux";
 
 export const dynamic = "force-dynamic";
 
@@ -24,9 +25,11 @@ export const dynamic = "force-dynamic";
 // Two engines can do it: ClawBox AI (the cloud) and faster-whisper on the box
 // itself. The owner picks which goes first (src/lib/stt-preference.ts) and the
 // other is the fallback, so a box with no uplink still takes dictation and a
-// box whose whisper is cold still answers quickly. When both fail the caller
-// hears about the PRIMARY's failure — that is the engine they chose, and its
-// message is the one that names their next step.
+// box whose whisper is cold still answers quickly. ANY failure of the first
+// engine sends the recording to the second: a 4xx the proxy chose, a 5xx, a
+// network error, a timeout, or something under the engine throwing. When both
+// fail the caller hears about the PRIMARY's failure — that is the engine they
+// chose, and its message is the one that names their next step.
 //
 // Why the device proxies instead of the browser calling out directly: the
 // ClawBox AI token is the device's credential, not the page's. Handing it to
@@ -43,10 +46,12 @@ export const dynamic = "force-dynamic";
 //
 // The upstream is the same ClawBox AI proxy that serves chat and vision, and it
 // speaks OpenAI's transcription shape: multipart with a `file` part, answering
-// `{ text }`. Verified against the live proxy from a real box on 2026-08-21 --
-// WAV and WebM/Opus both transcribe, and WebM/Opus is what Chrome's
-// `MediaRecorder` actually produces, so the browser's native output needs no
-// re-encoding on the device.
+// `{ text }`. On 2026-08-21 the browser's WebM/Opus transcribed as it was
+// recorded. By 2026-09-25 it did not: the proxy now reads the duration before it
+// accepts a recording, and `MediaRecorder`'s WebM has none, so every recording
+// came back 400 `unsupported_audio`. The cloud leg therefore remuxes the
+// recording on the box first (src/lib/stt-remux.ts). That costs a fraction of a
+// second and does not depend on which side moved.
 //
 // Session-gated by middleware, which lists /setup-api/chat among the surfaces
 // that stay closed even during the pre-setup AP window.
@@ -88,8 +93,46 @@ const MAX_MULTIPART_PARTS = 4;
 // minutes with no way out.
 const UPSTREAM_TIMEOUT_MS = 120_000;
 
-/** Everything the caller needs to be told, without saying how we are built. */
-type Failure = { status: number; error: string };
+/**
+ * Everything the caller needs to be told, without saying how we are built.
+ * `detail` is for the box's log only and never reaches the response.
+ */
+type Failure = { status: number; error: string; detail?: string };
+
+// Enough for the proxy's error envelope, which is all that is read out of it.
+const MAX_ERROR_BODY_BYTES = 4096;
+
+/**
+ * The proxy's own error code (`unsupported_audio`, `rate_limited`, …) from a
+ * refusal, for the box's log. Only a short lowercase identifier is kept. The
+ * rest of the body can echo the request back, and the request carried a bearer
+ * token, so none of it is logged or relayed.
+ */
+async function upstreamErrorCode(res: Response): Promise<string | null> {
+  const body = res.body;
+  if (!body) return null;
+  const reader = body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (value) {
+        total += value.byteLength;
+        if (total > MAX_ERROR_BODY_BYTES) {
+          await reader.cancel().catch(() => {});
+          return null;
+        }
+        chunks.push(Buffer.from(value));
+      }
+      if (done) break;
+    }
+    const code = (JSON.parse(Buffer.concat(chunks).toString("utf8")) as { error?: { code?: unknown } } | null)?.error?.code;
+    return typeof code === "string" && /^[a-z0-9_.-]{1,64}$/.test(code) ? code : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Read the one audio part out of the request.
@@ -276,8 +319,15 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
   // the box no longer holds.
   const generation = clawaiCredentialGeneration();
 
+  // MediaRecorder's WebM has no duration and the proxy will not take a
+  // recording without one (src/lib/stt-remux.ts). It is done here, after the
+  // credential checks, so a box that is not going to upload does not pay for
+  // it. It is also done on this leg only: faster-whisper decodes the browser's
+  // own output as it is.
+  const upload = await audioForCloud(audio, req.signal);
+
   const upstream = new FormData();
-  upstream.set("file", audio.file, audio.name);
+  upstream.set("file", upload.file, upload.name);
   upstream.set("model", TRANSCRIBE_MODEL);
 
   let res: Response;
@@ -297,6 +347,7 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
     return {
       status: 504,
       error: timedOut ? "Transcription timed out. Please try again." : "Could not reach ClawBox AI to transcribe the recording.",
+      detail: `${timedOut ? "upstream timed out" : "upstream unreachable"}, recording sent ${upload.prepared}`,
     };
   }
 
@@ -309,14 +360,17 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
     // `missing_token` / `invalid_token`; a bare 401/403 can be an edge rule or
     // a plan gate, and remembering one of those would mute the microphone on a
     // box whose credential is fine. Only the proxy's own verdict is recorded.
+    const credentialStatus = res.status === 401 || res.status === 403;
     if (await proxyRefusedClawaiCredential(res)) await noteClawaiCredentialRefused(res.status, generation);
-    const status = res.status === 401 || res.status === 403
+    // The credential check above has already read a 401/403 body.
+    const code = credentialStatus ? null : await upstreamErrorCode(res);
+    const status = credentialStatus
       ? 503
       : res.status >= 400 && res.status < 500 ? 400 : 502;
     const error = status === 503
       ? "ClawBox AI rejected this device's credentials. Re-link the device and try again."
       : `Transcription failed (upstream ${res.status}).`;
-    return { status, error };
+    return { status, error, detail: `upstream ${res.status}${code ? ` ${code}` : ""}, recording sent ${upload.prepared}` };
   }
 
   let payload: unknown;
@@ -333,21 +387,43 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
   return { text };
 }
 
+/** An engine this box does not have, and why — for the log, never the caller. */
+type Unavailable = { unavailable: string };
+
 /**
- * The on-box engine, or null when it is not installed — which is a fact about
- * the box, not a failure of this recording, so it must not become the error
- * the caller sees.
+ * The on-box engine, or `unavailable` when it is not installed. That is a fact
+ * about the box, not a failure of this recording, so it must not become the
+ * error the caller sees.
  */
-async function transcribeOnBox(audio: Audio): Promise<Transcript | Failure | null> {
-  if (!(await localSttInstalled()).installed) return null;
+async function transcribeOnBox(audio: Audio): Promise<Transcript | Failure | Unavailable> {
+  const probe = await localSttInstalled();
+  if (!probe.installed) return { unavailable: probe.detail };
   const result = await transcribeLocally(Buffer.from(await audio.file.arrayBuffer()), audio.name);
   if (!result.ok) {
     // The detail names a temp path and whatever python printed. Worth having
     // in the box's log; not something to hand the composer's status line.
-    console.warn("[chat/transcribe] on-box transcription failed:", result.error);
-    return { status: 500, error: "Transcription failed on this box." };
+    return { status: 500, error: "Transcription failed on this box.", detail: result.error };
   }
   return { text: result.text };
+}
+
+/**
+ * One engine's attempt, which never throws. Either engine can fail from
+ * somewhere beneath it: a credential store that will not parse, a disk that
+ * refuses the refusal note, a temp dir that cannot be made. A throw used to
+ * escape the loop below as a bare 500, and the other engine was never asked.
+ * It is one more failure now, and the fallback runs.
+ */
+async function attempt(engine: SttEngine, req: NextRequest, audio: Audio): Promise<Transcript | Failure | Unavailable> {
+  try {
+    return engine === "cloud" ? await transcribeInCloud(req, audio) : await transcribeOnBox(audio);
+  } catch (err) {
+    // Only the error's NAME from the cloud leg: its message can quote the
+    // credential file it failed to parse, and this line goes to the journal.
+    return engine === "cloud"
+      ? { status: 502, error: "Transcription failed.", detail: `cloud leg threw ${err instanceof Error ? err.name : typeof err}` }
+      : { status: 500, error: "Transcription failed on this box.", detail: `on-box leg threw: ${String(err)}` };
+  }
 }
 
 // POST /setup-api/chat/transcribe
@@ -375,9 +451,19 @@ export async function POST(req: NextRequest) {
     // recording on to the box's own engine and hold a two-minute whisper run
     // for nobody. Nothing is spawned for a request nobody is waiting on.
     if (req.signal.aborted) return NextResponse.json({ error: "The recording was cancelled." }, { status: 499 });
-    const result = engine === "cloud" ? await transcribeInCloud(req, audio) : await transcribeOnBox(audio);
-    if (result === null) continue;
+    const result = await attempt(engine, req, audio);
+    // Each fallback is logged, and so is a fallback that had nothing to go to.
+    // Without these lines a box whose on-box engine is missing, and whose
+    // cloud refuses every recording, shows only a column of 400s.
+    if ("unavailable" in result) {
+      if (firstFailure) console.warn(`[chat/transcribe] no ${engine} engine to fall back to: ${result.unavailable}`);
+      continue;
+    }
     if ("status" in result) {
+      console.warn(
+        `[chat/transcribe] ${engine} engine failed (${result.status}${result.detail ? `: ${result.detail}` : ""})`
+        + (firstFailure ? "" : "; trying the other engine"),
+      );
       firstFailure ??= result;
       continue;
     }
@@ -386,7 +472,7 @@ export async function POST(req: NextRequest) {
     // is not an error and must not be reported as one.
     return NextResponse.json({ ok: true, text: result.text.trim(), engine });
   }
-  // The cloud engine always answers, so the null case is unreachable today;
+  // The cloud engine always answers, so the all-unavailable case is unreachable today;
   // it is spelled out rather than asserted away so a chain of two optional
   // engines would still fail with a status instead of a crash.
   const failure = firstFailure ?? { status: 503, error: "No transcription engine is available on this ClawBox." };

@@ -282,6 +282,14 @@ const ALSO_REQUIRED = [
   // governs. Seen taking the whole components project's other files down with
   // it before the mascot and the chat popup were mocked out of the mount.
   "src/tests/components/desktop-wallpaper-delete.test.tsx",
+  // The same whole-desktop mount, twice per case (owner, then a second
+  // ClawBox user), each waiting on the preference load and /users/me.
+  "src/tests/components/desktop-non-owner-apps.test.tsx",
+  // The same whole-desktop mount once per case, waiting on the pairing poll,
+  // the translation catalogue and a settle — ~0.6 s a case on an idle machine
+  // (2026-10-02) — and one case on the notice ring's real 2 s poll twice over,
+  // ~4 s idle.
+  "src/tests/components/desktop-shell-renders.test.tsx",
   "src/tests/components/hermes-oauth-inline.test.tsx",
   // The two component suites in the chat/provider mount family that do NOT
   // mount `ChatPopup`, so the rule below cannot detect them. Measured

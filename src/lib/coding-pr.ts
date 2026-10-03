@@ -24,8 +24,10 @@
  * an implementation written from memory of a newer gh fails silently.
  */
 
+import os from "os";
 import path from "./runtime-path";
 import { runChild, type ChildResult, failureDetail } from "./child-run";
+import { redactForPublishing } from "./publish-redaction";
 import {
   emptyChecks,
   foldChecks,
@@ -62,6 +64,29 @@ function run(bin: string, args: string[], cwd?: string): Promise<ChildResult> {
 
 const ok = (r: ChildResult) => r.code === 0;
 const out = (r: ChildResult) => r.stdout.trim();
+
+/**
+ * The names this box answers to: the kernel's host name, whole and as its first
+ * label. Read per call, like `systemHostLabel` in ./host-allowlist — a rename
+ * restarts nothing — and empty rather than a throw when it cannot be read.
+ */
+export function boxHostNames(): string[] {
+  try {
+    const full = os.hostname().trim().toLowerCase();
+    return full ? [...new Set([full, full.split(".")[0]])] : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Text the box is about to put on GitHub BY ITSELF — a pull request's title or
+ * body, a comment — with the owner's private details taken out (see
+ * ./publish-redaction for what, and why). Never applied to what a run is told.
+ */
+export function redactForGitHub(text: string): string {
+  return redactForPublishing(text, { hostNames: boxHostNames() });
+}
 
 /**
  * The branch a PR should target.
@@ -203,7 +228,12 @@ export async function openPullRequest(input: {
     return { ok: false, detail: failureDetail(pushed, `Pushing ${input.branch}`, "Check the GitHub connection and try again.") };
   }
 
-  const args = ["pr", "create", "--base", input.base, "--head", input.branch, "--title", input.title, "--body", input.body];
+  // Redacted HERE as well as wherever the caller composed them: this is the one
+  // call that publishes a pull request, and the project page's "Create PR"
+  // (commit subjects, which carry the task's first line) comes through it too.
+  const title = redactForGitHub(input.title);
+  const body = redactForGitHub(input.body);
+  const args = ["pr", "create", "--base", input.base, "--head", input.branch, "--title", title, "--body", body];
   let created = await run("gh", input.draft ? [...args, "--draft"] : args, dir);
   // Drafts need a plan that has them: a private repository on a free account
   // answers "Draft pull requests are not supported in this repository". Such a

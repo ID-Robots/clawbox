@@ -4,6 +4,10 @@ import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
 
+// Read by EVERY signed-in ClawBox user, not only the owner (the tray's online
+// dot; see src/lib/non-owner-scope.ts). Keep the answer a bare connectivity
+// reading — nothing of the network's configuration belongs in it.
+
 export const dynamic = "force-dynamic";
 
 let cache: { online: boolean; checkedAt: number; latencyMs: number | null } | null = null;

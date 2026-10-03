@@ -22,6 +22,7 @@
 
 import path from "./runtime-path";
 import { runChild, type ChildResult, failureDetail } from "./child-run";
+import { redactForGitHub } from "./coding-pr";
 import {
   labelNames,
   parseCheckRollup,
@@ -240,7 +241,10 @@ export async function readReviewDetails(dir: string, number: number): Promise<Re
  * as "review what changed since your last review".
  */
 export async function requestCodeRabbitReview(dir: string, number: number): Promise<{ ok: true } | { ok: false; detail: string }> {
-  const commented = await run("gh", ["pr", "comment", String(number), "--body", "@coderabbitai review"], path.resolve(dir));
+  // Fixed text today, and still through the redactor: every comment the box
+  // posts by itself goes through it, so the next one that carries a sentence of
+  // the run's cannot be the one that forgot (TASK-1366).
+  const commented = await run("gh", ["pr", "comment", String(number), "--body", redactForGitHub("@coderabbitai review")], path.resolve(dir));
   if (ok(commented)) return { ok: true };
   return { ok: false, detail: failureDetail(commented, `Asking CodeRabbit to review pull request #${number}`, "Comment `@coderabbitai review` on it yourself.") };
 }

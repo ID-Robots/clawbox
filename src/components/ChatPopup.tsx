@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, memo } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, memo, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 
 // ── Gateway WebSocket chat widget ──
@@ -10,12 +10,12 @@ import {
   uuid,
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
-import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
+import { useChatToolCalls, ToolCallPills, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { useCodingAgentActivity, isCodingAgentTool, type CodingAgentActivity } from '@/lib/use-coding-agent-activity'
 import { useCodingRunAutoHide } from '@/lib/use-coding-run-auto-hide'
 import { pickSpinnerVerb } from '@/lib/spinner-verbs'
+import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
-import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { gatewayFrameError, isGatewayStartingRefusal } from '@/lib/chat-gateway-starting'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
 import { ApprovalPrompt } from '@/lib/chat-approvals'
@@ -66,6 +66,7 @@ import {
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeFallbackReply, describeImageFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
+import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
@@ -87,17 +88,35 @@ import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 // and now lives with the rest of the media helpers.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
 import { DESKTOP_TRANSCRIPT_KEY } from '@/lib/harness/transcript-key'
+import { CHAT_TABS_ROUTE, conversationToFollow, isChatTabKey, nextTabSeq, parseActiveRecord, parseTabList, sortTabs, tabLabelFromText, type ChatActiveRecord, type ChatTabRecord } from '@/lib/chat-tabs'
 import { HarnessError, type HarnessStatus, type TurnResult, type HarnessAdapter } from '@/lib/harness/transport'
-import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, extractFileAttachments, boundedAudio, boundedFiles } from '@/lib/chat-media'
-import ChatFileCard from '@/components/ChatFileCard'
+import { splitMediaDirectives, mediaFileName, mediaUrl, isImageMedia, boundedAudio } from '@/lib/chat-media'
+import { ChatMessageRow, NO_AUDIO_NOTES, StreamingReplyBubble } from '@/components/ChatMessageRow'
+import { samePlainData } from '@/lib/same-plain-data'
+import { RecordingClock, SpeakingReplyLabel, TurnClock } from '@/components/ChatStatusClocks'
+// The live final, the pushed append and the history merge, written once for
+// this chat and the full-page one (TASK-1372).
+import {
+  cancelTranscriptReconcile,
+  finalAlreadyShownWithMedia,
+  finiteMessageTimestamp,
+  isAckOnlyReply,
+  mergeRestoredTranscript,
+  pushedSpokenReply,
+  readLiveReply,
+  scheduleTranscriptReconcile,
+  sessionMessagePush,
+  withAssistantReply,
+  withPushedSpokenReply,
+  type ReconcileTimer,
+} from '@/lib/chat-transcript-reconcile'
 import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective } from '@/lib/chat-email-refs'
-import { EmailCard, EmailFullView } from '@/lib/chat-email'
+import { EmailFullView } from '@/lib/chat-email'
 import {
   IDLE_STATUS,
   MAX_RECORDING_MS,
   classifyCaptureError,
   describeTranscribeFailure,
-  formatRecordingClock,
   pickRecordingMimeType,
   readCaptureAvailability,
   recordingFileName,
@@ -120,6 +139,7 @@ import {
   HISTORY_ATTEMPT_TIMEOUT_MS,
   HISTORY_RESTORE_DEADLINE_MS,
   HISTORY_RETRY_DELAYS_MS,
+  TRANSCRIPT_REFRESH_MS,
   RECONNECT_DEADLINE_MS,
   RESTORE_HANDSHAKE_TIMEOUT_MS,
   classifyRestoreFailure,
@@ -205,8 +225,6 @@ const AUTH_BACKOFF_DELAY = 30000
 const SPINNER_STYLE: React.CSSProperties = { width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }
 // The status line's small sibling of SPINNER_STYLE.
 const TURN_SPINNER_STYLE: React.CSSProperties = { width: 12, height: 12, border: '2px solid rgba(249,115,22,0.25)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }
-// Past this, a pasted user message folds behind "Show more".
-const USER_CLAMP_CHARS = 700
 
 // The chat used to clip up to two sentences out of every assistant reply into
 // `clawbox-mascot-convo-lines` so the crab could quote them back. It has been
@@ -384,6 +402,20 @@ function getChatModelOptionText(option: ChatModelState['options'][number]) {
   return option.label || option.id
 }
 
+/**
+ * Would the effort picker's snap (the `[headerProvider]` effect in ChatPopup,
+ * which re-reads the level persisted per provider) MOVE the picker if it ran
+ * now against `state`? Its own rule, read off the same active row the
+ * header's memos read it from.
+ */
+function thinkingSnapDue(state: ChatModelState, current: ThinkingLevel): boolean {
+  const active = state.options.find((option) => option.id === state.activeOptionId)
+  const provider = active?.provider ?? null
+  if (!provider) return false
+  const cfg = getProviderReasoningConfig(provider, active?.model ?? state.activeModel ?? null, active?.thinkingLevels)
+  return readPersistedThinkingLevel(provider, cfg) !== current
+}
+
 // Compact provider labels for the chat header pill. The chat panel
 // can be docked at ~370px wide where "OpenAI Codex" + "GPT-5.4 Mini"
 // + "Medium" combined exceeds the available width and pills truncate
@@ -409,11 +441,12 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
   return PROVIDER_PILL_LABEL[option.label ?? ''] ?? full
 }
 
-import { renderText, audioLabel } from '@/lib/chat-markdown'
-import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
 import { claimSpokenReply, releaseSpokenReply, spokenReplyInterruptions, stopSpokenReply } from '@/lib/spoken-reply-playback'
 import SnapPreviewOverlay from '@/components/SnapPreviewOverlay'
-import { DESKTOP_GAP, DESKTOP_LAYERS, getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
+import { DESKTOP_GAP, DESKTOP_LAYERS, clampFloatingRect, desktopTop, dockedChatMaxWidth, dockedChatWidth, getSnapRect, MIN_DOCKED_CHAT_WIDTH, getSnapZone, snapTargetAt, type SnapTarget } from '@/lib/window-snap'
+import { useKioskBarInset } from '@/lib/kiosk-bar-inset'
+import { mainInsets, mainScreen } from '@/lib/desktop-screens'
+import { useDeskScreens } from '@/lib/use-desk-screens'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import {
   attachmentAcceptAttribute,
@@ -425,6 +458,8 @@ import {
   revokePreviews,
   type StagingFailure,
 } from '@/lib/chat-attachments'
+import { useChatFileDrop, useChatUploads } from '@/lib/use-chat-drop'
+import { ChatDropOverlay, ChatUploadChips } from './ChatDropUploads'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 import { usePortrait } from '@/lib/use-portrait'
@@ -492,147 +527,6 @@ import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pill
 const IMAGE_GEN_BACKSTOP_MS = 20_000
 const IMAGE_GEN_MAX_WAIT_MS = 4 * 60_000
 
-// A reconcile usually returns a transcript identical to the one on screen.
-// Handing React a fresh array anyway re-renders the whole list and re-fires the
-// auto-scroll, which would yank a user who had scrolled up back to the bottom.
-function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i], y = b[i]
-    if (x.role !== y.role || x.text !== y.text || x.timestamp !== y.timestamp) return false
-    if ((x.images?.length ?? 0) !== (y.images?.length ?? 0)) return false
-    // Without this a reply that gained its spoken half between two history
-    // reads compares equal, React skips the render, and the player never
-    // appears until something else forces one. Compared by URL and not only by
-    // count: a reply whose recording was replaced keeps the count and changes
-    // the file, and a player left pointing at the old one plays the wrong
-    // words convincingly.
-    const xa = x.audio ?? [], ya = y.audio ?? []
-    if (xa.length !== ya.length) return false
-    for (let j = 0; j < xa.length; j++) if (xa[j] !== ya[j]) return false
-    // Same rule as the audio above, for the same reason: a reply that gained
-    // the model that served it between two reads must repaint, or the label
-    // never appears. Declared here because this comparator is where a
-    // late-arriving per-message field has to be named to survive a reconcile.
-    if (x.model !== y.model || x.provider !== y.provider) return false
-    // A reply that gained a file between two reads must repaint its card.
-    const xf = x.files ?? [], yf = y.files ?? []
-    if (xf.length !== yf.length) return false
-    for (let j = 0; j < xf.length; j++) if (xf[j] !== yf[j]) return false
-  }
-  return true
-}
-
-/** The gateway suffixes its stored copy by role; the client holds the bare run id. */
-function runIdOf(key: string | undefined): string | undefined {
-  if (!key) return undefined
-  return key.endsWith(':user') ? key.slice(0, -':user'.length) : key
-}
-
-/**
- * Which locally-appended user turns the server has NOT echoed back yet.
- *
- * A turn is added to the transcript the moment it is sent, so a history read
- * that lands before the write completes must not erase it. Deciding that by
- * timestamp alone is not possible: the local copy is stamped with the browser's
- * clock and the server's with the device's, and a browser running ahead makes
- * every local copy look newer than everything the server returned.
- *
- * Identity settles it — both sides carry the run's idempotency key. Text is
- * kept only as the fallback for turns without one (other harnesses, older
- * gateways), and cannot be the primary test: an attachment turn displays
- * "📎 pic.png\nwhat is this" locally while the gateway stores the prompt alone.
- */
-export function unechoedUserTurns(
-  previous: ChatMessage[],
-  restored: ChatMessage[],
-  lastServerTs: number,
-): ChatMessage[] {
-  const serverRunIds = new Set<string>()
-  // Per-text stock of server copies. Counting rather than a boolean so the
-  // same words sent twice keep the second bubble.
-  const unclaimed = new Map<string, number>()
-  for (const message of restored) {
-    if (message.role !== 'user') continue
-    const runId = runIdOf(message.idempotencyKey)
-    if (runId) serverRunIds.add(runId)
-    unclaimed.set(message.text, (unclaimed.get(message.text) ?? 0) + 1)
-  }
-  const claimText = (text: string): boolean => {
-    const left = unclaimed.get(text) ?? 0
-    if (left <= 0) return false
-    unclaimed.set(text, left - 1)
-    return true
-  }
-  const pending: ChatMessage[] = []
-  for (const message of previous) {
-    if (message.role !== 'user') continue
-    const runId = runIdOf(message.idempotencyKey)
-    if (runId && serverRunIds.has(runId)) {
-      // Also spend this text's stock, so a later identical turn is not matched
-      // against the copy this one already accounted for.
-      claimText(message.text)
-      continue
-    }
-    if (claimText(message.text)) continue
-    // Nothing on the server matches. Keep it only if it is newer than the whole
-    // replay — an older unmatched turn has aged out of the history window and
-    // re-appending it would put it back in the wrong place.
-    if (message.timestamp > lastServerTs) pending.push(message)
-  }
-  return pending
-}
-
-// A live TTS supplement can arrive before an older gateway's history
-// projection learns about it. Carry players across that short reconcile by
-// message occurrence, never by a text->audio map: common replies such as
-// "Sure." may appear many times, and one map entry would put the newest
-// recording on every identical bubble.
-function preserveSpokenByOccurrence(previous: ChatMessage[], next: ChatMessage[]): ChatMessage[] {
-  const restored = next.map(message => ({ ...message }))
-  const used = new Set<number>()
-  for (let i = previous.length - 1; i >= 0; i--) {
-    const prior = previous[i]
-    if (prior.role !== 'assistant' || !prior.audio?.length) continue
-    let target = -1
-    if (prior.timestamp > 0) {
-      target = restored.findIndex((candidate, index) =>
-        !used.has(index) && candidate.role === 'assistant'
-        && candidate.timestamp === prior.timestamp && candidate.text === prior.text)
-      if (target !== -1) {
-        // Durable transcript recovery may already have filled this exact
-        // occurrence. Treat that as the match even though there is nothing to
-        // copy; falling through would clone the same recording onto a later
-        // identical reply.
-        if (!restored[target].audio?.length) {
-          restored[target] = { ...restored[target], audio: boundedAudio(prior.audio) }
-        }
-        used.add(target)
-        continue
-      }
-    }
-    for (let j = restored.length - 1; j >= 0; j--) {
-      const candidate = restored[j]
-      if (prior.text.length > 0 && !used.has(j) && candidate.role === 'assistant' && !candidate.audio?.length
-          && candidate.text === prior.text) {
-        target = j
-        break
-      }
-    }
-    if (target !== -1) {
-      restored[target] = { ...restored[target], audio: boundedAudio(prior.audio) }
-      used.add(target)
-    }
-  }
-  return restored
-}
-
-function finiteMessageTimestamp(message: unknown): number | null {
-  if (!message || typeof message !== 'object') return null
-  const timestamp = (message as { timestamp?: unknown }).timestamp
-  return typeof timestamp === 'number' && Number.isFinite(timestamp) ? timestamp : null
-}
-
 // The newest server timestamp currently on screen — the line a later message
 // has to be after to belong to the wait that starts now.
 function newestTimestamp(msgs: ChatMessage[]): number {
@@ -681,8 +575,10 @@ const DEFAULT_PANEL_WIDTH = 420
  * same chat, only wider, so it keeps the popup's radius and shadow and floats
  * clear of the edges instead.
  *
- * It is the DESKTOP's gap, not the chat's own — the same margin a maximized
- * window keeps — which is why the number comes from `window-snap`. Still
+ * It is the DESKTOP's gap, not the chat's own — the margin the desktop keeps
+ * between the panel and the windows beside it (a maximized window fills the
+ * strip up to it edge to edge) — which is why the number comes from
+ * `window-snap`. Still
  * exported under this name because the desktop reserves this strip: `page.tsx`
  * passes the reserved width to windows and to the mascot as `rightInset`, and
  * that reservation has to include the gap or a maximized window slides under
@@ -704,22 +600,23 @@ const SIZE_STORAGE_KEY = 'clawbox-chat-size'
 // main session: on OpenClaw the gateway's (the one Telegram, the desktop and
 // every other surface share), on Hermes the desktop transcript. The others are
 // sessions this popup minted through the adapter, which is what makes the
-// strip one thing on both editions. The list and which one is open survive a
-// refresh; the transcripts live with the transport.
-interface ChatTab {
-  /** The session key as the transport minted it — see `HarnessAdapter.newSessionKey`. */
-  key: string
-  label: string
-  createdAt: number
-  /** Still carrying its "Chat N" placeholder: the first thing the owner
-   *  types becomes the label, once. */
-  autoLabel?: boolean
-  /** The N its placeholder was minted with; the next tab takes max+1, so
-   *  closing "Chat 2" while "Chat 3" lives can never mint a second "Chat 3". */
-  seq?: number
-}
+// strip one thing on both editions. The transcripts live with the transport.
+//
+// The LIST lives on the box (`/setup-api/chat/tabs`, chat-tabs.ts), so a tab
+// opened on the phone is on the desktop's strip too (TASK-1159). What this
+// browser keeps in localStorage is a cache of it — painted at once on mount,
+// then replaced by the box's answer — plus two things that are this browser's
+// own: which tab it has open, and the closes the box has not confirmed yet.
+type ChatTab = ChatTabRecord
 const TABS_STORAGE_KEY = 'clawbox-chat-tabs'
-const TAB_LABEL_MAX = 24
+/** How long one sync of the tab list may take before it is given up on. */
+const TAB_SYNC_TIMEOUT_MS = 10_000
+/**
+ * How often an open chat asks the box for the list while it is on screen.
+ * Coming back to the tab or window asks at once; this only has to catch a tab
+ * opened on the phone while the desktop sat untouched in front of the owner.
+ */
+const TAB_SYNC_POLL_MS = 60_000
 
 /** The transcript, as the tab strip's one panel. */
 const TRANSCRIPT_PANEL_ID = 'chat-transcript-panel'
@@ -771,12 +668,28 @@ const TabControlGlyph = () => (
   </svg>
 )
 
-function readStoredTabs(): { tabs: ChatTab[]; active: string | null } {
-  if (typeof window === 'undefined') return { tabs: [], active: null }
+interface StoredTabs {
+  tabs: ChatTab[]
+  active: string | null
+  /** Closed here, not yet confirmed by the box: sent again with every sync. */
+  closed: string[]
+  /**
+   * The newest of the box's "last active conversation" records this browser
+   * has accounted for — its own turns, the record it last followed, the one
+   * that was current when the owner picked a tab here (TASK-1364, see
+   * `conversationToFollow`). The box's clock, compared only with the box's.
+   */
+  seenActiveAt: number
+}
+
+const NO_STORED_TABS: StoredTabs = { tabs: [], active: null, closed: [], seenActiveAt: 0 }
+
+function readStoredTabs(): StoredTabs {
+  if (typeof window === 'undefined') return NO_STORED_TABS
   try {
     const raw = window.localStorage?.getItem(TABS_STORAGE_KEY)
-    if (!raw) return { tabs: [], active: null }
-    const parsed = JSON.parse(raw) as { tabs?: unknown; active?: unknown }
+    if (!raw) return NO_STORED_TABS
+    const parsed = JSON.parse(raw) as { tabs?: unknown; active?: unknown; closed?: unknown; seenActiveAt?: unknown }
     const tabs = (Array.isArray(parsed.tabs) ? parsed.tabs : [])
       .filter((t): t is ChatTab =>
         !!t && typeof t === 'object'
@@ -786,10 +699,28 @@ function readStoredTabs(): { tabs: ChatTab[]; active: string | null } {
         && typeof (t as ChatTab).label === 'string')
       .map(t => ({ key: t.key, label: t.label, createdAt: typeof t.createdAt === 'number' ? t.createdAt : 0, autoLabel: t.autoLabel === true, seq: typeof t.seq === 'number' ? t.seq : undefined }))
     const active = typeof parsed.active === 'string' && tabs.some(t => t.key === parsed.active) ? parsed.active : null
-    return { tabs, active }
+    const closed = (Array.isArray(parsed.closed) ? parsed.closed : [])
+      .filter((k): k is string => typeof k === 'string' && k.length > 0)
+    const seenActiveAt = typeof parsed.seenActiveAt === 'number' && Number.isFinite(parsed.seenActiveAt) && parsed.seenActiveAt > 0
+      ? parsed.seenActiveAt
+      : 0
+    return { tabs, active, closed, seenActiveAt }
   } catch {
-    return { tabs: [], active: null }
+    return NO_STORED_TABS
   }
+}
+
+function writeStoredTabs(stored: StoredTabs): void {
+  try { window.localStorage?.setItem(TABS_STORAGE_KEY, JSON.stringify(stored)) } catch { /* localStorage unavailable */ }
+}
+
+/** Two lists that would paint the same strip — so a sync that changed nothing re-renders nothing. */
+function sameTabList(a: readonly ChatTab[], b: readonly ChatTab[]): boolean {
+  return a.length === b.length && a.every((tab, i) => {
+    const other = b[i]
+    return tab.key === other.key && tab.label === other.label && tab.createdAt === other.createdAt
+      && !!tab.autoLabel === !!other.autoLabel && tab.seq === other.seq
+  })
 }
 
 function readStoredSize(): { w: number; h: number } {
@@ -813,7 +744,7 @@ function readStoredSize(): { w: number; h: number } {
 // squeeze past a readable size, so the resize handles (floating + docked panel)
 // and the rendered width all clamp here — the chat simply stops getting
 // narrower instead of smashing the pills.
-const MIN_CHAT_WIDTH = 340
+const MIN_CHAT_WIDTH = MIN_DOCKED_CHAT_WIDTH
 
 // The gutter the floating popup keeps from every screen edge — the same 8px
 // per side `readStoredSize` already reserves when it restores a remembered
@@ -822,6 +753,77 @@ const MIN_CHAT_WIDTH = 340
 // buttons and the composer's send button off-screen with it, and nothing on the
 // desktop brings a chat in that state back.
 const VIEWPORT_MARGIN = 8
+
+// The floating popup's height budget once it has been placed (dragged,
+// resized or snapped) rather than anchored above the mascot.
+const PLACED_MAX_HEIGHT = 'calc(100vh - 60px)'
+
+/**
+ * Put the floating popup where a drag or a resize has got to, straight onto
+ * the DOM — the styles the render gives a PLACED popup (`pos` set), so the
+ * commit at the end of the gesture writes nothing the popup is not already
+ * showing. The first move off the mascot's anchor is the one that matters: the
+ * popup stops hanging from `bottom` and takes the placed height budget, as the
+ * per-move render used to make it do.
+ */
+function placeFloating(el: HTMLElement, at: { x: number; y: number }, size?: { w: number; h: number }): void {
+  el.style.left = `${at.x}px`
+  el.style.top = `${at.y}px`
+  el.style.bottom = 'auto'
+  el.style.maxHeight = PLACED_MAX_HEIGHT
+  if (size) {
+    el.style.width = `${size.w}px`
+    el.style.height = `${size.h}px`
+  }
+}
+
+/** `fn` at most once per animation frame, for as long as moves keep asking. */
+function frameThrottled(fn: () => void): { schedule: () => void; cancel: () => void } {
+  let frame: number | null = null
+  return {
+    schedule: () => {
+      if (frame !== null) return
+      frame = requestAnimationFrame(() => { frame = null; fn() })
+    },
+    cancel: () => {
+      if (frame !== null) cancelAnimationFrame(frame)
+      frame = null
+    },
+  }
+}
+
+const subscribeViewport = (onChange: () => void) => {
+  window.addEventListener('resize', onChange)
+  return () => window.removeEventListener('resize', onChange)
+}
+const ignoreViewport = () => () => {}
+const viewportWidth = () => window.innerWidth
+const viewportHeight = () => window.innerHeight
+// What the placement read before there was a window to ask (`typeof window`).
+const serverViewportWidth = () => 1000
+const serverViewportHeight = () => 800
+
+/**
+ * The viewport's size, re-rendering the popup when it changes — but only while
+ * `listening`: the floating popup that hangs above the mascot is the one
+ * placement worked out from the window's size in render (its `left` is a share
+ * of the width), and every other placement is either CSS that follows the
+ * viewport by itself or a position the owner put it at. Read fresh on every
+ * render either way, so a popup that is not listening still draws the size the
+ * window has the next time anything renders it.
+ *
+ * It used to need nothing: the desktop re-rendered the chat for every 100 px of
+ * a resize, every poll and the shelf clock, so the size in render was never
+ * old for long. With the chat memoised that stopped — a window narrowed from
+ * 1920 to 1280 px left the popup at the old `left`, entirely off the screen,
+ * until the mascot was tapped again.
+ */
+function useViewportSize(listening: boolean): { w: number; h: number } {
+  const subscribe = listening ? subscribeViewport : ignoreViewport
+  const w = useSyncExternalStore(subscribe, viewportWidth, serverViewportWidth)
+  const h = useSyncExternalStore(subscribe, viewportHeight, serverViewportHeight)
+  return { w, h }
+}
 
 
 /**
@@ -912,6 +914,12 @@ function emailRefusalSentence(rows: unknown[]): string {
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, onFloatingRectChange, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t, locale } = useT()
   const tr = useTr()
+  // The kiosk bar's height on the laptop (0 everywhere else): the docked panel
+  // starts under it.
+  const barInset = useKioskBarInset()
+  // The main monitor when the desktop is spread over several (null with one
+  // screen): the chat docks to ITS right edge and floats above the crab on it.
+  const deskScreens = useDeskScreens()
   // The words a failed turn is said in. A ref, because the gateway's event
   // handlers outlive the render that created them and must still speak the
   // owner's current language.
@@ -1000,7 +1008,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [])
   // Debounce for the pushed-append reconcile, and a stable handle on it — the
   // socket handler is built once and must not close over a stale callback.
-  const transcriptReconcileTimerRef = useRef<number | null>(null)
+  const transcriptReconcileTimerRef = useRef<ReconcileTimer['current']>(null)
   const reconcileTranscriptRef = useRef<() => Promise<void>>(async () => {})
   // Mirrors `generatingImage` for the socket handler and the reconcile, neither
   // of which re-subscribes when it changes.
@@ -1084,24 +1092,34 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // whatever the harness last said it was doing ({kind:'status'} events — a
   // contract the popup used to ignore). Both are per-turn: armed when
   // `sending` flips true, cleared when it flips back.
-  const turnStartedAtRef = useRef(0)
-  const [turnNow, setTurnNow] = useState(0)
+  //
+  // The clock TICKS in its own component (TurnClock): a once-a-second state
+  // here re-rendered this whole popup for every second of every turn, even
+  // with the chat closed. Only the moment the turn started lives here, and its
+  // setter is also the render that puts this turn's verb on screen.
+  const [turnStartedAt, setTurnStartedAt] = useState(0)
   const [turnStatus, setTurnStatus] = useState<string | null>(null)
   // The turn's spinner verb — "Percolating…", "Scuttling…" — picked once per
   // turn so the line does not flicker through the dictionary, and replaced by
   // the harness's own status text the moment one arrives.
   const turnVerbRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!sending) { setTurnStatus(null); return }
+    if (!sending) { setTurnStatus(null); setTurnStartedAt(0); return }
     turnVerbRef.current = pickSpinnerVerb(turnVerbRef.current)
-    turnStartedAtRef.current = Date.now()
-    setTurnNow(Date.now())
-    const id = setInterval(() => setTurnNow(Date.now()), 1000)
-    return () => clearInterval(id)
+    setTurnStartedAt(Date.now())
   }, [sending])
   // Long pasted user messages the owner chose to unfold, keyed by position and
   // timestamp so a history reconcile cannot re-collapse a different message.
   const [expandedLong, setExpandedLong] = useState<Set<string>>(() => new Set())
+  // Stable, so folding one message does not re-render every other bubble.
+  const toggleLongMessage = useCallback((longKey: string) => {
+    setExpandedLong(prev => {
+      const next = new Set(prev);
+      if (next.has(longKey)) next.delete(longKey);
+      else next.add(longKey);
+      return next;
+    })
+  }, [])
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   // A delegated coding run outlives the tool call that started it, so this is
   // driven by the device's run record rather than the tool pills. Only probed
@@ -1370,6 +1388,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // strip: the previous behaviour was to return early on a non-OK response,
   // which is indistinguishable to the user from a paste that never fired.
   const [attachmentError, setAttachmentError] = useState<(StagingFailure & { file: string }) | null>(null)
+  // What is still on its way to the box — a chip per file or dropped folder,
+  // so a big upload is not a composer that looks like nothing happened.
+  const uploadTracker = useChatUploads()
+  const beginUpload = uploadTracker.begin
   // The image the full-size preview is showing, or null when it is closed.
   // It carries the picture's accessible name as well as its URL: a screen
   // reader must not be told "generated image" after opening one the customer
@@ -1513,11 +1535,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
   const [size, setSize] = useState<{ w: number; h: number }>(DEFAULT_SIZE)
+  // The window's size, kept current while the placement reads it (see the
+  // render's end): the popup hanging above the mascot (or the tray), whose
+  // spot is worked out from the width, and — over a row of monitors — the
+  // docked panel too, whose offsets from the main monitor's edges
+  // (`mainInsets`) are measured against the viewport. A change of the monitors
+  // themselves already re-renders the popup through `useDeskScreens`. A popup
+  // the owner dragged or resized has a place of its own, and a phone's is
+  // CSS: neither listens.
+  const viewport = useViewportSize(isOpen && !mobile && (panelMode ? deskScreens !== null : pos === null))
   // Drag-to-edge snapping, the same zones the app windows use — the chat is a
   // draggable surface on the same desktop, and landing it against an edge had
   // no effect at all before.
-  const [snapPreview, setSnapPreview] = useState<SnapZone>(null)
+  // The zone a drop would snap the chat to, and the monitor it would land on.
+  const [snapPreview, setSnapPreview] = useState<SnapTarget | null>(null)
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null)
+  // A drag took the entrance burst off this opening of the chat (see
+  // onDragStart); cleared when the chat closes, so the next open bursts.
+  const burstTakenByDragRef = useRef(false)
   const popupRef = useRef<HTMLDivElement>(null)
 
   // Remembered size: read once on mount; written by the resize handler when
@@ -1532,6 +1567,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Re-anchor to the mascot when reopened. The size is deliberately kept: the
   // owner resized it once and expects it to stay that way.
   useEffect(() => {
+    burstTakenByDragRef.current = false
     if (isOpen) { setPos(null); setPreview(null) }
     else { setGeneratingImage(false); closeNewApp() }
   }, [isOpen])
@@ -1779,6 +1815,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [initialPanelWidth]) // eslint-disable-line react-hooks/exhaustive-deps -- panelWidth excluded: one-way sync from parent, must not re-trigger on local resize
 
+  // Over a row of monitors the docked panel is DRAWN no wider than the main
+  // monitor's own cap (`dockedChatMaxWidth`) whatever width it has: one dragged
+  // wider by an older build, or kept while the main monitor changed to a
+  // narrower one. Only drawn: the width stays the owner's, so a main monitor
+  // that is narrow for a while (a trial layout, a monitor off) does not cut it
+  // for good — the desktop reserves its strip with the same cap
+  // (`dockedChatWidth`). Nothing changes with one screen.
+  const drawnPanelWidth = panelWidth !== null ? dockedChatWidth(panelWidth, deskScreens !== null) : null
+
   // The width a CLOSED chat was docked at, or null when it was floating.
   // Closing has to hand the desktop its strip back (a window must not be
   // squeezed for a panel nobody can see), and the only way to say that is
@@ -1813,6 +1858,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // callback unless a notice is actually on screen), because `pos`/`size` move
   // on every pointer event of a drag and each report is a desktop re-render.
   const reportedRectRef = useRef<string | null>(null)
+  // The reporter below while the desktop is listening, for the drag and the
+  // resize: they move the popup without a render (see `placeFloating`), so
+  // the effect's own `pos`/`size` dependency no longer fires on every move and
+  // they call this instead — once a frame — so the notices still step aside
+  // live, exactly as they did.
+  const liveRectReportRef = useRef<(() => void) | null>(null)
   useEffect(() => {
     if (!onFloatingRectChange) return
     if (!isOpen || panelMode || mobile) {
@@ -1832,9 +1883,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       onFloatingRectChange({ left: r.left, top: r.top, right: r.right, bottom: r.bottom })
     }
     report()
+    liveRectReportRef.current = report
     window.addEventListener('resize', report)
-    return () => window.removeEventListener('resize', report)
-  }, [isOpen, panelMode, mobile, pos, size, visible, onFloatingRectChange])
+    return () => {
+      if (liveRectReportRef.current === report) liveRectReportRef.current = null
+      window.removeEventListener('resize', report)
+    }
+    // `viewport`: a resize MOVES the popup that hangs above the mascot, but in
+    // the render after the event — the listener above measures it where it
+    // stood — so the rect is told again once the move has landed, or the
+    // notices would keep dodging the place it left.
+  }, [isOpen, panelMode, mobile, pos, size, visible, onFloatingRectChange, viewport.w, viewport.h])
 
   // The width the panel was docked at before Undock, so Dock to right puts it
   // back rather than at the default: a brief undock used to cost a resized
@@ -1863,27 +1922,49 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     e.stopPropagation()
     const startX = 'touches' in e ? e.touches[0].clientX : e.clientX
     const startW = popupRef.current?.getBoundingClientRect().width ?? DEFAULT_PANEL_WIDTH
+    // The width the last move wrote, for a gesture that ends without a point
+    // of its own to read (see `onCancel`).
+    let lastW: number | null = null
     const onMove = (ev: MouseEvent | TouchEvent) => {
       const cx = 'touches' in ev ? ev.touches[0].clientX : (ev as MouseEvent).clientX
-      const newW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      // At most 60% of the screen it docks on: the MAIN monitor over a row of
+      // monitors, where 60% of the whole row covered the main one and more.
+      const newW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), dockedChatMaxWidth()))
+      lastW = newW
       // Direct DOM update during drag — no React re-renders
       if (popupRef.current) popupRef.current.style.width = newW + 'px'
     }
-    const onUp = (ev: MouseEvent | TouchEvent) => {
+    const detach = () => {
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
       window.removeEventListener('touchmove', onMove)
       window.removeEventListener('touchend', onUp)
+      window.removeEventListener('touchcancel', onCancel)
+    }
+    const onUp = (ev: MouseEvent | TouchEvent) => {
+      detach()
       // Commit final width to React state + notify parent
       const cx = 'changedTouches' in ev ? ev.changedTouches[0].clientX : (ev as MouseEvent).clientX
-      const finalW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), window.innerWidth * 0.6))
+      const finalW = Math.max(MIN_CHAT_WIDTH, Math.min(startW - (cx - startX), dockedChatMaxWidth()))
       setPanelWidth(finalW)
       onPanelModeChange?.(finalW)
+    }
+    // A touch the system CANCELLED (the browser or the OS took the gesture)
+    // ends the resize at the width on screen, the one the last move wrote:
+    // the cancel carries no point the owner chose. Unhandled, the panel kept
+    // that width while the state — and the strip the desktop reserves beside
+    // it — kept the old one, and the next touch anywhere went on resizing.
+    const onCancel = () => {
+      detach()
+      if (lastW === null) return
+      setPanelWidth(lastW)
+      onPanelModeChange?.(lastW)
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
     window.addEventListener('touchmove', onMove)
     window.addEventListener('touchend', onUp)
+    window.addEventListener('touchcancel', onCancel)
   }, [onPanelModeChange])
 
   const onDragStart = useCallback((e: React.PointerEvent) => {
@@ -1892,6 +1973,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (!el) return
     const rect = el.getBoundingClientRect()
     dragRef.current = { startX: e.clientX, startY: e.clientY, origX: rect.left, origY: rect.top }
+    // Where the last move put the popup, committed to state once on the drop.
+    // The moves themselves write the DOM (`placeFloating`) the way the docked
+    // panel's resize does: a `setPos` per pointer event re-rendered this whole
+    // popup about sixty times a second for as long as the drag lasted.
+    let moved: { x: number; y: number } | null = null
+    // The snap plate this drag has put up, so a move that keeps it (or keeps
+    // none) asks nothing of React. Handing the setter an unchanged value is
+    // not free: after a commit React may still run this whole component once
+    // before it notices the state did not move.
+    let shownTarget: SnapTarget | null = null
+    const report = frameThrottled(() => liveRectReportRef.current?.())
     const onMove = (ev: PointerEvent) => {
       const d = dragRef.current
       if (!d) return
@@ -1901,31 +1993,82 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // the top-left gutter, where its header is at least on screen.
       const x = d.origX + (ev.clientX - d.startX)
       const y = d.origY + (ev.clientY - d.startY)
-      setPos({
-        x: Math.max(VIEWPORT_MARGIN, Math.min(x, window.innerWidth - rect.width - VIEWPORT_MARGIN)),
-        y: Math.max(VIEWPORT_MARGIN, Math.min(y, window.innerHeight - rect.height - VIEWPORT_MARGIN)),
-      })
-      setSnapPreview(getSnapZone(ev.clientX, ev.clientY))
+      // The top gutter starts under the kiosk bar on the laptop (0 elsewhere):
+      // a header dropped under it could not be grabbed again. Over a row of
+      // monitors the bottom is the bottom of the monitor the chat is on.
+      const next = clampFloatingRect({ x, y, width: rect.width, height: rect.height }, VIEWPORT_MARGIN)
+      if (!moved) {
+        // What the first move's render did to the entrance burst: a drag pins
+        // the popup to its resting state (see `animation` on the popup), so a
+        // burst still playing stops where it would have ended. And it stays
+        // off until the chat is next opened — the render after a drop used to
+        // put the burst back and replay it, at whatever moment that render
+        // happened to come.
+        burstTakenByDragRef.current = true
+        el.style.animation = ''
+      }
+      moved = { x: next.x, y: next.y }
+      placeFloating(el, moved)
+      const target = snapTargetAt(ev.clientX, ev.clientY, 0, shownTarget)
+      if (target !== shownTarget) {
+        shownTarget = target
+        setSnapPreview(target)
+      }
+      report.schedule()
     }
-    const onUp = (ev: PointerEvent) => {
+    // Both ends of the drag — the drop and a cancel — take the gesture down
+    // the same way: its listeners, the pending rect report and the snap plate.
+    const detach = () => {
       dragRef.current = null
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+      report.cancel()
+      if (shownTarget) setSnapPreview(null)
+    }
+    const onUp = (ev: PointerEvent) => {
+      detach()
       // Read the zone from the RELEASE point, not from the preview state: a
       // pointerup can arrive without a preceding pointermove (a click that
       // barely moved), and reusing a stale preview would snap on a drag that
       // never reached an edge.
       const zone = getSnapZone(ev.clientX, ev.clientY)
-      setSnapPreview(null)
-      const rect = getSnapRect(zone)
-      if (!rect) return
+      // On the monitor the chat was dropped on.
+      const rect = getSnapRect(zone, 0, { x: ev.clientX, y: ev.clientY })
+      if (!rect) {
+        if (moved) setPos(moved)
+        return
+      }
       // Honour the chat's own floor. `getSnapRect` divides the screen, and half
       // of a narrow window is narrower than the chat can render.
-      setPos({ x: rect.x, y: rect.y })
-      setSize({ w: Math.max(MIN_CHAT_WIDTH, rect.width), h: Math.max(MIN_CHAT_HEIGHT, rect.height) })
+      const snappedPos = { x: rect.x, y: rect.y }
+      const snappedSize = { w: Math.max(MIN_CHAT_WIDTH, rect.width), h: Math.max(MIN_CHAT_HEIGHT, rect.height) }
+      // Written here as well as committed: React only writes a style that
+      // differs from what it LAST rendered, and a snap that lands where the
+      // popup was before the drag would leave the moved DOM where the drag
+      // left it.
+      placeFloating(el, snappedPos, snappedSize)
+      setPos(snappedPos)
+      setSize(snappedSize)
+    }
+    // A pointer the system CANCELLED — the browser or the OS took the gesture
+    // for itself — ends the drag where the chat stands, as a release there
+    // would, but snaps nothing: the owner never let go, so a plate the drag
+    // happened to be showing is no answer (ChromeWindow's cancel, for the
+    // same reason). Unhandled, the popup stayed where the moves had written it
+    // while `pos` still said "above the mascot", and the move listener stayed
+    // armed for the next touch anywhere. That state is also what the
+    // window-size listener reads: with `pos` null a resize re-rendered the
+    // anchored `left` over a popup the drag had given a `top` and
+    // `bottom: auto`, and the chat landed half in one place and half in the
+    // other. Committing the place it stands closes both.
+    const onCancel = () => {
+      detach()
+      if (moved) setPos(moved)
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
   }, [])
 
   const handleResizeStart = useCallback((edge: string, e: React.MouseEvent | React.TouchEvent) => {
@@ -1939,6 +2082,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY
     const start = { x: clientX, y: clientY, w: rect.width, h: rect.height, left: rect.left, top: rect.top }
+    const report = frameThrottled(() => liveRectReportRef.current?.())
+    // The rect the moves last wrote, committed on release. Declared before
+    // the move handler that assigns it, so the closure never reaches into
+    // its temporal dead zone however the handlers come to be wired.
+    let last: { x: number; y: number; w: number; h: number } | null = null
     const onMove = (ev: MouseEvent | TouchEvent) => {
       const cx = 'touches' in ev ? ev.touches[0].clientX : (ev as MouseEvent).clientX
       const cy = 'touches' in ev ? ev.touches[0].clientY : (ev as MouseEvent).clientY
@@ -1957,27 +2105,39 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Growing leftward/upward moves the far edge, which is what has to stay
       // inside: the right edge is fixed at `start.left + start.w`.
       if (edge.includes('l')) { newW = Math.max(MIN_CHAT_WIDTH, Math.min(start.w - dx, start.left + start.w - VIEWPORT_MARGIN)); newX = start.left + (start.w - newW) }
-      if (edge.includes('t')) { newH = Math.max(MIN_CHAT_HEIGHT, Math.min(start.h - dy, start.top + start.h - VIEWPORT_MARGIN)); newY = start.top + (start.h - newH) }
-      setSize({ w: newW, h: newH })
-      setPos({ x: newX, y: newY })
-      last = { w: newW, h: newH }
+      if (edge.includes('t')) { newH = Math.max(MIN_CHAT_HEIGHT, Math.min(start.h - dy, start.top + start.h - VIEWPORT_MARGIN - desktopTop())); newY = start.top + (start.h - newH) }
+      // Straight onto the DOM, and into state once on release — the same
+      // reason as the drag: a `setSize` + `setPos` per move re-rendered the
+      // whole popup for every pointer event of the resize.
+      last = { x: newX, y: newY, w: newW, h: newH }
+      placeFloating(el, { x: newX, y: newY }, { w: newW, h: newH })
+      report.schedule()
     }
-    let last: { w: number; h: number } | null = null
+    // The release, and a touch the system CANCELLED: a resize has no snap to
+    // leave out, so a cancel ends it exactly as letting go there would — at
+    // the size on screen, remembered. Unhandled, the popup kept the size the
+    // moves wrote while the state and the remembered size kept the old one,
+    // and the next touch anywhere went on resizing it.
     const onUp = () => {
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
       window.removeEventListener('touchmove', onMove)
       window.removeEventListener('touchend', onUp)
+      window.removeEventListener('touchcancel', onUp)
+      report.cancel()
       // The size the owner let go at is the one to remember — once per
       // resize, not once per pointer move.
       if (last) {
-        try { window.localStorage?.setItem(SIZE_STORAGE_KEY, JSON.stringify(last)) } catch { /* localStorage unavailable */ }
+        setSize({ w: last.w, h: last.h })
+        setPos({ x: last.x, y: last.y })
+        try { window.localStorage?.setItem(SIZE_STORAGE_KEY, JSON.stringify({ w: last.w, h: last.h })) } catch { /* localStorage unavailable */ }
       }
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
     window.addEventListener('touchmove', onMove)
     window.addEventListener('touchend', onUp)
+    window.addEventListener('touchcancel', onUp)
   }, [])
 
   const wsRef = useRef<WebSocket | null>(null)
@@ -2014,12 +2174,178 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Bumped on every tab switch so the sticky reasoning level is pushed to the
   // session that is now bound (the effect below cannot see a ref change).
   const [sessionEpoch, setSessionEpoch] = useState(0)
-  useEffect(() => {
-    try { window.localStorage?.setItem(TABS_STORAGE_KEY, JSON.stringify({ tabs, active: activeTabKey })) } catch { /* localStorage unavailable */ }
-  }, [tabs, activeTabKey])
   // The adapter, for the two stable callbacks below that run inside the socket
   // handshake and cannot re-create themselves when it changes.
   const adapterRef = useRef<HarnessAdapter | null>(null)
+
+  // ── The strip on every device (TASK-1159) ──
+  // Every sync sends the whole cached list and the closes the box has not
+  // confirmed — the merge on the box only ever adds, names a placeholder or
+  // closes, so repeating it is harmless — and only the answer to the LATEST
+  // request is applied. An older answer cannot know about a tab opened since,
+  // and the newer request carries it anyway; a local change bumps the counter
+  // the moment it is made, so no answer already in flight can undo it.
+  const tabsRef = useRef<ChatTab[]>(storedTabs.tabs)
+  const closedTabsRef = useRef<string[]>(storedTabs.closed)
+  const tabSyncSeqRef = useRef(0)
+  // ── Where the owner left off (TASK-1364) ──
+  // The strip was one list on every device, but which tab was OPEN stayed this
+  // browser's own: a conversation started on the desktop sat on the phone's
+  // strip while the phone opened main, so carrying on from the phone meant
+  // finding the right tab by hand. The box now keeps the conversation the owner
+  // last sent a turn in (`active` beside the list, chat-tabs.ts); a device
+  // opens that one when the owner ARRIVES — the chat mounted or opened, its
+  // window or tab come back to — and the record is newer than anything this
+  // browser has accounted for. Never on the minute poll, never under a turn
+  // running here, and never over a tab picked by hand after the record.
+  const seenActiveAtRef = useRef(storedTabs.seenActiveAt)
+  /** The box's latest record, and the tabs it listed with it — what a follow may open. */
+  const boxActiveRef = useRef<ChatActiveRecord | null>(null)
+  const boxListedRef = useRef<ChatTab[]>([])
+  /** Has the box answered once on this mount? Until it has, an arrival waits for it. */
+  const boxAnsweredRef = useRef(false)
+  /** The owner arrived and the box's record has not been weighed since. */
+  const followPendingRef = useRef(true)
+  /** A tab was picked here by hand: the record the next answer carries predates it. */
+  const absorbRecordRef = useRef(false)
+  const statusRef = useRef(status)
+  useEffect(() => { statusRef.current = status }, [status])
+  const markActiveSeen = useCallback((at: number) => {
+    if (!(at > seenActiveAtRef.current)) return
+    seenActiveAtRef.current = at
+    writeStoredTabs({ tabs: tabsRef.current, active: activeTabKeyRef.current, closed: closedTabsRef.current, seenActiveAt: at })
+  }, [])
+  /**
+   * Weigh the box's record for a pending arrival and answer the session to
+   * open instead of `current`, or null. Consumes the arrival once the box has
+   * answered — a record of nothing, or one this browser has seen, is the
+   * answer too. While the socket is down the arrival waits for the reconnect's
+   * bind, which is the moment a phone coming back from the background is
+   * actually here. While a turn of this device's own is running the arrival is
+   * spent WITHOUT moving and without marking the record seen: the owner is
+   * watching that reply, and a pending arrival left standing would be acted on
+   * by whatever answer came next — the minute tick, long after they arrived.
+   * Their next arrival asks again.
+   */
+  const pickFollowTarget = useCallback((current: string, binding = false): string | null => {
+    if (!followPendingRef.current || !boxAnsweredRef.current) return null
+    const main = mainSessionKeyRef.current
+    if (!main) return null
+    if (!binding && statusRef.current !== 'connected') return null
+    followPendingRef.current = false
+    if (!binding && sendingRef.current) return null
+    const owns = (key: string) => adapterRef.current?.ownsSessionKey(key) ?? false
+    const listed = (key: string) => tabsRef.current.some(tb => tb.key === key) || boxListedRef.current.some(tb => tb.key === key)
+    const { follow, seenAt } = conversationToFollow({
+      record: boxActiveRef.current,
+      seenAt: seenActiveAtRef.current,
+      current,
+      main,
+      canOpen: (key) => owns(key) && listed(key),
+    })
+    markActiveSeen(seenAt)
+    if (follow && follow !== main && !tabsRef.current.some(tb => tb.key === follow)) {
+      // On the box's list but not yet this browser's — a phone opening the
+      // chat for the first time. On the strip now, so the header names the
+      // conversation it opened; the sync in flight brings the rest.
+      const record = boxListedRef.current.find(tb => tb.key === follow)
+      if (record) {
+        const next = sortTabs([...tabsRef.current, record])
+        tabsRef.current = next
+        setTabs(next)
+      }
+    }
+    return follow
+  }, [markActiveSeen])
+  /** A change made here that the box has not been sent yet: the +, a close, a naming. */
+  const tabsDirtyRef = useRef(false)
+  const markTabsDirty = useCallback(() => {
+    tabsDirtyRef.current = true
+    tabSyncSeqRef.current += 1
+  }, [])
+  // Declared below; a tab closed on another device while it is open here is
+  // left through it, exactly as if the owner had clicked another tab.
+  const switchSessionRef = useRef<(key: string, opts?: { auto?: boolean }) => Promise<void>>(async () => {})
+  const syncTabs = useCallback(async (opts?: { activity?: { key: string | null } }) => {
+    // Before the main session is bound there is no adapter to say which keys
+    // this transport owns; the bind itself syncs.
+    if (!mainSessionKeyRef.current) return
+    const seq = ++tabSyncSeqRef.current
+    const close = [...closedTabsRef.current]
+    const activity = opts?.activity
+    let answer: unknown
+    try {
+      const res = await fetch(CHAT_TABS_ROUTE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // `activity`: the owner just sent a turn in this conversation, which
+        // makes it the one every other device opens next (TASK-1364).
+        body: JSON.stringify({ upsert: tabsRef.current, close, ...(activity ? { activity } : {}) }),
+        signal: AbortSignal.timeout(TAB_SYNC_TIMEOUT_MS),
+      })
+      if (!res.ok) return
+      answer = await res.json()
+    } catch {
+      // Offline, signed out, or a box too old to have the route: the cached
+      // list stands, and the next sync carries everything this one did.
+      return
+    }
+    const listed = answer && typeof answer === 'object' ? (answer as { tabs?: unknown }).tabs : undefined
+    if (!Array.isArray(listed) || seq !== tabSyncSeqRef.current) return
+    closedTabsRef.current = closedTabsRef.current.filter(k => !close.includes(k))
+    const owns = (key: string) => adapterRef.current?.ownsSessionKey(key) ?? true
+    const before = tabsRef.current
+    const next = [
+      ...parseTabList(listed).filter(tb => owns(tb.key)),
+      // A key no transport mints any more is not the box's to judge: it
+      // stays exactly as this browser had it.
+      ...before.filter(tb => !isChatTabKey(tb.key) && owns(tb.key)),
+    ]
+    tabsRef.current = next
+    setTabs(prev => sameTabList(prev, next) ? prev : next)
+    writeStoredTabs({ tabs: next, active: activeTabKeyRef.current, closed: closedTabsRef.current, seenActiveAt: seenActiveAtRef.current })
+    // Tabs closed on another device: what this popup held for them goes too.
+    const gone = before.filter(tb => !next.some(n => n.key === tb.key)).map(tb => tb.key)
+    if (gone.length > 0) {
+      for (const key of gone) {
+        tabStashRef.current.delete(key)
+        tabErrorsRef.current.delete(key)
+        busyKeysRef.current.delete(key)
+      }
+      setBusyKeys(new Set(busyKeysRef.current))
+      setUnreadKeys(prev => gone.some(k => prev.has(k)) ? new Set([...prev].filter(k => !gone.includes(k))) : prev)
+    }
+    // Where the owner was last active. A box too old to say answers no
+    // `active` at all, which reads as "nothing recorded" — the strip above
+    // still synced, and the browser keeps the tab it had.
+    const record = parseActiveRecord((answer as { active?: unknown }).active)
+    boxActiveRef.current = record
+    boxListedRef.current = next
+    boxAnsweredRef.current = true
+    // This browser's own turn, or a record that predates a tab picked here
+    // by hand: neither is somewhere to move the owner to.
+    if (record && ((activity && record.key === activity.key) || absorbRecordRef.current)) markActiveSeen(record.at)
+    absorbRecordRef.current = false
+    // The tab on screen was closed on another device: it is left for main —
+    // or, when the owner has just arrived and carried on elsewhere, straight
+    // for that conversation.
+    const shown = activeTabKeyRef.current
+    const shownGone = shown !== null && gone.includes(shown)
+    const follow = pickFollowTarget(shownGone ? mainSessionKeyRef.current : sessionKeyRef.current)
+    if (follow !== null) void switchSessionRef.current(follow, { auto: true })
+    else if (shownGone) void switchSessionRef.current(mainSessionKeyRef.current, { auto: true })
+  }, [markActiveSeen, pickFollowTarget])
+  const syncTabsRef = useRef(syncTabs)
+  // An answer still in flight when the popup goes away belongs to nothing: it
+  // must not write a list into the localStorage whoever mounts next reads.
+  useEffect(() => () => { tabSyncSeqRef.current += 1 }, [])
+  useEffect(() => {
+    tabsRef.current = tabs
+    writeStoredTabs({ tabs, active: activeTabKey, closed: closedTabsRef.current, seenActiveAt: seenActiveAtRef.current })
+    if (!tabsDirtyRef.current) return
+    tabsDirtyRef.current = false
+    void syncTabs()
+  }, [tabs, activeTabKey, syncTabs])
   /**
    * Bind the popup to its main session: the gateway's, named by the hello, or
    * the desktop transcript on a harness with no handshake to name one.
@@ -2029,6 +2355,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * switched harness — so what the adapter does not own is dropped here. The
    * bound key is the open tab if it survived, else main. Idempotent: a re-bind
    * (a reconnect, a capability re-probe) keeps the owner where they were.
+   *
+   * Every bind asks the box for the list, which is how a desktop that has
+   * never seen the phone's tabs gets them the moment its chat connects.
+   *
+   * And the first bind of an arrival opens the conversation the owner was
+   * last active in on ANY device, when the box has already said which
+   * (TASK-1364) — the phone lands in the conversation the desktop was in,
+   * rather than painting main first and moving a moment later.
    */
   const bindMainSession = useCallback((main: string): string => {
     mainSessionKeyRef.current = main
@@ -2039,10 +2373,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       activeTabKeyRef.current = null
       setActiveTabKey(null)
     }
+    const followed = pickFollowTarget(activeTabKeyRef.current ?? main, true)
+    if (followed !== null) {
+      const nextActive = followed === main ? null : followed
+      activeTabKeyRef.current = nextActive
+      setActiveTabKey(nextActive)
+    }
     const bound = activeTabKeyRef.current ?? main
     sessionKeyRef.current = bound
+    void syncTabsRef.current()
     return bound
-  }, [])
+  }, [pickFollowTarget])
   /**
    * A run on `key` has ended. Its busy mark goes — a tab the owner left
    * mid-run and came back to carries one too — and a tab they are NOT looking
@@ -2063,6 +2404,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // provider's own refusal rides on the lifecycle frames, never on the `chat`
   // error itself. See lib/chat-run-failure.ts.
   const runFailureRef = useRef(new RunFailureLedger())
+  // The turns sent, by idempotency key, for the Anthropic account swap (TASK-1260) — see ChatApp.
+  const turnsRef = useRef(new TurnLedger())
   /**
    * `dispatchTurn`, reachable from `loadHistory` above it.
    *
@@ -2217,6 +2560,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // would let a Hermes box open a gateway socket after a Settings event.
   const hasLiveConnectionRef = useRef(true)
   useEffect(() => { hasLiveConnectionRef.current = caps.hasLiveConnection }, [caps])
+  // Whether this box takes the sticky reasoning patch at all — read by the
+  // model-state re-read, which has to know whether a failed push is still
+  // owed a retry (see refreshChatModelState).
+  const canPatchSessionDefaultsRef = useRef(false)
+  useEffect(() => { canPatchSessionDefaultsRef.current = caps.canPatchSessionDefaults }, [caps])
   // The agent's "Task progress" card for the conversation on screen — the
   // gateway's `progressCard.get`, re-read on (re)connect, on a tab switch and
   // on every `progressCard.changed` for this session (TASK-896). Only the
@@ -2362,7 +2710,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
       if (!res.ok) return
       const data = await res.json() as ChatModelState
-      setChatModelState(data)
+      // This re-read runs once a minute and on every focus — which comes back
+      // each time the owner clicks out of an app's iframe — and nearly always
+      // answers exactly what the header already shows. A fresh object
+      // rendered the whole popup again for it, so an answer equal BY VALUE
+      // keeps the object on screen.
+      //
+      // Except when the fresh object was doing a job. Each re-read handed the
+      // two effort effects (the sticky push and the per-provider snap) a new
+      // `thinkingLevels` array, which re-ran both, and two behaviours rode on
+      // that: a reasoning push the gateway REFUSED is retried (its catch
+      // clears `lastSentThinkingRef` and waits for the next run), and a level
+      // persisted from another window of this browser is adopted by the snap.
+      // While either would act on a re-run, the fresh object is handed over
+      // exactly as before. Otherwise a re-run could do nothing, and skipping
+      // it loses nothing — the flash-alias effect also re-runs on it, and is
+      // idempotent by its own attempt ref.
+      const pushOwed = canPatchSessionDefaultsRef.current && lastSentThinkingRef.current === undefined
+      const rerunOwed = pushOwed || thinkingSnapDue(data, thinkingLevelRef.current)
+      setChatModelState(prev => (!rerunOwed && prev && samePlainData(prev, data) ? prev : data))
     } catch {
       // Ignore toggle-state refresh failures and keep the current option list.
     }
@@ -2805,68 +3171,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // into the local list (and have to dedupe it against the one the `chat`
         // stream may also deliver), treat it as a signal and re-read history —
         // the same reconcile a manual page refresh used to be doing by hand.
+        // The handling is shared with the full-page chat
+        // (lib/chat-transcript-reconcile.ts), which had none of it and showed a
+        // file the agent sent only after a reload (TASK-1372).
         if (eventName === 'session.message') {
-          const payload = data.payload as Record<string, unknown> | undefined
-          if (!payload) return
-          const sk = payload.sessionKey as string | undefined
-          if (sk && sk !== sessionKeyRef.current) return
+          const push = sessionMessagePush(data.payload, sessionKeyRef.current)
+          if (!push) return
           // Older gateways push the TTS supplement intact here but omit it
           // from chat.history. Render it immediately; the on-box transcript
           // supplement route below restores the same identity after refresh.
-          const pushedMessage = payload.message
-          const pushedRole = pushedMessage && typeof pushedMessage === 'object'
-            ? String((pushedMessage as Record<string, unknown>).role ?? '').toLowerCase()
-            : ''
-          const pushedRaw = extractText(pushedMessage)
-          const pushedAudio = boundedAudio(extractAudioAttachments(pushedMessage))
-          if (pushedRole === 'assistant' && pushedAudio.length > 0
-              && !isSentinel(pushedRaw) && !isInterSessionEnvelope(pushedRaw, pushedMessage)) {
-            const pushedText = splitEmailRefs(splitMediaDirectives(pushedRaw).text).text
-            setMessages(prev => {
-              // Only a bubble after the latest user turn can own this event.
-              // Otherwise a late supplement from the previous turn could be
-              // put on a new identical "Sure.". If the target is ambiguous,
-              // the timestamp-aware transcript reconcile scheduled below is
-              // the sole authority; text-only pending queues cross turns.
-              let latestUser = -1
-              for (let i = prev.length - 1; i >= 0; i--) {
-                if (prev[i].role === 'user') { latestUser = i; break }
-              }
-              for (let i = prev.length - 1; pushedText && i > latestUser; i--) {
-                const candidate = prev[i]
-                // The STORED text still carries its `EMAIL:` lines — they are
-                // lifted at render, not at write — and a caption can carry a
-                // `MEDIA:` line too, while `pushedText` has had
-                // them taken out. Compare like with like, or a turn that named
-                // messages never matches its own spoken supplement and the
-                // audio is dropped.
-                if (candidate.role !== 'assistant') continue
-                if (splitEmailRefs(splitMediaDirectives(candidate.text).text).text !== pushedText) continue
-                if (candidate.audio?.length) return prev // duplicate push
-                const next = [...prev]
-                next[i] = { ...candidate, audio: pushedAudio }
-                return next
-              }
-              // A genuinely audio-only reply has no caption to wait for.
-              if (!pushedText) {
-                return [...prev, {
-                  role: 'assistant' as const,
-                  text: '',
-                  timestamp: finiteMessageTimestamp(pushedMessage) ?? Date.now(),
-                  audio: pushedAudio,
-                }]
-              }
-              return prev
-            })
-          }
-          if (transcriptReconcileTimerRef.current !== null) {
-            window.clearTimeout(transcriptReconcileTimerRef.current)
-          }
+          const spoken = pushedSpokenReply(push.message)
+          if (spoken) setMessages(prev => withPushedSpokenReply(prev, spoken))
           // Coalesce the burst an agent turn produces into one read.
-          transcriptReconcileTimerRef.current = window.setTimeout(() => {
-            transcriptReconcileTimerRef.current = null
-            void reconcileTranscriptRef.current()
-          }, 400)
+          scheduleTranscriptReconcile(transcriptReconcileTimerRef, () => { void reconcileTranscriptRef.current() })
           return
         }
 
@@ -2882,8 +3199,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // history reload cannot recreate what was never stored.
           // One sentence per failed run, worded once: the ledger's note is
           // consumed here and reused by the error branch below.
-          const failureText = state === 'error'
-            ? describeChatFailure(payload.errorMessage, runFailureRef.current.settle(payload), failureWordsRef.current)
+          const failureContext = state === 'error' ? runFailureRef.current.settle(payload) : undefined
+          const failureText = failureContext
+            ? describeChatFailure(payload.errorMessage, failureContext, failureWordsRef.current)
             : undefined
           if (state === 'final' || state === 'aborted' || state === 'error') {
             settleRun(sk, failureText)
@@ -2915,17 +3233,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }
           } else if (state === 'final') {
             // A generated picture arrives as a MEDIA: line inside the reply
-            // text, not as a structured attachment — see lib/chat-media.ts.
-            const { text, images: directiveImages, audio: directiveAudio, files: directiveFiles } = splitAssistantMedia(extractText(msg))
-            // Any other file the agent sent — by directive or as a structured
-            // attachment — becomes a download card rather than vanishing.
-            const structuredFiles = extractFileAttachments(msg)
-            const images = [...new Set([...directiveImages, ...structuredFiles.images])]
-            const files = boundedFiles(directiveFiles, structuredFiles.files)
-            // A spoken reply is a structured attachment part, not a MEDIA:
-            // line — see lib/chat-media.ts. Both are read; the harness uses
-            // the first and image generation the second.
-            const audio = boundedAudio(extractAudioAttachments(msg), directiveAudio)
+            // text, a spoken reply as a structured attachment part, and any
+            // other file the agent sent by either — see lib/chat-media.ts. Read
+            // by the reader the full-page chat uses too.
+            const { raw, text, images, audio, files } = readLiveReply(msg)
             // Suppress sentinel and "Sent." (delivery-mirror ack) from the
             // rendered transcript — the latter is just a server-side
             // acknowledgement that the real reply will follow via the
@@ -2938,44 +3249,38 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // harness delivers a spoken reply as its own message whose text is
             // a repeat of the one already on screen, and treating that as an
             // empty ack threw the recording away and refetched history instead.
-            const isAckOnly = (!text && images.length === 0 && audio.length === 0 && files.length === 0) || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            const isAckOnly = isAckOnlyReply({ text, images, audio, files })
             // The reconcile often wins the race now: `session.message` lands
             // the stored reply, media intact, before this event arrives with
             // the same text and the media stripped. Appending it again showed
-            // the reply twice — once with the picture, once without.
+            // the reply twice — once with the picture, once without. Asked
+            // here as well as in the append below so a reply already on screen
+            // is not spoken a second time either.
             const latestShown = messagesRef.current[messagesRef.current.length - 1]
-            const alreadyShownWithMedia = images.length === 0 && audio.length === 0 && files.length === 0 && text.length > 0 &&
-              latestShown?.role === 'assistant' && latestShown.text === text &&
-              ((latestShown.images?.length ?? 0) > 0 || (latestShown.audio?.length ?? 0) > 0 || (latestShown.files?.length ?? 0) > 0)
+            const alreadyShownWithMedia = finalAlreadyShownWithMedia(latestShown, { text, images, audio, files })
             // Envelope suppression (TASK-416) still applies on the live path, so
             // the bubble cannot appear in real time and an envelope can never be
             // cached as a mascot snippet. Checked on the ORIGINAL text: a routing
             // envelope carrying a MEDIA: line must be dropped whole, not split
             // into a picture plus its own machinery.
-            if (!isAckOnly && !alreadyShownWithMedia && !isInterSessionEnvelope(extractText(msg), msg)) {
-              setMessages(prev => {
-                // The spoken half arrives as a SECOND message repeating the
-                // text of the one already rendered. Appending it verbatim
-                // showed the answer twice, once silent and once playable, so
-                // the audio is folded into the bubble it belongs to when the
-                // text matches and that bubble has none yet.
-                const last = prev[prev.length - 1]
-                if (text.length > 0 && audio.length > 0 && !images.length && !files.length && last && last.role === 'assistant'
-                    && last.text === text) {
-                  const mergedAudio = boundedAudio(last.audio ?? [], audio)
-                  if (last.audio?.length === mergedAudio.length
-                      && last.audio.every((src, index) => src === mergedAudio[index])) return prev
-                  return [...prev.slice(0, -1), { ...last, audio: mergedAudio }]
-                }
-                return [...prev, {
-                  role: 'assistant' as const,
-                  text,
-                  timestamp: finiteMessageTimestamp(msg) ?? Date.now(),
-                  images,
-                  audio,
-                  ...(files.length ? { files } : {}),
-                }]
-              })
+            if (!isAckOnly && !alreadyShownWithMedia && !isInterSessionEnvelope(raw, msg)) {
+              // The spoken half arrives as a SECOND message repeating the text
+              // of the one already rendered; `withAssistantReply` folds its
+              // audio into that bubble instead of showing the answer twice. A
+              // clip THIS chat made for the bubble gives way to the gateway's:
+              // both are the same words in the same voice, and which landed
+              // first is a race — merging them put two players on one answer
+              // whenever the box spoke for the chat first. The chat's clip
+              // stays in its ring, which releases it.
+              const reply: ChatMessage = {
+                role: 'assistant',
+                text,
+                timestamp: finiteMessageTimestamp(msg) ?? Date.now(),
+                images,
+                audio,
+                ...(files.length ? { files } : {}),
+              }
+              setMessages(prev => withAssistantReply(prev, reply, { ownClips: new Set(spokenUrlsRef.current) }))
               // The picture reached us over the socket after all — nothing
               // left to wait for, so take the banner down.
               if (images.length > 0) endImageWait()
@@ -3063,6 +3368,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
               setMessages(prev => [...prev, { role: 'system', text: failureText ?? describeChatFailure(payload.errorMessage, undefined, failureWordsRef.current), timestamp: Date.now() }])
+              // A Claude account at its limit, or refused (TASK-1260): see ChatApp.
+              const forKey = sessionKeyRef.current
+              void reportAnthropicChatFailure({
+                errorMessage: payload.errorMessage,
+                context: failureContext,
+                sessionKey: forKey || null,
+                message: turnsRef.current.resendable(payload.runId),
+              }).then((answer) => {
+                const line = describeChatSwap(answer, failureWordsRef.current)
+                if (line && sessionKeyRef.current === forKey) setMessages(prev => [...prev, { role: 'system', text: line, timestamp: Date.now() }])
+              })
             }
           }
         }
@@ -3300,6 +3616,62 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [isOpen, refreshChatModelState])
 
+  // The tab list, by the same three triggers: the chat being opened, the owner
+  // coming back to this browser tab or window, and a slow tick while it is on
+  // screen. A tab opened on the phone reaches a desktop that is already open
+  // this way — the connect-time sync in `bindMainSession` only covers a desktop
+  // that connects after it.
+  //
+  // The first two are ARRIVALS (TASK-1364): the owner has just come to this
+  // device, so the answer may also move them to the conversation they were
+  // last active in elsewhere — a phone left open on main follows the desktop's
+  // conversation when it is picked up again. The tick never moves anyone: a
+  // screen the owner is reading is not changed under them from another room.
+  useEffect(() => {
+    if (!isOpen) return
+    followPendingRef.current = true
+    void syncTabs()
+    const onArrive = () => {
+      if (document.visibilityState !== 'visible') return
+      followPendingRef.current = true
+      void syncTabs()
+    }
+    const onTick = () => { if (document.visibilityState === 'visible') void syncTabs() }
+    document.addEventListener('visibilitychange', onArrive)
+    window.addEventListener('focus', onArrive)
+    const tick = setInterval(onTick, TAB_SYNC_POLL_MS)
+    return () => {
+      document.removeEventListener('visibilitychange', onArrive)
+      window.removeEventListener('focus', onArrive)
+      clearInterval(tick)
+    }
+  }, [isOpen, syncTabs])
+
+  // Ask the box where the owner was before the socket names main, so the
+  // first bind can open that conversation straight away instead of painting
+  // main and moving a moment later (TASK-1364). A read only: the strip itself
+  // is synced by the bind, which also sends what this browser holds. Whatever
+  // answers later — this or the bind's sync — is weighed the same way.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch(CHAT_TABS_ROUTE, { cache: 'no-store', signal: AbortSignal.timeout(TAB_SYNC_TIMEOUT_MS) })
+        if (!res.ok) return
+        const answer = await res.json() as { tabs?: unknown; active?: unknown }
+        if (cancelled || boxAnsweredRef.current || !Array.isArray(answer?.tabs)) return
+        boxActiveRef.current = parseActiveRecord(answer.active)
+        boxListedRef.current = parseTabList(answer.tabs)
+        boxAnsweredRef.current = true
+        const follow = pickFollowTarget(sessionKeyRef.current)
+        if (follow !== null) void switchSessionRef.current(follow, { auto: true })
+      } catch {
+        // The bind's own sync asks again.
+      }
+    })()
+    return () => { cancelled = true }
+  }, [pickFollowTarget])
+
   // Load chat history, and open the first conversation on a box that has an
   // introduction waiting.
   const greetedRef = useRef(false)
@@ -3402,18 +3774,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Preserve any optimistic user turns appended after this load was
       // dispatched but before chat.history responded — they haven't reached
       // the server yet so chatMsgs doesn't include them.
-      setMessages(prev => {
-        if (prev.length === 0) return chatMsgs
-        // Carry an event that beat the disk/history read across this one
-        // reconcile. One-to-one occurrence matching is essential here: a map
-        // keyed by text put the newest recording on every historical "Sure.".
-        const restored = preserveSpokenByOccurrence(prev, chatMsgs)
-        const lastServerTs = restored.length > 0 ? restored[restored.length - 1].timestamp : 0
-        const inFlight = unechoedUserTurns(prev, restored, lastServerTs)
-        const next = inFlight.length === 0 ? restored : [...restored, ...inFlight]
-        // Returning `prev` when nothing changed makes React skip the render.
-        return sameTranscript(prev, next) ? prev : next
-      })
+      // The merge is shared with the full-page chat
+      // (lib/chat-transcript-reconcile.ts); it returns `prev` itself when
+      // nothing changed, which makes React skip the render.
+      setMessages(prev => mergeRestoredTranscript(prev, chatMsgs))
 
       // Open the FIRST conversation, but only on a box that actually has an
       // introduction waiting.
@@ -3582,8 +3946,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * cancelled here: the two history-refetch timers, the picture wait, the
    * queued turns (stashed with the tab, not dropped).
    */
-  const switchSession = useCallback(async (key: string) => {
+  const switchSession = useCallback(async (key: string, opts?: { auto?: boolean }) => {
     if (!key || key === sessionKeyRef.current) return
+    // A tab picked here is the owner's own answer to "where am I": an arrival
+    // still waiting on the box is settled by it, and the box's record as of
+    // now — the one this browser holds, and whatever the next answer carries,
+    // which was written before this click — must not undo it (TASK-1364).
+    // `auto` is a move the owner did not make: following the record, or
+    // leaving a tab closed on another device.
+    if (!opts?.auto) {
+      followPendingRef.current = false
+      markActiveSeen(boxActiveRef.current?.at ?? 0)
+      absorbRecordRef.current = true
+      void syncTabsRef.current()
+    }
     const oldKey = sessionKeyRef.current
     // `runId` rides with the rest: the live-frame gates in `dispatchTurn` ask
     // whether the frame belongs to the run this popup is showing, and a tab
@@ -3603,10 +3979,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     sendingRef.current = false
     setSending(false)
     runIdRef.current = null
-    if (transcriptReconcileTimerRef.current !== null) {
-      window.clearTimeout(transcriptReconcileTimerRef.current)
-      transcriptReconcileTimerRef.current = null
-    }
+    cancelTranscriptReconcile(transcriptReconcileTimerRef)
     if (ackOnlyHistoryTimerRef.current !== null) {
       window.clearTimeout(ackOnlyHistoryTimerRef.current)
       ackOnlyHistoryTimerRef.current = null
@@ -3703,15 +4076,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         setMessages(prev => [...prev, { role: 'system', text: storedError, timestamp: Date.now() }])
       }
     }
-  }, [input, queuedSends, attachments, clearTranscript, endImageWait, loadHistory, wsRequest])
+  }, [input, queuedSends, attachments, clearTranscript, endImageWait, loadHistory, wsRequest, markActiveSeen])
+  useEffect(() => { switchSessionRef.current = switchSession }, [switchSession])
 
   /** The + : a new tab, bound to a fresh session under the same agent. */
   const newTab = useCallback(() => {
     const main = mainSessionKeyRef.current
     if (!main) return
     const key = adapter.newSessionKey(main)
+    markTabsDirty()
     setTabs(prev => {
-      const nextSeq = prev.reduce((m, tb) => Math.max(m, tb.seq ?? 1), 1) + 1
+      const nextSeq = nextTabSeq(prev)
       return [...prev, {
         key,
         label: t('chat.tabUntitled', { n: nextSeq }),
@@ -3721,7 +4096,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }]
     })
     void switchSession(key)
-  }, [adapter, switchSession, t])
+  }, [adapter, switchSession, t, markTabsDirty])
 
   /**
    * Close a tab: the popup forgets it and the transport deletes the session
@@ -3738,6 +4113,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // both.
     const running = busyKeysRef.current.has(key) || (sessionKeyRef.current === key && sendingRef.current)
     const remaining = tabs.filter(tb => tb.key !== key)
+    // Closed on EVERY device, not just this one: the box keeps the key as
+    // closed, so no other browser's cached copy can bring the tab back.
+    if (!closedTabsRef.current.includes(key)) closedTabsRef.current = [...closedTabsRef.current, key]
+    markTabsDirty()
     setTabs(remaining)
     tabStashRef.current.delete(key)
     tabErrorsRef.current.delete(key)
@@ -3768,9 +4147,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } else {
       void dispose()
     }
-  }, [tabs, switchSession, adapter])
+  }, [tabs, switchSession, adapter, markTabsDirty])
 
-  // A new tab is named after the first thing the owner says in it, once.
+  // A new tab is named after the first thing the owner says in it, once —
+  // and everywhere: the name goes to the box with the next sync, and a tab
+  // opened here from another device's list is named by its own first message
+  // the moment its history is on screen.
   useEffect(() => {
     const key = activeTabKey
     if (!key) return
@@ -3778,11 +4160,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (!tab?.autoLabel) return
     const first = messages.find(m => m.role === 'user' && m.text.trim())
     if (!first) return
-    const text = first.text.replace(/^📎 .*$/gm, '').replace(/\s+/g, ' ').trim()
-    if (!text) return
-    const label = text.length > TAB_LABEL_MAX ? `${text.slice(0, TAB_LABEL_MAX).trimEnd()}…` : text
+    const label = tabLabelFromText(first.text)
+    if (!label) return
+    markTabsDirty()
     setTabs(prev => prev.map(tb => tb.key === key ? { ...tb, label, autoLabel: false } : tb))
-  }, [messages, activeTabKey, tabs])
+  }, [messages, activeTabKey, tabs, markTabsDirty])
 
   // While a picture is being generated, go and look for it. The background run
   // that produces it does not deliver renderable media over this socket, so a
@@ -3863,6 +4245,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (!isCurrent()) return
         setAttachmentError({ ...classifyStagingFailure(status, payload), file: filename })
       }
+      const chip = beginUpload(filename, 'file')
       try {
         const res = await fetch('/setup-api/chat/attachments', { method: 'POST', body: formData })
         const json = await res.json().catch(() => ({} as { name?: string; path?: string; error?: string }))
@@ -3898,10 +4281,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // that to the box's problem rather than the file's, and the thrown
         // error itself is never shown — it can carry the request URL.
         fail(undefined, null)
+      } finally {
+        chip.end()
       }
     })
     void Promise.all(tasks)
-  }, [caps])
+  }, [caps, beginUpload])
+
+  // Files and whole folders dragged onto the chat. Loose files take the path
+  // above; a folder is staged as a folder and comes back as one attachment.
+  const addFolderAttachment = useCallback((folder: ChatAttachment) => {
+    setAttachments(prev => [...prev, folder])
+  }, [])
+  const drop = useChatFileDrop({
+    enabled: status === 'connected' && (caps.canAttachImages || caps.canAttachDocuments),
+    caps,
+    stageFiles: uploadFiles,
+    onFolderStaged: addFolderAttachment,
+    onError: setAttachmentError,
+    generationRef: uploadGenerationRef,
+    tracker: uploadTracker,
+  })
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
@@ -3985,7 +4385,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // origin: it offers a live route to this box's Remote Access tunnel
   // (TASK-470). Opened only from a mic click that classified as `insecure`.
   const [tunnelDialogOpen, setTunnelDialogOpen] = useState(false)
-  const [recordingMs, setRecordingMs] = useState(0)
   useEffect(() => {
     setCaptureAvailability(readCaptureAvailability())
   }, [])
@@ -4058,8 +4457,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Kokoro is 13-19 s on an Orin and the reply is already on screen by then,
   // so with nothing said the chat looked finished and simply spoke half a
   // minute later; the seconds are what tells a wait from a hang.
-  const [speakingReply, setSpeakingReply] = useState(false)
-  const [speakingFor, setSpeakingFor] = useState(0)
+  // Held as the moment THIS reply's sound was asked for (null while nothing is
+  // being made); the seconds themselves tick inside SpeakingReplyLabel, not
+  // here: a once-a-second state in this component re-rendered the whole popup.
+  // A start rather than a flag, so a reply whose wait begins in the same tick
+  // the previous one's ended still counts from 0 — what resetting the counter
+  // here did.
+  const [speakingSince, setSpeakingSince] = useState<number | null>(null)
   // The two things a player cannot say for itself, by the object URL they
   // belong to: which replies the CLOUD voice spoke (the owner picked the box's
   // own voice and is owed the fact when it could not answer), and which ones
@@ -4068,12 +4472,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [cloudSpoken, setCloudSpoken] = useState<string[]>([])
   const [autoplayBlocked, setAutoplayBlocked] = useState<string[]>([])
   useEffect(() => () => releaseSpokenReplies(), [releaseSpokenReplies])
-  useEffect(() => {
-    if (!speakingReply) return
-    const startedAt = Date.now()
-    const timer = window.setInterval(() => setSpeakingFor(Math.floor((Date.now() - startedAt) / 1000)), 1000)
-    return () => window.clearInterval(timer)
-  }, [speakingReply])
   useEffect(() => {
     if (!isOpen) return
     let active = true
@@ -4212,7 +4610,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // through, so "Speaking…" never counts the seconds an EARLIER reply was
       // taking; cleared in the same breath as the response, so the line goes
       // the moment the player takes over.
-      if (aloud()) { setSpeakingFor(0); setSpeakingReply(true) }
+      if (aloud()) setSpeakingSince(Date.now())
       try {
         for (let attempt = 0; attempt < 3; attempt++) {
           res = await fetch('/setup-api/tts/speak', {
@@ -4228,7 +4626,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           await new Promise((resolve) => setTimeout(resolve, 3000 * (attempt + 1)))
         }
       } finally {
-        setSpeakingReply(false)
+        setSpeakingSince(null)
       }
       if (!res || !res.ok) return
       // WHICH voice spoke. The chain falls through to the cloud whenever the
@@ -4545,7 +4943,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       setVoice({ state: 'error', error: 'unsupported', message: null, canRetry: false })
       return
     }
-    setRecordingMs(0)
     setVoice({ state: 'recording', error: null, message: null, canRetry: false })
   }, [voice.state, releaseMicrophone, transcribe])
 
@@ -4572,18 +4969,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   const dismissVoiceError = useCallback(() => { lastAudioRef.current = null; setVoice(IDLE_STATUS) }, [])
 
-  // Elapsed time, so a recording always shows that it is running — and a hard
-  // ceiling on how long it can run. Finishing through `stopRecording` is the
-  // same finish the button performs, so a capture that hits the cap is still
-  // transcribed instead of thrown away; the alternative is a blob the route
-  // answers 413 to after the whole upload, which loses the dictation at the
-  // point it cost the most. Armed once per recording: `stopRecording` and the
-  // `releaseMicrophone` it closes over are stable callbacks, so the clock's
-  // re-renders cannot push the deadline back.
+  // A hard ceiling on how long a recording can run. Finishing through
+  // `stopRecording` is the same finish the button performs, so a capture that
+  // hits the cap is still transcribed instead of thrown away; the alternative
+  // is a blob the route answers 413 to after the whole upload, which loses the
+  // dictation at the point it cost the most. Armed once per recording:
+  // `stopRecording` and the `releaseMicrophone` it closes over are stable
+  // callbacks, so no re-render can push the deadline back.
+  //
+  // The elapsed time on screen is RecordingClock's (ChatStatusClocks.tsx),
+  // which ticks itself: kept here, as a 200 ms state, it re-rendered this whole
+  // popup five times a second for as long as the microphone was open.
   useEffect(() => {
     if (voice.state !== 'recording') return
-    const started = Date.now()
-    const id = setInterval(() => setRecordingMs(Date.now() - started), 200)
     const deadline = setTimeout(() => {
       // Not through `stopRecording` blind: that clears the cancelled flag, and
       // cancelling leaves a window where clearing it is wrong. `stop()` goes
@@ -4596,7 +4994,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (cancelledRef.current) return
       stopRecording()
     }, MAX_RECORDING_MS)
-    return () => { clearInterval(id); clearTimeout(deadline) }
+    return () => clearTimeout(deadline)
   }, [voice.state, stopRecording])
 
   // Closing the panel, navigating away or unmounting must not leave the
@@ -5035,6 +5433,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // owner may be in another tab by the time the reply lands, and painting
     // it there would put one conversation inside another.
     const keyAtSend = sessionKeyRef.current
+    // Tell the box this is where the owner is now, so the phone (or the
+    // desktop) they pick up next opens this conversation (TASK-1364). Best
+    // effort: the turn does not wait on it and a box that cannot answer
+    // changes nothing here. A turn sent here is also the owner's own answer to
+    // an arrival still waiting on the box: they chose this conversation.
+    followPendingRef.current = false
+    void syncTabsRef.current({ activity: { key: keyAtSend === mainSessionKeyRef.current ? null : keyAtSend } })
+    turnsRef.current.remember(idempotencyKey, text, sendAttachments.length > 0)
     // A new turn is the owner's answer to a restore choice left on screen.
     setRestoreState(prev => (prev && prev.key === keyAtSend ? null : prev))
     let result: TurnResult
@@ -5241,6 +5647,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[], origin: TurnOrigin = {}) => {
+    // The owner chose where to be by speaking here: an arrival still waiting on
+    // the box must not move this turn — queued until the gateway answers — or
+    // the owner into another conversation afterwards (TASK-1364).
+    followPendingRef.current = false
     // Pictures render in the bubble; everything else keeps its 📎 line, because
     // a document has nothing to show and a caption alone would refer to nothing.
     //
@@ -5905,6 +6315,38 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     void loadHistory({ restore: true })
   }, [harnessLoaded, isOpen, caps, loadHistory])
 
+  // …and keep it current while it is on screen (TASK-1364). The gateway pushes
+  // every append to a session (`session.message`), so a turn sent from the
+  // phone shows on the desktop as it lands; a harness with no live connection
+  // pushes nothing, and the other device's turn stayed invisible here until a
+  // reload. So it is re-read when the owner comes back to this window and on a
+  // short tick while the chat is open and visible — never while this device's
+  // own turn is in flight (its reply paints itself) or a restore is running,
+  // and never before the first replay (the bubbles it reconciles are its own).
+  useEffect(() => {
+    if (!harnessLoaded || !isOpen || caps.hasLiveConnection || !caps.canListHistory) return
+    // One read at a time: on a slow box the tick, a focus and a visibility
+    // change can all land inside one read, and an older answer settling last
+    // would paint over a newer transcript.
+    let inFlight = false
+    const refresh = () => {
+      if (inFlight || document.visibilityState !== 'visible' || !replayedRef.current) return
+      if (sendingRef.current || restoreAbortRef.current) return
+      // The first conversation's auto-greet decides on its own read.
+      if (caps.shouldOpenFirstConversation && !greetedRef.current) return
+      inFlight = true
+      void loadHistory().finally(() => { inFlight = false })
+    }
+    document.addEventListener('visibilitychange', refresh)
+    window.addEventListener('focus', refresh)
+    const tick = setInterval(refresh, TRANSCRIPT_REFRESH_MS)
+    return () => {
+      document.removeEventListener('visibilitychange', refresh)
+      window.removeEventListener('focus', refresh)
+      clearInterval(tick)
+    }
+  }, [harnessLoaded, isOpen, caps, loadHistory])
+
   // Open the first conversation, once both of its inputs are in.
   //
   // The decision needs two facts that arrive independently and in either order:
@@ -5968,18 +6410,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         window.clearTimeout(ackOnlyHistoryTimerRef.current)
         ackOnlyHistoryTimerRef.current = null
       }
-      if (transcriptReconcileTimerRef.current !== null) {
-        window.clearTimeout(transcriptReconcileTimerRef.current)
-        transcriptReconcileTimerRef.current = null
-      }
+      cancelTranscriptReconcile(transcriptReconcileTimerRef)
     }
   }, [failPending])
 
-  // Focus input when opened
+  // Focus input when opened — on a big screen with a mouse only. On a phone or
+  // a touch screen a focused input is an open soft keyboard, and the chat
+  // jumped up under one before the owner had touched anything (and again on
+  // every session switch or reconnect); there the keyboard waits for a tap on
+  // the input.
   useEffect(() => {
-    if (isOpen && visible && status === 'connected') {
-      setTimeout(() => inputRef.current?.focus(), 100)
-    }
+    if (!(isOpen && visible && status === 'connected')) return
+    if (!shouldAutoFocusChatInput(readChatFirstEnvironment(window))) return
+    setTimeout(() => inputRef.current?.focus(), 100)
   }, [isOpen, visible, status])
 
   // Close on Escape — but only when nothing is open ON TOP of the chat, since
@@ -6217,31 +6660,38 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // the live/remembered width: the old fixed `- 200` was the half-width of the
   // original 400px popup and became a 60px offset when the default grew to
   // 520px (and was wrong for every user-resized width too).
-  const winW = typeof window !== 'undefined' ? window.innerWidth : 1000
-  const mascotCenterPx = ((mascotX ?? 85) / 100) * winW
-  const defaultLeft = Math.max(8, Math.min(mascotCenterPx - size.w / 2, winW - size.w - 8))
+  const winW = viewport.w
+  // Over a row of monitors everything below is measured on the MAIN one: the
+  // mascot's place is a share of its width, and the panel and the default
+  // spot keep to its edges (all insets are 0 with one screen).
+  const main = deskScreens ? mainScreen() : { x: 0, y: 0, width: winW, height: viewport.h }
+  const ins = deskScreens ? mainInsets() : { left: 0, top: 0, right: 0, bottom: 0 }
+  const mascotCenterPx = main.x + ((mascotX ?? 85) / 100) * main.width
+  const defaultLeft = Math.max(main.x + 8, Math.min(mascotCenterPx - size.w / 2, main.x + main.width - size.w - 8))
   const posStyle: React.CSSProperties = panelMode
     ? {
-        right: DESKTOP_GAP,
-        top: DESKTOP_GAP,
+        right: DESKTOP_GAP + ins.right,
+        // Under the kiosk bar on the laptop while it is up; the bar's height
+        // is 0 everywhere else, so this is the old DESKTOP_GAP there.
+        top: barInset + DESKTOP_GAP + ins.top,
         // The safe-area inset rides along because a maximized window subtracts
         // it from its height too; a flat 62 left the panel hanging below the
         // window's bottom edge on a device that has an inset.
-        bottom: `calc(${SHELF_HEIGHT_PX + DESKTOP_GAP}px + env(safe-area-inset-bottom, 0px))`,
+        bottom: `calc(${SHELF_HEIGHT_PX + DESKTOP_GAP + ins.bottom}px + env(safe-area-inset-bottom, 0px))`,
       }
     : mobile
       ? { left: 0, top: 0, right: 0, bottom: 0 }
       : pos
         ? { left: pos.x, top: pos.y, bottom: 'auto' }
         : trayMode
-          ? { right: 8, bottom: 65 }
-          : { left: defaultLeft, bottom: 170 }
+          ? { right: 8 + ins.right, bottom: 65 + ins.bottom }
+          : { left: defaultLeft, bottom: 170 + ins.bottom }
 
   // macOS-style open: grow the popup OUT of the mascot. The transform-origin
   // is pinned to the popup's bottom edge, horizontally aligned with the
   // mascot, so the scale animation emanates from where the user tapped
   // instead of from the popup's centre.
-  const anchorLeft = pos ? pos.x : (trayMode ? winW - size.w - 8 : defaultLeft)
+  const anchorLeft = pos ? pos.x : (trayMode ? main.x + main.width - size.w - 8 : defaultLeft)
   const originX = Math.max(20, Math.min(mascotCenterPx - anchorLeft, size.w - 20))
   const transformOrigin = panelMode ? 'right center' : mobile ? 'center bottom' : `${originX}px bottom`
 
@@ -6377,9 +6827,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // What the fullscreen strip says in place of the header: the conversation on
   // screen, and whether another one is answering or holds an unread reply —
   // the per-tab dots it would otherwise hide.
-  const activeTabLabel = activeTabKey === null
-    ? 'ClawBox'
-    : (tabs.find(tb => tb.key === activeTabKey)?.label ?? 'ClawBox')
+  // A placeholder is spelled from its N at render time, in the language on
+  // screen: the list is shared, and a tab another device opened as "Chat 3"
+  // reads "Chat 3" in whatever this browser speaks. A tab found on the box
+  // with nothing said in it yet has no stored name at all.
+  const tabLabel = (tb: ChatTab) => tb.autoLabel && (tb.seq !== undefined || !tb.label)
+    ? t('chat.tabUntitled', { n: tb.seq ?? 2 })
+    : tb.label
+  const activeTabEntry = activeTabKey === null ? undefined : tabs.find(tb => tb.key === activeTabKey)
+  const activeTabLabel = activeTabEntry ? tabLabel(activeTabEntry) : 'ClawBox'
   const shownSessionKey = activeTabKey ?? mainSessionKey
   const stripActivity: 'busy' | 'unread' | null = [...busyKeys].some(k => !!k && k !== shownSessionKey)
     ? 'busy'
@@ -6470,11 +6926,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // their own pointer events, and a click that raises no surface is a click
       // that leaves the chat buried under the window that covered it.
       onPointerDownCapture={onFocus}
+      // Files and folders dragged from the owner's computer attach to the
+      // composer wherever on the chat they are let go.
+      {...drop.dropHandlers}
       style={{
         position: 'fixed',
         ...posStyle,
         ...(panelMode
-          ? { width: panelWidth, minWidth: MIN_CHAT_WIDTH, height: 'auto', maxHeight: 'none', borderRadius: 16 }
+          ? { width: drawnPanelWidth ?? panelWidth, minWidth: MIN_CHAT_WIDTH, height: 'auto', maxHeight: 'none', borderRadius: 16 }
           : mobile
             ? {
                 width: 'auto', height: 'auto', maxHeight: 'none', borderRadius: 0,
@@ -6495,12 +6954,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 // budget must subtract that anchor too — the old flat
                 // `100vh - 60px` let a 500px-tall popup shove its header (pills,
                 // close button) off the TOP of short/zoomed viewports, which
-                // looked completely broken. Reserve anchor + 12px top margin.
+                // looked completely broken. Reserve anchor + 12px top margin,
+                // and the kiosk bar's height on the laptop (0 everywhere
+                // else), which covers the top of the screen there.
+                // Over a row of monitors the main one's own height, which a
+                // shorter main monitor makes less than the viewport's.
                 maxHeight: pos
-                  ? 'calc(100vh - 60px)'
-                  : trayMode
-                    ? 'calc(100vh - 77px)'
-                    : 'calc(100vh - 182px)',
+                  ? PLACED_MAX_HEIGHT
+                  : deskScreens
+                    ? `${main.height - (trayMode ? 77 : 182) - barInset}px`
+                    : trayMode
+                    ? `calc(100vh - ${77 + barInset}px)`
+                    : `calc(100vh - ${182 + barInset}px)`,
                 borderRadius: 16,
               }),
         // The docked panel owns its strip and stays above the windows beside
@@ -6523,9 +6988,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // `clawChatBurstIn` keyframes below (a spring burst OUT of the mascot
         // with an overshoot, a tilt-wobble and an orange energy-glow flash),
         // which override this while playing and settle back onto scale(1).
-        // Mobile keeps its clean slide-up; a drag pins it to the resting state.
+        // Mobile keeps its clean slide-up; a drag pins it to the resting state
+        // — and keeps it there until the chat is next opened, so the render
+        // after a drop does not put the burst back and play it again.
         transform: visible ? 'scale(1) translateY(0)' : (mobile ? 'translateY(100%)' : 'scale(0.72) translateY(14px)'),
-        animation: (visible && !mobile && !dragRef.current)
+        animation: (visible && !mobile && !dragRef.current && !burstTakenByDragRef.current)
           ? 'clawChatBurstIn 0.62s cubic-bezier(0.34, 1.56, 0.64, 1) both'
           : undefined,
         // Mobile / drag still use a transition; the desktop entrance is the
@@ -6540,6 +7007,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         willChange: 'transform, opacity',
       }}
     >
+      <ChatDropOverlay active={drop.dragActive} t={t} />
       {/* Spring burst out of the mascot: overshoot + tilt-wobble, transform +
           opacity only. transform-origin (set on the container) pins it to where
           the crab is. The previous version also tweened filter:blur/brightness/
@@ -6638,7 +7106,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             data-testid="chat-tabs"
             style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0, flex: 1, overflowX: 'auto', scrollbarWidth: 'none' }}
           >
-            {[{ key: mainSessionKey, label: 'ClawBox', main: true }, ...tabs.map(tb => ({ key: tb.key, label: tb.label, main: false }))].map(tab => {
+            {[{ key: mainSessionKey, label: 'ClawBox', main: true }, ...tabs.map(tb => ({ key: tb.key, label: tabLabel(tb), main: false }))].map(tab => {
               const active = tab.main ? activeTabKey === null : activeTabKey === tab.key
               const busy = !!tab.key && busyKeys.has(tab.key)
               const unread = !!tab.key && !active && unreadKeys.has(tab.key)
@@ -6984,26 +7452,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </div>
         )}
 
+        {/* One memoised row per message (ChatMessageRow.tsx): a render of the
+            popup — a keystroke, a streamed chunk, a clock — no longer parses
+            the Markdown of the whole conversation again. Keyed by position,
+            as the bubbles always were, so their own state stays put. */}
         {!reloadingSkill && messages.map((msg, i) => {
-          const isSuccess = msg.variant === 'success';
-          const isUser = msg.role === 'user';
-          const isSystem = msg.role === 'system';
-          // Messages the agent pointed at, as `EMAIL:<uid>` lines in the reply.
-          // Derived at render rather than stored on the message: a replayed
-          // turn carries the same directive text a live one did, so deriving
-          // here makes history and live identical for free — and keeps the
-          // owner's mail out of the cached transcript, which is where it very
-          // deliberately does not belong.
-          const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null;
-          const bodyText = emailRefs ? emailRefs.text : msg.text;
-          // A long paste folds behind "Show more": the paste is the owner's
-          // own text, and the answer should not sit a page of it away.
           const longKey = `${i}:${msg.timestamp}`;
-          const isLongUser = isUser && bodyText.length > USER_CLAMP_CHARS;
-          const userExpanded = expandedLong.has(longKey);
-          const shownText = isLongUser && !userExpanded
-            ? `${bodyText.slice(0, USER_CLAMP_CHARS).trimEnd()}…`
-            : bodyText;
           // Which model actually answered, as the turn recorded it. The header
           // pills are a request; this is the record — the one thing on screen
           // that settles "which model are you" after a mid-conversation
@@ -7012,234 +7466,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const served = msg.role === 'assistant' && msg.model
             ? `${msg.provider ? `${hermesProviderName(msg.provider)} · ` : ''}${msg.model}`
             : null;
+          const hasAudio = (msg.audio?.length ?? 0) > 0;
           return (
-            <div key={i} style={{
-              display: 'flex',
-              justifyContent: isUser ? 'flex-end' : 'flex-start',
-            }}>
-              {/* Three treatments, after the Claude Code web UI: the owner's
-                  words in a quiet right-aligned pill, the assistant's answer
-                  as plain unbubbled text, and system notices as a bordered
-                  row that keeps the green/red verdict on the text alone. */}
-              <div style={isUser ? {
-                maxWidth: '85%',
-                padding: '8px 14px',
-                borderRadius: 14,
-                background: 'rgba(255,255,255,0.07)',
-                border: '1px solid rgba(255,255,255,0.07)',
-                color: 'rgba(255,255,255,0.92)',
-                fontSize: 13.5,
-                lineHeight: 1.45,
-                wordBreak: 'break-word',
-                whiteSpace: 'pre-wrap',
-              } : isSystem ? {
-                width: '100%',
-                padding: '6px 12px',
-                borderRadius: 10,
-                background: 'rgba(255,255,255,0.02)',
-                border: `1px solid ${isSuccess ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.3)'}`,
-                color: isSuccess ? '#86efac' : '#fca5a5',
-                fontSize: 12.5,
-                lineHeight: 1.45,
-                wordBreak: 'break-word',
-              } : {
-                width: '100%',
-                padding: '2px 2px',
-                color: 'rgba(255,255,255,0.88)',
-                fontSize: 13.5,
-                lineHeight: 1.5,
-                wordBreak: 'break-word',
-              }}>
-                {msg.images && msg.images.length > 0 && (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: bodyText ? 6 : 0 }}>
-                    {msg.images.map((src, j) => {
-                    // The same block draws both the pictures the assistant made
-                    // and, since TASK-436, the ones the customer sent. They are
-                    // not the same thing to announce: "Generated image" on a
-                    // photo the customer just attached is simply wrong, and an
-                    // accessible name is read out verbatim.
-                    const imageAlt = msg.role === 'user' ? t("chat.sentImage") : t("chat.generatedImage")
-                    return (
-                      <div key={j} style={{ position: 'relative', display: 'inline-flex', maxWidth: '100%' }}>
-                        {/* A button, not a bare onClick on the image: the
-                            preview has to be reachable from the keyboard too,
-                            and the alt text gives the control its name. */}
-                        <button
-                          type="button"
-                          onClick={() => setPreview({ src, alt: imageAlt })}
-                          style={{
-                            padding: 0, border: 'none', background: 'none',
-                            cursor: 'zoom-in', lineHeight: 0, borderRadius: 8, maxWidth: '100%',
-                          }}
-                        >
-                          {/* A generated picture IS the message, not decoration:
-                              it gets a real alt so a screen reader announces it,
-                              and it is contained rather than cropped so the image
-                              the user asked for does not lose its edges. */}
-                          <img src={src} alt={imageAlt} style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, objectFit: 'contain' }} />
-                        </button>
-                        {/* Same-origin, so the `download` attribute is enough to
-                            save it under the name the harness gave it. */}
-                        <a
-                          href={src}
-                          download={mediaFileName(src)}
-                          title={t("chat.downloadImage")}
-                          aria-label={t("chat.downloadImage")}
-                          style={{
-                            position: 'absolute', top: 6, right: 6,
-                            width: 26, height: 26, borderRadius: 8,
-                            background: 'rgba(0,0,0,0.55)', color: '#fff',
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            textDecoration: 'none', backdropFilter: 'blur(4px)',
-                          }}
-                        >
-                          <span className="material-symbols-rounded" style={{ fontSize: 16 }}>download</span>
-                        </a>
-                      </div>
-                    );
-                    })}
-                  </div>
-                )}
-                {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))) : null}
-                {isLongUser && (
-                  <button
-                    type="button"
-                    data-testid="chat-user-expand"
-                    aria-expanded={userExpanded}
-                    onClick={() => setExpandedLong(prev => {
-                      const next = new Set(prev);
-                      if (next.has(longKey)) next.delete(longKey);
-                      else next.add(longKey);
-                      return next;
-                    })}
-                    style={{
-                      display: 'block', marginTop: 6, background: 'none', border: 0,
-                      padding: 0, color: 'rgba(255,255,255,0.55)', cursor: 'pointer',
-                      font: 'inherit', fontSize: 12, textDecoration: 'underline',
-                    }}
-                  >
-                    {userExpanded ? t("chat.showLess") : t("chat.showMore")}
-                  </button>
-                )}
-                {msg.files && msg.files.length > 0 && (
-                  // Files the agent sent that no bubble can render inline: one
-                  // download card each (name, size, button). Keyed by URL.
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
-                    {msg.files.map(src => <ChatFileCard key={src} src={src} />)}
-                  </div>
-                )}
-                {msg.audio && msg.audio.length > 0 && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0 }}>
-                    {msg.audio.map((src) => (
-                      // The player and, under it, the two things a player
-                      // cannot say for itself: which voice spoke, when it was
-                      // not the one the owner picked, and that the browser
-                      // would not start it.
-                      <div key={src} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      {/* ClawBox's own transport, not the browser's grey bar.
-                          The customer's pick from the voice mockups (TASK-782,
-                          A2): a play button, the clip's own waveform as the
-                          scrub target, a clock and a download — because the one
-                          thing people do with a spoken reply, scrub back four
-                          seconds to catch a number, had a 3px track to aim at
-                          in a 370px panel. Play, pause, seek and duration all
-                          still work and are all still reachable from the
-                          keyboard; see SpokenReplyPlayer for how.
-
-                          `preload="metadata"` and the box's own media route,
-                          which answers Range requests, are kept inside the
-                          component: without the Range answers a custom
-                          scrubber is exactly as dead as the browser's was.
-
-                          Keyed by the URL: the harness names every file with a
-                          uuid, so re-rendering a transcript cannot hand one
-                          player another player's audio. */}
-                      <SpokenReplyPlayer
-                        src={src}
-                        // Markdown source must not reach an accessible name —
-                        // it is read out character for character. See
-                        // plainTextForLabel. `bodyText` rather than `msg.text`
-                        // for one more reason: the stored text keeps its
-                        // `EMAIL:` directives, so the raw string announced
-                        // "EMAIL 4471" after a summary short enough to survive
-                        // the 100-character trim.
-                        //
-                        // The RECORDED clip is a second copy of the same words,
-                        // and WHERE it is made decides who strips them. On
-                        // Hermes ClawBox makes it, so the route strips there
-                        // too (setup-api/hermes/chat/route.ts). On OpenClaw the
-                        // gateway picks the engine: a cloud voice, whose text
-                        // ClawBox never touches, or on-device Kokoro, which it
-                        // speaks by running ClawBox's own
-                        // scripts/openclaw/clawbox-tts.sh with the reply in
-                        // argv. Neither engine strips the id, so it is still
-                        // spoken on that edition — the outbound half, TASK-697,
-                        // which covers both voices at once.
-                        label={audioLabel(bodyText, t("chat.audioReply"))}
-                        downloadName={mediaFileName(src)}
-                      />
-                      {cloudSpoken.includes(src) && (
-                        <span data-testid="chat-audio-cloud" style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>
-                          {t("chat.spokenByCloud")}
-                        </span>
-                      )}
-                      {autoplayBlocked.includes(src) && (
-                        <span data-testid="chat-audio-blocked" style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)' }}>
-                          {t("chat.tapToHearReply")}
-                        </span>
-                      )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {/* A way back to the real message, for each one the reply
-                    referred to. The agent's summary is what the bubble says;
-                    this is the mail itself, opened on demand and fetched only
-                    then — see lib/chat-email-refs.ts. */}
-                {emailRefs && emailRefs.uids.length > 0 && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: bodyText ? 8 : 0 }}>
-                    {emailRefs.uids.map(uid => (
-                      <EmailCard key={uid} uid={uid} onOpen={setOpenEmailUid} t={t} />
-                    ))}
-                  </div>
-                )}
-                {/* What the agent DID and what it was thinking, under the
-                    answer and never inside it. Both come off the stored
-                    message, so a replayed turn shows exactly what the live one
-                    did — the chips sit where the live pills sat, and the
-                    monologue stays collapsed until it is asked for. */}
-                {msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length > 0 && (
-                  <ToolCallSummaryChips
-                    toolCalls={msg.toolCalls}
-                    label={t("chat.toolsUsed")}
-                    ranLabel={t(msg.toolCalls.length === 1 ? "chat.ranCommand" : "chat.ranCommands", { n: msg.toolCalls.length })}
-                  />
-                )}
-                {msg.role === 'assistant' && msg.reasoning && (
-                  <ReasoningDisclosure reasoning={msg.reasoning} label={t("chat.reasoning")} />
-                )}
-                {served && (
-                  <div
-                    data-testid="chat-served-model"
-                    // Sighted readers get the answer from where the line sits —
-                    // under the reply, in the place the tool chips and the
-                    // monologue use. A screen reader gets two proper nouns and
-                    // a middot, so the label says what they are; the visible
-                    // text stays as short as the bubble needs it to be.
-                    aria-label={`${t("chat.servedBy")}: ${served}`}
-                    // 0.55 over the panel's #0d1117 is ~6:1 — AA. The quiet
-                    // 0.35 the tool chips use is ~3.2:1, which is fine for a
-                    // decoration and not for the one line that answers a
-                    // question. Wraps rather than clips: an id cut to an
-                    // ellipsis with the rest in a mouse-only title is not
-                    // visible.
-                    style={{ marginTop: 4, fontSize: 11, lineHeight: 1.3, color: 'rgba(255,255,255,0.55)', wordBreak: 'break-all' }}
-                  >
-                    {served}
-                  </div>
-                )}
-              </div>
-            </div>
+            <ChatMessageRow
+              key={i}
+              msg={msg}
+              longKey={longKey}
+              expanded={expandedLong.has(longKey)}
+              onToggleExpand={toggleLongMessage}
+              served={served}
+              t={t}
+              onPreview={setPreview}
+              onOpenEmail={setOpenEmailUid}
+              // Only a bubble with a player reads the notes: the rest get one
+              // constant, so a note landing on today's reply leaves them alone.
+              cloudSpoken={hasAudio ? cloudSpoken : NO_AUDIO_NOTES}
+              autoplayBlocked={hasAudio ? autoplayBlocked : NO_AUDIO_NOTES}
+            />
           );
         })}
 
@@ -7344,21 +7587,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
         {/* Streaming message — the same plain treatment the finished answer
             gets, so nothing jumps when the turn lands. */}
-        {!reloadingSkill && streaming && (
-          <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
-            <div style={{
-              width: '100%', padding: '2px 2px',
-              color: 'rgba(255,255,255,0.88)',
-              fontSize: 13.5, lineHeight: 1.5, wordBreak: 'break-word',
-            }}>
-              {/* Lifted out HERE, not on the way into state, so an interrupted
-                  turn keeps the directive and can still become cards. */}
-              {renderText(streamingEmailRefsText(streaming), t("chat.table"), t("chat.detailsSummary"))}
-              <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
-              <style>{`@keyframes blink { 50% { opacity: 0 } }`}</style>
-            </div>
-          </div>
-        )}
+        {!reloadingSkill && streaming && <StreamingReplyBubble text={streaming} t={t} />}
 
         {/* The status line: a small spinner, what the harness says it is
             doing (or just "Working…"), and a ticking clock for the whole
@@ -7374,14 +7603,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           >
             <span aria-hidden="true" style={TURN_SPINNER_STYLE} />
             <span>{turnStatus ?? (sending && turnVerbRef.current ? `${turnVerbRef.current}…` : t("chat.working"))}</span>
-            {sending && turnStartedAtRef.current > 0 && (
-              <span aria-hidden="true">
-                · {(() => {
-                  const s = Math.max(0, Math.round((turnNow - turnStartedAtRef.current) / 1000));
-                  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
-                })()}
-              </span>
-            )}
+            {sending && turnStartedAt > 0 && <TurnClock startedAt={turnStartedAt} />}
           </div>
         )}
 
@@ -7443,14 +7665,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             that gap the chat looked finished and then spoke out of nowhere.
             The seconds are what tells a wait from a hang — the same counter
             Settings → Voice runs while it auditions a voice. */}
-        {speakingReply && (
+        {speakingSince !== null && (
           <div
             data-testid="chat-speaking-reply"
             role="status"
             style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 2px', fontSize: 12, color: 'rgba(255,255,255,0.5)' }}
           >
             <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 15 }}>graphic_eq</span>
-            <span>{t("chat.speakingReply", { seconds: speakingFor })}</span>
+            <SpeakingReplyLabel since={speakingSince} t={t} />
           </div>
         )}
 
@@ -7531,6 +7753,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           on disk — so the thumbnail IS the confirmation that the right image
           is about to be sent. The file name stays beside it for the
           file-picker case and for non-images, which have no thumbnail. */}
+      <ChatUploadChips uploads={uploadTracker.uploads} onCancel={uploadTracker.cancel} t={t} />
       {attachments.length > 0 && (
         <div data-testid="chat-attachments" style={{ padding: '6px 14px 0', display: 'flex', gap: 6, flexWrap: 'wrap', background: 'rgba(0,0,0,0.2)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
           {attachments.map((a, i) => (
@@ -7546,9 +7769,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   style={{ width: 34, height: 34, borderRadius: 6, objectFit: 'cover', display: 'block', background: 'rgba(0,0,0,0.35)' }}
                 />
               ) : (
-                <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{isPreviewableImage(a.type) ? 'image' : 'attach_file'}</span>
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{a.kind === 'folder' ? 'folder' : isPreviewableImage(a.type) ? 'image' : 'attach_file'}</span>
               )}
               <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
+              {a.kind === 'folder' && typeof a.fileCount === 'number' && (
+                <span data-testid="chat-attachment-folder-count" style={{ color: 'rgba(255,255,255,0.5)', whiteSpace: 'nowrap' }}>
+                  {t('chat.attachment.folderFiles', { count: a.fileCount })}
+                </span>
+              )}
               <button
                 onClick={() => removeAttachment(i)}
                 aria-label={t('chat.attachment.remove', { name: a.name })}
@@ -7577,7 +7805,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         >
           <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 15, flexShrink: 0 }}>error</span>
           <span style={{ flex: 1 }}>
-            {t(`chat.attachment.error.${attachmentError.reason}`, { name: attachmentError.file })}
+            {t(`chat.attachment.error.${attachmentError.reason}`, { ...attachmentError.params, name: attachmentError.file })}
             {attachmentError.detail ? ` ${attachmentError.detail}` : ''}
           </span>
           <button
@@ -7641,7 +7869,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   can see, so the announcement fires on what a listener
                   actually needs: the state going recording → transcribing →
                   error. Sighted users lose nothing; this renders as before. */}
-              <span aria-hidden data-testid="voice-clock">{formatRecordingClock(recordingMs)}</span>
+              <RecordingClock />
             </>}
             {voice.state === 'transcribing' && t("chat.voice.transcribing")}
             {voice.state === 'error' && (
@@ -8190,7 +8418,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           app windows draw, portalled so the popup's own overflow cannot clip
           it. */}
       {!mobile && !panelMode && snapPreview && createPortal(
-        <SnapPreviewOverlay zone={snapPreview} />,
+        <SnapPreviewOverlay zone={snapPreview.zone} at={snapPreview.at} />,
         document.body,
       )}
 
@@ -8233,11 +8461,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // Backdrop: dismissal only. The dialog role belongs on the panel — on
         // the backdrop the accessible dialog would be the whole viewport and
         // its name would swallow every bit of text behind the scrim.
+        //
+        // No backdrop blur. A blur under a full-viewport scrim is a re-blur of
+        // the WHOLE screen — 7.4 MP on the spread desktop — on every frame
+        // anything behind it moves, and the crab behind it always moves. At
+        // 0.85 black the blurred desktop was 15% of what was seen; one step
+        // darker (0.9, from 0.85 + blur(2px)) keeps it just as far back.
         <div
+          data-testid="chat-image-preview-scrim"
           onClick={closePreview}
           style={{
             position: 'fixed', inset: 0, zIndex: 10020,
-            background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(2px)',
+            background: 'rgba(0,0,0,0.9)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             padding: 24,
           }}

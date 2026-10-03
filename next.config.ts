@@ -15,7 +15,7 @@ const GATEWAY_URL = process.env.GATEWAY_URL || "http://127.0.0.1:18789";
 // shared by connect-src (fetch probes) and img-src (the handoff overlays'
 // <img> probes) so the two CSP directives can't drift apart.
 const LOCAL_LAN_SOURCES = "http://*.local http://*.local:* https://*.local https://*.local:*";
-// The build's own version, "v4.1.0": package.json's number with the "v" that
+// The build's own version, "v4.2.0": package.json's number with the "v" that
 // `readClawboxVersion` (updater.ts) puts on it for /setup-api/update/versions.
 // About falls back to this until that route answers, so the two must never
 // name different releases. It used to be `git describe --tags`, which names
@@ -41,6 +41,21 @@ const APP_VERSION = (() => {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // The build's own type check runs over tsconfig.build.json: the project
+  // WITHOUT its ~1,400 test files. Over tsconfig.json it held 2.45 GB of heap
+  // (measured with `tsc --extendedDiagnostics`, 2026-10-03), and an 8 GB
+  // Jetson Orin Nano building with Node's default heap died in "Running
+  // TypeScript" with "JavaScript heap out of memory" once a branch grew the
+  // program by 3% — beta itself was 74 MB under that edge. Without the tests it
+  // is 0.96 GB and half the time, and a box never needed to type-check its
+  // tests to build. The WHOLE program is still checked on every PR, by
+  // src/tests/unit/build-typecheck.test.ts (tsconfig.json, its own 4 GB heap),
+  // which is the gate that catches an error only the full program shows.
+  // tsconfig.build.json repeats tsconfig.json's exclusions (`data/` above all —
+  // see tsconfig-excludes-data.test.ts, which pins both files).
+  typescript: {
+    tsconfigPath: "tsconfig.build.json",
+  },
   // The build's root is this checkout, always. Left alone, Next infers it from
   // the lockfiles it finds walking UP from here, and one in a parent directory
   // makes that parent the root: all of it becomes the project the build can
@@ -142,6 +157,14 @@ const nextConfig: NextConfig = {
     // run page builds its terminal command in the browser, where a runtime
     // process.env read is not available.
     NEXT_PUBLIC_CLAWBOX_ROOT: process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
+    // The in-app updater's own copy of scripts/preserve-local-edits.sh, carried
+    // IN the build (src/lib/local-edits.ts). Its restart step saves the owner's
+    // edits just before resetting a tree that step 1 has already moved to the
+    // update target — which, on a switch to main, a downgrade or an older
+    // release, has no such script. Server-only: nothing in the browser reads
+    // it, so it is inlined nowhere else. A missing file fails the build here
+    // rather than an owner's update later.
+    CLAWBOX_PRESERVE_LOCAL_EDITS_SH: readFileSync(path.join(__dirname, "scripts", "preserve-local-edits.sh"), "utf-8"),
   },
   async rewrites() {
     return {

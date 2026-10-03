@@ -1,0 +1,107 @@
+DP-2 "AOC Q27B3MA 17ZP6HA001316 (DP-2 via HDMI)"
+  Make: AOC
+  Model: Q27B3MA
+  Serial: 17ZP6HA001316
+  Physical size: 600x340 mm
+  Enabled: yes
+  Modes:
+    2560x1440 px, 59.951000 Hz (preferred, current)
+    2560x1440 px, 74.968002 Hz
+    1920x1080 px, 74.973000 Hz
+    1920x1080 px, 60.000000 Hz
+    1920x1080 px, 60.000000 Hz
+    1920x1080 px, 59.939999 Hz
+    1920x1080 px, 50.000000 Hz
+    1280x1440 px, 59.912998 Hz
+    1680x1050 px, 59.882999 Hz
+    1280x1024 px, 75.025002 Hz
+    1280x1024 px, 60.020000 Hz
+    1440x900 px, 59.901001 Hz
+    1280x960 px, 60.000000 Hz
+    1280x720 px, 60.000000 Hz
+    1280x720 px, 60.000000 Hz
+    1280x720 px, 59.939999 Hz
+    1280x720 px, 50.000000 Hz
+    1024x768 px, 75.028999 Hz
+    1024x768 px, 70.069000 Hz
+    1024x768 px, 60.004002 Hz
+    832x624 px, 74.551003 Hz
+    800x600 px, 75.000000 Hz
+    800x600 px, 72.188004 Hz
+    800x600 px, 60.317001 Hz
+    800x600 px, 56.250000 Hz
+    720x576 px, 50.000000 Hz
+    720x576 px, 50.000000 Hz
+    720x480 px, 60.000000 Hz
+    720x480 px, 60.000000 Hz
+    720x480 px, 59.939999 Hz
+    720x480 px, 59.939999 Hz
+    640x480 px, 75.000000 Hz
+    640x480 px, 72.808998 Hz
+    640x480 px, 66.667000 Hz
+    640x480 px, 60.000000 Hz
+    640x480 px, 59.939999 Hz
+    640x480 px, 59.939999 Hz
+    720x400 px, 70.082001 Hz
+  Position: 2560,0
+  Transform: normal
+  Scale: 1.000000
+  Adaptive Sync: disabled
+HDMI-A-1 "AOC Q27B3MA 17ZP6HA000848 (HDMI-A-1)"
+  Make: AOC
+  Model: Q27B3MA
+  Serial: 17ZP6HA000848
+  Physical size: 600x340 mm
+  Enabled: yes
+  Modes:
+    2560x1440 px, 59.951000 Hz (preferred, current)
+    2560x1440 px, 74.968002 Hz
+    1920x1080 px, 74.973000 Hz
+    1920x1080 px, 60.000000 Hz
+    1920x1080 px, 60.000000 Hz
+    1920x1080 px, 59.939999 Hz
+    1920x1080 px, 50.000000 Hz
+    1280x1440 px, 59.912998 Hz
+    1680x1050 px, 59.882999 Hz
+    1280x1024 px, 75.025002 Hz
+    1280x1024 px, 60.020000 Hz
+    1440x900 px, 59.901001 Hz
+    1280x960 px, 60.000000 Hz
+    1280x720 px, 60.000000 Hz
+    1280x720 px, 60.000000 Hz
+    1280x720 px, 59.939999 Hz
+    1280x720 px, 50.000000 Hz
+    1024x768 px, 75.028999 Hz
+    1024x768 px, 70.069000 Hz
+    1024x768 px, 60.004002 Hz
+    832x624 px, 74.551003 Hz
+    800x600 px, 75.000000 Hz
+    800x600 px, 72.188004 Hz
+    800x600 px, 60.317001 Hz
+    800x600 px, 56.250000 Hz
+    720x576 px, 50.000000 Hz
+    720x576 px, 50.000000 Hz
+    720x480 px, 60.000000 Hz
+    720x480 px, 60.000000 Hz
+    720x480 px, 59.939999 Hz
+    720x480 px, 59.939999 Hz
+    640x480 px, 75.000000 Hz
+    640x480 px, 72.808998 Hz
+    640x480 px, 66.667000 Hz
+    640x480 px, 60.000000 Hz
+    640x480 px, 59.939999 Hz
+    640x480 px, 59.939999 Hz
+    720x400 px, 70.082001 Hz
+  Position: 0,0
+  Transform: normal
+  Scale: 1.000000
+  Adaptive Sync: disabled
+eDP-1 "BOE 0x06DF (eDP-1)"
+  Make: BOE
+  Model: 0x06DF
+  Serial: (null)
+  Physical size: 310x170 mm
+  Enabled: no
+  Modes:
+    1920x1080 px, 60.012001 Hz (preferred)
+    1920x1080 px, 48.009998 Hz

@@ -49,6 +49,20 @@ jobs:
       - name: Doc image paths
         run: ./scripts/check-doc-images.sh
 
+      # The on-device suite (scripts/nano-tests/, TASK-1324) runs on a lab
+      # board, in its own workflow and only once `plan` there says the PR
+      # needs one (TASK-1362) — but its RUNNER is
+      # plain bash that decides what counts as a pass, redacts the logs and
+      # writes the verdict the lab job trusts, so it is checked here on every
+      # PR: shellcheck over every script under it, then its self-test against
+      # fixture tests and a stub nano-ci (no board). Needs no toolchain —
+      # shellcheck and jq are on the runner image — and takes seconds.
+      - name: Nano hardware tests — shellcheck
+        run: shellcheck -x scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh
+
+      - name: Nano hardware tests — runner self-test
+        run: bash scripts/nano-tests/selftest.sh
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.2.10"

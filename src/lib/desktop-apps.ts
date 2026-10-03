@@ -23,6 +23,9 @@ export interface AppDef {
   defaultWidth?: number;
   defaultHeight?: number;
   storeApp?: StoreApp;
+  // Only on the x64 laptop's kiosk desktop (its extension's bar is on the
+  // page, `inKiosk()`); hidden everywhere else — every Jetson included.
+  kioskOnly?: boolean;
 }
 
 export const apps: AppDef[] = [
@@ -45,6 +48,10 @@ export const apps: AppDef[] = [
   // `claude-ds` away in the Terminal app.)
   { id: "coding", name: "app.codingAgent", color: "#14304d", type: "coding" as const, pinned: true, defaultWidth: 960, defaultHeight: 640 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
+  // The owner's pinned project folders: the Files app itself, opened on its
+  // Projects view (src/lib/project-folders.ts) — a door into Files, not a
+  // second file manager. On the desktop, off the shelf.
+  { id: "projects", name: "app.projects", color: "#0d9488", type: "files", pinned: false, defaultWidth: 900, defaultHeight: 620 },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
   // The memory index — health, "Index now", the schedule — as its own window.
   // It used to be a card inside ClawKeep and borrowed its green; it has its own
@@ -55,5 +62,13 @@ export const apps: AppDef[] = [
   { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
+  // The web itself: a start page with a search box, opened as an EXTERNAL
+  // page through the kiosk API on the x64 laptop's kiosk Chrome, where the
+  // extension's bar then gives it an address bar and tab chips. Kiosk-only:
+  // no other box shows it. Not the `browser` app above, which is the
+  // VNC-framed Chromium the agent drives. kiosk/extension/content.js opens
+  // its own new tabs on the same start page; the kiosk extension test holds
+  // the two URLs together.
+  { id: "web", name: "app.web", color: "#0f766e", type: "external", url: "https://duckduckgo.com/", pinned: false, kioskOnly: true },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
 ];

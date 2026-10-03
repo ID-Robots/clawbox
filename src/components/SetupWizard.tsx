@@ -5,6 +5,7 @@ import Link from "next/link";
 import Image from "next/image";
 import ProgressBar from "./ProgressBar";
 import WifiStep from "./WifiStep";
+import EditionStep from "./EditionStep";
 import UpdateStep from "./UpdateStep";
 import CredentialsStep from "./CredentialsStep";
 import AIModelsStep from "./AIModelsStep";
@@ -27,8 +28,14 @@ function applyStatusData(
   data: Record<string, unknown>,
   setCurrentStep: (v: number) => void,
   beginCompletion: () => void,
-  onComplete?: () => void
+  onComplete?: () => void,
+  setEditionChoiceNeeded?: (v: boolean) => void,
 ) {
+  // A unified-image box that has not been told which agent to run (TASK-1149).
+  // Strictly `true`: an older server that does not send the field, and every
+  // box with a fixed edition, keeps today's wizard exactly.
+  const editionChoiceNeeded = data.edition_choice_needed === true;
+  setEditionChoiceNeeded?.(editionChoiceNeeded);
   const persistedProgressStep = typeof data.setup_progress_step === "number"
     ? data.setup_progress_step
     : Number(data.setup_progress_step ?? 0);
@@ -60,7 +67,8 @@ function applyStatusData(
   // reaches 5 only with `ai_model_configured`, or with the wizard's own
   // persisted progress). That was always true of the boxes beta could produce,
   // so no working flow changes.
-  if (data.telegram_configured && resumeStep >= 5) {
+  // Never past an agent nobody chose: the steps after it depend on it.
+  if (data.telegram_configured && resumeStep >= 5 && !editionChoiceNeeded) {
     setCurrentStep(6);
     beginCompletion();
     return;
@@ -163,7 +171,18 @@ function PowerMenu({ onClose, onRestart, t }: { onClose: () => void; onRestart: 
 
 /* ── Help popover ── */
 
-function HelpPopover({ step, onClose, t }: { step: number; onClose: () => void; t: (key: string) => string }) {
+function HelpPopover({
+  step,
+  onClose,
+  t,
+  choosingAssistant = false,
+}: {
+  step: number;
+  onClose: () => void;
+  t: (key: string) => string;
+  /** The "Choose your assistant" gate is on screen in front of step 2. */
+  choosingAssistant?: boolean;
+}) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -197,7 +216,9 @@ function HelpPopover({ step, onClose, t }: { step: number; onClose: () => void; 
     },
   };
 
-  const tip = tips[step] ?? tips[1];
+  const tip = choosingAssistant
+    ? { title: t("assistant.helpTitle"), body: t("assistant.helpBody") }
+    : tips[step] ?? tips[1];
 
   return (
     <div ref={ref} className="absolute right-0 top-full mt-1 w-[min(280px,calc(100vw-1rem))] bg-[var(--bg-surface)] border border-[var(--border-subtle)] rounded-lg shadow-xl z-50 p-4">
@@ -413,6 +434,10 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   const [showHelp, setShowHelp] = useState(false);
   const [showLang, setShowLang] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  // "Choose your assistant" (TASK-1149): shown in front of step 2 while the
+  // box carries both agents and none is chosen. From /setup/status; the step
+  // itself reloads the page once the choice has landed.
+  const [editionChoiceNeeded, setEditionChoiceNeeded] = useState(false);
   // Device edition. Seeded from the process-wide cache (the edition is baked
   // into a root-owned env file and cannot change under a live page), so on a
   // resume it is already known and the completion overlay never paints the
@@ -466,7 +491,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
         return r.json();
       })
       .then((data) => {
-        if (!cancelled) applyStatusData(data, setCurrentStep, startCompletion, onComplete);
+        if (!cancelled) applyStatusData(data, setCurrentStep, startCompletion, onComplete, setEditionChoiceNeeded);
       })
       .catch((err) => {
         if (cancelled || (err instanceof DOMException && err.name === "AbortError")) return;
@@ -632,6 +657,11 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
     };
   }, [completionStarted, onComplete]);
 
+  // The gate sits between WiFi and Update. It never renumbers anything: a
+  // box with a fixed edition never sets the flag, and a resumed setup lands on
+  // the step it always did once the choice is made.
+  const choosingAssistant = editionChoiceNeeded && currentStep >= 2;
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -702,7 +732,14 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
                     it rendered as its own name. `help` is the real glyph. */}
                 <span className="material-symbols-rounded" style={{ fontSize: 20 }}>help</span>
               </button>
-              {showHelp && <HelpPopover step={currentStep} onClose={() => setShowHelp(false)} t={t} />}
+              {showHelp && (
+                <HelpPopover
+                  step={currentStep}
+                  onClose={() => setShowHelp(false)}
+                  t={t}
+                  choosingAssistant={choosingAssistant}
+                />
+              )}
             </div>
             <div className="relative">
               <button
@@ -781,13 +818,14 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
             {currentStep === 1 && (
               <WifiStep onNext={() => goToStep(2)} />
             )}
-            {currentStep === 2 && (
+            {choosingAssistant && <EditionStep />}
+            {currentStep === 2 && !choosingAssistant && (
               <UpdateStep onNext={() => goToStep(3)} />
             )}
-            {currentStep === 3 && (
+            {currentStep === 3 && !choosingAssistant && (
               <CredentialsStep onNext={() => goToStep(4)} hermes={isHermesEdition} />
             )}
-            {currentStep === 4 && (
+            {currentStep === 4 && !choosingAssistant && (
               <AIModelsStep
                 providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "llamacpp"]}
                 defaultProviderId="clawai"
@@ -800,7 +838,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
                 it via Settings → Local AI on demand. The wizard ships a
                 ClawBox-AI-first happy path; a local fallback is no longer
                 a precondition for finishing setup. */}
-            {currentStep === 5 && (
+            {currentStep === 5 && !choosingAssistant && (
               <TelegramStep onNext={startCompletion} />
             )}
           </>

@@ -55,6 +55,21 @@ function shellCode(fn: string): string {
  * exit-contract test below would iterate nothing and pass having inspected no
  * code at all.
  */
+/**
+ * Does this pip command cap huggingface-hub below 1.0? Read from the quoted
+ * requirement's constraints rather than matched as a string, so `<1.0`,
+ * `>=0.21,<1` and `huggingface_hub<1` pass while `<10` or `<1.5` do not. The
+ * quotes are part of the requirement: `<` unquoted is a redirection.
+ */
+function hubCeiling(cmd: string): boolean {
+  const req = /'huggingface[-_]hub([^']*)'/i.exec(cmd)?.[1];
+  if (!req) return false;
+  const ceiling = req.split(",").map((c) => c.trim()).find((c) => /^<[^=]/.test(c));
+  if (!ceiling) return false;
+  const [maj = 0, min = 0, patch = 0] = ceiling.slice(1).split(".").map(Number);
+  return maj * 1_000_000 + min * 1_000 + patch <= 1_000_000;
+}
+
 function ttsOnlyArm(): string {
   const at = VOICE_SH.indexOf('if [ "$VOICE_MODE" != "full" ]; then');
   if (at < 0) throw new Error("the mode dispatch was not found in install-voice.sh");
@@ -72,7 +87,12 @@ describe("the STT half is reachable on a click, and never on an update", () => {
     expect(arm).toMatch(/^\s*\*\) whisper_refresh_present ;;\s*$/m);
     const refresh = shellCode(extractShellFunction("whisper_refresh_present"));
     expect(refresh).not.toMatch(/pip_as_clawbox|build_ctranslate2_cuda|whisper_predownload_model|install_whisper_stt/);
-    expect(refresh).toMatch(/whisper_stack_present \|\| return 0/);
+    // An unstamped box reaches only the adoption of an engine a retired legacy
+    // unit was pointed at (install-whisper-legacy-unit.test.ts), which fetches
+    // nothing either.
+    expect(refresh).toMatch(/if ! whisper_stack_present; then\s*\n\s*whisper_adopt_legacy_engine\s*\n\s*return 0\s*\n\s*fi/);
+    const adopt = shellCode(extractShellFunction("whisper_adopt_legacy_engine"));
+    expect(adopt).not.toMatch(/pip_as_clawbox|build_ctranslate2_cuda|whisper_predownload_model|install_whisper_stt/);
   });
 
   it("in --tts-only it still comes after Kokoro", () => {
@@ -172,6 +192,25 @@ describe("one writer for whisper-server.service", () => {
   });
 });
 
+describe("every engine pip step resolves on the box's pip 22.0.2", () => {
+  it("caps huggingface-hub below 1.0 wherever faster-whisper or Kokoro is installed", () => {
+    // install_whisper_stt (Settings → Local AI), the full pipeline's step 2 and
+    // install_kokoro_packages all resolve a huggingface-hub. A step without the
+    // ceiling hits the same get_topological_weights assertion and installs
+    // nothing. Both engines share one user-site and agree on the ceiling:
+    // Kokoro's transformers<5 needs hub<1, and faster-whisper imports with it
+    // whichever of the two installs first.
+    const steps = shellCode(VOICE_SH).split(NL).filter(
+      (l) => /faster-whisper|kokoro soundfile/.test(l) && /pip_as_clawbox |\$PIP install /.test(l),
+    );
+    expect(steps.filter((l) => l.includes("faster-whisper")).length, "no pip step installs faster-whisper").toBeGreaterThan(0);
+    expect(steps.filter((l) => l.includes("kokoro soundfile")).length, "no pip step installs kokoro").toBeGreaterThan(0);
+    for (const step of steps) {
+      expect(hubCeiling(step), `huggingface-hub is not capped below 1.0 in: ${step.trim()}`).toBe(true);
+    }
+  });
+});
+
 /**
  * The ordering rule is the one thing a regex cannot settle, and it is the one
  * that matters: src/lib/local-models.ts derives `installed` from the unit
@@ -256,6 +295,19 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
     expect(r.out).toContain("RC=0");
     expect(r.unitWritten).toBe(true);
     expect(r.stamped).toBe(true);
+  });
+
+  it("asks for a huggingface-hub the box's own pip 22.0.2 can resolve", () => {
+    // Unpinned, the resolve took huggingface-hub 1.33.0 and apt's pip 22.0.2
+    // died in get_topological_weights (`assert len(weights) ==
+    // expected_node_count`) before installing anything: hardware validation of
+    // TASK-1214, 2026-09-29. `huggingface-hub<1` installed on the same board.
+    const r = run();
+    const step = r.calls.find((c) => c.startsWith("pip ") && c.includes("faster-whisper"));
+    expect(step, "no pip step installs faster-whisper").toBeDefined();
+    expect(hubCeiling(step!), `huggingface-hub is not capped below 1.0 in: ${step}`).toBe(true);
+    // The numpy floor rides in the same command, for the Jetson torch wheel.
+    expect(step).toContain("'numpy>=1.24,<2'");
   });
 
   it("writes NO unit when the wheels fail", () => {

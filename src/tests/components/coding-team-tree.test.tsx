@@ -4,10 +4,10 @@
  * counts — the nodes are the agents the card states — each column captioned
  * with its count, the ones at work marked live, hidden from assistive tech.
  */
-import { describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@/tests/helpers/test-utils";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, render, screen, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
-import CodingTeamTree, { MAX_TREE_REVIEWERS, MAX_TREE_WORKERS } from "@/components/CodingTeamTree";
+import CodingTeamTree, { FLOW_FPS, MAX_TREE_REVIEWERS, MAX_TREE_WORKERS } from "@/components/CodingTeamTree";
 
 const t = (key: string) => translations.en[key] ?? key;
 vi.mock("@/lib/i18n", () => ({ useT: () => ({ locale: "en", t }) }));
@@ -120,6 +120,108 @@ describe("CodingTeamTree", () => {
       // The two that ARE there stay.
       expect(svg.textContent).toContain(t("codingAgent.team.artMain"));
       expect(svg.textContent).toContain(t("codingAgent.title"));
+    });
+  });
+
+  /**
+   * The connectors' flowing dashes animate stroke-dashoffset, which the
+   * compositor cannot run: left running they cost a style recalc and a repaint
+   * of the drawing every frame, on every run page left open. They run PAUSED
+   * (globals.css) and the tree steps them at FLOW_FPS — the same flow, a
+   * quarter of the frames — and not at all while nobody can see it.
+   */
+  describe("the flowing dashes", () => {
+    /** A CSS animation as the hook sees it: its name, and every time it is set. */
+    class FakeAnimation {
+      writes: number[] = [];
+      constructor(readonly animationName: string) {}
+      get currentTime(): number | null { return this.writes.at(-1) ?? null; }
+      set currentTime(t: number | null) { if (t !== null) this.writes.push(t); }
+    }
+    let flow: FakeAnimation;
+    let breathe: FakeAnimation;
+    let getAnimations: ReturnType<typeof vi.fn>;
+
+    const stubAnimations = () => {
+      flow = new FakeAnimation("ct-art-flow");
+      breathe = new FakeAnimation("ct-art-node");
+      getAnimations = vi.fn(() => [flow, breathe]);
+      Object.defineProperty(SVGElement.prototype, "getAnimations", { value: getAnimations, configurable: true, writable: true });
+    };
+
+    afterEach(() => {
+      delete (SVGElement.prototype as { getAnimations?: unknown }).getAnimations;
+      Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+      vi.useRealTimers();
+    });
+
+    it("steps the flow FLOW_FPS times a second to the time since it mounted, and leaves the breathing alone", () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+      stubAnimations();
+      const { unmount } = render(<CodingTeamTree />);
+      // The first step lands at mount.
+      expect(flow.writes).toEqual([0]);
+      act(() => { vi.advanceTimersByTime(1000); });
+      const steps = flow.writes.length - 1;
+      expect(steps).toBeGreaterThanOrEqual(FLOW_FPS - 1);
+      expect(steps).toBeLessThanOrEqual(FLOW_FPS + 1);
+      // Where a running animation would be a second in.
+      expect(flow.currentTime).toBeGreaterThan(900);
+      expect(flow.currentTime).toBeLessThanOrEqual(1000);
+      // The opacity breathing runs on the compositor and is never touched.
+      expect(breathe.writes).toEqual([]);
+      // Looked up once, not once a step: reading an animation flushes style.
+      expect(getAnimations).toHaveBeenCalledTimes(1);
+      // Unmounted, the timer goes with it.
+      unmount();
+      const atUnmount = flow.writes.length;
+      act(() => { vi.advanceTimersByTime(1000); });
+      expect(flow.writes.length).toBe(atUnmount);
+    });
+
+    it("looks the connectors up again after a render, which can add or drop one", () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+      stubAnimations();
+      const { rerender } = render(<CodingTeamTree workers={1} />);
+      act(() => { vi.advanceTimersByTime(500); });
+      expect(getAnimations).toHaveBeenCalledTimes(1);
+      const added = new FakeAnimation("ct-art-flow");
+      getAnimations.mockImplementation(() => [flow, breathe, added]);
+      rerender(<CodingTeamTree workers={3} />);
+      act(() => { vi.advanceTimersByTime(200); });
+      expect(getAnimations).toHaveBeenCalledTimes(2);
+      // The new connector joins the same clock.
+      expect(added.writes.length).toBeGreaterThan(0);
+      expect(added.currentTime).toBe(flow.currentTime);
+    });
+
+    it("does not step while the desktop is hidden, and catches up when it is back", () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+      stubAnimations();
+      render(<CodingTeamTree />);
+      Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+      const hiddenAt = flow.writes.length;
+      act(() => { vi.advanceTimersByTime(2000); });
+      expect(flow.writes.length).toBe(hiddenAt);
+      Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+      act(() => { vi.advanceTimersByTime(100); });
+      // Not resumed from where it stopped: where it would be after 2.1 s.
+      expect(flow.currentTime).toBeGreaterThan(2000);
+    });
+
+    it("does not step under reduced motion", () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+      stubAnimations();
+      const matchMedia = window.matchMedia;
+      window.matchMedia = vi.fn((query: string) => ({ matches: query.includes("reduce"), media: query })) as unknown as typeof window.matchMedia;
+      try {
+        render(<CodingTeamTree />);
+        act(() => { vi.advanceTimersByTime(1000); });
+        expect(getAnimations).not.toHaveBeenCalled();
+        expect(flow.writes).toEqual([]);
+      } finally {
+        window.matchMedia = matchMedia;
+      }
     });
   });
 });

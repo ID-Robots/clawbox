@@ -26,6 +26,13 @@
  * Clicking anything in the strip keeps the keyboard in the terminal
  * (mousedown's default would move focus to the tab or the button, and
  * clicking the tab that is already in front refocuses nothing).
+ *
+ * On the desktop (`onStateChange`, TASK-1306) every tab's shell is a session
+ * on the box that outlives the page, and the tab list — names, which is in
+ * front, each tab's session — goes to the window's record, which the desktop
+ * saves; a refresh hands it back as `persisted` and each tab reattaches to its
+ * own session. A tab closed by hand ends its session there and then. The
+ * standalone Terminal page passes neither and its shells end with the page.
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -35,6 +42,8 @@ import { useTr } from "@/lib/i18n-floor";
 import { DESKTOP_LAYERS, shelfHeight } from "@/lib/window-snap";
 import { WINDOW_CHROME, useWindowChrome } from "@/lib/window-chrome";
 import { terminalThemeFor, useTerminalSettings } from "@/lib/terminal-settings";
+import { MAX_TAB_TITLE, MAX_TERMINAL_TABS, type SavedTerminalTabs } from "@/lib/desktop-state";
+import { endTerminalSession } from "@/lib/terminal-sessions";
 import { isMacPlatform, shortcutLabel, terminalShortcut } from "@/lib/terminal-keys";
 import TerminalApp, { type TerminalTabAction } from "./TerminalApp";
 import TerminalSettingsSheet from "./TerminalSettingsSheet";
@@ -42,6 +51,13 @@ import TerminalSettingsSheet from "./TerminalSettingsSheet";
 export interface TerminalTabsProps {
   /** Typed into the FIRST tab's shell once it is alive — see TerminalApp. */
   initialCommand?: string;
+  /** The tabs a restored window had, each with the session its shell runs in. Read once. */
+  persisted?: SavedTerminalTabs;
+  /**
+   * Where the tab list goes whenever it changes. Given, every tab's shell is a
+   * device session that outlives the page (see the header).
+   */
+  onStateChange?: (state: SavedTerminalTabs) => void;
 }
 
 interface Tab {
@@ -51,6 +67,8 @@ interface Tab {
   title?: string;
   /** The shell rang the bell while another tab was in front. */
   bell?: boolean;
+  /** The device session the tab's shell runs in (persistent tabs only). */
+  session?: string;
 }
 
 /** The tab's name: what it runs, or its number. */
@@ -75,15 +93,35 @@ interface TabState {
   nextId: number;
 }
 
-/**
- * How many shells one window may hold. Every tab is a PTY, a WebSocket and
- * an xterm instance kept alive on an 8 GB board; eight is more than a person
- * uses and far fewer than would hurt.
- */
-export const MAX_TERMINAL_TABS = 8;
+// How many shells one window may hold, and the longest name a tab may be
+// given: src/lib/desktop-state.ts, which holds a saved window to the same.
+export { MAX_TAB_TITLE, MAX_TERMINAL_TABS };
 
-/** The longest name a tab may be given. */
-export const MAX_TAB_TITLE = 40;
+/** The tab list a restored window starts with, or null when it has none worth restoring. */
+function restoredTabs(persisted: SavedTerminalTabs | undefined): TabState | null {
+  const tabs = (persisted?.tabs ?? []).slice(0, MAX_TERMINAL_TABS).map((tab) => ({ ...tab }));
+  if (tabs.length === 0) return null;
+  const highest = Math.max(...tabs.map((tab) => tab.id));
+  return {
+    tabs,
+    activeId: tabs.some((tab) => tab.id === persisted!.activeId) ? persisted!.activeId : tabs[0].id,
+    nextId: Math.max(persisted!.nextId, highest + 1),
+  };
+}
+
+/** What is saved of the tab list: no bells, nothing empty. */
+function snapshotTabs(state: TabState): SavedTerminalTabs {
+  return {
+    tabs: state.tabs.map((tab) => ({
+      id: tab.id,
+      ...(tab.title ? { title: tab.title } : {}),
+      ...(tab.command ? { command: tab.command } : {}),
+      ...(tab.session ? { session: tab.session } : {}),
+    })),
+    activeId: state.activeId,
+    nextId: state.nextId,
+  };
+}
 
 /** One object, so every change is a pure function of the last state. */
 function addTab(state: TabState): TabState {
@@ -133,15 +171,53 @@ interface TabMenuState { id: number; x: number; y: number }
 const TAB_MENU_W = 220;
 const TAB_MENU_H = 170;
 
-export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
+export default function TerminalTabs({ initialCommand, persisted, onStateChange }: TerminalTabsProps) {
   const { t } = useT();
   const tr = useTr();
-  const [state, setState] = useState<TabState>(() => ({
+  const [state, setState] = useState<TabState>(() => restoredTabs(persisted) ?? {
     tabs: [{ id: 1, command: initialCommand?.trim() || undefined }],
     activeId: 1,
     nextId: 2,
-  }));
+  });
   const { tabs, activeId } = state;
+  // Decided once: a window does not change between keeping its shells and not.
+  const [persistent] = useState(() => Boolean(onStateChange));
+  const onStateChangeRef = useRef(onStateChange);
+  useEffect(() => { onStateChangeRef.current = onStateChange; }, [onStateChange]);
+
+  // The tab list to the window's record, whenever what is saved of it changes.
+  const lastSnapshotRef = useRef("");
+  useEffect(() => {
+    if (!persistent) return;
+    const snapshot = snapshotTabs(state);
+    const json = JSON.stringify(snapshot);
+    if (json === lastSnapshotRef.current) return;
+    lastSnapshotRef.current = json;
+    onStateChangeRef.current?.(snapshot);
+  }, [state, persistent]);
+
+  // A session no tab names any more — the tab was closed, the others were
+  // closed, the last one was replaced, or its ended shell gave way to a new
+  // one — is ended on the box. Unmounting (a refresh, the page going away)
+  // ends nothing: that is the point of a session.
+  const prevTabsRef = useRef(tabs);
+  useEffect(() => {
+    const before = prevTabsRef.current;
+    prevTabsRef.current = tabs;
+    if (!persistent || before === tabs) return;
+    const named = new Set(tabs.map((tab) => tab.session).filter(Boolean));
+    for (const tab of before) {
+      if (tab.session && !named.has(tab.session)) endTerminalSession(tab.session);
+    }
+  }, [tabs, persistent]);
+
+  const onSession = useCallback((id: number, session: string) => {
+    setState((prev) => {
+      const tab = prev.tabs.find((candidate) => candidate.id === id);
+      if (!tab || tab.session === session) return prev;
+      return { ...prev, tabs: prev.tabs.map((candidate) => (candidate.id === id ? { ...candidate, session } : candidate)) };
+    });
+  }, []);
   const { settings } = useTerminalSettings();
   const theme = terminalThemeFor(settings.theme);
   const palette = WINDOW_CHROME[theme.tone];
@@ -513,6 +589,9 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
             onTabAction={onTabAction}
             onOpenSettings={() => setSettingsOpen(true)}
             onBell={() => onBell(tab.id)}
+            persist={persistent}
+            session={tab.session}
+            onSession={persistent ? (session) => onSession(tab.id, session) : undefined}
           />
         </div>
       ))}

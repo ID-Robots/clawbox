@@ -8,6 +8,8 @@ import {
   clearHarnessFault,
   CodingAgentError,
   getCodingAgentStatus,
+  HISTORY_EXTENDED_LIMITS,
+  HISTORY_RETENTION_MODES,
   httpStatusForCodingError,
   MAX_DIRECTORY_CHARS,
   MAX_MAX_PARALLEL_RUNS,
@@ -22,8 +24,10 @@ import {
   setAutoPr,
   setCompletionAttempts,
   setMaxParallelRuns,
+  setPrBodyIncludesTask,
   setGenerateAudio,
   setGenerateImages,
+  setHistoryRetention,
   setRealBrowser,
   setReviewPass,
   setReviewRounds,
@@ -31,6 +35,7 @@ import {
   setTeamDynamic,
   setTokenLimit,
 } from "@/lib/coding-agent";
+import { PR_BODY_TASK_MODES } from "@/lib/coding-pr-body";
 
 export const dynamic = "force-dynamic";
 
@@ -82,6 +87,11 @@ function forbidden() {
  * POST { autoPr: boolean } → branch, open a pull request into the repo's
  * default branch, wait for GitHub Actions, and merge when at least one real
  * check has passed. See @/lib/coding-pr for the guardrails.
+ * POST { prBodyIncludesTask: "summary"|"full-redacted"|"none" } → how much of
+ * the run's task that pull request carries: a one-line summary and the first
+ * ~600 characters (the default), the whole task, or none of it. Whichever, it
+ * is redacted before it is published (@/lib/publish-redaction); a value this
+ * box does not offer is refused before anything is saved.
  * POST { reviewRounds: number } → how many follow-up turns the review loop may
  * hand the harness after the pull request is opened (failing check logs,
  * unresolved review comments, "rebase onto <base>"). 0 switches the loop off
@@ -99,6 +109,12 @@ function forbidden() {
  * HAS a deliverable — one the caller named, or the pull request the auto-PR
  * switch implies — so a box that uses neither is unaffected. The range is
  * refused rather than clamped, like the review rounds.
+ * POST { historyRetention: "standard"|"extended"|"everything"|"archive",
+ * historyLimit?: 100|300|1000 } → what the box keeps of finished runs (see
+ * @/lib/coding-run-history). Either field alone is accepted; a value this box
+ * does not offer is refused before anything is saved. Choosing "everything"
+ * also tells Claude Code to keep its transcripts (merged into its settings
+ * files, never overwriting them); choosing anything else hands that back.
  * POST { setupComplete: boolean } → mark the setup wizard finished (the app
  * shows the wizard instead of its home page until this is true; the reset
  * route is what puts it back to false).
@@ -160,6 +176,7 @@ export async function POST(request: Request) {
     tokenLimit?: unknown;
     reviewPass?: unknown;
     autoPr?: unknown;
+    prBodyIncludesTask?: unknown;
     reviewRounds?: unknown;
     autoMerge?: unknown;
     completionAttempts?: unknown;
@@ -173,6 +190,8 @@ export async function POST(request: Request) {
     provider?: unknown;
     gitAuthorName?: unknown;
     gitAuthorEmail?: unknown;
+    historyRetention?: unknown;
+    historyLimit?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasReviewPass = typeof fields.reviewPass === "boolean";
@@ -206,7 +225,13 @@ export async function POST(request: Request) {
     && (typeof fields.gitAuthorName === "string" || fields.gitAuthorName === null);
   const hasGitAuthorEmail = "gitAuthorEmail" in fields
     && (typeof fields.gitAuthorEmail === "string" || fields.gitAuthorEmail === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !clearsFault) {
+  // Presence decides, like the counted settings: a wrong TYPE is still a
+  // request about the history, and is refused below rather than ignored.
+  const hasHistoryRetention = "historyRetention" in fields;
+  const hasHistoryLimit = "historyLimit" in fields;
+  // Presence decides here too, for the same reason as the history setting.
+  const hasPrBodyIncludesTask = "prBodyIncludesTask" in fields;
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -218,7 +243,9 @@ export async function POST(request: Request) {
           + "{ reviewRounds: number }, "
           + "{ autoMerge: boolean }, { completionAttempts: number }, "
           + "{ maxParallelRuns: number }, "
+          + "{ historyRetention: string, historyLimit?: number }, "
           + "{ gitAuthorName: string | null }, { gitAuthorEmail: string | null }, "
+          + "{ prBodyIncludesTask: string }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
@@ -253,6 +280,25 @@ export async function POST(request: Request) {
       || (fields.maxParallelRuns as number) > MAX_MAX_PARALLEL_RUNS)) {
     return NextResponse.json(
       { error: `The number of runs at once must be a whole number between ${MIN_MAX_PARALLEL_RUNS} and ${MAX_MAX_PARALLEL_RUNS}.`, kind: "invalid" },
+      { status: 400 },
+    );
+  }
+  // The history setting, checked before any setter runs for the same reason.
+  if (hasHistoryRetention && !(HISTORY_RETENTION_MODES as readonly unknown[]).includes(fields.historyRetention)) {
+    return NextResponse.json(
+      { error: `The run history setting must be one of: ${HISTORY_RETENTION_MODES.join(", ")}.`, kind: "invalid" },
+      { status: 400 },
+    );
+  }
+  if (hasHistoryLimit && !(HISTORY_EXTENDED_LIMITS as readonly unknown[]).includes(fields.historyLimit)) {
+    return NextResponse.json(
+      { error: `The number of runs to keep must be one of: ${HISTORY_EXTENDED_LIMITS.join(", ")}.`, kind: "invalid" },
+      { status: 400 },
+    );
+  }
+  if (hasPrBodyIncludesTask && !(PR_BODY_TASK_MODES as readonly unknown[]).includes(fields.prBodyIncludesTask)) {
+    return NextResponse.json(
+      { error: `What a pull request includes of the task must be one of: ${PR_BODY_TASK_MODES.join(", ")}.`, kind: "invalid" },
       { status: 400 },
     );
   }
@@ -323,6 +369,11 @@ export async function POST(request: Request) {
       const saved = await setAutoPr(fields.autoPr);
       console.error(`[coding-agent] auto pull requests switched ${saved ? "on" : "off"} by the owner`);
     }
+    if (hasPrBodyIncludesTask) {
+      const saved = await setPrBodyIncludesTask(fields.prBodyIncludesTask);
+      // A value from the setter's own fixed list by now.
+      console.error(`[coding-agent] pull requests will carry the task as ${logSafe(saved)}, by the owner's choice`);
+    }
     if (hasReviewRounds) {
       const saved = await setReviewRounds(fields.reviewRounds);
       console.error(`[coding-agent] review rounds set to ${saved} by the owner`);
@@ -353,6 +404,17 @@ export async function POST(request: Request) {
       // saved number, and `data/config.json` holds it; the log line is here to
       // record that the owner changed it, which it still does.
       console.error("[coding-agent] the number of coding runs at once was changed by the owner");
+    }
+    if (hasHistoryRetention || hasHistoryLimit) {
+      const { policy, transcripts } = await setHistoryRetention({
+        ...(hasHistoryRetention ? { mode: fields.historyRetention } : {}),
+        ...(hasHistoryLimit ? { limit: fields.historyLimit } : {}),
+      });
+      // Both are values from the setter's own fixed lists by now.
+      console.error(`[coding-agent] run history set to ${logSafe(policy.mode)}${policy.mode === "extended" ? ` (${logSafe(String(policy.limit))} runs)` : ""} by the owner`);
+      for (const t of transcripts) {
+        if (t.state !== "already") console.error(`[coding-agent] Claude Code transcript period ${t.state}: ${logSafe(t.file)}`);
+      }
     }
     if (hasGenImages) {
       const saved = await setGenerateImages(fields.generateImages);

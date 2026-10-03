@@ -10,7 +10,7 @@ import { isInterSessionEnvelope, INTER_SESSION_MARKERS } from "@/lib/chat-sentin
  * customer (TASK-416).
  *
  * The fixtures below are not invented. They were captured from the beta test
- * box 192.168.50.65 by reading its persisted session
+ * box in the lab by reading its persisted session
  * (`~/.openclaw/agents/main/sessions/*.jsonl`) and by calling the gateway's own
  * `chat.history` — the exact surface ChatApp/ChatPopup read. Both agree:
  *

@@ -11,6 +11,9 @@ import CodingAgentSecretsCard from "./CodingAgentSecretsCard";
 // The toggle lives in its own module now — the secrets card draws one too.
 import Switch from "./CodingAgentSwitch";
 import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
+import CodingRunHistoryCard from "./CodingRunHistoryCard";
+import type { HistoryRetentionMode } from "@/lib/coding-run-history";
+import type { PrBodyTaskMode } from "@/lib/coding-pr-body";
 import HelpTip from "./HelpTip";
 import { PaidPlanNotice } from "./PaidFeatureGate";
 import { enableBlockedBy, type PlanGate } from "@/lib/paid-plan-gate";
@@ -88,6 +91,10 @@ export interface AgentStatus {
   /** The owner's switch for branch -> pull request -> wait for checks ->
    *  merge. Optional: an older server does not answer with it. */
   autoPr?: boolean;
+  /** How much of the run's task that pull request carries, always redacted
+   *  (TASK-1366). Optional: an older server answers with none, and the control
+   *  is then not drawn at all. */
+  prBodyIncludesTask?: PrBodyTaskMode;
   /** How many follow-up turns the review loop may hand the harness after the
    *  pull request is opened. 0 is off. Optional: an older server answers with
    *  none, and the card then shows no control rather than inventing a value. */
@@ -109,6 +116,13 @@ export interface AgentStatus {
   maxParallelRuns?: number;
   minMaxParallelRuns?: number;
   maxMaxParallelRuns?: number;
+  /** What the box keeps of finished runs (TASK-1178). Optional, for the reason
+   *  the counted settings are: an older server answers with none and the Run
+   *  history card is then not drawn at all. */
+  historyRetention?: HistoryRetentionMode;
+  historyLimit?: number;
+  historyLimits?: number[];
+  historyLiveKept?: number;
   /** The folder the device proposes when none is chosen: ~/Projects. The
    *  wizard pre-fills it, and saving it creates it. */
   suggestedDirectory?: string;
@@ -183,12 +197,25 @@ const CONFIRM_MS = 5_000;
  * message sat below the GitHub card, a screen away from a Steps field that
  * still held the refused number.
  */
-type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "completionAttempts" | "maxParallelRuns" | "gitAuthor" | "settings" | "github";
+type ErrorSlot = "dir" | "turns" | "tokens" | "reviewRounds" | "completionAttempts" | "maxParallelRuns" | "gitAuthor" | "history" | "settings" | "github";
 // The slots that draw their refusal BESIDE the field rather than at the foot of
 // the card. The rounds select is one of them: the route refuses a number
 // outside its range rather than clamping it, and that sentence belongs next to
-// the control that asked for it.
-const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds", "completionAttempts", "maxParallelRuns", "gitAuthor"]);
+// the control that asked for it. The run history's is inside its own card.
+const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens", "reviewRounds", "completionAttempts", "maxParallelRuns", "gitAuthor", "history"]);
+
+/**
+ * The label of each choice for how much of the task a pull request carries,
+ * in the order the select offers them. A Record over the mode type rather than
+ * an import of the list, so the redactor's code stays out of the browser
+ * bundle — and a mode added in @/lib/coding-pr-body without a label here still
+ * fails the typecheck.
+ */
+const PR_BODY_TASK_LABEL_KEY: Record<PrBodyTaskMode, string> = {
+  summary: "codingAgent.prBodyIncludesTaskSummary",
+  "full-redacted": "codingAgent.prBodyIncludesTaskFullRedacted",
+  none: "codingAgent.prBodyIncludesTaskNone",
+};
 
 /** The slowest cadence GitHub's device flow ever asks for, in seconds. */
 const DEVICE_POLL_FLOOR_S = 5;
@@ -214,7 +241,12 @@ const SMALL_BUTTON = BTN_SECONDARY;
 export default function CodingAgentSettingsPanel({
   onReset,
   onStatus,
+  onOpenHistory,
 }: {
+  /** Open the Coding Agent's Run history page, from the Run history card.
+   *  Absent where this panel is not inside the app, and the card then draws
+   *  no button for it. */
+  onOpenHistory?: () => void;
   /** Called after a successful reset, so the host can leave this page: the
    *  settings it describes no longer exist and the window's front door is the
    *  setup wizard again. */
@@ -1041,6 +1073,36 @@ export default function CodingAgentSettingsPanel({
           />
         </div>
 
+        {/* How much of the task that pull request shows (TASK-1366). Its
+            sentence is on the card rather than behind a help tip: it is the
+            one place the owner learns the box takes their paths, addresses
+            and tokens out before publishing. Hidden on a server that does not
+            answer with the field, like the counted settings below. */}
+        {typeof status?.prBodyIncludesTask === "string" && (
+          <div className="mt-4">
+            <div className="flex items-start justify-between gap-4">
+              <label htmlFor="coding-agent-pr-body-task" className="min-w-0 text-xs font-medium text-[var(--text-secondary)]">
+                {t("codingAgent.prBodyIncludesTaskLabel")}
+              </label>
+              <select
+                id="coding-agent-pr-body-task"
+                value={status.prBodyIncludesTask}
+                disabled={saving}
+                data-testid="coding-agent-pr-body-task"
+                onChange={(e) => void saveSetting({ prBodyIncludesTask: e.target.value }, "prBodyIncludesTask", t("codingAgent.prBodyIncludesTaskFailed"))}
+                className={`text-base sm:text-xs ${FIELD} w-44 shrink-0`}
+              >
+                {(Object.keys(PR_BODY_TASK_LABEL_KEY) as PrBodyTaskMode[]).map((id) => (
+                  <option key={id} value={id}>{t(PR_BODY_TASK_LABEL_KEY[id])}</option>
+                ))}
+              </select>
+            </div>
+            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
+              {t("codingAgent.prBodyIncludesTaskHint")}
+            </p>
+          </div>
+        )}
+
         {/* What happens to that pull request AFTER it is opened: CI going red,
             review comments, a conflict with a sibling merge. Each round is one
             follow-up turn in the run's own session, so the number is a budget
@@ -1185,6 +1247,22 @@ export default function CodingAgentSettingsPanel({
 
         {errorIn("settings")}
       </div>
+
+      {/* What the box keeps of finished runs, what that weighs, and the
+          whole-history actions. The setting itself goes through this panel's
+          write chain like every other; the figures are the card's own read. */}
+      {status?.historyRetention && (
+        <CodingRunHistoryCard
+          mode={status.historyRetention}
+          limit={status.historyLimit ?? 100}
+          limits={status.historyLimits ?? [100, 300, 1000]}
+          liveKept={status.historyLiveKept ?? 30}
+          saving={saving}
+          onSave={(patch) => saveSetting(patch, "history", t("codingAgent.history.saveFailed"))}
+          error={errorIn("history")}
+          onOpenHistory={onOpenHistory}
+        />
+      )}
 
       {/* What the owner has allowed a run BEYOND the defaults. Its own card and
           its own route: the list is mostly filled from the other end — "Allow

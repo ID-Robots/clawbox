@@ -12,7 +12,7 @@
 // absent from tools/list, not present-and-erroring.
 
 import { readFileSync, statSync } from "fs";
-import { readEdition } from "../../src/lib/edition-source";
+import { readEdition, readEditionSource } from "../../src/lib/edition-source";
 
 export type Ed = "openclaw" | "hermes";
 
@@ -87,6 +87,10 @@ export function resolveEdition(appHarness: Ed | null): Ed {
     );
     return "hermes";
   }
+  // A unified-image box whose owner has not picked an agent yet runs neither
+  // harness, so whatever spawned this process is not an agent the box chose:
+  // the smaller set, for the same fail-closed reason as an unreadable lock.
+  if (readEditionSource().unselected) return "hermes";
   const installed = readEdition();
   if (installed === "openclaw" || installed === "hermes") return installed;
   // Dual box whose API was not up — register the default harness's tools rather
@@ -136,6 +140,9 @@ export async function resolveAppHarness(
   authHeader: string | null,
 ): Promise<Ed | null> {
   if (lockUnreadable()) return null;
+  // No agent chosen yet (the lock reads `unselected`): neither app set is this
+  // box's, and the device has nothing better to say than this file does.
+  if (readEditionSource().unselected) return null;
   const installed = readEdition();
   if (installed === "openclaw" || installed === "hermes") return installed;
   return askActiveHarness(apiBase, authHeader);

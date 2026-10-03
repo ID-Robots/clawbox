@@ -184,8 +184,13 @@ describe("who emits the signal and who listens", () => {
   });
 
   it("keeps the hook's listener off the expensive path", () => {
-    // Bumping the nonce re-asks; setting pendingRefreshRef would add `refresh=1`.
-    expect(HOOK).toMatch(/onProvidersChanged\(\(\) => setNonce\(\(n\) => n \+ 1\)\)/);
+    // The listener restarts the load with the flag as it stands — set only
+    // while an explicit Refresh's read is the one being dropped — and never
+    // SETS it, or calls `refresh`, either of which would add `refresh=1` to
+    // every signal's read.
+    const listener = between(HOOK, "const off = onProvidersChanged(() => {", "});");
+    expect(listener).toContain("load(pendingRefreshRef.current);");
+    expect(listener).not.toMatch(/pendingRefreshRef\.current = true|refresh\(\)/);
     expect(HOOK).toMatch(/const fresh = provider && loaded\?\.provider === provider \? loaded : null/);
   });
 });

@@ -1,0 +1,47 @@
+# Guake in the ClawBox look — loaded with `dconf load /org/guake/` by
+# install-guake.sh (as the desktop's user). The same face as the ClawBox
+# Terminal (src/lib/terminal-settings.ts "clawbox-dark"): GitHub's dark scheme,
+# on that scheme's own canvas #0d1117 — a shade under the Terminal window's
+# #181c22, because a drop-down terminal sits over everything — a block
+# cursor, tabs on top. The
+# palette is ANSI 0-15, then the foreground and the background, each as Guake
+# stores them (#rrrrggggbbbb).
+#
+# The font is the system monospace, NOT JetBrains Mono: Ubuntu packages that
+# one as a variable font, and Guake's terminal widget measures its cells too
+# wide — every line came out letter-spaced.
+
+[general]
+use-default-font=false
+gtk-use-system-default-theme=false
+gtk-theme-name='Adwaita'
+gtk-prefer-dark-theme=true
+tab-ontop=true
+window-tabbar=true
+hide-tabs-if-one-tab=false
+tab-close-buttons=true
+use-scrollbar=true
+use-popup=false
+use-trayicon=false
+mouse-display=true
+window-valignment=0
+window-halignment=0
+window-width=100
+window-height=50
+window-losefocus=false
+prompt-on-quit=false
+prompt-on-close-tab=0
+
+[style]
+cursor-shape=0
+cursor-blink-mode=0
+
+[style/font]
+style='Monospace 10'
+palette-name='ClawBox Dark'
+palette='#48484f4f5858:#ffff7b7b7272:#3f3fb9b95050:#d2d299992222:#5858a6a6ffff:#bcbc8c8cffff:#3939c5c5cfcf:#b1b1babac4c4:#6e6e76768181:#ffffa1a19898:#5656d3d36464:#e3e3b3b34141:#7979c0c0ffff:#d2d2a8a8ffff:#5656d4d4dddd:#f0f0f6f6fcfc:#e6e6ededf3f3:#0d0d11111717'
+allow-bold=true
+bold-is-bright=false
+
+[style/background]
+transparency=100

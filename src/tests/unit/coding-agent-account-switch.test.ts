@@ -63,6 +63,10 @@ const INIT = JSON.stringify({ type: "system", subtype: "init", session_id: SESSI
 const SYNTHETIC_LIMIT = JSON.stringify({ type: "assistant", error: "rate_limit", message: { model: "<synthetic>", content: [{ type: "text", text: LIMIT_LINE }] } });
 const LIMIT_RESULT = JSON.stringify({ type: "result", subtype: "success", is_error: true, result: LIMIT_LINE, num_turns: 4 });
 const OK_RESULT = JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Done.", num_turns: 2 });
+/** What the CLI writes when Anthropic refuses the credential (TASK-1260). */
+const AUTH_LINE = "Invalid API key · Please run /login";
+const SYNTHETIC_AUTH = JSON.stringify({ type: "assistant", error: "authentication_failed", message: { model: "<synthetic>", content: [{ type: "text", text: AUTH_LINE }] } });
+const AUTH_RESULT = JSON.stringify({ type: "result", subtype: "success", is_error: true, result: AUTH_LINE, num_turns: 1 });
 
 function callsLog(): string {
   return path.join(base, "calls.log");
@@ -82,7 +86,7 @@ function calls(): { n: number; cred: string; args: string }[] {
  * (works until something ends it). It reads — and deletes — the credential
  * handoff exactly as the real wrapper does, and logs what it was handed.
  */
-function installWrapper(plan: readonly ("limit" | "ok" | "hang")[]): void {
+function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth")[]): void {
   fs.writeFileSync(path.join(base, "plan"), `${plan.join("\n")}\n`);
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
@@ -98,6 +102,7 @@ function installWrapper(plan: readonly ("limit" | "ok" | "hang")[]): void {
       `mode=$(sed -n "\${n}p" ${sq(path.join(base, "plan"))})`,
       'case "$mode" in',
       `  limit) printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_LIMIT)} ${sq(LIMIT_RESULT)}; exit 1 ;;`,
+      `  auth) printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_AUTH)} ${sq(AUTH_RESULT)}; exit 1 ;;`,
       `  hang) printf '%s\\n' ${sq(INIT)}; sleep 30; exit 0 ;;`,
       `  *) printf '%s\\n' ${sq(INIT)} ${sq(OK_RESULT)}; exit 0 ;;`,
       "esac",
@@ -138,11 +143,14 @@ beforeEach(async () => {
   lib = await import("@/lib/coding-agent");
   pool = await import("@/lib/anthropic-accounts");
   pool._resetAnthropicAccountsForTests();
+  (await import("@/lib/anthropic-swap"))._resetAnthropicSwapForTests();
 });
 
 afterEach(async () => {
   await lib._resetCodingAgentStateForTests();
   pool._resetAnthropicAccountsForTests();
+  (await import("@/lib/anthropic-swap"))._resetAnthropicSwapForTests();
+  vi.unstubAllGlobals();
   restore();
   fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
@@ -280,5 +288,115 @@ describe("the owner's test hook", () => {
     expect(run.anthropicAccount).toBe(personal.id);
     expect(run.accountSwitches).toHaveLength(1);
     expect(calls()[1].args).toContain(`--resume ${SESSION}`);
+  });
+});
+
+// ── TASK-1260: a refused credential, and a swap another consumer caused ──────
+
+/** Anthropic's answer to the key check (`verifyAnthropicKey`): a 401 for the keys in `refused`. */
+function anthropicRefuses(...refused: string[]): void {
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+    const key = (init?.headers as Record<string, string> | undefined)?.["x-api-key"] ?? "";
+    return new Response("{}", { status: refused.includes(key) ? 401 : 200 });
+  }));
+}
+
+describe("an account Anthropic refuses mid-run (TASK-1260)", () => {
+  it("confirms the refusal, takes the account out, and carries the SAME run on on the next account", async () => {
+    installWrapper(["auth", "ok"]);
+    makeProject("site");
+    const { work, personal } = await twoAccounts();
+    anthropicRefuses(KEY_A);
+
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" });
+    const run = await settled(started.id);
+
+    expect(run.status).toBe("completed");
+    expect(run.anthropicAccount).toBe(personal.id);
+    expect(run.accountSwitches).toEqual([expect.objectContaining({ fromId: work.id, toId: personal.id, kind: "auth", limitedUntil: null })]);
+    expect(run.progress).toContain('Anthropic refused the credential of account "Work"; carrying on with "Personal" in the same session');
+    const [first, second] = calls();
+    expect(first.cred).toBe(`api_key:${KEY_A}:`);
+    expect(second.cred).toBe(`api_key:${KEY_B}:`);
+    expect(second.args).toContain(`--resume ${SESSION}`);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("revoked");
+    // The swap says so, once: an account that needs the owner, not one waiting for a reset.
+    await vi.waitFor(() => expect(announceAnthropicLimit).toHaveBeenCalledWith(expect.objectContaining({ kind: "switched", reason: "auth", fromLabel: "Work", toLabel: "Personal" })));
+  });
+
+  it("keeps an account Anthropic still accepts: the run goes on on it, and nothing is marked", async () => {
+    installWrapper(["auth", "ok"]);
+    makeProject("site");
+    const { work } = await twoAccounts();
+    anthropicRefuses();
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+    expect(run.status).toBe("completed");
+    expect(run.anthropicAccount).toBe(work.id);
+    expect(run.accountSwitches).toEqual([]);
+    expect(calls()[1].cred).toBe(`api_key:${KEY_A}:`);
+    expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+  });
+
+  it("fails with the way out when no account is left and none comes back by itself", async () => {
+    installWrapper(["auth", "ok"]);
+    makeProject("site");
+    await pool.addApiKeyAccount({ label: "Only", key: KEY_A });
+    anthropicRefuses(KEY_A);
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/Anthropic refused the credential of every account/);
+    expect(calls()).toHaveLength(1);
+  });
+
+  it("does not bounce a run for ever on a refusal nobody can pin on the account", async () => {
+    installWrapper(["auth", "auth", "auth", "auth", "auth", "ok"]);
+    makeProject("site");
+    await twoAccounts();
+    anthropicRefuses();
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+    expect(run.status).toBe("failed");
+    // The first attempt and three carried-on ones, then it stops.
+    expect(calls()).toHaveLength(4);
+  });
+});
+
+describe("a swap another consumer caused (TASK-1260)", () => {
+  it("moves a live run off the account that can no longer answer and resumes it in its session", async () => {
+    installWrapper(["hang", "ok"]);
+    makeProject("site");
+    const { work, personal } = await twoAccounts();
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" });
+    await vi.waitFor(() => expect(lib.getRun(started.id)?.sessionId).toBe(SESSION), { timeout: 10_000 });
+    expect(lib.getRun(started.id)?.anthropicAccount).toBe(work.id);
+
+    // The chat hit the weekly limit on the same account.
+    await pool.markLimited(work.id, Date.now() + 60 * 60_000, "weekly", { source: "chat" });
+
+    const run = await settled(started.id);
+    expect(run.status).toBe("completed");
+    expect(run.anthropicAccount).toBe(personal.id);
+    expect(run.accountSwitches).toEqual([expect.objectContaining({ fromId: work.id, toId: personal.id, kind: "moved" })]);
+    expect(run.progress).toContain('Anthropic account "Work" can no longer answer; carrying on with "Personal" in the same session');
+    expect(calls()[1].args).toContain(`--resume ${SESSION}`);
+    expect(calls()[1].cred).toBe(`api_key:${KEY_B}:`);
+    expect(run.retries).toBe(0);
+    // One notice for the one move, whoever saw the limit.
+    await vi.waitFor(() => expect(announceAnthropicLimit).toHaveBeenCalledTimes(1));
+  });
+
+  it("leaves a run on an account that can still answer when the owner changes the order", async () => {
+    installWrapper(["hang", "ok"]);
+    makeProject("site");
+    const { work, personal } = await twoAccounts();
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" });
+    await vi.waitFor(() => expect(lib.getRun(started.id)?.sessionId).toBe(SESSION), { timeout: 10_000 });
+
+    await pool.reorderAccounts([personal.id, work.id]);
+    await (await import("@/lib/anthropic-swap")).whenSwapsSettled();
+    expect(lib.getRun(started.id)).toMatchObject({ status: "running", anthropicAccount: work.id });
+    expect(calls()).toHaveLength(1);
   });
 });

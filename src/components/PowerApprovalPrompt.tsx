@@ -1,12 +1,36 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
+import { setVisibleInterval } from "@/lib/visible-interval";
 
 interface Prompt { id: string; action: "restart" | "shutdown"; reason: string; expiresAt: number }
 
-/** Human-only confirmation. Rendering or fetching a request never authorizes it. */
-export default function PowerApprovalPrompt() {
+/**
+ * Fired on `window` by the desktop when the owner-notice ring says a power
+ * request was raised, answered or ran out (a `power_approval` notice, pushed by
+ * src/lib/power-approval.ts). The prompt then asks the approval route what is
+ * pending: the notice only says WHEN to ask, never what to show.
+ */
+export const POWER_APPROVAL_EVENT = "clawbox:power-approval";
+
+/**
+ * How often the prompt asks on its own, as a SAFETY net under the ring: a
+ * notice the desktop could not read (the box's store refused the write, the
+ * ring poll failed at the wrong moment) still reaches the screen within a
+ * minute. It used to be the only way the prompt learned anything, every 5 s
+ * on every owner desktop, all day, for a request that almost never exists —
+ * the ring now brings a request to the screen within its own 2 s instead.
+ */
+const SAFETY_POLL_MS = 60_000;
+
+/**
+ * Human-only confirmation. Rendering or fetching a request never authorizes it.
+ *
+ * Memoized: it takes no props, and the desktop re-renders for a hundred things
+ * this prompt does not show — it re-renders for its own state alone.
+ */
+const PowerApprovalPrompt = memo(function PowerApprovalPrompt() {
   const { t } = useT();
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [busy, setBusy] = useState(false);
@@ -17,8 +41,13 @@ export default function PowerApprovalPrompt() {
   useEffect(() => {
     let stopped = false;
     let inFlight = false;
+    // Asked for while a request was already in flight: that answer may predate
+    // what the ask was for (a request raised just after the server answered),
+    // so it is asked once more when the first lands rather than dropped.
+    let askAgain = false;
     const refresh = async () => {
-      if (inFlight || decisionPending.current) return;
+      if (decisionPending.current) return;
+      if (inFlight) { askAgain = true; return; }
       inFlight = true;
       try {
         const res = await fetch("/setup-api/system/power/approval", { cache: "no-store" });
@@ -26,11 +55,29 @@ export default function PowerApprovalPrompt() {
         const data = await res.json();
         if (!stopped && !decisionPending.current) setPrompt(data.pending?.expiresAt > Date.now() ? data.pending : null);
       } catch { /* A network outage is not a confirmation. */ }
-      finally { inFlight = false; }
+      finally {
+        inFlight = false;
+        if (askAgain && !stopped) {
+          askAgain = false;
+          void refresh();
+        }
+      }
     };
     void refresh();
-    const timer = setInterval(() => void refresh(), 5000);
-    return () => { stopped = true; clearInterval(timer); };
+    // The ring's word: something about a power request changed.
+    const onNotice = () => { void refresh(); };
+    window.addEventListener(POWER_APPROVAL_EVENT, onNotice);
+    // The safety poll waits while the page is HIDDEN (a phone or a laptop tab
+    // in the background), where the prompt could not be seen, and asks at once
+    // on the way back if a tick fell due meanwhile (src/lib/visible-interval.ts).
+    // The ring keeps reading behind a hidden tab, so a request raised while
+    // away is already known when the owner is back.
+    const stopPoll = setVisibleInterval(() => { void refresh(); }, SAFETY_POLL_MS);
+    return () => {
+      stopped = true;
+      window.removeEventListener(POWER_APPROVAL_EVENT, onNotice);
+      stopPoll();
+    };
   }, []);
   const decide = async (approve: boolean) => {
     if (!prompt || decisionPending.current) return;
@@ -64,4 +111,6 @@ export default function PowerApprovalPrompt() {
       <button disabled={busy || !prompt} onClick={() => void decide(true)} className="rounded-lg bg-red-600 px-3 py-2">{t("chat.approval.allowOnce")}</button>
     </div>}
   </section>;
-}
+});
+
+export default PowerApprovalPrompt;

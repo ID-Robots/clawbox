@@ -61,9 +61,12 @@ vi.mock("@/lib/harness/clawai-images", async (importOriginal) => ({
 // give — the queue already as deep as the route lets it get.
 const FakeSlotBusy = vi.hoisted(() => class extends Error {});
 const slotBusy = vi.hoisted(() => ({ on: false }));
+// What the route asked the slot for: its queue class and its bound.
+const slotOptions = vi.hoisted(() => [] as unknown[]);
 vi.mock("@/lib/webapp-icon", () => ({
   GenerationSlotBusy: FakeSlotBusy,
-  withGenerationSlot: <T,>(fn: () => Promise<T>) => {
+  withGenerationSlot: <T,>(fn: () => Promise<T>, opts?: unknown) => {
+    slotOptions.push(opts);
     if (slotBusy.on) throw new FakeSlotBusy("queue full");
     return fn();
   },
@@ -439,9 +442,24 @@ describe("the slot a call holds", () => {
     slotBusy.on = true;
     const res = await postImage(body({ path: "hero.png", prompt: "x" }, "image"));
     expect(res.status).toBe(429);
-    expect((await res.json()).code).toBe("busy");
+    const refusal = await res.json();
+    expect(refusal.code).toBe("busy");
+    // The code is the whole difference from a spent allowance, which is also
+    // a 429: busy must never read like the allowance, nor pause the run.
+    expect(refusal.error).not.toMatch(/allowance|used up/i);
+    expect(noteAllowanceRefusal).not.toHaveBeenCalled();
     // Refused before the slot was spent, so the run still has all of them.
     expect(generated.images).toBe(0);
+  });
+
+  it("asks for the slot as a request, ahead of the box's own icon jobs", async () => {
+    // TASK-1355: queued behind the project icon the run itself had asked for
+    // at start, the run's first picture was refused as busy in 30 ms.
+    slotOptions.length = 0;
+    generateClawaiImageBytes.mockResolvedValue({ bytes: PNG, extension: "png" });
+    const res = await postImage(body({ path: "hero.png", prompt: "a crab" }, "image"));
+    expect(res.status).toBe(200);
+    expect(slotOptions).toEqual([{ maxWaiting: 2, priority: "request" }]);
   });
 });
 

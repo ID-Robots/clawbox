@@ -6,6 +6,8 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { resolveHarnessProbe } from "@/lib/harness-probe";
+import { mayUseOwnerApis } from "@/lib/use-session-user";
+import { useFollowSessionSwitch } from "@/lib/session-switch";
 import { customWallpaperId, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
   brandingHarness,
@@ -348,6 +350,10 @@ function BackToDesktopLabel() {
 
 export default function StandaloneAppPage() {
   const { id } = useParams<{ id: string }>();
+  // A tab opened with "Open in new tab" — /app/terminal above all — follows a
+  // sign-in or sign-out made in another tab, reopening this same app on the
+  // session that now holds (TASK-1247).
+  useFollowSessionSwitch();
   // Only /app/settings reads the appearance preferences — every other page
   // here would be paying for a request it never renders.
   // null while unresolved — a harness-only app must not paint before we know
@@ -373,16 +379,28 @@ export default function StandaloneAppPage() {
     // the browser reloads right after it, so a page that mounted inside that
     // window used to wear the wrong product for the life of the tab. The
     // desktop has always retried; this is the same helper, not a second copy.
-    void resolveHarnessProbe({
-      signal: probe.signal,
-      // Every attempt, including one that answered nothing: this page shows its
-      // own "unknown" at once — which hides BOTH harnesses' apps, the same
-      // fail-closed answer as before — rather than sitting on "Loading…" for
-      // the whole retry budget. A later, settled answer replaces it.
-      onAnswer: (d) => {
-        setHarness(d?.active || "unknown");
-        setWallpaperHarness(brandingHarness(d));
-      },
+    //
+    // Only for the owner (TASK-1256). The harness route is the owner's, and a
+    // non-owner's session — which reaches this page for /app/terminal alone —
+    // would be refused every retry of the probe. Their answer is "unknown",
+    // the fail-closed one, and the Terminal never waits on it.
+    void mayUseOwnerApis().then((may) => {
+      if (probe.signal.aborted) return;
+      if (!may) {
+        setHarness("unknown");
+        return;
+      }
+      void resolveHarnessProbe({
+        signal: probe.signal,
+        // Every attempt, including one that answered nothing: this page shows its
+        // own "unknown" at once — which hides BOTH harnesses' apps, the same
+        // fail-closed answer as before — rather than sitting on "Loading…" for
+        // the whole retry budget. A later, settled answer replaces it.
+        onAnswer: (d) => {
+          setHarness(d?.active || "unknown");
+          setWallpaperHarness(brandingHarness(d));
+        },
+      });
     });
     return () => { probe.abort(); };
   }, []);
@@ -512,6 +530,8 @@ export default function StandaloneAppPage() {
         return <CodingAgentApp />;
       case "files":
         return <FilesApp />;
+      case "projects":
+        return <FilesApp initialPlace="projects" />;
       case "memory-shard":
         return <MemoryShardApp />;
       case "browser":

@@ -22,7 +22,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * path in the message. OpenClaw reads media only from a fixed root allowlist
  * (`buildMediaLocalRoots`), and `$HOME/uploads` is not on it, so the `image`
  * tool answered "Local media path is not under an allowed directory" — proven
- * on box 192.168.50.65 on 2026-08-21 with the exact path the composer produces.
+ * on a lab box on 2026-08-21 with the exact path the composer produces.
  *
  * Asserting on the component rather than on source text: the upload URL and the
  * `[Attached file: …]` line are two different callbacks that have to agree, and

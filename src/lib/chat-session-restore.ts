@@ -60,6 +60,14 @@ export const HISTORY_RESTORE_DEADLINE_MS = 90_000;
 /** The waits between history reads; the last one repeats until the deadline. */
 export const HISTORY_RETRY_DELAYS_MS: readonly number[] = [2_000, 4_000, 8_000, 15_000];
 
+/**
+ * How often an open, visible chat re-reads its conversation on a harness that
+ * pushes nothing (no live connection) — what makes a turn sent on another
+ * device appear without a reload (TASK-1364). One small file read on the box;
+ * the gateway pushes `session.message` instead and is never polled.
+ */
+export const TRANSCRIPT_REFRESH_MS = 5_000;
+
 /** Why a restore ended without the conversation. */
 export type RestoreFailureKind =
   /** The gateway kept saying "not yet" (rebuilding, restarting) past the deadline. */

@@ -28,6 +28,7 @@ import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { classifyUpdaterHandover } from "./updater-handover";
 import { startRootStep } from "./root-step-runner";
+import { preserveLocalEdits } from "./local-edits";
 import { watchRootStepProgress } from "./root-step-follow";
 import {
   setUpdateLock,
@@ -91,6 +92,13 @@ import {
 
 const PROJECT_DIR = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
+/**
+ * The card for edits saved by the restart step's own save. Step 1's save
+ * arrives as `local-edits-saved` through install.sh's CLAWBOX-WARN marker, and
+ * `warnUpdate` keeps the first card per code — so a second save needs its own
+ * code or the second place the owner's work went would never be named.
+ */
+const LOCAL_EDITS_SAVED_BEFORE_RESTART = "local-edits-saved:restart";
 // Pinned OpenClaw version — single source of truth shared with install.sh
 // so the in-UI "Latest" column reflects the ClawBox-approved release, not
 // whatever npm last published. Bump the file in a PR → beta → main and the
@@ -494,26 +502,23 @@ function unresolvedTargetReason(branch: string): RemoteReachability {
 }
 
 /**
- * There is no branch to compare against at all.
+ * There is a `.update-branch` and it cannot be used.
  *
- * The same unknown one step earlier: an unreadable `.update-branch`, or a
- * pinned value `isSafeBranch` refuses. Both used to answer "the remote is
- * reachable" over a comparison that never happened — and then the tag list,
- * which between releases says "the latest tag is the one I have", supplied the
- * green all-clear to a box dozens of commits behind its branch.
- *
- * An update still RUNS on such a box: `resolveUpdateBranch()` falls back to the
- * checked-out branch and its origin copy, all of it local. Making this check
- * resolve the branch the same way is the better answer and a change to the
- * branch-resolution module, not to this card's honesty; until then the check
- * says it does not know rather than claiming the box is current.
+ * An unreadable file (EACCES, EIO), or a pinned value `isSafeBranch` refuses.
+ * Both used to answer "the remote is reachable" over a comparison that never
+ * happened — and then the tag list, which between releases says "the latest
+ * tag is the one I have", supplied the green all-clear to a box dozens of
+ * commits behind its branch. Unlike a MISSING pin, which follows the branch the
+ * updater would resolve (see `resolveEffectiveUpdateBranch`), a pin that is
+ * there and says nothing usable is evidence of nothing: the check says it does
+ * not know rather than guessing which branch the operator meant.
  */
 function noUpdateBranchReason(): RemoteReachability {
   return {
     reachable: false,
     cause: "device",
-    reason: "This ClawBox records no update branch to compare itself against, so it cannot say whether "
-      + "an update is waiting. Set the update branch in System Update → Advanced options.",
+    reason: "This ClawBox records no update branch it can use to compare itself against, so it cannot say "
+      + "whether an update is waiting. Set the update branch in System Update → Advanced options.",
   };
 }
 
@@ -1221,6 +1226,54 @@ export async function resolveUpdateBranch(projectDir: string = PROJECT_DIR): Pro
   );
 }
 
+/** The branch this box follows for updates, and how that was decided. */
+export interface EffectiveUpdateBranch {
+  /** Branch on `origin` that the version check compares HEAD against. */
+  branch: string;
+  /**
+   * `unresolved` is the one answer an update does not share: a detached HEAD
+   * with no pin and no evidence, which `resolveUpdateBranch()` refuses. The
+   * check still looks at `main`; the update asks for a branch first.
+   */
+  source: BranchSource | "unresolved";
+}
+
+/**
+ * Which branch this box follows, for the two places that only LOOK: the
+ * version check and System Update → Advanced options.
+ *
+ * The same rules as `resolveUpdateBranch()`, so the check compares against the
+ * branch an update would actually move to — with one difference. Where that
+ * function refuses (a detached HEAD with nothing on it naming a branch), this
+ * answers `main`, the release channel, marked `unresolved`. Refusing there is
+ * right for an UPDATE, which would otherwise change the device's channel on a
+ * guess; for a look it only made releases invisible. A box with no recorded
+ * branch could not say whether v4.1.0 was waiting, and its owner could not see
+ * which branch to enter.
+ *
+ * Nothing is written: `main` is never auto-pinned (see `repinUpdateBranch`).
+ */
+export async function resolveEffectiveUpdateBranch(
+  projectDir: string = PROJECT_DIR,
+): Promise<EffectiveUpdateBranch> {
+  try {
+    const resolved = await resolveUpdateBranch(projectDir);
+    // The version check fetches `origin <branch>` and compares against
+    // `origin/<branch>`, so name the branch on origin, not the local one — a
+    // local branch may track an origin branch of another name.
+    const branch = resolved.upstream.startsWith("origin/")
+      ? resolved.upstream.slice("origin/".length)
+      : resolved.local;
+    // It is interpolated into git argv below; `origin/-x` passes the check the
+    // full upstream got, and `-x` would be read as an option.
+    if (!isSafeBranch(branch)) return { branch: "main", source: "default" };
+    return { branch, source: resolved.source };
+  } catch (err) {
+    if (err instanceof UnresolvableUpdateBranchError) return { branch: "main", source: "unresolved" };
+    throw err;
+  }
+}
+
 /**
  * Record a warning on the running update: journal + update log.
  *
@@ -1659,6 +1712,23 @@ async function updateClawBoxAndReboot(): Promise<void> {
       `This ClawBox has no local copy of ${upstream}. Step 1 of this update was supposed to fetch it — `
       + "run the update again, and if it keeps failing, GitHub may be refusing this address's anonymous requests.",
     );
+  }
+  // SAVE, then reset and clean. Step 1 already saved whatever the tree held
+  // when the update started (install.sh runs the same script before its own
+  // resets); this catches anything written since, so nothing the two commands
+  // below remove is lost without a word. A save that fails stops the update
+  // here — this step is failFast — with the tree untouched. TASK-1316.
+  //
+  // The script is the one this build carries (local-edits.ts), because the
+  // tree was moved by step 1 and may be a release that never had it. And a save
+  // step 1's card already names is not a second place the owner's work went:
+  // the script names a save it recognises rather than writing another.
+  const saved = await preserveLocalEdits(PROJECT_DIR);
+  const alreadyNamed = saved !== null && saved.savedTo !== "git-stash"
+    && (runtime.state.warnings ?? []).some((w) => w.message.split(/\s+/).includes(saved.savedTo));
+  if (saved && !alreadyNamed) {
+    warnUpdate(LOCAL_EDITS_SAVED_BEFORE_RESTART, saved.message);
+    await persistWarnings();
   }
   await execGit(PROJECT_DIR, ["reset", "--hard", "HEAD"], gitOptions);
   try {
@@ -3788,10 +3858,19 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
   let branch: string;
   try {
     branch = (await readFile(path.join(projectDir, ".update-branch"), "utf-8")).trim();
-  } catch {
-    return { target: null, remote: noUpdateBranchReason() };
+  } catch (err) {
+    // Only "there is no file" means "no branch is recorded". Any other read
+    // error is a pin that IS there and could not be read.
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      return { target: null, remote: noUpdateBranchReason() };
+    }
+    branch = "";
   }
-  if (!branch || !isSafeBranch(branch)) return { target: null, remote: noUpdateBranchReason() };
+  // No branch recorded — missing file or an empty one. Follow the branch the
+  // updater would resolve, `main` by default, instead of declining to look:
+  // a box in that state could not see a release waiting for it (TASK-1213).
+  if (!branch) branch = (await resolveEffectiveUpdateBranch(projectDir)).branch;
+  else if (!isSafeBranch(branch)) return { target: null, remote: noUpdateBranchReason() };
 
   const remote = await reachOrigin(projectDir, ["fetch", "--quiet", "origin", branch], {
     timeout: 20_000,
@@ -3873,8 +3952,14 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   const taggedClawboxTarget = targetVersion && compareSemverTags(targetVersion, baseTag) > 0
     ? targetVersion
     : null;
+  // `main` is the release channel and its releases are tagged, so a box behind
+  // main is offered the release by its name — "v4.1.0", the number in the
+  // release notes — rather than `main@<sha>`. Any other branch, or main moved on
+  // with no newer tag, is named by its commit: that is what the update installs.
   const clawboxTarget = pinnedBranchTarget
-    ? `${pinnedBranchTarget.branch}@${pinnedBranchTarget.targetSha.slice(0, 7)}`
+    ? pinnedBranchTarget.branch === "main" && taggedClawboxTarget
+      ? taggedClawboxTarget
+      : `${pinnedBranchTarget.branch}@${pinnedBranchTarget.targetSha.slice(0, 7)}`
     : taggedClawboxTarget;
 
   cachedVersionInfo = {
@@ -5119,8 +5204,14 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       }
       // Only let the unit's journal override the error when the unit actually
       // FAILED — on a generic budget overrun its last journal line can still
-      // be whatever fixup happened to finish most recently.
-      if (step.requiresRoot && rootStepResultFailed(await getRootStepResult(step.id))) {
+      // be whatever fixup happened to finish most recently. And never over a
+      // launcher that could not be asked (root-step-runner's
+      // RootStepUnavailableError, duck-typed because route tests mock that
+      // module): the unit did not run this time, so its "failed" result and
+      // any line in its journal belong to an earlier run, while the message
+      // already says what is wrong and names the command that repairs it.
+      const launcherUnavailable = (err as { rootStepUnavailable?: boolean } | null)?.rootStepUnavailable === true;
+      if (step.requiresRoot && !launcherUnavailable && rootStepResultFailed(await getRootStepResult(step.id))) {
         const rootFailure = await readRootStepFailure(step.id, stepStartedAt);
         if (rootFailure) message = rootFailure;
       }

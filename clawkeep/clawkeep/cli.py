@@ -217,6 +217,11 @@ def _restore_main(argv: list[str]) -> int:
         # Emitted unconditionally so the bridge and the UI can warn instead of
         # presenting an incomplete restore as a clean one.
         "skippedMembers": list(result.skipped_members),
+        # The symbolic links the BACKUP skipped, as the snapshot's own record
+        # names them (the first 20, `skippedLinkCount` counts them all): the
+        # restore is complete without them, and the app says which they were.
+        "skippedLinks": list(result.skipped_links),
+        "skippedLinkCount": result.skipped_link_count,
     }))
     return 0
 

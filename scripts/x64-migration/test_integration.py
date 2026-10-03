@@ -26,8 +26,9 @@ class IntegrationTest(unittest.TestCase):
         cls.stage=cls.base/'package'
         cls.deb=cls.base/'package.deb'
         owner=pwd.getpwuid(os.getuid())
-        args=SimpleNamespace(user=owner.pw_name,project='/home/nexus0/clawbox',node_dir='/usr/bin',
-                             npm_prefix='/home/nexus0/.nvm/versions/node/v24.0.0',version='1.0.0',
+        cls.project=os.path.join(owner.pw_dir,'clawbox')
+        args=SimpleNamespace(user=owner.pw_name,project=cls.project,node_dir='/usr/bin',
+                             npm_prefix=os.path.join(owner.pw_dir,'.nvm/versions/node/v24.0.0'),version='1.0.0',
                              staging=str(cls.stage),output=str(cls.deb))
         builder.build(args)
 
@@ -45,7 +46,7 @@ class IntegrationTest(unittest.TestCase):
         self.assertIn('COVERED_PATHS="install.sh install-x64.sh scripts config"',manifest)
         sudoers=self.stage/'etc/sudoers.d/clawbox-x64-integration'
         subprocess.run(['/usr/sbin/visudo','-cf',str(sudoers)],check=True,capture_output=True)
-        self.assertNotIn('/home/nexus0/clawbox/scripts/',sudoers.read_text())
+        self.assertNotIn(f'{self.project}/scripts/',sudoers.read_text())
         launcher=(self.stage/'usr/local/libexec/clawbox/clawbox-run-root-step.sh').read_text()
         self.assertNotIn('harness_swap ',launcher)
 

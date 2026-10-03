@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { TelegramCallbackQuery } from "@/lib/email-approval-telegram";
+import { pushPendingAction } from "@/lib/pending-actions";
 
 export class PowerApprovalConflict extends Error {}
 
@@ -14,9 +15,89 @@ export interface PowerApproval {
   messages: { chatId: string; messageId: number }[];
 }
 const key: unique symbol = Symbol.for("clawbox.power-approval");
-const runtime = globalThis as typeof globalThis & { [key]?: { pending: PowerApproval | null; deniedAt?: number } };
+const runtime = globalThis as typeof globalThis & {
+  [key]?: { pending: PowerApproval | null; deniedAt?: number; expiry?: ReturnType<typeof setTimeout> };
+};
 const state = runtime[key] ??= { pending: null };
 const DENIAL_COOLDOWN_MS = 60_000;
+/**
+ * How long after its `expiresAt` the expiry timer looks. A timer is not a
+ * promise about the WALL clock the expiry is judged by (`Date.now()`), and one
+ * that fired a millisecond early would find the request still live and have to
+ * come back; a quarter of a second late it never has to, unless the clock has
+ * actually been stepped back.
+ */
+const EXPIRY_SLACK_MS = 250;
+/**
+ * The longest the expiry timer waits before it looks again. `expiresAt` is a
+ * WALL-clock time and the timer runs on the monotonic one, so the gap between
+ * them is whatever the box's clock has done since the request was made — and a
+ * clock stepped back by more than ~24.8 days (a date set by hand far ahead and
+ * then corrected by NTP — the box has no RTC to hold a sane one) makes that gap
+ * larger than a timer can hold: Node then logs a `TimeoutOverflowWarning` and
+ * fires after 1 ms, the request is still live by the wall-clock test, the timer
+ * is armed again at once, and the web server spins on 1 ms timers and floods
+ * the journal until the clock catches up. Capped, a request that is still live
+ * is simply looked at once a minute. A normal request is looked at twice (one
+ * minute in, then at its two-minute expiry), which costs nothing; a clock
+ * stepped FORWARD is noticed within a minute rather than at the old deadline.
+ */
+const EXPIRY_LOOK_MAX_MS = 60_000;
+
+/**
+ * Tell every open desktop that the question changed — asked, answered (here,
+ * on another desktop or from Telegram) or run out — through the owner-notice
+ * ring the desktops already read every 2 s (src/lib/pending-actions.ts). The
+ * prompt used to ask the approval route every 5 s, around the clock, on every
+ * owner desktop, for a request that almost never exists; it now asks when the
+ * ring says there is something to ask about (src/components/PowerApprovalPrompt.tsx).
+ *
+ * The notice carries no part of the request: the ring is a file the MCP bearer
+ * can read and the agent can write, so the prompt's content still comes only
+ * from the owner-gated route, and a forged notice can do no more than make a
+ * desktop ask it. One id per request and phase, so a desktop that sees the same
+ * notice on two polls acts on it once.
+ *
+ * Never awaited and never thrown: a decision must not wait on — or fail over —
+ * a write that only saves the desktops a few seconds (their slow safety poll
+ * catches up without it).
+ */
+function announce(prompt: PowerApproval, phase: "asked" | "settled"): void {
+  try {
+    void pushPendingAction({ type: "power_approval" }, `power-approval:${prompt.id}:${phase}`).catch(() => undefined);
+  } catch { /* The safety poll still brings the desktops up to date. */ }
+}
+
+/**
+ * Expire `prompt` when its time is up even if nobody asks. Expiry used to be
+ * noticed only by the next reader, and the 5 s desktop poll was always the next
+ * reader; with that poll gone, a request nobody answered would otherwise stay
+ * on every desktop until the slow safety poll. Judged by the same wall-clock
+ * test as always (`pendingPowerApproval`): if the box's clock has been stepped
+ * back since the request was made, the request is still live by that test and
+ * the timer simply looks again — never more than `EXPIRY_LOOK_MAX_MS` later,
+ * which is what keeps a large step from overflowing the timer (see there).
+ */
+function armExpiry(prompt: PowerApproval): void {
+  if (state.expiry) clearTimeout(state.expiry);
+  const untilExpiry = Math.max(0, prompt.expiresAt - Date.now());
+  const timer = setTimeout(() => {
+    if (state.expiry === timer) state.expiry = undefined;
+    if (state.pending !== prompt) return;
+    // Expires it (and tells the desktops) when its time is up, by the same
+    // wall-clock rule as every reader; still live means look again.
+    if (pendingPowerApproval() === prompt) armExpiry(prompt);
+  }, Math.min(untilExpiry, EXPIRY_LOOK_MAX_MS) + EXPIRY_SLACK_MS);
+  // Never what keeps a process alive.
+  timer.unref?.();
+  state.expiry = timer;
+}
+
+function clearExpiry(): void {
+  if (state.expiry) clearTimeout(state.expiry);
+  state.expiry = undefined;
+}
+
 // Share lazy imports across cleanup and simultaneous chat decisions. These
 // modules participate in the approval poller's cycle, so keep them lazy.
 let approvalModule: Promise<typeof import("@/lib/email-approval")> | undefined;
@@ -35,7 +116,9 @@ export function pendingPowerApproval(): PowerApproval | null {
   if (state.pending && state.pending.expiresAt <= Date.now()) {
     const expired = state.pending;
     state.pending = null;
+    clearExpiry();
     retirePowerKeyboards(expired);
+    announce(expired, "settled");
   }
   return state.pending;
 }
@@ -64,6 +147,10 @@ export async function requestPowerApproval(action: PowerAction, reason: string):
     expiresAt: Date.now() + 120_000, messages: [],
   };
   state.pending = prompt;
+  armExpiry(prompt);
+  // Before the Telegram round trips below: the desktop is where the owner
+  // most likely is, and it should not wait on a chat delivery to see this.
+  announce(prompt, "asked");
   // Use the existing dedicated approvals bot, never a second consumer of the
   // harness's main Telegram bot. No configured bot simply means desktop-only.
   try {
@@ -105,8 +192,12 @@ export async function resolvePowerApproval(id: string, action: PowerAction, appr
   const prompt = pendingPowerApproval();
   if (!prompt || prompt.id !== id || prompt.action !== action) return false;
   state.pending = null;
+  clearExpiry();
   if (!approve) state.deniedAt = Date.now();
   retirePowerKeyboards(prompt);
+  // Every other desktop takes the question down — this one did, or the owner
+  // answered in Telegram — whichever way it went.
+  announce(prompt, "settled");
   if (approve) await dispatchPowerAction(prompt.action);
   return true;
 }

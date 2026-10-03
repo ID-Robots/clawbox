@@ -1,9 +1,12 @@
 "use client";
 
-import { useState, useEffect, useRef, ReactNode, useCallback } from "react";
+import { memo, useState, useEffect, useRef, ReactNode, useCallback } from "react";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
+import { mainInsets, mainScreen } from "@/lib/desktop-screens";
+import { useDeskScreens } from "@/lib/use-desk-screens";
+import { openInKiosk } from "@/lib/kiosk-tabs-client";
 
 interface LauncherApp {
   id: string;
@@ -41,7 +44,7 @@ function useLauncherGrid() {
   return grid;
 }
 
-export default function ChromeLauncher({
+function ChromeLauncher({
   apps,
   isOpen,
   onClose,
@@ -58,6 +61,9 @@ export default function ChromeLauncher({
   // handed placeholder substitution to `t`, which the no-provider fallback
   // does not do.
   const tr = useTr();
+  // Above the shelf on the main monitor when the desktop is spread over several.
+  const deskScreens = useDeskScreens();
+  const onMain = deskScreens ? { main: mainScreen(), ins: mainInsets() } : null;
   const { cols: gridCols, rows: gridRows } = useLauncherGrid();
   const appsPerPage = gridCols * gridRows;
   const [searchQuery, setSearchQuery] = useState("");
@@ -229,7 +235,12 @@ export default function ChromeLauncher({
 
       {/* Launcher panel */}
       <div
-        style={{ maxWidth: gridCols * 100 + 32, bottom: 56, zIndex: DESKTOP_LAYERS.overlay + 1 }}
+        style={{
+          maxWidth: gridCols * 100 + 32,
+          bottom: 56 + (onMain?.ins.bottom ?? 0),
+          zIndex: DESKTOP_LAYERS.overlay + 1,
+          ...(onMain ? { left: onMain.main.x + onMain.main.width / 2, maxWidth: Math.min(gridCols * 100 + 32, onMain.main.width) } : {}),
+        }}
         data-testid="app-launcher"
         className={`fixed left-1/2 -translate-x-1/2 w-full transition-all duration-200 ${
           isClosing ? "translate-y-full opacity-0 pointer-events-none" : "translate-y-0 opacity-100"
@@ -239,9 +250,13 @@ export default function ChromeLauncher({
         <div
           className="rounded-t-2xl overflow-hidden"
           style={{
-            background: "rgba(17, 24, 39, 0.95)",
-            backdropFilter: "blur(20px)",
-            WebkitBackdropFilter: "blur(20px)",
+            // No backdrop blur: at 0.95 the blurred desktop was 5% of what the
+            // panel shows, and the blur cost a pass over everything beneath it
+            // on every frame anything there moved — the mascot always does.
+            // Without it the desktop shows through SHARP, so the fill is made
+            // that much more opaque that an icon's label under the panel stays
+            // below what the eye picks out (2% of it, against 5% blurred).
+            background: "rgba(17, 24, 39, 0.98)",
             border: "1px solid rgba(255, 255, 255, 0.1)",
             borderBottom: "none",
           }}
@@ -261,7 +276,7 @@ export default function ChromeLauncher({
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && searchQuery.trim()) {
-                    window.open(`https://clawbox.com/store?q=${encodeURIComponent(searchQuery.trim())}`, "_blank", "noopener,noreferrer");
+                    openInKiosk(`https://clawbox.com/store?q=${encodeURIComponent(searchQuery.trim())}`);
                   }
                 }}
                 className="w-full h-11 pl-10 pr-4 bg-white/5 border border-white/10 rounded-full text-white placeholder-white/40 text-sm focus:outline-none focus:border-white/20 focus:bg-white/10 transition-colors"
@@ -334,10 +349,11 @@ export default function ChromeLauncher({
         </div>
       </div>
 
-      {/* Launcher context menu */}
+      {/* Launcher context menu. No backdrop blur: its fill is opaque, so the
+          blur could not be seen — it only cost a pass over what lay beneath. */}
       {ctxMenu && (
         <div
-          className="fixed min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          className="fixed min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 text-sm text-white/90"
           style={{
             left: Math.min(ctxMenu.x, window.innerWidth - 200),
             top: Math.min(ctxMenu.y, window.innerHeight - 150),
@@ -389,3 +405,9 @@ export default function ChromeLauncher({
     </>
   );
 }
+
+// Memoized: the desktop hands it props that keep their identity while they
+// mean the same thing (the apps list is memoized there, every handler is
+// stable), so a desktop render that does not concern the launcher — a window
+// focused, a poll answered — no longer rebuilds its grid.
+export default memo(ChromeLauncher);

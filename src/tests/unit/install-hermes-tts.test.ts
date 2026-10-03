@@ -196,8 +196,10 @@ function runStep(edition: string, opts: StepOpts = {}) {
     // The REAL predicates, so this file pins which one gates which arm: the
     // dual SKU runs both harnesses and has to be registered with both.
     extractShellOneLiner("is_hermes_edition"),
+    extractShellOneLiner("is_unselected_edition"),
     extractShellOneLiner("has_hermes_harness"),
     extractShellOneLiner("has_openclaw_harness"),
+    extractShellOneLiner("installs_hermes_harness"),
     // OpenClaw 1 vs 2 decides messages.tts vs tts; pinned to v1 here so the
     // OpenClaw assertions in this file read the same key on every run. Which
     // home is correct is install-kokoro-tts.test.ts's subject, not this one's.
@@ -850,7 +852,9 @@ function runValidator(edition: string, ttsStatusContents: string | null) {
     "FOREIGN_EDITION_UNITS=()",
     'is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }',
     extractShellOneLiner("is_hermes_edition"),
+    extractShellOneLiner("is_unselected_edition"),
     extractShellOneLiner("has_hermes_harness"),
+    extractShellOneLiner("installs_hermes_harness"),
     extractShellFn(INSTALL_SH, "harness_has_no_gpu"),
     "gateway_port_listening() { return 1; }",
     "systemctl() { return 0; }",

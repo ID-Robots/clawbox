@@ -21,7 +21,7 @@ it.each(["127.0.0.1", "::1"])("allows only a live run's own %s listener in its p
     expect(await ownsLocalPreview(url, { ...run, directory: otherProject })).toBe(false);
     expect(await ownsLocalPreview(url, { ...run, directory: cwd + '-other' })).toBe(false);
     expect(await ownsLocalPreview(url, { ...run, status: "completed" })).toBe(false);
-    for (const target of ["http://127.0.0.1:80/", "http://192.168.50.1:3000/", "http://169.254.169.254/", `http://name.localhost:${port}/`, `http://user:pass@127.0.0.1:${port}/`]) {
+    for (const target of ["http://127.0.0.1:80/", "http://192.0.2.1:3000/", "http://169.254.169.254/", `http://name.localhost:${port}/`, `http://user:pass@127.0.0.1:${port}/`]) {
       expect(await ownsLocalPreview(new URL(target), run)).toBe(false);
     }
     child.kill();

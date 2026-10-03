@@ -93,6 +93,56 @@ export interface MediaRetention {
   maxAgeMs: number;
   /** What age left behind is then trimmed oldest-first down to this. */
   maxBytes: number;
+  /**
+   * Sweep the directory's FOLDERS too, each as one item: its age is its
+   * newest entry's, its size the whole tree's, and it goes whole. For the
+   * attachment staging directory, where a folder dropped on the composer is
+   * staged as a folder. Off for every other tree, whose folders are not ours.
+   */
+  folders?: boolean;
+}
+
+/** Entries one folder's measurement walks before it stops counting — a bound, not a policy. */
+const MAX_FOLDER_WALK_ENTRIES = 100_000;
+
+/**
+ * A staged folder's bytes and its newest entry's mtime. Links are not
+ * followed (lstat), so a link inside a folder can neither inflate it nor send
+ * the walk out of the tree.
+ */
+async function measureFolder(dir: string, ownMtimeMs: number): Promise<{ size: number; newestMs: number }> {
+  let size = 0;
+  let newestMs = ownMtimeMs;
+  let walked = 0;
+  const stack = [dir];
+  while (stack.length > 0 && walked < MAX_FOLDER_WALK_ENTRIES) {
+    const current = stack.pop()!;
+    let names: string[];
+    try {
+      names = await fsp.readdir(current);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (++walked > MAX_FOLDER_WALK_ENTRIES) break;
+      const full = path.join(current, name);
+      let stat;
+      try {
+        stat = await fsp.lstat(full);
+      } catch {
+        continue;
+      }
+      if (stat.mtimeMs > newestMs) newestMs = stat.mtimeMs;
+      if (stat.isDirectory()) stack.push(full);
+      else if (stat.isFile()) size += stat.size;
+    }
+  }
+  return { size, newestMs };
+}
+
+async function removeItem(full: string, folder: boolean): Promise<void> {
+  if (folder) await fsp.rm(full, { recursive: true, force: true });
+  else await fsp.unlink(full);
 }
 
 /**
@@ -106,8 +156,8 @@ export interface MediaRetention {
  * BEST EFFORT BY CONSTRUCTION. It is called for its side effect before
  * something is written, and every failure — an unreadable entry, a file another
  * sweep already removed, a stat racing an unlink — is skipped rather than
- * raised. Directories and anything else that is not a regular file are left
- * untouched.
+ * raised. Directories (unless `retention.folders` says they are ours to
+ * sweep) and anything else that is not a regular file are left untouched.
  */
 export async function pruneMediaDir(dirReal: string, retention: MediaRetention): Promise<void> {
   let entries: string[];
@@ -117,7 +167,7 @@ export async function pruneMediaDir(dirReal: string, retention: MediaRetention):
     return;
   }
   const now = Date.now();
-  const kept: { path: string; mtimeMs: number; size: number }[] = [];
+  const kept: { path: string; mtimeMs: number; size: number; folder: boolean }[] = [];
   for (const name of entries) {
     const full = path.join(dirReal, name);
     let stat;
@@ -126,14 +176,18 @@ export async function pruneMediaDir(dirReal: string, retention: MediaRetention):
     } catch {
       continue;
     }
-    if (!stat.isFile()) continue;
-    const age = now - stat.mtimeMs;
+    const folder = stat.isDirectory() && retention.folders === true;
+    if (!stat.isFile() && !folder) continue;
+    // A folder still being filled is as young as its newest file, so a drop
+    // that is uploading is never swept out from under itself.
+    const { size, newestMs } = folder ? await measureFolder(full, stat.mtimeMs) : { size: stat.size, newestMs: stat.mtimeMs };
+    const age = now - newestMs;
     if (age < RETENTION_MIN_AGE_MS) continue;
     if (age > retention.maxAgeMs) {
-      try { await fsp.unlink(full); } catch { /* raced another sweep */ }
+      try { await removeItem(full, folder); } catch { /* raced another sweep */ }
       continue;
     }
-    kept.push({ path: full, mtimeMs: stat.mtimeMs, size: stat.size });
+    kept.push({ path: full, mtimeMs: newestMs, size, folder });
   }
   let total = kept.reduce((sum, f) => sum + f.size, 0);
   if (total <= retention.maxBytes) return;
@@ -141,7 +195,7 @@ export async function pruneMediaDir(dirReal: string, retention: MediaRetention):
   for (const f of kept) {
     if (total <= retention.maxBytes) break;
     try {
-      await fsp.unlink(f.path);
+      await removeItem(f.path, f.folder);
       total -= f.size;
     } catch { /* raced another sweep */ }
   }

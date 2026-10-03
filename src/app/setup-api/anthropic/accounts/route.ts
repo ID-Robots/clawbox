@@ -12,13 +12,13 @@ import {
   renameAccount,
   reorderAccounts,
   replaceCredential,
+  setReturnToPrimary,
   type AnthropicAccount,
   type OAuthTokens,
 } from "@/lib/anthropic-accounts";
-import { pickAccount } from "@/lib/anthropic-limit";
+import { startAnthropicSwap } from "@/lib/anthropic-swap";
 import { looksLikeAnthropicKey, MAX_ANTHROPIC_KEY_CHARS, verifyAnthropicKey } from "@/lib/coding-anthropic";
 import { simulateAnthropicLimit } from "@/lib/coding-agent";
-import { announceAnthropicLimit } from "@/lib/coding-agent-notify";
 import { clearHandoffTokens, readHandoffTokens } from "@/lib/oauth-handoff";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { hasValidSession } from "@/lib/route-auth";
@@ -32,8 +32,11 @@ export const dynamic = "force-dynamic";
  * limit has set aside and when it is back (src/lib/anthropic-accounts.ts).
  *
  * GET is the pool's STATE — labels, emails, kinds, statuses, reset times, the
- * order, which account a run starting now would use, and the pool's health
- * (`healthy`, `allLimited`, `nextResetAt`). Readable with the owner's cookie AND
+ * order, the ACTIVE account every Claude consumer on the box uses now
+ * (TASK-1260), the pool's health (`healthy`, `allLimited`, `nextResetAt`), the
+ * owner's `returnToPrimary` preference, the last swap with what each consumer
+ * did about it, and whether the gateway's Claude subscription follows the
+ * active account. Readable with the owner's cookie AND
  * with the MCP bearer: it is what the `anthropic_accounts` tool reads, so the
  * assistant running a queue knows how many accounts can answer and waits for
  * the reset instead of spending attempts. It never carries a credential — not
@@ -56,12 +59,20 @@ export const dynamic = "force-dynamic";
  *    checked live the way the Coding Agent's key form checks it (only a
  *    definite 401/403 refuses; an offline box still stores it).
  *  - `add_login` — put this box's `claude` sign-in (back) on the list.
- *  - `rename` `{ id, label }`, `reorder` `{ ids }`, `remove` `{ id }`.
+ *  - `rename` `{ id, label }`, `remove` `{ id }`.
+ *  - `reorder` `{ ids }` — and the first usable account in the new order
+ *    becomes the active one: moving an account to the top is how the owner
+ *    switches every consumer to it by hand (TASK-1260).
  *  - `clear_limit` `{ id }` — take a recorded limit back.
+ *  - `set_return_to_primary` `{ on }` — the owner's preference: back to the
+ *    first account the moment it can answer again, instead of staying on the
+ *    account the box moved to (the default).
  *  - `simulate_limit` `{ id, minutes? }` — THE TEST HOOK: every live coding run
  *    on that account ends as if Anthropic had answered "You've hit your session
  *    limit · resets <then>", and the real switch path takes it from there; with
- *    no live run the account is simply marked limited. Owner-only like the rest.
+ *    no live run the account is simply marked limited — which, like a real
+ *    limit, swaps every consumer (the gateway included) to the next account
+ *    and sends the owner's notice. Owner-only like the rest.
  *
  * Every answer is the re-read GET shape (plus `verified` for a key and
  * `interrupted` for the test hook), so the panel never has to guess.
@@ -149,6 +160,9 @@ async function takeHandoff(): Promise<{ tokens: OAuthTokens; email: string | nul
 export async function POST(request: Request) {
   if (!(await hasOwnerSession(request))) return forbidden();
   if (!isSameOriginRequest(request)) return crossOrigin();
+  // Every change below may move the active account; the swap has to be
+  // listening in this process when it does (the boot hook normally is first).
+  startAnthropicSwap();
 
   let body: Record<string, unknown>;
   try {
@@ -234,6 +248,11 @@ export async function POST(request: Request) {
       case "clear_limit":
         await clearLimit(body.id);
         break;
+      case "set_return_to_primary":
+        if (typeof body.on !== "boolean") return refusal("`on` must be true or false.", "invalid", 400);
+        await setReturnToPrimary(body.on);
+        console.error(`[anthropic-accounts] the owner turned "return to the first account" ${body.on ? "on" : "off"}`);
+        break;
       case "simulate_limit": {
         const minutes = typeof body.minutes === "number" && Number.isFinite(body.minutes)
           ? Math.min(Math.max(Math.round(body.minutes), 1), MAX_SIMULATED_LIMIT_MINUTES)
@@ -244,15 +263,10 @@ export async function POST(request: Request) {
         const until = Date.now() + minutes * 60_000;
         const interrupted = simulateAnthropicLimit(account.id, until);
         if (interrupted.length === 0) {
-          // No run to move: the account is set aside for the runs that come
-          // next, and the owner is told the way a real limit would tell them.
-          const recorded = await markLimited(account.id, until, "session");
-          const next = pickAccount(await readAccounts(), Date.now());
-          if (recorded.newlyLimited && next) {
-            void announceAnthropicLimit({ kind: "switched", fromLabel: account.label, toLabel: next.label, resetAt: until, runId: null }).catch(() => {});
-          } else if (recorded.becameAllLimited) {
-            void announceAnthropicLimit({ kind: "all_limited", resetAt: recorded.health.nextResetAt, runId: null }).catch(() => {});
-          }
+          // No run to move: the account is set aside exactly as a real limit
+          // would set it aside. The swap that follows moves every consumer (the
+          // gateway too) and tells the owner (src/lib/anthropic-swap.ts).
+          await markLimited(account.id, until, "session", { source: "owner" });
         }
         extra.interrupted = interrupted;
         console.error(`[anthropic-accounts] the owner's test hook set account ${account.id} aside for ${minutes} min (${interrupted.length} run(s) interrupted)`);

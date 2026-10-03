@@ -19,6 +19,29 @@
 #                          the default and a line is printed saying so.
 #   CLAWBOX_GIT_RETRY_DELAY — seconds before the first retry, doubling (default: 3).
 #                          Same rule for a value that is not a whole number.
+#   CLAWBOX_EDITION      — which agent the box runs: openclaw (default) | hermes
+#                          | dual | unselected. Read on a fresh install only; an
+#                          installed box keeps the edition its lock records.
+#
+# The unified image (TASK-1149) — one image for every box, the owner picks the
+# agent in the setup wizard:
+#
+#   sudo CLAWBOX_EDITION=unselected bash install.sh
+#
+#   installs BOTH OpenClaw and Hermes, enables and starts NEITHER, and bakes
+#   CLAWBOX_EDITION=unselected into /etc/clawbox/edition.env. The verdict
+#   ([provision-status] OK) additionally requires both agents to pass the
+#   harness swap's "does it run" probes. On first setup the wizard asks
+#   "Choose your assistant" between WiFi and Update; the choice runs
+#   `--step edition_select`, which locks the box to the chosen agent,
+#   provisions it and removes the other, so the box ends as a plain
+#   single-edition box. Add CLAWBOX_EDITION_HINT=hermes (or openclaw) to have
+#   the wizard preselect that card, e.g. for a box packed for a Hermes order;
+#   on a box that is already `unselected` the same variable with
+#   `--step edition_lock` sets or changes the hint. A hint never locks.
+#
+#   Per-edition installs keep working unchanged: CLAWBOX_EDITION=openclaw,
+#   hermes or dual installs that edition and the wizard never asks.
 set -euo pipefail
 
 # ── Require root ─────────────────────────────────────────────────────────────
@@ -163,6 +186,48 @@ git_with_retry() {
   return "$rc"
 }
 
+# ── Local edits survive an update ────────────────────────────────────────────
+#
+# `preserve_local_edits <dir holding scripts/> <checkout>` — save the checkout's
+# tracked modifications and untracked, non-ignored files OUTSIDE the tree before
+# anything here resets it (scripts/preserve-local-edits.sh says where and how).
+# Every reset in this file used to discard them without a word: the bootstrap
+# block below, sync_repo_to_update_target, and then src/lib/updater.ts's own
+# `reset --hard` + `clean -fd`. TASK-1316.
+#
+# Run as whoever owns the checkout, like git (use_tree_owner_for_git must have
+# set GIT_RUNNER for it first): it writes into that account's home, where root
+# writing would be the symlink primitive, and it reads the script out of $1 —
+# the root-owned mirror on a dispatched step, the tree root is already running
+# on every other path — never out of the tree it is about to hand to the owner.
+#
+# Non-zero means there ARE local edits and they could not be saved, and the
+# caller must not reset. Defined above the bootstrap block, which calls it.
+preserve_local_edits() {
+  local src="$1" dir="$2" script
+  script="$src/scripts/preserve-local-edits.sh"
+  if [ ! -f "$script" ]; then
+    # A copy of install.sh that shipped without the helper (`bash <(curl …)`
+    # has no scripts/ beside it). A missing helper never stops an update: the
+    # edits go into the checkout's own stash — the helper's own fallback, and
+    # said the same way — and only edits the stash cannot take either refuse.
+    local runner=(${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -c safe.directory="$dir" -C "$dir") stamp
+    [ -n "$("${runner[@]}" status --porcelain --untracked-files=all 2>/dev/null)" ] || return 0
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    if "${runner[@]}" -c user.name="ClawBox updater" -c user.email="updater@clawbox.invalid" \
+         stash push --include-untracked \
+         --message "clawbox-update $stamp: local edits saved without $script" >/dev/null 2>&1; then
+      echo "  $script is missing; kept the local code changes in the checkout's git stash instead"
+      echo "CLAWBOX-WARN[local-edits-saved]: This box had local changes to its code. They were kept in the code's git stash (\"clawbox-update $stamp\") — run: git -C $dir stash list"
+      echo "CLAWBOX-LOCAL-EDITS: git-stash"
+      return 0
+    fi
+    echo "Error: $dir has local changes, $script is missing and git stash could not take them, so they cannot be saved before the reset" >&2
+    return 1
+  fi
+  ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} bash "$script" "$dir"
+}
+
 # ── Bootstrap: pull latest install.sh and re-exec before parsing constants ───
 # Fixes the race where a stale install.sh (e.g. rsync'd from an out-of-date
 # checkout by flash.sh) parses old EXPECTED_*_SERVICES while step_git_pull
@@ -277,7 +342,14 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
       printf '%s\n' "$_fetchout" | tail -n 3
     fi
     unset _fetchout
-    if ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
+    # The FIRST reset of an update, so the owner's edits are saved here or not
+    # at all: by the time step_bootstrap_updater's sync asks, this has already
+    # discarded them. Unsaveable edits keep the tree as it is — the step that
+    # follows refuses with the reason. TASK-1316.
+    _keep_tree=0
+    preserve_local_edits "$_self" "$_b" || _keep_tree=1
+    if [ "$_keep_tree" = "0" ] \
+      && ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
       chown -R clawbox:clawbox "$_b" 2>/dev/null || true
       # Re-record what root is allowed to run, BEFORE re-exec'ing into it. The
       # reset just replaced install.sh, scripts/ and config/ wholesale, so the
@@ -407,7 +479,11 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
         CLAWBOX_ROOT_MANIFEST_STALE="${CLAWBOX_ROOT_MANIFEST_STALE:-0}" \
         bash "$_self/install.sh" "$@"
     fi
-    echo "[bootstrap] WARN: couldn't reset to origin/${_br}; continuing with on-disk copy."
+    if [ "$_keep_tree" = "1" ]; then
+      echo "[bootstrap] WARN: $_b has local changes that could not be saved; not resetting it — continuing with on-disk copy."
+    else
+      echo "[bootstrap] WARN: couldn't reset to origin/${_br}; continuing with on-disk copy."
+    fi
   fi
 fi
 
@@ -702,11 +778,12 @@ _read_recorded_edition() {
 # Lower-case and map anything unrecognised onto openclaw — the same rule the
 # resolution `case` below applies, minus the warning. Empty stays empty so
 # "no edition recorded" is distinguishable from "recorded as openclaw".
+# `unselected` is the unified image's "no agent chosen yet" (TASK-1149).
 _normalise_edition() {
   local v
   v="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
   case "$v" in
-    openclaw|hermes|dual|"") printf '%s' "$v" ;;
+    openclaw|hermes|dual|unselected|"") printf '%s' "$v" ;;
     *) printf 'openclaw' ;;
   esac
 }
@@ -732,14 +809,44 @@ fi
 # at an operator who had typed hermes.
 CLAWBOX_EDITION="$(printf '%s' "$CLAWBOX_EDITION_RAW" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
 case "$CLAWBOX_EDITION" in
-  openclaw|hermes|dual) ;;
+  openclaw|hermes|dual|unselected) ;;
   "") CLAWBOX_EDITION="openclaw" ;;
   *)
     # Loud, not silent: an unrecognised value used to degrade to openclaw with
     # no output at all, so a typo'd SKU shipped as the wrong product.
     echo "WARNING: unrecognised edition '$CLAWBOX_EDITION_RAW' — installing as 'openclaw'." >&2
-    echo "         Valid editions: openclaw | hermes | dual" >&2
+    echo "         Valid editions: openclaw | hermes | dual | unselected" >&2
     CLAWBOX_EDITION="openclaw"
+    ;;
+esac
+
+# The agent the setup wizard PRESELECTS on an `unselected` box — e.g. one
+# packed for a Hermes order (TASK-1149). Written into the lock beside
+# CLAWBOX_EDITION=unselected by step_edition_lock and dropped the moment the
+# box is locked to an agent, so a chosen box's lock stays byte-for-byte a
+# single-edition one. A hint is a default for one screen, never a lock: the
+# owner can still pick the other card. The environment first (an operator, or
+# the root-update unit, which loads the lock as its EnvironmentFile), then the
+# lock itself, so `--step edition_lock` run from a bare root shell keeps it.
+_read_edition_hint_from_file() {
+  [ -f "$1" ] || return 0
+  local v
+  v="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}CLAWBOX_EDITION_HINT[[:space:]]*=[[:space:]]*//p' "$1" 2>/dev/null | tail -n 1)"
+  v="$(printf '%s' "$v" | tr -d '[:space:]')"
+  v="${v%\"}"; v="${v#\"}"
+  v="${v%\'}"; v="${v#\'}"
+  printf '%s' "$v"
+}
+CLAWBOX_EDITION_HINT_RAW="${CLAWBOX_EDITION_HINT:-}"
+if [ -z "$CLAWBOX_EDITION_HINT_RAW" ]; then
+  CLAWBOX_EDITION_HINT_RAW="$(_read_edition_hint_from_file "$CLAWBOX_EDITION_FILE" || true)"
+fi
+CLAWBOX_EDITION_HINT="$(printf '%s' "$CLAWBOX_EDITION_HINT_RAW" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+case "$CLAWBOX_EDITION_HINT" in
+  openclaw|hermes|"") ;;
+  *)
+    echo "WARNING: unrecognised edition hint '$CLAWBOX_EDITION_HINT_RAW' — ignored (valid: openclaw | hermes)." >&2
+    CLAWBOX_EDITION_HINT=""
     ;;
 esac
 
@@ -776,6 +883,65 @@ esac
 # it must refuse.
 CLAWBOX_ALLOW_EDITION_CHANGE="${CLAWBOX_ALLOW_EDITION_CHANGE:-0}"
 CLAWBOX_RECORDED_EDITION="$(_normalise_edition "$CLAWBOX_RECORDED_EDITION_RAW")"
+
+# The unified image's `unselected` (TASK-1149) adds two refusals that NO escape
+# hatch opens, CLAWBOX_ALLOW_EDITION_CHANGE=1 included:
+#
+#   - X -> unselected, for any recorded X. "Un-choosing" would put a
+#     provisioned box back in front of the wizard's one free choice — a swap
+#     that skips the Max plan Settings -> Harness requires — and nothing about
+#     a box that has run an agent is the factory state the value promises.
+#   - unselected -> dual. `dual` is a licensed flash-time build, never a
+#     choice the wizard offers.
+#
+# unselected -> openclaw|hermes is the CHOICE itself: --step edition_select
+# re-execs its sub-steps with CLAWBOX_ALLOW_EDITION_CHANGE=1 and its reason,
+# and an operator can do the same by hand. Without the flag it is refused
+# below with a message that says what the box is waiting for.
+if [ "$CLAWBOX_EDITION" = "unselected" ] && [ -n "$CLAWBOX_RECORDED_EDITION" ] && [ "$CLAWBOX_RECORDED_EDITION" != "unselected" ]; then
+  cat >&2 <<EOF
+
+ERROR: this device is already the '$CLAWBOX_RECORDED_EDITION' edition; it cannot go back to 'unselected'.
+
+       'unselected' is the factory state of the unified image, before the
+       owner picks an agent in the setup wizard. A box that has been locked
+       to an agent keeps it; changing it is Settings -> Harness, or a reflash.
+
+       Nothing has been changed. The edition lock still reads '$CLAWBOX_RECORDED_EDITION'.
+
+EOF
+  exit 1
+fi
+if [ "$CLAWBOX_RECORDED_EDITION" = "unselected" ] && [ "$CLAWBOX_EDITION" = "dual" ]; then
+  cat >&2 <<EOF
+
+ERROR: this device is waiting for its owner to choose OpenClaw or Hermes; it
+       cannot become the 'dual' edition from here. 'dual' is a licensed build
+       chosen when the device is flashed.
+
+       Nothing has been changed. The edition lock still reads 'unselected'.
+
+EOF
+  exit 1
+fi
+if [ "$CLAWBOX_RECORDED_EDITION" = "unselected" ] && [ "$CLAWBOX_EDITION" != "unselected" ] && [ "$CLAWBOX_ALLOW_EDITION_CHANGE" != "1" ]; then
+  cat >&2 <<EOF
+
+ERROR: this device carries both agents and is waiting for its owner to choose
+       one in the setup wizard ("Choose your assistant").
+
+         Recorded edition:  unselected   ($CLAWBOX_EDITION_FILE)
+         Requested edition: $CLAWBOX_EDITION
+
+       The wizard's choice runs install.sh --step edition_select, which locks
+       the box, provisions the chosen agent and removes the other. To lock it
+       from a shell instead, re-run with CLAWBOX_ALLOW_EDITION_CHANGE=1.
+
+       Nothing has been changed. The edition lock still reads 'unselected'.
+
+EOF
+  exit 1
+fi
 
 # Empty means no lock has ever been written: a fresh install, which is exactly
 # how an edition is legitimately chosen. Untouched.
@@ -836,12 +1002,31 @@ fi
 
 # The Hermes SKU: Hermes is the ONLY harness, the OpenClaw gateway is removed.
 is_hermes_edition() { [ "$CLAWBOX_EDITION" = "hermes" ]; }
-# Editions that ship the Hermes harness + dashboard (hermes AND the premium
+# The unified image before the owner's choice (TASK-1149): BOTH harnesses on
+# disk, NEITHER running. So the predicates come in two kinds, and every call
+# site asks the one it means:
+#
+#   RUNS a harness   — has_hermes_harness / has_openclaw_harness: units
+#                      enabled and started, provisioning, probes of a live
+#                      service. `unselected` answers no to both.
+#   INSTALLS it      — installs_hermes_harness / installs_openclaw_harness:
+#                      the harness's program and config on disk. `unselected`
+#                      answers yes to both.
+#
+# On openclaw, hermes and dual the two kinds agree, so no existing edition
+# changes behaviour.
+is_unselected_edition() { [ "$CLAWBOX_EDITION" = "unselected" ]; }
+# Editions that RUN the Hermes harness + dashboard (hermes AND the premium
 # dual SKU, which runs both). Anything Hermes-side must key off this, not
 # is_hermes_edition, or dual installs silently get no Hermes at all.
 has_hermes_harness() { [ "$CLAWBOX_EDITION" = "hermes" ] || [ "$CLAWBOX_EDITION" = "dual" ]; }
-# Editions that ship the OpenClaw gateway (openclaw AND dual).
-has_openclaw_harness() { [ "$CLAWBOX_EDITION" != "hermes" ]; }
+# Editions that RUN the OpenClaw gateway (openclaw AND dual).
+has_openclaw_harness() { [ "$CLAWBOX_EDITION" = "openclaw" ] || [ "$CLAWBOX_EDITION" = "dual" ]; }
+# Editions whose disk carries the Hermes harness: the ones that run it, plus
+# `unselected`, which carries both until the owner chooses.
+installs_hermes_harness() { has_hermes_harness || is_unselected_edition; }
+# Editions whose disk carries the OpenClaw core: everything but the Hermes SKU.
+installs_openclaw_harness() { ! is_hermes_edition; }
 
 # CLAWBOX_TEST_MODE=1 skips hardware-only steps (Jetson power modes, CUDA
 # llama.cpp build, snap Chromium, WiFi AP, VNC, cloudflared, jtop) so the
@@ -1112,6 +1297,9 @@ EXPECTED_INSTALLED_SERVICES=(
   "clawbox-root-update@.service"
   clawbox-ap-watchdog.service
   clawbox-codex-auth-sync.service
+  # A oneshot at boot that exits when there is nothing to heal — which is every
+  # boot of a healthy box — so it is never "active". TASK-1316.
+  clawbox-build-heal.service
 )
 
 # Units that ship in config/ on EVERY edition but are only installed on the
@@ -1142,7 +1330,9 @@ if has_hermes_harness; then
 fi
 # The Hermes SKU runs no OpenClaw gateway at all — drop it from the active set
 # so nothing installs, enables or expects it. (dual keeps it: it runs both.)
-if is_hermes_edition; then
+# `unselected` runs neither harness, so it drops it too; gateway_setup installs
+# and enables the unit once the owner chooses OpenClaw (step_edition_select).
+if ! has_openclaw_harness; then
   _active_svcs=()
   for _s in "${EXPECTED_ACTIVE_SERVICES[@]}"; do
     [ "$_s" = "clawbox-gateway.service" ] || _active_svcs+=("$_s")
@@ -3778,11 +3968,21 @@ sync_repo_to_update_target() {
     git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
 
   git_with_retry -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
-  # Discard local working-tree changes before switching branches. The later
-  # `reset --hard` would blow them away anyway; doing it up-front avoids
-  # `git checkout` aborting with "local changes would be overwritten" when
-  # the user (or test seeding) has uncommitted edits. This is by design —
-  # the updater's whole purpose is to align the device with upstream.
+  # SAVE, then discard. The resets below align the device with upstream, which
+  # is the updater's whole purpose — but "discard" used to mean "lose": an
+  # owner's edited file went with no trace and no word. It is copied out of the
+  # tree first (preserve_local_edits; the owner is told where on the update's
+  # result card), and the update then carries on over a clean tree whatever the
+  # edits were. The one refusal is edits that could not be saved anywhere —
+  # a stopped update is recoverable, reset-away work is not. TASK-1316.
+  if ! preserve_local_edits "$SRC_DIR" "$PROJECT_DIR"; then
+    echo "Error: this ClawBox has local changes to its code that could not be saved (is the disk full?), so the update did not reset them away. Free some space and run the update again." >&2
+    GIT_RUNNER=()
+    exit 1
+  fi
+  # Discard local working-tree changes before switching branches. Doing it
+  # up-front avoids `git checkout` aborting with "local changes would be
+  # overwritten" when the tree has uncommitted edits — saved just above.
   "${run_git[@]}" reset --hard HEAD 2>/dev/null || true
   if ! "${run_git[@]}" checkout "$target_branch" 2>/dev/null; then
     if ! "${run_git[@]}" checkout -b "$target_branch" "$upstream_branch" 2>/dev/null; then
@@ -3792,6 +3992,15 @@ sync_repo_to_update_target() {
     fi
   fi
   "${run_git[@]}" reset --hard "$upstream_branch"
+  # ...and the untracked, non-ignored files, which `reset --hard` leaves behind:
+  # a clean tree, the one src/lib/updater.ts's own `clean -fd` produces — and
+  # it is what makes the About screen's "the code on disk has uncommitted
+  # changes" go away after an update. `-fd`, never `-x`: data/, .env,
+  # node_modules and .next are ignored and stay. Everything it removes was
+  # copied out above. Never fatal: a file it cannot remove is a stray, not a
+  # reason to stop an update that has already synced.
+  "${run_git[@]}" clean -fdq 2>/dev/null \
+    || echo "  Warning: could not remove every untracked file from $PROJECT_DIR (they were saved before the reset)" >&2
 
   # ANCHOR FIRST, chown after.
   #
@@ -4033,7 +4242,9 @@ step_openclaw_setup() {
     14) echo "  Warning: the TTS install did not complete (recorded above; provisioning continues)" ;;
     *) return "$TTS_STEP_RC" ;;
   esac
-  if [ "$_oc_gateway_restore_pending" -eq 1 ]; then
+  # Only an edition that RUNS the gateway gets it back: `unselected` installs
+  # the core but must not start an OpenClaw nobody chose (TASK-1149).
+  if has_openclaw_harness && [ "$_oc_gateway_restore_pending" -eq 1 ]; then
     systemctl start clawbox-gateway.service 2>/dev/null || true
   fi
 
@@ -4217,7 +4428,7 @@ hermes_dashboard_restart_after_install() {
 # previously skipped here, so a dual box got the switcher but no second
 # harness to switch to).
 step_hermes_install() {
-  has_hermes_harness || return 0
+  installs_hermes_harness || return 0
   local shim="$CLAWBOX_HOME/.local/bin/hermes"
   local agent_dir="$CLAWBOX_HOME/.hermes/hermes-agent"
   local venv_python="$agent_dir/venv/bin/python"
@@ -4868,7 +5079,11 @@ if [ "${#brought_down[@]}" -eq 0 ]; then
 # how the flagship SKU's gateway-only paths stop 404-ing and the updater skips
 # `--step hermes_edition`. A rename cannot be observed half-done.
 step_edition_lock() {
-  install -d -o root -g root -m 0755 /etc/clawbox
+  # Both directories come from the two record paths rather than being spelled
+  # again here: the same /etc/clawbox and clawbox-setup.service.d on a box,
+  # and a sandbox when a test points CLAWBOX_EDITION_FILE and
+  # LEGACY_EDITION_DROPIN at one — never the CI runner's own /etc.
+  install -d -o root -g root -m 0755 "$(dirname "$CLAWBOX_EDITION_FILE")"
   local _edition_tmp
   _edition_tmp="$(mktemp)"
   # The STAGING write is checked too. `install_root_file` copies whatever is in
@@ -4884,6 +5099,16 @@ step_edition_lock() {
     echo "  Error: could not stage the edition lock for $CLAWBOX_EDITION_FILE" >&2
     return 1
   fi
+  # The wizard's preselect, on the unified image only (TASK-1149). Any other
+  # edition is written exactly as before, so a box locked by the wizard's
+  # choice carries the same three lines as a factory-flashed one.
+  if is_unselected_edition && [ -n "${CLAWBOX_EDITION_HINT:-}" ]; then
+    if ! printf 'CLAWBOX_EDITION_HINT=%s\n' "$CLAWBOX_EDITION_HINT" >> "$_edition_tmp"; then
+      rm -f "$_edition_tmp"
+      echo "  Error: could not stage the edition hint for $CLAWBOX_EDITION_FILE" >&2
+      return 1
+    fi
+  fi
   # BOTH RECORDS ARE STAGED BEFORE EITHER IS COMMITTED. They are two files and
   # no rename can cover both, but staging is where the ordinary failure lives
   # (a full /tmp, an EIO) — and committing the lock and then failing to stage
@@ -4896,7 +5121,7 @@ step_edition_lock() {
   # The drop-in's DIRECTORY counts as part of staging it: created after the
   # lock was committed, a failure here would leave the same split the ordering
   # above exists to prevent.
-  if ! mkdir -p /etc/systemd/system/clawbox-setup.service.d; then
+  if ! mkdir -p "$(dirname "$LEGACY_EDITION_DROPIN")"; then
     rm -f "$_edition_tmp"
     echo "  Error: could not create the drop-in directory for $LEGACY_EDITION_DROPIN" >&2
     return 1
@@ -5002,14 +5227,19 @@ step_hermes_edition() {
 #   2  TARGET_EDITION is not exactly `openclaw` or `hermes`
 #   3  data/harness-swap.env is not the plain file the route writes
 #   4  REQUESTED_AT is missing, not a number, older than an hour or in the future
+#
+# Optional arguments: the request file and the writer to name in the refusal.
+# step_edition_select reads data/edition-select.env through THIS gate, so the
+# two root steps that take a target edition from a clawbox-writable file can
+# never drift apart on what they accept.
 read_configured_harness_swap() {
-  local req="$PROJECT_DIR/data/harness-swap.env" line target at now
+  local req="${1:-$PROJECT_DIR/data/harness-swap.env}" writer="${2:-the harness-swap route}" line target at now
   # Same shape rule as read_configured_timezone, for the same reason: `[ -f ]`
   # follows a symlink and is false for a directory or a FIFO, so every planted
   # shape would otherwise read as "no request" and exit 0 — and a FIFO would
   # park the grep below for ever.
   if [ -L "$req" ] || { [ -e "$req" ] && [ ! -f "$req" ]; }; then
-    echo "Error: $req is not the plain file the harness-swap route writes — refusing to read it." >&2
+    echo "Error: $req is not the plain file $writer writes — refusing to read it." >&2
     return 3
   fi
   [ -f "$req" ] || return 1
@@ -5302,6 +5532,13 @@ step_harness_swap() {
       echo "Error: a dual box switches harness at runtime — refusing to swap its edition." >&2
       return 1
       ;;
+    unselected)
+      # A unified-image box before the owner's choice runs no harness, so
+      # there is nothing to swap FROM: the choice is the setup wizard's
+      # (step_edition_select), not this button's.
+      echo "Error: this box has not chosen its assistant yet — that is the setup wizard's step, not a swap." >&2
+      return 1
+      ;;
     "")
       # No lock and no legacy drop-in: nothing on the box says what it IS, so
       # there is nothing to swap FROM. The route never asks in this state
@@ -5328,6 +5565,301 @@ step_harness_swap() {
   # a finished one, and deleting it after a failure is the route's to do.
   rm -f "$req"
   echo "  This box is now the $name edition"
+}
+
+# ── The setup wizard's choice: a unified-image box becomes OpenClaw or Hermes ──
+#
+# TASK-1149 (reports/clawbox/unified-image-design-2026-09.md §3). The unified
+# image carries both harnesses with the lock reading `unselected`; the wizard's
+# "Choose your assistant" writes $PROJECT_DIR/data/edition-select.env through
+# /setup-api/setup/edition and starts this step through the granted launcher.
+#
+# It is the harness swap's machinery with ONE rule of its own. The same
+# request gate (read_configured_harness_swap, on this step's file), the same
+# "does it run" probes, the same re-exec of the installer's own edition steps
+# as the TARGET edition. And it acts only while the recorded lock is
+# `unselected` — or, to finish an activation cut short after the lock flipped,
+# while the lock names the target AND the pending marker this step wrote says
+# the same. Every deployed box records openclaw, hermes or dual and carries no
+# marker, so none of them can reach this: it is never a free swap.
+#
+# ORDER, as in the swap: the chosen agent is proved to run before anything
+# changes (a box that cannot run it stays `unselected` and the owner can pick
+# again); the marker goes down before the lock flips and comes off only once
+# the agent is provisioned. IDEMPOTENT end to end: every sub-step is safe to
+# repeat, so the wizard's "Try again" simply asks for the same step again.
+#
+# Phases, one line each, on the shape /setup-api/setup/edition reads:
+#   [edition-select] phase=check → lock → provision → cleanup → done
+# Failures print the swap's two lines (harness_swap_say_failed): the owner's
+# sentence, then a Repair line that never says "error".
+
+# Root-owned, beside the lock. Its presence with a lock naming the same agent
+# is what "an activation was cut short" means, to this step and to the web.
+EDITION_SELECT_PENDING_FILE="/etc/clawbox/edition-select.pending"
+# Seconds between the end of the step and the web server's restart, so the
+# route following this step (it runs IN that server) can report the end first.
+EDITION_SELECT_RESTART_DELAY_S="${EDITION_SELECT_RESTART_DELAY_S:-10}"
+
+# One installer step, run as the chosen edition — harness_swap_substep with
+# this step's own reason line, for the same reasons that one gives.
+edition_select_substep() {
+  local name="$1" target="$2"
+  echo "  -> install.sh --step $name (as the $(harness_swap_label "$target") edition)"
+  CLAWBOX_EDITION="$target" CLAWBOX_ALLOW_EDITION_CHANGE=1 \
+    CLAWBOX_EDITION_CHANGE_REASON="the owner chose $(harness_swap_label "$target") in the setup wizard (install.sh --step edition_select)" \
+    CLAWBOX_INSTALL_BOOTSTRAPPED=1 \
+    bash "$SRC_DIR/install.sh" --step "$name"
+}
+
+edition_select_runnable() {
+  case "$1" in
+    hermes) harness_swap_hermes_runnable ;;
+    openclaw) harness_swap_openclaw_runnable ;;
+    *) return 1 ;;
+  esac
+}
+
+# The agent the pending marker names, or nothing. Parsed, never sourced, and
+# only from the plain root-owned file this step writes.
+edition_select_pending_target() {
+  local f="$EDITION_SELECT_PENDING_FILE" line v
+  [ -L "$f" ] && return 0
+  [ -f "$f" ] || return 0
+  line="$(grep -m1 -E '^TARGET_EDITION=' "$f" 2>/dev/null)" || return 0
+  v="${line#*=}"
+  case "$v" in
+    openclaw|hermes) printf '%s' "$v" ;;
+  esac
+  return 0
+}
+
+edition_select_mark_pending() {
+  local dir tmp
+  dir="$(dirname "$EDITION_SELECT_PENDING_FILE")"
+  mkdir -p "$dir" || return 1
+  tmp="$EDITION_SELECT_PENDING_FILE.tmp.$$"
+  if ! printf 'TARGET_EDITION=%s\n' "$1" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod 0644 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$EDITION_SELECT_PENDING_FILE" || { rm -f "$tmp"; return 1; }
+}
+
+# Prove the chosen agent runs. The unified image installed and proved both at
+# the factory, so this is normally the probe alone and needs no network; an
+# agent that does not run is repaired ONCE through its own install step (which
+# may need the internet), and still nothing has changed if that fails.
+edition_select_prove() {
+  local target="$1" name
+  name="$(harness_swap_label "$target")"
+  EDITION_SELECT_REPAIRED=0
+  if edition_select_runnable "$target"; then
+    echo "  $name runs"
+    return 0
+  fi
+  echo "  $name does not run yet ($HARNESS_SWAP_PROBE_SAID) — repairing it with its install step"
+  EDITION_SELECT_REPAIRED=1
+  if ! edition_select_substep "${target}_install" "$target"; then
+    harness_swap_say_failed check "$name could not be repaired on this box, so nothing was changed and the box is still waiting for its assistant to be chosen." \
+      "nothing to undo; the install step's own lines are above — choose again in the setup wizard once the box is online"
+    return 1
+  fi
+  if ! edition_select_runnable "$target"; then
+    harness_swap_say_failed check "$name does not run on this box ($HARNESS_SWAP_PROBE_SAID), so nothing was changed and the box is still waiting for its assistant to be chosen." \
+      "nothing to undo; choose again in the setup wizard once that is answered"
+    return 1
+  fi
+  echo "  $name runs"
+}
+
+edition_select_provision_hermes() {
+  if ! edition_select_substep hermes_edition hermes; then
+    harness_swap_say_failed provision "the Hermes provisioning step did not finish. This box is now set up for Hermes without a working dashboard." \
+      "sudo bash $PROJECT_DIR/install.sh --step hermes_edition, or choose Hermes again in the setup wizard"
+    return 1
+  fi
+  local unit what
+  for unit in clawbox-hermes-dashboard.service clawbox-hermes-dashboard-proxy.service; do
+    if [ "$(systemctl is-enabled "$unit" 2>/dev/null || true)" != "enabled" ]; then
+      case "$unit" in
+        *-proxy.service) what="the Hermes dashboard's proxy" ;;
+        *) what="the Hermes dashboard" ;;
+      esac
+      harness_swap_say_failed provision "$what is not enabled after provisioning. This box is now set up for Hermes with its dashboard not enabled." \
+        "sudo systemctl enable --now $unit"
+      return 1
+    fi
+  done
+  echo "  Hermes dashboard units enabled"
+}
+
+# gateway_setup installs, enables and starts the unit the unified image left
+# out; openclaw_patch only when the probe had to reinstall the core (the
+# factory already patched the one it installed). No openclaw_config: the
+# factory seeded it, and the AI step that follows writes the sign-in.
+edition_select_provision_openclaw() {
+  if ! edition_select_substep gateway_setup openclaw; then
+    harness_swap_say_failed provision "the gateway setup step did not finish. This box is now set up for OpenClaw with its gateway not installed." \
+      "sudo bash $PROJECT_DIR/install.sh --step gateway_setup, or choose OpenClaw again in the setup wizard"
+    return 1
+  fi
+  if [ "${EDITION_SELECT_REPAIRED:-0}" = 1 ] && ! edition_select_substep openclaw_patch openclaw; then
+    harness_swap_say_failed provision "the gateway patch step did not finish. This box is now set up for OpenClaw with its gateway unpatched." \
+      "sudo bash $PROJECT_DIR/install.sh --step openclaw_patch"
+    return 1
+  fi
+  if ! wait_for_gateway_port; then
+    harness_swap_say_failed provision "the OpenClaw gateway did not start listening on port ${GATEWAY_PORT:-18789}. This box is now set up for OpenClaw with its gateway down." \
+      "journalctl -u clawbox-gateway.service, or choose OpenClaw again in the setup wizard"
+    return 1
+  fi
+  echo "  OpenClaw gateway is listening"
+}
+
+# Take the agent the owner did NOT choose off the box, so it ends as the
+# single-edition box a factory flash would have made and the disk the image
+# spent on it comes back.
+#
+#   Hermes chosen   → the OpenClaw PROGRAM: its core package and its command,
+#                     so `openclaw` is not on PATH. ~/.openclaw stays: it holds
+#                     the workspace identity copies the shared-identity bridge
+#                     keeps on every edition, and files ClawBox itself keeps.
+#   OpenClaw chosen → Hermes whole: its launcher and ~/.hermes (checkout, venv,
+#                     config). Nothing an OpenClaw box uses lives there; a
+#                     factory OpenClaw box has none of it. The shared
+#                     ~/.cache/ms-playwright stays.
+#
+# As the clawbox user first — the files are the owner's — and as root only for
+# what that leaves behind (a root-owned __pycache__ from a root probe). `rm`
+# removes a planted link as a link and never follows one inside the tree.
+# NON-FATAL: behaviour follows the lock, so a box that keeps both on disk
+# still runs exactly one agent; the miss is reported, never hidden.
+edition_select_remove_other() {
+  local target="$1" p failed=0
+  local -a paths=()
+  case "$target" in
+    hermes) paths=("$NPM_PREFIX/bin/openclaw" "$NPM_PREFIX/lib/node_modules/openclaw") ;;
+    openclaw) paths=("$CLAWBOX_HOME/.local/bin/hermes" "$CLAWBOX_HOME/.hermes") ;;
+    *) return 1 ;;
+  esac
+  for p in "${paths[@]}"; do
+    [ -e "$p" ] || [ -L "$p" ] || continue
+    runuser -u "$CLAWBOX_USER" -- rm -rf --one-file-system -- "$p" >/dev/null 2>&1 || true
+    if [ -e "$p" ] || [ -L "$p" ]; then
+      rm -rf --one-file-system -- "$p" >/dev/null 2>&1 || true
+    fi
+    if [ -e "$p" ] || [ -L "$p" ]; then
+      echo "  Warning: could not remove $p — it stays on disk, unused" >&2
+      failed=1
+    else
+      echo "  Removed $p"
+    fi
+  done
+  return "$failed"
+}
+
+# The boot-time readers — the MCP registration (register-mcp.sh runs at every
+# start of the web server), the Hermes plugin watcher, the wallpaper
+# migrations that deferred while the edition read as defaulted — come up for
+# the chosen agent only on a fresh start of clawbox-setup. Deferred through a
+# transient timer so the route following this step can report its end first;
+# the wizard waits for the restart either way.
+edition_select_restart_web() {
+  local systemctl_bin
+  systemctl_bin="$(command -v systemctl 2>/dev/null || echo /bin/systemctl)"
+  if command -v systemd-run >/dev/null 2>&1 \
+    && systemd-run --quiet --on-active="$EDITION_SELECT_RESTART_DELAY_S" --timer-property=AccuracySec=1s \
+      --unit="clawbox-edition-select-restart-$(date +%s)" \
+      "$systemctl_bin" restart clawbox-setup.service >/dev/null 2>&1; then
+    echo "  The web server restarts in ${EDITION_SELECT_RESTART_DELAY_S} s to load $1"
+    return 0
+  fi
+  if systemctl --no-block restart clawbox-setup.service >/dev/null 2>&1; then
+    echo "  Restarting the web server to load $1"
+    return 0
+  fi
+  echo "  Warning: could not restart the web server — $1's tools appear after its next restart" >&2
+  return 0
+}
+
+step_edition_select() {
+  local req="$PROJECT_DIR/data/edition-select.env" target rc=0
+  target="$(read_configured_harness_swap "$req" "the setup wizard")" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) echo "  No assistant choice requested — nothing to do"; return 0 ;;
+    2) echo "Error: the setup wizard's request does not name an assistant this box can run (openclaw or hermes) — refusing." >&2; return 1 ;;
+    3) echo "Error: the setup wizard's request was refused — leaving the box as it is." >&2; return 1 ;;
+    4) echo "Error: the setup wizard's request is stale (older than an hour, or dated in the future) — choose again." >&2; return 1 ;;
+    *) echo "Error: could not read the setup wizard's request (rc=$rc) — leaving the box as it is." >&2; return 1 ;;
+  esac
+  local name recorded pending
+  name="$(harness_swap_label "$target")"
+  recorded="${CLAWBOX_RECORDED_EDITION:-}"
+  pending="$(edition_select_pending_target)"
+  case "$recorded" in
+    unselected)
+      echo "  This box carries both assistants; setting it up with $name"
+      ;;
+    "")
+      echo "Error: this box records no edition, so it is not a unified-image box waiting for a choice — refusing." >&2
+      return 1
+      ;;
+    *)
+      if [ "$recorded" != "$target" ]; then
+        # THE rule: a box whose agent is chosen keeps it. Changing it is the
+        # swap, on its own plan gate.
+        echo "Error: this box already runs $(harness_swap_label "$recorded"), so its assistant cannot be chosen again here — changing it is Settings → Harness." >&2
+        return 1
+      fi
+      if [ "$pending" != "$target" ]; then
+        rm -f "$req"
+        echo "  Already set up with $name — nothing to do"
+        return 0
+      fi
+      echo "  Finishing the $name setup an earlier run started"
+      ;;
+  esac
+
+  echo "[edition-select] phase=check"
+  edition_select_prove "$target" || return 1
+
+  echo "[edition-select] phase=lock"
+  if ! edition_select_mark_pending "$target"; then
+    harness_swap_say_failed lock "this box could not record that $name is being set up, so nothing was changed and it is still waiting for its assistant to be chosen." \
+      "nothing to undo; choose again in the setup wizard"
+    return 1
+  fi
+  if ! edition_select_substep edition_lock "$target"; then
+    harness_swap_say_failed lock "the edition lock step did not finish. This box may now be set up for $name with nothing running yet." \
+      "sudo CLAWBOX_EDITION=$target CLAWBOX_ALLOW_EDITION_CHANGE=1 bash $PROJECT_DIR/install.sh --step edition_lock, then choose $name again in the setup wizard"
+    return 1
+  fi
+
+  echo "[edition-select] phase=provision"
+  case "$target" in
+    hermes) edition_select_provision_hermes || return 1 ;;
+    openclaw) edition_select_provision_openclaw || return 1 ;;
+  esac
+
+  echo "[edition-select] phase=cleanup"
+  if ! edition_select_remove_other "$target"; then
+    echo "  Warning: the assistant that was not chosen is still partly on disk; this box runs $name only"
+  fi
+  # The activation is complete: the marker comes off before `done`, so a web
+  # server that reads `done` never also reads "cut short".
+  if ! rm -f "$EDITION_SELECT_PENDING_FILE"; then
+    harness_swap_say_failed cleanup "$name is set up, but this box could not record that its setup finished." \
+      "sudo rm -f $EDITION_SELECT_PENDING_FILE"
+    return 1
+  fi
+
+  echo "[edition-select] phase=done"
+  rm -f "$req"
+  echo "  This box is now set up with $name"
+  edition_select_restart_web "$name"
 }
 
 openclaw_migration_complete() {
@@ -5920,7 +6452,11 @@ for p in d.get("plugins", []):
   fi
   # Standalone installs restore only after plugin refresh. The composite setup
   # step owns restoration after its remaining patch/config/voice operations.
-  if [ "$_oc_gateway_stopped" -eq 1 ]; then
+  # `_oc_gateway_stopped` is set whether or not a gateway was running, so the
+  # restore is gated on an edition that RUNS one: on `unselected` (both cores
+  # installed, no agent chosen) it would start a leftover unit before the
+  # owner picked OpenClaw (TASK-1149).
+  if has_openclaw_harness && [ "$_oc_gateway_stopped" -eq 1 ]; then
     if [ "${_oc_defer_gateway_start:-0}" -eq 1 ]; then
       _oc_gateway_restore_pending=1
     else
@@ -6816,9 +7352,11 @@ step_openclaw_tts() {
   # here. `hermes config set` is the harness's own writer for this, so nothing
   # in ClawBox edits config.yaml behind its back.
   #
-  # has_hermes_harness, NEVER is_hermes_edition: the premium `dual` SKU runs
+  # installs_hermes_harness, NEVER is_hermes_edition: the premium `dual` SKU runs
   # both harnesses, and a box keyed off the hermes SKU alone would get a voice
-  # on OpenClaw and silence on Hermes.
+  # on OpenClaw and silence on Hermes. `unselected` (both on disk, the owner
+  # has not chosen) gets the voice written into Hermes' own config too, so a
+  # box that is then set up as Hermes speaks without waiting for an update.
   #
   # WHY AN ALREADY-SHIPPED BOX GETS THIS WITHOUT A FACTORY RESET: the in-app
   # updater dispatches `post_update`, and step_post_update calls
@@ -6827,7 +7365,7 @@ step_openclaw_tts() {
   # brings an existing Hermes box up. (On a FRESH install the caller is
   # step_openclaw_setup, which is why step_hermes_install now runs before it:
   # this block needs the Hermes CLI to exist.)
-  if has_hermes_harness; then
+  if installs_hermes_harness; then
     local HERMES_TTS_BIN="${HERMES_BIN:-$CLAWBOX_HOME/.local/bin/hermes}"
     # HOME EXPLICITLY, on every call. `as_clawbox` is `sudo -u`, and whether
     # that resets HOME to the target user's home or preserves root's depends on
@@ -7069,9 +7607,10 @@ step_openclaw_tts() {
   # early-returns, clawbox-gateway.service is stopped, disabled and masked), so
   # there is no `openclaw` CLI to write to: every oc_config_set below would
   # retry three times, fail, and turn a perfectly good voice install into a
-  # failed step. Spelled with is_hermes_edition because that is exactly
-  # has_openclaw_harness's own definition — `dual` keeps the gateway and takes
-  # the path below like any openclaw box.
+  # failed step. Spelled with is_hermes_edition, i.e. installs_openclaw_harness:
+  # `dual` keeps the gateway and takes the path below like any openclaw box,
+  # and so does `unselected`, whose core is on disk (the gateway is merely not
+  # running yet, and these are config writes, not a gateway call).
   if is_hermes_edition; then
     return "$TTS_RC"
   fi
@@ -7826,7 +8365,12 @@ install_root_libexec() {
   local src failed=0
   # The integrity helper first: the dispatcher installed at the END of this
   # function refuses to run any step unless the manifest this writes verifies.
-  for src in clawbox-root-manifest.sh clawbox-run-root-step.sh clawbox-gateway-maintenance.sh; do
+  # clawbox-user-helper.sh is the multi-user sign-in check and Terminal shell
+  # (TASK-1256), granted NOPASSWD in config/clawbox-sudoers.
+  # clawbox-build-heal.sh is what clawbox-build-heal.service runs as root at
+  # boot (TASK-1316); it is granted to nobody.
+  for src in clawbox-root-manifest.sh clawbox-run-root-step.sh clawbox-gateway-maintenance.sh \
+             clawbox-user-helper.sh clawbox-build-heal.sh; do
     if [ -f "$SRC_DIR/config/$src" ]; then
       install_root_file "$SRC_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src" || {
         echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
@@ -8537,6 +9081,12 @@ step_post_update() {
   # sudoers change the same way. The step is idempotent — cp, daemon-reload,
   # enable — and is exactly what fresh installs already run.
   optional_step systemd_services step_systemd_services
+  # The polkit narrowing, again. step_rebuild_reboot removes the old grant right
+  # after its verified rebuild, but a box can reach this step by another road —
+  # a hand-run force-update.sh, a heal, an update that stopped after the rebuild
+  # — and still carry it. step_polkit_rules keeps it only while the build on disk
+  # needs it, so asking here is safe whichever build runs. TASK-1316.
+  optional_step polkit_rules step_polkit_rules
   # Refresh the device-side ClawKeep CLI from the repo. The Python package
   # has the same version string ("0.1.0") across releases, so a plain
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
@@ -8772,6 +9322,9 @@ step_gateway_legacy_state_recovery() {
   # state there, and running `openclaw doctor` + restarting a masked unit would
   # just churn (and, before the mask, resurrect it).
   is_hermes_edition && { echo "  [hermes edition] skipping gateway recovery"; return 0; }
+  # Nor on a box with no agent chosen yet: the gateway is deliberately not
+  # running there, and the recovery below restarts it.
+  is_unselected_edition && { echo "  [no agent chosen yet] skipping gateway recovery"; return 0; }
   local gw_port="${GATEWAY_PORT:-18789}"
   # WITH the budget, not a single `ss`: see wait_for_gateway_port. A gateway
   # still in its ExecStartPre is not a gateway in legacy state.
@@ -8870,7 +9423,7 @@ step_update_smoke() {
   # validate_services. Do not turn that absence into a failed update fixup.
   # Dual still ships OpenClaw and must keep all of these checks.
   if ! has_openclaw_harness; then
-    echo "    [skip] OpenClaw post-update smokes (Hermes-only edition)"
+    echo "    [skip] OpenClaw post-update smokes (this edition runs no OpenClaw gateway)"
     return 0
   fi
   # WHAT THE SMOKES FOUND, in a return code the caller can report.
@@ -8986,14 +9539,51 @@ except Exception: print("")' 2>/dev/null || echo "")
   return "$SMOKE_FINDINGS"
 }
 
+# Does the web build a server on this box would run start its root steps through
+# the root-owned launcher (TASK-539), rather than through the polkit
+# `manage-units` grant it replaced? Also yes when there is no build at all:
+# nothing then depends on the old path. Asked of config/clawbox-build-heal.sh,
+# the one copy of the probe (the boot-time heal asks it the same question), out
+# of $SRC_DIR like every other script root runs.
+#
+# A copy of install.sh with no probe beside it (`bash <(curl …)`) answers yes,
+# which is exactly how step_polkit_rules behaved before it asked. TASK-1316.
+web_build_uses_root_step_launcher() {
+  local probe="$SRC_DIR/config/clawbox-build-heal.sh"
+  [ -f "$probe" ] || return 0
+  bash "$probe" --build-uses-launcher "$PROJECT_DIR"
+}
+
 step_polkit_rules() {
   local POLKIT_PKLA_DIR="/etc/polkit-1/localauthority/50-local.d"
   mkdir -p "$POLKIT_PKLA_DIR"
-  cp "$SRC_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
-  # Remove the manage-units authorisation from devices that already have it.
-  # The .pkla shipped above no longer contains that stanza, but `cp` only
-  # replaces the file — a box provisioned before TASK-539 keeps whatever polkit
-  # already cached until this runs, and there is no other remover.
+  # NOT WHILE THE WEB BUILD STILL NEEDS IT. A build from before TASK-539 starts
+  # every root step — the updater's "Refreshing updater scripts" first of all —
+  # with a plain `systemctl start clawbox-root-update@<step>.service`, which
+  # only this grant authorises. Removing it while that build is the one on disk
+  # left a box whose rebuild then failed (step_rebuild_reboot used to call this
+  # BEFORE do_rebuild) running the old server with no way to start any root
+  # step: every update died at step 1 with polkit's "Interactive authentication
+  # required", and no update could ever fix it, because the update is what that
+  # server can no longer start (TASK-1316, a customer's box).
+  #
+  # So the removal waits for the build that no longer needs it: every caller
+  # reaches this again once a new build is verified on disk (step_rebuild_reboot
+  # right after do_rebuild, the legacy handover, post_update, heal_build). The
+  # grant is only ever KEPT on a box that already has it — never re-added.
+  local installed_pkla="$POLKIT_PKLA_DIR/49-clawbox-updates.pkla" deferred=0
+  if grep -qs 'org.freedesktop.systemd1.manage-units' "$installed_pkla" \
+     && ! web_build_uses_root_step_launcher; then
+    deferred=1
+    echo "  Keeping the old polkit manage-units grant for now: the web build on this box predates the root-step launcher and still starts its root steps through it."
+    echo "  It is removed by the first root step that runs after a newer build is in place (rebuild_reboot, post_update, heal_build)."
+  else
+    # Remove the manage-units authorisation from devices that already have it.
+    # The .pkla shipped here no longer contains that stanza, but `cp` only
+    # replaces the file — a box provisioned before TASK-539 keeps whatever
+    # polkit already cached until this runs, and there is no other remover.
+    cp "$SRC_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
+  fi
   #
   # The scoped .rules twin is INSTALLED now rather than deleted. polkit 0.105
   # (JetPack's) ignores rules.d entirely, so on the appliance it is inert
@@ -9004,7 +9594,11 @@ step_polkit_rules() {
     install_root_file "$SRC_DIR/config/49-clawbox-updates.rules" \
       "$POLKIT_RULES_DIR/49-clawbox-updates.rules" 0644
   fi
-  echo "  Polkit rules installed (NetworkManager only; root steps go through sudo)"
+  if [ "$deferred" = "1" ]; then
+    echo "  Polkit rules installed (NetworkManager, plus the old manage-units grant until the web build moves to the launcher)"
+  else
+    echo "  Polkit rules installed (NetworkManager only; root steps go through sudo)"
+  fi
 }
 
 step_start_services() {
@@ -9259,6 +9853,13 @@ ensure_local_embeddings() {
     return 0
   fi
   # A hermes box has no core to point at the model it would spend 639 MB on.
+  if is_unselected_edition; then
+    # No gateway runs until the owner chooses; gateway-pre-start.sh runs the
+    # same helper on the gateway's first start, so a box set up as OpenClaw
+    # is wired then.
+    echo "  No agent chosen yet; memory search is wired when OpenClaw is chosen."
+    return 0
+  fi
   if ! has_openclaw_harness; then
     echo "  Memory search is an OpenClaw feature; this edition does not include it."
     return 0
@@ -9756,6 +10357,169 @@ step_chpasswd() {
   printf '%s\n' "$record" | /usr/sbin/chpasswd
 }
 
+# ── ClawBox users (TASK-1256) ────────────────────────────────────────────────
+#
+# Every ClawBox user other than the owner is a real Linux account, created and
+# removed from Settings → Users through these two steps. They are fed like
+# step_chpasswd — ONE record in a 0600 file under data/ that is read once,
+# validated, and deleted — and they never let the web server name an account
+# it could use to reach root:
+#
+#   * the name must match src/lib/username-rules.ts's USERNAME_RE and must not
+#     be root or $CLAWBOX_USER;
+#   * user_add refuses a name any account or group already has, and puts the
+#     new account in exactly one supplementary group, clawbox-users — never
+#     sudo, never adm;
+#   * user_remove removes ONLY a member of clawbox-users with uid >= 1000 that
+#     is not in an administrator group, so it cannot delete the owner, root or
+#     any account the box itself runs as, whatever the web server writes.
+#
+# config/clawbox-user-helper.sh (sign-in and the Terminal) holds itself to the
+# same membership rule.
+CLAWBOX_USERS_GROUP="clawbox-users"
+
+# 1-32 characters, carried by a length test rather than a `{0,31}` bound in
+# the regex (shell-regex-hygiene.test.ts: glibc expands a bounded repeat into
+# one NFA state per repetition).
+clawbox_user_name_ok() {
+  [ "${#1}" -ge 1 ] && [ "${#1}" -le 32 ] && [[ "$1" =~ ^[a-z_][a-z0-9_-]*$ ]]
+}
+
+# Read the one record a user step was handed, refusing a symlink, a missing
+# file and a second record. Prints the record; exits on refusal.
+read_user_step_input() {
+  local input_file="$1" record
+  if [ -L "$input_file" ]; then
+    rm -f "$input_file"
+    echo "Error: user input file is a symlink; refusing" >&2
+    exit 64
+  fi
+  if [ ! -f "$input_file" ]; then
+    echo "Error: user input file not found" >&2
+    exit 1
+  fi
+  record="$(cat "$input_file")"
+  rm -f "$input_file"
+  case "$record" in
+    *$'\n'*)
+      echo "Error: user input must be exactly one record" >&2
+      exit 64
+      ;;
+    *$'\r'*)
+      echo "Error: user input contains a carriage return" >&2
+      exit 64
+      ;;
+  esac
+  printf '%s' "$record"
+}
+
+step_user_add() {
+  local record user password home owner_home
+  record="$(read_user_step_input "$PROJECT_DIR/data/.user-add-input")" || exit $?
+  user="${record%%:*}"
+  password="${record#*:}"
+  if ! clawbox_user_name_ok "$user"; then
+    echo "Error: '$user' is not a valid username" >&2
+    exit 64
+  fi
+  if [ "$user" = "root" ] || [ "$user" = "$CLAWBOX_USER" ]; then
+    echo "Error: '$user' cannot be created here" >&2
+    exit 64
+  fi
+  if [ "$record" = "$user" ] || [ -z "$password" ]; then
+    echo "Error: user input has no password" >&2
+    exit 64
+  fi
+  if getent passwd "$user" >/dev/null 2>&1 || getent group "$user" >/dev/null 2>&1; then
+    echo "Error: an account or group named '$user' already exists" >&2
+    exit 65
+  fi
+
+  if ! getent group "$CLAWBOX_USERS_GROUP" >/dev/null 2>&1; then
+    groupadd --system "$CLAWBOX_USERS_GROUP" || {
+      echo "Error: could not create the $CLAWBOX_USERS_GROUP group" >&2
+      exit 1
+    }
+  fi
+  useradd --create-home --shell /bin/bash --user-group \
+    --groups "$CLAWBOX_USERS_GROUP" "$user" || {
+    echo "Error: useradd could not create '$user'" >&2
+    exit 1
+  }
+  if ! printf '%s:%s\n' "$user" "$password" | /usr/sbin/chpasswd; then
+    userdel --remove "$user" >/dev/null 2>&1 || true
+    echo "Error: could not set the password for '$user'; the account was removed again" >&2
+    exit 1
+  fi
+
+  # Each user's home is theirs alone, and the owner's stops being readable by
+  # the accounts this step creates: /home/<owner> holds data/, the assistant's
+  # state and every credential store. Nothing on the box that runs as another
+  # user reads from it (the gateway, the embedder, Chromium and the terminal
+  # server all run as $CLAWBOX_USER). Only the "other" bits are dropped, so the
+  # owner's own group access is untouched.
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  if [ -n "$home" ] && [ -d "$home" ]; then
+    chmod 0750 "$home" || true
+  fi
+  owner_home="$(getent passwd "$CLAWBOX_USER" | cut -d: -f6)"
+  if [ -n "$owner_home" ] && [ -d "$owner_home" ] && [ "$owner_home" != "/" ]; then
+    chmod o-rwx "$owner_home" || echo "  Warning: could not restrict $owner_home" >&2
+  fi
+  echo "Created ClawBox user '$user'"
+}
+
+step_user_remove() {
+  local user uid groups
+  user="$(read_user_step_input "$PROJECT_DIR/data/.user-remove-input")" || exit $?
+  if ! clawbox_user_name_ok "$user"; then
+    echo "Error: '$user' is not a valid username" >&2
+    exit 64
+  fi
+  if [ "$user" = "root" ] || [ "$user" = "$CLAWBOX_USER" ]; then
+    echo "Error: '$user' cannot be removed here" >&2
+    exit 64
+  fi
+  if ! getent passwd "$user" >/dev/null 2>&1; then
+    # Already gone (removed by hand, or a retry after a partial run): the
+    # registry entry is what the owner is asking to clear, and it has been.
+    echo "ClawBox user '$user' has no account; nothing to remove"
+    return 0
+  fi
+  uid="$(getent passwd "$user" | cut -d: -f3)"
+  groups=" $(id -nG "$user" 2>/dev/null || true) "
+  case "$groups" in
+    *" $CLAWBOX_USERS_GROUP "*) ;;
+    *)
+      echo "Error: '$user' is not a ClawBox user (not in $CLAWBOX_USERS_GROUP); refusing" >&2
+      exit 64
+      ;;
+  esac
+  case "$groups" in
+    *" sudo "*|*" admin "*|*" wheel "*|*" root "*|*" adm "*)
+      echo "Error: '$user' is an administrator account; refusing" >&2
+      exit 64
+      ;;
+  esac
+  if ! [[ "$uid" =~ ^[0-9]+$ ]] || [ "$uid" -lt 1000 ] || [ "$uid" -eq 65534 ]; then
+    echo "Error: '$user' is a system account; refusing" >&2
+    exit 64
+  fi
+
+  # End everything the user is running first — a Terminal session is a login
+  # shell under their uid — or userdel refuses with "user is currently used".
+  pkill -KILL -u "$uid" >/dev/null 2>&1 || true
+  sleep 1
+  local rc=0
+  userdel --remove "$user" || rc=$?
+  # 12: the account is gone but its home or mail spool could not be removed.
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 12 ]; then
+    echo "Error: userdel could not remove '$user' (exit $rc)" >&2
+    exit 1
+  fi
+  echo "Removed ClawBox user '$user'"
+}
+
 step_rebuild() {
   do_rebuild
   # `restart`, not `start`, for the reason spelled out in
@@ -9771,6 +10535,79 @@ step_rebuild() {
   # would turn this restart into a failure over a build that is fine.
   systemctl reset-failed clawbox-setup.service 2>/dev/null || true
   systemctl restart clawbox-setup.service
+}
+
+# ── Heal a web build an interrupted update left behind (TASK-1316) ───────────
+#
+# Started at boot by config/clawbox-build-heal.service (through
+# config/clawbox-build-heal.sh, which bounds the attempts and records each one),
+# or by an operator: `sudo bash install.sh --step heal_build`. Never by the web
+# server — it is on no launcher list — because the case it exists for is a web
+# server that cannot start root steps at all.
+#
+# Two states, both "the web build and the root side of the box disagree about
+# how a root step is started", and both of which the web server cannot leave by
+# itself:
+#
+#   stale-build            the build on disk predates the root-step launcher
+#                          while the code on disk uses it — an update that
+#                          moved the tree and never landed its rebuild. The
+#                          build starts root steps through the polkit grant
+#                          step_polkit_rules removes, so on a box where that
+#                          grant is gone every update fails at step 1.
+#   root-contract-missing  the build uses the launcher, but the launcher or its
+#                          sudoers grant is not installed.
+#
+# PINNED, deliberately — not in the self-updating family: it rebuilds from the
+# tree ON DISK, with no fetch and no reset, so it never moves the code under an
+# owner and needs no network for git. And being pinned, the dispatcher runs it
+# only while the tree still matches the root-exec record, out of the mirror, the
+# same as chpasswd: the heal adds no way for root to run something it did not
+# record.
+step_heal_build() {
+  local probe="$SRC_DIR/config/clawbox-build-heal.sh" verdict
+  if [ ! -f "$probe" ]; then
+    echo "Error: $probe is missing — cannot tell whether this box needs healing" >&2
+    return 1
+  fi
+  if ! verdict="$(bash "$probe" --check "$PROJECT_DIR")"; then
+    echo "  Nothing to heal: $verdict"
+    return 0
+  fi
+  echo "  Healing: $verdict"
+  local rc=0
+  case "$verdict" in
+    stale-build*)
+      # Rebuilt from the tree on disk, owner's local edits and all: the heal
+      # discards nothing. do_rebuild stops the dashboard, restores the previous
+      # build and restarts it on failure, and returns non-zero — errexit then
+      # ends this step with the old grant, if the box still has one, intact.
+      do_rebuild
+      # The root side of the contract the new build speaks — launcher,
+      # dispatcher, mirror, sudoers, units — out of the mirror this step runs
+      # from, BEFORE that build is started: the first thing an owner does on it
+      # is start an update. A subshell, because the step exits on a drift it
+      # finds; the dashboard is stopped here and must come back regardless.
+      ( step_systemd_services ) || rc=$?
+      systemctl reset-failed clawbox-setup.service 2>/dev/null || true
+      systemctl restart clawbox-setup.service || rc=$?
+      ;;
+    *)
+      ( step_systemd_services ) || rc=$?
+      ;;
+  esac
+  # Only now, with the server on a build that uses the launcher, may the grant
+  # the old one needed go — step_polkit_rules asks the build before it removes it.
+  ( step_polkit_rules ) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "Error: the heal did not finish (exit $rc) — see the lines above" >&2
+    return "$rc"
+  fi
+  if verdict="$(bash "$probe" --check "$PROJECT_DIR")"; then
+    echo "Error: the box still needs healing after the heal ran: $verdict" >&2
+    return 1
+  fi
+  echo "  Healed: $verdict"
 }
 
 step_restart() {
@@ -9817,6 +10654,11 @@ step_gateway_setup() {
   # The same applies to the guards in step_openclaw_install / step_openclaw_patch
   # and to `install.sh --step <name>`, which can be run by hand on any edition.
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw gateway setup"; return 0; }
+  # Nor before the owner has chosen an agent: the in-app updater dispatches
+  # this step on every box whose edition is not hermes, and on the unified
+  # image that would start an OpenClaw nobody picked. step_edition_select
+  # re-runs it AS openclaw once OpenClaw is the choice.
+  is_unselected_edition && { echo "  [no agent chosen yet] skipping OpenClaw gateway setup"; return 0; }
   cp "$SRC_DIR/config/clawbox-gateway.service" /etc/systemd/system/
 
   # Mask any leftover user-level openclaw-gateway.service. Standalone
@@ -10705,10 +11547,17 @@ step_fix_git_perms() {
 }
 
 step_rebuild_reboot() {
-  # Redeploy config files and scripts that may have changed after git pull
+  # Redeploy config files and scripts that may have changed after git pull.
+  #
+  # step_polkit_rules is NOT here any more. It removes the polkit grant a
+  # pre-TASK-539 web build starts its root steps through, and it ran here —
+  # before do_rebuild — so a rebuild that then failed (bun install, the swap
+  # gate, an OOM kill: do_rebuild restores the previous build and returns
+  # non-zero) left the OLD server running with that grant gone and the box
+  # unable to start any root step ever again, the update included. It runs
+  # below, once a new build is verified on disk. TASK-1316.
   step_directories_permissions
   step_systemd_services
-  step_polkit_rules
   step_ollama_install
   step_openclaw_patch
   step_openclaw_config
@@ -10723,6 +11572,14 @@ step_rebuild_reboot() {
   else
     do_rebuild --reboot-follows
   fi
+  # Reached only with a new build verified on disk: do_rebuild returns non-zero
+  # on every other outcome and errexit ends this step there. The server that
+  # comes up next — the restart below, or the boot after the reboot — is that
+  # build, so the old build's polkit grant can go now (step_polkit_rules asks
+  # the build itself before it removes anything). Never fatal HERE: the
+  # dashboard is stopped until the restart or reboot below, and a polkit file
+  # that could not be written must not keep it down; post_update asks again.
+  step_polkit_rules || echo "  Warning: polkit rules not refreshed after the rebuild (post_update tries again)" >&2
   if is_test_mode; then
     echo "CLAWBOX_TEST_MODE=1, restarting clawbox-setup.service in lieu of reboot"
     # `reset-failed` first, as the other two rebuild-ending restarts already do
@@ -11133,10 +11990,19 @@ DISPATCH_STEPS=(
   edition_lock edition_foreign_teardown hermes_install hermes_edition
   # `harness_swap` is the owner's Settings → Harness button: value-gated by
   # data/harness-swap.env, it re-execs the edition steps above as the target.
-  harness_swap
+  # `edition_select` is the setup wizard's "Choose your assistant" on a
+  # unified-image box: the same gate on data/edition-select.env, and it acts
+  # only while the lock reads `unselected`. TASK-1149. No parentheses in this
+  # list's comments: root-steps.test.ts reads it up to the first one.
+  harness_swap edition_select
   network_setup set_hostname set_timezone setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
+  # The boot-time heal of TASK-1316: config/clawbox-build-heal.service. Pinned,
+  # and on no web or UI list — the web server it heals cannot start it.
+  heal_build
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
+  # Settings → Users, multi-user ClawBox OS: TASK-1256. On WEB_ROOT_STEPS, never on the UI list.
+  user_add user_remove
   directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch cloudflared_install
   nm_dispatcher sysctl_linkdown persistent_journal resource_limits desktop_mode
@@ -11399,6 +12265,27 @@ if has_hermes_harness; then
     # print "Setup Complete", exit 0, and be shipped as healthy.
     record_provision_failure hermes_edition
   }
+fi
+
+# The unified image (CLAWBOX_EDITION=unselected): the owner will pick EITHER
+# agent in the setup wizard, possibly offline, so the factory verdict is OK
+# only if BOTH run — proved with the same probes step_edition_select uses
+# before it changes anything. Neither is started here; that is the choice's.
+if is_unselected_edition; then
+  echo ""
+  echo "  Unified image: checking that both assistants run..."
+  if harness_swap_openclaw_runnable; then
+    echo "  OpenClaw runs"
+  else
+    echo "  ERROR: OpenClaw does not run on this box ($HARNESS_SWAP_PROBE_SAID)" >&2
+    record_provision_failure openclaw_install
+  fi
+  if harness_swap_hermes_runnable; then
+    echo "  Hermes runs"
+  else
+    echo "  ERROR: Hermes does not run on this box ($HARNESS_SWAP_PROBE_SAID)" >&2
+    record_provision_failure hermes_install
+  fi
 fi
 
 log "Validating services..."

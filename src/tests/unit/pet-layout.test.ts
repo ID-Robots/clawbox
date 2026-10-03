@@ -5,7 +5,8 @@
 import { describe, expect, it } from "vitest";
 import {
   PET_BODY_PX,
-  petKeyframes,
+  petFrameMs,
+  petFrameTransforms,
   petLayout,
   rowMetricsFor,
   widestFreeSpan,
@@ -93,34 +94,29 @@ describe("petLayout", () => {
   });
 });
 
-describe("petKeyframes", () => {
-  it("carries the frame AND its foot offset in one animation", () => {
-    // Split across two animations they would drift out of phase, and the whole
+describe("petFrameTransforms", () => {
+  it("carries the frame AND its foot offset in one transform", () => {
+    // Split across two properties they would drift out of phase, and the whole
     // point is that the drawn feet are on the bar in every frame.
-    const layout = petLayout(PET, { state: "jump", facing: "right" });
-    const { name, css } = petKeyframes(layout);
-    expect(css.startsWith(`@keyframes ${name}{`)).toBe(true);
-    expect(css).toContain("0%{background-position-x:0px;bottom:-10px}");
-    expect(css).toContain("20%{background-position-x:-96px;bottom:-20px}");
-    expect(css).toContain("40%{background-position-x:-192px;bottom:-30px}");
+    const frames = petFrameTransforms(petLayout(PET, { state: "jump", facing: "right" }));
+    expect(frames[0]).toBe("translate(0px, 10px)");
+    expect(frames[1]).toBe("translate(-96px, 20px)");
+    expect(frames[2]).toBe("translate(-192px, 30px)");
     // Never a sixth step: that column is empty on every installed sheet.
-    expect(css).not.toContain("background-position-x:-480px");
+    expect(frames).toHaveLength(5);
+    expect(frames.join()).not.toContain("translate(-480px");
   });
 
-  it("holds the last frame all the way to 100%", () => {
-    const { css } = petKeyframes(petLayout(PET, { state: "dance", facing: "right" }));
+  it("stops at the last frame the row really draws", () => {
+    const frames = petFrameTransforms(petLayout(PET, { state: "dance", facing: "right" }));
     // `waving` frame 3 is inset 8 source px -> 4 CSS px of downward shift.
-    expect(css).toContain("75%{background-position-x:-288px;bottom:-4px}");
-    expect(css).toContain("100%{background-position-x:-288px;bottom:-4px}");
+    expect(frames).toHaveLength(4);
+    expect(frames[3]).toBe("translate(-288px, 4px)");
   });
 
-  it("gives different rows different names, and the same row the same one", () => {
-    const a = petKeyframes(petLayout(PET, { state: "idle", facing: "right" }));
-    const b = petKeyframes(petLayout(PET, { state: "idle", facing: "right" }));
-    const c = petKeyframes(petLayout(PET, { state: "jump", facing: "right" }));
-    // Stable across re-renders, so a re-render does not restart the animation.
-    expect(a.name).toBe(b.name);
-    expect(a.name).not.toBe(c.name);
+  it("shows each frame for the row's loop split evenly", () => {
+    const layout = petLayout(PET, { state: "dance", facing: "right" });
+    expect(petFrameMs(layout)).toBe(Math.round(layout.loopMs / layout.frames));
   });
 });
 
