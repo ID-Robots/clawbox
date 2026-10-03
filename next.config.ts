@@ -15,7 +15,7 @@ const GATEWAY_URL = process.env.GATEWAY_URL || "http://127.0.0.1:18789";
 // shared by connect-src (fetch probes) and img-src (the handoff overlays'
 // <img> probes) so the two CSP directives can't drift apart.
 const LOCAL_LAN_SOURCES = "http://*.local http://*.local:* https://*.local https://*.local:*";
-// The build's own version, "v4.1.0": package.json's number with the "v" that
+// The build's own version, "v4.2.0": package.json's number with the "v" that
 // `readClawboxVersion` (updater.ts) puts on it for /setup-api/update/versions.
 // About falls back to this until that route answers, so the two must never
 // name different releases. It used to be `git describe --tags`, which names

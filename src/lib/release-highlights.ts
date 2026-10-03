@@ -10,7 +10,7 @@
  * What it reads is the `## Highlights` section's top-level bullets, in the two
  * shapes the releases have used:
  *
- *   - **More of the phone for the chat.** On a phone the chat opens …   (4.0, 4.1)
+ *   - **More of the phone for the chat.** On a phone the chat opens …   (4.0, 4.1, 4.2)
  *   - **Hermes edition** — a single-harness SKU locked at install time …  (3.9)
  *
  * A bullet wraps over indented lines; those are joined back into one. Nested
@@ -32,12 +32,13 @@ export interface ReleaseHighlight {
 
 /**
  * A panel shows a handful and links to the rest: the update screen's step list
- * stays the thing to read. The 4.1 notes list four, the 4.0 notes eight.
+ * stays the thing to read. The 4.2 notes list six, the 4.1 notes four, the
+ * 4.0 notes eight.
  */
 export const MAX_HIGHLIGHTS = 6;
 /** Longer than any title the notes have used, short enough for one line or two. */
 export const MAX_TITLE_CHARS = 120;
-/** Two or three sentences — the longest 4.1 highlight is about 200. */
+/** Two or three sentences — the longest 4.1 and 4.2 highlights are about 200. */
 export const MAX_BODY_CHARS = 360;
 /**
  * How much of one bullet's Markdown is read at all. Well past what the capped

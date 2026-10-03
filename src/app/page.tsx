@@ -2689,8 +2689,8 @@ function ChromeDesktopInner() {
     openAppRef.current("settings");
   }, []);
 
-  // "What's new in 4.1" (TASK-1059, TASK-1195): shown after the box lands on
-  // 4.1 until the owner dismisses it, which the box records for every browser. Asked again
+  // "What's new in 4.2" (TASK-1059, TASK-1195): shown after the box lands on
+  // 4.2 until the owner dismisses it, which the box records for every browser. Asked again
   // when the ClawBox AI tier changes, so an upgrade made in the portal drops
   // the plan section without a reload. Like every card in the column, it leaves
   // on its own after NOTICE_AUTO_HIDE_MS. That is not recorded, so it is back

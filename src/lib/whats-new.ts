@@ -1,6 +1,6 @@
 /**
- * The "What's new in 4.1" card (TASK-1059, re-keyed for 4.1 by TASK-1195) —
- * the pure half.
+ * The "What's new in 4.2" card (TASK-1059, re-keyed for each minor release
+ * since TASK-1195) — the pure half.
  *
  * Client-safe on purpose: the desktop card, its hook and the route all read
  * this file, so the release the card announces, the two links it carries and
@@ -8,12 +8,12 @@
  * disk or the plan on record is in `@/lib/whats-new-server`.
  *
  * WHEN THE CARD SHOWS. A box whose running version is on the release line the
- * card announces (4.1.0, 4.1.3), until the owner dismisses it. The dismissal is
+ * card announces (4.2.0, 4.2.3), until the owner dismisses it. The dismissal is
  * stored in the box's config store, not the browser, so a card dismissed on the
  * laptop does not come back on the phone. It is keyed by
- * {@link WHATS_NEW_RELEASE}, so a box that dismissed the 4.0 card is shown this
- * one, and a later "What's new" card is a new constant here and shows again on
- * every box.
+ * {@link WHATS_NEW_RELEASE}, so a box that dismissed the 4.1 card (or the 4.0
+ * one) is shown this one, and a later "What's new" card is a new constant here
+ * and shows again on every box.
  */
 
 import { PORTAL_PLANS_URL } from "@/lib/clawai-usage";
@@ -23,27 +23,29 @@ import { PORTAL_PLANS_URL } from "@/lib/clawai-usage";
  * `major.minor` of package.json's version; release-identity.test.ts holds the
  * two together, so a minor bump without a new card fails there.
  */
-export const WHATS_NEW_RELEASE = "4.1";
+export const WHATS_NEW_RELEASE = "4.2";
 
 /**
  * The highlights of the release {@link WHATS_NEW_RELEASE} names, in the order
  * its release notes list them — catalogue keys, so they read in the owner's
- * language. The copy is taken from RELEASE-NOTES-4.1.0.md, so this list should
+ * language. The copy is taken from RELEASE-NOTES-4.2.0.md, so this list should
  * only change when the release notes do.
  *
  * Two surfaces draw it: the desktop card, and the /updating screen's "What's
  * new" panel when the target release's own notes cannot be read (TASK-1205).
  */
 export const WHATS_NEW_HIGHLIGHTS = [
-  { icon: "fullscreen", title: "whatsNew.phoneFullscreenTitle", body: "whatsNew.phoneFullscreenBody" },
-  { icon: "history", title: "whatsNew.chatRestoreTitle", body: "whatsNew.chatRestoreBody" },
-  { icon: "web", title: "whatsNew.webappDataTitle", body: "whatsNew.webappDataBody" },
-  { icon: "merge", title: "whatsNew.autoMergeTitle", body: "whatsNew.autoMergeBody" },
+  { icon: "group", title: "whatsNew.multiUserTitle", body: "whatsNew.multiUserBody" },
+  { icon: "desktop_windows", title: "whatsNew.monitorModeTitle", body: "whatsNew.monitorModeBody" },
+  { icon: "backup", title: "whatsNew.githubBackupTitle", body: "whatsNew.githubBackupBody" },
+  { icon: "tab", title: "whatsNew.kioskTitle", body: "whatsNew.kioskBody" },
+  { icon: "settings_backup_restore", title: "whatsNew.clawkeepTitle", body: "whatsNew.clawkeepBody" },
+  { icon: "build", title: "whatsNew.hardwareFixesTitle", body: "whatsNew.hardwareFixesBody" },
 ] as const;
 
 /**
  * The docs page the card links to: `docs-site/whats-new.mdx`, whose newest
- * section is "ClawBox 4.1". ONE constant, so a page that moves is one edit.
+ * section is "ClawBox 4.2". ONE constant, so a page that moves is one edit.
  */
 export const WHATS_NEW_DOCS_URL = "https://docs.clawbox.com/whats-new";
 
@@ -75,8 +77,8 @@ export const WHATS_NEW_PLANS_URL = withUtm(PORTAL_PLANS_URL, WHATS_NEW_UTM);
  * The release line of a ClawBox version string, `[major, minor]`, or null when
  * there is none.
  *
- * Takes what the box actually reports: package.json's `4.1.0`, a `v4.1.0` tag,
- * `git describe` output (`v4.1.0-12-gabc123`), and the card's own `4.1`.
+ * Takes what the box actually reports: package.json's `4.2.0`, a `v4.2.0` tag,
+ * `git describe` output (`v4.2.0-12-gabc123`), and the card's own `4.2`.
  */
 export function releaseLineOf(version: string | null | undefined): readonly [major: number, minor: number] | null {
   if (typeof version !== "string") return null;
@@ -86,10 +88,10 @@ export function releaseLineOf(version: string | null | undefined): readonly [maj
 
 /**
  * Is this the running version the card is about? Only the release line it
- * announces: 4.1.0 and 4.1.3, not 4.0.x and not 4.2.0.
+ * announces: 4.2.0 and 4.2.3, not 4.1.x and not 4.3.0.
  *
  * Not "anything on 4.x", which it was while the card announced 4.0. The card
- * says "What's new in 4.1" above "This box now runs ClawBox {version}", so on
+ * says "What's new in 4.2" above "This box now runs ClawBox {version}", so on
  * any other line those two lines would name different releases. A later release
  * shows no card until it has one of its own.
  */
@@ -178,7 +180,7 @@ export function hasPlanCta(cta: WhatsNewPlanCta): boolean {
   return cta.paidFeatures || cta.editionSwitch !== null;
 }
 
-/** Strip a leading `v` so the card prints `4.1.0`, the way the release notes do. */
+/** Strip a leading `v` so the card prints `4.2.0`, the way the release notes do. */
 export function displayVersion(version: string | null): string | null {
   if (!version) return null;
   return version.trim().replace(/^v/i, "") || null;

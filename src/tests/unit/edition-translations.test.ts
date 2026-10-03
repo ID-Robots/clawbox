@@ -70,10 +70,10 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // owner who cannot read "Limited until 14:30" cannot tell a waiting run from
   // a broken one.
   { name: "Anthropic accounts card", matches: (k) => k.startsWith("settings.anthropicAccounts.") },
-  // The desktop's "What's new in 4.1" card (TASK-1059, TASK-1195): the
+  // The desktop's "What's new in 4.2" card (TASK-1059, TASK-1195): the
   // release's highlights and the plan it takes to use them. The first thing an
   // updated box says about itself, so it is not left in English on any locale.
-  { name: "What's new in 4.1 card", matches: (k) => k.startsWith("whatsNew.") },
+  { name: "What's new in 4.2 card", matches: (k) => k.startsWith("whatsNew.") },
   // Multi-user ClawBox OS (TASK-1256): Settings → Users, the login screen's
   // user picker and error lines, and the tray's "signed in as". The login
   // screen is the one page every person on the box sees before anything else.

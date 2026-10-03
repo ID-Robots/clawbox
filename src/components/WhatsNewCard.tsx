@@ -18,8 +18,8 @@ interface WhatsNewCardProps {
 }
 
 /**
- * "What's new in 4.1": a card in the desktop's top-right notice column, shown
- * after a box lands on 4.1 until the owner dismisses it (TASK-1059, TASK-1195).
+ * "What's new in 4.2": a card in the desktop's top-right notice column, shown
+ * after a box lands on 4.2 until the owner dismisses it (TASK-1059, TASK-1195).
  *
  * It has three parts. First the highlights. Then the docs page. Last, a plan
  * section that names only what the box's plan does not cover yet. A Max box

@@ -1,13 +1,13 @@
 /**
- * GET/POST /setup-api/whats-new — the "What's new in 4.1" card (TASK-1059,
- * re-keyed for 4.1 by TASK-1195).
+ * GET/POST /setup-api/whats-new — the "What's new in 4.2" card (TASK-1059,
+ * re-keyed for 4.1 by TASK-1195 and for 4.2 the same way).
  *
  * What is pinned here:
- *  - the card is for a box RUNNING 4.1, read from the checkout's package.json;
+ *  - the card is for a box RUNNING 4.2, read from the checkout's package.json;
  *  - a dismissal is recorded in the box's config store, so a fresh module (a
  *    second browser asking) sees it too;
- *  - a box that dismissed the 4.0 card is shown the 4.1 card, and a tab still
- *    showing the 4.0 card cannot dismiss 4.1;
+ *  - a box that dismissed the 4.1 card (or the 4.0 one) is shown the 4.2 card,
+ *    and a tab still showing the 4.1 card cannot dismiss 4.2;
  *  - the plan section offers only what the plan on record does not cover, by
  *    the same predicates the features' own gates use: Pro or Max for the Coding
  *    Agent and Memory Shard, Max for the edition switch;
@@ -82,7 +82,7 @@ beforeEach(async () => {
   process.env.CLAWBOX_ROOT = root;
   delete process.env.NEXT_PUBLIC_APP_VERSION;
   edition = { edition: "openclaw", defaulted: false };
-  writeVersion("4.1.0");
+  writeVersion("4.2.0");
   writeConfig({});
   await load();
 });
@@ -94,25 +94,25 @@ afterEach(() => {
 });
 
 describe("GET /setup-api/whats-new: when the card shows", () => {
-  it("shows on a box running 4.1.0 that has not dismissed it", async () => {
+  it("shows on a box running 4.2.0 that has not dismissed it", async () => {
     expect(await state()).toEqual({
       show: true,
-      release: "4.1",
-      version: "4.1.0",
+      release: "4.2",
+      version: "4.2.0",
       edition: "openclaw",
       cta: { paidFeatures: true, editionSwitch: "hermes" },
       freeMonthCode: null,
     });
   });
 
-  it.each(["4.1.3", "v4.1.0"])("shows on %s, which is on the 4.1 line", async (version) => {
+  it.each(["4.2.3", "v4.2.0"])("shows on %s, which is on the 4.2 line", async (version) => {
     writeVersion(version);
     expect((await state()).show).toBe(true);
   });
 
-  // "What's new in 4.1" above "This box now runs ClawBox 4.0.0" would name two
+  // "What's new in 4.2" above "This box now runs ClawBox 4.1.0" would name two
   // releases at once, so a box that reports another line gets no card at all.
-  it.each(["4.0.0", "4.0.3", "4.2.0", "3.9.0", "3.9.12", "5.0.0", "not-a-version"])("does not show on %s", async (version) => {
+  it.each(["4.1.0", "4.1.3", "4.0.0", "4.3.0", "3.9.0", "3.9.12", "5.0.0", "not-a-version"])("does not show on %s", async (version) => {
     writeVersion(version);
     const body = await state();
     expect(body.show).toBe(false);
@@ -121,15 +121,15 @@ describe("GET /setup-api/whats-new: when the card shows", () => {
 
   it("falls back to the build-time version when package.json is unreadable", async () => {
     writeVersion(null);
-    process.env.NEXT_PUBLIC_APP_VERSION = "v4.1.0";
+    process.env.NEXT_PUBLIC_APP_VERSION = "v4.2.0";
     const body = await state();
-    expect(body.version).toBe("v4.1.0");
+    expect(body.version).toBe("v4.2.0");
     expect(body.show).toBe(true);
   });
 
   it("reads a git-describe style build version on the same line", async () => {
     writeVersion(null);
-    process.env.NEXT_PUBLIC_APP_VERSION = "v4.1.0-12-gabc1234";
+    process.env.NEXT_PUBLIC_APP_VERSION = "v4.2.0-12-gabc1234";
     expect((await state()).show).toBe(true);
   });
 
@@ -141,20 +141,26 @@ describe("GET /setup-api/whats-new: when the card shows", () => {
   });
 
   it("stays hidden once this release's card is dismissed on record", async () => {
-    writeConfig({ whats_new_dismissed: "4.1" });
+    writeConfig({ whats_new_dismissed: "4.2" });
     expect((await state()).show).toBe(false);
   });
 
-  // TASK-1195: the regression. The card used to be keyed "4.0", so an owner who
-  // closed it on a 4.0 build would never have been shown 4.1's.
-  it("a box that dismissed the 4.0 card is shown the 4.1 card", async () => {
-    writeConfig({ whats_new_dismissed: "4.0" });
+  // The regression TASK-1195 pinned for 4.0, one release on: the card is keyed
+  // by release, so an owner who closed it on a 4.1 build is shown 4.2's.
+  it("a box that dismissed the 4.1 card is shown the 4.2 card", async () => {
+    writeConfig({ whats_new_dismissed: "4.1" });
     const body = await state();
     expect(body.show).toBe(true);
-    expect(body.release).toBe("4.1");
+    expect(body.release).toBe("4.2");
+    expect(body.version).toBe("4.2.0");
   });
 
-  it.each(["3.9", "4.0.0", "4"])("a dismissal of %j does not hide this one", async (dismissed) => {
+  it("a box that dismissed the 4.0 card, and never saw 4.1's, is shown the 4.2 card", async () => {
+    writeConfig({ whats_new_dismissed: "4.0" });
+    expect(await state()).toMatchObject({ show: true, release: "4.2" });
+  });
+
+  it.each(["3.9", "4.0", "4.1", "4.1.0", "4"])("a dismissal of %j does not hide this one", async (dismissed) => {
     writeConfig({ whats_new_dismissed: dismissed });
     expect((await state()).show).toBe(true);
   });
@@ -243,20 +249,20 @@ describe("GET /setup-api/whats-new: when a read fails", () => {
 describe("POST /setup-api/whats-new: dismissal", () => {
   it("records the dismissal in the box's config store, for every browser", async () => {
     writeConfig({ keep: "me" });
-    const res = await post({ release: "4.1" });
+    const res = await post({ release: "4.2" });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, show: false });
-    expect(readConfig()).toEqual({ keep: "me", whats_new_dismissed: "4.1" });
+    expect(readConfig()).toEqual({ keep: "me", whats_new_dismissed: "4.2" });
 
     // Another browser, another module graph: still dismissed.
     await load();
     expect((await state()).show).toBe(false);
   });
 
-  it("dismissing 4.1 on a box that dismissed 4.0 records 4.1", async () => {
-    writeConfig({ whats_new_dismissed: "4.0" });
-    expect((await post({ release: "4.1" })).status).toBe(200);
-    expect(readConfig()).toEqual({ whats_new_dismissed: "4.1" });
+  it("dismissing 4.2 on a box that dismissed 4.1 records 4.2", async () => {
+    writeConfig({ whats_new_dismissed: "4.1" });
+    expect((await post({ release: "4.2" })).status).toBe(200);
+    expect(readConfig()).toEqual({ whats_new_dismissed: "4.2" });
     expect((await state()).show).toBe(false);
   });
 
@@ -266,10 +272,10 @@ describe("POST /setup-api/whats-new: dismissal", () => {
     expect(readConfig()).toEqual({});
   });
 
-  it("a tab still showing the 4.0 card cannot dismiss 4.1 unseen", async () => {
-    const res = await post({ release: "4.0" });
+  it("a tab still showing the 4.1 card cannot dismiss 4.2 unseen", async () => {
+    const res = await post({ release: "4.1" });
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: 'release must be "4.1"' });
+    expect(await res.json()).toEqual({ error: 'release must be "4.2"' });
     expect(readConfig()).toEqual({});
     expect((await state()).show).toBe(true);
   });
@@ -287,20 +293,20 @@ describe("POST /setup-api/whats-new: dismissal", () => {
   });
 
   it("refuses a body far larger than a dismissal", async () => {
-    const res = await post({ release: "4.1", padding: "x".repeat(4096) });
+    const res = await post({ release: "4.2", padding: "x".repeat(4096) });
     expect(res.status).toBe(413);
     expect(readConfig()).toEqual({});
   });
 
   it("refuses a dismissal fired from another site's page", async () => {
-    const res = await post({ release: "4.1" }, { origin: "https://evil.example" });
+    const res = await post({ release: "4.2" }, { origin: "https://evil.example" });
     expect(res.status).toBe(403);
     expect(readConfig()).toEqual({});
   });
 
   it("answers 500 when the store cannot be written", async () => {
     fs.writeFileSync(path.join(root, "data", "config.json"), "{ corrupt");
-    const res = await post({ release: "4.1" });
+    const res = await post({ release: "4.2" });
     expect(res.status).toBe(500);
   });
 });

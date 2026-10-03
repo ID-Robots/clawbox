@@ -14,9 +14,12 @@ the entry says so.
 
 Entries are grouped by release, newest first.
 
-<Columns cols={3}>
-  <Card title="4.1" href="#clawbox-41" icon="sparkles">
-    Current release candidate and the newest fixes.
+<Columns cols={2}>
+  <Card title="4.2" href="#clawbox-42" icon="sparkles">
+    Current release candidate: several users on one box, monitor mode, kiosk mode and GitHub backup.
+  </Card>
+  <Card title="4.1" href="#clawbox-41" icon="mobile">
+    A fuller chat on phones, reliable conversation restores and auto-merging pull requests.
   </Card>
   <Card title="4.0" href="#clawbox-40" icon="rocket">
     The major release that introduced Coding Agent and the new mobile experience.
@@ -31,11 +34,88 @@ Looking for your installed version? Open **Settings → About**. To update, open
 **Settings → System Update**.
 </Tip>
 
-## ClawBox 4.1
+## ClawBox 4.2
 
 <Note>
-**Release status:** 4.1.0 is being validated on beta devices before the stable release.
+**Release status:** 4.2.0 is being validated on beta devices before the stable release.
 </Note>
+
+ClawBox 4.2 lets several people share one box, each with a user of their own. On an x64
+ClawBox it spreads the desktop over several monitors, adds a drop-down terminal and a
+proper kiosk mode. Project folders can be backed up to GitHub in one click, ClawKeep
+backups are fixed, and testing on real ClawBox hardware fixed the problems it found.
+After updating, the desktop shows a **What's new in 4.2** card. Choose **Got it** to hide
+it on all your browsers.
+
+### Several people, one ClawBox
+
+The owner adds users in **Settings → Users**. Each person signs in with their own name and
+password, and gets a desktop and a Terminal of their own; their Terminal runs as their own
+account on the box. Settings, installed apps and the assistant stay with the owner. The
+sign-in page only asks which user you are on a box that has more than one, and removing a
+user signs them out everywhere.
+
+### Monitor mode, with a drop-down terminal
+
+On an x64 ClawBox running the ClawBox desktop session, one desktop spans a row of
+monitors. Arrange them in **Settings → Monitors**: drag them into place, choose the main
+one, and set resolution, refresh rate, scale, rotation and mirroring, plus brightness where
+the monitor allows it. A new layout is undone after 20 seconds unless you keep it. Press
+**Win+Down** and a terminal drops down from the top of the screen; press it again to hide it.
+
+### Back up project folders to GitHub
+
+In **Files → Projects**, **Back up** copies a folder to a private GitHub repository, using
+the Coding Agent's GitHub sign-in. After the first backup you can back up again, see the
+history, open the copy on GitHub, or turn on a daily backup that runs only when something
+changed. Files that look like passwords or keys, files over 50 MB and nested repositories
+are left out, and you are told which. A folder that already has its own GitHub remote is
+pushed to its current branch and never force-pushed.
+
+### Kiosk mode
+
+On an x64 ClawBox that shows its desktop full screen, every page the desktop opens gets a
+ClawBox bar with tabs, back, forward, reload and an address field, and a new tab opens a
+ClawBox start page with search. The desktop's shelf gathers those pages under one **Web**
+icon, so the desktop is always one click away.
+
+<Note>
+Monitor mode, the drop-down terminal and kiosk mode come with the ClawBox desktop session on
+an x64 install. The update does not switch them on, and a ClawBox on Jetson looks and works
+as before.
+</Note>
+
+### ClawKeep backups fixed
+
+- Snapshots no longer carry old backup archives along, which had made them grow until the
+  account was full.
+- A link that cannot be archived is skipped and named, instead of failing the backup.
+- While the account is full, auto-backup says **Paused while the account is full** and
+  comes back on by itself once there is room.
+
+### Fixes from hardware testing
+
+- Voice input works with ClawBox AI's transcription again, and falls back to the box's own
+  Whisper when the cloud cannot answer. **Install speech** works on a freshly set-up box.
+- Spoken replies no longer fail when the voice engine has to start from cold.
+- **Retry** on the ClawBox AI plugin installs it and switches it back on, and the plugin no
+  longer loops through a repair on every start.
+- A box left on an older build by a failed update repairs itself at the next boot.
+
+### Smaller things
+
+- Desktop windows and running Terminals survive a page refresh.
+- Your chat tabs are the same on every device, and files the assistant sends in the web
+  chat now download.
+- The Files app selects several files at once, moves them by drag and drop, and lets you
+  choose where an upload goes.
+- With several Anthropic accounts, the chat and every coding run switch to the next account
+  together when one reaches its limit.
+- The update screen shows what is new in the version being installed.
+
+## ClawBox 4.1
+
+**Released September 25, 2026**
 
 ClawBox 4.1 makes chat easier on phones, makes conversation recovery more reliable,
 restores saved data for older web apps, and improves automatic coding-agent pull

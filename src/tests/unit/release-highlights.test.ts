@@ -3,9 +3,10 @@
  * /updating screen's "What's new" panel.
  *
  * What is pinned here:
- *  - the real 4.1.0 and 4.0.0 notes in this checkout (which are also the
+ *  - the real 4.2.0, 4.1.0 and 4.0.0 notes in this checkout (which are also the
  *    GitHub release bodies) give their Highlights, joined across wrapped lines
- *    and without a single Markdown mark;
+ *    and without a single Markdown mark, and the 4.2.0 ones are word for word
+ *    the desktop card's English copy;
  *  - the 3.9 shape (`**Title** — body`) splits the same way;
  *  - notes with no Highlights section — the older "What's Changed" PR lists —
  *    give NOTHING, so the panel shows its fallback rather than PR titles;
@@ -30,6 +31,27 @@ const notes = (version: string) =>
   fs.readFileSync(path.join(process.cwd(), `RELEASE-NOTES-${version}.md`), "utf-8");
 
 describe("parseReleaseHighlights on the releases this repo shipped", () => {
+  it("reads the six 4.2.0 highlights, title and body, in order, all of them within the panel's handful", () => {
+    const highlights = parseReleaseHighlights(notes("4.2.0"));
+    expect(highlights.map((h) => h.title)).toEqual([
+      "Several people, one ClawBox",
+      "Monitor mode, with a drop-down terminal",
+      "Back up project folders to GitHub",
+      "Kiosk mode",
+      "ClawKeep backups fixed",
+      "Fixes from hardware testing",
+    ]);
+    // Six, and nothing past the panel's cap was cut to get there.
+    expect(parseReleaseHighlights(notes("4.2.0"), 100)).toEqual(highlights);
+    expect(highlights.length).toBeLessThanOrEqual(MAX_HIGHLIGHTS);
+    // The arrows of "Settings → Users" are text, not Markdown, and survive.
+    expect(highlights[0].body).toMatch(/^The owner adds users in Settings → Users\. /);
+    for (const h of highlights) {
+      expect(`${h.title} ${h.body}`).not.toMatch(/\*\*|`/);
+      expect(h.body.length).toBeLessThan(MAX_BODY_CHARS);
+    }
+  });
+
   it("reads the four 4.1.0 highlights, title and body, in order", () => {
     const highlights = parseReleaseHighlights(notes("4.1.0"));
     expect(highlights.map((h) => h.title)).toEqual([
@@ -48,11 +70,13 @@ describe("parseReleaseHighlights on the releases this repo shipped", () => {
 
   it("matches the desktop card's English copy of the same highlights", async () => {
     // The card's catalogue says it was taken from these notes; the parser must
-    // read the notes the same way a person did.
+    // read the notes the same way a person did, and the /updating panel (notes)
+    // and its fallback (the card's keys) must say the same thing.
     const { whatsNewEn } = await import("@/lib/edition-translations/en-whats-new");
-    const [first] = parseReleaseHighlights(notes("4.1.0"));
-    expect(first.title).toBe(whatsNewEn["whatsNew.phoneFullscreenTitle"]);
-    expect(first.body).toBe(whatsNewEn["whatsNew.phoneFullscreenBody"]);
+    const { WHATS_NEW_HIGHLIGHTS } = await import("@/lib/whats-new");
+    expect(parseReleaseHighlights(notes("4.2.0"))).toEqual(
+      WHATS_NEW_HIGHLIGHTS.map((item) => ({ title: whatsNewEn[item.title], body: whatsNewEn[item.body] })),
+    );
   });
 
   it("caps the 4.0.0 notes' eight highlights at the panel's handful, and strips the code span", () => {
