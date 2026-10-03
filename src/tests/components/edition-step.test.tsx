@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import userEvent from "@testing-library/user-event";
+import { render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import EditionStep, { readEditionChoiceStatus } from "@/components/EditionStep";
 
@@ -24,6 +25,14 @@ vi.mock("next/image", () => ({
 }));
 
 const STARTED = 1_700_000_000_000;
+
+/** The agent cards are real radios, named by the agent (aria-labelledby). */
+const card = (name: "OpenClaw" | "Hermes") => screen.getByRole("radio", { name });
+const findCard = (name: "OpenClaw" | "Hermes") => screen.findByRole("radio", { name });
+/** The one primary button, whichever agent it names. */
+const CONTINUE = { name: /^assistant\.continue\[/ };
+const continueButton = () => screen.getByRole("button", CONTINUE);
+const findContinue = () => screen.findByRole("button", CONTINUE);
 
 interface Status {
   needed: boolean;
@@ -103,10 +112,10 @@ describe("EditionStep — choosing", () => {
     render(<EditionStep onReady={vi.fn()} pollMs={5} />);
 
     expect(await screen.findByText("assistant.title")).toBeInTheDocument();
-    const openclaw = screen.getByTestId("edition-card-openclaw");
-    const hermes = screen.getByTestId("edition-card-hermes");
-    expect(openclaw).toHaveAttribute("data-selected", "true");
-    expect(hermes).toHaveAttribute("data-selected", "false");
+    expect(card("OpenClaw")).toBeChecked();
+    expect(card("Hermes")).not.toBeChecked();
+    const openclaw = card("OpenClaw").closest("label")!;
+    const hermes = card("Hermes").closest("label")!;
     expect(within(openclaw).getByText("assistant.recommended")).toBeInTheDocument();
     expect(within(hermes).queryByText("assistant.recommended")).toBeNull();
     // One plain sentence and three "good if" lines per card.
@@ -116,22 +125,25 @@ describe("EditionStep — choosing", () => {
     // The recommendation and whether it can be changed later.
     expect(screen.getByText("assistant.recommendLine")).toBeInTheDocument();
     expect(screen.getByText("assistant.changeLater")).toBeInTheDocument();
-    expect(screen.getByTestId("edition-continue")).toHaveTextContent("assistant.continue[OpenClaw]");
+    expect(continueButton()).toHaveTextContent("assistant.continue[OpenClaw]");
     // Real radios, one group.
     expect(screen.getAllByRole("radio")).toHaveLength(2);
     expect(screen.queryByTestId("edition-hint")).toBeNull();
   });
 
   it("preselects the agent the box was prepared for, and says why", async () => {
+    const user = userEvent.setup();
     device([status({ needed: true, hint: "hermes" })]);
     render(<EditionStep onReady={vi.fn()} pollMs={5} />);
 
     expect(await screen.findByTestId("edition-hint")).toHaveTextContent("assistant.hint[Hermes]");
-    expect(screen.getByTestId("edition-card-hermes")).toHaveAttribute("data-selected", "true");
-    expect(screen.getByTestId("edition-continue")).toHaveTextContent("assistant.continue[Hermes]");
+    expect(card("Hermes")).toBeChecked();
+    expect(continueButton()).toHaveTextContent("assistant.continue[Hermes]");
     // A hint never locks: the other card is still a choice.
-    fireEvent.click(screen.getByTestId("edition-card-openclaw"));
-    expect(screen.getByTestId("edition-continue")).toHaveTextContent("assistant.continue[OpenClaw]");
+    await user.click(card("OpenClaw"));
+    expect(card("OpenClaw")).toBeChecked();
+    expect(card("Hermes")).not.toBeChecked();
+    expect(continueButton()).toHaveTextContent("assistant.continue[OpenClaw]");
   });
 
   it("goes straight on when the box needs no choice", async () => {
@@ -142,16 +154,18 @@ describe("EditionStep — choosing", () => {
   });
 
   it("offers a retry when the box cannot be asked", async () => {
+    const user = userEvent.setup();
     const fetchMock = device([new Error("offline"), status({ needed: true })]);
     render(<EditionStep onReady={vi.fn()} pollMs={5} />);
-    fireEvent.click(await screen.findByText("retry"));
-    expect(await screen.findByTestId("edition-card-openclaw")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "retry" }));
+    expect(await findCard("OpenClaw")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
 describe("EditionStep — setting up", () => {
   it("posts the choice, shows progress, waits for the restart, then moves on", async () => {
+    const user = userEvent.setup();
     const fetchMock = device(
       [
         status({ needed: true }),
@@ -173,8 +187,8 @@ describe("EditionStep — setting up", () => {
     const onReady = vi.fn();
     render(<EditionStep onReady={onReady} pollMs={5} />);
 
-    fireEvent.click(await screen.findByTestId("edition-card-hermes"));
-    fireEvent.click(screen.getByTestId("edition-continue"));
+    await user.click(await findCard("Hermes"));
+    await user.click(continueButton());
 
     expect(await screen.findByText("assistant.settingUpTitle[Hermes]")).toBeInTheDocument();
     await waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
@@ -182,12 +196,13 @@ describe("EditionStep — setting up", () => {
   });
 
   it("marks finished phases done and the restart as the current row", async () => {
+    const user = userEvent.setup();
     device(
       [status({ needed: true }), status({ needed: false, serverStartedAt: STARTED })],
       [ndjson([{ phase: "request" }, { phase: "check" }, { phase: "lock" }, { phase: "provision" }, { phase: "cleanup" }, { phase: "done" }, { success: true }])],
     );
     render(<EditionStep onReady={vi.fn()} pollMs={50} />);
-    fireEvent.click(await screen.findByTestId("edition-continue"));
+    await user.click(await findContinue());
 
     const list = await screen.findByTestId("edition-progress");
     await waitFor(() => {
@@ -198,6 +213,7 @@ describe("EditionStep — setting up", () => {
   });
 
   it("follows the box when the stream is lost, until the restarted server says it is done", async () => {
+    const user = userEvent.setup();
     const lost = new Response("", { status: 200 });
     const onReady = vi.fn();
     device(
@@ -210,7 +226,7 @@ describe("EditionStep — setting up", () => {
       [lost],
     );
     render(<EditionStep onReady={onReady} pollMs={5} />);
-    fireEvent.click(await screen.findByTestId("edition-continue"));
+    await user.click(await findContinue());
     await waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
   });
 
@@ -228,6 +244,7 @@ describe("EditionStep — setting up", () => {
 
 describe("EditionStep — when it fails", () => {
   it("says nothing changed, keeps the step's sentence behind Details, and retries or lets the owner choose again", async () => {
+    const user = userEvent.setup();
     const fetchMock = device(
       [status({ needed: true })],
       [ndjson([
@@ -237,21 +254,22 @@ describe("EditionStep — when it fails", () => {
       ])],
     );
     render(<EditionStep onReady={vi.fn()} pollMs={5} />);
-    fireEvent.click(await screen.findByTestId("edition-card-hermes"));
-    fireEvent.click(screen.getByTestId("edition-continue"));
+    await user.click(await findCard("Hermes"));
+    await user.click(continueButton());
 
     expect(await screen.findByText("assistant.failedTitle[Hermes]")).toBeInTheDocument();
     expect(screen.getByTestId("edition-failed-body")).toHaveTextContent("assistant.failedBody");
     expect(screen.getByTestId("edition-failed-detail")).toHaveTextContent("Hermes does not run on this box");
 
-    fireEvent.click(screen.getByTestId("edition-retry"));
+    await user.click(screen.getByRole("button", { name: "retry" }));
     await waitFor(() => expect(postedBodies(fetchMock)).toEqual([{ edition: "hermes" }, { edition: "hermes" }]));
 
-    fireEvent.click(await screen.findByText("assistant.chooseOther"));
-    expect(await screen.findByTestId("edition-card-openclaw")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "assistant.chooseOther" }));
+    expect(await findCard("OpenClaw")).toBeInTheDocument();
   });
 
   it("only offers to FINISH the agent a cut-short activation locked the box to", async () => {
+    const user = userEvent.setup();
     const fetchMock = device(
       [status({ needed: true, pending: "hermes" })],
       [ndjson([{ phase: "request" }, { success: true }])],
@@ -261,46 +279,50 @@ describe("EditionStep — when it fails", () => {
     expect(await screen.findByText("assistant.failedTitle[Hermes]")).toBeInTheDocument();
     expect(screen.getByTestId("edition-failed-body")).toHaveTextContent("assistant.pendingBody[Hermes]");
     expect(screen.queryByText("assistant.chooseOther")).toBeNull();
-    fireEvent.click(screen.getByTestId("edition-retry"));
+    await user.click(screen.getByRole("button", { name: "retry" }));
     await waitFor(() => expect(postedBodies(fetchMock)).toEqual([{ edition: "hermes" }]));
   });
 
   it("turns a failure after the lock flipped into the finish-it view", async () => {
+    const user = userEvent.setup();
     device(
       [status({ needed: true })],
       [ndjson([{ phase: "request" }, { error: "Error: the provision phase failed — x", code: "select_failed", unselected: false, pending: "openclaw" }])],
     );
     render(<EditionStep onReady={vi.fn()} pollMs={5} />);
-    fireEvent.click(await screen.findByTestId("edition-continue"));
+    await user.click(await findContinue());
     expect(await screen.findByTestId("edition-failed-body")).toHaveTextContent("assistant.pendingBody[OpenClaw]");
     expect(screen.queryByText("assistant.chooseOther")).toBeNull();
   });
 
   it("explains an update that owns the box in the owner's language", async () => {
+    const user = userEvent.setup();
     device(
       [status({ needed: true })],
       [json({ error: "An update is running on this box.", code: "update_in_progress" }, { status: 409 })],
     );
     render(<EditionStep onReady={vi.fn()} pollMs={5} />);
-    fireEvent.click(await screen.findByTestId("edition-continue"));
+    await user.click(await findContinue());
     expect(await screen.findByTestId("edition-failed-body")).toHaveTextContent("assistant.updateRunning");
   });
 
   it("moves on when another tab already made the choice", async () => {
+    const user = userEvent.setup();
     const onReady = vi.fn();
     device([status({ needed: true })], [json({ error: "This box already runs Hermes.", code: "already_chosen" }, { status: 409 })]);
     render(<EditionStep onReady={onReady} pollMs={5} />);
-    fireEvent.click(await screen.findByTestId("edition-continue"));
+    await user.click(await findContinue());
     await waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
   });
 
   it("reports a step that ended without finishing, seen only by polling", async () => {
+    const user = userEvent.setup();
     device(
       [status({ needed: true }), status({ needed: true, inProgress: false })],
       [new Response("", { status: 200 })],
     );
     render(<EditionStep onReady={vi.fn()} pollMs={5} />);
-    fireEvent.click(await screen.findByTestId("edition-continue"));
+    await user.click(await findContinue());
     expect(await screen.findByTestId("edition-failed-body")).toHaveTextContent("assistant.failedBody");
   });
 });

@@ -24,7 +24,7 @@ function assignment(name: string) {
 }
 // Execute the real installer step, not a mirrored caller. Doctor deliberately
 // can fail or succeed; all side effects use isolated fixtures.
-function run(scenario: string, needsInstall = false) {
+function run(scenario: string, needsInstall = false, extraEnv: Record<string, string> = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "migration-stop-"));
   const core = path.join(dir, "openclaw");
   const v1 = scenario.startsWith("v1-");
@@ -43,6 +43,9 @@ NPM_PREFIX="${dir}/npm-global"
 CLAWBOX_HOME=/nonexistent
 id() { echo 1000; }
 is_hermes_edition() { return 1; }
+# An OpenClaw box runs its gateway; RUNS_OPENCLAW=0 is the unified image's
+# \`unselected\`, which installs the core but runs no agent (TASK-1149).
+has_openclaw_harness() { [ "\${RUNS_OPENCLAW:-1}" = 1 ]; }
 ensure_clawbox_bashrc_path() { :; }
 ensure_openclaw_node_engine() { :; }
 openclaw_version_is_v2() { [[ "$1" == 2026.8.* ]]; }
@@ -123,7 +126,7 @@ if [[ "$SCENARIO" == setup-* ]]; then
 else
   step_openclaw_install
 fi
-`, "test"], { encoding: "utf8", env: { ...process.env, SCENARIO: scenario } });
+`, "test"], { encoding: "utf8", env: { ...process.env, SCENARIO: scenario, ...extraEnv } });
   return { ...result, events: existsSync(path.join(dir, "events")) ? readFileSync(path.join(dir, "events"), "utf8").trim().split("\n") : [] };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -173,6 +176,23 @@ describe("OpenClaw stopped-writer prerequisite", () => {
     expect(r.status, r.stderr).toBe(0);
     expect(r.events).toEqual(["PLUGINS_LIST", "PLUGIN_REFRESH", "PATCH", "CONFIG", "TTS", "START"]);
   });
+  // TASK-1149: `_oc_gateway_stopped` is set whether or not a gateway was
+  // running, so the restore must be the edition's to grant. On `unselected`
+  // (both cores installed, no agent chosen) neither restore path may start a
+  // leftover clawbox-gateway unit before the owner picks OpenClaw.
+  it("does not start the gateway after the install step on a box that runs no OpenClaw yet", () => {
+    const r = run("v2-current", false, { RUNS_OPENCLAW: "0" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).not.toContain("GATEWAY_RESTARTED");
+    expect(r.events).toEqual(["PLUGINS_LIST", "PLUGIN_REFRESH"]);
+  });
+
+  it("does not start the gateway after the composite setup on a box that runs no OpenClaw yet", () => {
+    const r = run("setup-success", false, { RUNS_OPENCLAW: "0" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.events).toEqual(["PLUGINS_LIST", "PLUGIN_REFRESH", "PATCH", "CONFIG", "TTS"]);
+  });
+
   for (const scenario of ["setup-patch-failure", "setup-config-failure", "setup-tts-failure"]) {
     it(`does not restart after ${scenario}`, () => {
       const r = run(scenario);

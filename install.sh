@@ -4242,7 +4242,9 @@ step_openclaw_setup() {
     14) echo "  Warning: the TTS install did not complete (recorded above; provisioning continues)" ;;
     *) return "$TTS_STEP_RC" ;;
   esac
-  if [ "$_oc_gateway_restore_pending" -eq 1 ]; then
+  # Only an edition that RUNS the gateway gets it back: `unselected` installs
+  # the core but must not start an OpenClaw nobody chose (TASK-1149).
+  if has_openclaw_harness && [ "$_oc_gateway_restore_pending" -eq 1 ]; then
     systemctl start clawbox-gateway.service 2>/dev/null || true
   fi
 
@@ -6450,7 +6452,11 @@ for p in d.get("plugins", []):
   fi
   # Standalone installs restore only after plugin refresh. The composite setup
   # step owns restoration after its remaining patch/config/voice operations.
-  if [ "$_oc_gateway_stopped" -eq 1 ]; then
+  # `_oc_gateway_stopped` is set whether or not a gateway was running, so the
+  # restore is gated on an edition that RUNS one: on `unselected` (both cores
+  # installed, no agent chosen) it would start a leftover unit before the
+  # owner picked OpenClaw (TASK-1149).
+  if has_openclaw_harness && [ "$_oc_gateway_stopped" -eq 1 ]; then
     if [ "${_oc_defer_gateway_start:-0}" -eq 1 ]; then
       _oc_gateway_restore_pending=1
     else
