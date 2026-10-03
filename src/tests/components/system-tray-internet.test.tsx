@@ -31,7 +31,7 @@ function stubInternet(body: unknown) {
 }
 
 function renderTray() {
-  return render(<SystemTray isOpen onClose={() => {}} date="Monday, September 7" time="09:18" />);
+  return render(<SystemTray isOpen onClose={() => {}} />);
 }
 
 describe("SystemTray — the internet line", () => {

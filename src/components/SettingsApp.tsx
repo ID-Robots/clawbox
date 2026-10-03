@@ -47,6 +47,7 @@ import { DISCORD_INVITE_URL } from "@/lib/community";
 import BackgroundJobsPanel from "./BackgroundJobsPanel";
 import ClawboxMcpPanel from "./ClawboxMcpPanel";
 import UsersPanel from "./UsersPanel";
+import MonitorsPanel from "./MonitorsPanel";
 // From the pure module, never `@/lib/plugin-repair`: that one reads the
 // marker file and would pull `fs` into the browser bundle.
 import { canonicalPluginId } from "@/lib/plugin-repair-id";
@@ -232,7 +233,7 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "users", "system", "update", "about"] as const;
+const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "users", "system", "update", "about"] as const;
 
 /**
  * The channels that live behind the single "Messaging Channels" entry — the same idea
@@ -330,6 +331,10 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   // not by history: the brain and the ways to reach it first, the box's own
   // machinery next, the once-a-year pages last.
   { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
+  // Monitor mode: the monitors the desktop is spread over. Only on a box that
+  // has a monitor session (`monitorsAvailable` below) — every other box never
+  // shows the row.
+  { id: "monitors", icon: "desktop_windows", labelKey: "settings.monitors" },
   // Providers (cloud sign-ins) and Local AI (the on-device model and the
   // inventory of everything running on the box) are neighbours, each with its
   // own provider list on top. "localModels" stays a Section so its deep links
@@ -587,13 +592,44 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     // must not take the picker down.
     row.scrollIntoView?.({ block: "nearest" });
   }, [langOpen, langActive]);
-  const [initialSection] = useState(peekPendingSection);
+  const [initialRequest] = useState(peekPendingSection);
+  // A deep link to Monitors waits for the question below: on a box without a
+  // monitor session it is ignored, exactly as it was before the section
+  // existed — Settings opens where it always did, with no pane for a row the
+  // sidebar does not have.
+  const initialSection = initialRequest === "monitors" ? null : initialRequest;
   const [section, setSection] = useState<Section>(initialSection ?? DEFAULT_SECTION);
+  // Does this box have a monitor session to arrange (monitor mode)? Asked once
+  // (below); every box without one answers `available: false` and the row
+  // stays hidden. `monitorsKnown` is the same answer for the deep-link
+  // listener — null until it has come, and an answer that never comes is a no
+  // — and `monitorsLink` a deep link to Monitors waiting for it.
+  const [monitorsAvailable, setMonitorsAvailable] = useState(false);
+  const monitorsKnown = useRef<boolean | null>(null);
+  const monitorsLink = useRef(initialRequest === "monitors");
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
   const [requestedAiProviderId, setRequestedAiProviderId] = useState<string | null>(null);
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(initialSection);
+  useEffect(() => {
+    let alive = true;
+    const answer = (available: boolean) => {
+      if (!alive) return;
+      monitorsKnown.current = available;
+      setMonitorsAvailable(available);
+      if (available && monitorsLink.current) {
+        setSection("monitors");
+        setMobileSection("monitors");
+      }
+      monitorsLink.current = false;
+    };
+    fetch("/setup-api/monitors", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((body: { available?: boolean } | null) => answer(body?.available === true))
+      .catch(() => answer(false));
+    return () => { alive = false; };
+  }, []);
 
   // ClawBox account gate — Remote Control needs the user to be signed in to
   // the portal so the tunnel can be claimed. The hook polls /ai-models/status
@@ -652,6 +688,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // user action wants to navigate; bypass it for programmatic restorations
   // (URL deep-link, tier-based redirects) where blocking would be confusing.
   const setSectionGated = useCallback((next: Section) => {
+    // The owner went somewhere: a Monitors link still waiting for the box's
+    // answer is not theirs any more.
+    monitorsLink.current = false;
     if (next === "remote" && requireLoginFor("remote")) return;
     // The old Local Models section is part of Local AI now.
     if (next === "localModels") next = "localAi";
@@ -670,16 +709,27 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     const apply = (s: unknown) => {
       const next = toSection(s);
       if (!next) return;
+      // Monitors only where the box has said it has a monitor session: until
+      // it has answered the link waits, and where it has none the link is
+      // ignored, as it was before the section existed.
+      if (next === "monitors" && monitorsKnown.current !== true) {
+        if (monitorsKnown.current === null) monitorsLink.current = true;
+        return;
+      }
+      // A later link to anywhere else wins over one still waiting.
+      monitorsLink.current = false;
       setSection(next);
       setMobileSection(next);
     };
     const requestClawAiOffer = () => {
+      monitorsLink.current = false;
       setSection("ai");
       setMobileSection("ai");
       setOpenClawAIOfferRequest((current) => current + 1);
     };
     const requestProviderSelection = (providerId: unknown) => {
       if (typeof providerId !== "string" || !providerId.trim()) return;
+      monitorsLink.current = false;
       setSection("ai");
       setMobileSection("ai");
       setRequestedAiProviderId(providerId);
@@ -3115,7 +3165,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const navSection: Section = isChannelSection(activeSection)
     ? "channels"
     : activeSection === "localModels" ? "localAi" : activeSection;
-  const visibleNavItems = NAV_ITEMS;
+  const visibleNavItems = monitorsAvailable ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id !== "monitors");
   // The panel's own heading. Taken from the entry that already names it — the
   // channels list for a channel pane, the sidebar for every other section — so
   // a heading needs no new translation key and cannot drift from the row the
@@ -3249,7 +3299,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // One dialog, rendered from both the mobile and the desktop tree below. It
   // used to be copy-pasted into each, which is how the two could have drifted.
   const factoryResetDialog = resetConfirm && !resetting && (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+    // No backdrop blur under the dim: a full-screen blur is redone over the whole
+    // desktop on every frame anything beneath it moves (the mascot always does).
+    // One step darker keeps the look.
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
       <div
         ref={factoryResetPanelRef}
         role="dialog"
@@ -3313,7 +3366,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // Shared by mobile and desktop. Keeping one dialog prevents the mobile
   // early-return layout from silently dropping password confirmation.
   const systemPasswordConfirmDialog = sysPasswordConfirmOpen && (
-    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+    // No backdrop blur under the dim: a full-screen blur is redone over the whole
+    // desktop on every frame anything beneath it moves (the mascot always does).
+    // One step darker keeps the look.
+    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/65 px-4">
       <div ref={systemPasswordConfirmPanelRef} role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
         <div className="flex items-center gap-2 mb-3">
           <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
@@ -6431,6 +6487,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
         {/* ─── Users (multi-user ClawBox OS) ─── */}
         {activeSection === "users" && <UsersPanel />}
+        {activeSection === "monitors" && monitorsAvailable && <MonitorsPanel />}
 
         {/* ─── About ─── */}
         {activeSection === "update" && (
@@ -6839,7 +6896,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
       {/* Hotspot enable confirmation — single-radio collision warning */}
       {hotspotConfirmEnable && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+        // No backdrop blur under the dim: a full-screen blur is redone over the whole
+        // desktop on every frame anything beneath it moves (the mascot always does).
+        // One step darker keeps the look.
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
@@ -6855,7 +6915,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
       {/* Hostname confirmation modal */}
       {hostnameConfirm && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+        // No backdrop blur under the dim: a full-screen blur is redone over the whole
+        // desktop on every frame anything beneath it moves (the mascot always does).
+        // One step darker keeps the look.
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
@@ -6947,7 +7010,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
       {/* Hostname confirmation modal */}
       {hostnameConfirm && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+        // No backdrop blur under the dim: a full-screen blur is redone over the whole
+        // desktop on every frame anything beneath it moves (the mascot always does).
+        // One step darker keeps the look.
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
@@ -6976,7 +7042,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
       {/* Hotspot enable confirmation — single-radio collision warning (desktop layout) */}
       {hotspotConfirmEnable && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+        // No backdrop blur under the dim: a full-screen blur is redone over the whole
+        // desktop on every frame anything beneath it moves (the mascot always does).
+        // One step darker keeps the look.
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">

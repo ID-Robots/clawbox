@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import ChromeShelf from "@/components/ChromeShelf";
 import { desktopTranslations } from "@/lib/desktop-translations";
 import type { Protection } from "@/lib/clawkeep-protection";
@@ -33,7 +33,6 @@ describe("ChromeShelf", () => {
     onAppClick: vi.fn(),
     onLauncherClick: vi.fn(),
     onTrayClick: vi.fn(),
-    time: "12:34",
   };
 
   it("hides the ClawKeep shield when no handler is provided", () => {
@@ -193,6 +192,28 @@ describe("ChromeShelf", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByText(EN["shelf.unpinFromShelf"])).not.toBeInTheDocument();
   });
+
+  it("draws its bar as a flat tint and its menus with no blur under their opaque fill", () => {
+    // A backdrop blur on the bar was redone over the WHOLE bar whenever
+    // anything changed under any part of it — the mascot standing on it, the
+    // shield's pulse, a window beneath. The menus are opaque, so a blur under
+    // them could never be seen at all.
+    const { container } = render(<ChromeShelf {...baseProps} onShelfSettings={vi.fn()} />);
+    const bar = container.querySelector("[data-mascot-ground]") as HTMLElement;
+    expect(bar.style.background).toBe("rgba(17, 24, 39, 0.8)");
+    expect(bar.getAttribute("style")).not.toMatch(/backdrop/);
+
+    fireEvent.contextMenu(screen.getByTestId("shelf-app-settings"));
+    const appMenu = screen.getByText(EN["shelf.unpinFromShelf"]).closest("div.fixed") as HTMLElement;
+    expect(appMenu.className).toContain("bg-[#2d2d2d]");
+    expect(appMenu.className).not.toMatch(/backdrop-blur/);
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    fireEvent.contextMenu(bar);
+    const shelfMenu = screen.getByText(EN["shelf.shelfSettings"]).closest("div.fixed") as HTMLElement;
+    expect(shelfMenu.className).toContain("bg-[#2d2d2d]");
+    expect(shelfMenu.className).not.toMatch(/backdrop-blur/);
+  });
 });
 
 describe("the phone bar", () => {
@@ -201,7 +222,6 @@ describe("the phone bar", () => {
     onAppClick: vi.fn(),
     onLauncherClick: vi.fn(),
     onTrayClick: vi.fn(),
-    time: "12:34",
   };
 
   beforeEach(() => {
@@ -233,6 +253,37 @@ describe("the phone bar", () => {
 
     fireEvent.click(screen.getByTestId("shelf-app-files"));
     expect(onAppClick).toHaveBeenCalledWith("files");
+  });
+
+  it("fills the phone bar more opaquely than the desktop shelf, so the icons scrolling under it do not read through", () => {
+    // The phone's icon grid scrolls UNDER the bar. At the shelf's 0.8 the
+    // tiles and their white labels showed through sharp — readable ghost
+    // text, where the old blur left only a glow — so the phone bar is 0.93.
+    const { container } = render(<ChromeShelf {...baseProps} />);
+    const bar = container.querySelector("[data-mascot-ground]") as HTMLElement;
+    expect(screen.getByTestId("shelf-mobile-apps")).toBeInTheDocument();
+    expect(bar.style.background).toBe("rgba(17, 24, 39, 0.93)");
+    expect(bar.getAttribute("style")).not.toMatch(/backdrop/);
+    // The same hairline as the desktop shelf.
+    expect(bar.style.borderTop).toBe("1px solid rgba(255, 255, 255, 0.1)");
+
+    // A phone in landscape is the phone bar too.
+    act(() => {
+      Object.defineProperty(window, "innerWidth", { value: 667, configurable: true });
+      Object.defineProperty(window, "innerHeight", { value: 375, configurable: true });
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(bar.style.background).toBe("rgba(17, 24, 39, 0.93)");
+
+    // Widened past the phone layout, it is the desktop shelf again, at the
+    // shelf's own fill (the one kiosk/extension/bar.js copies).
+    act(() => {
+      Object.defineProperty(window, "innerWidth", { value: 1024, configurable: true });
+      Object.defineProperty(window, "innerHeight", { value: 768, configurable: true });
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(screen.queryByTestId("shelf-mobile-apps")).not.toBeInTheDocument();
+    expect(bar.style.background).toBe("rgba(17, 24, 39, 0.8)");
   });
 
   it("still draws an open Settings the owner unpinned", () => {

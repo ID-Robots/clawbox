@@ -374,6 +374,109 @@ interface ContextMenuState {
   hasSelection: boolean;
 }
 
+/**
+ * How often, at most, the PTY is told a new size while the grid keeps
+ * changing — under an edge drag the grid follows the pointer frame by frame,
+ * and each size the PTY hears is a SIGWINCH on which a full-screen program
+ * (claude, htop, vim) redraws its whole screen and streams it back: up to
+ * sixty a second. The first change of a burst still goes at once and the size
+ * the grid settles on always goes last, so a single resize — maximize, a tab
+ * coming forward, a font that loaded — is heard exactly as before.
+ */
+export const PTY_RESIZE_INTERVAL_MS = 100;
+
+/**
+ * The clock that interval is measured on: monotonic, because the box has no
+ * RTC and its wall clock jumps at NTP sync (the reason src/lib/visible-interval.ts
+ * keeps one too).
+ */
+function monotonicNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+
+/**
+ * The longest a width or height TRANSITION of the window around a terminal
+ * may hold its fit back (see `watchResizeTransitions`). The window's own
+ * glides are 200 ms; this is only the floor under a transition whose end is
+ * never reported — its element taken off the page mid-glide — so the grid is
+ * never left at the old size for good.
+ */
+export const RESIZE_TRANSITION_WATCHDOG_MS = 1000;
+
+/**
+ * Whether something AROUND `el` — the window it is drawn in, a panel holding
+ * it — is in a CSS transition of its width or height, and `onSettled` when the
+ * last such transition ends.
+ *
+ * A snapped window glides to its zone for 200 ms (ChromeWindow's left / top /
+ * width / height transition), and glides again whenever the desktop changes
+ * shape under it — the docked chat opened, closed or dragged wider, the kiosk
+ * bar, the monitors. Fitted frame by frame, the terminal re-laid its grid and
+ * reflowed its scrollback about twelve times per glide, and told the PTY each
+ * size, on which a full-screen program redrew its whole screen each time. The
+ * grid is fitted once instead, to the size the window comes to rest at.
+ *
+ * Counted per element and property from `transitionrun` to `transitionend` or
+ * `transitioncancel` (the events bubble, so the document hears every one), so
+ * a glide that is retargeted mid-way — the chat dragged wider — stays one
+ * glide whatever order the cancel and the new run arrive in. An end whose run
+ * was never seen (it started before the terminal did) changes nothing.
+ */
+export function watchResizeTransitions(el: HTMLElement, onSettled: () => void): { running: () => boolean; dispose: () => void } {
+  const doc = el.ownerDocument;
+  const inFlight = new Map<EventTarget, Map<string, number>>();
+  let watchdog: ReturnType<typeof setTimeout> | null = null;
+  const settle = () => {
+    if (watchdog !== null) clearTimeout(watchdog);
+    watchdog = null;
+    inFlight.clear();
+    onSettled();
+  };
+  // Only a width or height, and only of something that holds this terminal:
+  // a button's hover colour or a sidebar beside it is none of its business.
+  const resizes = (e: Event): EventTarget | null => {
+    const property = (e as TransitionEvent).propertyName;
+    if (property !== "width" && property !== "height") return null;
+    const target = e.target as Node | null;
+    return target && typeof target.contains === "function" && target.contains(el) ? target : null;
+  };
+  const begin = (e: Event) => {
+    const target = resizes(e);
+    if (!target) return;
+    const property = (e as TransitionEvent).propertyName;
+    let counts = inFlight.get(target);
+    if (!counts) inFlight.set(target, (counts = new Map()));
+    counts.set(property, (counts.get(property) ?? 0) + 1);
+    if (watchdog === null) watchdog = setTimeout(settle, RESIZE_TRANSITION_WATCHDOG_MS);
+  };
+  const end = (e: Event) => {
+    const target = resizes(e);
+    const counts = target ? inFlight.get(target) : undefined;
+    if (!target || !counts) return;
+    const property = (e as TransitionEvent).propertyName;
+    const left = (counts.get(property) ?? 0) - 1;
+    if (left < 0) return;
+    if (left > 0) counts.set(property, left);
+    else counts.delete(property);
+    if (counts.size === 0) inFlight.delete(target);
+    if (inFlight.size === 0) settle();
+  };
+  doc.addEventListener("transitionrun", begin);
+  doc.addEventListener("transitionend", end);
+  doc.addEventListener("transitioncancel", end);
+  return {
+    running: () => inFlight.size > 0,
+    dispose: () => {
+      doc.removeEventListener("transitionrun", begin);
+      doc.removeEventListener("transitionend", end);
+      doc.removeEventListener("transitioncancel", end);
+      if (watchdog !== null) clearTimeout(watchdog);
+      watchdog = null;
+      inFlight.clear();
+    },
+  };
+}
+
 /** The menu's width and height, for keeping it inside the viewport. */
 const MENU_W = 240;
 const MENU_H = 270;
@@ -430,6 +533,11 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   const webglRef = useRef<XWebglAddon | null>(null);
   const webglLoadingRef = useRef(false);
   const fitFrameRef = useRef<number | null>(null);
+  // The window around the terminal is gliding to a new size (see
+  // `watchResizeTransitions`): a fit asked for meanwhile is held, and made
+  // once when the glide ends.
+  const resizeTransitionsRef = useRef<{ running: () => boolean } | null>(null);
+  const fitHeldRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
   // `exited`: the SHELL ended — `exit`, Ctrl+D — as opposed to the connection
   // to it going away. The first is the owner's doing and gets no retry; the
@@ -501,11 +609,17 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   }, [showNotice]);
 
   // One fit per frame, however many things asked for it. A panel that is not
-  // on screen has no size to fit to and is fitted when it comes back.
+  // on screen has no size to fit to and is fitted when it comes back. One
+  // whose window is mid-glide is fitted when the glide ends.
   const scheduleFit = useCallback(() => {
     if (fitFrameRef.current !== null || typeof requestAnimationFrame !== "function") return;
     fitFrameRef.current = requestAnimationFrame(() => {
       fitFrameRef.current = null;
+      if (resizeTransitionsRef.current?.running()) {
+        fitHeldRef.current = true;
+        return;
+      }
+      fitHeldRef.current = false;
       const el = containerRef.current;
       if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
       try { fitAddonRef.current?.fit(); } catch { /* not open yet */ }
@@ -586,12 +700,42 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   /** Everything that lives as long as the xterm instance, wired once after it opens. */
   const wireTerminal = useCallback((term: XTerm, el: HTMLElement) => {
     const cleanup = terminalCleanupRef.current;
-    // xterm's own resize (a fit that changed the grid) is what the PTY hears.
-    const resizeSub = term.onResize?.(({ cols, rows }) => {
+    // xterm's own resize (a fit that changed the grid) is what the PTY hears —
+    // at once, then at most once per PTY_RESIZE_INTERVAL_MS while the grid
+    // keeps changing, the latest size last (see the constant). A socket that
+    // is not open drops it, as before: `onopen` sends the grid's size anyway.
+    // (A window GLIDING to a new size changes the grid once, at its end: see
+    // `watchResizeTransitions` below.)
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    let resizePending: { cols: number; rows: number } | null = null;
+    let resizeSentAt = -Infinity;
+    const sendResize = () => {
+      resizeTimer = null;
+      const size = resizePending;
+      resizePending = null;
       const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      if (!size || !ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
+      resizeSentAt = monotonicNow();
+    };
+    const resizeSub = term.onResize?.(({ cols, rows }) => {
+      resizePending = { cols, rows };
+      // A send is already due: it takes this size with it.
+      if (resizeTimer !== null) return;
+      // On the MONOTONIC clock: the box has no RTC and NTP steps its wall
+      // clock, backwards too. Measured by Date.now(), a step back of an hour
+      // made this wait an hour — the pending size held in a timer, every later
+      // resize joining it, and a full-screen program drawing at the wrong size
+      // all that time.
+      const wait = resizeSentAt + PTY_RESIZE_INTERVAL_MS - monotonicNow();
+      if (wait <= 0) sendResize();
+      else resizeTimer = setTimeout(sendResize, wait);
     });
     if (resizeSub) cleanup.push(() => resizeSub.dispose());
+    cleanup.push(() => {
+      if (resizeTimer !== null) clearTimeout(resizeTimer);
+      resizeTimer = null;
+    });
     const bellSub = term.onBell?.(() => {
       if (settingsRef.current.bell !== "visual") return;
       setBellFlash((n) => n + 1);
@@ -603,6 +747,16 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       ro.observe(el);
       cleanup.push(() => ro.disconnect());
     }
+    // Held through a glide of the window, fitted once at its end — which is
+    // also the one size the PTY hears for it.
+    const transitions = watchResizeTransitions(el, () => {
+      if (fitHeldRef.current) scheduleFit();
+    });
+    resizeTransitionsRef.current = transitions;
+    cleanup.push(() => {
+      transitions.dispose();
+      if (resizeTransitionsRef.current === transitions) resizeTransitionsRef.current = null;
+    });
     // A move to a screen with another pixel ratio (or a browser zoom) changes
     // the cell's size in CSS pixels without changing the element's.
     if (typeof window.matchMedia === "function") {

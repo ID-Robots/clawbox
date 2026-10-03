@@ -58,7 +58,10 @@ export default function VoiceTunnelDialog({
       data-testid="voice-tunnel-overlay"
       style={{
         position: "fixed", inset: 0, zIndex: 10020,
-        background: "rgba(0,0,0,0.6)", backdropFilter: "blur(2px)",
+        // No backdrop blur under the dim: a full-screen blur is redone over the
+        // whole desktop on every frame anything beneath it moves (the mascot
+        // always does). It was a 2px blur, so a slightly darker fill keeps the look.
+        background: "rgba(0,0,0,0.62)",
         display: "flex", alignItems: "center", justifyContent: "center",
         padding: 24,
       }}

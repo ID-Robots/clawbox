@@ -1,0 +1,110 @@
+/* Guake in the ClawBox look: the ClawBox Terminal's tab strip (TerminalTabs)
+   and scrollbar, on the darker canvas Guake's palette uses (#0d1117). Every
+   rule is scoped to Guake's own window (#guake-terminal), so no other GTK
+   application of this account changes. The tab in front carries the
+   desktop's coral #f97316. */
+#guake-terminal,
+#guake-terminal notebook,
+#guake-terminal notebook > stack {
+  background-color: #0d1117;
+}
+
+/* The tab strip. */
+#guake-terminal notebook > header {
+  background-color: #161b22;
+  background-image: none;
+  border: none;
+  box-shadow: inset 0 -1px #30363d;
+  padding: 4px 6px 0 6px;
+}
+#guake-terminal notebook > header.bottom {
+  box-shadow: inset 0 1px #30363d;
+  padding: 0 6px 4px 6px;
+}
+#guake-terminal notebook > header > tabs > tab {
+  min-height: 0;
+  margin: 0 1px;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 8px 8px 0 0;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  color: rgba(240, 246, 252, 0.55);
+  font-size: 12px;
+  font-weight: 500;
+}
+#guake-terminal notebook > header > tabs > tab:hover {
+  background-color: rgba(240, 246, 252, 0.06);
+  color: rgba(240, 246, 252, 0.85);
+}
+#guake-terminal notebook > header > tabs > tab:checked,
+#guake-terminal notebook > header > tabs > tab .custom_tab:checked,
+#guake-terminal .custom_tab:checked {
+  background-color: #0d1117;
+  color: #f0f6fc;
+  box-shadow: inset 0 2px #f97316, inset 1px 0 #30363d, inset -1px 0 #30363d;
+}
+#guake-terminal notebook > header.bottom > tabs > tab {
+  border-radius: 0 0 8px 8px;
+}
+#guake-terminal notebook > header.bottom > tabs > tab:checked {
+  box-shadow: inset 0 -2px #f97316, inset 1px 0 #30363d, inset -1px 0 #30363d;
+}
+#guake-terminal notebook > header > tabs > tab label,
+#guake-terminal notebook > header > tabs > tab * {
+  color: inherit;
+  background-color: transparent;
+}
+#guake-terminal notebook > header button,
+#guake-terminal notebook > header > tabs > tab button {
+  min-height: 0;
+  min-width: 0;
+  padding: 2px;
+  border: none;
+  border-radius: 6px;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  color: rgba(240, 246, 252, 0.45);
+}
+#guake-terminal notebook > header button:hover,
+#guake-terminal notebook > header > tabs > tab button:hover {
+  background-color: rgba(240, 246, 252, 0.1);
+  color: #f97316;
+}
+
+/* The scrollbar: a thin rounded slider on the terminal's own ground, as the
+   ClawBox Terminal draws it — no trough, no arrows. */
+#guake-terminal scrollbar,
+#guake-terminal scrollbar trough {
+  background-color: #0d1117;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+}
+#guake-terminal scrollbar.vertical {
+  min-width: 10px;
+  padding: 2px;
+}
+#guake-terminal scrollbar button {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  opacity: 0;
+}
+#guake-terminal scrollbar slider {
+  min-width: 6px;
+  min-height: 40px;
+  margin: 0;
+  border: none;
+  border-radius: 999px;
+  background-color: rgba(240, 246, 252, 0.14);
+}
+#guake-terminal scrollbar slider:hover {
+  background-color: rgba(240, 246, 252, 0.24);
+}
+#guake-terminal scrollbar slider:active {
+  background-color: rgba(240, 246, 252, 0.32);
+}

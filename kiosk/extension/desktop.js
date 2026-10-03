@@ -7,8 +7,9 @@
 //
 //  - the desktop — "/" on one of DESKTOP_ORIGINS, the same list background.js
 //    names the desktop by (the extension test holds them equal) — gets the
-//    bar as its tab strip: always up, in the shelf's glass, no address box
-//    (see bar.js for what else it leaves out and how the desktop makes room);
+//    bar as its tab strip: always up, in the shelf's flat tint and hairline,
+//    no address box (see bar.js for what else it leaves out, why a tint and
+//    not a blur, and how the desktop makes room);
 //  - the shell's own pages there (login, setup, updating, portal — SHELL_PATH,
 //    also background.js's) get nothing;
 //  - every other page is one the desktop OPENED — /app/<id>, /apps/<id>/,

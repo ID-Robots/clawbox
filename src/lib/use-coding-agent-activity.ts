@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isCodingRunStatus, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { onCodingRunStarted } from "@/lib/ui-events";
 import { isPrPending, isPrPhase, type PrPhase, type PrState } from "@/lib/coding-pr-state";
+import { samePlainData } from "@/lib/same-plain-data";
 
 /**
  * The coding runs this conversation has seen, and what became of them.
@@ -246,6 +247,11 @@ function toPrPhase(pr: PrState | null | undefined): PrPhase | null {
   return pr.phase;
 }
 
+/** The same runs, in the same order, each the very object already held. */
+function sameRuns(a: readonly CodingAgentActivity[], b: readonly CodingAgentActivity[]): boolean {
+  return a.length === b.length && a.every((run, i) => run === b[i]);
+}
+
 /** True when the tool the chat just saw is one of the coding-agent family. */
 export function isCodingAgentTool(name: string): boolean {
   return /coding_agent/i.test(name);
@@ -282,7 +288,9 @@ export function useCodingAgentActivity(active: boolean): {
 
   useEffect(() => {
     if (!active) {
-      setRuns([]);
+      // `prev` when there is nothing to drop: a new empty array is still a
+      // new state, and a render of the chat for it.
+      setRuns((prev) => (prev.length === 0 ? prev : []));
       openedAtRef.current = 0;
       return;
     }
@@ -318,13 +326,21 @@ export function useCodingAgentActivity(active: boolean): {
             // Adopt what belongs to this conversation: in flight now, or
             // started around the time the chat opened (a 9-second run can
             // begin and end between two polls, and it still happened here).
-            const mine = byId.has(run.id)
+            const known = byId.get(run.id);
+            const mine = known !== undefined
               || run.status === "running"
               || run.startedAt >= openedAtRef.current - RECENT_MS;
-            if (mine) byId.set(run.id, run);
+            // A run whose record has not moved keeps the object already on
+            // screen, so its card is handed the same props it drew last time.
+            if (mine) byId.set(run.id, known && samePlainData(known, run) ? known : run);
           }
-          const next = [...byId.values()].sort((a, b) => a.startedAt - b.startedAt);
-          return next.slice(-MAX_BADGES);
+          const next = [...byId.values()].sort((a, b) => a.startedAt - b.startedAt).slice(-MAX_BADGES);
+          // Nothing moved: the SAME array, so React skips the render. Every
+          // poll parses a fresh answer, and handing that back unconditionally
+          // re-rendered the whole chat every five seconds for as long as a run
+          // was live or a pull request pending — the run idling on a long
+          // build, the PR waiting on CI — to draw exactly what was on screen.
+          return sameRuns(prev, next) ? prev : next;
         });
 
         // Keep asking only while there is something to ask about — and once

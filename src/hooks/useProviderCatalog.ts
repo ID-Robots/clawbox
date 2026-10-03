@@ -98,55 +98,53 @@ export function useProviderCatalog(
     [provider],
   );
   const [live, setLive] = useState<LiveCatalog | null>(null);
-  // Set by the provider-set signal, read and cleared by the next load. A REF,
-  // not the reload counter: `reloads > 0` stays true for the rest of the
-  // session after any connect, so using it as "force a re-enumeration" made
-  // every later provider switch in the picker send `?refresh=1` for a provider
-  // that had received no signal at all — a fresh ~3-minute fork on a Jetson
-  // for a catalogue that was already live.
-  const forceNextLoad = useRef(false);
-  // Bumped by the same signal, purely to re-run the effect.
-  const [reloads, setReloads] = useState(0);
+  // What `live` holds, for the fetch callbacks: an answer the picker already
+  // shows is dropped BEFORE it reaches React. Handing the setter an updater
+  // that returns the same object is not free — after a commit React may still
+  // call the whole host component once to find out nothing moved, and the
+  // host is the chat popup, rendered whole for a catalogue it already draws.
+  const liveRef = useRef<LiveCatalog | null>(null);
 
   useEffect(() => {
     if (!provider || !isCatalogProvider(provider)) return;
-    const ctrl = new AbortController();
+    // Replaced, not reused, when a provider-set signal restarts the reads: the
+    // old request's answer predates the change and must never land.
+    let ctrl = new AbortController();
     let timer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
 
     const load = (refresh: boolean) => {
-      fetchProviderCatalog(provider, { signal: ctrl.signal, refresh })
+      const { signal } = ctrl;
+      fetchProviderCatalog(provider, { signal, refresh })
         .then((next) => {
-          if (ctrl.signal.aborted) return;
+          if (signal.aborted) return;
           // Only when something actually changed. During a warm-up every poll
           // returns the same curated rows, and a fresh object identity there
           // re-runs eight memos and two setState effects in AIModelsStep and
           // the same again in ChatPopup, per poll, per mounted picker.
-          setLive((current) => (
-            current && current.provider === provider && sameCatalog(current.catalog, next)
-              ? current
-              : { provider, catalog: next }
-          ));
+          const current = liveRef.current;
+          if (!(current && current.provider === provider && sameCatalog(current.catalog, next))) {
+            const fresh = { provider, catalog: next };
+            liveRef.current = fresh;
+            setLive(fresh);
+          }
           if (!next.warming || attempt >= WARMING_RETRY_ATTEMPTS) return;
           const delay = Math.min(WARMING_RETRY_BASE_MS * 2 ** attempt, WARMING_RETRY_MAX_MS);
           attempt += 1;
           timer = setTimeout(() => load(false), delay);
         })
         .catch((err) => {
-          if (ctrl.signal.aborted) return;
+          if (signal.aborted) return;
           console.warn(`[useProviderCatalog] fetch failed for ${provider}:`, err);
         });
     };
 
-    // A connect is exactly when the catalogue becomes enumerable — the plugin
-    // is enabled and the credential is written — so that ONE read asks the
-    // route to re-enumerate rather than serve the pre-connect snapshot. The
-    // warming polls that may follow do not: the route is already enumerating,
-    // and telling it to start again on each poll is how a picker turns a
-    // three-minute fork into several.
-    const force = forceNextLoad.current;
-    forceNextLoad.current = false;
-    load(force);
+    // A plain read: the route's own warm-up and backoff decide what it serves.
+    // Never `?refresh=1` merely because the provider changed — that made every
+    // later provider switch in the picker send it for a provider that had
+    // received no signal at all, a fresh ~3-minute fork on a Jetson for a
+    // catalogue that was already live.
+    load(false);
 
     // The provider SET changed — a key saved, an OAuth flow approved, a
     // provider enabled or removed, a new default. Deliberately NOT the whole
@@ -154,10 +152,27 @@ export function useProviderCatalog(
     // which means "the chat's model SELECTION changed", and a catalogue does
     // not change when someone picks a different row out of the list it already
     // has. Waking on it would ask a Jetson to re-enumerate on every switch.
+    //
+    // A connect is exactly when the catalogue becomes enumerable — the plugin
+    // is enabled and the credential is written — so that ONE read asks the
+    // route to re-enumerate rather than serve the pre-connect snapshot. The
+    // warming polls that may follow do not: the route is already enumerating,
+    // and telling it to start again on each poll is how a picker turns a
+    // three-minute fork into several.
+    //
+    // Restarted right here rather than through a state counter that re-ran
+    // this effect: the counter rendered the host — the whole chat popup — on
+    // every signal just to get here, and a catalogue that came back the same
+    // then cost nothing more. The restart is the one the re-run did: the read
+    // in flight and the warming poll dropped, the poll's budget back to zero.
     const off = onProvidersChanged(
       () => {
-        forceNextLoad.current = true;
-        setReloads((n) => n + 1);
+        ctrl.abort();
+        if (timer) clearTimeout(timer);
+        timer = null;
+        ctrl = new AbortController();
+        attempt = 0;
+        load(true);
       },
       { events: [PROVIDERS_CHANGED_EVENT] },
     );
@@ -167,7 +182,7 @@ export function useProviderCatalog(
       if (timer) clearTimeout(timer);
       off();
     };
-  }, [provider, reloads]);
+  }, [provider]);
 
   if (!provider) return null;
   return live?.provider === provider ? live.catalog : fallback;

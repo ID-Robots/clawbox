@@ -17,7 +17,7 @@
  * rather than on screen.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentSettingsPanel from "@/components/CodingAgentSettingsPanel";
 
@@ -271,7 +271,15 @@ describe("the Anthropic card", () => {
     // over a request that had simply fallen over.
     stubDevice({ providers: ["clawbox-ai", "anthropic"], anthropicReadFails: true });
     render(<CodingAgentSettingsPanel />);
-    const badge = await screen.findByTestId("coding-agent-anthropic-state");
+    await screen.findByTestId("coding-agent-anthropic-state");
+    // The card says "checking…" from its first frame, so the claim is only
+    // tested once the read has been made and has failed — read at once, this
+    // passed whatever a failed read then drew.
+    await waitFor(() => {
+      expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => input.toString().startsWith("/setup-api/coding-agent/anthropic"))).toBe(true);
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const badge = screen.getByTestId("coding-agent-anthropic-state");
     expect(badge.textContent).toBe(t("codingAgent.anthropicUnknown"));
     expect(badge.textContent).not.toBe(t("codingAgent.anthropicOff"));
   });
@@ -280,7 +288,15 @@ describe("the Anthropic card", () => {
     stubDevice({ providers: ["clawbox-ai", "anthropic"] });
     render(<CodingAgentSettingsPanel />);
     await screen.findByTestId("coding-agent-anthropic-card");
-    expect((await screen.findByTestId("coding-agent-anthropic-state")).textContent).toBe(t("codingAgent.anthropicOff"));
+    // Every state of the badge carries the one test id, and the card mounts
+    // saying "checking…" until its first read lands — so the badge is found
+    // at once, and only its TEXT says the read has answered. Waiting on the
+    // element alone raced that read.
+    await waitFor(() => {
+      expect(screen.getByTestId("coding-agent-anthropic-state").textContent).toBe(t("codingAgent.anthropicOff"));
+    });
+    // Asked only once the read has answered: before it, there is no Remove
+    // whatever the account says.
     expect(screen.queryByTestId("coding-agent-anthropic-remove")).toBeNull();
   });
 

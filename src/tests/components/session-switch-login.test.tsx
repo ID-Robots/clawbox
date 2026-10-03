@@ -129,7 +129,7 @@ describe("/login — a tab left on the form while another tab signs in", () => {
 describe("the tray's Switch user / Lock — the other way a session is switched", () => {
   it("signs out, tells the other tabs, and replaces the desktop with /login", async () => {
     location = stubLocation("/");
-    render(<SystemTray isOpen onClose={() => {}} date="Tuesday, September 29" time="09:00" />);
+    render(<SystemTray isOpen onClose={() => {}} />);
     fireEvent.click(await screen.findByText("tray.lock"));
 
     await waitFor(() => expect(location!.replace).toHaveBeenCalledWith("/login"));

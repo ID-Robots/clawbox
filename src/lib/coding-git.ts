@@ -393,11 +393,94 @@ function branchFromDecoration(decoration: string): string | null {
   return refs.includes("HEAD") ? "HEAD" : null;
 }
 
+/** A full commit id: SHA-1, or SHA-256 in a repository made with that object format. */
+const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * The commit HEAD names, read off `.git` the way git itself resolves it — or
+ * null whenever that takes more than the plain layout, and the caller asks git.
+ *
+ * HEAD holds a commit id (detached) or `ref: refs/…`; that ref is a loose file
+ * holding an id, which wins over its line in `packed-refs` (`<id> <ref>`). Any
+ * other shape — `.git` a FILE (a linked worktree), a symbolic ref chained
+ * through another, a branch with no commit yet, the reftable store (whose HEAD
+ * names `refs/heads/.invalid`) — answers null rather than a guess. Two small
+ * reads, no process.
+ */
+async function headCommitId(dir: string): Promise<string | null> {
+  const gitDir = path.join(dir, ".git");
+  let head: string;
+  try {
+    head = (await fsp.readFile(path.join(gitDir, "HEAD"), "utf8")).trim();
+  } catch {
+    return null;
+  }
+  if (COMMIT_ID.test(head)) return head;
+  const named = /^ref: (refs\/\S+)$/.exec(head)?.[1];
+  // The name becomes a path under .git: one that could climb out of it is not
+  // a ref this reads.
+  if (!named || named.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return null;
+  try {
+    const loose = (await fsp.readFile(path.join(gitDir, named), "utf8")).trim();
+    return COMMIT_ID.test(loose) ? loose : null;
+  } catch (err) {
+    // Only "there is no loose ref" sends the look on to packed-refs.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return null;
+  }
+  let packed: string;
+  try {
+    packed = await fsp.readFile(path.join(gitDir, "packed-refs"), "utf8");
+  } catch {
+    return null;
+  }
+  for (const line of packed.split("\n")) {
+    // "# pack-refs with: …" is the header and "^<id>" a peeled tag: neither
+    // has the "<id> <ref>" shape matched here.
+    const space = line.indexOf(" ");
+    if (space <= 0 || line.slice(space + 1).trimEnd() !== named) continue;
+    const id = line.slice(0, space);
+    return COMMIT_ID.test(id) ? id : null;
+  }
+  return null;
+}
+
+/** `lastCommit` answers by project folder, keyed by the commit they describe. */
+const lastCommitByDir = new Map<string, { id: string; commit: LastCommit | null }>();
+/** More folders than the projects listing ever describes (100 + the code projects). */
+const MAX_LAST_COMMIT_ENTRIES = 256;
+
+/**
+ * The newest commit of the folder's own repository: its subject and time.
+ *
+ * The Coding Agent window asks the projects listing — this, once per project —
+ * every 5 s while a run is live or a pull request waits on its checks, which
+ * was a `git log` per project per poll on a box whose CPU the run being
+ * watched needs. A commit never changes once made, so an answer is kept
+ * under the id git PRINTED for it, and handed back while HEAD still names
+ * that id: the same answer git would give, with two small reads instead of a
+ * process. HEAD moving — a commit, a reset, a checkout, a merge, a pull — is
+ * a different id and asks git again; anything `headCommitId` cannot read
+ * plainly always asks git.
+ */
 export async function lastCommit(dir: string): Promise<LastCommit | null> {
-  const r = await git(path.resolve(dir), ["log", "-1", `--format=${LAST_COMMIT_FORMAT}`]);
+  const d = path.resolve(dir);
+  const head = await headCommitId(d);
+  const known = head ? lastCommitByDir.get(d) : undefined;
+  if (known && known.id === head) return known.commit;
+  // `%H` first, so the answer is filed under the commit it describes even if
+  // HEAD moved between the read above and git's own.
+  const r = await git(d, ["log", "-1", `--format=%H%n${LAST_COMMIT_FORMAT}`]);
   if (r.code !== 0 || !r.stdout) return null;
-  const [subject = "", seconds = ""] = r.stdout.split("\n");
-  return parseLastCommit(subject, seconds);
+  const [id = "", subject = "", seconds = ""] = r.stdout.split("\n");
+  const commit = parseLastCommit(subject, seconds);
+  if (COMMIT_ID.test(id)) {
+    lastCommitByDir.delete(d);
+    if (lastCommitByDir.size >= MAX_LAST_COMMIT_ENTRIES) {
+      lastCommitByDir.delete(lastCommitByDir.keys().next().value as string);
+    }
+    lastCommitByDir.set(d, { id, commit });
+  }
+  return commit;
 }
 
 // ─── The project page's workspace: what changed, and the diff of one file ────

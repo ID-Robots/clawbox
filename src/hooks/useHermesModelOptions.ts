@@ -114,6 +114,26 @@ function isPlaceholder(scope: HermesModelScope | null | undefined): boolean {
 }
 
 /**
+ * The same JSON value, whatever object identity it arrived in. The scope is the
+ * route's payload as parsed, so this compares exactly what a re-read can bring
+ * back — every field, the ones a later server adds included — rather than a
+ * hand-kept list of the fields this file happens to know about today.
+ */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, i) => sameJson(item, b[i]));
+  }
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((key) => Object.prototype.hasOwnProperty.call(right, key) && sameJson(left[key], right[key]));
+}
+
+/**
  * Go back for the real catalogue, with backoff, while the box is still
  * answering with a placeholder.
  *
@@ -146,6 +166,14 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
   // from "what we hold isn't for the provider we were asked about", so
   // switching provider needs no synchronous setState (and no extra render).
   const [loaded, setLoaded] = useState<LoadedState | null>(null);
+  // What `loaded` holds, for the fetch callbacks: an answer that is what the
+  // hook already hands out is dropped BEFORE it reaches React. A fresh object
+  // with the same contents is a new `scope` to every memo downstream, and the
+  // host here is the chat popup — rendered whole for a list it already draws.
+  const loadedRef = useRef<LoadedState | null>(null);
+  // Bumped by `refresh` alone, the owner's explicit ask: re-running the load
+  // effect is the point there. A provider-set signal restarts the load inside
+  // the effect instead (see below).
   const [nonce, setNonce] = useState(0);
   const controllerRef = useRef<AbortController | null>(null);
   // ONE-SHOT. `nonce` only ever increments, so gating the flag on `nonce > 0`
@@ -163,37 +191,30 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
     setNonce((n) => n + 1);
   }, []);
 
-  // A provider configured elsewhere in the UI changes what this scope should
-  // contain, but the effect below only re-runs when the PROVIDER changes — so
-  // without this the panel and the chat header kept serving the pre-configure
-  // answer until the page was reloaded.
-  //
-  // Note what this deliberately does NOT do: call `refresh`. Bumping the nonce
-  // alone re-asks the route plainly, which is enough because the write that
-  // emitted the signal already invalidated the server's caches. Going through
-  // `refresh` would set the explicit flag and make the server bust Hermes' own
-  // per-provider disk cache and re-enumerate EVERY provider's live /v1/models —
-  // a device-wide sweep to answer "is there a new provider in the list?".
-  //
-  // It also leaves `loaded` in place, so `fresh` (and therefore `loading`) is
-  // unchanged: the chat's model pill keeps its place instead of collapsing.
-  //
-  // Subscribed through `onProvidersChanged` rather than to the Hermes name
-  // alone: a provider connected anywhere in the UI is the same news whichever
-  // vocabulary the emitter happened to use, and the shared subscriber also
-  // debounces — a key save legitimately emits twice (credential, then pairing)
-  // and this hook would otherwise re-ask the route for both halves.
-  useEffect(() => onProvidersChanged(() => setNonce((n) => n + 1)), []);
-
   useEffect(() => {
     if (!provider) return;
     // Abort the previous provider's request so a slow response for the OLD
-    // provider can never land after the user has already moved on.
+    // provider can never land after the user has already moved on. Replaced,
+    // not reused, when a provider-set signal restarts the load below: the read
+    // it drops predates the change and must never land either.
     controllerRef.current?.abort();
-    const controller = new AbortController();
+    let controller = new AbortController();
     controllerRef.current = controller;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
+
+    /** Hand an answer over — unless it is exactly what is already handed out. */
+    const settle = (next: LoadedState) => {
+      const shown = loadedRef.current;
+      if (
+        shown
+        && shown.provider === next.provider
+        && shown.error === next.error
+        && sameJson(shown.scope, next.scope)
+      ) return;
+      loadedRef.current = next;
+      setLoaded(next);
+    };
 
     /** Ask again later, keeping what is on screen. True when one was booked. */
     const retryLater = (): boolean => {
@@ -211,11 +232,14 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
     };
 
     const load = (refresh: boolean) => {
+      // This read's own signal: a restart swaps `controller` for a new one,
+      // and the answer to a read it dropped must still see itself aborted.
+      const { signal } = controller;
       const url = `/setup-api/hermes/models?provider=${encodeURIComponent(provider)}${refresh ? "&refresh=1" : ""}`;
-      fetch(url, { cache: "no-store", signal: controller.signal })
+      fetch(url, { cache: "no-store", signal })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then((data: HermesModelScope) => {
-          if (controller.signal.aborted) return;
+          if (signal.aborted) return;
           // The request COMPLETED, which is the condition this flag is cleared
           // on — a degraded body is still the server answering. Only an ABORT
           // (fast provider switch, StrictMode double-mount) carries the intent
@@ -242,7 +266,7 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
             // `error: null`, which is how a dead dashboard rendered as a
             // provider that simply has these models; the rejected-request
             // branch below already reported the same fact. TASK-678.
-            setLoaded({
+            settle({
               provider,
               scope: data?.provider === provider ? data : emptyScope(provider),
               error: "Couldn't load models",
@@ -250,14 +274,14 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
             return;
           }
           // Guard against a stale/garbled payload naming a different provider.
-          setLoaded({
+          settle({
             provider,
             scope: data?.provider === provider ? data : emptyScope(provider),
             error: null,
           });
         })
         .catch((err) => {
-          if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return;
+          if (signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return;
           // Cleared here too, and BEFORE the retry: only an abort preserves the
           // intent (see above). An HTTP error, a dropped connection and a
           // failed parse all leave this branch with retries pending, and a
@@ -271,7 +295,7 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
           // connections and 502s, not tidy degraded 200s. Retrying only the
           // polite failure would have left the observed case unfixed.
           if (retryLater()) return;
-          setLoaded({ provider, scope: emptyScope(provider), error: "Couldn't load models" });
+          settle({ provider, scope: emptyScope(provider), error: "Couldn't load models" });
         });
     };
 
@@ -281,9 +305,50 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
     // "is the dashboard up yet?".
     load(pendingRefreshRef.current);
 
+    // A provider configured elsewhere in the UI changes what this scope should
+    // contain, but this effect only re-runs when the PROVIDER changes — so
+    // without this the panel and the chat header kept serving the pre-configure
+    // answer until the page was reloaded.
+    //
+    // Note what this deliberately does NOT do: call `refresh`. It re-asks the
+    // route plainly, which is enough because the write that emitted the signal
+    // already invalidated the server's caches. Going through `refresh` would
+    // set the explicit flag and make the server bust Hermes' own per-provider
+    // disk cache and re-enumerate EVERY provider's live /v1/models — a
+    // device-wide sweep to answer "is there a new provider in the list?". (A
+    // Refresh the owner pressed whose read is still out is the one exception,
+    // and only because that read is dropped here: the intent rides over to the
+    // read that replaces it, as it does across a provider switch.)
+    //
+    // It also leaves `loaded` in place, so `fresh` (and therefore `loading`) is
+    // unchanged: the chat's model pill keeps its place instead of collapsing.
+    //
+    // Restarted right here rather than through a state counter that re-ran
+    // this effect: the counter rendered the host — the whole chat popup — on
+    // every signal just to get here, including on an OpenClaw box, where the
+    // provider is null and nothing was ever asked. Listening only while there
+    // is a provider ends that too. The restart is the one the re-run did: the
+    // read in flight and a booked retry dropped, the retry budget back to zero.
+    //
+    // Subscribed through `onProvidersChanged` rather than to the Hermes name
+    // alone: a provider connected anywhere in the UI is the same news whichever
+    // vocabulary the emitter happened to use, and the shared subscriber also
+    // debounces — a key save legitimately emits twice (credential, then pairing)
+    // and this hook would otherwise re-ask the route for both halves.
+    const off = onProvidersChanged(() => {
+      controller.abort();
+      if (timer) clearTimeout(timer);
+      timer = null;
+      controller = new AbortController();
+      controllerRef.current = controller;
+      attempt = 0;
+      load(pendingRefreshRef.current);
+    });
+
     return () => {
       if (timer) clearTimeout(timer);
       controller.abort();
+      off();
     };
   }, [provider, nonce]);
 

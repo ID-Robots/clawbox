@@ -16,6 +16,7 @@ import {
 } from '@/lib/chat-history-cache'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
+import { samePlainData } from '@/lib/same-plain-data'
 
 import { renderText, audioLabel } from '@/lib/chat-markdown'
 import { PROGRESS_CARD_CHANGED_EVENT, useGatewayProgressCard } from '@/lib/chat-progress-card'
@@ -132,6 +133,167 @@ interface ChatAppProps {
 const HEADER_REGION_ID = 'chatapp-header-region'
 const TEXT_SIZE_BAR_ID = 'chatapp-text-size-bar'
 const COMPOSER_OPTIONS_ID = 'chatapp-composer-options'
+
+type Translate = (key: string, params?: Record<string, string | number>) => string
+
+// ── One bubble of this page's transcript ──
+//
+// A component of its own so React can SKIP it, for the reason the mascot
+// chat's rows are one (ChatMessageRow.tsx): this page renders on every
+// keystroke in the composer, every streamed chunk and every status change, and
+// while the bubbles were built inline each of those renders parsed the
+// Markdown of every reply in the conversation again and handed React a fresh
+// tree to diff — for a transcript that had not changed. Memoised, a bubble
+// renders again only when what it shows does.
+//
+// Not the mascot chat's row: this page draws its own bubbles (the orange pill,
+// the rounded grey answer, smaller pictures with no preview, no tool chips),
+// and the markup below is the one it drew inline, line for line. The parent
+// still keys rows by position, so a bubble's own state — an open `<details>`,
+// a player mid-clip — stays exactly where it was.
+
+interface ChatAppMessageRowProps {
+  msg: ChatMessage
+  t: Translate
+  onOpenEmail: (uid: number) => void
+}
+
+// The message by VALUE: a history read rebuilds every message object from the
+// box's answer even when only the newest one is new, and compared by identity
+// every reply would be parsed again at the end of every turn. `t` and the
+// opener are stable (the provider's memoised translator, a state setter).
+function sameChatAppRowProps(prev: ChatAppMessageRowProps, next: ChatAppMessageRowProps): boolean {
+  return prev.t === next.t
+    && prev.onOpenEmail === next.onOpenEmail
+    && samePlainData(prev.msg, next.msg)
+}
+
+const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail }: ChatAppMessageRowProps) {
+  // `MEDIA:` is lifted on the way INTO state — by the shared history
+  // projection and by the live `final` handler — so what is stored
+  // already carries its pictures and clips and the bubble just draws
+  // them. Only the mail directives are derived here, because a card is
+  // fetched when the owner opens it and must not be built from a turn
+  // that is still streaming.
+  const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null
+  const bodyText = emailRefs ? emailRefs.text : msg.text
+  const images = msg.images ?? []
+  const audio = msg.audio ?? []
+  const files = msg.files ?? []
+  return (
+    <div style={{
+      display: 'flex',
+      justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+    }}>
+      <div style={{
+        maxWidth: '85%',
+        padding: msg.role === 'system' ? '6px 12px' : '8px 14px',
+        borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
+        background: msg.role === 'user'
+          ? 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)'
+          : msg.role === 'system'
+            ? 'rgba(239,68,68,0.15)'
+            : 'rgba(255,255,255,0.06)',
+        color: msg.role === 'user' ? '#fff' : msg.role === 'system' ? '#ef4444' : 'rgba(255,255,255,0.85)',
+        fontSize: 13.5,
+        lineHeight: 1.45,
+        wordBreak: 'break-word',
+      }}>
+        {images.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: bodyText ? 6 : 0 }}>
+            {images.map((src, j) => (
+              // A picture the agent drew IS the message, so it gets a
+              // real alt and is contained rather than cropped; one the
+              // customer sent is announced as theirs, because an
+              // accessible name is read out verbatim. `contain` applies
+              // to both — a sent photo is letterboxed rather than cropped
+              // here, matching the mascot chat.
+              <img
+                key={j}
+                src={src}
+                alt={msg.role === 'user' ? t("chat.sentImage") : t("chat.generatedImage")}
+                style={{ maxWidth: 180, maxHeight: 140, borderRadius: 8, objectFit: 'contain' }}
+              />
+            ))}
+          </div>
+        )}
+        {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))}
+        {files.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
+            {files.map(src => <ChatFileCard key={src} src={src} />)}
+          </div>
+        )}
+        {audio.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0 }}>
+            {/* The same player the mascot chat draws, from the same
+                component: two surfaces showing the same spoken reply must
+                not offer two different controls for it. Keyed by the URL
+                — the harness names every file with a uuid, so
+                re-rendering a transcript cannot hand one player
+                another's audio. */}
+            {audio.map(src => (
+              <SpokenReplyPlayer
+                key={src}
+                src={src}
+                // `bodyText`, never `msg.text`: the stored text still
+                // carries the directives, and a screen reader would read
+                // the absolute media path and the mail ids out loud.
+                label={audioLabel(bodyText, t("chat.audioReply"))}
+                downloadName={mediaFileName(src)}
+              />
+            ))}
+          </div>
+        )}
+        {emailRefs && emailRefs.uids.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: bodyText ? 8 : 0 }}>
+            {emailRefs.uids.map(uid => (
+              <EmailCard key={uid} uid={uid} onOpen={onOpenEmail} t={t} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}, sameChatAppRowProps)
+
+/**
+ * The reply while it streams in, in the bubble the finished answer gets.
+ *
+ * Memoised on the text for the reason the rows are: the reply has to be parsed
+ * again on every chunk, but not on every keystroke the owner types while it
+ * arrives, nor on any other render of the page.
+ */
+const ChatAppStreamingBubble = memo(function ChatAppStreamingBubble({ text, t }: { text: string; t: Translate }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+      <div style={{
+        maxWidth: '85%', padding: '8px 14px',
+        borderRadius: '14px 14px 14px 4px',
+        background: 'rgba(255,255,255,0.06)',
+        color: 'rgba(255,255,255,0.85)',
+        fontSize: 13.5, lineHeight: 1.45, wordBreak: 'break-word',
+      }}>
+        {/* Stripped at RENDER, not on the way into state: the directive
+            lands in the last chunk before the turn finalises, so without
+            this the bare id sits in the bubble for that moment, and an
+            abort keeps the raw buffer it was holding — so the turn it
+            leaves behind can still become cards and pictures. No cards
+            and no pictures while streaming: half a directive is not an id
+            or a path yet.
+
+            A payload-less `MEDIA:` is deliberately kept as text by
+            `splitMediaDirectives` — a line that names nothing is not
+            swallowed — so a Stop landing exactly on the colon leaves that
+            token in the bubble and in the stored turn. Shown and stored
+            still agree, which is the property that matters; there is no
+            `dropUnfinishedDirective` equivalent for media, and the
+            mascot chat accepts the same token. */}
+        {renderText(streamingEmailRefsText(splitMediaDirectives(text).text), t("chat.table"), t("chat.detailsSummary"))}
+        <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
+      </div>
+    </div>
+  )
+})
 
 function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChange }: ChatAppProps) {
   const { t, locale } = useT()
@@ -1629,125 +1791,15 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           </div>
         )}
 
-        {messages.map((msg, i) => {
-          // `MEDIA:` is lifted on the way INTO state — by the shared history
-          // projection and by the live `final` handler — so what is stored
-          // already carries its pictures and clips and the bubble just draws
-          // them. Only the mail directives are derived here, because a card is
-          // fetched when the owner opens it and must not be built from a turn
-          // that is still streaming.
-          const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null
-          const bodyText = emailRefs ? emailRefs.text : msg.text
-          const images = msg.images ?? []
-          const audio = msg.audio ?? []
-          const files = msg.files ?? []
-          return (
-          <div key={i} style={{
-            display: 'flex',
-            justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-          }}>
-            <div style={{
-              maxWidth: '85%',
-              padding: msg.role === 'system' ? '6px 12px' : '8px 14px',
-              borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
-              background: msg.role === 'user'
-                ? 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)'
-                : msg.role === 'system'
-                  ? 'rgba(239,68,68,0.15)'
-                  : 'rgba(255,255,255,0.06)',
-              color: msg.role === 'user' ? '#fff' : msg.role === 'system' ? '#ef4444' : 'rgba(255,255,255,0.85)',
-              fontSize: 13.5,
-              lineHeight: 1.45,
-              wordBreak: 'break-word',
-            }}>
-              {images.length > 0 && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: bodyText ? 6 : 0 }}>
-                  {images.map((src, j) => (
-                    // A picture the agent drew IS the message, so it gets a
-                    // real alt and is contained rather than cropped; one the
-                    // customer sent is announced as theirs, because an
-                    // accessible name is read out verbatim. `contain` applies
-                    // to both — a sent photo is letterboxed rather than cropped
-                    // here, matching the mascot chat.
-                    <img
-                      key={j}
-                      src={src}
-                      alt={msg.role === 'user' ? t("chat.sentImage") : t("chat.generatedImage")}
-                      style={{ maxWidth: 180, maxHeight: 140, borderRadius: 8, objectFit: 'contain' }}
-                    />
-                  ))}
-                </div>
-              )}
-              {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))}
-              {files.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
-                  {files.map(src => <ChatFileCard key={src} src={src} />)}
-                </div>
-              )}
-              {audio.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0 }}>
-                  {/* The same player the mascot chat draws, from the same
-                      component: two surfaces showing the same spoken reply must
-                      not offer two different controls for it. Keyed by the URL
-                      — the harness names every file with a uuid, so
-                      re-rendering a transcript cannot hand one player
-                      another's audio. */}
-                  {audio.map(src => (
-                    <SpokenReplyPlayer
-                      key={src}
-                      src={src}
-                      // `bodyText`, never `msg.text`: the stored text still
-                      // carries the directives, and a screen reader would read
-                      // the absolute media path and the mail ids out loud.
-                      label={audioLabel(bodyText, t("chat.audioReply"))}
-                      downloadName={mediaFileName(src)}
-                    />
-                  ))}
-                </div>
-              )}
-              {emailRefs && emailRefs.uids.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: bodyText ? 8 : 0 }}>
-                  {emailRefs.uids.map(uid => (
-                    <EmailCard key={uid} uid={uid} onOpen={setOpenEmailUid} t={t} />
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-          )
-        })}
+        {/* One memoised row per message: a render of this page no longer
+            parses the conversation — see ChatAppMessageRow. */}
+        {messages.map((msg, i) => (
+          <ChatAppMessageRow key={i} msg={msg} t={t} onOpenEmail={setOpenEmailUid} />
+        ))}
 
         <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />
 
-        {streaming && (
-          <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
-            <div style={{
-              maxWidth: '85%', padding: '8px 14px',
-              borderRadius: '14px 14px 14px 4px',
-              background: 'rgba(255,255,255,0.06)',
-              color: 'rgba(255,255,255,0.85)',
-              fontSize: 13.5, lineHeight: 1.45, wordBreak: 'break-word',
-            }}>
-              {/* Stripped at RENDER, not on the way into state: the directive
-                  lands in the last chunk before the turn finalises, so without
-                  this the bare id sits in the bubble for that moment, and an
-                  abort keeps the raw buffer it was holding — so the turn it
-                  leaves behind can still become cards and pictures. No cards
-                  and no pictures while streaming: half a directive is not an id
-                  or a path yet.
-
-                  A payload-less `MEDIA:` is deliberately kept as text by
-                  `splitMediaDirectives` — a line that names nothing is not
-                  swallowed — so a Stop landing exactly on the colon leaves that
-                  token in the bubble and in the stored turn. Shown and stored
-                  still agree, which is the property that matters; there is no
-                  `dropUnfinishedDirective` equivalent for media, and the
-                  mascot chat accepts the same token. */}
-              {renderText(streamingEmailRefsText(splitMediaDirectives(streaming).text), t("chat.table"), t("chat.detailsSummary"))}
-              <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
-            </div>
-          </div>
-        )}
+        {streaming && <ChatAppStreamingBubble text={streaming} t={t} />}
 
         {sending && !streaming && (
           <div style={{ display: 'flex', justifyContent: 'flex-start' }}>

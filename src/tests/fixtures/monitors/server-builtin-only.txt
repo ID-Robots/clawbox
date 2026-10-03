@@ -1,0 +1,13 @@
+eDP-1 "BOE 0x06DF (eDP-1)"
+  Make: BOE
+  Model: 0x06DF
+  Serial: (null)
+  Physical size: 310x170 mm
+  Enabled: yes
+  Modes:
+    1920x1080 px, 60.012001 Hz (preferred, current)
+    1920x1080 px, 48.009998 Hz
+  Position: 0,0
+  Transform: normal
+  Scale: 1.000000
+  Adaptive Sync: disabled

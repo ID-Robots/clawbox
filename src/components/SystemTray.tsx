@@ -1,18 +1,19 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { memo, useState, useEffect, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
 import { useSessionUser } from "@/lib/use-session-user";
 import { announceSessionSwitch } from "@/lib/session-switch";
 import CrabWaitMark from "./CrabWaitMark";
+import { mainInsets } from "@/lib/desktop-screens";
+import { useDeskScreens } from "@/lib/use-desk-screens";
+import { useDesktopClock } from "@/lib/use-desktop-clock";
 
 const BRAND_ORANGE = "#fe6e00";
 
 interface SystemTrayProps {
   isOpen: boolean;
   onClose: () => void;
-  date: string;
-  time: string;
 }
 
 type RebootState =
@@ -22,11 +23,26 @@ type RebootState =
   | { phase: "restoring" }
   | { phase: "shutdown" };
 
-export default function SystemTray({
+/**
+ * The power menu's time and date. Read from the desktop clock here, mounted
+ * only while the menu is open, rather than handed down by the desktop — whose
+ * every new minute used to re-render the whole desktop for these two lines and
+ * the shelf's. The same ticker as the shelf's clock, so the two turn the
+ * minute together (see use-desktop-clock.ts).
+ */
+function TrayClock() {
+  const { time, date } = useDesktopClock();
+  return (
+    <div className="p-4 border-b border-white/10">
+      <div className="text-2xl font-medium text-white">{time}</div>
+      <div className="text-sm text-white/60">{date}</div>
+    </div>
+  );
+}
+
+function SystemTray({
   isOpen,
   onClose,
-  date,
-  time,
 }: SystemTrayProps) {
   const { t } = useT();
   // Multi-user ClawBox OS (TASK-1256): who is signed in, and whether they may
@@ -35,6 +51,9 @@ export default function SystemTray({
   const isOwner = sessionUser?.isOwner !== false;
   const showUser = !!sessionUser && (sessionUser.multiUser || !sessionUser.isOwner);
   const [closing, setClosing] = useState(false);
+  // Above the power button on the main monitor when the desktop is spread over several.
+  const deskScreens = useDeskScreens();
+  const mainIns = deskScreens ? mainInsets() : null;
   const [confirmAction, setConfirmAction] = useState<"shutdown" | "restart" | null>(null);
   const [internet, setInternet] = useState<{ online: boolean; latencyMs: number | null } | null>(null);
   useEffect(() => {
@@ -279,22 +298,21 @@ export default function SystemTray({
             : "opacity-100 translate-y-0 scale-100"
         }`}
         data-testid="system-tray"
-        style={{ transformOrigin: "bottom right" }}
+        style={{ transformOrigin: "bottom right", ...(mainIns ? { right: 8 + mainIns.right, bottom: 64 + mainIns.bottom } : {}) }}
       >
         <div
           className="rounded-xl overflow-hidden"
           style={{
-            background: "rgba(17, 24, 39, 0.95)",
-            backdropFilter: "blur(20px)",
-            WebkitBackdropFilter: "blur(20px)",
+            // No backdrop blur, and a fill that much more opaque — the
+            // launcher's panel, for its reason (ChromeLauncher.tsx): 5% of a
+            // blurred desktop cost a pass over everything beneath on every
+            // frame the mascot moved; 2% of a sharp one is not seen.
+            background: "rgba(17, 24, 39, 0.98)",
             border: "1px solid rgba(255, 255, 255, 0.1)",
           }}
         >
           {/* Date and time */}
-          <div className="p-4 border-b border-white/10">
-            <div className="text-2xl font-medium text-white">{time}</div>
-            <div className="text-sm text-white/60">{date}</div>
-          </div>
+          <TrayClock />
 
           {/* Internet status */}
           {internet && (
@@ -374,3 +392,8 @@ export default function SystemTray({
     </>
   );
 }
+
+// Memoized: the desktop hands it `isOpen` and a stable `onClose`, so its
+// renders — and while the tray is closed it still runs its hooks — follow the
+// tray's own state, not every render of the desktop.
+export default memo(SystemTray);

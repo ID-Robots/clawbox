@@ -2,11 +2,15 @@
 
 import { getSnapRect, type SnapZone } from "@/lib/window-snap";
 
-/** The translucent plate that shows where a dragged surface would land. */
+/**
+ * The translucent plate that shows where a dragged surface would land — on
+ * the monitor under `at` (the cursor, `snapTargetAt`), the one the drop lays
+ * the window on; the main monitor without it, the viewport with one screen.
+ */
 export default function SnapPreviewOverlay(
-  { zone, rightInset = 0 }: { zone: SnapZone; rightInset?: number },
+  { zone, rightInset = 0, at }: { zone: SnapZone; rightInset?: number; at?: { x: number; y: number } },
 ) {
-  const rect = getSnapRect(zone, rightInset);
+  const rect = getSnapRect(zone, rightInset, at);
   if (!rect) return null;
   return (
     <div

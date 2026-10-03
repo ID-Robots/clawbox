@@ -2799,3 +2799,121 @@ describe("CodingAgentApp — the run page's honesty", () => {
     }
   });
 });
+
+/**
+ * The live poll (every 5 s while a run works or a pull request waits on its
+ * checks). It used to run all four reads on every tick with nothing in flight
+ * checked: the GitHub one is `gh auth status` — a process and a round trip to
+ * api.github.com, 720 an hour — and on a busy box or with github.com silent
+ * (gh waits up to a minute) the reads piled up a dozen deep. What the owner
+ * SEES still moves every 5 s: the status, the runs and the projects (a row's
+ * live dot, the icon a run draws in its first seconds).
+ */
+describe("the live poll", () => {
+  const LIVE = { ...RUN, id: "run-live0009", status: "running", completedAt: null, summary: null };
+  let visibility: DocumentVisibilityState = "visible";
+  const reads = (url: string) => vi.mocked(globalThis.fetch).mock.calls
+    .filter(([input, init]) => input.toString() === url && (init?.method ?? "GET") === "GET").length;
+  const runsReads = () => vi.mocked(globalThis.fetch).mock.calls
+    .filter(([input]) => input.toString().startsWith("/setup-api/coding-agent/runs?limit=30")).length;
+  const advance = async (ms: number) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    visibility = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    // jsdom's own getter is on Document.prototype; the instance override goes.
+    delete (document as unknown as Record<string, unknown>).visibilityState;
+  });
+
+  it("reads the runs, the status and the projects every tick, and GitHub once a minute", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [PROJECT] });
+    render(<CodingAgentApp />);
+    await advance(50);
+    expect(reads("/setup-api/coding-agent/git")).toBe(1);
+    expect(runsReads()).toBe(1);
+
+    await advance(55_000);
+    expect(runsReads()).toBe(12);
+    expect(reads("/setup-api/coding-agent/status")).toBe(12);
+    expect(reads("/setup-api/coding-agent/projects")).toBe(12);
+    // The mount's read, and nothing more inside the minute.
+    expect(reads("/setup-api/coding-agent/git")).toBe(1);
+
+    await advance(5_000);
+    expect(reads("/setup-api/coding-agent/git")).toBe(2);
+    expect(runsReads()).toBe(13);
+  });
+
+  it("keeps GitHub's minute on the box's own clock when its wall clock steps back", async () => {
+    // The box has no RTC and its clock steps at NTP sync. Timed on the wall
+    // clock, a step back an hour stopped the live poll re-reading GitHub for
+    // that hour while every other read kept its 5 s.
+    stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [PROJECT] });
+    render(<CodingAgentApp />);
+    await advance(50);
+    expect(reads("/setup-api/coding-agent/git")).toBe(1);
+    vi.setSystemTime(Date.now() - 60 * 60_000);
+    await advance(60_000);
+    expect(reads("/setup-api/coding-agent/git")).toBe(2);
+  });
+
+  it("re-reads GitHub at once when Settings says something changed, live poll or not", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [PROJECT] });
+    render(<CodingAgentApp />);
+    await advance(50);
+    await advance(10_000);
+    expect(reads("/setup-api/coding-agent/git")).toBe(1);
+    act(() => { window.dispatchEvent(new CustomEvent(CODING_AGENT_CHANGED_EVENT)); });
+    await advance(0);
+    expect(reads("/setup-api/coding-agent/git")).toBe(2);
+  });
+
+  it("starts no read on the clock while the previous one of the same kind is still on its way", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [PROJECT] });
+    const inner = globalThis.fetch;
+    let hold = false;
+    const held: Array<() => void> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      if (hold && input.toString() === "/setup-api/coding-agent/projects") {
+        await new Promise<void>((resolve) => { held.push(resolve); });
+      }
+      return inner(input, init);
+    }));
+    render(<CodingAgentApp />);
+    await advance(50);
+    // The box gets slow: the projects read stops answering for half a minute.
+    hold = true;
+    await advance(30_000);
+    expect(held).toHaveLength(1);
+    // The runs kept moving meanwhile.
+    expect(runsReads()).toBe(7);
+    held.splice(0).forEach((release) => release());
+    hold = false;
+    await advance(5_000);
+    expect(reads("/setup-api/coding-agent/projects")).toBe(3);
+  });
+
+  it("reads nothing on the clock while the page is hidden, and everything on the way back", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [PROJECT] });
+    render(<CodingAgentApp />);
+    await advance(50);
+    const before = runsReads();
+    visibility = "hidden";
+    act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+    await advance(120_000);
+    expect(runsReads()).toBe(before);
+    expect(reads("/setup-api/coding-agent/git")).toBe(1);
+
+    visibility = "visible";
+    act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+    await advance(0);
+    expect(runsReads()).toBe(before + 1);
+    expect(reads("/setup-api/coding-agent/git")).toBe(2);
+    expect(reads("/setup-api/coding-agent/projects")).toBe(2);
+  });
+});

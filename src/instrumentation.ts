@@ -569,6 +569,16 @@ export async function register() {
     console.error('[instrumentation] Could not warm the hermes chat capability memos:', err instanceof Error ? err.message : err)
   }
   try {
+    // Monitor mode (src/lib/monitors.ts): the owner's saved monitor layout
+    // put back whenever a monitor is plugged in or out, or the display session
+    // restarts. Starts nothing on a box without a kiosk — every Jetson.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { startMonitorReconciler } = require('./lib/monitors')
+    startMonitorReconciler()
+  } catch (err) {
+    console.error('[instrumentation] Could not start the monitor reconciler:', err instanceof Error ? err.message : err)
+  }
+  try {
     // Memory indexing is armed the same way, from its own persisted schedule.
     // Rebuilding the timer at every boot is what makes the schedule survive a
     // reboot and an update without a crontab entry to duplicate or orphan.
