@@ -94,6 +94,8 @@ describe("translations", () => {
       // Manually maintained: add new prefixes here when introducing new
       // translation namespaces (i.e. keys like "foo.bar" where "foo" is the prefix).
       const knownPrefixes = new Set([
+        // The setup wizard's "Choose your assistant" step (TASK-1149).
+        "assistant",
         "wifi",
         "clawaiUsage",
         "update",

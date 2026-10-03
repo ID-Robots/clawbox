@@ -269,7 +269,7 @@ function AgentCard({
         {t(face.whatKey)}
       </span>
       <span className="flex flex-col gap-[var(--s-1)]">
-        <span className="text-[var(--text-muted)] uppercase tracking-wide" style={{ fontSize: "var(--t-1)", fontWeight: "var(--w-label)" }}>
+        <span className="text-[var(--text-secondary)] uppercase tracking-wide" style={{ fontSize: "var(--t-1)", fontWeight: "var(--w-label)" }}>
           {t("assistant.goodFor")}
         </span>
         <ul className="list-none m-0 p-0 flex flex-col gap-[var(--s-1)]">
@@ -309,8 +309,13 @@ export default function EditionStep({ onReady, pollMs = DEFAULT_POLL_MS }: Editi
   // choice: a different value afterwards means the restart has happened.
   const startedAtRef = useRef<number | null>(null);
   const aliveRef = useRef(true);
+  // The latest onReady, for the polling loop that outlives the render that
+  // started it. Written in an effect, never during render.
   const readyRef = useRef(onReady);
-  readyRef.current = onReady;
+
+  useEffect(() => {
+    readyRef.current = onReady;
+  }, [onReady]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -355,9 +360,8 @@ export default function EditionStep({ onReady, pollMs = DEFAULT_POLL_MS }: Editi
     }
   }, [pollMs, ready]);
 
-  const load = useCallback(async () => {
-    setView({ kind: "loading" });
-    const status = await fetchChoiceStatus();
+  /** Draw the step from the route's GET — or the retry card when the box could not be asked. */
+  const applyStatus = useCallback((status: EditionChoiceStatus | null) => {
     if (!aliveRef.current) return;
     if (!status) { setView({ kind: "loadError" }); return; }
     startedAtRef.current = status.serverStartedAt;
@@ -377,9 +381,19 @@ export default function EditionStep({ onReady, pollMs = DEFAULT_POLL_MS }: Editi
     setView({ kind: "choose" });
   }, [follow, ready]);
 
+  const load = useCallback(async () => {
+    setView({ kind: "loading" });
+    applyStatus(await fetchChoiceStatus());
+  }, [applyStatus]);
+
+  // The first render is already "loading"; state changes only once the box answered.
   useEffect(() => {
-    void load();
-  }, [load]);
+    let cancelled = false;
+    void fetchChoiceStatus().then((status) => {
+      if (!cancelled) applyStatus(status);
+    });
+    return () => { cancelled = true; };
+  }, [applyStatus]);
 
   const start = useCallback(async (target: Agent) => {
     setView({ kind: "working", target, phase: "request" });
@@ -454,7 +468,12 @@ export default function EditionStep({ onReady, pollMs = DEFAULT_POLL_MS }: Editi
       <Card>
         <h1 className="font-bold font-display mb-[var(--s-2)]" style={T_H1}>{t("assistant.title")}</h1>
         <p className="text-red-400 mb-[var(--s-6)]" style={T_LEDE}>{t("assistant.loadFailed")}</p>
-        <button type="button" onClick={() => void load()} className={BTN_PRIMARY} style={T_BTN}>
+        <button
+          type="button"
+          onClick={() => void load()}
+          className={BTN_PRIMARY}
+          style={T_BTN}
+        >
           {t("retry")}
         </button>
       </Card>
@@ -581,7 +600,7 @@ export default function EditionStep({ onReady, pollMs = DEFAULT_POLL_MS }: Editi
         ))}
       </div>
       <p className="mt-[var(--s-4)] text-[var(--text-primary)]" style={T_SMALL}>{t("assistant.recommendLine")}</p>
-      <p className="mt-[var(--s-1)] mb-[var(--s-5)] text-[var(--text-muted)]" style={T_SMALL}>{t("assistant.changeLater")}</p>
+      <p className="mt-[var(--s-1)] mb-[var(--s-5)] text-[var(--text-secondary)]" style={T_SMALL}>{t("assistant.changeLater")}</p>
       <button
         type="button"
         onClick={() => void start(selected)}

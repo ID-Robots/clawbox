@@ -4056,7 +4056,7 @@ handover_legacy_updater() {
   local previous_id mask_owned=0 gateway_was_active=0 rc=0
   previous_id=$(cat "$PROJECT_DIR/.next/BUILD_ID") || return 1
   [ -n "$previous_id" ] || return 1
-  if has_openclaw_harness; then
+  if ! is_hermes_edition; then
     systemctl is-active --quiet clawbox-gateway.service && gateway_was_active=1
     # /run masks cannot override the gold image's /etc unit. The root-held
     # drop-in works before the new launcher has been installed as well.

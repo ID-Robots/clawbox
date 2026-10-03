@@ -694,6 +694,8 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
       // from the environment exactly as `${HERMES_PIN_COMMIT:-…}` resolves it.
       'export HERMES_PIN_COMMIT="$7"',
       "has_hermes_harness() { return 0; }",
+      // The step's own gate since TASK-1149: hermes, dual or the unified image.
+      "installs_hermes_harness() { return 0; }",
       // Run the command as this user instead of switching: `runuser -u X -- cmd`.
       'runuser() { shift 2; if [ "$1" = "--" ]; then shift; fi; "$@"; }',
       // curl is stubbed as a real executable on PATH, not as a shell function:

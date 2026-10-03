@@ -4,6 +4,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
+import { testEnv } from "@/tests/helpers/env";
+
 /**
  * The unified image's lock value, `unselected` (TASK-1149,
  * reports/clawbox/unified-image-design-2026-09.md §6/§8 PR 1): both harnesses
@@ -110,7 +112,7 @@ function parse(env: Record<string, string> = {}): Parsed {
   ].join("\n");
   const r = spawnSync("bash", ["-c", script], {
     encoding: "utf-8",
-    env: { PATH: process.env.PATH ?? "", ...env },
+    env: testEnv({ PATH: process.env.PATH ?? "", ...env }),
     timeout: 20_000,
   });
   const vars: Record<string, string> = {};
@@ -291,7 +293,7 @@ d("step_edition_lock writes the hint on the unified image only", () => {
       extractShellFunction("step_edition_lock"),
       "step_edition_lock",
     ].join("\n");
-    const r = spawnSync("bash", ["-c", program], { encoding: "utf-8", env: { PATH: process.env.PATH ?? "" }, timeout: 20_000 });
+    const r = spawnSync("bash", ["-c", program], { encoding: "utf-8", env: testEnv({ PATH: process.env.PATH ?? "" }), timeout: 20_000 });
     return {
       out: `${r.stdout ?? ""}${r.stderr ?? ""}`,
       lock: fs.existsSync(published) ? fs.readFileSync(published, "utf-8") : "",
