@@ -239,6 +239,16 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 
+# --disable-features is ONE list: Chrome reads only the last one on its
+# command line, so every feature this session turns off goes in that line.
+# IntensiveWakeUpThrottling is there because the desktop's window can be
+# hidden too (minimised, or covered), and Chrome wakes a chain of timers in a
+# page hidden for more than five minutes only once a MINUTE: the desktop's
+# 2 s poll of the agent's notice ring then ran about as rarely as a ring entry
+# lives (60 s), so an "open this app" or the move to /updating could be missed
+# rather than late. Only that: the ordinary hidden-page throttling (one
+# wake-up a second) stays, which --disable-background-timer-throttling would
+# have switched off too.
 FLAGS=(
   --ozone-platform=wayland
   --user-data-dir="$PROFILE"
@@ -246,7 +256,7 @@ FLAGS=(
   --no-default-browser-check
   --noerrdialogs
   --disable-infobars
-  --disable-features=Translate,MediaRouter
+  --disable-features=Translate,MediaRouter,IntensiveWakeUpThrottling
   --overscroll-history-navigation=0
   --password-store=basic
   --autoplay-policy=no-user-gesture-required

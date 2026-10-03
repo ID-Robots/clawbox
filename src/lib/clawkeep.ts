@@ -958,12 +958,38 @@ async function readStateFile(): Promise<StateFile> {
 // Binary discovery (memoised)
 // ────────────────────────────────────────────────────────────────────
 
-function which(bin: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const p = spawn("which", [bin], { stdio: "ignore" });
-    p.on("error", () => resolve(false));
-    p.on("close", (code) => resolve(code === 0));
-  });
+/**
+ * Is `bin` on this process's PATH — the answer `which <bin>` gives, without
+ * spawning it.
+ *
+ * `getStatus()` asks this on every call, and the desktop shelf's shield calls
+ * that every 5 s: on a box with no `clawkeepd` (the negative answer is never
+ * cached — the card must see an install the moment it lands), or a Hermes box
+ * whose `openclaw` is not at a managed path, that was one or two `which`
+ * processes — a shell script, so a shell and its children — every five
+ * seconds from the web server, around the clock. The walk is the same
+ * question asked of the filesystem: debianutils' `which` takes each PATH
+ * element in turn (an empty one — leading, doubled or trailing — is the
+ * current directory; an empty PATH has none at all) and answers yes for the
+ * first `$ELEMENT/$bin` that is a regular file (`-f`, through a symlink) and
+ * executable by this process (`-x`). A dozen stat calls and no process, with
+ * exactly the answers the spawn gave — never cached, so an install is seen at
+ * the next poll as it always was.
+ */
+async function which(bin: string): Promise<boolean> {
+  const searchPath = process.env.PATH ?? "";
+  if (!searchPath) return false;
+  for (const element of searchPath.split(":")) {
+    const candidate = untraced(`${element || "."}/${bin}`);
+    try {
+      if (!(await fs.stat(candidate)).isFile()) continue;
+      await fs.access(candidate, fsConstants.X_OK);
+      return true;
+    } catch {
+      // Not here (or not executable by us): the next element.
+    }
+  }
+  return false;
 }
 
 // systemd's secure_path doesn't include ~/.local/bin or ~/.npm-global/bin,
@@ -1192,8 +1218,44 @@ export async function setClawKeepSetupComplete(done: boolean): Promise<boolean> 
   return done;
 }
 
+/**
+ * Has a status read in this process already made the data directory?
+ *
+ * `getStatus()` used to `mkdir -p` it on every call, and the desktop shelf's
+ * shield calls it every 5 s, around the clock — a mkdir and a stat each time
+ * for a directory that has existed since the first one. Once is enough,
+ * because nothing a read answers depends on the directory being there: every
+ * probe below takes a missing file and a missing directory alike (ENOENT) for
+ * "not there", and the one that must have a file, `readConfigToml`, makes the
+ * directory itself before it seeds one. So a directory emptied or removed
+ * under a running server (a factory reset empties it; a person can delete it)
+ * is answered exactly as before: unpaired, the defaults, and the directory and
+ * its config.toml back on disk after the read.
+ *
+ * What the per-call mkdir did besides is fail: a data path that cannot be a
+ * directory (a file where it should be, a parent gone read-only) refused every
+ * read with the mkdir's own error. A read that fails on the fast path is
+ * therefore asked again the old way — mkdir first, then the reads — so the
+ * answer to a broken directory is the same error it always was, on every read
+ * for as long as it stays broken.
+ */
+let statusDataDirMade = false;
+
 export async function getStatus(): Promise<ClawKeepStatus> {
+  if (statusDataDirMade) {
+    try {
+      return await readStatus();
+    } catch {
+      // Fall through: the old order, whose answer this must be.
+      statusDataDirMade = false;
+    }
+  }
   await ensureDataDir();
+  statusDataDirMade = true;
+  return readStatus();
+}
+
+async function readStatus(): Promise<ClawKeepStatus> {
   const [token, configToml, stateRaw, openclawInstalled, daemonBin, restoring, scheduleSnapshot, encryptionConfigured, setupComplete] = await Promise.all([
     readToken(),
     readConfigToml(),

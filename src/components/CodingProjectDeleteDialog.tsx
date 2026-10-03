@@ -216,7 +216,10 @@ export default function CodingProjectDeleteDialog({
   return (
     <div
       className="fixed inset-0 z-[200] flex items-center justify-center p-4"
-      style={{ background: "rgba(0, 0, 0, 0.62)", backdropFilter: "blur(6px)" }}
+      // No backdrop blur under the dim: a full-screen blur is redone over the whole
+      // desktop on every frame anything beneath it moves (the mascot always does).
+      // One step darker keeps the look.
+      style={{ background: "rgba(0, 0, 0, 0.67)" }}
       data-testid="coding-agent-delete-dialog"
     >
       <div

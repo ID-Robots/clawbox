@@ -384,6 +384,168 @@ describe("kv-store", () => {
     });
   });
 
+  // The owner's desktop polls ONE key of this file every two seconds, all
+  // day, and each poll used to read and parse the WHOLE file — every web
+  // app's data rides in it too. The parsed store is now kept while the file
+  // is provably the one it came from.
+  describe("the parsed store, kept between reads of an unchanged file", () => {
+    /** Make every file on disk look long settled to the racy-read rule. */
+    function settle() {
+      const now = Date.now();
+      vi.spyOn(Date, "now").mockReturnValue(now + 10_000);
+    }
+
+    afterEach(async () => {
+      // A read of a missing file drops the kept snapshot, so a later test's
+      // file can never be mistaken for this one's — in a test the racy-read
+      // rule is switched off by `settle()`, and a recycled inode written in
+      // the same clock tick is exactly what that rule exists for.
+      await fs.rm(KV_PATH, { force: true });
+      kvStore.kvGet("any");
+    });
+
+    it("answers an unchanged file without reading or parsing it again", async () => {
+      await fs.writeFile(KV_PATH, JSON.stringify({ "ui:pending-actions": "[]", "app:data": "x".repeat(4096) }));
+      settle();
+      expect(kvStore.kvGet("ui:pending-actions")).toBe("[]");
+      const read = vi.spyOn(fsSync, "readFileSync");
+      const parse = vi.spyOn(JSON, "parse");
+      for (let i = 0; i < 5; i++) expect(kvStore.kvGet("ui:pending-actions")).toBe("[]");
+      expect(kvStore.kvGetAll("ui:")).toEqual({ "ui:pending-actions": "[]" });
+      expect(read).not.toHaveBeenCalled();
+      expect(parse).not.toHaveBeenCalled();
+    });
+
+    it("parses a file that changed a moment ago again rather than keeping it", async () => {
+      // No `settle()`: the file was written just now, and a file can still be
+      // rewritten in place inside the clock tick its timestamps came from.
+      await fs.writeFile(KV_PATH, JSON.stringify({ a: "1" }));
+      expect(kvStore.kvGet("a")).toBe("1");
+      const read = vi.spyOn(fsSync, "readFileSync");
+      expect(kvStore.kvGet("a")).toBe("1");
+      expect(read).toHaveBeenCalledTimes(1);
+    });
+
+    it("sees its own write at once", async () => {
+      await fs.writeFile(KV_PATH, JSON.stringify({ "ui:pending-actions": "[]" }));
+      settle();
+      expect(kvStore.kvGet("ui:pending-actions")).toBe("[]");
+      kvStore.kvSet("ui:pending-actions", '[{"id":"a"}]');
+      expect(kvStore.kvGet("ui:pending-actions")).toBe('[{"id":"a"}]');
+      kvStore.kvSetMany({ b: "2" });
+      expect(kvStore.kvGetAll()).toEqual({ "ui:pending-actions": '[{"id":"a"}]', b: "2" });
+      kvStore.kvDelete("b");
+      expect(kvStore.kvGet("b")).toBeNull();
+    });
+
+    it("sees a file another writer renamed into place, even of the same size", async () => {
+      await fs.writeFile(KV_PATH, JSON.stringify({ k: "old" }));
+      settle();
+      expect(kvStore.kvGet("k")).toBe("old");
+      // The other copy of this module (the boot hook's layer) writes the way
+      // this one does: a temp file renamed over the store.
+      const other = `${KV_PATH}.other`;
+      await fs.writeFile(other, JSON.stringify({ k: "new" }));
+      await fs.rename(other, KV_PATH);
+      expect(kvStore.kvGet("k")).toBe("new");
+    });
+
+    it("sees an in-place rewrite of the same size", async () => {
+      await fs.writeFile(KV_PATH, JSON.stringify({ k: "old" }));
+      settle();
+      expect(kvStore.kvGet("k")).toBe("old");
+      // Past the coarse clock's tick, which is what the racy-read rule
+      // guarantees on a real box: the file was settled when it was kept.
+      await new Promise((r) => setTimeout(r, 30));
+      await fs.writeFile(KV_PATH, JSON.stringify({ k: "new" }));
+      expect(kvStore.kvGet("k")).toBe("new");
+    });
+
+    it("hands every caller that may change the store its own copy", async () => {
+      await fs.writeFile(KV_PATH, JSON.stringify({ a: "1" }));
+      settle();
+      expect(kvStore.kvGet("a")).toBe("1");
+      const all = kvStore.kvGetAll();
+      all.a = "changed by a caller";
+      const strict = kvStore.kvReadStrict();
+      strict.a = "changed by another";
+      expect(kvStore.kvGet("a")).toBe("1");
+      // A mutation that is then refused leaves nothing behind either.
+      expect(() => kvStore.kvUpdateStrict((d) => { d.a = "half"; throw new Error("refused"); })).toThrow("refused");
+      expect(kvStore.kvGet("a")).toBe("1");
+    });
+
+    // Next compiles this module twice into the one web server — once in the
+    // boot hook's layer, once in the routes' (src/lib/process-store.ts) — and
+    // kv.json has no total size cap. `vi.resetModules()` is the same thing in
+    // a test: a second, separately evaluated copy of the module.
+    describe("one parsed store per process, however many copies of this module", () => {
+      async function secondCopy(): Promise<typeof import("@/lib/kv-store")> {
+        vi.resetModules();
+        const other = await import("@/lib/kv-store");
+        expect(other).not.toBe(kvStore);
+        return other;
+      }
+
+      it("serves the other copy from the store this copy parsed, without parsing it again", async () => {
+        await fs.writeFile(KV_PATH, JSON.stringify({ "ui:pending-actions": "[]", "app:data": "x".repeat(4096) }));
+        settle();
+        expect(kvStore.kvGet("ui:pending-actions")).toBe("[]");
+        const other = await secondCopy();
+        const read = vi.spyOn(fsSync, "readFileSync");
+        const parse = vi.spyOn(JSON, "parse");
+        expect(other.kvGet("ui:pending-actions")).toBe("[]");
+        expect(other.kvGetAll("app:")).toEqual({ "app:data": "x".repeat(4096) });
+        // And back the other way: still the one store.
+        expect(kvStore.kvGet("ui:pending-actions")).toBe("[]");
+        expect(read).not.toHaveBeenCalled();
+        expect(parse).not.toHaveBeenCalled();
+      });
+
+      it("drops it for both copies when either one writes", async () => {
+        await fs.writeFile(KV_PATH, JSON.stringify({ k: "old" }));
+        settle();
+        expect(kvStore.kvGet("k")).toBe("old");
+        const other = await secondCopy();
+        expect(other.kvGet("k")).toBe("old");
+        other.kvSet("k", "new");
+        expect(kvStore.kvGet("k")).toBe("new");
+        kvStore.kvSet("k", "newer");
+        expect(other.kvGet("k")).toBe("newer");
+      });
+
+      it("still hands each copy's writers a copy of their own", async () => {
+        await fs.writeFile(KV_PATH, JSON.stringify({ a: "1" }));
+        settle();
+        expect(kvStore.kvGet("a")).toBe("1");
+        const other = await secondCopy();
+        const all = other.kvGetAll();
+        all.a = "changed by a caller of the other copy";
+        const strict = other.kvReadStrict();
+        strict.a = "changed by another";
+        expect(kvStore.kvGet("a")).toBe("1");
+        expect(other.kvGet("a")).toBe("1");
+      });
+    });
+
+    it("answers a file that has gone, or gone bad, the way it always did", async () => {
+      await fs.writeFile(KV_PATH, JSON.stringify({ a: "1" }));
+      settle();
+      expect(kvStore.kvGet("a")).toBe("1");
+      await fs.rm(KV_PATH);
+      expect(kvStore.kvGet("a")).toBeNull();
+      expect(kvStore.kvReadStrict()).toEqual({});
+
+      await fs.writeFile(KV_PATH, JSON.stringify({ a: "1" }));
+      expect(kvStore.kvGet("a")).toBe("1");
+      const torn = `${KV_PATH}.torn`;
+      await fs.writeFile(torn, "{ torn");
+      await fs.rename(torn, KV_PATH);
+      expect(kvStore.kvGet("a")).toBeNull();
+      expect(() => kvStore.kvReadStrict()).toThrow();
+    });
+  });
+
   // The strict pair the webapp legacy-storage layer moves the owner's data
   // with: "could not read the file" must never read as "the store is empty",
   // because the lenient writers above would then write that emptiness back.

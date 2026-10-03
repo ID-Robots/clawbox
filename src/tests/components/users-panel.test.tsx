@@ -118,7 +118,7 @@ describe("SystemTray — signed-in user", () => {
 
   it("names a second user, offers Switch user, and hides restart and shut down", async () => {
     stubMe({ username: "alice", isOwner: false, multiUser: true });
-    render(<SystemTray isOpen onClose={() => {}} date="Sunday" time="09:00" />);
+    render(<SystemTray isOpen onClose={() => {}} />);
     expect(await screen.findByText("alice")).toBeInTheDocument();
     expect(screen.getByText("tray.switchUser")).toBeInTheDocument();
     expect(screen.getByText("tray.nonOwnerHint")).toBeInTheDocument();
@@ -128,7 +128,7 @@ describe("SystemTray — signed-in user", () => {
 
   it("leaves a single-user owner's tray exactly as it was", async () => {
     stubMe({ username: "clawbox", isOwner: true, multiUser: false });
-    render(<SystemTray isOpen onClose={() => {}} date="Sunday" time="09:00" />);
+    render(<SystemTray isOpen onClose={() => {}} />);
     expect(await screen.findByText("tray.lock")).toBeInTheDocument();
     expect(screen.getByText("tray.restart")).toBeInTheDocument();
     expect(screen.queryByTestId("tray-session-user")).toBeNull();

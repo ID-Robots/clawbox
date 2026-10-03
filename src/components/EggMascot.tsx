@@ -115,9 +115,17 @@ const hatchCss =
  * The idle bounce on `ref`'s background, by direct writes on a timer (see
  * EGG_IDLE_STEPS). Off while `active` is false — the burst frame is React's —
  * and while reduced motion is asked for or the desktop is hidden.
+ *
+ * A LAYOUT effect, and its cleanup leaves the sprite alone. React writes the
+ * burst's first frame in the same commit that turns this off, before the
+ * cleanup runs: a cleanup that put the rest frame back overwrote it, and since
+ * the burst then sets that same frame again, nothing re-rendered it — the hatch
+ * opened on the rest pose instead of the first crack. A passive effect would
+ * also leave the timer armed until after paint, free to write one more bounce
+ * frame over the burst; a layout cleanup clears it inside the commit.
  */
 function useIdleBounce(ref: RefObject<HTMLSpanElement | null>, active: boolean) {
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = ref.current
     if (!el || !active) return
     let reduce: MediaQueryList | null = null
@@ -145,7 +153,6 @@ function useIdleBounce(ref: RefObject<HTMLSpanElement | null>, active: boolean) 
       if (timer !== null) clearTimeout(timer)
       document.removeEventListener('visibilitychange', resume)
       reduce?.removeEventListener?.('change', resume)
-      show(0)
     }
   }, [ref, active])
 }

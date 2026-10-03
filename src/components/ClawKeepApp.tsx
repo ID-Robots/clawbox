@@ -2,6 +2,11 @@
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { useModalDialog } from "@/hooks/useModalDialog";
+import {
+  pollClawkeepStatus,
+  refreshClawkeepStatus,
+  type ClawkeepStatusResult,
+} from "@/hooks/useClawkeepShieldStatus";
 import { useT } from "@/lib/i18n";
 import { backupSourceFor } from "@/lib/harness/backup-source";
 import { deriveProtection, isBackupRunning, type ProtectionState } from "@/lib/clawkeep-protection";
@@ -304,17 +309,38 @@ export default function ClawKeepApp() {
     return () => window.clearInterval(id);
   }, []);
 
-  const refresh = useCallback(async () => {
+  // The newest request whose answer this window has drawn. The requests are
+  // the page's (`pollClawkeepStatus`, shared with the shelf's shield), and an
+  // answer can land after a newer one — a poll still out when an action's
+  // refresh came back — so an older one is not drawn over what is on screen.
+  const shownSeq = useRef(0);
+  const take = useCallback(async ({ answer, seq }: ClawkeepStatusResult) => {
+    let next: ClawKeepStatus | null = null;
+    let failure: string | null = null;
     try {
-      const next = await jsonOrError<ClawKeepStatus>(
-        await fetch("/setup-api/clawkeep", { cache: "no-store" }),
-      );
+      if (!answer.response) throw answer.error;
+      // The same reading as a Response of its own: `jsonOrError` uses only
+      // `ok`, `status`, `statusText` and `json()`, which the shared answer
+      // replays for every reader.
+      next = await jsonOrError<ClawKeepStatus>(answer.response as unknown as Response);
+    } catch (e) {
+      failure = (e as Error).message;
+    }
+    if (seq <= shownSeq.current) return;
+    shownSeq.current = seq;
+    if (next) {
       setStatus(next);
       setError(null);
-    } catch (e) {
-      setError((e as Error).message);
+    } else {
+      setError(failure);
     }
   }, []);
+
+  // A look that starts now: the window's first, and every one after an
+  // action, whose effect the answer must already show.
+  const refresh = useCallback(async () => {
+    await take(await refreshClawkeepStatus());
+  }, [take]);
 
   useEffect(() => {
     refresh();
@@ -329,21 +355,41 @@ export default function ClawKeepApp() {
   // a cheap local-file read (no portal call). The effect re-runs whenever
   // `status` changes, so the period re-evaluates the moment a backup starts or
   // ends.
+  //
+  // The requests are the page's, not this window's: every answer also reaches
+  // the shelf's shield, which then skips its own 5 s look, and a tick that
+  // falls due while one is already out — the shield's, or this window's own
+  // still on its way — joins it, which is also what keeps a slow or hung
+  // request from stacking concurrent ones on the Jetson. While the page is
+  // hidden nothing is asked (no window of it can be seen); a tick that fell
+  // due meanwhile is asked on the visible edge, as the shield does.
   useEffect(() => {
     // Reads the clock directly rather than `nowMs`: this is an effect, not a
     // render, and taking `nowMs` as a dependency would tear the poll down and
     // re-arm it every minute.
     const intervalMs = isBackupRunning(status, Date.now()) ? 3000 : 10000;
-    // Skip a tick if the previous refresh is still in flight, so a slow/hung
-    // fetch can't stack concurrent requests on the Jetson.
-    let inFlight = false;
+    const hidden = () => document.visibilityState === "hidden";
+    let missed = false;
+    const look = () => {
+      missed = false;
+      void pollClawkeepStatus().then(take);
+    };
     const id = window.setInterval(() => {
-      if (inFlight) return;
-      inFlight = true;
-      void refresh().finally(() => { inFlight = false; });
+      if (hidden()) {
+        missed = true;
+        return;
+      }
+      look();
     }, intervalMs);
-    return () => window.clearInterval(id);
-  }, [status, refresh]);
+    const onVisibility = () => {
+      if (!hidden() && missed) look();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [status, take]);
 
   // RFC 8628 device-code poll loop. While pairing is active we hit
   // /pair/poll every `interval` seconds (the upstream's recommended
@@ -1204,10 +1250,11 @@ function BackupProgressPanel({
             style={{ width: `${(uploadRatio * 100).toFixed(1)}%` }}
           />
         ) : (
-          <div
-            className={`h-full rounded-full ${palette.bar}`}
-            style={{ animation: "indeterminate 1.6s ease-in-out infinite" }}
-          />
+          // Two pieces, one bar: globals.css, .indeterminate-bar.
+          <div className="indeterminate-bar" style={{ ["--indeterminate-duration" as string]: "1.6s" }}>
+            <div className={`rounded-full ${palette.bar}`} />
+            <div className={`indeterminate-bar-tail rounded-full ${palette.bar}`} />
+          </div>
         )}
       </div>
       {uploading && (
@@ -1940,7 +1987,10 @@ function RestoreModal({
   return (
     <ClawKeepModalPortal>
     <div
-      className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md"
+      // No backdrop blur under the dim: a full-screen blur is redone over the whole
+      // desktop on every frame anything beneath it moves (the mascot always does).
+      // One step darker keeps the look.
+      className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/90"
       onClick={onClose}
     >
       <div
@@ -2268,7 +2318,10 @@ function SetPassphraseModal({
 
   return (
     <ClawKeepModalPortal>
-    <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+    {/* No backdrop blur under the dim: a full-screen blur is redone over the whole
+        desktop on every frame anything beneath it moves (the mascot always does).
+        One step darker keeps the look. */}
+    <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/75 p-4">
       <form
         ref={panelRef}
         role="dialog"
@@ -2432,7 +2485,10 @@ function RestorePassphraseModal({
 
   return (
     <ClawKeepModalPortal>
-    <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+    {/* No backdrop blur under the dim: a full-screen blur is redone over the whole
+        desktop on every frame anything beneath it moves (the mascot always does).
+        One step darker keeps the look. */}
+    <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/75 p-4">
       <form
         ref={panelRef}
         role="dialog"

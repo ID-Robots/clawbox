@@ -28,13 +28,15 @@ import nodePath from "node:path";
  *  - on a web page, offset.js lays the page's fixed and sticky headers and
  *    its viewport-tall shells out below the bar, which the margin alone does
  *    not move, and only once the bar is up;
- *  - on the desktop the bar is always up, in the shelf's glass, and tells the
+ *  - on the desktop the bar is always up, in the shelf's fill, and tells the
  *    desktop its height through the variable and event
  *    src/lib/kiosk-bar-inset.ts reads;
  *  - the bar's address rule (Enter: address or search), the "+" landing on
  *    the extension's start page, and the start page's own search box;
- *  - the version is bumped (semver): Chrome caches unpacked extension code
- *    across restarts and re-reads it only when the version changes;
+ *  - the version is bumped (semver) with every change to the folder, checked
+ *    against a recorded hash of each release's files: Chrome caches unpacked
+ *    extension code across restarts and re-reads it only when the version
+ *    changes;
  *  - what keeps the extension cheap on a busy page: offset.js judges a box
  *    again only for a change that can move one, the bar redraws its strip
  *    only when the tabs changed and not at all while hidden, and the worker
@@ -61,6 +63,48 @@ function stringConst(source: string, name: string): string {
 
 const JS_FILES = ["background.js", "bar.js", "offset.js", "content.js", "desktop.js", "newtab.js"];
 const BAR_H = 40;
+
+const versionNumber = (v: string) => {
+  const [major, minor, patch] = v.split(".").map(Number);
+  return major * 1e6 + minor * 1e3 + patch;
+};
+
+/**
+ * Every version of the extension and a hash of the files it shipped
+ * (`extensionHash`). An entry is FROZEN once its version is committed: from
+ * then on a kiosk may be running those files under that number, and
+ * rewriting the entry's hash in place is the same unloaded change the list
+ * exists to catch — a later change is a new version, APPENDED. Until then the
+ * newest entry belongs to the uncommitted pass still making that version and
+ * is re-recorded as the pass changes the folder.
+ */
+const RELEASES: readonly { version: string; files: string }[] = [
+  { version: "1.5.2", files: "3e6c440c9f6bc37e4abc2d7d674657cd6c84aa2eafebec7cdb1ee0064773995c" },
+  // The desktop bar's flat fill instead of a backdrop blur.
+  { version: "1.5.3", files: "c05f89216307470adbaf94161ceebf6f4d267c3a55182c0a8a1b23fa0ad7b257" },
+];
+
+/**
+ * sha256 over every file in the folder, by name, with manifest.json's
+ * `version` left out so a bump alone does not read as a code change (and a
+ * new file counts as much as an edited one). Line endings are normalised so
+ * a checkout's CRLF cannot fail it.
+ */
+function extensionHash(): string {
+  const h = crypto.createHash("sha256");
+  for (const name of fs.readdirSync(EXT).sort()) {
+    let body = fs.readFileSync(nodePath.join(EXT, name));
+    if (name === "manifest.json") {
+      const m = JSON.parse(body.toString("utf-8"));
+      delete m.version;
+      body = Buffer.from(JSON.stringify(m));
+    } else if (!name.endsWith(".png")) {
+      body = Buffer.from(body.toString("utf-8").replace(/\r\n/g, "\n"));
+    }
+    h.update(name).update("\0").update(body).update("\0");
+  }
+  return h.digest("hex");
+}
 
 describe("kiosk extension", () => {
   it("has its files and valid JS", () => {
@@ -176,11 +220,30 @@ describe("kiosk extension", () => {
     expect(bg).not.toMatch(/addListener\(broadcast\)|\) broadcast\(\);/);
   });
 
-  it("carries a semver version, bumped past 1.5.0 (offset.js skips inert style writes, the strip redraws only on change, one broadcast per burst)", () => {
+  it("carries a semver version, bumped past 1.5.2 (the desktop bar's flat fill)", () => {
     const m = JSON.parse(read("manifest.json"));
     expect(m.version).toMatch(/^\d+\.\d+\.\d+$/);
-    const [major, minor, patch] = m.version.split(".").map(Number);
-    expect(major * 1e6 + minor * 1e3 + patch).toBeGreaterThan(1e6 + 5e3);
+    expect(versionNumber(m.version)).toBeGreaterThan(versionNumber("1.5.2"));
+  });
+
+  it("moves the version whenever a file the extension loads changes", () => {
+    // A floor alone ("past 1.5.2") still passed when bar.js changed under an
+    // unchanged version — exactly the edit the kiosk then never loads. So
+    // every release is recorded with a hash of what it shipped: a change to
+    // any file in the folder no longer matches the newest entry, and the only
+    // way back to green is a new entry, which needs a version above the last.
+    for (let i = 1; i < RELEASES.length; i++) {
+      expect(versionNumber(RELEASES[i].version), RELEASES[i].version).toBeGreaterThan(versionNumber(RELEASES[i - 1].version));
+    }
+    const newest = RELEASES[RELEASES.length - 1];
+    const now = extensionHash();
+    expect(
+      now,
+      `kiosk/extension changed since ${newest.version}: bump "version" in manifest.json and append ` +
+        `{ version: "<the new version>", files: "${now}" } to RELEASES in this test ` +
+        `(or, while ${newest.version} is not committed yet, put this hash in its entry)`,
+    ).toBe(newest.files);
+    expect(JSON.parse(read("manifest.json")).version, "manifest.json's version is not the newest RELEASES entry").toBe(newest.version);
   });
 
   it("centres the address box: three columns, the two sides equal", () => {
@@ -301,16 +364,29 @@ describe("kiosk extension", () => {
     expect(off).not.toContain('getElementsByTagName("*").length');
   });
 
-  it("wears the shelf's glass on the desktop, so the wallpaper shows behind the bar", () => {
+  it("wears the shelf's fill on the desktop, so the wallpaper shows behind the bar", () => {
     const bar = read("bar.js");
     const shelf = fs.readFileSync(nodePath.resolve(__dirname, "../../components/ChromeShelf.tsx"), "utf-8");
-    // The same tint, blur and hairline as the shelf, copied (the extension
-    // cannot import the component); kept equal here.
-    expect(shelf).toContain('background: "rgba(17, 24, 39, 0.55)"');
-    expect(shelf).toContain('backdropFilter: "blur(20px)"');
-    expect(shelf).toContain('borderTop: "1px solid rgba(255, 255, 255, 0.1)"');
-    expect(bar).toContain(".bar.desktop { background: rgba(17, 24, 39, 0.55); -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);");
-    expect(bar).toContain("border-bottom: 1px solid rgba(255, 255, 255, 0.1); }");
+    // The shelf's own bar: the element the mascot stands on.
+    const shelfBar = /data-mascot-ground\s+className="fixed bottom-0[\s\S]*?style=\{\{([\s\S]*?)\}\}/.exec(shelf)?.[1];
+    expect(shelfBar).toBeDefined();
+    // The same tint and hairline as the shelf, copied (the extension cannot
+    // import the component); kept equal here by reading the shelf's values.
+    // The desktop shelf's tint, that is: the phone bar is more opaque
+    // (PHONE_BAR_FILL, chrome-shelf.test.tsx), and the kiosk's desktop fills
+    // a monitor, so it never wears the phone layout.
+    expect(shelfBar).toContain("background: isMobile ? PHONE_BAR_FILL : SHELF_FILL,");
+    const tint = /const SHELF_FILL = "(rgba\([^)]*\))";/.exec(shelf)?.[1];
+    const hairline = /borderTop: "([^"]*)"/.exec(shelfBar!)?.[1];
+    expect(tint).toBe("rgba(17, 24, 39, 0.8)");
+    expect(hairline).toBe("1px solid rgba(255, 255, 255, 0.1)");
+    const desktopRule = /\.bar\.desktop \{ background:[^}]*\}/.exec(bar)?.[0];
+    expect(desktopRule).toBe(`.bar.desktop { background: ${tint};\n      border-bottom: ${hairline}; }`);
+    // A tint, not frosted glass, on both: a backdrop blur is redone over the
+    // whole bar whenever anything changes under any part of it — the mascot on
+    // the shelf, the shield's pulse, a window below.
+    expect(shelfBar).not.toMatch(/backdropFilter|WebkitBackdropFilter/);
+    expect(bar).not.toMatch(/\.bar\.desktop[^{]*\{[^}]*backdrop-filter/);
     // Web pages keep the solid ground: there is no wallpaper behind them.
     expect(bar).toContain("background: var(--ground); border-bottom: 1px solid var(--border-subtle);");
   });

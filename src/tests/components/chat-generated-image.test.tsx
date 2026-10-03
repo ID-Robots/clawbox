@@ -167,6 +167,27 @@ describe("a generated image in the mascot chat", () => {
     expect(screen.getAllByRole("img")).toHaveLength(1);
   });
 
+  it("lays a flat scrim behind the preview — darker, never a full-screen blur", async () => {
+    // A backdrop blur over the whole viewport is redone on every frame that
+    // anything behind it moves (the crab always does): on the spread desktop
+    // that was a 7.4 MP blur per frame for a 2 px softening. One step darker
+    // keeps the desktop as far back as the blur did.
+    installFetch(REPLY);
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await send("generate image of cat");
+    fireEvent.click(await screen.findByRole("button", { name: "chat.generatedImage" }));
+
+    const dialog = await screen.findByRole("dialog");
+    const scrim = screen.getByTestId("chat-image-preview-scrim");
+    expect(scrim).toBe(dialog.parentElement);
+    expect(scrim.style.background).toBe("rgba(0, 0, 0, 0.9)");
+    // jsdom's CSSStyleDeclaration does not know backdrop-filter, so React's
+    // write would land as a plain property (and in the serialised style
+    // attribute, which jsdom does keep for unknown properties).
+    expect((scrim.style as unknown as Record<string, unknown>).backdropFilter ?? "").toBe("");
+    expect(scrim.getAttribute("style") ?? "").not.toMatch(/blur/);
+  });
+
   it("closes the preview on its close button, leaving the chat open", async () => {
     installFetch(REPLY);
     render(<ChatPopup isOpen onClose={() => {}} />);

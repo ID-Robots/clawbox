@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import type { ReactNode } from "react";
+import { Profiler, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import MonitorsPanel, { recommendedScale } from "@/components/MonitorsPanel";
@@ -752,6 +752,50 @@ describe("MonitorsPanel — the trial's countdown (fake clock)", () => {
     expect(monitorCalls("GET")).toHaveLength(3);
     // ...and the owner's change survived.
     expect(rowIds()).toEqual([RIGHT.id, LEFT.id]);
+  });
+
+  // The idle look every 5 s almost always brings back the monitors the panel
+  // already shows. It used to replace the status, the draft and the baseline
+  // with new objects all the same, and re-draw the whole panel for nothing.
+  it("a look that brings back the same monitors draws nothing; one that brings back a change lands", async () => {
+    // A fresh object per answer, as a JSON body is: only equal CONTENTS are the same.
+    box.get = () => ({ status: 200, body: structuredClone(box.status) });
+    const commits = vi.fn();
+    render(<Profiler id="monitors" onRender={commits}><MonitorsPanel /></Profiler>);
+    await settle();
+    expect(screen.getByTestId("monitors-panel")).toBeInTheDocument();
+    // React may call a component once more after an update before it bails
+    // out of a same-state one (its documented caveat), so the count is taken
+    // after the first look; from there an identical answer commits nothing.
+    await advance(5_000);
+    const drawn = commits.mock.calls.length;
+
+    await advance(5_000);
+    await advance(5_000);
+    await advance(5_000);
+    expect(monitorCalls("GET")).toHaveLength(5);
+    expect(commits.mock.calls.length).toBe(drawn);
+    expect(applyButton()).toBeDisabled();
+
+    // Changed from another screen: the main monitor is now the right one.
+    box.status = deskStatus({ main: RIGHT.id });
+    await advance(5_000);
+    expect(commits.mock.calls.length).toBeGreaterThan(drawn);
+    expect(within(block(2)).getByText(tx("settings.monitors.main"))).toBeInTheDocument();
+    expect(within(block(1)).queryByText(tx("settings.monitors.main"))).toBeNull();
+    // It is what the box shows, not an edit: nothing to apply.
+    expect(applyButton()).toBeDisabled();
+  });
+
+  it("a selection the owner made survives a look that brings back the same monitors", async () => {
+    box.get = () => ({ status: 200, body: structuredClone(box.status) });
+    render(<MonitorsPanel />);
+    await settle();
+    fireEvent.click(block(2));
+    await advance(5_000);
+    expect(monitorCalls("GET")).toHaveLength(2);
+    expect(block(2)).toHaveAttribute("aria-pressed", "true");
+    expect(detail().getByText(port("DP-2"))).toBeInTheDocument();
   });
 
   it("a box without monitors is asked once and never again", async () => {

@@ -19,7 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logicalSize, parseWlrRandr } from "@/lib/monitors-layout";
-import { isShellPage, layoutBox, spanWindow } from "../../../scripts/x64-migration/kiosk/clawbox-desktop-span.mjs";
+import { createWatcher, isShellPage, layoutBox, shellSignature, spanWindow } from "../../../scripts/x64-migration/kiosk/clawbox-desktop-span.mjs";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
@@ -30,6 +30,9 @@ const BOX = { width: 5120, height: 1440 };
 // ── Chrome, stubbed ─────────────────────────────────────────────────────────
 
 let targets: unknown = [];
+/** What Chrome's /json/version answers (null: no browser endpoint to dial). */
+let version: unknown = null;
+let fetched: string[] = [];
 let liveViolations: string[] = [];
 
 type Reply = (method: string, socket: FakeSocket) => Record<string, unknown> | null;
@@ -79,12 +82,16 @@ async function flush(n = 10) {
 
 beforeEach(() => {
   targets = [];
+  version = null;
+  fetched = [];
   liveViolations = [];
   FakeSocket.instances = [];
   FakeSocket.reply = () => ({});
   vi.stubGlobal("fetch", async (input: unknown) => {
     const url = String(input);
     if (/:(18800|18801|3005)\b/.test(url)) liveViolations.push(url);
+    fetched.push(url);
+    if (url.endsWith("/json/version")) return new Response(JSON.stringify(version), { status: 200 });
     return new Response(JSON.stringify(targets), { status: 200 });
   });
   vi.stubGlobal("WebSocket", FakeSocket);
@@ -205,6 +212,215 @@ describe("spanWindow", () => {
       return null;
     };
     expect(await spanWindow(1, DESKTOP, BOX)).toBe(false);
+  });
+});
+
+// ── The watcher's look ──────────────────────────────────────────────────────
+
+/**
+ * Every 2 s the watcher reads the row; it used to attach to every desktop page
+ * and run a script in it on every one of those looks too. A look whose row,
+ * pages and window are what the last full pass left asks the BROWSER alone —
+ * and anything else, at once, gets the full pass it always got.
+ */
+describe("createWatcher", () => {
+  const BROWSER_WS = "ws://127.0.0.1:1/devtools/browser/B";
+  const pageSockets = () => FakeSocket.instances.filter((s) => s.url.includes("/devtools/page/"));
+  const browserSockets = () => FakeSocket.instances.filter((s) => s.url === BROWSER_WS);
+
+  /** The app window `A`, wherever Chrome has it: a set moves it, as labwc honours one. */
+  let win = { width: 5120, height: 1440, windowState: "normal" };
+  let row: { width: number; height: number } | null = { ...BOX };
+  let clock = 0;
+  /** Browser.getWindowBounds: `null` never answers; "close" drops the socket under the call. */
+  let boundsReply: "answer" | "close" = "answer";
+
+  beforeEach(() => {
+    version = { webSocketDebuggerUrl: BROWSER_WS };
+    targets = [page("A")];
+    win = { width: 5120, height: 1440, windowState: "normal" };
+    row = { ...BOX };
+    clock = 0;
+    boundsReply = "answer";
+    FakeSocket.reply = (method, socket) => {
+      if (method === "Runtime.evaluate") return { result: { type: "string", value: "standalone" } };
+      if (method === "Browser.getWindowForTarget") return { windowId: 3, bounds: { ...win } };
+      if (method === "Browser.setWindowBounds") {
+        win = { ...win, ...(socket.sent.at(-1)!.params.bounds as object) };
+        return {};
+      }
+      if (method === "Browser.getWindowBounds") {
+        if (boundsReply === "close") {
+          socket.close();
+          return null;
+        }
+        return { bounds: { left: 0, top: 0, ...win } };
+      }
+      return {};
+    };
+  });
+
+  const watcher = () => createWatcher(1, DESKTOP, { readBox: async () => (row ? { ...row } : null), now: () => clock });
+  /** One look, `ms` after the last. */
+  const look = async (w: ReturnType<typeof createWatcher>, ms = 2_000) => {
+    clock += ms;
+    return w.tick();
+  };
+
+  it("a row that stands still is confirmed by the browser alone: no page is attached after the first look", async () => {
+    const w = watcher();
+    expect(await w.tick()).toBe(true);
+    expect(pageSockets()).toHaveLength(1);
+    for (let i = 0; i < 10; i++) expect(await look(w)).toBe(true);
+
+    expect(pageSockets()).toHaveLength(1);
+    // One socket to the browser, kept open, one question per look.
+    expect(browserSockets()).toHaveLength(1);
+    expect(browserSockets()[0].closed).toBe(false);
+    expect(browserSockets()[0].sent).toEqual(Array.from({ length: 10 }, () => ({ method: "Browser.getWindowBounds", params: { windowId: 3 } })));
+    expect(fetched.filter((u) => u.endsWith("/json/version"))).toHaveLength(1);
+    expect(fetched.filter((u) => u.endsWith("/json/list"))).toHaveLength(11);
+  });
+
+  it("a row that changed is spread at the very next look", async () => {
+    const w = watcher();
+    await w.tick();
+    await look(w);
+    row = { width: 2560, height: 1440 };
+    expect(await look(w)).toBe(true);
+    expect(pageSockets()).toHaveLength(2);
+    expect(pageSockets()[1].sent.at(-1)).toEqual({
+      method: "Browser.setWindowBounds",
+      params: { windowId: 3, bounds: { left: 0, top: 0, width: 2560, height: 1440 } },
+    });
+    // ...and from there that row is the steady one.
+    await look(w);
+    expect(pageSockets()).toHaveLength(2);
+  });
+
+  it("a window Chrome put back maximized, or at another size, is spread again at the very next look", async () => {
+    const w = watcher();
+    await w.tick();
+    win = { width: 2560, height: 1440, windowState: "maximized" };
+    expect(await look(w)).toBe(true);
+    expect(pageSockets()).toHaveLength(2);
+    expect(pageSockets()[1].sent.slice(2).map((s) => s.params)).toEqual([
+      { windowId: 3, bounds: { windowState: "normal" } },
+      { windowId: 3, bounds: { left: 0, top: 0, width: 5120, height: 1440 } },
+    ]);
+    win = { ...win, width: 5000 };
+    await look(w);
+    expect(pageSockets()).toHaveLength(3);
+    expect(win).toMatchObject({ width: 5120, height: 1440, windowState: "normal" });
+    await look(w);
+    expect(pageSockets()).toHaveLength(3);
+  });
+
+  it("desktop pages other than the ones the last pass asked — another address, another window — get the full pass", async () => {
+    const w = watcher();
+    await w.tick();
+    targets = [page("A", `${DESKTOP}login`)];
+    await look(w);
+    expect(pageSockets()).toHaveLength(2);
+    targets = [page("B"), page("A", `${DESKTOP}login`)];
+    await look(w);
+    expect(pageSockets()).toHaveLength(3);
+    // A page the desktop opened is not one the full pass would ask: no pass for it.
+    targets = [page("B"), page("A", `${DESKTOP}login`), page("P", `${DESKTOP}app/clawbox`)];
+    await look(w);
+    expect(pageSockets()).toHaveLength(3);
+  });
+
+  it("a browser socket that closes under the question gets the full pass, and the next look dials a fresh one", async () => {
+    const w = watcher();
+    await w.tick();
+    await look(w);
+    boundsReply = "close";
+    expect(await look(w)).toBe(true);
+    expect(pageSockets()).toHaveLength(2);
+    boundsReply = "answer";
+    expect(await look(w)).toBe(true);
+    expect(pageSockets()).toHaveLength(2);
+    expect(browserSockets()).toHaveLength(2);
+  });
+
+  it("still makes the full pass every 30 s", async () => {
+    const w = watcher();
+    await w.tick();
+    for (let i = 0; i < 14; i++) await look(w);
+    expect(pageSockets()).toHaveLength(1);
+    await look(w);
+    expect(pageSockets()).toHaveLength(2);
+  });
+
+  // The session's clock is stepped by NTP (no RTC). Timed on Date, a step back
+  // held off the 30 s full pass for as long as the step; the watcher's own
+  // clock, left at its default, is the monotonic one.
+  it("a wall clock stepped back does not hold off the 30 s full pass", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let mono = 1_000_000;
+    vi.spyOn(performance, "now").mockImplementation(() => mono);
+    const w = createWatcher(1, DESKTOP, { readBox: async () => (row ? { ...row } : null) });
+    await w.tick();
+    vi.setSystemTime(Date.now() - 60 * 60_000);
+    for (let i = 0; i < 14; i++) {
+      mono += 2_000;
+      await w.tick();
+    }
+    expect(pageSockets()).toHaveLength(1);
+    mono += 2_000;
+    await w.tick();
+    expect(pageSockets()).toHaveLength(2);
+  });
+
+  it("a wall clock stepped forward does not cut the 30 s short", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let mono = 1_000_000;
+    vi.spyOn(performance, "now").mockImplementation(() => mono);
+    const w = createWatcher(1, DESKTOP, { readBox: async () => (row ? { ...row } : null) });
+    await w.tick();
+    vi.setSystemTime(Date.now() + 60 * 60_000);
+    mono += 2_000;
+    await w.tick();
+    expect(pageSockets()).toHaveLength(1);
+  });
+
+  it("a Chrome with no browser endpoint is looked at in full every time, as before", async () => {
+    version = { Browser: "Chrome" };
+    const w = watcher();
+    for (let i = 0; i < 4; i++) expect(await look(w)).toBe(true);
+    expect(pageSockets()).toHaveLength(4);
+    expect(browserSockets()).toHaveLength(0);
+  });
+
+  it("no row, or no app window, keeps nothing to shortcut with", async () => {
+    const w = watcher();
+    await w.tick();
+    row = null;
+    expect(await look(w)).toBe(false);
+    row = { ...BOX };
+    await look(w);
+    expect(pageSockets()).toHaveLength(2);
+    targets = [];
+    expect(await look(w)).toBe(false);
+    targets = [page("A")];
+    await look(w);
+    expect(pageSockets()).toHaveLength(3);
+  });
+});
+
+describe("shellSignature / spanWindow's `found`", () => {
+  it("is the desktop pages in the list's order, and what a pass that found the window leaves", async () => {
+    const list = [page("B", `${DESKTOP}login`), page("P", `${DESKTOP}app/x`), page("A")];
+    expect(shellSignature(list, DESKTOP)).toBe(JSON.stringify([["B", `${DESKTOP}login`], ["A", DESKTOP]]));
+    expect(shellSignature([page("A"), page("B", `${DESKTOP}login`)], DESKTOP)).not.toBe(shellSignature(list, DESKTOP));
+    expect(shellSignature({ nope: true }, DESKTOP)).toBeNull();
+
+    targets = [page("A")];
+    FakeSocket.reply = windowReplies("standalone", { width: 5120, height: 1440, windowState: "normal" });
+    const found: Record<string, unknown> = {};
+    expect(await spanWindow(1, DESKTOP, BOX, [], found)).toBe(true);
+    expect(found).toEqual({ windowId: 3, shells: shellSignature(targets, DESKTOP) });
   });
 });
 

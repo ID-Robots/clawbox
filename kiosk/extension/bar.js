@@ -9,10 +9,12 @@
 // a new tab. The address box is left out there — the desktop is not a page to
 // type an address over, and "+" lands on the start page's own search box —
 // and so are back/forward/reload and Close, which would act on the desktop
-// itself. DevTools stays: the desktop is a page like any other to inspect. It wears the shelf's glass
-// there rather than the solid ground (ChromeShelf.tsx: the same tint, blur and
-// hairline), so the desktop's wallpaper runs on behind the bar's empty space
-// and the top bar and the shelf read as one frame. The desktop cannot be
+// itself. DevTools stays: the desktop is a page like any other to inspect. It wears the shelf's fill
+// there rather than the solid ground (ChromeShelf.tsx: the same translucent tint
+// and hairline), so the desktop's wallpaper runs on behind the bar's empty space
+// and the top bar and the shelf read as one frame. Like the shelf, a tint and
+// not a backdrop blur: a blur is redone over the whole bar whenever anything
+// changes under any part of it. The desktop cannot be
 // pushed down the way a web page is (every surface on it is position: fixed),
 // so the bar TELLS it how tall it is instead: `--clawbox-kiosk-bar-h` on
 // <html>, and a `clawbox:kiosk-bar` event on window once it is up, which
@@ -125,7 +127,7 @@
     .home .word { font-weight: 700; font-size: 14px; letter-spacing: -0.01em;
       background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); -webkit-background-clip: text; background-clip: text;
       -webkit-text-fill-color: transparent; color: var(--coral-bright); }
-    .bar.desktop { background: rgba(17, 24, 39, 0.55); -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
+    .bar.desktop { background: rgba(17, 24, 39, 0.8);
       border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
     .bar.desktop .home { background: rgba(249,115,22,0.14); cursor: default; }
     .bar.desktop .home::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: 0; height: 2px; border-radius: 2px 2px 0 0; background: var(--coral-bright); }

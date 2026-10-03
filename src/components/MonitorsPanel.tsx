@@ -193,15 +193,27 @@ export default function MonitorsPanel() {
     percent: new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }),
   }), [locale]);
 
+  /**
+   * The box's answer becomes what the panel shows: the status, and a draft and
+   * baseline made from it (an unsaved draft is replaced — the callers that
+   * adopt over one mean to). Every piece is kept as the SAME object when its
+   * contents are what the panel already holds, so the idle panel's look every
+   * 5 s, which almost always brings back the same monitors, changes no state
+   * and draws nothing: the whole panel (and the canvas's measuring effect, keyed
+   * on the status) used to re-render for an identical answer. Equal contents
+   * are the only thing skipped — a draft that differs from the answer is still
+   * replaced, and an answer that differs in anything at all still lands.
+   */
   const adopt = useCallback((next: MonitorStatus) => {
-    setStatus(next);
+    setStatus((cur) => (cur && JSON.stringify(cur) === JSON.stringify(next) ? cur : next));
     const d = draftOf(next);
-    setDraft(d);
-    setBaseline(d);
+    setDraft((cur) => (sameDraft(cur, d) ? cur : d));
+    setBaseline((cur) => (sameDraft(cur, d) ? cur : d));
     setSelected((cur) => (cur && next.monitors.some((m) => m.id === cur) ? cur : next.main ?? next.order[0] ?? null));
-    // Fresh with the status, so the first frame of a countdown counts from now.
-    setNow(Date.now());
     if (next.pending) {
+      // Fresh with the status, so the first frame of a countdown counts from
+      // now. Only a countdown reads `now`, so only a trial's answer sets it.
+      setNow(Date.now());
       trial.current = d;
       setTrialEnd(next.pending.deadline - skew.current);
       return;

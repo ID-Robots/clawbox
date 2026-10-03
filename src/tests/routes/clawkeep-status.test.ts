@@ -127,6 +127,23 @@ describe("GET /setup-api/clawkeep", () => {
     spy.mockRestore();
   });
 
+  it("a data path that cannot be a directory is refused with the same error it always was", async () => {
+    // The shelf's shield asks every 5 s, so the read no longer makes the data
+    // directory each time — but a path that cannot BE one (a file where it
+    // should be) must still be the mkdir's refusal, not some read's.
+    await GET();
+    await fs.rm(DATA_DIR, { recursive: true, force: true });
+    await fs.writeFile(DATA_DIR, "not a directory");
+    try {
+      const res = await GET();
+      expect(res.status).toBe(500);
+      expect((await res.json()).error).toBe(`EEXIST: file already exists, mkdir '${DATA_DIR}'`);
+    } finally {
+      await fs.rm(DATA_DIR, { force: true });
+      await fs.mkdir(DATA_DIR, { recursive: true });
+    }
+  });
+
   it("propagates a ClawKeepError's status code", async () => {
     const err = new clawkeep.ClawKeepError("auth required", 401);
     const spy = vi.spyOn(clawkeep, "getStatus").mockRejectedValueOnce(err);
@@ -135,5 +152,69 @@ describe("GET /setup-api/clawkeep", () => {
     const body = await res.json();
     expect(body.error).toBe("auth required");
     spy.mockRestore();
+  });
+});
+
+/**
+ * The data directory, made once per process rather than on every read.
+ *
+ * Each case takes a FRESH copy of the module (the "once" is module state), and
+ * the answer it is held to is the one a copy that has never read anything
+ * gives — which makes the directory first, as every read used to.
+ */
+describe("getStatus — the data directory", () => {
+  async function freshClawkeep() {
+    vi.resetModules();
+    return import("@/lib/clawkeep");
+  }
+
+  it("is made by the first read, not by every read", async () => {
+    await fs.writeFile(path.join(DATA_DIR, "config.toml"), 'server = "https://portal.example"\n');
+    const lib = await freshClawkeep();
+    const mkdir = vi.spyOn(fs, "mkdir");
+    for (let i = 0; i < 4; i++) await lib.getStatus();
+    expect(mkdir.mock.calls.filter(([p]) => p === DATA_DIR)).toHaveLength(1);
+  });
+
+  it("a directory removed under a running server is answered exactly as before, and is back after the read", async () => {
+    const lib = await freshClawkeep();
+    await lib.getStatus();
+    await fs.writeFile(path.join(DATA_DIR, "token"), "claw_test_token");
+    await fs.writeFile(path.join(DATA_DIR, "state.json"), JSON.stringify({ last_backup_at_ms: 1_700_000_000_000 }));
+    expect((await lib.getStatus()).paired).toBe(true);
+
+    await fs.rm(DATA_DIR, { recursive: true, force: true });
+    const after = await lib.getStatus();
+
+    await fs.rm(DATA_DIR, { recursive: true, force: true });
+    const never = await (await freshClawkeep()).getStatus();
+
+    expect(after).toEqual(never);
+    expect(after).toMatchObject({ paired: false, lastBackupAtMs: 0, schedule: clawkeep.DEFAULT_SCHEDULE });
+    // The read seeded config.toml, which makes the directory again.
+    expect((await fs.stat(DATA_DIR)).isDirectory()).toBe(true);
+    await expect(fs.readFile(path.join(DATA_DIR, "config.toml"), "utf8")).resolves.toContain("server =");
+  });
+
+  it("a data path that became a file is refused with the error a first read gives", async () => {
+    const lib = await freshClawkeep();
+    await lib.getStatus();
+    await fs.rm(DATA_DIR, { recursive: true, force: true });
+    await fs.writeFile(DATA_DIR, "not a directory");
+    try {
+      const after = await lib.getStatus().then(() => null, (e: NodeJS.ErrnoException) => e);
+      const never = await (await freshClawkeep()).getStatus().then(() => null, (e: NodeJS.ErrnoException) => e);
+      expect(never?.code).toBe("EEXIST");
+      expect(after?.code).toBe(never?.code);
+      expect(after?.message).toBe(never?.message);
+      // And it is not trusted afterwards: once the path is a directory again,
+      // the next read answers normally.
+      await fs.rm(DATA_DIR, { force: true });
+      await fs.mkdir(DATA_DIR, { recursive: true });
+      await expect(lib.getStatus()).resolves.toMatchObject({ paired: false });
+    } finally {
+      await fs.rm(DATA_DIR, { recursive: true, force: true });
+      await fs.mkdir(DATA_DIR, { recursive: true });
+    }
   });
 });

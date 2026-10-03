@@ -2,7 +2,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { MONITOR_POLL_MS, MONITOR_SOON_MS, useMonitorLayoutSync } from "@/lib/use-monitor-layout";
-import { MONITORS_CHANGED_EVENT, getDeskScreens, setDeskScreens, type MonitorStatusLike } from "@/lib/desktop-screens";
+import {
+  MONITORS_CHANGED_EVENT,
+  getDeskScreens,
+  isMonitorSessionWindow,
+  setDeskScreens,
+  setMonitorSessionWindow,
+  type MonitorStatusLike,
+} from "@/lib/desktop-screens";
+import { isBoxOwnScreen } from "@/lib/visible-interval";
 
 /**
  * The desktop's poll of `/setup-api/monitors` (monitor mode). Two rules the
@@ -87,6 +95,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   setDeskScreens(null);
+  setMonitorSessionWindow(false);
 });
 
 describe("useMonitorLayoutSync", () => {
@@ -213,5 +222,153 @@ describe("useMonitorLayoutSync", () => {
     expect(getDeskScreens()).toBeNull();
     await advance(MONITOR_POLL_MS * 3);
     expect(f.fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * A window nobody can see (the app window minimised) does not spawn wlr-randr
+ * on the box every 5 s. A tick that falls due then is read the moment the page
+ * is visible again, so the layout on return is at least as fresh as before;
+ * a resize or a Settings change is an event, not the clock, and is read at
+ * once whether the page is visible or not.
+ */
+describe("useMonitorLayoutSync — a hidden page", () => {
+  let visibility: DocumentVisibilityState = "visible";
+  function setVisibility(next: DocumentVisibilityState) {
+    visibility = next;
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+  }
+
+  beforeEach(() => {
+    visibility = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+  });
+  afterEach(() => {
+    // jsdom's own getter is on Document.prototype; the instance override goes.
+    delete (document as unknown as Record<string, unknown>).visibilityState;
+  });
+
+  it("skips the periodic read while hidden and reads at once on the visible edge", async () => {
+    const f = manualFetch();
+    renderHook(() => useMonitorLayoutSync(true));
+    await f.answer(ROW);
+    setVisibility("hidden");
+    await advance(MONITOR_POLL_MS * 10);
+    expect(f.fetchMock).toHaveBeenCalledTimes(1);
+
+    setVisibility("visible");
+    expect(f.fetchMock).toHaveBeenCalledTimes(2);
+    await f.answer({ ...ROW, main: "b" });
+    expect(getDeskScreens()?.find((s) => s.main)?.id).toBe("b");
+    // The cadence carries on from there.
+    await advance(MONITOR_POLL_MS);
+    expect(f.fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("a trip away shorter than the interval reads nothing extra", async () => {
+    const f = manualFetch();
+    renderHook(() => useMonitorLayoutSync(true));
+    await f.answer(ROW);
+    setVisibility("hidden");
+    await advance(MONITOR_POLL_MS - 1_000);
+    setVisibility("visible");
+    expect(f.fetchMock).toHaveBeenCalledTimes(1);
+    await advance(1_000);
+    expect(f.fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("still reads a resize at once while hidden", async () => {
+    const f = manualFetch();
+    renderHook(() => useMonitorLayoutSync(true));
+    await f.answer(ROW);
+    setVisibility("hidden");
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    await advance(MONITOR_SOON_MS);
+    expect(f.fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * The box's own answer is what tells the rest of the page it is the monitor
+ * session's window (`isBoxOwnScreen()`, which keeps the owner-notice ring at
+ * its on-screen pace while the window is hidden). An app `display-mode` used
+ * to be the test, and that also took in the desktop installed as an app on a
+ * phone and a tab in full screen — a hidden phone then read the ring every
+ * 2 s. Those pages ask here too, and on a box with no monitor session (every
+ * Jetson) the answer is `available: false`.
+ */
+describe("useMonitorLayoutSync — the page learns it is the session's window", () => {
+  it("is marked once a monitor session answered, and isBoxOwnScreen() says so", async () => {
+    const f = manualFetch();
+    renderHook(() => useMonitorLayoutSync(true));
+    expect(isMonitorSessionWindow()).toBe(false);
+    expect(isBoxOwnScreen()).toBe(false);
+    await f.answer(ROW);
+    expect(isMonitorSessionWindow()).toBe(true);
+    expect(isBoxOwnScreen()).toBe(true);
+  });
+
+  it("is marked with ONE monitor on, where the page has no screens to lay out", async () => {
+    const f = manualFetch();
+    renderHook(() => useMonitorLayoutSync(true));
+    await f.answer({ available: true, main: "a", box: { width: 2560, height: 1440 }, monitors: [ROW.monitors![0]] });
+    expect(getDeskScreens()).toBeNull();
+    expect(isMonitorSessionWindow()).toBe(true);
+  });
+
+  it("is not marked in an app window the box answers with no monitor session (an installed app, a full-screen tab)", async () => {
+    const f = manualFetch();
+    renderHook(() => useMonitorLayoutSync(true));
+    await f.answer(UNAVAILABLE);
+    expect(isMonitorSessionWindow()).toBe(false);
+    expect(isBoxOwnScreen()).toBe(false);
+  });
+
+  it("is not marked by a refusal or a server error before any answer", async () => {
+    const f = manualFetch();
+    renderHook(() => useMonitorLayoutSync(true));
+    await f.answer({}, 502);
+    expect(isMonitorSessionWindow()).toBe(false);
+  });
+
+  it("keeps the mark through a read that failed, as it keeps the layout", async () => {
+    const f = manualFetch();
+    renderHook(() => useMonitorLayoutSync(true));
+    await f.answer(ROW);
+    await advance(MONITOR_POLL_MS);
+    await f.answer(UNAVAILABLE);
+    expect(isMonitorSessionWindow()).toBe(true);
+    await advance(MONITOR_POLL_MS);
+    await f.answer({}, 502);
+    expect(isMonitorSessionWindow()).toBe(true);
+  });
+
+  it("drops the mark when it unmounts, with the layout", async () => {
+    const f = manualFetch();
+    const { unmount } = renderHook(() => useMonitorLayoutSync(true));
+    await f.answer(ROW);
+    unmount();
+    expect(isMonitorSessionWindow()).toBe(false);
+  });
+
+  it("an answer that lands after it unmounted marks nothing", async () => {
+    const f = manualFetch();
+    const { unmount } = renderHook(() => useMonitorLayoutSync(true));
+    unmount();
+    await f.answer(ROW);
+    expect(isMonitorSessionWindow()).toBe(false);
+  });
+
+  it("a browser tab asks nothing and is never marked", async () => {
+    const f = manualFetch();
+    vi.stubGlobal("matchMedia", (q: string) => ({ matches: q === "(display-mode: browser)" }));
+    renderHook(() => useMonitorLayoutSync(true));
+    await advance(MONITOR_POLL_MS);
+    expect(f.fetchMock).not.toHaveBeenCalled();
+    expect(isMonitorSessionWindow()).toBe(false);
   });
 });

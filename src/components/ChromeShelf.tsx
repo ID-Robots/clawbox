@@ -7,9 +7,42 @@ import { mainInsets } from "@/lib/desktop-screens";
 import { useDeskScreens } from "@/lib/use-desk-screens";
 import type { Protection, ProtectionReason } from "@/lib/clawkeep-protection";
 import { openInKiosk } from "@/lib/kiosk-tabs-client";
+import { useDesktopClock } from "@/lib/use-desktop-clock";
 
 /** The reasons that put a shield in an at-risk state. `ok` is not among them. */
 type AtRiskReason = Exclude<ProtectionReason, "ok">;
+
+/**
+ * The shelf's fill: a flat tint, not frosted glass. Chromium cannot redraw
+ * part of a backdrop blur: anything that changes over ANY pixel of the bar —
+ * the mascot standing on it (its feet and glows reach a few pixels in), the
+ * shield's pulse on every box not signed in to ClawBox AI, a pet, a window
+ * beneath — re-blurred the WHOLE bar, at the rate the change ran: measured as
+ * 1920x162 of damage per frame for a resting crab where 154x154 would do, and
+ * 1920x56 at 60 Hz for the pulse. A plain fill is redrawn only where something
+ * moved. 0.8 is the fill that reads closest to the glass over the built-in
+ * wallpapers (compared pixel by pixel in Chromium): the bar's brightness moves
+ * by under 3/255, and the wallpaper's own detail now shows through faintly,
+ * where the blur used to smear it. kiosk/extension/bar.js wears the same fill
+ * on the desktop (kiosk-extension.test.ts).
+ */
+const SHELF_FILL = "rgba(17, 24, 39, 0.8)";
+
+/**
+ * The phone bar's fill, more opaque than the shelf's. On a phone the icon grid
+ * scrolls UNDER the bar (its scroll area is the whole screen, padded 56 px at
+ * the bottom; in landscape a row can sit under it before any scrolling), and
+ * at the shelf's 0.8 the tiles and their white labels showed through sharp:
+ * faint but readable text, where the blur used to leave only a soft glow.
+ * 0.93 is where a label's brightest step (17.9/255) meets the glass's own
+ * strongest glow (17.8/255) — measured in Chromium over the four built-in
+ * wallpapers, with the grid at every offset of a row, portrait and landscape.
+ * There the tiles show through less than the glass's glows did, and the bar
+ * is on average 4.5/255 darker than the glass (2.8 at 0.8). 0.9 still left
+ * the labels 40% brighter than anything the glass let through; anything more
+ * opaque only darkens the bar further from the glass's tone.
+ */
+const PHONE_BAR_FILL = "rgba(17, 24, 39, 0.93)";
 
 /**
  * What the shield says out loud for each way a box can be unprotected. The
@@ -72,7 +105,6 @@ interface ChromeShelfProps {
   onPowerClick?: () => void;
   onChatClick?: () => void;
   showChatButton?: boolean;
-  time: string;
   clawAiAuthenticated?: boolean;
   /**
    * Who is signed in (TASK-1256). Drawn as an avatar beside the power button
@@ -80,6 +112,17 @@ interface ChromeShelfProps {
    * a single-user shelf is unchanged. Opens the tray, where "Switch user" is.
    */
   sessionUser?: { username: string; isOwner: boolean } | null;
+}
+
+/**
+ * The shelf's clock. It reads the desktop clock itself (see
+ * use-desktop-clock.ts) instead of being handed the time by the desktop, so a
+ * new minute re-renders this label — not the desktop, every window on it and
+ * the chat.
+ */
+function ShelfClock({ className }: { className: string }) {
+  const { time } = useDesktopClock();
+  return <span className={className}>{time}</span>;
 }
 
 export default function ChromeShelf({
@@ -97,7 +140,6 @@ export default function ChromeShelf({
   onPowerClick,
   onChatClick,
   showChatButton,
-  time,
   clawAiAuthenticated = false,
   sessionUser = null,
 }: ChromeShelfProps) {
@@ -370,9 +412,9 @@ export default function ChromeShelf({
           zIndex: DESKTOP_LAYERS.shelf,
           height: "calc(56px + env(safe-area-inset-bottom))",
           paddingBottom: "env(safe-area-inset-bottom)",
-          background: "rgba(17, 24, 39, 0.55)",
-          backdropFilter: "blur(20px)",
-          WebkitBackdropFilter: "blur(20px)",
+          // A flat tint, not frosted glass (see SHELF_FILL), and a more opaque
+          // one on a phone, where the icon grid scrolls under the bar.
+          background: isMobile ? PHONE_BAR_FILL : SHELF_FILL,
           borderTop: "1px solid rgba(255, 255, 255, 0.1)",
         }}
         onContextMenu={(e) => {
@@ -439,7 +481,7 @@ export default function ChromeShelf({
                   aria-label={t("shelf.systemSettings")}
                   data-testid="shelf-tray-button"
                 >
-                  <span className="text-xs text-white/80 font-medium tabular-nums">{time}</span>
+                  <ShelfClock className="text-xs text-white/80 font-medium tabular-nums" />
                 </button>
               )}
               <button
@@ -522,7 +564,7 @@ export default function ChromeShelf({
             aria-label={t("shelf.systemSettings")}
             data-testid="shelf-tray-button"
           >
-            <span className="text-sm text-white/80 font-medium">{time}</span>
+            <ShelfClock className="text-sm text-white/80 font-medium" />
           </button>
           <button
             onClick={toggleFullscreen}
@@ -547,10 +589,12 @@ export default function ChromeShelf({
         </>}
       </div>
 
-      {/* Shelf context menu */}
+      {/* Shelf context menu. No backdrop blur under its fill: #2d2d2d is
+          opaque, so the blur could not be seen, and it was still a render pass
+          re-run whenever anything beneath it moved — the crab, a pet. */}
       {ctxMenu && (
         <div
-          className="fixed min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          className="fixed min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 text-sm text-white/90"
           style={{
             zIndex: DESKTOP_LAYERS.menu,
             left: Math.min(ctxMenu.x, window.innerWidth - 200),
@@ -632,10 +676,11 @@ export default function ChromeShelf({
         </div>
       )}
 
-      {/* Shelf context menu (right-click on empty shelf area) */}
+      {/* Shelf context menu (right-click on empty shelf area) — opaque, so no
+          blur behind it either (see the menu above). */}
       {shelfMenu && (
         <div
-          className="fixed min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          className="fixed min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 text-sm text-white/90"
           style={{
             zIndex: DESKTOP_LAYERS.menu,
             left: Math.min(shelfMenu.x, window.innerWidth - 200),

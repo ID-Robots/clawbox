@@ -245,3 +245,94 @@ describe("useHarnessAdapter facts backoff", () => {
     expect(capabilityFetches).toBe(1);
   });
 });
+
+/**
+ * A provider signal re-asks the facts, and nearly always hears what the chat
+ * already shows. The hook lives in the chat popup — one very large component —
+ * so an answer that changes nothing must cost it no render: handing React the
+ * value it already holds is not free (after a commit React may still call the
+ * host once to find out nothing moved). Measured on the hook's own renders,
+ * which are the host's.
+ */
+describe("useHarnessAdapter on a provider signal", () => {
+  async function mountCounted() {
+    const { useHarnessAdapter } = await import("@/lib/harness/use-harness-adapter");
+    const counter = { renders: 0 };
+    const rendered = renderHook(() => {
+      counter.renders += 1;
+      return useHarnessAdapter({ gateway, hermesContext });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    return { ...rendered, counter };
+  }
+
+  async function signal() {
+    const { notifyProvidersChanged } = await import("@/lib/ui-events");
+    await act(async () => {
+      notifyProvidersChanged();
+      // Past the shared subscriber's debounce, and the fetch it starts.
+      await vi.advanceTimersByTimeAsync(500);
+    });
+  }
+
+  it("renders nothing for an answer that changes nothing", async () => {
+    const { result, counter, unmount } = await mountCounted();
+    expect(result.current.resolved).toBe(true);
+    const adapter = result.current.adapter;
+    const renders = counter.renders;
+
+    for (let i = 0; i < 3; i += 1) await signal();
+
+    // Asked every time — a signal is a fresh cause — and rendered for none.
+    expect(capabilityFetches).toBe(4);
+    expect(counter.renders).toBe(renders);
+    expect(result.current.adapter).toBe(adapter);
+    unmount();
+  });
+
+  it("still applies a fact the signal's answer changes", async () => {
+    const { result, unmount } = await mountCounted();
+    expect(result.current.capabilities.canAttachImages).toBe(false);
+    const adapter = result.current.adapter;
+
+    capabilities = {
+      facts: { ...FACTS, hermesSupportsImages: true, hermesHasVisionRoute: true },
+      factsPending: false,
+      factsRetryAfterMs: RETRY_AFTER_MS,
+    };
+    await signal();
+
+    expect(result.current.capabilities.canAttachImages).toBe(true);
+    // New capabilities are a new adapter, as they always were.
+    expect(result.current.adapter).not.toBe(adapter);
+    unmount();
+  });
+
+  it("still chases a placeholder the signal's answer admits to, and stops when it is answered", async () => {
+    const { result, unmount } = await mountCounted();
+    expect(capabilityFetches).toBe(1);
+
+    capabilities.factsPending = true;
+    await signal();
+    expect(capabilityFetches).toBe(2);
+
+    capabilities = {
+      facts: { ...FACTS, hermesSupportsImages: true, hermesHasVisionRoute: true },
+      factsPending: false,
+      factsRetryAfterMs: RETRY_AFTER_MS,
+    };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_THE_RETRY_MS);
+    });
+    expect(capabilityFetches).toBe(3);
+    expect(result.current.capabilities.canAttachImages).toBe(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_THE_RETRY_MS * 3);
+    });
+    expect(capabilityFetches).toBe(3);
+    unmount();
+  });
+});

@@ -36,6 +36,10 @@
 #   sudo scripts/x64-migration/kiosk/install-desktop-session.sh            # install, reboot
 #   sudo scripts/x64-migration/kiosk/install-desktop-session.sh --no-restart
 #   sudo scripts/x64-migration/kiosk/install-desktop-session.sh --revert   # back to the cage kiosk
+#   sudo scripts/x64-migration/kiosk/install-desktop-session.sh --no-guake # without the drop-down terminal
+#
+# The session's drop-down terminal — Guake in the ClawBox look on Win+Down —
+# comes with it (install-guake.sh) unless --no-guake.
 #
 # Idempotent; run it again after any change to the files it installs.
 set -euo pipefail
@@ -47,9 +51,11 @@ ENV_FILE=/etc/clawbox/kiosk.env
 SESSION=clawbox-desktop
 RESTART=1
 REVERT=0
+GUAKE=1
 for arg in "$@"; do
   case "$arg" in
     --no-restart) RESTART=0 ;;
+    --no-guake) GUAKE=0 ;;
     --revert) REVERT=1 ;;
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
@@ -164,5 +170,9 @@ if [ -S "/run/user/$uid/bus" ]; then
 fi
 
 set_session "$SESSION"
+if [ "$GUAKE" -eq 1 ]; then
+  CLAWBOX_KIOSK_USER="$KIOSK_USER" bash "$HERE/install-guake.sh" \
+    || echo "the drop-down terminal (install-guake.sh) did not install; the session works without it" >&2
+fi
 echo "installed: ClawBox Desktop session (labwc), extension $EXT"
 offer_reboot

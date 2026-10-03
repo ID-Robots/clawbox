@@ -9,8 +9,8 @@ import { useEffect, useState } from "react";
  * page it opens is another. The kiosk extension (`kiosk/extension/bar.js`)
  * draws its bar — ClawBox, the open tabs, an address box, "+" — on each of
  * those pages, and on the desktop page too, always, as the kiosk's tab strip
- * (in the shelf's glass there, so the wallpaper runs on behind it, and with no
- * address box). The bar is
+ * (in the shelf's flat tint and hairline there — a translucent fill, no blur —
+ * so the wallpaper runs on behind it, and with no address box). The bar is
  * `position: fixed` at the top at the largest z-index there is, so anything of
  * the desktop's own under that strip would be hidden and could not be
  * clicked.

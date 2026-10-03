@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { onProvidersChanged } from "@/lib/ui-events";
 import { fetchHarness } from "@/lib/client-harness";
 import { capabilitiesFor, UNKNOWN_FACTS, type HarnessFacts } from "./capabilities";
@@ -137,7 +137,26 @@ export function useHarnessAdapter(wiring: HarnessWiring): UseHarnessAdapterResul
    * cap cannot be lost to a re-render, and so the effect's dependency is the
    * whole decision rather than half of it.
    */
-  const [factsRetry, setFactsRetry] = useState<{ delayMs: number; attempt: number } | null>(null);
+  const [factsRetry, setFactsRetryState] = useState<{ delayMs: number; attempt: number } | null>(null);
+
+  /**
+   * What the two states above hold, for the fetch callbacks. An answer that
+   * changes nothing — every fact as it is and nothing to chase, which is what
+   * nearly every provider signal brings — must not reach React at all: handing
+   * a setter the value it already holds is not free, because after a commit
+   * React may still call the whole host component once to find out nothing
+   * moved, and the host is the chat popup. Each state is set in ONE place
+   * (`applyFacts`, `setFactsRetry`), beside its ref, so the two cannot drift.
+   */
+  const factsRef = useRef<HarnessFacts>(UNKNOWN_FACTS);
+  const factsRetryRef = useRef<{ delayMs: number; attempt: number } | null>(null);
+  const setFactsRetry = useCallback((next: { delayMs: number; attempt: number } | null) => {
+    // null over null is the only "nothing changed" here: a pending answer is a
+    // FRESH object every time on purpose, so the chase below re-arms from now.
+    if (next === null && factsRetryRef.current === null) return;
+    factsRetryRef.current = next;
+    setFactsRetryState(next);
+  }, []);
 
   /**
    * Apply a fetched answer, and decide whether to come back for a better one.
@@ -148,13 +167,16 @@ export function useHarnessAdapter(wiring: HarnessWiring): UseHarnessAdapterResul
    */
   const applyFacts = useCallback((probed: ProbedFacts | null, attempt: number) => {
     if (!probed) return;
-    setFacts((prev) => (sameFacts(prev, probed.facts) ? prev : probed.facts));
+    if (!sameFacts(factsRef.current, probed.facts)) {
+      factsRef.current = probed.facts;
+      setFacts(probed.facts);
+    }
     setFactsRetry(
       probed.pending && attempt < MAX_PENDING_RETRIES
         ? { delayMs: probed.retryAfterMs, attempt: attempt + 1 }
         : null,
     );
-  }, []);
+  }, [setFactsRetry]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -239,7 +261,7 @@ export function useHarnessAdapter(wiring: HarnessWiring): UseHarnessAdapterResul
       clearTimeout(timer);
       controller.abort();
     };
-  }, [factsRetry, applyFacts]);
+  }, [factsRetry, applyFacts, setFactsRetry]);
 
   const capabilities = useMemo(() => capabilitiesFor(harnessId, facts), [harnessId, facts]);
 

@@ -109,4 +109,19 @@ describe("InstalledAppIcon", () => {
     expect(img()).toBeNull();
     expect(screen.getByText("extension")).toBeInTheDocument();
   });
+
+  /**
+   * The picture sits inside controls with gestures of their own — the desktop
+   * icon's drag and its long-press menu — and on an iPhone or iPad a held
+   * touch on a draggable image starts iOS's own image drag, which cancels the
+   * pointer and so the desktop's gesture. Every source it walks is a
+   * non-draggable picture, not only the first.
+   */
+  it("is never a drag source of its own, whichever source it is showing", () => {
+    render(<InstalledAppIcon appId="todo" iconUrl={VERSIONED} name="Todo" />);
+    expect(img()?.getAttribute("draggable")).toBe("false");
+    fireEvent.error(img()!);
+    expect(img()?.getAttribute("src")).toBe(LOCAL);
+    expect(img()?.getAttribute("draggable")).toBe("false");
+  });
 });

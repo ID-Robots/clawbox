@@ -148,9 +148,32 @@ scrollbars in dark, beside the dark desktop) and
 `--remote-allow-origins=chrome-extension://<id>` (the extension's DevTools
 button: the CDP port refuses a WebSocket from any origin not listed; `<id>` is
 Chrome's id for the unpacked extension, the first 32 hex digits of the
-SHA-256 of its path written as a..p), keeps a backup beside the launcher and
-`bash -n`-checks the result. Run it again after any update that rewrites the
-launcher, and after moving the checkout (the id follows the path).
+SHA-256 of its path written as a..p), and switches `IntensiveWakeUpThrottling`
+off (below); keeps a backup beside the launcher and `bash -n`-checks the
+result. Run it again after any update that rewrites the launcher, and after
+moving the checkout (the id follows the path).
+
+`IntensiveWakeUpThrottling` is MERGED into the launcher's own
+`--disable-features` list (a line of its own after the flags above when the
+launcher has none), never added beside it: Chrome reads only the last
+`--disable-features` on its command line, so a second list would turn back on
+whatever the launcher's own turned off. The desktop is a kiosk tab, hidden
+whenever the owner is on another one, and Chrome wakes a chain of timers in a
+page hidden for more than five minutes only once a minute: the desktop's 2 s
+read of the agent's notice ring then ran about as rarely as a ring entry lives
+(60 s), so an "open this app" or the move to `/updating` could be missed
+rather than late. Only that feature: a hidden page keeps Chrome's ordinary
+throttling (one wake-up a second), which `--disable-background-timer-throttling`
+would have switched off too. A launcher whose list the script cannot edit
+without guessing — two `--disable-features`, a quoted list, or the list on a
+line with another flag (a commented-out line is not a flag) — is refused
+before anything is touched (exit 1, no backup), with a note to add the
+feature by hand. (`--enable-features=WebUIDarkMode` is still a line of its
+own: a launcher that brought an `--enable-features` of its own would lose one
+of the two the same way.) The ClawBox Desktop session's launcher,
+`kiosk/clawbox-desktop-browser`, carries the same feature in its one
+`--disable-features` list, for the same reason (its window can be minimised or
+covered); it reaches `/usr/local/bin` through `kiosk/install-desktop-session.sh`.
 
 The three pieces that then work together:
 
@@ -206,9 +229,11 @@ The three pieces that then work together:
   the desktop page itself gets it always, as the kiosk's tab strip: the
   ClawBox chip is the current page, the chips switch to the others and `+`
   opens a new tab on the start page; the address box, back / forward / reload
-  and Close are left out there. On the desktop it wears the shelf's glass (the same
-  tint, blur and hairline as `ChromeShelf.tsx`) instead of the solid ground,
-  so the wallpaper runs on behind its empty space. The desktop's surfaces are
+  and Close are left out there. On the desktop it wears the shelf's flat tint
+  and hairline (the same `rgba(17, 24, 39, 0.8)` fill and 1 px white hairline
+  as `ChromeShelf.tsx`, and like the shelf no backdrop blur, which Chromium
+  redrew over the whole bar whenever anything under it changed) instead of the
+  solid ground, so the wallpaper runs on behind its empty space. The desktop's surfaces are
   `position: fixed`, so a page offset cannot make room there; the bar sets
   `--clawbox-kiosk-bar-h` on `<html>` and fires `clawbox:kiosk-bar` instead,
   and `src/lib/kiosk-bar-inset.ts` lays the desktop out under it (windows,
@@ -219,9 +244,10 @@ The three pieces that then work together:
   (the web server cannot address the extension's page by URL).
 
 **Every change to `kiosk/extension` must bump `"version"` in `manifest.json`**
-(semver; the unit test checks it): Chrome caches an unpacked extension's code
-across restarts and only re-reads the files when the version changes. The
-kiosk Chrome must then be relaunched to load it — end the running Chrome's
+(semver; `src/tests/unit/kiosk-extension.test.ts` checks it, see below):
+Chrome caches an unpacked extension's code across restarts and only re-reads
+the files when the version changes. The kiosk Chrome must then be relaunched
+to load it — end the running Chrome's
 parent process (the `bash /usr/local/bin/clawbox-kiosk-browser` loop restarts
 it with the new files) rather than rebooting. Do not call
 `chrome.runtime.reload()` on it over the CDP port instead: on this kiosk that
@@ -235,3 +261,43 @@ desktop tab; `chrome://extensions` is not reachable in kiosk, so the bar on a
 page opened from Settings → Providers → Anthropic is the proof the extension
 loaded, and the `+` on it landing on the ClawBox start page is the proof the
 version in use is the one on disk.
+
+`kiosk-extension.test.ts`'s `RELEASES` list records every version with a
+sha256 of the files it shipped (the manifest's own `version` left out, CRLF
+normalised): the folder must match the newest entry and the manifest carry
+that version, and a changed file fails with the hash to record. An entry is FROZEN once its version is
+committed — a kiosk may already be running those files under that number, and
+a hash rewritten in place is exactly the unloaded change the list exists to
+catch — so a later change is a new version and a new entry, appended. Until
+then the newest entry belongs to the uncommitted change still making that
+version and is re-recorded as the change goes on.
+
+## The drop-down terminal (Guake) in the ClawBox look
+
+`kiosk/install-desktop-session.sh` also installs Guake as the ClawBox
+Desktop session's drop-down terminal (skip it with `--no-guake`); on its own:
+
+```sh
+sudo scripts/x64-migration/kiosk/install-guake.sh            # packages + the desktop user's settings
+scripts/x64-migration/kiosk/install-guake.sh --user-config   # only this account's settings, no sudo
+```
+
+- `kiosk/guake/clawbox-guake.dconf` — Guake's settings, loaded with
+  `dconf load /org/guake/`: the ClawBox Terminal's GitHub-dark palette on that
+  scheme's own canvas `#0d1117` (a shade under the Terminal window's
+  `#181c22`), the system monospace (JetBrains Mono came out letter-spaced in
+  Guake's terminal widget), tabs on top, opaque, no tray icon or start-up
+  notification.
+- `kiosk/guake/guake.css` — the ClawBox Terminal's dark tab strip (the tab in
+  front marked with the desktop's coral) and its thin rounded scrollbar,
+  written into `~/.config/gtk-3.0/gtk.css` between markers; every rule is
+  scoped to Guake's own window (`#guake-terminal`), so no other GTK
+  application changes, and anything else in that file stays as it was.
+- `kiosk/guake/keybinds.xml` — Win+Down toggles Guake (`guake -t`), added to
+  the session's `~/.config/clawbox-desktop/keybinds.xml` unless the key is
+  already bound; `~/.config/clawbox-desktop/autostart` starts Guake hidden with
+  the session, so the first Win+Down shows it at once.
+
+A running Guake takes the colours at once; it reads the GTK theme and the
+stylesheet (the tab strip, the scrollbar) only when it starts, and the
+installer never restarts it — it may be the terminal the installer runs in.

@@ -59,6 +59,7 @@ import {
   MONITOR_MODE_MARKER,
   RECONCILE_INTERVAL_MS,
   REVERT_AFTER_MS,
+  STATUS_READ_REUSE_MS,
   REVERT_RETRY_MS,
   MAX_REVERT_ATTEMPTS,
   _resetMonitorsForTests,
@@ -136,6 +137,11 @@ function writeFakeWlrRandr(dir: string): string {
 D='${dir}'
 if [ "$#" -eq 0 ]; then
   echo "$WAYLAND_DISPLAY" >> "$D/reads.log"
+  if [ -e "$D/hold-read" ]; then
+    # Answer with the screen as it was when asked, after a while: a read on
+    # its way while something else changes the screen. \`held\` says it has looked.
+    OUT=$(cat "$D/outputs.txt"); : > "$D/held"; sleep 0.6; printf '%s\\n' "$OUT"; exit 0
+  fi
   if [ -e "$D/slow-read" ]; then sleep 0.4; fi
   if [ -e "$D/refuse-$WAYLAND_DISPLAY" ]; then
     echo "compositor doesn't support wlr-output-management-unstable-v1" >&2
@@ -949,6 +955,114 @@ describe("monitors: apply, keep, revert", () => {
     expect(await reconcileMonitors()).toBe(true);
     expect(applyCalls().at(-1)!.args).toEqual(DP2_1080_LEFT_ARGS);
     expect(await reconcileMonitors()).toBe(false);
+  });
+});
+
+/**
+ * The desktop asks GET /setup-api/monitors every 5 s, the Settings tab every
+ * 5 s while open, and the reconciler looks every 3 s on its own: each used to
+ * run a wlr-randr of its own — a process from the web server and a compositor
+ * round trip — mostly for an answer the reconciler had just had. A GET now
+ * takes a read begun within STATUS_READ_REUSE_MS, or waits for the one on its
+ * way; what it may never be given is a look from before a change the box put
+ * on screen.
+ */
+describe("monitors: the GET shares the compositor's answer", () => {
+  /** SAMPLE with both monitors at the origin: a change a GET can see (`mirror`). */
+  const MIRRORED = SAMPLE.replace("Position: 2560,0", "Position: 0,0");
+
+  it("is answered from the reconciler's own look, with no wlr-randr of its own", async () => {
+    expect(await reconcileMonitors()).toBe(true);
+    // A look that finds the layout already on screen: the one a GET reuses.
+    expect(await reconcileMonitors()).toBe(false);
+    const looked = reads().length;
+    const status = await getMonitorStatus();
+    expect(status.available).toBe(true);
+    expect(status.order).toEqual([HDMI, DP2, EDP]);
+    expect(reads()).toHaveLength(looked);
+  });
+
+  it("two GETs at once run one wlr-randr", async () => {
+    const [a, b] = await Promise.all([getMonitorStatus(), getMonitorStatus()]);
+    expect(a).toEqual(b);
+    expect(reads()).toEqual(["wayland-0"]);
+  });
+
+  /** The monotonic clock the reuse window is judged on, held still between steps. */
+  function monotonic(start = 1_000_000) {
+    const clock = { now: start };
+    vi.spyOn(performance, "now").mockImplementation(() => clock.now);
+    return clock;
+  }
+
+  it("reads again once the reuse window has passed — the most a monitor plugged in waits", async () => {
+    const clock = monotonic();
+    const t0 = clock.now;
+    expect((await getMonitorStatus()).mirror).toBe(false);
+    setOutputs(MIRRORED);
+    clock.now = t0 + STATUS_READ_REUSE_MS - 1;
+    expect((await getMonitorStatus()).mirror).toBe(false);
+    expect(reads()).toHaveLength(1);
+    clock.now = t0 + STATUS_READ_REUSE_MS;
+    expect((await getMonitorStatus()).mirror).toBe(true);
+    expect(reads()).toHaveLength(2);
+  });
+
+  // The box has no RTC and NTP steps its wall clock. Timed on it, a step back
+  // kept every GET on the read from before the step for as long as the step.
+  it("a wall clock stepped BACK does not keep handing out the read from before the step", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const clock = monotonic();
+    expect((await getMonitorStatus()).mirror).toBe(false);
+    setOutputs(MIRRORED);
+    vi.setSystemTime(Date.now() - 60 * 60_000);
+    clock.now += STATUS_READ_REUSE_MS;
+    expect((await getMonitorStatus()).mirror).toBe(true);
+    expect(reads()).toHaveLength(2);
+  });
+
+  it("a wall clock stepped FORWARD does not cut the reuse window short", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const clock = monotonic();
+    await getMonitorStatus();
+    vi.setSystemTime(Date.now() + 60 * 60_000);
+    clock.now += STATUS_READ_REUSE_MS - 1;
+    await getMonitorStatus();
+    expect(reads()).toHaveLength(1);
+  });
+
+  it("the first GET after a layout went on screen reads the compositor afresh", async () => {
+    await getMonitorStatus();
+    setOutputs(MIRRORED);
+    await applyMonitorLayout(DP2_1080_LEFT);
+    const before = reads().length;
+    expect((await getMonitorStatus()).mirror).toBe(true);
+    expect(reads()).toHaveLength(before + 1);
+  });
+
+  it("the reconciler never takes a GET's read for its own look", async () => {
+    await getMonitorStatus();
+    expect(reads()).toHaveLength(1);
+    // A monitor unplugged a moment after the desktop asked: the reconciler
+    // still looks for itself, at once, and acts on it.
+    setOutputs(BUILTIN_ONLY);
+    expect(await reconcileMonitors()).toBe(true);
+    expect(reads().length).toBeGreaterThan(1);
+  });
+
+  it("a read on its way while a layout went on screen is not handed to the next GET", async () => {
+    marker("hold-read");
+    const racing = getMonitorStatus();
+    await vi.waitFor(() => expect(fs.existsSync(path.join(work, "held"))).toBe(true), { timeout: 5_000 });
+    // That read has looked at the old row. The owner applies a layout while it
+    // is still on its way, and the screen changes under it.
+    marker("hold-read", false);
+    setOutputs(MIRRORED);
+    await applyMonitorLayout(DP2_1080_LEFT);
+    // It answers what it saw, as a GET always did...
+    expect((await racing).mirror).toBe(false);
+    // ...but the next GET is not given that look from before the change.
+    expect((await getMonitorStatus()).mirror).toBe(true);
   });
 });
 

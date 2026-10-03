@@ -216,3 +216,36 @@ describe("SystemUpdateApp — an interrupted run offers Resume", () => {
     expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
   });
 });
+
+// The hero glyph glows while an update runs, and the glow's breathing half is a
+// COPY of the glyph drawn by the stylesheet (globals.css, .clawkeep-shelf-glow):
+// a pseudo-element cannot read its host's text, so the glyph's name travels as
+// --glow-glyph. Without it the copy would default to the shelf's "shield" and
+// breathe a shield-shaped halo around the download arrow.
+describe("SystemUpdateApp — the updating hero's glow", () => {
+  it("names its own glyph to the glow while an update runs", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/setup-api/update/versions")) {
+          return jsonResponse({
+            clawbox: { current: "3.1.11", target: "3.1.12", updateAvailable: true },
+            openclaw: { current: "2026.7.1", target: "2026.7.1", updateAvailable: false },
+          });
+        }
+        if (url.includes("/setup-api/system/update-branch")) return jsonResponse({ branch: null });
+        if (url.includes("/setup-api/update/status")) {
+          return jsonResponse({ phase: "running", steps: [{ id: "build", label: "Build", status: "running" }] });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const { findByText, container } = render(<SystemUpdateApp />);
+    await findByText("Updating your device");
+    const glyph = [...container.querySelectorAll(".material-symbols-rounded")].find((el) => el.textContent?.trim() === "downloading") as HTMLElement;
+    expect(glyph).toBeTruthy();
+    expect(glyph.className).toContain("clawkeep-shelf-glow");
+    expect(glyph.style.getPropertyValue("--glow-glyph")).toBe('"downloading"');
+  });
+});

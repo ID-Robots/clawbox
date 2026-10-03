@@ -74,6 +74,15 @@ export default function InstalledAppIcon({ iconUrl, appId, name, size = "w-6 h-6
       <img
         src={src}
         alt={name || ""}
+        // Not a drag source of its own. The picture sits inside a control
+        // that has a gesture of its own (the desktop icon's drag and its
+        // long-press menu), and a held touch on a draggable image is where
+        // iPhone and iPad start their own image drag instead — cancelling the
+        // pointer, which ends the desktop's gesture before its menu opens.
+        // Nothing drags the picture itself: no caller sets data on a drag of
+        // it, and a draggable ANCESTOR still drags as before, since the
+        // browser walks past a `draggable="false"` image to find its source.
+        draggable={false}
         className="w-full h-full object-cover rounded-[inherit]"
         onError={() => {
           setAttempt(

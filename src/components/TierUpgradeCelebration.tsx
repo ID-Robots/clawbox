@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  memo,
   useEffect,
   useId,
   useReducer,
@@ -106,7 +107,13 @@ const CONTENT: Record<ContentKey, DialogContent> = {
   },
 };
 
-export default function TierUpgradeCelebration() {
+// Memoized: it takes no props — the tier comes from the shared login poll and
+// the copy from the language context, both of which re-render it themselves —
+// so the desktop's own renders have nothing to tell it.
+export default memo(function TierUpgradeCelebration() {
+  // A second call beside the page's own costs the box nothing: every mounted
+  // useClawboxLogin() is answered by the one shared poll (it used to be a
+  // second 30 s chain asking the status route the same question).
   const { tier, loading } = useClawboxLogin();
   const { t } = useT();
   const [dialog, dispatch] = useReducer(dialogReducer, null);
@@ -204,7 +211,7 @@ export default function TierUpgradeCelebration() {
       primary={primary}
     />
   );
-}
+});
 
 interface ShellProps {
   tone: Tone;
@@ -246,7 +253,10 @@ function CelebrationShell({ tone, badge, headline, body, primary, onClose }: She
 
   return (
     <div
-      className="fixed inset-0 z-[100001] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+      // No backdrop blur under the dim: a full-screen blur is redone over the whole
+      // desktop on every frame anything beneath it moves (the mascot always does).
+      // One step darker keeps the look.
+      className="fixed inset-0 z-[100001] flex items-center justify-center bg-black/75 p-4"
       onClick={onOverlayClick}
     >
       <div

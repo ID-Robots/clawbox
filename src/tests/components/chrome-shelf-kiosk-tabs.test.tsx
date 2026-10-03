@@ -44,7 +44,6 @@ const base = {
   onAppClick: vi.fn(),
   onLauncherClick: vi.fn(),
   onTrayClick: vi.fn(),
-  time: "12:34",
 };
 
 describe("kioskPageTabs", () => {

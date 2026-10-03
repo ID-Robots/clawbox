@@ -58,6 +58,13 @@ export const REVERT_RETRY_MS = 3_000;
 export const MAX_REVERT_ATTEMPTS = 5;
 /** How often the reconciler looks for a monitor plugged in or out. */
 export const RECONCILE_INTERVAL_MS = 3_000;
+/**
+ * How old a compositor read may be and still answer `getMonitorStatus()` (the
+ * desktop's 5 s GET, and the Settings tab's) — see `readCompositorShared`.
+ * Half the reconciler's interval, so a GET is never answered from further
+ * back than the reconciler itself looks.
+ */
+export const STATUS_READ_REUSE_MS = 1_500;
 const WLR_TIMEOUT_MS = 5_000;
 /** Each DevTools call's ceiling — connecting, and every command after it. */
 const CDP_TIMEOUT_MS = 4_000;
@@ -147,6 +154,16 @@ interface MonitorState {
   noAdaptiveSync: Set<string>;
   /** DevTools targets seen as the desktop's app window, oldest first. */
   desktopTargets?: string[];
+  /**
+   * Bumped by every change put on screen, before wlr-randr is asked and again
+   * once it has answered: a read begun under an older number may show the
+   * screen as it was, and is never handed to a GET (`readCompositorShared`).
+   */
+  readGeneration?: number;
+  /** The newest read of this generation, and when it was begun (`performance.now()`). */
+  lastRead?: { at: number; generation: number; result: Compositor | null } | null;
+  /** The read on its way, which a GET waits for rather than run wlr-randr again. */
+  reading?: { at: number; generation: number; promise: Promise<Compositor | null> } | null;
 }
 
 const state = () =>
@@ -250,7 +267,7 @@ interface Compositor {
 }
 
 /** The first display of the monitor-mode session whose compositor answers `wlr-randr`, and its outputs. */
-async function readCompositor(): Promise<Compositor | null> {
+async function askCompositor(): Promise<Compositor | null> {
   if (!kioskConfigured()) return null;
   for (const display of findWaylandDisplays()) {
     // Only the ClawBox Desktop session is monitor mode's: the cage kiosk
@@ -265,6 +282,79 @@ async function readCompositor(): Promise<Compositor | null> {
     }
   }
   return null;
+}
+
+/**
+ * A FRESH read of the compositor — what the reconciler, Apply, Keep and Revert
+ * judge by, always — recorded for `readCompositorShared` to hand to a GET.
+ * The look taken right after a change put on screen is `askCompositor()`
+ * instead, recorded nowhere (see `readCompositorShared`).
+ */
+async function readCompositor(): Promise<Compositor | null> {
+  const s = state();
+  const generation = s.readGeneration ?? 0;
+  // On the monotonic clock, like the GET that judges it: see `readCompositorShared`.
+  const at = performance.now();
+  const promise = askCompositor();
+  s.reading = { at, generation, promise };
+  try {
+    const result = await promise;
+    // Only a read begun since the last change put on screen: one that was on
+    // its way across a change may show the screen from before it.
+    if ((s.readGeneration ?? 0) === generation) s.lastRead = { at, generation, result };
+    return result;
+  } finally {
+    if (s.reading?.promise === promise) s.reading = null;
+  }
+}
+
+/**
+ * The compositor as the desktop's GET answers it: a read begun within the
+ * last `STATUS_READ_REUSE_MS` (the reconciler's, which looks every 3 s, or
+ * another GET's), the one on its way, or a fresh one.
+ *
+ * Every GET used to run wlr-randr of its own — a process spawned from the web
+ * server and a round trip that wakes the compositor to list every output and
+ * mode — every 5 s from the desktop and again from the Settings tab, on top
+ * of the reconciler's own look every 3 s: one spawn every two seconds from an
+ * idle desktop, mostly for an answer the reconciler had just had.
+ *
+ * What a GET answers is never from before a change ClawBox put on screen:
+ * Apply, Revert and the reconciler's own re-apply all go through
+ * `putOnScreen`, which forgets every read (`forgetReads`) before wlr-randr is
+ * asked and again once it has answered, so the first GET after a change reads
+ * the compositor afresh, exactly as every GET used to (their own
+ * after-the-change reads are deliberately not offered: what a GET is handed
+ * is a look at a screen nobody was changing). A change the box did NOT make —
+ * a monitor plugged in — reaches the GET at most `STATUS_READ_REUSE_MS` later
+ * than it did; the reconciler, which still reads fresh every time, puts the
+ * layout on screen for it within its own 3 s and that write forgets the older
+ * read.
+ * The rest of the status (the main monitor, the trial, the refused variable
+ * refresh) is built fresh from the saved file and this process's state on
+ * every call — only the compositor's answer is shared.
+ */
+async function readCompositorShared(): Promise<Compositor | null> {
+  const s = state();
+  const generation = s.readGeneration ?? 0;
+  // Monotonic, never the wall clock, which NTP steps. Stepped back, `now - at`
+  // stayed under the window for as long as the step: no GET read for itself
+  // in that time, each was handed whatever look was newest, and only the
+  // reconciler's own look every 3 s kept that from going stale.
+  const now = performance.now();
+  const last = s.lastRead;
+  if (last && last.generation === generation && now - last.at < STATUS_READ_REUSE_MS) return last.result;
+  const reading = s.reading;
+  if (reading && reading.generation === generation && now - reading.at < STATUS_READ_REUSE_MS) return reading.promise;
+  return readCompositor();
+}
+
+/** A change is going on screen (or has just landed): no read from before it answers a GET. */
+function forgetReads(): void {
+  const s = state();
+  s.readGeneration = (s.readGeneration ?? 0) + 1;
+  s.lastRead = null;
+  s.reading = null;
 }
 
 // ── The saved layout ────────────────────────────────────────────────────────
@@ -529,7 +619,7 @@ export async function readMonitorOutputs(): Promise<MonitorOutput[] | null> {
 }
 
 export async function getMonitorStatus(): Promise<MonitorStatus> {
-  const c = await readCompositor();
+  const c = await readCompositorShared();
   return c ? statusFrom(c.outputs) : UNAVAILABLE;
 }
 
@@ -541,23 +631,30 @@ export async function getMonitorStatus(): Promise<MonitorStatus> {
 async function putOnScreen(display: WaylandDisplay, plan: MonitorPlan): Promise<string[]> {
   let refused: string[] = [];
   const full = wlrRandrArgs(plan);
+  // Forgotten on both sides of the write: a GET that read while wlr-randr was
+  // still changing the screen must not hand that read to the next one.
+  forgetReads();
   try {
-    await wlrRandr(display, full);
-  } catch (err) {
-    const first = err instanceof WlrRandrError ? err : new WlrRandrError(errText(err), false);
-    // A monitor (or compositor) that refuses variable refresh refuses the
-    // whole configuration: once more without it, so the layout itself lands.
-    const plain = wlrRandrArgs(plan, false);
-    if (plain.length === full.length) throw first;
     try {
-      await wlrRandr(display, plain);
-    } catch (again) {
-      throw new WlrRandrError(errText(again), first.timedOut || (again instanceof WlrRandrError && again.timedOut));
+      await wlrRandr(display, full);
+    } catch (err) {
+      const first = err instanceof WlrRandrError ? err : new WlrRandrError(errText(err), false);
+      // A monitor (or compositor) that refuses variable refresh refuses the
+      // whole configuration: once more without it, so the layout itself lands.
+      const plain = wlrRandrArgs(plan, false);
+      if (plain.length === full.length) throw first;
+      try {
+        await wlrRandr(display, plain);
+      } catch (again) {
+        throw new WlrRandrError(errText(again), first.timedOut || (again instanceof WlrRandrError && again.timedOut));
+      }
+      refused = plan.outputs.filter((o) => o.enabled && o.adaptiveSync === true).map((o) => o.id);
+      const s = state();
+      s.noAdaptiveSync ??= new Set();
+      for (const id of refused) s.noAdaptiveSync.add(id);
     }
-    refused = plan.outputs.filter((o) => o.enabled && o.adaptiveSync === true).map((o) => o.id);
-    const s = state();
-    s.noAdaptiveSync ??= new Set();
-    for (const id of refused) s.noAdaptiveSync.add(id);
+  } finally {
+    forgetReads();
   }
   // What is on screen now, for the session's shelf margin. The layout is up
   // whether or not this lands: a full disk costs the margin, not the layout.
@@ -730,7 +827,7 @@ export function applyMonitorLayout(layout: MonitorLayout): Promise<MonitorStatus
     for (const id of refused) {
       if (next.monitors[id]) next.monitors[id] = { ...next.monitors[id], adaptiveSync: false };
     }
-    const after = await readCompositor();
+    const after = await askCompositor();
     const status = after ? statusFrom(after.outputs) : UNAVAILABLE;
     return refused.length ? { ...status, refusedAdaptiveSync: refused } : status;
   });
@@ -752,6 +849,9 @@ export function keepMonitorLayout(): Promise<MonitorStatus> {
     }
     clearTimeout(trial.timer);
     s.pending = null;
+    // Nothing on screen changes, but a Keep is a layout change all the same:
+    // the read below, not one from before it, is what the next GET is given.
+    forgetReads();
     const c = await readCompositor();
     if (!c) return UNAVAILABLE;
     // The screen already shows the saved layout: nothing for the reconciler
@@ -803,7 +903,7 @@ function undoTrial(only: Trial | null): Promise<MonitorStatus | null> {
       }
     }
     s.pending = null;
-    const after = await readCompositor();
+    const after = await askCompositor();
     return after ? statusFrom(after.outputs) : UNAVAILABLE;
   });
 }
@@ -840,7 +940,7 @@ export function reconcileMonitors(): Promise<boolean> {
       return false;
     }
     // Judged by what the screen shows AFTER: the next look finds the same.
-    const after = await readCompositor();
+    const after = await askCompositor();
     s.signature = after ? signatureOf(after, lid) : null;
     return true;
   });
@@ -878,4 +978,7 @@ export function _resetMonitorsForTests(): void {
   s.reconciler = null;
   s.busy = null;
   s.desktopTargets = [];
+  s.readGeneration = 0;
+  s.lastRead = null;
+  s.reading = null;
 }

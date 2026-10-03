@@ -3299,7 +3299,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // One dialog, rendered from both the mobile and the desktop tree below. It
   // used to be copy-pasted into each, which is how the two could have drifted.
   const factoryResetDialog = resetConfirm && !resetting && (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+    // No backdrop blur under the dim: a full-screen blur is redone over the whole
+    // desktop on every frame anything beneath it moves (the mascot always does).
+    // One step darker keeps the look.
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
       <div
         ref={factoryResetPanelRef}
         role="dialog"
@@ -3363,7 +3366,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // Shared by mobile and desktop. Keeping one dialog prevents the mobile
   // early-return layout from silently dropping password confirmation.
   const systemPasswordConfirmDialog = sysPasswordConfirmOpen && (
-    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+    // No backdrop blur under the dim: a full-screen blur is redone over the whole
+    // desktop on every frame anything beneath it moves (the mascot always does).
+    // One step darker keeps the look.
+    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/65 px-4">
       <div ref={systemPasswordConfirmPanelRef} role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
         <div className="flex items-center gap-2 mb-3">
           <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
@@ -6890,7 +6896,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
       {/* Hotspot enable confirmation — single-radio collision warning */}
       {hotspotConfirmEnable && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+        // No backdrop blur under the dim: a full-screen blur is redone over the whole
+        // desktop on every frame anything beneath it moves (the mascot always does).
+        // One step darker keeps the look.
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
@@ -6906,7 +6915,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
       {/* Hostname confirmation modal */}
       {hostnameConfirm && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+        // No backdrop blur under the dim: a full-screen blur is redone over the whole
+        // desktop on every frame anything beneath it moves (the mascot always does).
+        // One step darker keeps the look.
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
@@ -6998,7 +7010,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
       {/* Hostname confirmation modal */}
       {hostnameConfirm && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+        // No backdrop blur under the dim: a full-screen blur is redone over the whole
+        // desktop on every frame anything beneath it moves (the mascot always does).
+        // One step darker keeps the look.
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
@@ -7027,7 +7042,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
       {/* Hotspot enable confirmation — single-radio collision warning (desktop layout) */}
       {hotspotConfirmEnable && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+        // No backdrop blur under the dim: a full-screen blur is redone over the whole
+        // desktop on every frame anything beneath it moves (the mascot always does).
+        // One step darker keeps the look.
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">

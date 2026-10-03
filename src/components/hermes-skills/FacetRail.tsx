@@ -277,7 +277,10 @@ function FacetDrawer({ onClose, children }: { onClose: () => void; children: Rea
   const titleId = useId();
   const panelRef = useModalDialog<HTMLDivElement>({ onClose });
   return (
-    <div className="fixed inset-0 z-[9999] flex bg-black/60 backdrop-blur-sm" onClick={onClose}>
+    // No backdrop blur under the dim: a full-screen blur is redone over the whole
+    // desktop on every frame anything beneath it moves (the mascot always does).
+    // One step darker keeps the look.
+    <div className="fixed inset-0 z-[9999] flex bg-black/65" onClick={onClose}>
       <div
         ref={panelRef}
         role="dialog"

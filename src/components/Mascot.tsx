@@ -73,22 +73,59 @@ const MASCOT_ACTIONS: { state: MascotState; dur: [number, number]; weight: numbe
 export const AMBIENT_FPS = 15
 
 /**
- * Step every PAUSED animation under `root` to the time since `active` turned
- * on, `fps` times a second — nothing while the desktop is hidden. A paused
- * animation costs nothing between steps.
+ * The animations the resting mascot runs PAUSED — every one that takes the
+ * `restPlay` suffix in the render below — and so the ones useAmbientSteps
+ * moves. While the mascot rests, an animation by one of these names is always
+ * paused; nothing else under the mascot is ever stepped (the bubble's pop, a
+ * damage number's float), because seeking a RUNNING animation would jump it.
+ */
+export const AMBIENT_ANIMATIONS: ReadonlySet<string> = new Set([
+  'mascot-idle', 'mascot-sleep', 'mascot-powerup', 'power-ring', 'power-particles', 'zzz-float',
+])
+
+/**
+ * Step the resting animations under `root` (AMBIENT_ANIMATIONS) to the time
+ * since `active` turned on, `fps` times a second — nothing while the desktop
+ * is hidden. A paused animation costs nothing between steps.
+ *
+ * A step only WRITES. It used to ask each animation whether it was paused,
+ * and reading a CSS animation's state flushes style: with a write between two
+ * reads, every step recalculated style once per animation — the sleeping crab
+ * (its body and three Zs) at 67 recalcs a second and the power stance (body,
+ * two rings, three sparks) at 102, measured in Chromium, where writes alone
+ * are one recalc per step (15 a second). So the animations are looked up once
+ * per commit — a render is what adds or drops one, or swaps the body's — and
+ * picked by `animationName`, which reads without a flush. (The same trap the
+ * team tree's stepped connectors hit, CodingTeamTree.tsx.)
+ *
+ * `activeRef` is the commit's own answer. A commit that ends the rest runs its
+ * layout effects at once but this effect's cleanup only later, and a step in
+ * between would have found the Zs and the power rings by name while they were
+ * RUNNING again — the very animations a step must never seek.
  */
 function useAmbientSteps(rootRef: React.RefObject<HTMLDivElement | null>, active: boolean, fps: number) {
+  const stale = useRef(true)
+  const activeRef = useRef(active)
+  useLayoutEffect(() => {
+    stale.current = true
+    activeRef.current = active
+  })
   useEffect(() => {
     const root = rootRef.current
     if (!active || !root || typeof root.getAnimations !== 'function') return
     const started = performance.now()
+    let resting: Animation[] = []
+    stale.current = true
     let timer: ReturnType<typeof setTimeout> | null = null
     const tick = () => {
-      if (document.visibilityState !== 'hidden') {
-        const now = performance.now() - started
-        for (const a of root.getAnimations({ subtree: true })) {
-          if (a.playState === 'paused') a.currentTime = now
+      if (activeRef.current && document.visibilityState !== 'hidden') {
+        if (stale.current) {
+          stale.current = false
+          resting = root.getAnimations({ subtree: true })
+            .filter((a) => AMBIENT_ANIMATIONS.has((a as CSSAnimation).animationName))
         }
+        const now = performance.now() - started
+        for (const a of resting) a.currentTime = now
       }
       timer = setTimeout(tick, 1000 / fps)
     }
@@ -184,6 +221,13 @@ const PET_WALK_SPEED_PX_S = 42
 const PET_WALK_DISTANCE_PX = { min: 90, max: 280 }
 const PET_WALK_MS = { min: 2500, max: 12000 }
 
+/**
+ * How long the mascot stands still before its position is stored. Nothing
+ * reads the stored position until the next page load, so there is no hurry;
+ * see `saveCrabPos`.
+ */
+const POSITION_SETTLE_MS = 1000
+
 interface Range { min: number; max: number }
 
 /**
@@ -210,6 +254,66 @@ function intersectRange(a: Range, b: Range): Range {
   const min = Math.max(a.min, b.min)
   const max = Math.min(a.max, b.max)
   return min < max ? { min, max } : { min: (min + max) / 2, max: (min + max) / 2 }
+}
+
+/** A stroll: where it starts and ends (vw of the stage) and how long it takes. */
+export interface WalkPlan { startX: number; target: number; ms: number }
+
+/** The stroll's speed curve: easeInOutQuad. */
+function walkEase(t: number): number {
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2
+}
+
+/**
+ * Where a stroll has the body `elapsed` ms in, clamped to the lane as it is
+ * now. The ONE formula a walk is drawn by, whichever way it is drawn — the
+ * frame loop asks it every frame, the Web Animation is built from it and read
+ * back through it (see `walkKeyframes`).
+ */
+export function walkXAt(lane: Range, plan: WalkPlan, elapsed: number): number {
+  const t = Math.min(elapsed / plan.ms, 1)
+  return clampTo(lane, plan.startX + (plan.target - plan.startX) * walkEase(t))
+}
+
+/**
+ * How many evenly spaced points of the stroll its Web Animation passes
+ * through. Between two of them the animation moves in a straight line, and the
+ * curve it stands in for is never further than 1/(2·N²) of the distance from
+ * that line — under a hundredth of a pixel for the longest stroll, 280 px.
+ * That is below what the screen can show: measured in Chromium, the stroll
+ * drawn this way and by the frames at the same moments differs by at most
+ * 9/255 on the crab's anti-aliased edge, which is exactly what moving the
+ * frame-drawn crab by 0.01 px does on its own.
+ */
+export const WALK_KEYFRAMES = 120
+
+/**
+ * The points a stroll's Web Animation passes through: `WALK_KEYFRAMES` evenly
+ * spaced ones, plus the moments the stroll crosses an edge of the lane. A body
+ * that starts outside the lane (thrown past it) is held at the edge until the
+ * curve comes back inside, and that corner has to be a keyframe of its own or
+ * the straight segment over it would cut it.
+ */
+export function walkKeyframes(lane: Range, plan: WalkPlan, transformAt: (x: number) => string): Keyframe[] {
+  const offsets = new Set<number>()
+  for (let i = 0; i <= WALK_KEYFRAMES; i++) offsets.add(i / WALK_KEYFRAMES)
+  const span = plan.target - plan.startX
+  if (span !== 0) {
+    for (const edge of [lane.min, lane.max]) {
+      // The share of the way the edge lies at, inverted through the curve.
+      const r = (edge - plan.startX) / span
+      if (r > 0 && r < 1) offsets.add(r <= 0.5 ? Math.sqrt(r / 2) : 1 - Math.sqrt(2 * (1 - r)) / 2)
+    }
+  }
+  return [...offsets].sort((a, b) => a - b).map((offset) => ({
+    offset,
+    transform: transformAt(walkXAt(lane, plan, offset * plan.ms)),
+  }))
+}
+
+/** An animation's clock as a plain number of ms (0 while it has none yet). */
+function animationMs(a: Animation): number {
+  return typeof a.currentTime === 'number' ? a.currentTime : 0
 }
 
 function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }: { onTap?: (x?: number) => void; frozen?: boolean; thinking?: boolean; onPositionChange?: (x: number) => void; rightInset?: number } = {}) {
@@ -389,6 +493,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // a layout effect: an ordinary effect let the pet paint one frame at the
   // crab's 8px desktop floor and then visibly jump onto the bar.
   useLayoutEffect(() => {
+    // A new body is a new lane. A stroll the compositor draws runs a path fixed
+    // against the old one, so it goes on as frames, which read the lane live.
+    if (walkAnimRef.current) handOffWalkRef.current?.()
     if (!pet) {
       groundRef.current = CRAB_GROUND_PX
       walkRangeRef.current = { ...CRAB_WALK_RANGE }
@@ -425,6 +532,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     const measure = (): boolean => {
       const el = document.querySelector('[data-mascot-ground]') as HTMLElement | null
       if (!el) return false
+      // Before the lane moves under it: a stroll the compositor draws is handed
+      // to the frames at the place it has reached on the lane it was given.
+      if (walkAnimRef.current) handOffWalkRef.current?.()
       const rect = el.getBoundingClientRect()
       const st = stage()
       const vw = st.w
@@ -654,6 +764,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   const stateTimeout = useRef<ReturnType<typeof setTimeout>>(null)
   const sleepZzzRef = useRef<ReturnType<typeof setInterval>>(null)
   const walkInterval = useRef<ReturnType<typeof setInterval>>(null)
+  /** A stroll the compositor is drawing, and its plan — see `walkAnimated`. */
+  const walkAnimRef = useRef<{ anim: Animation; plan: WalkPlan } | null>(null)
+  /** Hand an animated stroll to the frame loop. Set where it is defined. */
+  const handOffWalkRef = useRef<(() => void) | null>(null)
   const powerStanceRef = useRef(false)
   const frenzyTimeout = useRef<ReturnType<typeof setTimeout>>(null)
   const frenzyIntervalsRef = useRef<ReturnType<typeof setInterval>[]>([])
@@ -681,10 +795,77 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   })
   const physicsRAF = useRef<number>(0)
 
-  // ─── Direct DOM update for position (bypasses React render cycle) ───
-  const saveCrabPos = useCallback(() => {
-    kv.setJSON('clawbox-crab-pos', { x: xRef.current })
+  // ─── The stored position: written once a movement has settled ───
+  //
+  // `clawbox-crab-pos` is read exactly once, when the desktop loads, to put
+  // the mascot back where it stood (`savedPos` above). It used to be written
+  // by the same call as the transform: every animation frame of a walk, a
+  // frenzy or the retreat from a docked chat, and again on each action's lane
+  // measurement and each turn on the spot. client-kv throttles to a POST every
+  // 500 ms, so that was two POSTs a second for as long as the mascot moved —
+  // measured at ~0.4 a second around the clock, each one a rewrite of the
+  // whole data/kv.json on the box's flash — for values nothing ever read.
+  //
+  // A request to save now only counts a move. One timer looks every
+  // POSITION_SETTLE_MS and stores the position once nothing has moved since
+  // its last look (one to two settle periods after the movement ended), and
+  // never re-sends the value that is already stored. A reload in the middle of
+  // a walk still brings the mascot back mid-walk: `pagehide` stores a
+  // position that is still settling at once (see the effect below).
+  //
+  // A stroll the compositor draws (see `walkAnimated`) counts no moves while
+  // it lasts — nothing writes the position frame by frame — so it is "still
+  // moving" for as long as it runs, and a store in the middle of one reads the
+  // body's place off the animation's clock first.
+  const storedPosRef = useRef<string | null | undefined>(undefined)
+  if (storedPosRef.current === undefined) storedPosRef.current = kv.get('clawbox-crab-pos')
+  const moveSeqRef = useRef(0)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  /** Bring `xRef` up to where an animated stroll has the body right now. */
+  const syncWalkX = useCallback(() => {
+    const w = walkAnimRef.current
+    if (w) xRef.current = walkXAt(walkRangeRef.current, w.plan, animationMs(w.anim))
   }, [])
+
+  /** Store the position now, unless it is the one already stored. True when it wrote. */
+  const storeCrabPos = useCallback((): boolean => {
+    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null }
+    syncWalkX()
+    const value = JSON.stringify({ x: xRef.current })
+    if (value === storedPosRef.current) return false
+    storedPosRef.current = value
+    kv.set('clawbox-crab-pos', value)
+    return true
+  }, [syncWalkX])
+
+  /** The position moved: store it once it settles. Cheap enough for every frame. */
+  const saveCrabPos = useCallback(() => {
+    moveSeqRef.current++
+    if (saveTimerRef.current) return
+    const look = (seen: number) => {
+      saveTimerRef.current = setTimeout(() => {
+        // Still moving: look again a full settle period later.
+        if (moveSeqRef.current !== seen || walkAnimRef.current) { look(moveSeqRef.current); return }
+        storeCrabPos()
+      }, POSITION_SETTLE_MS)
+    }
+    look(moveSeqRef.current)
+  }, [storeCrabPos])
+
+  // A position still settling when the mascot goes — the page reloading or
+  // closing, or the desktop unmounting it — is stored at once, and on the way
+  // out of the page sent as a request that outlives it.
+  useEffect(() => {
+    const onPageHide = () => {
+      if ((saveTimerRef.current || walkAnimRef.current) && storeCrabPos()) kv.flush()
+    }
+    window.addEventListener('pagehide', onPageHide)
+    return () => {
+      window.removeEventListener('pagehide', onPageHide)
+      if (saveTimerRef.current || walkAnimRef.current) storeCrabPos()
+    }
+  }, [storeCrabPos])
 
   /**
    * The mascot's transform, and the only place it is written.
@@ -696,14 +877,22 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
    * that spoke mid-throw (an impact reaction does) counter-flipped a flip that
    * was not applied and rendered its text mirror-reversed.
    */
-  const writeCrabTransform = useCallback(() => {
-    const el = crabElRef.current
-    if (!el) return
+  const crabTransformAt = useCallback((x: number) => {
     const scaleX = facingRef.current === 'left' ? -1 : 1
     const y = jumpYRef.current - liftRef.current
-    el.style.transform = `translateX(calc(${stageX(xRef.current)} - 50%)) translateY(${y.toFixed(2)}px) scaleX(${scaleX})`
-    positionBubbleRef.current?.()
+    return `translateX(calc(${stageX(x)} - 50%)) translateY(${y.toFixed(2)}px) scaleX(${scaleX})`
   }, [])
+  const writeCrabTransform = useCallback(() => {
+    // Something other than the stroll is drawing the mascot — a turn, a hop,
+    // a new floor or stage. A stroll the compositor draws runs a path fixed
+    // when it started and cannot take that in, so it goes on as frames from
+    // here, which is what every stroll was (see `walkAnimated`).
+    if (walkAnimRef.current) handOffWalkRef.current?.()
+    const el = crabElRef.current
+    if (!el) return
+    el.style.transform = crabTransformAt(xRef.current)
+    positionBubbleRef.current?.()
+  }, [crabTransformAt])
 
   const updateCrabPos = useCallback(() => {
     writeCrabTransform()
@@ -751,6 +940,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
   // Wrapper setters that update refs + DOM directly (no React setState for position)
   const setX = useCallback((v: number | ((p: number) => number)) => {
+    // Before the new value lands: handing a stroll over reads its own place.
+    if (walkAnimRef.current) handOffWalkRef.current?.()
     if (typeof v === 'function') xRef.current = v(xRef.current)
     else xRef.current = v
     updateCrabPos()
@@ -772,6 +963,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
    */
   const faceTowards = useCallback((dir: 'left' | 'right') => {
     if (facingRef.current === dir) return
+    // A stroll drawn by the compositor carries the facing it started with.
+    if (walkAnimRef.current) handOffWalkRef.current?.()
     facingRef.current = dir
     setFacing(dir)
   }, [])
@@ -780,6 +973,152 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     faceTowards(dir)
     updateCrabPos()
   }, [faceTowards, updateCrabPos])
+
+  // ─── The stroll: drawn by the compositor, carried on as frames when it must ───
+  //
+  // A stroll used to be a requestAnimationFrame loop writing the transform on
+  // every frame: a style recalc, a main-thread frame and a commit, 60 times a
+  // second for its 2.5-12 s — about a fifth of the mascot's waking time.
+  // Measured in Chromium with the body's waddle running as it does during a
+  // stroll: 37-53 ms of main-thread work and 60 style recalcs a second, against
+  // ~1 ms and none for the same stroll as a Web Animation, which the
+  // compositor runs by itself.
+  //
+  // The animation is built from the stroll's own formula (`walkKeyframes` /
+  // `walkXAt`), and every place that ever stopped the loop stops it through
+  // `stopWalk`, which reads where the body is off the animation's clock —
+  // never off the screen — and leaves it drawn exactly there. What only the
+  // frames could do is react DURING a stroll: to a new lane or stage, a turn,
+  // a hop, the root being made again, a pet's bubble that has to be kept on
+  // screen frame by frame. Each of those hands the stroll to the frame loop at
+  // the very moment the animation had reached (`handOffWalk`), and the frames
+  // carry it on as they always did. A browser without Web Animations, and the
+  // test runner, walk in frames from the start.
+
+  /** The stroll as frames: the loop every stroll used to be, from `startTime`. */
+  const walkOnFrames = useCallback((plan: WalkPlan, startTime: number) => {
+    // A frame is DRAWN only once the body has moved far enough to show it.
+    // The stroll is slow — 42 px/s on average, far slower where it eases in
+    // and out — so at 60 Hz many frames move it by a fraction of a pixel, and
+    // each transform written for one cost a style recalc and a commit for
+    // nothing the screen could show. Half a DEVICE pixel is the bound: the
+    // body drawn is never further than that from where it really is, and a
+    // frame that moves it more is drawn exactly as before, so no cadence is
+    // imposed. (A 30 fps cap would halve the frames, but at the walk's peak,
+    // ~84 px/s, its 2.8 px steps judder on a 60 Hz screen — and walking is
+    // deliberately not one of the stepped resting animations, see
+    // AMBIENT_FPS.)
+    const minStep = (0.5 / (window.devicePixelRatio || 1) / stage().w) * 100
+    let drawnX = xRef.current
+    const animate = (now: number) => {
+      const t = Math.min((now - startTime) / plan.ms, 1)
+      // Read the lane every frame. Captured once, a mid-walk resize left this
+      // clamping against a range the bar no longer has.
+      const cx = walkXAt(walkRangeRef.current, plan, now - startTime)
+      xRef.current = cx
+
+      if (t < 1) {
+        if (Math.abs(cx - drawnX) >= minStep) {
+          drawnX = cx
+          setX(cx)
+        }
+        walkInterval.current = requestAnimationFrame(animate) as unknown as ReturnType<typeof setInterval>
+      } else {
+        xRef.current = clampTo(walkRangeRef.current, plan.target)
+        setX(xRef.current)
+      }
+    }
+    walkInterval.current = requestAnimationFrame(animate) as unknown as ReturnType<typeof setInterval>
+  }, [setX])
+
+  /** A window resize moves the stage under an animated stroll's fixed path. */
+  const onWalkResize = useCallback(() => { handOffWalkRef.current?.() }, [])
+
+  /** Forget the animated stroll (the caller has its plan and its clock). */
+  const releaseWalkAnimation = useCallback(() => {
+    walkAnimRef.current = null
+    window.removeEventListener('resize', onWalkResize)
+  }, [onWalkResize])
+
+  /**
+   * Start a stroll as a Web Animation. False when it has to be frames: no Web
+   * Animations, nothing drawn, or a pet's bubble up — `positionBubble` keeps
+   * that on screen frame by frame, and only the frames can follow it.
+   */
+  const walkAnimated = useCallback((plan: WalkPlan): boolean => {
+    const el = crabElRef.current
+    if (!el || typeof el.animate !== 'function' || bubbleElRef.current) return false
+    let anim: Animation
+    try {
+      anim = el.animate(walkKeyframes(walkRangeRef.current, plan, crabTransformAt), {
+        duration: plan.ms,
+        easing: 'linear',
+        // Held on the last point until `onfinish` writes the same place into
+        // the element's own style, so the end is never a frame without it.
+        fill: 'forwards',
+      })
+    } catch {
+      return false
+    }
+    walkAnimRef.current = { anim, plan }
+    window.addEventListener('resize', onWalkResize)
+    anim.onfinish = () => {
+      if (walkAnimRef.current?.anim !== anim) return
+      releaseWalkAnimation()
+      // Where the frames end a stroll: on its target, against today's lane.
+      xRef.current = clampTo(walkRangeRef.current, plan.target)
+      setX(xRef.current)
+      anim.cancel()
+    }
+    return true
+  }, [crabTransformAt, onWalkResize, releaseWalkAnimation, setX])
+
+  /**
+   * Carry an animated stroll on as frames, from the time the animation had
+   * reached: its own start time on the document timeline, the clock a frame's
+   * timestamp is read on, so the first frame lands where the next compositor
+   * frame would have.
+   */
+  const handOffWalk = useCallback(() => {
+    const w = walkAnimRef.current
+    if (!w) return
+    const elapsed = animationMs(w.anim)
+    const startTime = typeof w.anim.startTime === 'number' ? w.anim.startTime : performance.now() - elapsed
+    releaseWalkAnimation()
+    xRef.current = walkXAt(walkRangeRef.current, w.plan, elapsed)
+    // A move, as the frame drawn here would have been: a stroll handed over
+    // as the mascot unmounts is then still stored (see `storeCrabPos`).
+    updateCrabPos()
+    w.anim.cancel()
+    walkOnFrames(w.plan, startTime)
+  }, [releaseWalkAnimation, updateCrabPos, walkOnFrames])
+  handOffWalkRef.current = handOffWalk
+
+  /**
+   * Stop a stroll where it stands — every interrupt goes through here: a grab,
+   * a new action, sleep, a frenzy, the chat opening, the mascot going away.
+   * The frame loop simply stops (the body is where its last frame drew it);
+   * an animated stroll is drawn, and stored, where its clock says it is.
+   */
+  const stopWalk = useCallback(() => {
+    if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+    const w = walkAnimRef.current
+    if (!w) return
+    const elapsed = animationMs(w.anim)
+    releaseWalkAnimation()
+    xRef.current = walkXAt(walkRangeRef.current, w.plan, elapsed)
+    updateCrabPos()
+    w.anim.cancel()
+  }, [releaseWalkAnimation, updateCrabPos])
+
+  /** The root element. A stroll the compositor draws lives ON it: when the
+   *  root goes (hidden, the egg) the stroll carries on as frames, which go on
+   *  walking whatever is drawn — exactly what every stroll used to do. */
+  const setCrabEl = useCallback((el: HTMLDivElement | null) => {
+    if (crabElRef.current === el) return
+    if (walkAnimRef.current) handOffWalkRef.current?.()
+    crabElRef.current = el
+  }, [])
 
   /**
    * The landing squash.
@@ -1001,6 +1340,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // ─── Crab drag + tap detection ───
   const dragStartPos = useRef({ x: 0, y: 0 })
   const didDragRef = useRef(false)
+  /** The pointer the press is following — see `handlePointerCancel`. */
+  const dragPointerRef = useRef<number | null>(null)
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     // Right-click — let onContextMenu handle it, don't start drag/tap
@@ -1011,6 +1352,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     // chat) leaves the mascot exactly where it stands.
     draggingRef.current = true
     didDragRef.current = false
+    dragPointerRef.current = e.pointerId
     dragStartPos.current = { x: e.clientX, y: e.clientY }
     const p = physicsRef.current
     p.active = false
@@ -1021,14 +1363,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     p.posY = groundRef.current + liftRef.current
     if (physicsRAF.current) cancelAnimationFrame(physicsRAF.current)
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
-    if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+    stopWalk()
     powerStanceRef.current = false; setPowerStance(false)
     const rect = crabElRef.current?.getBoundingClientRect()
     if (rect) dragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
     p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = performance.now()
     p.velX = 0; p.velY = 0
     capturePointer(e)
-  }, [])
+  }, [stopWalk])
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
     if (!draggingRef.current) return
@@ -1067,6 +1409,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
    *  shown — so a mascot that could only be tapped left a keyboard user with
    *  no way through it at all. */
   const tapMascot = useCallback(() => {
+    // Mid-stroll from the keyboard, the body is where the animation has it.
+    syncWalkX()
     // Works even when sleeping.
     if (onTap) onTap(xRef.current)
     if (isSleepingRef.current) return
@@ -1074,7 +1418,21 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     // Restart the action loop so mascot doesn't freeze after tap
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
     stateTimeout.current = setTimeout(() => doActionRef.current(), 3500)
-  }, [onTap, say])
+  }, [onTap, say, syncWalkX])
+
+  /** Let go of a mascot that was dragged: physics plays out the drop with the
+   *  pointer's last velocity, and the landing resumes normal actions. Shared
+   *  by a release and a pointer the system took away mid-drag. */
+  const dropMascot = useCallback(() => {
+    // Drag-and-drop while sleeping wakes the mascot
+    if (isSleepingRef.current) wakeSleepRef.current?.()
+    const p = physicsRef.current
+    p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
+    p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
+    p.lastTime = performance.now()
+    p.active = true
+    physicsRAF.current = requestAnimationFrame(physicsLoop)
+  }, [physicsLoop])
 
   const handlePointerUp = useCallback(() => {
     if (!draggingRef.current) return
@@ -1086,26 +1444,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       return
     }
 
-    // Drag-and-drop while sleeping wakes the mascot
-    if (isSleepingRef.current) {
-      wakeSleepRef.current?.()
-      // Let physics play out the drop, then resume normal actions
-      const p = physicsRef.current
-      p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
-      p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
-      p.lastTime = performance.now()
-      p.active = true
-      physicsRAF.current = requestAnimationFrame(physicsLoop)
-      return
-    }
-
-    const p = physicsRef.current
-    p.velX = Math.max(-p.maxVel, Math.min(p.maxVel, p.velX))
-    p.velY = Math.max(-p.maxVel, Math.min(p.maxVel, p.velY))
-    p.lastTime = performance.now()
-    p.active = true
-    physicsRAF.current = requestAnimationFrame(physicsLoop)
-  }, [physicsLoop, tapMascot])
+    dropMascot()
+  }, [dropMascot, tapMascot])
 
   const randRange = (min: number, max: number) => min + Math.random() * (max - min)
 
@@ -1141,6 +1481,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   useLayoutEffect(() => {
     const el = bubbleElRef.current
     if (!el) { bubbleWRef.current = 0; bubbleTransformRef.current = ''; return }
+    // The clamp follows the body frame by frame, which a stroll the compositor
+    // draws cannot do: it goes on as frames from here (see `walkAnimated`).
+    if (walkAnimRef.current) handOffWalkRef.current?.()
     bubbleWRef.current = el.offsetWidth
     bubbleTransformRef.current = ''
     positionBubble()
@@ -1155,10 +1498,23 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
   const SLEEP_KEY = 'clawbox-mascot-sleep'
 
+  /** The end of a nap, `remainingMs` from now. While asleep this is what
+   *  `stateTimeout` holds — the action loop does not run during a nap. */
+  const endSleepIn = useCallback((remainingMs: number) => {
+    stateTimeout.current = setTimeout(() => {
+      if (sleepZzzRef.current) { clearInterval(sleepZzzRef.current); sleepZzzRef.current = null }
+      setSpeech('')
+      setState('idle')
+      setIsSleeping(false)
+      kv.remove(SLEEP_KEY)
+      setTimeout(() => doActionRef.current(), 1000)
+    }, remainingMs) as ReturnType<typeof setTimeout>
+  }, [])
+
   // Start or resume sleep for a given remaining duration (ms)
   const startSleep = useCallback((remainingMs: number) => {
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
-    if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+    stopWalk()
     if (sleepZzzRef.current) clearInterval(sleepZzzRef.current)
     setState('sleep')
     // From the locale's own pack — these used to be hardcoded English.
@@ -1169,15 +1525,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       zIdx = (zIdx + 1) % zzzLines.length
       say(zzzLines[zIdx], 4000)
     }, 30000)
-    stateTimeout.current = setTimeout(() => {
-      if (sleepZzzRef.current) { clearInterval(sleepZzzRef.current); sleepZzzRef.current = null }
-      setSpeech('')
-      setState('idle')
-      setIsSleeping(false)
-      kv.remove(SLEEP_KEY)
-      setTimeout(() => doActionRef.current(), 1000)
-    }, remainingMs) as ReturnType<typeof setTimeout>
-  }, [say])
+    endSleepIn(remainingMs)
+  }, [say, stopWalk, endSleepIn])
 
   // Wake from sleep — clears all sleep state
   const wakeSleep = useCallback(() => {
@@ -1193,6 +1542,52 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   useEffect(() => {
     wakeSleepRef.current = wakeSleep
   }, [wakeSleep])
+
+  /**
+   * The system took the pointer away mid-press: `pointercancel` (a touch the
+   * browser claimed for a pan or a gesture, a palm rejected, the pen leaving
+   * range) or the capture lost on its own. Neither is followed by a
+   * `pointerup`, and the press had already stopped everything — the next
+   * action's timer, the stroll, a throw still in the air — and taken the
+   * pointer. Left at that, `draggingRef` stayed set with nothing to clear it:
+   * the mascot stood frozen until it was touched again, and a mouse merely
+   * hovering over it dragged it about.
+   *
+   * A press that had moved is dropped exactly as a release drops it (the
+   * landing stores the position and resumes the action loop). One that had
+   * not is NOT a tap — the owner did not let go, so the chat does not open —
+   * and only the loop it interrupted is put back: the next action after the
+   * pause a landing takes, or, asleep, the nap's own end, which is the timer
+   * the press cleared and which the action loop cannot stand in for.
+   *
+   * A normal release fires `lostpointercapture` too, right after `pointerup`;
+   * by then `draggingRef` is clear and this does nothing. So does a cancel of
+   * any pointer but the one the press is following — a second finger's.
+   */
+  const handlePointerCancel = useCallback((e: React.PointerEvent) => {
+    if (!draggingRef.current || e.pointerId !== dragPointerRef.current) return
+    draggingRef.current = false
+    if (didDragRef.current) {
+      dropMascot()
+      return
+    }
+    if (stateTimeout.current) clearTimeout(stateTimeout.current)
+    if (isSleepingRef.current) {
+      const wakeAt = kv.getJSON<number>(SLEEP_KEY) ?? 0
+      endSleepIn(Math.max(0, wakeAt - Date.now()))
+      return
+    }
+    // Held off the ground — caught mid-throw, or standing on an icon. The
+    // press stopped the physics and zeroed its velocity, so let it finish the
+    // fall from where it was held, the way a release would: re-arming the
+    // action loop instead left it hanging in the air for two seconds and then
+    // stepped it off THROUGH the icon it would have landed on.
+    if (liftRef.current > 0.5) {
+      dropMascot()
+      return
+    }
+    stateTimeout.current = setTimeout(() => doActionRef.current(), 2000)
+  }, [dropMascot, endSleepIn])
 
   // mascotSleep — stops movement, sleeps for 10-15 min (or until dragged), shows zzz bubbles
   const mascotSleep = useCallback(() => {
@@ -1215,7 +1610,23 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     // is safe: the 60 s end-timer calls `doAction` again, and so does an
     // unfreeze.
     if (frenzyRef.current) return
-    if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+    stopWalk()
+
+    // Nothing is drawn: the owner hid the mascot, /setup-api/pets has not
+    // answered yet, or the fresh-box egg stands in for it. Acting anyway ran a
+    // 60 Hz walk loop, a re-render per bubble and a stored position, forever,
+    // for a mascot nobody could see. Stand at rest instead and look again
+    // after the loop's own pause, so the first action once the body is on
+    // screen comes on the cadence it always had — and it does not appear
+    // waddling on the spot, mid-way through an action nobody saw start.
+    // Rescheduled exactly the way an action reschedules (below), without
+    // cancelling anything: whatever other timer would have called this keeps
+    // running, so the mascot comes back acting as often as it went.
+    if (!crabElRef.current) {
+      setState('idle')
+      stateTimeout.current = setTimeout(() => doActionRef.current(), randRange(2000, 6000))
+      return
+    }
 
     // The lane comes from live geometry — the bar, and the desktop icons that
     // stand in the pet's band. Both move (a resize, a dragged icon), so re-read
@@ -1308,26 +1719,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         setFacingDirect(newTarget > startX ? 'right' : 'left')
       }
 
-      // Use requestAnimationFrame for smooth GPU-friendly movement
+      // Drawn by the compositor where it can be, as frames where it cannot —
+      // the same stroll either way (see `walkAnimated`).
+      const plan: WalkPlan = { startX, target: newTarget, ms: actionMs }
       const startTime = performance.now()
-      const animate = (now: number) => {
-        const elapsed = now - startTime
-        const t = Math.min(elapsed / actionMs, 1)
-        const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2
-        // Read the lane every frame. Captured once, a mid-walk resize left this
-        // clamping against a range the bar no longer has.
-        const cx = clampTo(walkRangeRef.current, startX + (newTarget - startX) * ease)
-        xRef.current = cx
-        setX(cx)
-
-        if (t < 1) {
-          walkInterval.current = requestAnimationFrame(animate) as unknown as ReturnType<typeof setInterval>
-        } else {
-          xRef.current = clampTo(walkRangeRef.current, newTarget)
-          setX(xRef.current)
-        }
-      }
-      walkInterval.current = requestAnimationFrame(animate) as unknown as ReturnType<typeof setInterval>
+      if (!walkAnimated(plan)) walkOnFrames(plan, startTime)
     } else if (action.state === 'jump') {
       const jumpStart = performance.now()
       const jumpDuration = 750 // 25 frames * 30ms
@@ -1341,7 +1737,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     }
 
     stateTimeout.current = setTimeout(() => doActionRef.current(), actionMs + randRange(2000, 6000))
-  }, [pickAction, physicsLoop])
+  }, [pickAction, physicsLoop, stopWalk, walkAnimated, walkOnFrames])
   useEffect(() => {
     doActionRef.current = doAction
   }, [doAction])
@@ -1369,7 +1765,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       if (frozenRef.current) return
       // Cancel current action
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
-      if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+      stopWalk()
       if (frenzyTimeout.current) clearTimeout(frenzyTimeout.current)
 
       // FRENZY MODE — 60 seconds of excited running + quotes + money
@@ -1483,7 +1879,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     return () => {
       clearTimeout(startDelay)
       if (stateTimeout.current) clearTimeout(stateTimeout.current)
-      if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
+      stopWalk()
       if (sleepZzzRef.current) clearInterval(sleepZzzRef.current)
       if (frenzyTimeout.current) clearTimeout(frenzyTimeout.current)
       frenzyIntervalsRef.current.forEach(clearInterval)
@@ -1495,7 +1891,18 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // Resting: what the mascot does most of the day (see AMBIENT_FPS).
   const ambient = !thinking && !frenzy && (state === 'idle' || state === 'sleep')
   const restPlay = ambient ? ' paused' : ''
-  useAmbientSteps(crabElRef, ambient, AMBIENT_FPS)
+  // Whether this render draws the root at all (the early returns below). The
+  // steps run on the root, and it is not there on the first render, while
+  // /setup-api/pets has not answered, while hidden or while the egg stands in
+  // — and the stepper, armed on a missing root, used to stay unarmed until the
+  // mood changed: after every page load the bob stood still until the first
+  // action that was not a rest, and a nap resumed by a reload kept its
+  // breathing and Zs frozen for the rest of the nap (idle and sleep are both
+  // resting, so nothing re-armed it). Re-armed, too, on the root a show makes
+  // anew.
+  const drawn = mounted && !hidden && petStatus !== null
+    && !(petStatus.supported && !pet && petStatus.placeholder === 'egg')
+  useAmbientSteps(crabElRef, ambient && drawn, AMBIENT_FPS)
 
   const bodyAnim = (() => {
     // A pet animates by STEPPING THROUGH SPRITESHEET FRAMES, so none of these
@@ -1545,12 +1952,13 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (frenzyTimeout.current) { clearTimeout(frenzyTimeout.current); frenzyTimeout.current = null }
     frenzyIntervalsRef.current.forEach(clearInterval)
     frenzyIntervalsRef.current = []
-    if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current); walkInterval.current = null }
+    stopWalk()
+    walkInterval.current = null
     setFrenzy(false)
     frenzyRef.current = false
     setMoneyParticles([])
     setJumpY(0)
-  }, [])
+  }, [stopWalk])
 
   // Freeze/unfreeze mascot (chat popup open, or reduced-motion) — enter power stance
   useEffect(() => {
@@ -1670,7 +2078,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   return (
     <>
       <style>{MASCOT_KEYFRAMES}</style>
-      <div ref={crabElRef}
+      <div ref={setCrabEl}
         // The MASCOT, not the renderer: ClawBox's own crab is still the crab
         // when it is drawn from a spritesheet, and `[data-mascot="crab"]` is
         // what the desktop's e2e placement spec looks for. A pet the owner
@@ -1693,6 +2101,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
+        onLostPointerCapture={handlePointerCancel}
         onContextMenu={(e) => {
           e.preventDefault()
           e.stopPropagation()
@@ -1719,7 +2129,19 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         pointerEvents: pet ? 'none' : 'auto',
         cursor: 'grab',
         touchAction: 'none',
-        willChange: 'transform, filter',
+        // A long touch on the crab's picture must stay the mascot's press: on
+        // iOS it otherwise opens the system image menu (or lifts the picture
+        // for a drag), which cancels the pointer mid-hold. The picture itself
+        // is `draggable={false}` for the same reason.
+        WebkitTouchCallout: 'none',
+        // `transform` only. The filter below is never animated — it switches
+        // between a glow and `none` when the state does — and naming it here
+        // made the browser keep a separate render surface for the mascot at all
+        // times: measured at twice the render passes per second (122 against
+        // 60), `filter: none` included. The transform and `position: fixed`
+        // already make this the stacking context and the containing block for
+        // the bubble, the Zs and the floaters, so nothing lays out differently.
+        willChange: 'transform',
         filter: isSleeping
           ? 'drop-shadow(0 0 10px rgba(147,197,253,0.3))'
           : frenzy
@@ -1757,7 +2179,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
               />
             </>
           ) : (
-            <img src="/clawbox-crab.png" alt="" style={{
+            <img src="/clawbox-crab.png" alt="" draggable={false} style={{
               position: 'absolute', bottom: CRAB_ART_BOTTOM_PX, left: (CRAB_BODY_PX - CRAB_ART_PX) / 2,
               width: CRAB_ART_PX, height: CRAB_ART_PX, objectFit: 'contain',
             }} />
@@ -1992,10 +2414,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
       </div>
 
-      {/* Mascot right-click context menu */}
+      {/* Mascot right-click context menu. No backdrop blur under its fill:
+          #2d2d2d is opaque and covers the border and the rounded corners too,
+          so the blur could not be seen — and it sat right over the mascot,
+          re-run on every step of the animation beneath it. */}
       {ctxMenu && (
         <div
-          className="fixed z-[99999] min-w-[220px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          data-testid="mascot-context-menu"
+          className="fixed z-[99999] min-w-[220px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 text-sm text-white/90"
           style={{
             left: Math.min(ctxMenu.x, window.innerWidth - 240),
             top: ctxMenu.y - 8,

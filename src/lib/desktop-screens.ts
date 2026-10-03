@@ -56,6 +56,33 @@ export function subscribeDeskScreens(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+/**
+ * Has a monitor session answered THIS page — `/setup-api/monitors` said
+ * `available: true` to `useMonitorLayoutSync`, which asks only from an app
+ * window? Then this page is the desktop in the "ClawBox Desktop" session, on
+ * the box's own monitors, and a hidden page there is still the one on the
+ * owner's display (`isBoxOwnScreen()` in visible-interval.ts).
+ *
+ * Kept apart from the screens because the screens are null for one monitor
+ * on, a mirrored row or a viewport not yet the row's size — all of them still
+ * that session's window. And asked of the box rather than read off
+ * `display-mode`: the desktop installed as an app on a phone, or a tab put
+ * in full screen, is an app display mode too, and on a box with no monitor
+ * session (every Jetson) the answer there is `available: false`. Once true it
+ * stays true for the page's life, the way the poll keeps the layout through a
+ * read that failed: the session does not go away under its own window.
+ */
+let monitorSessionWindow = false;
+
+export function isMonitorSessionWindow(): boolean {
+  return monitorSessionWindow;
+}
+
+/** Only `useMonitorLayoutSync` sets it (and clears it when it unmounts). */
+export function setMonitorSessionWindow(on: boolean): void {
+  monitorSessionWindow = on;
+}
+
 function viewport(): DeskScreen {
   const w = typeof window === "undefined" ? 0 : window.innerWidth;
   const h = typeof window === "undefined" ? 0 : window.innerHeight;

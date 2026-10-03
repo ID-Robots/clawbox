@@ -621,7 +621,9 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 </>
               )}
               <div className="relative w-24 h-24 rounded-full flex items-center justify-center bg-white/[0.04] border border-[var(--border-subtle)]">
-                <span className={`material-symbols-rounded ${hero.iconClass} ${status === "updating" ? "clawkeep-shelf-glow" : ""}`} style={{ fontSize: 56, fontVariationSettings: "'FILL' 1, 'wght' 600" }}>
+                {/* The glow's breathing half is a copy of the glyph (globals.css,
+                    .clawkeep-shelf-glow), which has to be told which glyph. */}
+                <span className={`material-symbols-rounded ${hero.iconClass} ${status === "updating" ? "clawkeep-shelf-glow" : ""}`} style={{ fontSize: 56, fontVariationSettings: "'FILL' 1, 'wght' 600", ["--glow-glyph" as string]: JSON.stringify(hero.icon) }}>
                   {hero.icon}
                 </span>
               </div>
@@ -912,7 +914,10 @@ function ConfirmModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+      // No backdrop blur under the dim: a full-screen blur is redone over the whole
+      // desktop on every frame anything beneath it moves (the mascot always does).
+      // One step darker keeps the look.
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75"
       onClick={onCancel}
     >
       <div

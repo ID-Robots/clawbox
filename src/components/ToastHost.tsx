@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { notifyActionLabel, parseNotifyAction, type NotifyAction } from "@/lib/notify-action";
 import { dispatchOpenSettingsSection } from "@/lib/ui-events";
@@ -76,7 +76,7 @@ function openNotifyAction(action: NotifyAction): void {
   }
 }
 
-export default function ToastHost() {
+function ToastHost() {
   const { t } = useT();
   const [toasts, setToasts] = useState<Toast[]>([]);
   // Over a row of monitors the stack stands in the MAIN monitor's corner,
@@ -178,3 +178,8 @@ export default function ToastHost() {
     </div>
   );
 }
+
+// Memoized: it takes no props and learns of a toast through its window event,
+// so a desktop render — of which there are many, on a page that is on screen
+// all day — has nothing to tell it.
+export default memo(ToastHost);

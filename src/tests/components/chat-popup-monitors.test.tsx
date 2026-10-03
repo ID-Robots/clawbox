@@ -164,3 +164,29 @@ describe("dragging the floating chat over a row of monitors", () => {
     expect(popup.style.left).toBe(`${MON_W + MON_W / 2}px`);
   });
 });
+
+// The docked panel keeps to the MAIN monitor's right edge, an offset from the
+// viewport's own (`mainInsets`) that is measured against the window's width in
+// render. A resize of the spread window reaches the page before the monitors
+// are read again, and the panel used to wait for whatever re-rendered it next.
+describe("the docked chat when the spread window changes size", () => {
+  const GAP = 6; // DESKTOP_GAP, mirrored from window-snap.
+
+  it("keeps to the main monitor's right edge, measured against the window it is in now", async () => {
+    act(() => setDeskScreens(ROW));
+    render(<ChatPopup isOpen onClose={() => {}} initialPanelWidth={420} />);
+    const popup = await screen.findByTestId("chat-popup");
+    // Connected and quiet, so a render after this is the resize's own.
+    await waitFor(() => expect(screen.getByRole("textbox")).not.toBeDisabled());
+    await act(async () => { await new Promise((r) => setTimeout(r, 300)); });
+    // The main monitor is the left one: the panel stands a whole monitor in
+    // from the viewport's right edge.
+    expect(popup.style.right).toBe(`${GAP + MON_W}px`);
+
+    act(() => {
+      setViewport(MON_W + 1920, MON_H);
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(popup.style.right).toBe(`${GAP + 1920}px`);
+  });
+});

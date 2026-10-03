@@ -4,6 +4,17 @@
 //   node clawbox-desktop-span.mjs <cdp port> <desktop url>          once
 //   node clawbox-desktop-span.mjs <cdp port> <desktop url> --watch  every 2 s, until killed
 //
+// The watcher reads `wlr-randr` every 2 s, but asks Chrome's pages only when
+// something may have changed: a look whose row is the one the last full pass
+// spread the window over asks the BROWSER one question on a DevTools socket it
+// keeps open (is that window still normal, and the row's size?) and lists the
+// targets over HTTP (are the desktop's pages the ones that pass saw?). Either
+// answer being no — or no answer — and the full pass runs at once, so a monitor
+// plugged in or a window Chrome put back maximized is fixed as soon as it was.
+// The shortcut costs the desktop's own page nothing: no DevTools session is
+// attached to it and no script is run in it every 2 s. The full pass still
+// runs every 30 s regardless (`createWatcher`).
+//
 // Monitor mode spreads ONE desktop over a row of monitors: the window sits at
 // the layout's origin (labwc's window rule moves it there when it maps and
 // holds it there) and is exactly as big as the row of enabled monitors, which
@@ -31,6 +42,10 @@ const TIMEOUT_MS = 4000;
 /** One pass's ceiling, every target included. */
 const PASS_MS = 8000;
 const KNOWN_TARGETS = 16;
+/** The watcher's look. */
+const WATCH_MS = 2000;
+/** The longest the watcher goes without a full pass while the row stands still. */
+const FULL_PASS_MS = 30_000;
 
 function wlrRandr() {
   return new Promise((resolve) => {
@@ -88,6 +103,22 @@ export function isShellPage(url, desktopUrl) {
   } catch {
     return false;
   }
+}
+
+const targetKey = (t) => (typeof t.id === "string" && t.id ? t.id : t.webSocketDebuggerUrl);
+const isShellTarget = (t, desktopUrl) =>
+  !!t && t.type === "page" && typeof t.webSocketDebuggerUrl === "string" && isShellPage(t.url, desktopUrl);
+
+/**
+ * The desktop shell's pages in a target list, in the list's order: each one's
+ * key and address. Two lists with the same signature are the same pages for a
+ * full pass — it asks only these, in this order — so while the signature holds
+ * a full pass would ask the same pages the same questions. Null for a list
+ * that is not one.
+ */
+export function shellSignature(targets, desktopUrl) {
+  if (!Array.isArray(targets)) return null;
+  return JSON.stringify(targets.filter((t) => isShellTarget(t, desktopUrl)).map((t) => [targetKey(t), t.url]));
 }
 
 const wait = (deadline) => Math.max(0, Math.min(TIMEOUT_MS, deadline - Date.now()));
@@ -151,9 +182,12 @@ const DISPLAY_MODE =
  * Spread the desktop's app window over `box`. `known` is the targets seen as
  * the app window so far (kept across a watcher's passes). Answers true when an
  * app window was found (and now spans the row); never throws, never takes
- * longer than one pass's ceiling.
+ * longer than one pass's ceiling. Given `found`, a pass that answers true
+ * leaves on it the window's id and the `shellSignature` of the list it asked.
+ *
+ * @param {{ windowId?: number, shells?: string | null } | null} [found]
  */
-export async function spanWindow(port, desktopUrl, box, known = []) {
+export async function spanWindow(port, desktopUrl, box, known = [], found = null) {
   const deadline = Date.now() + PASS_MS;
   let targets;
   try {
@@ -164,8 +198,8 @@ export async function spanWindow(port, desktopUrl, box, known = []) {
   if (!Array.isArray(targets)) return false;
   for (const t of targets) {
     if (Date.now() >= deadline) break;
-    if (!t || t.type !== "page" || typeof t.webSocketDebuggerUrl !== "string" || !isShellPage(t.url, desktopUrl)) continue;
-    const key = typeof t.id === "string" && t.id ? t.id : t.webSocketDebuggerUrl;
+    if (!isShellTarget(t, desktopUrl)) continue;
+    const key = targetKey(t);
     let s;
     try {
       s = await session(t.webSocketDebuggerUrl, deadline);
@@ -186,6 +220,10 @@ export async function spanWindow(port, desktopUrl, box, known = []) {
       if (bounds.windowState !== "normal" || bounds.width !== box.width || bounds.height !== box.height) {
         await s.send("Browser.setWindowBounds", { windowId, bounds: { left: 0, top: 0, width: box.width, height: box.height } });
       }
+      if (found) {
+        found.windowId = windowId;
+        found.shells = shellSignature(targets, desktopUrl);
+      }
       return true;
     } catch {
       // A target that went away under us, or a page that does not answer.
@@ -203,6 +241,99 @@ async function span(port, desktopUrl, known) {
   return spanWindow(port, desktopUrl, box, known);
 }
 
+async function getJson(url) {
+  return (await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) })).json();
+}
+
+/**
+ * The `--watch` loop's look, as an object the suites can drive: `tick()` is one
+ * look (answers what a full pass would: true when the app window spans the
+ * row), `readBox` is the row (`wlr-randr`'s, by default) and `now` the clock.
+ *
+ * A full pass attaches to every desktop page Chrome lists and runs a script in
+ * each — every 2 s, for ever, on a page the size of every monitor together. Most
+ * looks change nothing, and the shortcut proves that without touching a page:
+ *
+ *   - the row is the one the last full pass spread the window over (a monitor
+ *     plugged in, unplugged or re-set changes it);
+ *   - the target list's desktop pages are the ones that pass asked, in the same
+ *     order and at the same addresses (`shellSignature`) — so a full pass now
+ *     would ask the same pages and find the same window;
+ *   - and the browser itself says that window is `normal` and exactly the row's
+ *     size (`Browser.getWindowBounds`, on a socket to the browser target kept
+ *     open between looks — a question the browser process answers alone).
+ *
+ * All three hold: nothing to do, which is what the full pass would have found.
+ * Any one fails, cannot be asked, or 30 s have passed since the last full pass:
+ * the full pass, at once, in the same look.
+ *
+ * Those 30 s are counted on the monotonic clock (`performance.now()`), never
+ * the wall clock: NTP steps that, and a step back held off the full pass —
+ * the shortcut's safety net — for as long as the step.
+ */
+export function createWatcher(port, desktopUrl, { readBox = async () => layoutBox(await wlrRandr()), now = () => performance.now() } = {}) {
+  const known = [];
+  /** What the last full pass that found the window left: { box, windowId, shells, at }. */
+  let steady = null;
+  /** A DevTools session on the browser target, kept between looks; null when there is none. */
+  let browser = null;
+
+  const dropBrowser = () => {
+    browser?.close();
+    browser = null;
+  };
+
+  async function browserSession() {
+    if (browser) return browser;
+    const version = await getJson(`http://127.0.0.1:${port}/json/version`);
+    const url = version?.webSocketDebuggerUrl;
+    if (typeof url !== "string" || !url) throw new Error("no browser endpoint");
+    // No pass deadline: each call still has its own ceiling, and a call that
+    // misses it ends the session (and the next look opens another).
+    browser = await session(url, Infinity);
+    return browser;
+  }
+
+  async function stillSpans(box) {
+    const shells = shellSignature(await getJson(`http://127.0.0.1:${port}/json/list`), desktopUrl);
+    if (shells === null || shells !== steady.shells) return false;
+    const s = await browserSession();
+    try {
+      const bounds = (await s.send("Browser.getWindowBounds", { windowId: steady.windowId }))?.bounds;
+      return !!bounds && bounds.windowState === "normal" && bounds.width === box.width && bounds.height === box.height;
+    } catch (err) {
+      // A window that is gone, a call past its ceiling, a socket that closed
+      // (Chrome restarted): the full pass decides, and the next shortcut opens
+      // a fresh session rather than telling these apart.
+      dropBrowser();
+      throw err;
+    }
+  }
+
+  return {
+    async tick() {
+      const box = await readBox();
+      if (!box) {
+        steady = null;
+        return false;
+      }
+      if (steady && steady.box.width === box.width && steady.box.height === box.height && now() - steady.at < FULL_PASS_MS) {
+        try {
+          if (await stillSpans(box)) return true;
+        } catch {
+          // Could not be asked: the full pass decides.
+        }
+      }
+      const found = {};
+      const spans = await spanWindow(port, desktopUrl, box, known, found);
+      steady = spans && found.windowId !== undefined && found.shells
+        ? { box, windowId: found.windowId, shells: found.shells, at: now() }
+        : null;
+      return spans;
+    },
+  };
+}
+
 async function main() {
   const [port, desktopUrl, mode] = process.argv.slice(2);
   if (!port || !desktopUrl) {
@@ -210,14 +341,14 @@ async function main() {
     process.exit(2);
   }
   new URL(desktopUrl);
-  const known = [];
   if (mode === "--watch") {
+    const watcher = createWatcher(port, desktopUrl);
     for (;;) {
-      try { await span(port, desktopUrl, known); } catch {}
-      await new Promise((r) => setTimeout(r, 2000));
+      try { await watcher.tick(); } catch {}
+      await new Promise((r) => setTimeout(r, WATCH_MS));
     }
   }
-  process.exit((await span(port, desktopUrl, known)) ? 0 : 1);
+  process.exit((await span(port, desktopUrl, [])) ? 0 : 1);
 }
 
 // Run as a program; imported (by the suites, for `layoutBox`), it does nothing.

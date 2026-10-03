@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
+import { memo, useState, useEffect, useCallback, useId, useLayoutEffect, useMemo, useRef } from "react";
+import { flushSync } from "react-dom";
 import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
 import { useModalDialog } from "@/hooks/useModalDialog";
@@ -19,9 +20,9 @@ import { endTerminalSession } from "@/lib/terminal-sessions";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
-import ChromeWindow, { type WindowMode } from "@/components/ChromeWindow";
+import ChromeWindow, { type WindowMode, type WindowRect } from "@/components/ChromeWindow";
 import SystemTray from "@/components/SystemTray";
-import SettingsApp from "@/components/SettingsApp";
+import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 import AppStore from "@/components/AppStore";
 import HermesSkillsStore from "@/components/HermesSkillsStore";
 import FilesApp from "@/components/FilesApp";
@@ -41,7 +42,7 @@ import ChatPopup, { CHAT_PANEL_GAP, noticeColumnInset, type ChatFloatingRect } f
 
 /** How long a coding run's finish card stays on the desktop before it hides itself. */
 import ToastHost from "@/components/ToastHost";
-import PowerApprovalPrompt from "@/components/PowerApprovalPrompt";
+import PowerApprovalPrompt, { POWER_APPROVAL_EVENT } from "@/components/PowerApprovalPrompt";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
@@ -73,6 +74,8 @@ import { TOAST_EVENT } from "@/components/ToastHost";
 import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
 import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat-first";
 import { runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
+import { isBoxOwnScreen, setVisibleInterval } from "@/lib/visible-interval";
+import { samePairingRequests, sameSelection, type PairingRequestCard } from "@/lib/desktop-shell-equality";
 import {
   layoutIcons,
   layoutsEqual,
@@ -157,6 +160,41 @@ function desktopAppsToShed(from: number): Set<string> {
 // so the reader has to apply the same rule or a stale entry replays for ever.
 const PENDING_ACTION_MAX_AGE_MS = 60_000;
 
+// How often the owner-notice ring is read while the page is on screen.
+const RING_POLL_MS = 2_000;
+// How often the owner-notice ring is still read while the page is HIDDEN (a
+// phone or a laptop tab in the background). Not paused like the other polls:
+// the ring delivers EVENTS — `register_webapp` is the only way a new web app's
+// icon reaches a desktop that is already open — and an entry older than
+// PENDING_ACTION_MAX_AGE_MS is dropped, so a desktop that stopped reading for
+// longer would miss it for good. A third of that lifetime keeps every entry
+// readable at least twice; the page reads at once when it is shown again.
+const RING_HIDDEN_POLL_MS = 20_000;
+
+/**
+ * The ring's cadence while the page is hidden — RING_POLL_MS on the box's own
+ * screen, RING_HIDDEN_POLL_MS everywhere else. On the box's screen a hidden
+ * desktop is still the page that acts on what the owner sees: in the kiosk it
+ * is hidden whenever the owner is on another of the kiosk's tabs, and its
+ * entries open pages there (an `open_app` for an external app, a
+ * `launch: "window"` web app — each a new kiosk tab) or take the screen to
+ * /updating. Slowed to 20 s they arrived up to 20 s after the agent said "I've
+ * opened it". The 2 s holds past five hidden minutes there too: both of the
+ * box's launchers (install-kiosk-tabs.sh, clawbox-desktop-browser) switch off
+ * Chrome's IntensiveWakeUpThrottling, which would otherwise wake this poll
+ * once a MINUTE — about as rarely as a ring entry lives — leaving only the
+ * ordinary one-wake-up-a-second throttling, which a 2 s beat never feels. A
+ * kiosk whose launcher predates that flag still throttles until
+ * install-kiosk-tabs.sh is run again. Asked at every tick (`isBoxOwnScreen()`
+ * is not cached) because both of its answers arrive after this page has
+ * mounted: the kiosk bar announces itself, and the monitor session's window
+ * is known only once /setup-api/monitors has answered
+ * (`isMonitorSessionWindow()`).
+ */
+function ringHiddenPollMs(): number {
+  return isBoxOwnScreen() ? RING_POLL_MS : RING_HIDDEN_POLL_MS;
+}
+
 // Desktop icon grid metrics. Module-level so the resize listener can derive
 // `rowsPerColumn` without reaching into the component.
 const CELL_H = 110; // px — one icon cell, label included
@@ -240,6 +278,15 @@ function usePreferenceWriter(loadedRef: { current: boolean }) {
   }, [loadedRef]);
 }
 
+/** A desktop icon's wrapper (`data-desktop-icon-id`) inside the icon grid. */
+function desktopIconElement(grid: HTMLElement | null, iconId: string): HTMLElement | null {
+  if (!grid) return null;
+  for (const el of grid.querySelectorAll<HTMLElement>("[data-desktop-icon-id]")) {
+    if (el.getAttribute("data-desktop-icon-id") === iconId) return el;
+  }
+  return null;
+}
+
 // Inline SVG icons for each app
 function MIcon({ name, className = "", size = 24 }: { name: string; className?: string; size?: number }) {
   return <span className={`material-symbols-rounded ${className}`} style={{ fontSize: size }}>{name}</span>;
@@ -248,9 +295,12 @@ function MIcon({ name, className = "", size = 24 }: { name: string; className?: 
 function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   const px = size.includes("w-6") ? 24 : size.includes("w-5") ? 20 : size.includes("w-4") ? 16 : 24;
 
+  // The two pictures below are never drag sources, for the reason
+  // InstalledAppIcon's is not: a held touch on a draggable image is where iOS
+  // starts its own image drag, which cancels the desktop icon's long press.
   if (id === "hermes") {
     // eslint-disable-next-line @next/next/no-img-element
-    return <img src="/hermes-agent.png" alt="Hermes" width={px} height={px} style={{ objectFit: "contain", borderRadius: 6 }} />;
+    return <img src="/hermes-agent.png" alt="Hermes" width={px} height={px} draggable={false} style={{ objectFit: "contain", borderRadius: 6 }} />;
   }
 
   if (id === "browser") {
@@ -274,6 +324,7 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
       <img
         src="/clawbox-crab.png"
         alt=""
+        draggable={false}
         style={{ width: scaled, height: scaled, objectFit: "contain", maxWidth: "none", maxHeight: "none" }}
       />
     );
@@ -360,8 +411,244 @@ interface OpenWindow {
   terminal?: SavedTerminalTabs;
 }
 
+/**
+ * What a window needs from the desktop beyond its own record. Every member is
+ * a callback that keeps one identity for the page's life (see `windowActions`).
+ */
+interface WindowActions {
+  openApp: (appId: string, forceNew?: boolean, meta?: Record<string, string>) => void;
+  installApp: (app: StoreApp) => void;
+  requestUninstall: (appId: string) => void;
+  setupComplete: () => void;
+  terminalState: (windowId: string, terminal: SavedTerminalTabs) => void;
+  close: (windowId: string) => void;
+  focus: (windowId: string) => void;
+  minimize: (windowId: string) => void;
+  geometry: (windowId: string, geo: WindowRect) => void;
+  mode: (windowId: string, mode: WindowMode) => void;
+}
+
+/** Store windows without the list (never drawn: the desktop hands every Store window its own). */
+const NO_APP_IDS: string[] = [];
+
+interface WindowContentProps {
+  app: AppDef;
+  meta?: Record<string, string>;
+  windowId: string;
+  /** A Terminal's tabs and their device sessions, from the window's record. */
+  terminal?: SavedTerminalTabs;
+  /** Settings windows only. */
+  settingsUi?: UISettings;
+  /** App Store windows only. */
+  installedApps?: string[];
+  actions: WindowActions;
+}
+
+/**
+ * The app inside a window — on the desktop in a ChromeWindow, on a phone full
+ * screen. Memoized, and given only what its own app reads, so it re-renders
+ * when that changes and not with every render of the desktop: Settings,
+ * Files, the Coding Agent and every Terminal used to re-render whole whenever
+ * the clock turned, a poll answered or an icon was dragged.
+ */
+const WindowContent = memo(function WindowContent({ app, meta, windowId, terminal, settingsUi, installedApps, actions }: WindowContentProps) {
+  const { t } = useT();
+  const resolveAppName = (a: AppDef) => t(a.name) || a.name;
+  const onTerminalState = useCallback(
+    (state: SavedTerminalTabs) => actions.terminalState(windowId, state),
+    [actions, windowId],
+  );
+
+  switch (app.type) {
+    case "settings":
+      return settingsUi ? (
+        <div className="h-full overflow-y-auto">
+          <SettingsApp ui={settingsUi} />
+        </div>
+      ) : null;
+    case "terminal":
+      // Its tabs and their device sessions ride with the window's record, so
+      // a refresh — or a phone bringing the window back to the front —
+      // reattaches every tab to the shell it had.
+      return (
+        <TerminalTabs
+          initialCommand={meta?.command}
+          persisted={terminal}
+          onStateChange={onTerminalState}
+        />
+      );
+    case "coding":
+      return <CodingAgentApp />;
+    case "store":
+      return (
+        <AppStore
+          installedAppIds={installedApps ?? NO_APP_IDS}
+          onInstall={actions.installApp}
+          onUninstall={actions.requestUninstall}
+        />
+      );
+    case "hermes_skills":
+      return <HermesSkillsStore />;
+    case "installed":
+      return app.storeApp ? (
+        <InstalledAppSettings
+          appId={app.storeApp.id}
+          storeApp={app.storeApp}
+          icon={<InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-12 h-12" />}
+          onUninstall={actions.requestUninstall}
+        />
+      ) : null;
+    case "files":
+      // The Projects icon is the Files app opened on its Projects view; a
+      // window record that names a folder (`meta.path`) still opens there.
+      return <FilesApp initialPath={meta?.path} initialPlace={app.id === "projects" || meta?.place === "projects" ? "projects" : undefined} />;
+    case "clawkeep":
+      return <ClawKeepApp />;
+    case "memory_shard":
+      return <MemoryShardApp />;
+    case "system_update":
+      return <SystemUpdateApp />;
+    case "browser":
+      return <BrowserApp onOpenApp={actions.openApp} />;
+    case "vnc":
+      return <VNCApp />;
+    case "webapp": {
+      let webappSrc = "about:blank";
+      try { const u = new URL(app.url || "", window.location.origin); if (["http:", "https:"].includes(u.protocol)) webappSrc = u.href; } catch {}
+      // Sandboxed to an opaque origin, the same as /app/[id]: the app is HTML
+      // the agent wrote, and with allow-same-origin it ran in the desktop's
+      // origin with the owner's session. Its persistence goes through the KV
+      // bridge (data-webapp-id is how the bridge knows whose keys to serve);
+      // WebappFrame is the one frame both pages draw, the proxied /apps/<id>/
+      // exception and the pre-v4.0 storage import included.
+      return <WebappFrame appId={app.storeApp?.id} src={webappSrc} title={resolveAppName(app)} />;
+    }
+    case "setup":
+      return (
+        <div className="h-full overflow-y-auto bg-[var(--bg-deep)]">
+          <SetupWizard onComplete={actions.setupComplete} />
+        </div>
+      );
+    case "placeholder":
+      return (
+        <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">
+          <div
+            className="w-20 h-20 rounded-full flex items-center justify-center"
+            style={{ backgroundColor: app.color }}
+          >
+            <AppIcon id={app.id} size="w-10 h-10" />
+          </div>
+          <div className="text-center">
+            <h2 className="text-xl font-medium text-white/80 mb-1">
+              {resolveAppName(app)}
+            </h2>
+            <p className="text-sm">Coming Soon</p>
+          </div>
+        </div>
+      );
+    default:
+      return null;
+  }
+});
+
+/** A window's title-bar icon. */
+function WindowIcon({ app }: { app: AppDef }) {
+  if (app.storeApp) {
+    return (
+      <div
+        className="w-5 h-5 rounded flex items-center justify-center"
+        style={{ backgroundColor: app.color }}
+      >
+        <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-3 h-3" />
+      </div>
+    );
+  }
+  return (
+    <div
+      className="w-5 h-5 rounded flex items-center justify-center"
+      style={{ backgroundColor: app.color }}
+    >
+      <AppIcon id={app.id} size="w-3 h-3" />
+    </div>
+  );
+}
+
+interface DesktopWindowProps {
+  win: OpenWindow;
+  app: AppDef;
+  title: string;
+  isActive: boolean;
+  rightInset: number;
+  settingsUi?: UISettings;
+  installedApps?: string[];
+  actions: WindowActions;
+}
+
+/**
+ * One desktop window: a ChromeWindow with its app. Memoized, and everything it
+ * hands ChromeWindow keeps its identity until it means something new — the
+ * callbacks are bound to this window once, the icon and the initial geometry
+ * are kept, and the app is the same element — so ChromeWindow's own memo holds
+ * too. Before, each window got fresh closures, a fresh icon and fresh children
+ * on every desktop render, and every ChromeWindow removed and re-added its
+ * window listeners for each one.
+ */
+const DesktopWindow = memo(function DesktopWindow({ win, app, title, isActive, rightInset, settingsUi, installedApps, actions }: DesktopWindowProps) {
+  const id = win.id;
+  const onClose = useCallback(() => actions.close(id), [actions, id]);
+  const onFocus = useCallback(() => actions.focus(id), [actions, id]);
+  const onMinimize = useCallback(() => actions.minimize(id), [actions, id]);
+  const onGeometryChange = useCallback((geo: WindowRect) => actions.geometry(id, geo), [actions, id]);
+  const onModeChange = useCallback((mode: WindowMode) => actions.mode(id, mode), [actions, id]);
+  const icon = useMemo(() => <WindowIcon app={app} />, [app]);
+  const { x, y, width, height, meta, terminal } = win;
+  const initialPosition = useMemo(() => (x !== undefined && y !== undefined ? { x, y } : undefined), [x, y]);
+  const initialSize = useMemo(() => (width !== undefined && height !== undefined ? { width, height } : undefined), [width, height]);
+  const content = useMemo(
+    () => (
+      <WindowContent
+        app={app}
+        meta={meta}
+        windowId={id}
+        terminal={terminal}
+        settingsUi={settingsUi}
+        installedApps={installedApps}
+        actions={actions}
+      />
+    ),
+    [app, meta, id, terminal, settingsUi, installedApps, actions],
+  );
+  return (
+    <ChromeWindow
+      title={title}
+      icon={icon}
+      appId={win.appId}
+      defaultWidth={app.defaultWidth}
+      defaultHeight={app.defaultHeight}
+      initialPosition={initialPosition}
+      initialSize={initialSize}
+      isActive={isActive}
+      zIndex={win.zIndex}
+      onClose={onClose}
+      onFocus={onFocus}
+      onMinimize={onMinimize}
+      onGeometryChange={onGeometryChange}
+      minimized={win.minimized}
+      rightInset={rightInset}
+      maximizeSignal={win.maximizeNonce}
+      windowId={id}
+      initialMaximized={win.maximized}
+      initialSnapped={win.snapped}
+      initialRestore={win.restore}
+      onModeChange={onModeChange}
+    >
+      {content}
+    </ChromeWindow>
+  );
+});
+
 function ChromeDesktopInner() {
-  const { t, locale } = useT();
+  const { t } = useT();
   // English is the floor for a key the locale packs do not carry yet: a raw
   // `window.switchApp` in an aria-label is what a screen reader would read out.
   const tr = useCallback((key: string, english: string) => {
@@ -470,8 +757,6 @@ function ChromeDesktopInner() {
   const [openWindows, setOpenWindows] = useState<OpenWindow[]>([]);
   const [nextZIndex, setNextZIndex] = useState(100);
   const nextZIndexRef = useRef(100);
-  const [time, setTime] = useState("");
-  const [date, setDate] = useState("");
   const [installedApps, setInstalledApps] = useState<string[]>([]);
   const [recentlyInstalled, setRecentlyInstalled] = useState<string | null>(null);
   const [installedMeta, setInstalledMeta] = useState<Record<string, InstalledMeta>>({});
@@ -645,7 +930,9 @@ function ChromeDesktopInner() {
   // Seeded from the stored value even on a phone, which never restores the
   // panel, so opening the desktop on a phone cannot erase the layout.
   const dockWidthRef = useRef(0);
-  useEffect(() => {
+  // A layout effect, so the counter is current before the browser can deliver
+  // the next event: `focusWindow` reads it to tell whether a window is on top.
+  useLayoutEffect(() => {
     nextZIndexRef.current = nextZIndex;
   }, [nextZIndex]);
 
@@ -832,11 +1119,12 @@ function ChromeDesktopInner() {
     restoring: clawkeepRestoring,
   } = useClawkeepShieldStatus(ownerApis);
 
-  const wpFitStyle: React.CSSProperties = wpFit === "fill"
+  // Memoized with the wallpaper layers below, which take it as a dependency.
+  const wpFitStyle = useMemo<React.CSSProperties>(() => (wpFit === "fill"
     ? { backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
     : wpFit === "fit"
     ? { backgroundSize: "contain", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
-    : { backgroundSize: "auto", backgroundPosition: "center", backgroundRepeat: "no-repeat" };
+    : { backgroundSize: "auto", backgroundPosition: "center", backgroundRepeat: "no-repeat" }), [wpFit]);
   const CUSTOM_WPS_KEY = "clawbox-custom-wallpapers";
   const [customWallpapers, setCustomWallpapersState] = useState<string[]>([]);
   // Mirrored so the writers below can compute the next list without a
@@ -929,6 +1217,39 @@ function ChromeDesktopInner() {
   // `currentWallpaper` is only the list's first entry then, not the picture
   // on screen, which is why the id is resolved again rather than reused).
   const paintedWpOpacity = paintedWallpaperOpacity(wpOpacity, renderedWallpaperId, wallpapers);
+  // The desktop wallpaper — once per monitor over a row of monitors, so each
+  // shows the whole picture rather than a slice — built only when what it
+  // draws changes. An uploaded picture is a data URL of up to several MB, and
+  // rebuilt inline on every desktop render React compared its `url(…)` with
+  // the previous render's equal copy character by character, once per screen.
+  const wallpaperLayers = useMemo(() => {
+    const customIdx = customWallpaperIndex(renderedWallpaperId);
+    const customWp = customIdx === null ? undefined : customWallpapers[customIdx];
+    const layers = customWp ? (
+      <>
+        <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />
+        <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${customWp})`, ...wpFitStyle, opacity: paintedWpOpacity / 100 }} />
+      </>
+    ) : currentWallpaper.image ? (
+      <>
+        <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />
+        <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${currentWallpaper.image})`, ...wpFitStyle, opacity: paintedWpOpacity / 100 }} />
+      </>
+    ) : (
+      <>
+        <div className={`absolute inset-0 ${currentWallpaper.gradient} z-0 pointer-events-none`} />
+        {currentWallpaper.stars && <div className="absolute inset-0 bg-stars z-0 pointer-events-none" />}
+        {currentWallpaper.nebula && <div className="absolute inset-0 bg-nebula z-0 pointer-events-none" />}
+      </>
+    );
+    return deskScreens
+      ? deskScreens.map((sc) => (
+        <div key={sc.id} data-testid="desktop-wallpaper-screen" className="absolute z-0 overflow-hidden pointer-events-none" style={{ left: sc.x, top: sc.y, width: sc.width, height: sc.height }}>
+          {layers}
+        </div>
+      ))
+      : layers;
+  }, [renderedWallpaperId, customWallpapers, currentWallpaper, wpBgColor, wpFitStyle, paintedWpOpacity, deskScreens]);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const handleWallpaperUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -967,6 +1288,14 @@ function ChromeDesktopInner() {
   // notice is on screen, since that is the one surface that has to dodge it.
   const [chatFloatingRect, setChatFloatingRect] = useState<ChatFloatingRect | null>(null);
   const handleChatFloatingRect = useCallback((rect: ChatFloatingRect | null) => setChatFloatingRect(rect), []);
+  // Stable, so the memo() on ChatPopup and on the Mascot holds: written inline
+  // in the JSX they were new functions on every desktop render, and both
+  // re-rendered with it — the chat with its whole transcript.
+  const closeChat = useCallback(() => setChatOpen(false), []);
+  const handleMascotTap = useCallback((x?: number) => {
+    if (x !== undefined) setMascotX(x);
+    setChatOpen((prev) => !prev);
+  }, []);
 
   // ─── Where the floating chat stands among the windows ───
   //
@@ -1187,8 +1516,30 @@ function ChromeDesktopInner() {
   }, [chatPanelWidth, chatOpen, savePreferences]);
 
   // ─── Marquee selection ───
-  const [selectedIcons, setSelectedIcons] = useState<Set<string>>(new Set());
-  const [marquee, setMarquee] = useState<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
+  // Lazy, so a render does not build a Set only to throw it away.
+  const [selectedIcons, setSelectedIcons] = useState<Set<string>>(() => new Set());
+  // Whether the rubber band is on screen — its rect is NOT state. It changes on
+  // every pointer move, and as state of this component each move rebuilt the
+  // whole desktop (every window and its app, the chat) to move one outline.
+  // The box is drawn by writing its style straight onto the element instead
+  // (`paintMarquee`), the way a dragged window moves.
+  const [marqueeShown, setMarqueeShown] = useState(false);
+  const marqueeBoxRef = useRef<{ left: number; top: number; width: number; height: number } | null>(null);
+  const marqueeElRef = useRef<HTMLDivElement | null>(null);
+  const paintMarquee = useCallback((el: HTMLDivElement) => {
+    const box = marqueeBoxRef.current;
+    if (!box) return;
+    el.style.left = `${box.left}px`;
+    el.style.top = `${box.top}px`;
+    el.style.width = `${box.width}px`;
+    el.style.height = `${box.height}px`;
+  }, []);
+  // The element mounts a commit after the first move asked for it: it takes
+  // the newest rect the moment it exists.
+  const marqueeElCallback = useCallback((el: HTMLDivElement | null) => {
+    marqueeElRef.current = el;
+    if (el) paintMarquee(el);
+  }, [paintMarquee]);
   const marqueeRef = useRef<{ active: boolean; startX: number; startY: number }>({ active: false, startX: 0, startY: 0 });
 
   const getMarqueeRect = useCallback((m: { startX: number; startY: number; endX: number; endY: number }) => ({
@@ -1218,7 +1569,9 @@ function ChromeDesktopInner() {
     if (isMobile) return;
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest("button")) return;
-    setSelectedIcons(new Set());
+    // Kept when nothing is selected: a new empty Set is still a change to
+    // React, and every click on bare wallpaper re-rendered the whole desktop.
+    setSelectedIcons((prev) => (prev.size ? new Set() : prev));
     // Long-press on touch → open desktop context menu
     if (isTouchDevice) {
       longPressFired.current = false;
@@ -1230,7 +1583,13 @@ function ChromeDesktopInner() {
       }, 500);
     }
     marqueeRef.current = { active: true, startX: e.clientX, startY: e.clientY };
-    setMarquee(null);
+    marqueeBoxRef.current = null;
+    setMarqueeShown(false);
+    // Where every icon is, measured once per gesture at the first move that
+    // draws: nothing moves an icon while the band is out, and measuring them
+    // on every move came right after the previous move's commit, so each one
+    // forced a synchronous layout of the page.
+    let iconRects: Array<{ id: string; rect: DOMRect }> | null = null;
 
     const onMove = (ev: PointerEvent) => {
       if (!marqueeRef.current.active) return;
@@ -1249,7 +1608,6 @@ function ChromeDesktopInner() {
         endX: ev.clientX,
         endY: ev.clientY,
       };
-      setMarquee(m);
       // Real-time selection during drag
       const mRect = {
         left: Math.min(m.startX, m.endX),
@@ -1257,29 +1615,46 @@ function ChromeDesktopInner() {
         right: Math.max(m.startX, m.endX),
         bottom: Math.max(m.startY, m.endY),
       };
+      marqueeBoxRef.current = { left: mRect.left, top: mRect.top, width: mRect.right - mRect.left, height: mRect.bottom - mRect.top };
+      if (marqueeElRef.current) paintMarquee(marqueeElRef.current);
+      else setMarqueeShown(true);
+      if (!iconRects) {
+        iconRects = [];
+        document.querySelectorAll("[data-desktop-icon-id]").forEach((el) => {
+          const iconId = el.getAttribute("data-desktop-icon-id");
+          if (iconId) iconRects!.push({ id: iconId, rect: el.getBoundingClientRect() });
+        });
+      }
       const selected = new Set<string>();
-      document.querySelectorAll("[data-desktop-icon-id]").forEach((el) => {
-        const iconId = el.getAttribute("data-desktop-icon-id");
-        if (!iconId) return;
-        const r = el.getBoundingClientRect();
+      for (const { id: iconId, rect: r } of iconRects) {
         if (r.left < mRect.right && r.right > mRect.left && r.top < mRect.bottom && r.bottom > mRect.top) {
           selected.add(iconId);
         }
-      });
-      setSelectedIcons(selected);
+      }
+      // Set only when the selection changed: most moves select what the last
+      // one did, and a new Set re-rendered the desktop for each of them.
+      setSelectedIcons((prev) => (sameSelection(prev, selected) ? prev : selected));
     };
 
+    // The release, and a pointer the system CANCELLED (a touch screen whose
+    // browser took the swipe for itself) ends the band the same way: the
+    // selection is live — made on the moves — so there is nothing to commit,
+    // only the band to take down. Unhandled, a cancel left it drawn over the
+    // desktop and these listeners armed, stretching it to the next touch.
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = undefined; }
       marqueeRef.current.active = false;
-      setMarquee(null);
+      marqueeBoxRef.current = null;
+      setMarqueeShown(false);
     };
 
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
-  }, []);
+    window.addEventListener("pointercancel", onUp);
+  }, [paintMarquee]);
 
   // ─── Context menu ───
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; appId?: string; isGroup?: boolean } | null>(null);
@@ -1338,7 +1713,7 @@ function ChromeDesktopInner() {
     if (selectedIcons.size > 1 && selectedIcons.has(appId)) {
       setCtxMenu({ x: e.clientX, y: e.clientY, appId, isGroup: true });
     } else {
-      setSelectedIcons(new Set());
+      setSelectedIcons((prev) => (prev.size ? new Set() : prev));
       setCtxMenu({ x: e.clientX, y: e.clientY, appId });
     }
   }, [selectedIcons]);
@@ -1404,9 +1779,13 @@ function ChromeDesktopInner() {
     setIconPositions(layoutIcons(allIconIds, {}, storageGeometry(iconGeometry), iconCanonicalOrder));
   }, [allIconIds, iconGeometry, iconCanonicalOrder]);
 
-  const snapToGrid = useCallback((clientX: number, clientY: number): { row: number; col: number } | null => {
+  // `measured`: the grid's rect as a drag read it when it began. Nothing moves
+  // the grid while an icon is dragged, and reading it on every pointer move —
+  // right after the move before it had changed the page — forced a layout each
+  // time.
+  const snapToGrid = useCallback((clientX: number, clientY: number, measured?: DOMRect | null): { row: number; col: number } | null => {
     if (!gridRef.current) return null;
-    const rect = gridRef.current.getBoundingClientRect();
+    const rect = measured ?? gridRef.current.getBoundingClientRect();
     const col = Math.floor((clientX - rect.left) / CELL_W);
     const row = Math.floor((clientY - rect.top) / CELL_H);
     const maxCols = Math.floor(rect.width / CELL_W);
@@ -1427,6 +1806,27 @@ function ChromeDesktopInner() {
     // Check if this icon is part of a multi-selection
     const isGroupDrag = selectedIcons.size > 1 && selectedIcons.has(appId);
     const groupIds = isGroupDrag ? Array.from(selectedIcons) : [appId];
+    // The icon follows the pointer OUTSIDE React. Its place was desktop state,
+    // set on every pointer move, and each move rebuilt the whole desktop —
+    // every window and its app, the chat, the shelf — to move one icon. Now
+    // React lifts it out of the grid once, at `anchor`, and every move after
+    // that is a transform written straight onto its wrapper, the way a dragged
+    // window moves (ChromeWindow). The drop hands the last point back to React.
+    let dragged: HTMLElement | null = null;
+    let anchor = { x: startX, y: startY };
+    // Where the last move put the icon on screen — what a cancelled drag
+    // glides home from (see `onCancel`). Kept here rather than read off the
+    // cancel: nothing promises a cancelled pointer still carries the point
+    // the touch was at when the system took it.
+    let seen = anchor;
+    let gridRect: DOMRect | null = null;
+    // Every way this gesture ends takes all three listeners off: the drop, a
+    // cancel, and the long press that turns it into a menu.
+    const detach = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+    };
 
     // Long-press on touch → open icon context menu
     longPressFired.current = false;
@@ -1440,8 +1840,7 @@ function ChromeDesktopInner() {
           setCtxMenu({ x: startX, y: startY, appId });
         }
         // Clean up listeners since we're opening menu, not dragging
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
+        detach();
       }, 500);
     }
 
@@ -1455,21 +1854,45 @@ function ChromeDesktopInner() {
         // storage encoding on every viewport, so a drop can be resolved against
         // it directly.
         if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = undefined; }
-        setDraggingIcon(appId);
+        // Measured before the commit below lifts the icon: the page has not
+        // changed since the last frame, so this costs no extra layout.
+        gridRect = gridRef.current?.getBoundingClientRect() ?? null;
+        dragged = desktopIconElement(gridRef.current, appId);
+        anchor = { x: ev.clientX, y: ev.clientY };
+        seen = anchor;
+        // Committed now rather than at React's convenience, so the moves that
+        // follow transform an icon that already stands at the anchor.
+        flushSync(() => {
+          setDraggingIcon(appId);
+          setDragPos(anchor);
+        });
+      } else if (dragged) {
+        dragged.style.transform = `translate(${ev.clientX - anchor.x}px, ${ev.clientY - anchor.y}px)`;
+        seen = { x: ev.clientX, y: ev.clientY };
       }
-      setDragPos({ x: ev.clientX, y: ev.clientY });
-      const s = snapToGrid(ev.clientX, ev.clientY);
-      if (s) setDragGhost(s);
+      const s = snapToGrid(ev.clientX, ev.clientY, gridRect);
+      // A new cell is a new ghost; the same cell keeps the object it has, so
+      // React has nothing to render for a move inside one cell.
+      if (s) setDragGhost((prev) => (prev && prev.row === s.row && prev.col === s.col ? prev : s));
     };
     const onUp = (ev: PointerEvent) => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+      detach();
       if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = undefined; }
       if (!isDragging) {
         // It was a tap/click — open the app via the onClick handler (unless long-press fired)
         setDraggingIcon(null);
         return;
       } else {
+        // The point it was let go at becomes React's again before the drop
+        // moves it: the icon glides from where it was seen to its cell, as it
+        // did when React placed it on every move. The transform comes off in
+        // the same breath, and a style read (no layout) makes the browser take
+        // the drop point as where that glide starts.
+        flushSync(() => setDragPos({ x: ev.clientX, y: ev.clientY }));
+        if (dragged) {
+          dragged.style.transform = "";
+          void getComputedStyle(dragged).opacity;
+        }
         const target = snapToGrid(ev.clientX, ev.clientY);
         if (target) {
           if (isGroupDrag) {
@@ -1515,34 +1938,46 @@ function ChromeDesktopInner() {
       setDragPos(null);
       setDragGhost(null);
     };
+    // A pointer the system CANCELLED — the browser or the OS took the gesture
+    // for itself (an edge swipe, a palm, a call coming in) — is not a drop,
+    // and not a press still being held either: no long-press menu half a
+    // second later. Unhandled, it left the icon lifted out of the grid at its
+    // last offset and these listeners armed, so the next touch anywhere on the
+    // screen went on dragging it and the next release dropped it there.
+    //
+    // It goes HOME, gliding from where it was last seen to the cell React
+    // still has for it, rather than being committed where it stood: an icon
+    // has no place outside its cell, so "where it stood" could only mean
+    // reordering the desktop around a cell the owner never let go over — a
+    // drag-and-drop called off mid-way puts the item back, everywhere. (A
+    // window, which can stand anywhere, keeps its last place instead; see
+    // ChromeWindow's own cancel.)
+    const onCancel = () => {
+      detach();
+      if (longPressTimer.current) { clearTimeout(longPressTimer.current); longPressTimer.current = undefined; }
+      if (!isDragging) return;
+      // The drop's own hand-back, without the drop: React takes the point it
+      // was seen at, the transform comes off, and a style read makes that
+      // point where the glide home starts.
+      flushSync(() => setDragPos(seen));
+      if (dragged) {
+        dragged.style.transform = "";
+        void getComputedStyle(dragged).opacity;
+      }
+      setDraggingIcon(null);
+      setDragPos(null);
+      setDragGhost(null);
+    };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
   }, [snapToGrid, selectedIcons, isMobile, allIconIds, iconGeometry, iconCanonicalOrder]);
 
 
-  // Update clock — in the desktop's own language, never the browser's: `[]`
-  // meant navigator.language, so a German box opened from an en-US browser
-  // showed "09:27 AM" on the shelf and "Monday, September 7" in the power
-  // menu while About printed its build date in German. Re-run when the
-  // locale resolves, since every provider starts on a provisional "en".
-  useEffect(() => {
-    // …with the browser's REGION for that language, when it offers one:
-    // `locale` is a bare tag, and a bare "en" is en-US to Intl — "09:27 AM" for
-    // every English desktop, the en-GB, en-IE and en-ZA browsers that read
-    // "09:27" until now included. The box's language still wins: the German
-    // box above finds no "de-…" entry in an en-US browser's list and keeps
-    // "de". A bare "en" ahead of "en-GB" in the list adds nothing over
-    // `locale`, so only a regional entry is taken.
-    const tag = navigator.languages?.find((l) => l.toLowerCase().startsWith(`${locale}-`)) ?? locale;
-    const updateClock = () => {
-      const now = new Date();
-      setTime(now.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit" }));
-      setDate(now.toLocaleDateString(tag, { weekday: "long", month: "long", day: "numeric" }));
-    };
-    updateClock();
-    const interval = setInterval(updateClock, 1000);
-    return () => clearInterval(interval);
-  }, [locale]);
+  // The clock is not here: the shelf and the power menu read it themselves
+  // (src/lib/use-desktop-clock.ts). As state of this component it rebuilt the
+  // whole desktop — every window and its app, the chat, the mascot — once a
+  // minute to change one label.
 
   // Install app handler — called after AppStore's server-side install completes
   const handleInstallApp = useCallback((app: StoreApp) => {
@@ -1739,6 +2174,10 @@ function ChromeDesktopInner() {
       },
     ];
   }, [installedApps, installedMeta, activeHarness, harnessHiddenAppIds, isOwner]);
+  // The same list as one value per change of what it is built from: an
+  // installed app's AppDef is built fresh by every call, and a window handed a
+  // new one re-renders with its app (see DesktopWindow).
+  const allApps = useMemo(() => getAllApps(), [getAllApps]);
 
   const getActiveWindowId = useCallback(() => {
     // A window whose app is not on this desktop — restored from a saved state
@@ -1839,7 +2278,8 @@ function ChromeDesktopInner() {
   // sessions (TASK-1306): a refresh, a closed browser tab or a phone switching
   // apps leaves them running for the window to reattach to.
   const openWindowsRef = useRef(openWindows);
-  useEffect(() => { openWindowsRef.current = openWindows; }, [openWindows]);
+  // Layout, not passive: `focusWindow` reads it too (see nextZIndexRef).
+  useLayoutEffect(() => { openWindowsRef.current = openWindows; }, [openWindows]);
   const closeWindow = useCallback((windowId: string) => {
     const closing = openWindowsRef.current.find((w) => w.id === windowId);
     for (const tab of closing?.terminal?.tabs ?? []) endTerminalSession(tab.session);
@@ -1941,6 +2381,13 @@ function ChromeDesktopInner() {
   // ─── Poll for MCP-triggered UI actions (open app, notify, etc.) ───
   const openAppRef = useRef(openApp);
   openAppRef.current = openApp;
+  // openApp with one identity for the page's life, for the props that hand it
+  // on (a window's app): openApp itself is rebuilt on every window focus, open
+  // and move, and each new one broke the memo of every window it reached.
+  const openAppStable = useCallback(
+    (appId: string, forceNew?: boolean, meta?: Record<string, string>) => openAppRef.current(appId, forceNew, meta),
+    [],
+  );
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -1991,7 +2438,8 @@ function ChromeDesktopInner() {
   // The owner-notice ring: `ui:pending-actions` holds an array of
   // { id, ts, ...action }, newest last, written through pushPendingAction()
   // in src/lib/pending-actions.ts by every server-side notice (ui_notify,
-  // `clawbox notify`, the coding agent's finish card, the webapp icon nudge).
+  // `clawbox notify`, the coding agent's finish card, the webapp icon nudge,
+  // a power request asked or settled).
   // Readers never delete or rewrite it — the writer prunes it. The previous
   // single-value slot was deleted by whichever desktop polled first, so with
   // a phone, a second tab or the remote-control tunnel open, every other
@@ -2054,6 +2502,12 @@ function ChromeDesktopInner() {
         // `ui_notify`.
         const detail = toastDetailForNotice(action);
         if (detail) window.dispatchEvent(new CustomEvent("clawbox:toast", { detail }));
+      } else if (action.type === "power_approval") {
+        // A power request was raised, answered or ran out
+        // (src/lib/power-approval.ts). The notice carries nothing to show —
+        // the prompt asks the owner-only approval route itself — so it is only
+        // the word to ask NOW rather than at its slow safety poll.
+        window.dispatchEvent(new Event(POWER_APPROVAL_EVENT));
       }
     };
     const poll = async () => {
@@ -2123,8 +2577,12 @@ function ChromeDesktopInner() {
       } catch {}
       polling = false;
     };
-    const id = setInterval(poll, 2000);
-    return () => { active = false; clearInterval(id); };
+    // Every 2 s on a page that is on screen; behind a hidden tab every
+    // RING_HIDDEN_POLL_MS instead — not paused, because the ring carries events
+    // that expire (see the constant) — and at once on the way back. The box's
+    // own screen keeps the 2 s while hidden (`ringHiddenPollMs`).
+    const stop = setVisibleInterval(poll, RING_POLL_MS, { hiddenMs: ringHiddenPollMs });
+    return () => { active = false; stop(); };
   }, [ownerApiAccess]);
 
   // Answers the KV requests framed webapps post — see src/lib/webapp-kv-bridge.ts.
@@ -2194,8 +2652,10 @@ function ChromeDesktopInner() {
       } catch { /* network blip — try again next interval */ }
     };
     checkVersions();
-    const id = setInterval(checkVersions, 30 * 60 * 1000);
-    return () => { active = false; clearInterval(id); };
+    // Not asked behind a hidden tab; a check that fell due meanwhile is made
+    // the moment the page is visible again.
+    const stop = setVisibleInterval(checkVersions, 30 * 60 * 1000);
+    return () => { active = false; stop(); };
   }, [applyUpdateAvailable, ownerApis]);
 
   const updateNoticeKeys = useMemo(() => (updateAvailable && !updateNoticeHidden ? ["update"] : []), [updateAvailable, updateNoticeHidden]);
@@ -2219,11 +2679,15 @@ function ChromeDesktopInner() {
     applyUpdateAvailable(null);
   }, [applyUpdateAvailable]);
 
+  // Through openAppRef — the openApp of the latest render — so this callback
+  // keeps one identity for the page's life: the chat takes it as a prop, and
+  // `[openApp]` (a new openApp on every window focus or move) broke the chat's
+  // memo() each time.
   const openSettingsSection = useCallback((section: "ai" | "localAi" | "system" | "update") => {
     (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = section;
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section } }));
-    openApp("settings");
-  }, [openApp]);
+    openAppRef.current("settings");
+  }, []);
 
   // "What's new in 4.1" (TASK-1059, TASK-1195): shown after the box lands on
   // 4.1 until the owner dismisses it, which the box records for every browser. Asked again
@@ -2267,9 +2731,7 @@ function ChromeDesktopInner() {
   // Polls the pairing store (a fast file read) so a new request surfaces even
   // when Settings is closed. De-duped by code via localStorage so a dismissed
   // request doesn't pop again.
-  const [pairingRequests, setPairingRequests] = useState<
-    Array<{ code?: string; id?: string; name?: string }>
-  >([]);
+  const [pairingRequests, setPairingRequests] = useState<PairingRequestCard[]>([]);
   const [approvingPairCode, setApprovingPairCode] = useState<string | null>(null);
 
   // Requests whose card has timed out in this session. Not the persisted
@@ -2293,6 +2755,11 @@ function ChromeDesktopInner() {
         const res = await fetch("/setup-api/telegram/pairing?poll=1", { cache: "no-store" });
         if (res.ok) {
           const data = await res.json();
+          // The list the cards would draw, kept as the SAME array when it is
+          // what is on screen already. A new array — even an empty one on a
+          // box with no bot, which is every answer there — re-rendered the
+          // whole desktop every 20 s for nothing that had changed.
+          let next: PairingRequestCard[] = [];
           // `unknown` is not "no bot": the route could not read this device's
           // Telegram credential, and it still answers with the pairing store,
           // which is a different file. Reading that third state as an empty
@@ -2300,19 +2767,18 @@ function ChromeDesktopInner() {
           if ((data.configured || data.unknown) && Array.isArray(data.pending)) {
             const dismissed = loadDismissedPairCodes();
             const expired = expiredPairCodesRef.current;
-            setPairingRequests(
-              data.pending.filter((r: { code?: string }) => r.code && !dismissed.has(r.code) && !expired.has(r.code)),
-            );
-          } else {
-            setPairingRequests([]);
+            next = data.pending.filter((r: { code?: string }) => r.code && !dismissed.has(r.code) && !expired.has(r.code));
           }
+          setPairingRequests((prev) => (samePairingRequests(prev, next) ? prev : next));
         }
       } catch {}
       polling = false;
     };
     poll();
-    const id = setInterval(poll, 20000);
-    return () => { active = false; clearInterval(id); };
+    // Requests are state, re-read in full on every poll: behind a hidden tab
+    // the poll waits, and the page asks at once when it is visible again.
+    const stop = setVisibleInterval(poll, 20000);
+    return () => { active = false; stop(); };
   }, [loadDismissedPairCodes, ownerApis]);
 
   const approvePairingRequest = useCallback(async (code: string) => {
@@ -2403,12 +2869,29 @@ function ChromeDesktopInner() {
     });
   }, []);
 
+  // One identity for the page's life — every window takes it, through
+  // DesktopWindow's memo — so it reads the counter off its ref, the way
+  // raiseChat does, and advances the ref with the state.
   const focusWindow = useCallback((windowId: string) => {
+    const next = nextZIndexRef.current;
+    // Already the top surface: nothing has taken a layer since it did — no
+    // window and not the chat, which draw from the same counter — and nothing
+    // shares its layer (the shelf restores an app's minimized windows onto one
+    // value, where the DOM order decides), so a new one would change no
+    // stacking order. Grabbing the title bar of the window in front (a click,
+    // a drag) used to spin the counter and re-render the whole desktop for
+    // nothing; ChromeWindow asks on every grab and leaves the answer to this.
+    const self = openWindowsRef.current.find((w) => w.id === windowId);
+    if (
+      self && self.zIndex === next - 1 && chatZIndexRef.current !== self.zIndex
+      && !openWindowsRef.current.some((w) => w !== self && w.zIndex >= self.zIndex)
+    ) return;
+    nextZIndexRef.current = next + 1;
     setOpenWindows((prev) =>
-      prev.map((w) => (w.id === windowId ? { ...w, zIndex: nextZIndex } : w))
+      prev.map((w) => (w.id === windowId ? { ...w, zIndex: next } : w))
     );
-    setNextZIndex((z) => z + 1);
-  }, [nextZIndex]);
+    setNextZIndex(next + 1);
+  }, []);
 
   const minimizeWindow = useCallback((windowId: string) => {
     setOpenWindows((prev) =>
@@ -2461,148 +2944,73 @@ function ChromeDesktopInner() {
     }
   }, [openWindows, openApp, minimizeWindow, getActiveWindowId, nextZIndex, kioskPages, activateKioskTab, vibrate]);
 
-  const pinnedApps = getAllApps().filter((a) => isAppPinned(a.id));
+  const pinnedApps = allApps.filter((a) => isAppPinned(a.id));
 
-  const renderWindowContent = (appId: string, _meta?: Record<string, string>, win?: OpenWindow) => {
-    const allApps = getAllApps();
-    const app = allApps.find((a) => a.id === appId);
-    if (!app) return null;
+  // The desktop's appearance as Settings shows and changes it, as ONE value per
+  // change of it. Handed to Settings windows only (see DesktopWindow): built
+  // inline on every desktop render, it was a new object each time, and the
+  // Settings app re-rendered with every render of the desktop.
+  const settingsUi = useMemo<UISettings>(() => ({
+    // What is on screen, not what the box holds: the panel must not
+    // highlight — or name — a slot this browser cannot show.
+    wallpaperId: renderedWallpaperId,
+    wpFit,
+    wpBgColor,
+    wpOpacity: paintedWpOpacity,
+    mascotHidden,
+    wallpapers,
+    customWallpapers,
+    onWallpaperChange: setWallpaperId,
+    onWpFitChange: setWpFit,
+    onWpBgColorChange: setWpBgColor,
+    onWpOpacityChange: setWpOpacity,
+    onMascotToggle: setMascotHidden,
+    onWallpaperUpload: () => wallpaperInputRef.current?.click(),
+    onCustomWallpaperDelete: (idx: number) => {
+      // Same as the upload above: outside the updater, and off the
+      // ref rather than off `prev`.
+      const before = customWallpapersRef.current;
+      const next = before.filter((_, i) => i !== idx);
+      // Nothing was removed, so nothing is renumbered.
+      if (!storeCustomWallpapers(next, "Could not remove that wallpaper — this browser is not letting the page store them.")) return;
+      // `custom-<n>` is an INDEX into that list, so deleting one
+      // renumbers every picture after it. Through the SHARED rule,
+      // which is also what src/app/app/[id]/page.tsx's handler and
+      // the background below now use — and the fallback is the
+      // harness's own art, so a Hermes box does not land on the
+      // ClawBox wallpaper.
+      // Off the STORED id, not the rendered one: this is the write
+      // that goes to the box, and it must renumber what the box
+      // actually holds. `before` is the list as it stood immediately
+      // ahead of THIS delete — captured before the store above, which
+      // advances the ref to the shortened one — and it is what tells
+      // the rule whether the saved id was an index into this
+      // browser's list at all.
+      //
+      // Nothing chosen yet is nothing to renumber: the fallback on
+      // screen is a built-in, so no `custom-<n>` can be pointing into
+      // this list, and writing one now would persist a selection the
+      // owner never made.
+      if (wallpaperId === null) return;
+      setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, before, persistableFallbackWallpaperId));
+    },
+  }), [renderedWallpaperId, wpFit, wpBgColor, paintedWpOpacity, mascotHidden, wallpapers, customWallpapers, storeCustomWallpapers, wallpaperId, persistableFallbackWallpaperId]);
 
-    switch (app.type) {
-      case "settings":
-        return (
-          <div className="h-full overflow-y-auto">
-            <SettingsApp ui={{
-              // What is on screen, not what the box holds: the panel must not
-              // highlight — or name — a slot this browser cannot show.
-              wallpaperId: renderedWallpaperId,
-              wpFit,
-              wpBgColor,
-              wpOpacity: paintedWpOpacity,
-              mascotHidden,
-              wallpapers,
-              customWallpapers,
-              onWallpaperChange: setWallpaperId,
-              onWpFitChange: setWpFit,
-              onWpBgColorChange: setWpBgColor,
-              onWpOpacityChange: setWpOpacity,
-              onMascotToggle: setMascotHidden,
-              onWallpaperUpload: () => wallpaperInputRef.current?.click(),
-              onCustomWallpaperDelete: (idx: number) => {
-                // Same as the upload above: outside the updater, and off the
-                // ref rather than off `prev`.
-                const before = customWallpapersRef.current;
-                const next = before.filter((_, i) => i !== idx);
-                // Nothing was removed, so nothing is renumbered.
-                if (!storeCustomWallpapers(next, "Could not remove that wallpaper — this browser is not letting the page store them.")) return;
-                // `custom-<n>` is an INDEX into that list, so deleting one
-                // renumbers every picture after it. Through the SHARED rule,
-                // which is also what src/app/app/[id]/page.tsx's handler and
-                // the background below now use — and the fallback is the
-                // harness's own art, so a Hermes box does not land on the
-                // ClawBox wallpaper.
-                // Off the STORED id, not the rendered one: this is the write
-                // that goes to the box, and it must renumber what the box
-                // actually holds. `before` is the list as it stood immediately
-                // ahead of THIS delete — captured before the store above, which
-                // advances the ref to the shortened one — and it is what tells
-                // the rule whether the saved id was an index into this
-                // browser's list at all.
-                //
-                // Nothing chosen yet is nothing to renumber: the fallback on
-                // screen is a built-in, so no `custom-<n>` can be pointing into
-                // this list, and writing one now would persist a selection the
-                // owner never made.
-                if (wallpaperId === null) return;
-                setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, before, persistableFallbackWallpaperId));
-              },
-            }} />
-          </div>
-        );
-      case "terminal":
-        // Its tabs and their device sessions ride with the window's record, so
-        // a refresh — or a phone bringing the window back to the front —
-        // reattaches every tab to the shell it had.
-        return (
-          <TerminalTabs
-            initialCommand={_meta?.command}
-            persisted={win?.terminal}
-            onStateChange={win ? (terminal) => updateTerminalState(win.id, terminal) : undefined}
-          />
-        );
-      case "coding":
-        return <CodingAgentApp />;
-      case "store":
-        return (
-          <AppStore
-            installedAppIds={installedApps}
-            onInstall={(app: StoreApp) => handleInstallApp(app)}
-            onUninstall={requestUninstallApp}
-          />
-        );
-      case "hermes_skills":
-        return <HermesSkillsStore />;
-      case "installed":
-        return app.storeApp ? (
-          <InstalledAppSettings
-            appId={app.storeApp.id}
-            storeApp={app.storeApp}
-            icon={<InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-12 h-12" />}
-            onUninstall={requestUninstallApp}
-          />
-        ) : null;
-      case "files":
-        // The Projects icon is the Files app opened on its Projects view; a
-        // window record that names a folder (`meta.path`) still opens there.
-        return <FilesApp initialPath={_meta?.path} initialPlace={app.id === "projects" || _meta?.place === "projects" ? "projects" : undefined} />;
-      case "clawkeep":
-        return <ClawKeepApp />;
-      case "memory_shard":
-        return <MemoryShardApp />;
-      case "system_update":
-        return <SystemUpdateApp />;
-      case "browser":
-        return <BrowserApp onOpenApp={openApp} />;
-      case "vnc":
-        return <VNCApp />;
-      case "webapp": {
-        let webappSrc = "about:blank";
-        try { const u = new URL(app.url || "", window.location.origin); if (["http:", "https:"].includes(u.protocol)) webappSrc = u.href; } catch {}
-        // Sandboxed to an opaque origin, the same as /app/[id]: the app is HTML
-        // the agent wrote, and with allow-same-origin it ran in the desktop's
-        // origin with the owner's session. Its persistence goes through the KV
-        // bridge (data-webapp-id is how the bridge knows whose keys to serve);
-        // WebappFrame is the one frame both pages draw, the proxied /apps/<id>/
-        // exception and the pre-v4.0 storage import included.
-        return <WebappFrame appId={app.storeApp?.id} src={webappSrc} title={resolveAppName(app)} />;
-      }
-      case "setup":
-        return (
-          <div className="h-full overflow-y-auto bg-[var(--bg-deep)]">
-            <SetupWizard onComplete={handleSetupComplete} />
-          </div>
-        );
-      case "placeholder":
-        return (
-          <div className="h-full flex flex-col items-center justify-center gap-4 text-white/60">
-            <div
-              className="w-20 h-20 rounded-full flex items-center justify-center"
-              style={{ backgroundColor: app.color }}
-            >
-              <AppIcon id={app.id} size="w-10 h-10" />
-            </div>
-            <div className="text-center">
-              <h2 className="text-xl font-medium text-white/80 mb-1">
-                {resolveAppName(app)}
-              </h2>
-              <p className="text-sm">Coming Soon</p>
-            </div>
-          </div>
-        );
-      default:
-        return null;
-    }
-  };
+  // The desktop's side of every window, one value for the page's life — every
+  // member is a callback with one identity — so a window's memo (DesktopWindow,
+  // ChromeWindow) holds through every desktop render that does not concern it.
+  const windowActions = useMemo<WindowActions>(() => ({
+    openApp: openAppStable,
+    installApp: handleInstallApp,
+    requestUninstall: requestUninstallApp,
+    setupComplete: handleSetupComplete,
+    terminalState: updateTerminalState,
+    close: closeWindow,
+    focus: focusWindow,
+    minimize: minimizeWindow,
+    geometry: updateWindowGeometry,
+    mode: updateWindowMode,
+  }), [openAppStable, handleInstallApp, requestUninstallApp, handleSetupComplete, updateTerminalState, closeWindow, focusWindow, minimizeWindow, updateWindowGeometry, updateWindowMode]);
 
   const activeWindowId = getActiveWindowId();
 
@@ -2621,9 +3029,26 @@ function ChromeDesktopInner() {
     .map((appId) => apps.find((a) => a.id === appId))
     .filter((a): a is AppDef => !!a);
 
-  // Get all apps for launcher (including installed)
-  const allApps = getAllApps();
-  const allAppsForLauncher = allApps.filter((app) => app.id !== "setup");
+  // Every app for the launcher (installed ones included), as ONE value per
+  // change of what it shows — the apps, their names in the desktop's language,
+  // which are pinned. Built inline in the launcher's props it was a new list
+  // with new icon elements on every desktop render, so the launcher's memo
+  // never held and its whole grid was rebuilt for a window focus or a poll.
+  const launcherApps = useMemo(() => allApps
+    .filter((app) => app.id !== "setup")
+    .map((app) => ({
+      id: app.id,
+      name: t(app.name) || app.name,
+      color: app.color,
+      icon: app.storeApp
+        ? <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} />
+        : <AppIcon id={app.id} />,
+      isPinned: isAppPinned(app.id),
+    })), [allApps, t, isAppPinned]);
+  // The launcher's and the tray's way out, one identity each for the page's
+  // life, for the same memo.
+  const closeLauncher = useCallback(() => setLauncherOpen(false), []);
+  const closeTray = useCallback(() => setTrayOpen(false), []);
 
   // ─── Global drag-and-drop file upload ───
   const [desktopDragOver, setDesktopDragOver] = useState(false);
@@ -2769,9 +3194,12 @@ function ChromeDesktopInner() {
           owner (`ownerApis`): each asks an owner-only route the moment it
           mounts, and another user's session is refused every one of them. */}
       {ownerApis && <TierUpgradeCelebration />}
-      {/* Drop overlay */}
+      {/* Drop overlay. No backdrop blur under the dim: a full-screen blur is
+          redone over the whole desktop — 5120x1440 over a row of monitors — on
+          every frame anything beneath it moves, and the mascot always does.
+          One step darker keeps the look, as on every other scrim. */}
       {desktopDragOver && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none" style={{ zIndex: DESKTOP_LAYERS.notice }}>
+        <div className="fixed inset-0 flex items-center justify-center bg-black/65 pointer-events-none" style={{ zIndex: DESKTOP_LAYERS.notice }}>
           {/* Dimmed everywhere — a drop lands wherever it is let go — but
               the card centred on the MAIN monitor over a row of monitors,
               not on the seam between two. */}
@@ -3033,36 +3461,8 @@ function ChromeDesktopInner() {
           })}
         </div>
       )}
-      {/* Desktop wallpaper background — once per monitor over a row of
-          monitors, so each shows the whole picture rather than a slice. */}
-      {(() => {
-        const customIdx = customWallpaperIndex(renderedWallpaperId);
-        const customWp = customIdx === null ? undefined : customWallpapers[customIdx];
-        const layers = customWp ? (
-          <>
-            <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />
-            <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${customWp})`, ...wpFitStyle, opacity: paintedWpOpacity / 100 }} />
-          </>
-      ) : currentWallpaper.image ? (
-        <>
-          <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />
-          <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundImage: `url(${currentWallpaper.image})`, ...wpFitStyle, opacity: paintedWpOpacity / 100 }} />
-        </>
-      ) : (
-        <>
-          <div className={`absolute inset-0 ${currentWallpaper.gradient} z-0 pointer-events-none`} />
-          {currentWallpaper.stars && <div className="absolute inset-0 bg-stars z-0 pointer-events-none" />}
-          {currentWallpaper.nebula && <div className="absolute inset-0 bg-nebula z-0 pointer-events-none" />}
-        </>
-      );
-        return deskScreens
-          ? deskScreens.map((sc) => (
-            <div key={sc.id} data-testid="desktop-wallpaper-screen" className="absolute z-0 overflow-hidden pointer-events-none" style={{ left: sc.x, top: sc.y, width: sc.width, height: sc.height }}>
-              {layers}
-            </div>
-          ))
-          : layers;
-      })()}
+      {/* Desktop wallpaper background (see `wallpaperLayers`). */}
+      {wallpaperLayers}
       {/* Hidden file input for wallpaper upload */}
       <input ref={wallpaperInputRef} type="file" accept="image/*" className="hidden" onChange={handleWallpaperUpload} />
       {/* Desktop icon grid — draggable + right-click surface */}
@@ -3110,7 +3510,14 @@ function ChromeDesktopInner() {
                 onPointerDown={(e) => handleIconDragStart(app.id, e)}
                 onClick={() => { if (!draggingIcon && !longPressFired.current) openApp(`installed-${app.id}`); }}
                 onContextMenu={(e) => handleIconContextMenu(e, app.id)}
-                className={`group flex flex-col items-center justify-start gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${
+                // `-webkit-touch-callout: none` (inherited, so it reaches the
+                // picture inside): a held touch here is the desktop's own
+                // long press, and on iPhone and iPad it is otherwise iOS's
+                // image menu too — which takes the touch with a pointercancel,
+                // and a cancel ends the gesture, so the icon menu never
+                // opened there. The picture is not a drag source for the same
+                // reason (InstalledAppIcon, AppIcon).
+                className={`group flex flex-col items-center justify-start gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none [-webkit-touch-callout:none] ${
                   isRecent ? "animate-install-bounce" : ""
                 } ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
               >
@@ -3170,7 +3577,9 @@ function ChromeDesktopInner() {
                 onPointerDown={(e) => handleIconDragStart(`desktop-${app.id}`, e)}
                 onClick={() => { if (!draggingIcon && !longPressFired.current) openApp(app.id); }}
                 onContextMenu={(e) => handleIconContextMenu(e, `desktop-${app.id}`)}
-                className={`group flex flex-col items-center justify-start gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
+                // No iOS callout under the long press — see the installed
+                // apps' icon above; the crab and Hermes are pictures too.
+                className={`group flex flex-col items-center justify-start gap-2 p-3 rounded-xl hover:bg-white/10 active:bg-white/15 transition-all duration-200 select-none touch-none [-webkit-touch-callout:none] ${isSelected ? "bg-white/15 ring-2 ring-blue-400/60 rounded-xl" : ""}`}
               >
                 <div
                   className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg ring-1 ring-black/20 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
@@ -3224,16 +3633,13 @@ function ChromeDesktopInner() {
 
         </div>{/* end centering wrapper */}
 
-        {/* Marquee selection rectangle */}
-        {marquee && (
+        {/* Marquee selection rectangle — placed and sized by `paintMarquee`,
+            never by a style prop, so a re-render cannot put back a stale rect. */}
+        {marqueeShown && (
           <div
+            ref={marqueeElCallback}
+            data-testid="desktop-marquee"
             className="fixed pointer-events-none border border-blue-400/60 bg-blue-400/15 z-[2]"
-            style={{
-              left: Math.min(marquee.startX, marquee.endX),
-              top: Math.min(marquee.startY, marquee.endY),
-              width: Math.abs(marquee.endX - marquee.startX),
-              height: Math.abs(marquee.endY - marquee.startY),
-            }}
           />
         )}
       </div>
@@ -3246,7 +3652,7 @@ function ChromeDesktopInner() {
           mascotX for a frame right after opening, flashing the popup to the wrong
           corner before it settled. */}
       {!isMobile && ownerApis && (
-        <Mascot frozen={chatOpen} rightInset={chatPanelInset} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
+        <Mascot frozen={chatOpen} rightInset={chatPanelInset} onTap={handleMascotTap} />
       )}
       {/* Mounted for the owner only, not merely kept closed: a closed popup
           still resolves its harness and capabilities and the gateway's
@@ -3254,7 +3660,7 @@ function ChromeDesktopInner() {
       {ownerApis && (
         <ChatPopup
           isOpen={chatOpen && isOwner}
-          onClose={() => setChatOpen(false)}
+          onClose={closeChat}
           onOpenSettingsSection={openSettingsSection}
           onPanelModeChange={handleChatPanelModeChange}
           initialPanelWidth={chatPanelWidth}
@@ -3275,7 +3681,6 @@ function ChromeDesktopInner() {
         (() => {
           // Only windows whose app is on this desktop: one restored after its
           // app went would otherwise be the "top" and leave the screen empty.
-          const allApps = getAllApps();
           const visible = openWindows.filter(w => !w.minimized && allApps.some(a => a.id === w.appId));
           if (visible.length === 0) return null;
           const top = visible.reduce((a, b) => a.zIndex > b.zIndex ? a : b);
@@ -3327,92 +3732,56 @@ function ChromeDesktopInner() {
               </div>
               {/* Mobile window content */}
               <div className="flex-1 overflow-hidden">
-                {renderWindowContent(top.appId, top.meta, top)}
+                <WindowContent
+                  app={app}
+                  meta={top.meta}
+                  windowId={top.id}
+                  terminal={top.terminal}
+                  settingsUi={app.type === "settings" ? settingsUi : undefined}
+                  installedApps={app.type === "store" ? installedApps : undefined}
+                  actions={windowActions}
+                />
               </div>
             </div>
           );
         })()
       ) : (
-        // Desktop: normal ChromeWindow rendering
-        openWindows.map((window) => {
-          const app = allApps.find((a) => a.id === window.appId);
+        // Desktop: normal ChromeWindow rendering. Each window is a memoized
+        // DesktopWindow given only values that keep their identity while they
+        // mean the same thing — its own record, its app, stable actions, and
+        // the Settings or Store inputs only where the app is that one — so a
+        // desktop render that does not concern a window leaves it, and the
+        // app inside it, alone.
+        openWindows.map((win) => {
+          const app = allApps.find((a) => a.id === win.appId);
           if (!app) return null;
-
-          const renderWindowIcon = () => {
-            if (app.storeApp) {
-              return (
-                <div
-                  className="w-5 h-5 rounded flex items-center justify-center"
-                  style={{ backgroundColor: app.color }}
-                >
-                  <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-3 h-3" />
-                </div>
-              );
-            }
-            return (
-              <div
-                className="w-5 h-5 rounded flex items-center justify-center"
-                style={{ backgroundColor: app.color }}
-              >
-                <AppIcon id={app.id} size="w-3 h-3" />
-              </div>
-            );
-          };
-
           return (
-            <ChromeWindow
-              key={window.id}
+            <DesktopWindow
+              key={win.id}
+              win={win}
+              app={app}
               title={resolveAppName(app)}
-              icon={renderWindowIcon()}
-              appId={window.appId}
-              defaultWidth={app.defaultWidth}
-              defaultHeight={app.defaultHeight}
-              initialPosition={window.x !== undefined && window.y !== undefined ? { x: window.x, y: window.y } : undefined}
-              initialSize={window.width !== undefined && window.height !== undefined ? { width: window.width, height: window.height } : undefined}
-              isActive={window.id === activeWindowId}
-              zIndex={window.zIndex}
-              onClose={() => closeWindow(window.id)}
-              onFocus={() => focusWindow(window.id)}
-              onMinimize={() => minimizeWindow(window.id)}
-              onGeometryChange={(geo) => updateWindowGeometry(window.id, geo)}
-              minimized={window.minimized}
+              isActive={win.id === activeWindowId}
               rightInset={chatPanelInset}
-              maximizeSignal={window.maximizeNonce}
-              windowId={window.id}
-              initialMaximized={window.maximized}
-              initialSnapped={window.snapped}
-              initialRestore={window.restore}
-              onModeChange={(mode) => updateWindowMode(window.id, mode)}
-            >
-              {renderWindowContent(window.appId, window.meta, window)}
-            </ChromeWindow>
+              settingsUi={app.type === "settings" ? settingsUi : undefined}
+              installedApps={app.type === "store" ? installedApps : undefined}
+              actions={windowActions}
+            />
           );
         })
       )}
 
       {/* App Launcher */}
+      {/* Every prop keeps its identity while it means the same thing (see
+          `launcherApps`), so the launcher's memo holds. `openAppStable`, not
+          `openApp`, which is rebuilt on every window open, focus and move —
+          and it calls the CURRENT openApp, so the launcher's delayed open
+          (after its closing animation) acts on the desktop as it is then. */}
       <ChromeLauncher
-        apps={allAppsForLauncher.map((app) => {
-          if (app.storeApp) {
-            return {
-              id: app.id,
-              name: resolveAppName(app),
-              color: app.color,
-              icon: <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} />,
-              isPinned: isAppPinned(app.id),
-            };
-          }
-          return {
-            id: app.id,
-            name: resolveAppName(app),
-            color: app.color,
-            icon: <AppIcon id={app.id} />,
-            isPinned: isAppPinned(app.id),
-          };
-        })}
+        apps={launcherApps}
         isOpen={launcherOpen}
-        onClose={() => setLauncherOpen(false)}
-        onAppClick={openApp}
+        onClose={closeLauncher}
+        onAppClick={openAppStable}
         onPinApp={handlePinApp}
         onUnpinApp={handleUnpinApp}
         onAddToDesktop={handleAddToDesktop}
@@ -3421,15 +3790,12 @@ function ChromeDesktopInner() {
       {/* System Tray */}
       <SystemTray
         isOpen={trayOpen}
-        onClose={() => setTrayOpen(false)}
-        date={date}
-        time={time}
+        onClose={closeTray}
       />
 
       {/* Shelf (taskbar) */}
       <ChromeShelf
         apps={(() => {
-          const allApps = getAllApps();
           const pinnedIds = new Set(pinnedApps.map(a => a.id));
           // Open apps that aren't pinned
           const unpinnedOpenApps = openWindows
@@ -3520,17 +3886,18 @@ function ChromeDesktopInner() {
         onShelfSettings={() => openApp("settings")}
         onChatClick={() => setChatOpen(prev => !prev)}
         showChatButton={isOwner && (mascotHidden || isMobile)}
-        time={time}
         clawAiAuthenticated={clawAiAuthenticated}
         sessionUser={sessionUser && (sessionUser.multiUser || !sessionUser.isOwner) ? sessionUser : null}
       />
 
 
-      {/* Context menu */}
+      {/* Context menu. No backdrop blur under its fill: #2d2d2d is opaque, so
+          the blur could not be seen, and it was still a render pass re-run
+          whenever anything beneath it moved — the crab, a pet. */}
       {ctxMenu && (
         <div
           data-testid="desktop-context-menu"
-          className="fixed min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90 overflow-y-auto"
+          className="fixed min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 text-sm text-white/90 overflow-y-auto"
           style={{
             zIndex: DESKTOP_LAYERS.menu,
             left: Math.min(ctxMenu.x, window.innerWidth - 220),
@@ -3706,12 +4073,13 @@ function ChromeDesktopInner() {
         </div>
       )}
 
-      {/* Uninstall confirmation modal */}
+      {/* Uninstall confirmation modal. The drop overlay's scrim, for its
+          reason: no full-screen blur, one step darker. */}
       {uninstallConfirm && (() => {
         const meta = installedMeta[uninstallConfirm];
         const appName = meta?.name || uninstallConfirm;
         return (
-          <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm" style={{ zIndex: DESKTOP_LAYERS.modal }} onClick={dismissUninstall}>
+          <div className="fixed inset-0 flex items-center justify-center bg-black/65" style={{ zIndex: DESKTOP_LAYERS.modal }} onClick={dismissUninstall}>
             {/* The role sits on the panel, not the scrim — see useModalDialog. */}
             <div
               ref={uninstallPanelRef}

@@ -15,6 +15,9 @@
  *  3. The watchdog does not ask for a second desktop window while the first
  *     is still coming up; it does once a window that was up is gone.
  *  4. A labwc template it cannot read is never a reason to reconfigure.
+ *  5. Every Chrome it starts gets ONE --disable-features list (Chrome reads
+ *     only the last), and that list keeps a hidden desktop's timers off
+ *     Chrome's once-a-minute wake-up for pages hidden five minutes.
  *
  * Everything runs on stand-ins in a temp dir: a `sleep` as the compositor
  * (LABWC_PID), a bash Chrome that takes the profile's SingletonLock or hands
@@ -330,6 +333,37 @@ describe.skipIf(!usable)("clawbox-desktop-browser in a session", { timeout: 30_0
     setWindow("up");
     labwc.kill("SIGTERM");
     expect(await finished(done)).toBe(0);
+  });
+
+  it("hands Chrome ONE --disable-features list that keeps a hidden desktop's timers off the once-a-minute wake-up, on every launch", async () => {
+    // The desktop window can be hidden too, and Chrome wakes a chain of
+    // timers in a page hidden for more than five minutes only once a minute —
+    // about as rarely as an entry of the agent's notice ring lives. Chrome
+    // reads only the LAST --disable-features, so the feature has to be in the
+    // session's one list, not a second one beside it. The watchdog's request
+    // for the window again goes out with the same flags as the first launch.
+    const labwc = compositor();
+    setModes(["hold"]);
+    setWindow("up");
+    const { done } = startLauncher(env(labwc.pid!));
+    await waitFor("the window to be seen", () => wlrctlCalls() >= 2);
+    setWindow("down");
+    await waitFor("the window to be asked for again", () => chromeLaunches().length >= 2);
+    setWindow("up");
+    labwc.kill("SIGTERM");
+    expect(await finished(done)).toBe(0);
+    for (const launch of chromeLaunches()) {
+      const args = launch.split(" ").slice(1);
+      const lists = args.filter((a) => a.startsWith("--disable-features="));
+      expect(lists, launch).toHaveLength(1);
+      expect(lists[0].slice("--disable-features=".length).split(",").sort(), launch).toEqual([
+        "IntensiveWakeUpThrottling",
+        "MediaRouter",
+        "Translate",
+      ]);
+      // Not the broad switch: hidden pages keep their one-wake-up-a-second throttling.
+      expect(args, launch).not.toContain("--disable-background-timer-throttling");
+    }
   });
 
   it("reconfigures labwc once for a config it rendered, not on every pass", async () => {

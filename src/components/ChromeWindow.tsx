@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, ReactNode } from "react";
+import { memo, useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { WINDOW_CHROME, WindowChromeContext, type WindowChrome, type WindowTone } from "@/lib/window-chrome";
 import { createPortal } from "react-dom";
@@ -112,7 +112,14 @@ function anchorOf(r: { x: number; y: number; width: number; height: number }) {
   return { x: r.x + r.width / 2, y: r.y + Math.min(r.height / 2, 18) };
 }
 
-export default function ChromeWindow({
+function sameRect(a: WindowRect | null, b: WindowRect): boolean {
+  return a !== null && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+}
+
+// Memoized (see the export at the bottom): the desktop re-renders for things
+// no window shows — the shelf clock, a poll, an icon dragged across the
+// wallpaper — and every window re-rendered with it, its whole app inside.
+function ChromeWindow({
   title,
   children,
   appId,
@@ -181,7 +188,9 @@ export default function ChromeWindow({
   const chrome = useMemo<WindowChrome>(() => ({ actions: actionsEl, active: isActive, tone, setTone }), [actionsEl, isActive, tone]);
   const palette = WINDOW_CHROME[tone];
   const windowRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef({ isDragging: false, startX: 0, startY: 0, startPosX: 0, startPosY: 0 });
+  // `moved`: the window has left the place the press found it — the moment it
+  // takes a compositor layer of its own (see handleMove).
+  const dragRef = useRef({ isDragging: false, moved: false, startX: 0, startY: 0, startPosX: 0, startPosY: 0 });
   const resizeRef = useRef<{
     isResizing: boolean;
     edge: string;
@@ -207,10 +216,35 @@ export default function ChromeWindow({
   const currentPosRef = useRef(position);
   const prevMinimizedRef = useRef(minimized);
   const rightInsetRef = useRef(rightInset);
+  // Read through refs by the pointer listeners, so a desktop that hands a
+  // fresh callback on every render does not tear down and re-add the four
+  // window listeners each time (they are installed once per window).
+  const onGeometryChangeRef = useRef(onGeometryChange);
+  const onModeChangeRef = useRef(onModeChange);
+  // The geometry the desktop's record of this window holds — what it was
+  // mounted from, or the last rect this window told it. A press that moves
+  // nothing tells it nothing: the same numbers again rebuilt the desktop and
+  // every app in every window for a record that did not change.
+  const [mountedRect] = useState<WindowRect | null>(() => (initialPosition && initialSize ? { ...initialPosition, ...initialSize } : null));
+  const reportedRef = useRef<WindowRect | null>(mountedRect);
+  // The snap zone as last committed, for the drop path's listeners.
+  const snappedRef = useRef<SnapZone>(snapped);
+  // Where a snap drop put the window, for the layout effect that writes it
+  // once the drop has committed (see there).
+  const snapLandingRef = useRef<{ x: number; y: number } | null>(null);
 
   useLayoutEffect(() => {
     rightInsetRef.current = rightInset;
   }, [rightInset]);
+
+  useLayoutEffect(() => {
+    onGeometryChangeRef.current = onGeometryChange;
+    onModeChangeRef.current = onModeChange;
+  }, [onGeometryChange, onModeChange]);
+
+  useLayoutEffect(() => {
+    snappedRef.current = snapped;
+  }, [snapped]);
 
   useLayoutEffect(() => {
     currentSizeRef.current = size;
@@ -218,6 +252,25 @@ export default function ChromeWindow({
 
   useLayoutEffect(() => {
     currentPosRef.current = position;
+  }, [position]);
+
+  // A snap drop lands the window on its zone's left/top. The drop writes the
+  // DROP POINT onto the element (so nothing jumps before React commits), and
+  // React writes only a style that differs from what it LAST rendered — which
+  // is where the window stood before the drag. So a zone whose corner is that
+  // same spot (a window at the top-left snapped to the left half) was given
+  // the zone's size and left standing at the drop point. Written here, after
+  // the commit, because the commit is what turns the glide on (`transition`,
+  // for a snapped window that is not being dragged): the drop computed the
+  // drop point's style, so the window still glides from where it was let go.
+  useLayoutEffect(() => {
+    const landing = snapLandingRef.current;
+    if (!landing) return;
+    snapLandingRef.current = null;
+    const el = windowRef.current;
+    if (!el) return;
+    el.style.left = `${landing.x}px`;
+    el.style.top = `${landing.y}px`;
   }, [position]);
 
   // Opening animation - runs once on mount
@@ -287,6 +340,7 @@ export default function ChromeWindow({
       setSnapped(null);
       dragRef.current = {
         isDragging: true,
+        moved: false,
         startX: clientX,
         startY: clientY,
         startPosX: newX,
@@ -295,6 +349,7 @@ export default function ChromeWindow({
     } else {
       dragRef.current = {
         isDragging: true,
+        moved: false,
         startX: clientX,
         startY: clientY,
         startPosX: position.x,
@@ -302,8 +357,17 @@ export default function ChromeWindow({
       };
     }
     setIsDragging(true);
-    // Its own compositor layer for the length of the drag (see handleMove).
-    if (windowRef.current) windowRef.current.style.willChange = "transform";
+    // No layer yet: a press is mostly a click (focus, a double-click to
+    // maximize), and promoting the window here rastered all of it into a layer
+    // of its own and the release painted it back, with nothing moved between.
+    // handleMove promotes it once it actually moves.
+    //
+    // Asked even of the ACTIVE window: the floating chat takes its layers
+    // from the same counter, so the window on top of the others can still be
+    // under the chat, and grabbing its title bar is what brings it forward.
+    // Whether it already holds the top layer is the desktop's to know — its
+    // focus handler is where a press on the top window is answered with
+    // nothing.
     onFocus();
   }, [maximized, snapped, position.x, position.y, onFocus]);
 
@@ -393,12 +457,28 @@ export default function ChromeWindow({
 
       // Direct DOM update — no React re-render during drag — and a TRANSFORM
       // from where the drag started, not left/top: the window is on a layer
-      // of its own while it moves (will-change, set at the grab), so the GPU
-      // compositor moves it without a layout or a repaint. Writing left/top
-      // here re-laid out the window and repainted the whole desktop under it
-      // on every pointer move — 5120x1440 of it over two monitors.
-      if (el) {
-        el.style.transform = `translate3d(${newX - dragRef.current.startPosX}px, ${newY - dragRef.current.startPosY}px, 0)`;
+      // of its own while it moves, so the GPU compositor moves it without a
+      // layout or a repaint. Writing left/top here re-laid out the window and
+      // repainted the whole desktop under it on every pointer move — 5120x1440
+      // of it over two monitors.
+      //
+      // The layer is taken at the first move that actually moves the window,
+      // not at the press (see handleDragStart). And the offset goes in the
+      // `translate` property, not `transform`: the open and restore animations
+      // run `transform` with fill-mode forwards, and an animation outranks an
+      // inline style, so a window grabbed in the first quarter-second after it
+      // opened did not follow the pointer until the class came off, and then
+      // jumped. `translate` composes with them, and composites exactly as
+      // `transform` does under `will-change: transform`.
+      const drag = dragRef.current;
+      const offsetX = newX - drag.startPosX;
+      const offsetY = newY - drag.startPosY;
+      if (el && (drag.moved || offsetX !== 0 || offsetY !== 0)) {
+        if (!drag.moved) {
+          drag.moved = true;
+          el.style.willChange = "transform";
+        }
+        el.style.translate = `${offsetX}px ${offsetY}px`;
       }
       currentPosRef.current = { x: newX, y: newY };
       // Disable pointer events on content during drag
@@ -407,14 +487,24 @@ export default function ChromeWindow({
     };
 
     const notifyGeometry = () => {
-      if (onGeometryChange) {
-        const s = currentSizeRef.current;
-        const p = currentPosRef.current;
-        onGeometryChange({ x: p.x, y: p.y, width: s.width, height: s.height });
-      }
+      const report = onGeometryChangeRef.current;
+      if (!report) return;
+      const s = currentSizeRef.current;
+      const p = currentPosRef.current;
+      const geometry = { x: p.x, y: p.y, width: s.width, height: s.height };
+      // Already what the desktop holds (a click, a double-click, a grab let go
+      // where it began): nothing to tell it. See `reportedRef`.
+      if (sameRect(reportedRef.current, geometry)) return;
+      reportedRef.current = geometry;
+      report(geometry);
     };
 
-    const handleEnd = (e: MouseEvent | TouchEvent) => {
+    // `release` is false for a touch the browser CANCELLED (it took the
+    // gesture for itself): the gesture ends where it stands, as a release
+    // there would, but snaps nothing — the owner did not let go. Without it a
+    // cancelled drag kept its layer and offset, kept the content deaf to the
+    // pointer, and went on following the next touch anywhere on the screen.
+    const handleEnd = (e: MouseEvent | TouchEvent, release = true) => {
       // Re-enable pointer events on content
       if (contentRef.current) contentRef.current.style.pointerEvents = "";
 
@@ -435,50 +525,79 @@ export default function ChromeWindow({
 
       if (!dragRef.current.isDragging) return;
       dragRef.current.isDragging = false;
+      dragRef.current.moved = false;
       setIsDragging(false);
-      // The drag's transform becomes the window's position again: written to
+
+      // Where it lands, measured BEFORE the writes below, as handleMove does:
+      // on the main monitor the snap test measures the shelf, and measured
+      // after a style write it forced a synchronous layout of the whole page.
+      let zone: SnapZone = null;
+      let rect: ReturnType<typeof getSnapRect> = null;
+      if (release) {
+        const point = "changedTouches" in e ? e.changedTouches[0] : (e as MouseEvent);
+        if (point) {
+          zone = getSnapZone(point.clientX, point.clientY, rightInsetRef.current);
+          // On the monitor the window was dropped on.
+          rect = getSnapRect(zone, rightInsetRef.current, { x: point.clientX, y: point.clientY });
+          if (!rect) zone = null;
+        }
+      }
+
+      // The drag's offset becomes the window's position again: written to
       // left/top here so nothing jumps before React commits the same values.
-      if (windowRef.current) {
-        const el = windowRef.current;
-        el.style.transform = "";
+      const el = windowRef.current;
+      if (el) {
+        el.style.translate = "";
         el.style.willChange = "";
         el.style.left = currentPosRef.current.x + "px";
         el.style.top = currentPosRef.current.y + "px";
+        // A snap glides from the drop point to the zone, and a CSS transition
+        // starts from the last style the browser COMPUTED — which, the motion
+        // having been all in the offset, is the left/top the drag began at:
+        // with nothing computed in between, the window jumped back to where
+        // it was grabbed and slid from there. (On the main monitor the shelf
+        // measurement above used to come after these writes and computed the
+        // style by the way, which is why only the other monitors showed it.)
+        // A style read is enough — no layout — and only a snap needs it.
+        if (rect) void getComputedStyle(el).opacity;
       }
-
-      const clientX = "changedTouches" in e ? e.changedTouches[0].clientX : (e as MouseEvent).clientX;
-      const clientY = "changedTouches" in e ? e.changedTouches[0].clientY : (e as MouseEvent).clientY;
-      const zone = getSnapZone(clientX, clientY, rightInsetRef.current);
       setSnapPreview(null);
 
-      if (zone) {
-        // On the monitor the window was dropped on.
-        const rect = getSnapRect(zone, rightInsetRef.current, { x: clientX, y: clientY })!;
+      if (zone && rect) {
         const cur = currentSizeRef.current;
         const pos = currentPosRef.current;
         prevSizeRef.current = { width: cur.width, height: cur.height, x: pos.x, y: pos.y };
+        snapLandingRef.current = { x: rect.x, y: rect.y };
         setPosition({ x: rect.x, y: rect.y });
         setSize({ width: rect.width, height: rect.height });
         setSnapped(zone);
+        // The mode report that follows (the effect on `snapped`) carries the
+        // zone's rect as the window's geometry, and the drop point as the rect
+        // it goes back to: reporting the drop point here first rebuilt the
+        // desktop twice for one drop, ending in the same record.
+        if (onModeChangeRef.current && zone !== snappedRef.current) return;
       } else {
         // Commit final drag position to React state
         setPosition(currentPosRef.current);
       }
       notifyGeometry();
     };
+    const handleCancel = (e: TouchEvent) => handleEnd(e, false);
 
     window.addEventListener("mousemove", handleMove);
     window.addEventListener("mouseup", handleEnd);
     window.addEventListener("touchmove", handleMove);
     window.addEventListener("touchend", handleEnd);
+    window.addEventListener("touchcancel", handleCancel);
 
     return () => {
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleEnd);
       window.removeEventListener("touchmove", handleMove);
       window.removeEventListener("touchend", handleEnd);
+      window.removeEventListener("touchcancel", handleCancel);
     };
-  }, [appId, onGeometryChange]);
+  }, [appId]);
 
   const handleClose = useCallback(() => {
     // No size write here: the resize-end path saves what the owner chose the
@@ -631,11 +750,8 @@ export default function ChromeWindow({
 
   // Maximized, snapped, set free: the desktop hears each change (not the
   // mount — it already knows how the window started) so a refresh brings the
-  // window back the way it was left.
-  const onModeChangeRef = useRef(onModeChange);
-  useLayoutEffect(() => {
-    onModeChangeRef.current = onModeChange;
-  }, [onModeChange]);
+  // window back the way it was left. (`onModeChangeRef` is declared with the
+  // other callback refs above.)
   const modeMountedRef = useRef(false);
   useEffect(() => {
     if (!modeMountedRef.current) {
@@ -645,11 +761,16 @@ export default function ChromeWindow({
     savedSnapAnchorRef.current = null;
     const pos = currentPosRef.current;
     const cur = currentSizeRef.current;
-    onModeChangeRef.current?.({
+    const geometry = { x: pos.x, y: pos.y, width: cur.width, height: cur.height };
+    const report = onModeChangeRef.current;
+    if (!report) return;
+    // The desktop's record takes this geometry too (see `reportedRef`).
+    reportedRef.current = geometry;
+    report({
       maximized,
       snapped,
       restore: maximized || snapped ? { ...prevSizeRef.current } : null,
-      geometry: { x: pos.x, y: pos.y, width: cur.width, height: cur.height },
+      geometry,
     });
   }, [maximized, snapped]);
 
@@ -800,3 +921,9 @@ export default function ChromeWindow({
   );
 }
 
+// A window re-renders for its own props and state only. Everything it draws
+// from outside them comes through hooks of its own (the language, the kiosk
+// bar, the monitors), so a desktop render that hands it the same props —
+// stable callbacks and the same app element — leaves it, and the app inside,
+// alone.
+export default memo(ChromeWindow);

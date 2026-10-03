@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { MONITORS_CHANGED_EVENT, screensFromStatus, setDeskScreens, type MonitorStatusLike } from "./desktop-screens";
+import { MONITORS_CHANGED_EVENT, screensFromStatus, setDeskScreens, setMonitorSessionWindow, type MonitorStatusLike } from "./desktop-screens";
 
 /** How often the desktop re-reads the monitors while a monitor session answers. */
 export const MONITOR_POLL_MS = 5_000;
@@ -32,6 +32,20 @@ export const MONITOR_SOON_MS = 200;
  * layout the page has stands and it keeps asking; stopping there left the
  * page laid out as one screen across every monitor until something happened
  * to resize the window.
+ *
+ * The every-few-seconds read waits while the page is HIDDEN (a minimised app
+ * window), the rule the chat's own polls keep (`installPendingRefresh`): a
+ * tick that falls due then is read the moment the page is visible again, so
+ * what the owner finds is at least as fresh as before, and a window nobody
+ * can see stops spawning wlr-randr on the box. A resize or a layout change
+ * from Settings is still read at once, hidden or not — those are events, not
+ * the clock.
+ *
+ * The first `available: true` is also how the rest of the page learns it is
+ * that session's window (`setMonitorSessionWindow`, read by
+ * `isBoxOwnScreen()`): the box answering is the proof, where an app
+ * `display-mode` alone would also take in the desktop installed as an app on
+ * a phone and a tab in full screen.
  */
 export function useMonitorLayoutSync(enabled: boolean): void {
   useEffect(() => {
@@ -42,6 +56,9 @@ export function useMonitorLayoutSync(enabled: boolean): void {
     let reading = false;
     let readAgain = false;
     let seen = false;
+    /** A periodic read fell due while the page was hidden; it is read on the visible edge. */
+    let missed = false;
+    const hidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
 
     const read = async (): Promise<"on" | "off" | "error"> => {
       try {
@@ -55,6 +72,7 @@ export function useMonitorLayoutSync(enabled: boolean): void {
           return "off";
         }
         seen = true;
+        setMonitorSessionWindow(true);
         setDeskScreens(screensFromStatus(status, window.innerWidth, window.innerHeight));
         return "on";
       } catch {
@@ -62,10 +80,14 @@ export function useMonitorLayoutSync(enabled: boolean): void {
       }
     };
 
-    const schedule = (ms: number) => {
+    const schedule = (ms: number, periodic = false) => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         timer = null;
+        if (periodic && hidden()) {
+          missed = true;
+          return;
+        }
         void tick();
       }, ms);
     };
@@ -76,6 +98,7 @@ export function useMonitorLayoutSync(enabled: boolean): void {
         return;
       }
       reading = true;
+      missed = false;
       const result = await read();
       reading = false;
       if (!live) return;
@@ -85,7 +108,7 @@ export function useMonitorLayoutSync(enabled: boolean): void {
         schedule(MONITOR_SOON_MS);
         return;
       }
-      if (result !== "off") schedule(MONITOR_POLL_MS);
+      if (result !== "off") schedule(MONITOR_POLL_MS, true);
     };
 
     const soon = () => {
@@ -93,15 +116,23 @@ export function useMonitorLayoutSync(enabled: boolean): void {
       else schedule(MONITOR_SOON_MS);
     };
 
+    // Only the visible EDGE, and only for a tick that fell due while away.
+    const onVisibility = () => {
+      if (!hidden() && missed) void tick();
+    };
+
     void tick();
     window.addEventListener("resize", soon);
     window.addEventListener(MONITORS_CHANGED_EVENT, soon);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       live = false;
       if (timer) clearTimeout(timer);
       window.removeEventListener("resize", soon);
       window.removeEventListener(MONITORS_CHANGED_EVENT, soon);
+      document.removeEventListener("visibilitychange", onVisibility);
       setDeskScreens(null);
+      setMonitorSessionWindow(false);
     };
   }, [enabled]);
 }

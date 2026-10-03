@@ -53,7 +53,10 @@ export default function ClawBoxLoginModal({ open, onClose, feature = "generic" }
 
   return (
     <div
-      className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+      // No backdrop blur under the dim: a full-screen blur is redone over the whole
+      // desktop on every frame anything beneath it moves (the mascot always does).
+      // One step darker keeps the look.
+      className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/75 p-4"
       onClick={onClose}
     >
       <div
