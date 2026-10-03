@@ -32,10 +32,10 @@ export interface ReleaseHighlight {
 
 /**
  * A panel shows a handful and links to the rest: the update screen's step list
- * stays the thing to read. The 4.2 notes list six, the 4.1 notes four, the
+ * stays the thing to read. The 4.2 notes list seven, the 4.1 notes four, the
  * 4.0 notes eight.
  */
-export const MAX_HIGHLIGHTS = 6;
+export const MAX_HIGHLIGHTS = 7;
 /** Longer than any title the notes have used, short enough for one line or two. */
 export const MAX_TITLE_CHARS = 120;
 /** Two or three sentences — the longest 4.1 and 4.2 highlights are about 200. */

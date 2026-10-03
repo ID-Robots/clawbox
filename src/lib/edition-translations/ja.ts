@@ -1522,6 +1522,8 @@ export const ja: Record<string, string> = {
   "whatsNew.githubBackupBody": "ファイル → プロジェクト の「バックアップ」で、フォルダーを GitHub の非公開リポジトリにコピーします。毎日のバックアップも選べます。パスワードや鍵らしいファイルは除外され、どれを除外したかが表示されます。",
   "whatsNew.kioskTitle": "キオスクモード",
   "whatsNew.kioskBody": "ClawBox がデスクトップを全画面表示しているときは、デスクトップが開くどのページにも、タブ、戻る、進む、再読み込み、アドレス欄を備えた ClawBox バーが付き、いつでもワンクリックでデスクトップに戻れます。",
+  "whatsNew.editionChoiceTitle": "セットアップ時に OpenClaw か Hermes を選択",
+  "whatsNew.editionChoiceBody": "新しい ClawBox は初回セットアップで使うアシスタントを尋ね、選んだアシスタントを準備します。",
   "whatsNew.clawkeepTitle": "ClawKeep バックアップの修正",
   "whatsNew.clawkeepBody": "スナップショットに古いバックアップアーカイブが含まれなくなりました。アーカイブできないリンクはバックアップを失敗させずにスキップして名前を示し、容量がいっぱいのアカウントでも自動バックアップが永久にオフになることはなくなりました。",
   "whatsNew.hardwareFixesTitle": "ハードウェアテストで見つかった問題の修正",

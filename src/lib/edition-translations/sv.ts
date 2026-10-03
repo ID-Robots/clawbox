@@ -1518,6 +1518,8 @@ export const sv: Record<string, string> = {
   "whatsNew.githubBackupBody": "I Filer → Projekt kopierar Säkerhetskopiera en mapp till ett privat GitHub-repo, med en daglig säkerhetskopia om du vill. Filer som ser ut som lösenord eller nycklar lämnas utanför, och du får veta vilka.",
   "whatsNew.kioskTitle": "Kioskläge",
   "whatsNew.kioskBody": "När ClawBox visar sitt skrivbord i helskärm får varje sida som skrivbordet öppnar en ClawBox-list med flikar, bakåt, framåt, ladda om och ett adressfält, så att skrivbordet alltid är ett klick bort.",
+  "whatsNew.editionChoiceTitle": "Välj OpenClaw eller Hermes vid installationen",
+  "whatsNew.editionChoiceBody": "Vid den första installationen frågar en ny ClawBox vilken assistent den ska köra, och ställer in den du väljer.",
   "whatsNew.clawkeepTitle": "ClawKeep-säkerhetskopior lagade",
   "whatsNew.clawkeepBody": "Ögonblicksbilder släpar inte längre med gamla säkerhetskopieringsarkiv, en länk som inte kan arkiveras hoppas över och namnges i stället för att få säkerhetskopieringen att misslyckas, och ett fullt konto stänger inte längre av automatisk säkerhetskopiering för gott.",
   "whatsNew.hardwareFixesTitle": "Rättningar från hårdvarutester",

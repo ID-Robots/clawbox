@@ -39,6 +39,7 @@ export const WHATS_NEW_HIGHLIGHTS = [
   { icon: "desktop_windows", title: "whatsNew.monitorModeTitle", body: "whatsNew.monitorModeBody" },
   { icon: "backup", title: "whatsNew.githubBackupTitle", body: "whatsNew.githubBackupBody" },
   { icon: "tab", title: "whatsNew.kioskTitle", body: "whatsNew.kioskBody" },
+  { icon: "alt_route", title: "whatsNew.editionChoiceTitle", body: "whatsNew.editionChoiceBody" },
   { icon: "settings_backup_restore", title: "whatsNew.clawkeepTitle", body: "whatsNew.clawkeepBody" },
   { icon: "build", title: "whatsNew.hardwareFixesTitle", body: "whatsNew.hardwareFixesBody" },
 ] as const;

@@ -1533,6 +1533,8 @@ export const it: Record<string, string> = {
   "whatsNew.githubBackupBody": "In File → Progetti, il pulsante Salva copia porta una cartella in un repository GitHub privato, con una copia giornaliera se la vuoi. I file che sembrano password o chiavi vengono esclusi, e ti viene detto quali.",
   "whatsNew.kioskTitle": "Modalità kiosk",
   "whatsNew.kioskBody": "Quando ClawBox mostra il desktop a schermo intero, ogni pagina aperta dal desktop riceve una barra ClawBox con schede, indietro, avanti, ricarica e un campo indirizzo, così il desktop è sempre a un clic.",
+  "whatsNew.editionChoiceTitle": "Scegli OpenClaw o Hermes durante la configurazione",
+  "whatsNew.editionChoiceBody": "Durante la prima configurazione, un nuovo ClawBox chiede quale assistente usare e prepara quello che scegli.",
   "whatsNew.clawkeepTitle": "Backup di ClawKeep corretti",
   "whatsNew.clawkeepBody": "Gli snapshot non si portano più dietro i vecchi archivi di backup, un collegamento che non si può archiviare viene saltato e indicato invece di far fallire il backup, e un account pieno non disattiva più per sempre il backup automatico.",
   "whatsNew.hardwareFixesTitle": "Correzioni dai test sull'hardware",

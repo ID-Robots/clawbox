@@ -1530,6 +1530,8 @@ export const zh: Record<string, string> = {
   "whatsNew.githubBackupBody": "在 文件 → 项目 中，点“备份”即可把文件夹复制到 GitHub 的私有仓库，还可选择每天自动备份。看起来像密码或密钥的文件会被排除，并告诉你是哪些。",
   "whatsNew.kioskTitle": "Kiosk 模式",
   "whatsNew.kioskBody": "当 ClawBox 全屏显示桌面时，桌面打开的每个页面都会带上一条 ClawBox 栏，含标签页、后退、前进、刷新和地址栏，随时一键回到桌面。",
+  "whatsNew.editionChoiceTitle": "设置时选择 OpenClaw 或 Hermes",
+  "whatsNew.editionChoiceBody": "首次设置时，新的 ClawBox 会询问要运行哪个助手，并为你准备好所选的助手。",
   "whatsNew.clawkeepTitle": "ClawKeep 备份问题已修复",
   "whatsNew.clawkeepBody": "快照不再夹带旧的备份归档；无法归档的链接会被跳过并列出名称，而不会让备份失败；账户空间已满也不会再永久关闭自动备份。",
   "whatsNew.hardwareFixesTitle": "硬件测试中发现的问题已修复",

@@ -1522,6 +1522,8 @@ export const nl: Record<string, string> = {
   "whatsNew.githubBackupBody": "In Bestanden → Projecten kopieert Back-up maken een map naar een privérepository op GitHub, met desgewenst een dagelijkse back-up. Bestanden die op wachtwoorden of sleutels lijken, worden overgeslagen, en je ziet welke.",
   "whatsNew.kioskTitle": "Kioskmodus",
   "whatsNew.kioskBody": "Wanneer ClawBox zijn bureaublad schermvullend toont, krijgt elke pagina die het bureaublad opent een ClawBox-balk met tabbladen, terug, vooruit, herladen en een adresveld, zodat het bureaublad altijd één klik weg is.",
+  "whatsNew.editionChoiceTitle": "Kies OpenClaw of Hermes bij de installatie",
+  "whatsNew.editionChoiceBody": "Tijdens de eerste installatie vraagt een nieuwe ClawBox welke assistent je wilt, en zet die voor je klaar.",
   "whatsNew.clawkeepTitle": "ClawKeep-back-ups gerepareerd",
   "whatsNew.clawkeepBody": "Snapshots slepen geen oude back-uparchieven meer mee, een koppeling die niet gearchiveerd kan worden, wordt overgeslagen en genoemd in plaats van de back-up te laten mislukken, en een vol account zet de automatische back-up niet meer voorgoed uit.",
   "whatsNew.hardwareFixesTitle": "Oplossingen uit hardwaretests",

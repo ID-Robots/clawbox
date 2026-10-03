@@ -22,6 +22,8 @@ problems it found.
 - **Kiosk mode.** When ClawBox shows its desktop full screen, every page the
   desktop opens gets a ClawBox bar with tabs, back, forward, reload and an
   address field, so the desktop is always one click away.
+- **Choose OpenClaw or Hermes at setup.** During first setup, a new ClawBox
+  asks which assistant it should run, and sets up the one you pick.
 - **ClawKeep backups fixed.** Snapshots no longer carry old backup archives
   along, a link that cannot be archived is skipped and named instead of failing
   the backup, and a full account no longer turns auto-backup off for good.
@@ -120,6 +122,13 @@ problems it found.
   turned off for good: the ClawKeep card says so, and it switches back on by
   itself once backups can run again. A schedule change from the assistant or a
   script no longer switches auto-backup off by accident.
+
+### First setup
+
+- **Choose your assistant** comes right after Wi-Fi: OpenClaw, which we
+  recommend for most people, or Hermes. When your order named one, it is
+  already selected. The box sets up your choice and removes the other to free
+  space. A box that already runs an assistant is never asked.
 
 ### Updates
 
