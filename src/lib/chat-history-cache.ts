@@ -62,9 +62,20 @@ function runIdOf(key: string | undefined): string | undefined {
  * every local copy look newer than everything the server returned.
  *
  * Identity settles it — both sides carry the run's idempotency key. Text is
- * kept only as the fallback for turns without one (other harnesses, older
- * gateways), and cannot be the primary test: an attachment turn displays
+ * kept only as the fallback for when one side has no key (other harnesses,
+ * older gateways), and cannot be the primary test: an attachment turn displays
  * "📎 pic.png\nwhat is this" locally while the gateway stores the prompt alone.
+ * Two turns that BOTH carry a key and whose keys differ are different turns,
+ * whatever they say: the same "yes" sent from the phone is not this browser's
+ * "yes", and matching them by text hid the local one until the next read.
+ *
+ * What is left unmatched is kept if it can still be in flight. A turn with a
+ * key is kept unless it is older than the oldest message the read returned —
+ * that one has aged out of the history window, and re-appending it would put
+ * it back at the end. It is NOT measured against the newest server message:
+ * the local copy carries this browser's clock, and a browser running behind
+ * the box would lose a turn it sent a moment ago. A turn with no key has only
+ * its timestamp to go on, and keeps the old rule: newer than the whole replay.
  */
 export function unechoedUserTurns<T extends ChatMessage>(
   previous: readonly T[],
@@ -72,36 +83,43 @@ export function unechoedUserTurns<T extends ChatMessage>(
   lastServerTs: number,
 ): T[] {
   const serverRunIds = new Set<string>();
-  // Per-text stock of server copies. Counting rather than a boolean so the
-  // same words sent twice keep the second bubble.
-  const unclaimed = new Map<string, number>();
+  const localRunIds = new Set<string>();
+  for (const message of restored) {
+    const runId = message.role === "user" ? runIdOf(message.idempotencyKey) : undefined;
+    if (runId) serverRunIds.add(runId);
+  }
+  for (const message of previous) {
+    const runId = message.role === "user" ? runIdOf(message.idempotencyKey) : undefined;
+    if (runId) localRunIds.add(runId);
+  }
+  // Per-text stock of the server copies no local turn claimed by its key —
+  // split by whether the copy has a key of its own. Counting rather than a
+  // boolean so the same words sent twice keep the second bubble.
+  const keyless = new Map<string, number>();
+  const keyed = new Map<string, number>();
   for (const message of restored) {
     if (message.role !== "user") continue;
     const runId = runIdOf(message.idempotencyKey);
-    if (runId) serverRunIds.add(runId);
-    unclaimed.set(message.text, (unclaimed.get(message.text) ?? 0) + 1);
+    if (runId && localRunIds.has(runId)) continue;
+    const stock = runId ? keyed : keyless;
+    stock.set(message.text, (stock.get(message.text) ?? 0) + 1);
   }
-  const claimText = (text: string): boolean => {
-    const left = unclaimed.get(text) ?? 0;
+  const claim = (stock: Map<string, number>, text: string): boolean => {
+    const left = stock.get(text) ?? 0;
     if (left <= 0) return false;
-    unclaimed.set(text, left - 1);
+    stock.set(text, left - 1);
     return true;
   };
+  const windowStart = restored.length > 0 ? restored[0].timestamp : 0;
   const pending: T[] = [];
   for (const message of previous) {
     if (message.role !== "user") continue;
     const runId = runIdOf(message.idempotencyKey);
-    if (runId && serverRunIds.has(runId)) {
-      // Also spend this text's stock, so a later identical turn is not matched
-      // against the copy this one already accounted for.
-      claimText(message.text);
-      continue;
-    }
-    if (claimText(message.text)) continue;
-    // Nothing on the server matches. Keep it only if it is newer than the whole
-    // replay — an older unmatched turn has aged out of the history window and
-    // re-appending it would put it back in the wrong place.
-    if (message.timestamp > lastServerTs) pending.push(message);
+    if (runId && serverRunIds.has(runId)) continue;
+    // By text only where one side has no key to compare.
+    if (claim(keyless, message.text)) continue;
+    if (!runId && claim(keyed, message.text)) continue;
+    if (runId ? message.timestamp >= windowStart : message.timestamp > lastServerTs) pending.push(message);
   }
   return pending;
 }

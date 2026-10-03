@@ -108,6 +108,28 @@ describe("a turn moves the record", () => {
     expect(mergeTabInventory(main, { close: [TAB] }, NOW + 1).inventory.active).toEqual({ key: null, at: NOW });
   });
 
+  it("never issues an earlier record after a close cleared the last one", () => {
+    // Every device stored NOW as seen; the tab is closed, and the box's clock
+    // (booted before it was set) now reads a minute earlier.
+    const active = mergeTabInventory(withTabs(TAB, OTHER), { activity: { key: TAB } }, NOW).inventory;
+    const closed = mergeTabInventory(active, { close: [TAB] }, NOW + 1).inventory;
+    expect(closed.active).toBeUndefined();
+    expect(closed.activeAt).toBe(NOW);
+    // …and the mark survives the file the store writes.
+    const reread = parseTabInventory(JSON.parse(JSON.stringify(closed)), NOW);
+    expect(reread.activeAt).toBe(NOW);
+    const next = mergeTabInventory(reread, { activity: { key: OTHER } }, NOW - 60_000).inventory;
+    expect(next.active).toEqual({ key: OTHER, at: NOW + 1 });
+    expect(conversationToFollow({ record: next.active!, seenAt: NOW, current: MAIN, main: MAIN, canOpen: () => true }).follow).toBe(OTHER);
+  });
+
+  it("reads a mark from the file no lower than the record beside it", () => {
+    expect(parseTabInventory({ tabs: [tab(TAB)], closed: [], active: { key: TAB, at: NOW } }, NOW).activeAt).toBe(NOW);
+    expect(parseTabInventory({ tabs: [tab(TAB)], closed: [], active: { key: TAB, at: NOW }, activeAt: NOW + 7 }, NOW).activeAt).toBe(NOW + 7);
+    expect(parseTabInventory({ tabs: [], closed: [], activeAt: "x" }, NOW).activeAt).toBeUndefined();
+    expect(parseTabInventory({ tabs: [], closed: [], activeAt: -3 }, NOW).activeAt).toBeUndefined();
+  });
+
   it("leaves the record alone when a device only syncs its strip", () => {
     const active = mergeTabInventory(withTabs(TAB), { activity: { key: TAB } }, NOW).inventory;
     const synced = mergeTabInventory(active, { upsert: [tab(TAB)] }, NOW + 1);

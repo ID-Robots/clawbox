@@ -68,6 +68,13 @@ export interface ChatTabInventory {
   closed: ClosedChatTab[];
   /** Absent until the owner has sent a turn from a build that records it. */
   active?: ChatActiveRecord;
+  /**
+   * The newest `at` ever handed out. Kept apart from `active` because closing
+   * the recorded tab clears the record, and the next one must still come after
+   * every `at` a device has already stored as seen — or, on a box whose clock
+   * is behind, no device would follow it until the clock caught up.
+   */
+  activeAt?: number;
 }
 
 export const CHAT_TABS_ROUTE = "/setup-api/chat/tabs";
@@ -227,7 +234,14 @@ export function parseTabInventory(value: unknown, now = Date.now()): ChatTabInve
   // And a record naming a conversation the strip no longer has names nothing.
   const active = parseActiveRecord(row.active);
   const activeHolds = active !== null && (active.key === null || tabs.some((tab) => tab.key === active.key));
-  return { tabs: sortTabs(tabs), closed, ...(activeHolds ? { active } : {}) };
+  const storedAt = typeof row.activeAt === "number" && Number.isFinite(row.activeAt) && row.activeAt > 0 ? Math.floor(row.activeAt) : 0;
+  const activeAt = Math.max(storedAt, active?.at ?? 0);
+  return {
+    tabs: sortTabs(tabs),
+    closed,
+    ...(activeHolds ? { active } : {}),
+    ...(activeAt > 0 ? { activeAt } : {}),
+  };
 }
 
 /** The strip's order: oldest first, which is the order the + appended them in. */
@@ -265,7 +279,7 @@ export interface TabInventoryChange {
  *   - past MAX_TABS nothing new is added; past MAX_CLOSED the oldest closes
  *     are forgotten;
  *   - an activity names the conversation the owner is in now, stamped with
- *     the box's clock and never earlier than the record it replaces (a box
+ *     the box's clock and never earlier than any record before it (a box
  *     that boots before its clock is set must not send the record back in
  *     time). It is applied after the upserts, so a tab opened and spoken in
  *     within one request is listed by the time it is named; a key the strip
@@ -315,13 +329,15 @@ export function mergeTabInventory(
   }
 
   let active = inventory.active;
+  // The floor every new record clears, whether or not a record still stands.
+  const floorAt = Math.max(inventory.activeAt ?? 0, inventory.active?.at ?? 0);
   if (active && active.key !== null && !tabs.some((tab) => tab.key === active?.key)) {
     active = undefined;
     changed = true;
   }
   const activity = change.activity;
   if (activity && (activity.key === null || (isChatTabKey(activity.key) && tabs.some((tab) => tab.key === activity.key)))) {
-    active = { key: activity.key, at: Math.max(Math.floor(now), (inventory.active?.at ?? 0) + 1) };
+    active = { key: activity.key, at: Math.max(Math.floor(now), floorAt + 1) };
     changed = true;
   }
 
@@ -330,7 +346,11 @@ export function mergeTabInventory(
     closed = closed.sort((a, b) => b.at - a.at).slice(0, MAX_CLOSED);
     changed = true;
   }
-  return { inventory: { tabs: sortTabs(tabs), closed, ...(active ? { active } : {}) }, changed };
+  const activeAt = Math.max(floorAt, active?.at ?? 0);
+  return {
+    inventory: { tabs: sortTabs(tabs), closed, ...(active ? { active } : {}), ...(activeAt > 0 ? { activeAt } : {}) },
+    changed,
+  };
 }
 
 /**

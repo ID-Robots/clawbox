@@ -592,6 +592,27 @@ describe("a box that pushes nothing", () => {
     await screen.findByText("Noted from the phone.");
   });
 
+  it("reads one at a time, however many reasons to read arrive together", async () => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    const box = installHermesBox();
+    await mountHermesChat(box);
+    await screen.findByText("Earlier in this chat.");
+    // A slow box: each read takes a while to answer.
+    box.historyDelayMs.desktop = 300;
+    const reads = box.historyReads.length;
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("focus"));
+    });
+    await settle(450);
+    expect(box.historyReads.length - reads).toBe(1);
+    // Once it has answered, the next arrival reads again.
+    await arrive();
+    await settle(450);
+    expect(box.historyReads.length - reads).toBe(2);
+  });
+
   it("…and on the full page", async () => {
     const box = installHermesBox();
     render(<ChatApp />);

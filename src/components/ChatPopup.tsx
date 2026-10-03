@@ -6212,12 +6212,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // and never before the first replay (the bubbles it reconciles are its own).
   useEffect(() => {
     if (!harnessLoaded || !isOpen || caps.hasLiveConnection || !caps.canListHistory) return
+    // One read at a time: on a slow box the tick, a focus and a visibility
+    // change can all land inside one read, and an older answer settling last
+    // would paint over a newer transcript.
+    let inFlight = false
     const refresh = () => {
-      if (document.visibilityState !== 'visible' || !replayedRef.current) return
+      if (inFlight || document.visibilityState !== 'visible' || !replayedRef.current) return
       if (sendingRef.current || restoreAbortRef.current) return
       // The first conversation's auto-greet decides on its own read.
       if (caps.shouldOpenFirstConversation && !greetedRef.current) return
-      void loadHistory()
+      inFlight = true
+      void loadHistory().finally(() => { inFlight = false })
     }
     document.addEventListener('visibilitychange', refresh)
     window.addEventListener('focus', refresh)
