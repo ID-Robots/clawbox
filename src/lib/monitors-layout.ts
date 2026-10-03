@@ -342,7 +342,16 @@ export function planLayout(outputs: MonitorOutput[], saved: MonitorLayout | null
     const i = saved?.order.indexOf(id) ?? -1;
     return i < 0 ? Number.MAX_SAFE_INTEGER : i;
   };
-  rows.sort((a, b) => rank(a.o.id) - rank(b.o.id) || (a.o.position?.x ?? 0) - (b.o.position?.x ?? 0) || a.o.name.localeCompare(b.o.name));
+  // Among monitors the saved layout does not rank, the ones the compositor
+  // places now keep their left-to-right order and a monitor with no position
+  // (one that is off) goes after them: read as x=0 it sorted LEFT of the row,
+  // so turning it on pushed every monitor already on screen to the right.
+  const unplaced = (r: { o: MonitorOutput }) => (r.o.position ? 0 : 1);
+  rows.sort((a, b) =>
+    rank(a.o.id) - rank(b.o.id) ||
+    unplaced(a) - unplaced(b) ||
+    (a.o.position?.x ?? 0) - (b.o.position?.x ?? 0) ||
+    a.o.name.localeCompare(b.o.name));
   const mirror = saved?.mirror === true && rows.filter((r) => r.s.enabled).length > 1;
   let x = 0;
   let width = 0;

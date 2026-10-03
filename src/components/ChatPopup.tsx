@@ -2195,6 +2195,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY
     const start = { x: clientX, y: clientY, w: rect.width, h: rect.height, left: rect.left, top: rect.top }
     const report = frameThrottled(() => liveRectReportRef.current?.())
+    // The rect the moves last wrote, committed on release. Declared before
+    // the move handler that assigns it, so the closure never reaches into
+    // its temporal dead zone however the handlers come to be wired.
+    let last: { x: number; y: number; w: number; h: number } | null = null
     const onMove = (ev: MouseEvent | TouchEvent) => {
       const cx = 'touches' in ev ? ev.touches[0].clientX : (ev as MouseEvent).clientX
       const cy = 'touches' in ev ? ev.touches[0].clientY : (ev as MouseEvent).clientY
@@ -2221,7 +2225,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       placeFloating(el, { x: newX, y: newY }, { w: newW, h: newH })
       report.schedule()
     }
-    let last: { x: number; y: number; w: number; h: number } | null = null
     // The release, and a touch the system CANCELLED: a resize has no snap to
     // leave out, so a cancel ends it exactly as letting go there would — at
     // the size on screen, remembered. Unhandled, the popup kept the size the

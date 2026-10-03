@@ -398,8 +398,17 @@ export default function MonitorsPanel() {
       brightnessTimer.current = setTimeout(flushBrightness, BRIGHTNESS_THROTTLE_MS);
     }
   };
+  // A move still waiting on the throttle when the panel goes (Settings closed,
+  // another section opened) is the owner's last word on the slider, and the
+  // monitor must still get it: dropped with the timer, the slider said 70%
+  // and the screen stayed where it was. Read through a ref so the cleanup,
+  // installed once, calls the newest flush rather than the one from mount.
+  const flushBrightnessRef = useRef(flushBrightness);
+  useEffect(() => { flushBrightnessRef.current = flushBrightness; }, [flushBrightness]);
   useEffect(() => () => {
-    if (brightnessTimer.current) clearTimeout(brightnessTimer.current);
+    if (!brightnessTimer.current) return;
+    clearTimeout(brightnessTimer.current);
+    flushBrightnessRef.current();
   }, []);
 
   const byId = useMemo(() => new Map((status?.monitors ?? []).map((m) => [m.id, m])), [status]);

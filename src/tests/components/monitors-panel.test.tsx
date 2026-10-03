@@ -1139,6 +1139,29 @@ describe("MonitorsPanel — Identify, mirror, brightness", () => {
     expect(screen.queryByTestId("monitors-brightness")).toBeNull();
   });
 
+  it("a slider move still waiting on the throttle is sent when the panel closes, once", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    installBox(twoStatus());
+    box.brightness = { status: 200, body: { monitors: { [LEFT.id]: { value: 40, max: 100 } } } };
+    const { unmount } = render(<MonitorsPanel />);
+    await flush();
+    const slider = screen.getByTestId("monitors-brightness");
+    const brightnessPosts = () =>
+      box.calls.filter((c) => c.url === "/setup-api/monitors/brightness" && c.method === "POST");
+
+    // A drag (no pointer-up yet) arms the throttle; nothing is written yet.
+    fireEvent.change(slider, { target: { value: "70" } });
+    expect(brightnessPosts()).toHaveLength(0);
+
+    // Settings closed before the throttle fired: the owner's last value still reaches the monitor.
+    unmount();
+    expect(brightnessPosts().map((c) => c.body)).toEqual([{ monitor: LEFT.id, value: 70 }]);
+
+    // ...and the throttle it replaced does not send it a second time.
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(brightnessPosts()).toHaveLength(1);
+  });
+
   it("a brightness write the monitor refuses is said from the catalogue", async () => {
     installBox(twoStatus());
     box.brightness = { status: 200, body: { monitors: { [LEFT.id]: { value: 40, max: 100 } } } };

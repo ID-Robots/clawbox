@@ -531,23 +531,20 @@ describe("planLayout", () => {
     expect(plan?.main).not.toBe(EDP);
   });
 
-  // BUG (src/lib/monitors-layout.ts:293, planLayout's sort): among monitors
-  // the saved layout does not rank, the tie-break is `position?.x ?? 0`, and an
-  // output that is OFF has no position — so it sorts as x=0, LEFT of the ones
-  // already on screen (then `localeCompare` puts "eDP-1" before "HDMI-A-1").
-  // On this machine, with nothing saved yet and the lid open, the reconciler
-  // would light the laptop panel at x=0 and push both AOC monitors 1920 px to
-  // the right, where the doc says a never-seen monitor "goes to the right end
-  // of the row".
-  it.fails("with nothing saved, a monitor that is off comes on to the right of the ones already on screen", () => {
+  // Among monitors the saved layout does not rank, one that is OFF has no
+  // position. Read as x=0 it sorted LEFT of the ones already on screen (and
+  // `localeCompare` put "eDP-1" before "HDMI-A-1"), so with nothing saved and
+  // the lid open the reconciler lit the laptop panel at x=0 and pushed both
+  // AOC monitors 1920 px to the right — where the doc says a never-seen
+  // monitor "goes to the right end of the row".
+  it("with nothing saved, a monitor that is off comes on to the right of the ones already on screen", () => {
     const plan = planLayout(sample(), null);
     expect(plan?.outputs.map((p) => [p.name, p.x])).toEqual([["HDMI-A-1", 0], ["DP-2", 2560], ["eDP-1", 5120]]);
   });
 
-  // Same bug with a saved layout: both never-seen monitors go after the known
-  // one, but the one that is off (no position → 0) lands LEFT of the one that
-  // is on screen at x=0.
-  it.fails("among never-seen monitors, one that is off goes after the ones on screen", () => {
+  // The same with a saved layout: both never-seen monitors go after the known
+  // one, and the one that is off (no position) after the one on screen at x=0.
+  it("among never-seen monitors, one that is off goes after the ones on screen", () => {
     const plan = planLayout(sample(), { order: [DP2], main: DP2, monitors: { [DP2]: on(2560, 1440, 59.951) } });
     expect(plan?.outputs.map((p) => p.name)).toEqual(["DP-2", "HDMI-A-1", "eDP-1"]);
   });

@@ -7,10 +7,11 @@
  *
  * ddcutil names each display's connector ("card1-HDMI-A-1"), which is how a
  * bus is tied to the compositor's output and so to a monitor id. Detection is
- * slow (≈2 s) and cached until the set of outputs changes or five minutes
- * pass; a read is ≈0.5 s and a write ≈1 s per monitor. All calls go through
- * ONE queue, because two ddcutil runs on one bus garble each other, and a
- * slider dragged quickly only ever sends its latest value.
+ * slow (≈2 s); one that found a monitor is cached until the set of outputs
+ * changes or five minutes pass. A read is ≈0.5 s and a write ≈1 s per
+ * monitor. All calls go through ONE queue, because two ddcutil runs on one bus
+ * garble each other, and a slider dragged quickly only ever sends its latest
+ * value.
  */
 import { execFile } from "child_process";
 import { processStore } from "./process-store";
@@ -26,14 +27,30 @@ export interface BrightnessValue {
   max: number;
 }
 
+/**
+ * A value waiting for its write. A caller that arrives before the write starts
+ * replaces the value and shares the outcome, so every caller answers when the
+ * monitor has (or has not) taken the value that stands for it.
+ */
+interface PendingWrite {
+  value: number;
+  max: number;
+  done: Promise<BrightnessValue>;
+  resolve: (v: BrightnessValue) => void;
+  reject: (err: Error) => void;
+}
+
 interface BrightnessState {
   detect: { at: number; key: string; buses: Map<string, number> } | null;
   values: Map<number, BrightnessValue & { at: number }>;
   queue: Promise<unknown>;
-  /** The latest value asked for each bus, applied by whichever write runs next. */
-  wanted: Map<number, number>;
-  /** Buses whose write loop is running. */
-  writing: Set<number>;
+  /** Per bus, the latest value asked for and not yet on its way to the monitor. */
+  wanted: Map<number, PendingWrite>;
+  /**
+   * Per bus, the write loop that is running — a token, so a loop the suites'
+   * reset forgot cannot unregister the one that replaced it.
+   */
+  loops: Map<number, object>;
 }
 
 const state = () =>
@@ -42,7 +59,7 @@ const state = () =>
     values: new Map(),
     queue: Promise.resolve(),
     wanted: new Map(),
-    writing: new Set(),
+    loops: new Map(),
   }));
 
 /**
@@ -107,9 +124,14 @@ function queued<T>(fn: () => Promise<T>): Promise<T> {
 async function buses(outputNames: string[]): Promise<Map<string, number>> {
   const s = state();
   const key = [...outputNames].sort().join(",");
-  // Not installed, or no monitor answers: an empty map, cached like any other.
   if (s.detect && s.detect.key === key && Date.now() - s.detect.at < DETECT_TTL_MS) return s.detect.buses;
-  const found = await queued(() => ddcutil(["detect", "--terse"])).then(parseDdcDetect, () => new Map<string, number>());
+  const found = await queued(() => ddcutil(["detect", "--terse"])).then(parseDdcDetect, () => null);
+  // Only a detection that found a monitor is kept. A run that failed, or one in
+  // which nothing answered — a monitor asleep or plugged in a moment ago — is
+  // asked again next time instead of leaving its slider off for five minutes;
+  // that costs little, since only the Monitors tab reads (once per set of
+  // monitors that are on) and a write asks only for a monitor it showed.
+  if (!found?.size) return new Map();
   s.detect = { at: Date.now(), key, buses: found };
   return found;
 }
@@ -144,10 +166,48 @@ export class BrightnessError extends Error {
   }
 }
 
+function pendingWrite(value: number, max: number): PendingWrite {
+  let resolve!: (v: BrightnessValue) => void;
+  let reject!: (err: Error) => void;
+  const done = new Promise<BrightnessValue>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { value, max, done, resolve, reject };
+}
+
+/** Write the bus's wanted values one after another until none is left. Never rejects. */
+function startWriteLoop(bus: number): void {
+  const s = state();
+  const self = {};
+  s.loops.set(bus, self);
+  void (async () => {
+    for (let next = s.wanted.get(bus); next; next = s.wanted.get(bus)) {
+      s.wanted.delete(bus);
+      const { value, max } = next;
+      try {
+        await queued(() => ddcutil(["--bus", String(bus), "setvcp", BRIGHTNESS_VCP, String(value), "--noverify"]));
+      } catch (err) {
+        // Only this value's callers are told: a newer value asked for during
+        // the write is still in `wanted`, and goes on the bus next.
+        next.reject(new BrightnessError("write_failed", err instanceof Error ? err.message : String(err)));
+        continue;
+      }
+      s.values.set(bus, { value, max, at: Date.now() });
+      next.resolve({ value, max });
+    }
+    // In the same step as the empty look above, so a caller cannot find this
+    // loop still registered after it has stopped looking.
+    if (s.loops.get(bus) === self) s.loops.delete(bus);
+  })();
+}
+
 /**
  * Set one monitor's brightness. Calls arriving while a write to the same
  * monitor is under way only replace the value it applies next, so a dragged
  * slider costs one write at a time and ends on the value it was let go at.
+ * Every call answers once the write carrying its value — or the newer one that
+ * replaced it — has landed or failed, with what that write put on the monitor.
  */
 export async function setBrightness(output: { id: string; name: string }, value: number, outputNames: string[]): Promise<BrightnessValue> {
   const s = state();
@@ -155,26 +215,16 @@ export async function setBrightness(output: { id: string; name: string }, value:
   if (bus === undefined) throw new BrightnessError("unsupported", "This monitor's brightness can only be changed on the monitor itself");
   const max = s.values.get(bus)?.max ?? 100;
   if (!Number.isInteger(value) || value < 0 || value > max) throw new BrightnessError("invalid_value", `Brightness must be a whole number from 0 to ${max}`);
-  s.wanted.set(bus, value);
-  if (s.writing.has(bus)) return { value, max };
-  s.writing.add(bus);
-  try {
-    for (;;) {
-      const next = s.wanted.get(bus);
-      if (next === undefined) break;
-      s.wanted.delete(bus);
-      try {
-        await queued(() => ddcutil(["--bus", String(bus), "setvcp", BRIGHTNESS_VCP, String(next), "--noverify"]));
-      } catch (err) {
-        s.wanted.delete(bus);
-        throw new BrightnessError("write_failed", err instanceof Error ? err.message : String(err));
-      }
-      s.values.set(bus, { value: next, max, at: Date.now() });
-    }
-  } finally {
-    s.writing.delete(bus);
+  let next = s.wanted.get(bus);
+  if (next) {
+    next.value = value;
+    next.max = max;
+  } else {
+    next = pendingWrite(value, max);
+    s.wanted.set(bus, next);
   }
-  return { value: s.values.get(bus)?.value ?? value, max };
+  if (!s.loops.has(bus)) startWriteLoop(bus);
+  return next.done;
 }
 
 /** For the suites. */
@@ -184,5 +234,5 @@ export function _resetBrightnessForTests(): void {
   s.values.clear();
   s.queue = Promise.resolve();
   s.wanted.clear();
-  s.writing.clear();
+  s.loops.clear();
 }
