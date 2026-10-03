@@ -40,6 +40,11 @@ export interface ChatMessage {
   // already on the server" without comparing text or clocks. The gateway
   // suffixes its copy by role (`<runId>:user`); `runIdOf` normalises that.
   idempotencyKey?: string;
+  // Client-only, never read from the box: an assistant bubble this page painted
+  // from the live stream that the box's transcript has not been seen to hold
+  // yet. A history read carries it until the server has a reply for its turn
+  // (lib/chat-transcript-reconcile.ts, `carryUnconfirmedReplies`).
+  unconfirmed?: boolean;
   // Which model produced this reply, and the provider behind it — what
   // answered, not what was asked for. Recorded per turn by the Hermes route.
   model?: string;
@@ -47,7 +52,7 @@ export interface ChatMessage {
 }
 
 /** The gateway suffixes its stored copy by role; the client holds the bare run id. */
-function runIdOf(key: string | undefined): string | undefined {
+export function runIdOf(key: string | undefined): string | undefined {
   if (!key) return undefined;
   return key.endsWith(":user") ? key.slice(0, -":user".length) : key;
 }

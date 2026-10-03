@@ -1140,6 +1140,14 @@ describe("how far an OpenClaw pass has got", () => {
    * reach the card if the pass is run on a pseudo-terminal with that flag —
    * which is exactly what the bytes below demand. It also writes chunks into
    * a scratch index as it goes, the way a full reindex does.
+   *
+   * It is `memory index` and nothing else. The module refreshes the status
+   * behind a finished pass (`memory status --json`, from the same binary), and
+   * a stand-in that indexed whatever it was asked started a SECOND pass there:
+   * a new scratch index growing in `agents/main/agent` after the run had
+   * settled, racing this file's `afterEach` delete of the directory —
+   * `ENOTEMPTY` on a loaded CI runner, intermittently, in whichever pull
+   * request happened to be running.
    */
   async function fakeIndexer(total: number): Promise<{ script: string; db: string }> {
     const db = path.join(tmpDir, "agents", "main", "agent", "openclaw-agent.sqlite");
@@ -1148,6 +1156,8 @@ describe("how far an OpenClaw pass has got", () => {
     await fs.writeFile(script, [
       `#!${process.execPath}`,
       "import { DatabaseSync } from 'node:sqlite';",
+      // Any other subcommand — the status refresh — answers nothing and touches nothing.
+      "if (process.argv.slice(2, 4).join(' ') !== 'memory index') process.exit(0);",
       "const verbose = process.argv.includes('--verbose');",
       "const tty = process.stderr.isTTY === true;",
       `const scratch = new DatabaseSync(${JSON.stringify(db)} + '.memory-reindex-' + crypto.randomUUID());`,

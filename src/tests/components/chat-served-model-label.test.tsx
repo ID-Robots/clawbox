@@ -205,8 +205,9 @@ describe("which model answered, on the bubble", () => {
  */
 describe("the transcript comparator", () => {
   it("counts a reply that gained its served model as changed", () => {
+    // Shared by both chats since TASK-1372.
     const source = fs.readFileSync(
-      path.join(process.cwd(), "src", "components", "ChatPopup.tsx"), "utf8");
+      path.join(process.cwd(), "src", "lib", "chat-transcript-reconcile.ts"), "utf8");
     const sameTranscript = /function sameTranscript[\s\S]*?\n}/.exec(source)?.[0] ?? "";
     expect(sameTranscript).toMatch(/x\.model !== y\.model \|\| x\.provider !== y\.provider/);
   });

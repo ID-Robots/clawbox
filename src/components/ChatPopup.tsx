@@ -7,7 +7,6 @@ import { createPortal } from 'react-dom'
 // Connects directly to the OpenClaw gateway, no iframe.
 
 import {
-  unechoedUserTurns,
   uuid,
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
@@ -91,10 +90,26 @@ import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-ad
 import { DESKTOP_TRANSCRIPT_KEY } from '@/lib/harness/transcript-key'
 import { CHAT_TABS_ROUTE, conversationToFollow, isChatTabKey, nextTabSeq, parseActiveRecord, parseTabList, sortTabs, tabLabelFromText, type ChatActiveRecord, type ChatTabRecord } from '@/lib/chat-tabs'
 import { HarnessError, type HarnessStatus, type TurnResult, type HarnessAdapter } from '@/lib/harness/transport'
-import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, extractFileAttachments, boundedAudio, boundedFiles } from '@/lib/chat-media'
+import { splitMediaDirectives, mediaFileName, mediaUrl, isImageMedia, boundedAudio } from '@/lib/chat-media'
 import { ChatMessageRow, NO_AUDIO_NOTES, StreamingReplyBubble } from '@/components/ChatMessageRow'
 import { samePlainData } from '@/lib/same-plain-data'
 import { RecordingClock, SpeakingReplyLabel, TurnClock } from '@/components/ChatStatusClocks'
+// The live final, the pushed append and the history merge, written once for
+// this chat and the full-page one (TASK-1372).
+import {
+  cancelTranscriptReconcile,
+  finalAlreadyShownWithMedia,
+  finiteMessageTimestamp,
+  isAckOnlyReply,
+  mergeRestoredTranscript,
+  pushedSpokenReply,
+  readLiveReply,
+  scheduleTranscriptReconcile,
+  sessionMessagePush,
+  withAssistantReply,
+  withPushedSpokenReply,
+  type ReconcileTimer,
+} from '@/lib/chat-transcript-reconcile'
 import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective } from '@/lib/chat-email-refs'
 import { EmailFullView } from '@/lib/chat-email'
 import {
@@ -511,87 +526,6 @@ import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pill
 // dropped the event as slow) — not as the normal path.
 const IMAGE_GEN_BACKSTOP_MS = 20_000
 const IMAGE_GEN_MAX_WAIT_MS = 4 * 60_000
-
-// A reconcile usually returns a transcript identical to the one on screen.
-// Handing React a fresh array anyway re-renders the whole list and re-fires the
-// auto-scroll, which would yank a user who had scrolled up back to the bottom.
-function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i], y = b[i]
-    if (x.role !== y.role || x.text !== y.text || x.timestamp !== y.timestamp) return false
-    if ((x.images?.length ?? 0) !== (y.images?.length ?? 0)) return false
-    // Without this a reply that gained its spoken half between two history
-    // reads compares equal, React skips the render, and the player never
-    // appears until something else forces one. Compared by URL and not only by
-    // count: a reply whose recording was replaced keeps the count and changes
-    // the file, and a player left pointing at the old one plays the wrong
-    // words convincingly.
-    const xa = x.audio ?? [], ya = y.audio ?? []
-    if (xa.length !== ya.length) return false
-    for (let j = 0; j < xa.length; j++) if (xa[j] !== ya[j]) return false
-    // Same rule as the audio above, for the same reason: a reply that gained
-    // the model that served it between two reads must repaint, or the label
-    // never appears. Declared here because this comparator is where a
-    // late-arriving per-message field has to be named to survive a reconcile.
-    if (x.model !== y.model || x.provider !== y.provider) return false
-    // A reply that gained a file between two reads must repaint its card.
-    const xf = x.files ?? [], yf = y.files ?? []
-    if (xf.length !== yf.length) return false
-    for (let j = 0; j < xf.length; j++) if (xf[j] !== yf[j]) return false
-  }
-  return true
-}
-
-// A live TTS supplement can arrive before an older gateway's history
-// projection learns about it. Carry players across that short reconcile by
-// message occurrence, never by a text->audio map: common replies such as
-// "Sure." may appear many times, and one map entry would put the newest
-// recording on every identical bubble.
-function preserveSpokenByOccurrence(previous: ChatMessage[], next: ChatMessage[]): ChatMessage[] {
-  const restored = next.map(message => ({ ...message }))
-  const used = new Set<number>()
-  for (let i = previous.length - 1; i >= 0; i--) {
-    const prior = previous[i]
-    if (prior.role !== 'assistant' || !prior.audio?.length) continue
-    let target = -1
-    if (prior.timestamp > 0) {
-      target = restored.findIndex((candidate, index) =>
-        !used.has(index) && candidate.role === 'assistant'
-        && candidate.timestamp === prior.timestamp && candidate.text === prior.text)
-      if (target !== -1) {
-        // Durable transcript recovery may already have filled this exact
-        // occurrence. Treat that as the match even though there is nothing to
-        // copy; falling through would clone the same recording onto a later
-        // identical reply.
-        if (!restored[target].audio?.length) {
-          restored[target] = { ...restored[target], audio: boundedAudio(prior.audio) }
-        }
-        used.add(target)
-        continue
-      }
-    }
-    for (let j = restored.length - 1; j >= 0; j--) {
-      const candidate = restored[j]
-      if (prior.text.length > 0 && !used.has(j) && candidate.role === 'assistant' && !candidate.audio?.length
-          && candidate.text === prior.text) {
-        target = j
-        break
-      }
-    }
-    if (target !== -1) {
-      restored[target] = { ...restored[target], audio: boundedAudio(prior.audio) }
-      used.add(target)
-    }
-  }
-  return restored
-}
-
-function finiteMessageTimestamp(message: unknown): number | null {
-  if (!message || typeof message !== 'object') return null
-  const timestamp = (message as { timestamp?: unknown }).timestamp
-  return typeof timestamp === 'number' && Number.isFinite(timestamp) ? timestamp : null
-}
 
 // The newest server timestamp currently on screen — the line a later message
 // has to be after to belong to the wait that starts now.
@@ -1074,7 +1008,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [])
   // Debounce for the pushed-append reconcile, and a stable handle on it — the
   // socket handler is built once and must not close over a stale callback.
-  const transcriptReconcileTimerRef = useRef<number | null>(null)
+  const transcriptReconcileTimerRef = useRef<ReconcileTimer['current']>(null)
   const reconcileTranscriptRef = useRef<() => Promise<void>>(async () => {})
   // Mirrors `generatingImage` for the socket handler and the reconcile, neither
   // of which re-subscribes when it changes.
@@ -3237,68 +3171,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // into the local list (and have to dedupe it against the one the `chat`
         // stream may also deliver), treat it as a signal and re-read history —
         // the same reconcile a manual page refresh used to be doing by hand.
+        // The handling is shared with the full-page chat
+        // (lib/chat-transcript-reconcile.ts), which had none of it and showed a
+        // file the agent sent only after a reload (TASK-1372).
         if (eventName === 'session.message') {
-          const payload = data.payload as Record<string, unknown> | undefined
-          if (!payload) return
-          const sk = payload.sessionKey as string | undefined
-          if (sk && sk !== sessionKeyRef.current) return
+          const push = sessionMessagePush(data.payload, sessionKeyRef.current)
+          if (!push) return
           // Older gateways push the TTS supplement intact here but omit it
           // from chat.history. Render it immediately; the on-box transcript
           // supplement route below restores the same identity after refresh.
-          const pushedMessage = payload.message
-          const pushedRole = pushedMessage && typeof pushedMessage === 'object'
-            ? String((pushedMessage as Record<string, unknown>).role ?? '').toLowerCase()
-            : ''
-          const pushedRaw = extractText(pushedMessage)
-          const pushedAudio = boundedAudio(extractAudioAttachments(pushedMessage))
-          if (pushedRole === 'assistant' && pushedAudio.length > 0
-              && !isSentinel(pushedRaw) && !isInterSessionEnvelope(pushedRaw, pushedMessage)) {
-            const pushedText = splitEmailRefs(splitMediaDirectives(pushedRaw).text).text
-            setMessages(prev => {
-              // Only a bubble after the latest user turn can own this event.
-              // Otherwise a late supplement from the previous turn could be
-              // put on a new identical "Sure.". If the target is ambiguous,
-              // the timestamp-aware transcript reconcile scheduled below is
-              // the sole authority; text-only pending queues cross turns.
-              let latestUser = -1
-              for (let i = prev.length - 1; i >= 0; i--) {
-                if (prev[i].role === 'user') { latestUser = i; break }
-              }
-              for (let i = prev.length - 1; pushedText && i > latestUser; i--) {
-                const candidate = prev[i]
-                // The STORED text still carries its `EMAIL:` lines — they are
-                // lifted at render, not at write — and a caption can carry a
-                // `MEDIA:` line too, while `pushedText` has had
-                // them taken out. Compare like with like, or a turn that named
-                // messages never matches its own spoken supplement and the
-                // audio is dropped.
-                if (candidate.role !== 'assistant') continue
-                if (splitEmailRefs(splitMediaDirectives(candidate.text).text).text !== pushedText) continue
-                if (candidate.audio?.length) return prev // duplicate push
-                const next = [...prev]
-                next[i] = { ...candidate, audio: pushedAudio }
-                return next
-              }
-              // A genuinely audio-only reply has no caption to wait for.
-              if (!pushedText) {
-                return [...prev, {
-                  role: 'assistant' as const,
-                  text: '',
-                  timestamp: finiteMessageTimestamp(pushedMessage) ?? Date.now(),
-                  audio: pushedAudio,
-                }]
-              }
-              return prev
-            })
-          }
-          if (transcriptReconcileTimerRef.current !== null) {
-            window.clearTimeout(transcriptReconcileTimerRef.current)
-          }
+          const spoken = pushedSpokenReply(push.message)
+          if (spoken) setMessages(prev => withPushedSpokenReply(prev, spoken))
           // Coalesce the burst an agent turn produces into one read.
-          transcriptReconcileTimerRef.current = window.setTimeout(() => {
-            transcriptReconcileTimerRef.current = null
-            void reconcileTranscriptRef.current()
-          }, 400)
+          scheduleTranscriptReconcile(transcriptReconcileTimerRef, () => { void reconcileTranscriptRef.current() })
           return
         }
 
@@ -3348,17 +3233,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }
           } else if (state === 'final') {
             // A generated picture arrives as a MEDIA: line inside the reply
-            // text, not as a structured attachment — see lib/chat-media.ts.
-            const { text, images: directiveImages, audio: directiveAudio, files: directiveFiles } = splitAssistantMedia(extractText(msg))
-            // Any other file the agent sent — by directive or as a structured
-            // attachment — becomes a download card rather than vanishing.
-            const structuredFiles = extractFileAttachments(msg)
-            const images = [...new Set([...directiveImages, ...structuredFiles.images])]
-            const files = boundedFiles(directiveFiles, structuredFiles.files)
-            // A spoken reply is a structured attachment part, not a MEDIA:
-            // line — see lib/chat-media.ts. Both are read; the harness uses
-            // the first and image generation the second.
-            const audio = boundedAudio(extractAudioAttachments(msg), directiveAudio)
+            // text, a spoken reply as a structured attachment part, and any
+            // other file the agent sent by either — see lib/chat-media.ts. Read
+            // by the reader the full-page chat uses too.
+            const { raw, text, images, audio, files } = readLiveReply(msg)
             // Suppress sentinel and "Sent." (delivery-mirror ack) from the
             // rendered transcript — the latter is just a server-side
             // acknowledgement that the real reply will follow via the
@@ -3371,50 +3249,38 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // harness delivers a spoken reply as its own message whose text is
             // a repeat of the one already on screen, and treating that as an
             // empty ack threw the recording away and refetched history instead.
-            const isAckOnly = (!text && images.length === 0 && audio.length === 0 && files.length === 0) || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            const isAckOnly = isAckOnlyReply({ text, images, audio, files })
             // The reconcile often wins the race now: `session.message` lands
             // the stored reply, media intact, before this event arrives with
             // the same text and the media stripped. Appending it again showed
-            // the reply twice — once with the picture, once without.
+            // the reply twice — once with the picture, once without. Asked
+            // here as well as in the append below so a reply already on screen
+            // is not spoken a second time either.
             const latestShown = messagesRef.current[messagesRef.current.length - 1]
-            const alreadyShownWithMedia = images.length === 0 && audio.length === 0 && files.length === 0 && text.length > 0 &&
-              latestShown?.role === 'assistant' && latestShown.text === text &&
-              ((latestShown.images?.length ?? 0) > 0 || (latestShown.audio?.length ?? 0) > 0 || (latestShown.files?.length ?? 0) > 0)
+            const alreadyShownWithMedia = finalAlreadyShownWithMedia(latestShown, { text, images, audio, files })
             // Envelope suppression (TASK-416) still applies on the live path, so
             // the bubble cannot appear in real time and an envelope can never be
             // cached as a mascot snippet. Checked on the ORIGINAL text: a routing
             // envelope carrying a MEDIA: line must be dropped whole, not split
             // into a picture plus its own machinery.
-            if (!isAckOnly && !alreadyShownWithMedia && !isInterSessionEnvelope(extractText(msg), msg)) {
-              setMessages(prev => {
-                // The spoken half arrives as a SECOND message repeating the
-                // text of the one already rendered. Appending it verbatim
-                // showed the answer twice, once silent and once playable, so
-                // the audio is folded into the bubble it belongs to when the
-                // text matches and that bubble has none yet.
-                const last = prev[prev.length - 1]
-                if (text.length > 0 && audio.length > 0 && !images.length && !files.length && last && last.role === 'assistant'
-                    && last.text === text) {
-                  // A clip THIS chat made for the bubble gives way to the
-                  // gateway's: both are the same words in the same voice, and
-                  // which landed first is a race — merging them put two players
-                  // on one answer whenever the box spoke for the chat first.
-                  // The chat's clip stays in its ring, which releases it.
-                  const own = new Set(spokenUrlsRef.current)
-                  const mergedAudio = boundedAudio((last.audio ?? []).filter(src => !own.has(src)), audio)
-                  if (last.audio?.length === mergedAudio.length
-                      && last.audio.every((src, index) => src === mergedAudio[index])) return prev
-                  return [...prev.slice(0, -1), { ...last, audio: mergedAudio }]
-                }
-                return [...prev, {
-                  role: 'assistant' as const,
-                  text,
-                  timestamp: finiteMessageTimestamp(msg) ?? Date.now(),
-                  images,
-                  audio,
-                  ...(files.length ? { files } : {}),
-                }]
-              })
+            if (!isAckOnly && !alreadyShownWithMedia && !isInterSessionEnvelope(raw, msg)) {
+              // The spoken half arrives as a SECOND message repeating the text
+              // of the one already rendered; `withAssistantReply` folds its
+              // audio into that bubble instead of showing the answer twice. A
+              // clip THIS chat made for the bubble gives way to the gateway's:
+              // both are the same words in the same voice, and which landed
+              // first is a race — merging them put two players on one answer
+              // whenever the box spoke for the chat first. The chat's clip
+              // stays in its ring, which releases it.
+              const reply: ChatMessage = {
+                role: 'assistant',
+                text,
+                timestamp: finiteMessageTimestamp(msg) ?? Date.now(),
+                images,
+                audio,
+                ...(files.length ? { files } : {}),
+              }
+              setMessages(prev => withAssistantReply(prev, reply, { ownClips: new Set(spokenUrlsRef.current) }))
               // The picture reached us over the socket after all — nothing
               // left to wait for, so take the banner down.
               if (images.length > 0) endImageWait()
@@ -3908,18 +3774,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Preserve any optimistic user turns appended after this load was
       // dispatched but before chat.history responded — they haven't reached
       // the server yet so chatMsgs doesn't include them.
-      setMessages(prev => {
-        if (prev.length === 0) return chatMsgs
-        // Carry an event that beat the disk/history read across this one
-        // reconcile. One-to-one occurrence matching is essential here: a map
-        // keyed by text put the newest recording on every historical "Sure.".
-        const restored = preserveSpokenByOccurrence(prev, chatMsgs)
-        const lastServerTs = restored.length > 0 ? restored[restored.length - 1].timestamp : 0
-        const inFlight = unechoedUserTurns(prev, restored, lastServerTs)
-        const next = inFlight.length === 0 ? restored : [...restored, ...inFlight]
-        // Returning `prev` when nothing changed makes React skip the render.
-        return sameTranscript(prev, next) ? prev : next
-      })
+      // The merge is shared with the full-page chat
+      // (lib/chat-transcript-reconcile.ts); it returns `prev` itself when
+      // nothing changed, which makes React skip the render.
+      setMessages(prev => mergeRestoredTranscript(prev, chatMsgs))
 
       // Open the FIRST conversation, but only on a box that actually has an
       // introduction waiting.
@@ -4121,10 +3979,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     sendingRef.current = false
     setSending(false)
     runIdRef.current = null
-    if (transcriptReconcileTimerRef.current !== null) {
-      window.clearTimeout(transcriptReconcileTimerRef.current)
-      transcriptReconcileTimerRef.current = null
-    }
+    cancelTranscriptReconcile(transcriptReconcileTimerRef)
     if (ackOnlyHistoryTimerRef.current !== null) {
       window.clearTimeout(ackOnlyHistoryTimerRef.current)
       ackOnlyHistoryTimerRef.current = null
@@ -6555,10 +6410,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         window.clearTimeout(ackOnlyHistoryTimerRef.current)
         ackOnlyHistoryTimerRef.current = null
       }
-      if (transcriptReconcileTimerRef.current !== null) {
-        window.clearTimeout(transcriptReconcileTimerRef.current)
-        transcriptReconcileTimerRef.current = null
-      }
+      cancelTranscriptReconcile(transcriptReconcileTimerRef)
     }
   }, [failPending])
 

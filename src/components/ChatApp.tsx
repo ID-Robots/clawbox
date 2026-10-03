@@ -12,7 +12,6 @@ import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
 import {
   type ChatMessage,
-  unechoedUserTurns,
   uuid,
 } from '@/lib/chat-history-cache'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
@@ -45,14 +44,32 @@ import { EmailCard, EmailFullView } from '@/lib/chat-email'
 import {
   splitMediaDirectives,
   splitAssistantMedia,
-  extractAudioAttachments,
-  extractFileAttachments,
   boundedAudio,
   boundedFiles,
   mediaFileName,
   isImageMedia,
   mediaUrl,
 } from '@/lib/chat-media'
+// A file the agent sends reaches the live `final` stripped and the stored
+// transcript intact, so this surface learns of the append from the gateway's
+// `session.message` push and re-reads — the mascot chat's own handling, from the
+// module both chats share (TASK-1372).
+import {
+  beginHistoryRead,
+  cancelTranscriptReconcile,
+  claimHistoryRead,
+  isAckOnlyReply,
+  mergeRestoredTranscript,
+  pushedSpokenReply,
+  readLiveReply,
+  scheduleTranscriptReconcile,
+  sessionMessagePush,
+  withAssistantReply,
+  withPushedSpokenReply,
+  type HistoryReadOrder,
+  type ReconcileTimer,
+} from '@/lib/chat-transcript-reconcile'
+import { subscribeSessionMessages } from '@/lib/gateway-approvals'
 // WHICH HARNESS ANSWERS, resolved the one way this product resolves it.
 //
 // This surface is `/app/clawbox` — the page behind "Open in new tab", and the
@@ -421,9 +438,13 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   // the deferred-reply rationale. Single-flight + cleared on unmount so
   // a burst of acked turns doesn't pile up overlapping fetches.
   const ackOnlyHistoryTimerRef = useRef<number | null>(null)
-  // The coalescing timer for `session.message`: one re-read per burst of
-  // appends, the same 400 ms the mascot chat waits (TASK-1364).
-  const transcriptReconcileTimerRef = useRef<number | null>(null)
+  // The coalesced re-read a `session.message` push schedules: one read per
+  // burst of appends, the same 400 ms the mascot chat waits (TASK-1364,
+  // TASK-1372). Cleared on unmount.
+  const transcriptReconcileTimerRef = useRef<ReconcileTimer['current']>(null)
+  // Which history read was asked for last, and which was painted last — so an
+  // answer that arrives after a later one's is dropped (`claimHistoryRead`).
+  const historyReadOrderRef = useRef<HistoryReadOrder>({ issued: 0, applied: 0 })
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
@@ -610,6 +631,10 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
    * written twice it would show the answer once silently and once playable on
    * whichever path was missed, which is the divergence this whole change is
    * about.
+   *
+   * The fold, and the refusal to append a text-only copy of a reply the
+   * transcript re-read has already painted with its file, are the mascot
+   * chat's own rules (`withAssistantReply`), asked of the latest state.
    */
   const appendAssistantReply = useCallback((
     text: string,
@@ -619,26 +644,17 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // than dropped: the transcript this surface replays carries all four, so
     // discarding them here would make the live bubble and the reloaded one
     // disagree the moment anything renders them.
-    extra?: Pick<ChatMessage, 'reasoning' | 'toolCalls' | 'model' | 'provider' | 'files'>,
+    extra?: Pick<ChatMessage, 'reasoning' | 'toolCalls' | 'model' | 'provider' | 'files' | 'unconfirmed'>,
   ) => {
-    setMessages(prev => {
-      const last = prev[prev.length - 1]
-      if (text.length > 0 && audio.length > 0 && images.length === 0 && !(extra?.files?.length)
-          && last && last.role === 'assistant' && last.text === text) {
-        const merged = boundedAudio(last.audio ?? [], audio)
-        if (last.audio?.length === merged.length
-            && last.audio.every((src, i) => src === merged[i])) return prev
-        return [...prev.slice(0, -1), { ...last, audio: merged }]
-      }
-      return [...prev, {
-        role: 'assistant' as const,
-        text: prettifyAssistantText(text),
-        timestamp: Date.now(),
-        images,
-        audio,
-        ...extra,
-      }]
-    })
+    const reply: ChatMessage = {
+      role: 'assistant',
+      text: prettifyAssistantText(text),
+      timestamp: Date.now(),
+      images,
+      audio,
+      ...extra,
+    }
+    setMessages(prev => withAssistantReply(prev, reply))
   }, [])
 
   const loadHistory = useCallback(async (opts?: { restore?: boolean }) => {
@@ -646,6 +662,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // A harness with no replay has nothing to read, and asking would be a call
     // the adapter's own contract answers `unsupported`.
     if (!transport.capabilities.canListHistory) return
+    // This read's place in line (see `claimHistoryRead` below).
+    const seq = beginHistoryRead(historyReadOrderRef.current)
+    const overtaken = () => historyReadOrderRef.current.applied > seq
     // A RESTORE — the read on the hello, the replay, Try again — is bounded and
     // retried only while the gateway says "not yet" or does not answer; the
     // ack-only refetch stays the single best-effort read it always was
@@ -677,32 +696,37 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           attemptTimeoutMs: HISTORY_ATTEMPT_TIMEOUT_MS,
           deadlineMs: HISTORY_RESTORE_DEADLINE_MS,
           delaysMs: HISTORY_RETRY_DELAYS_MS,
-          onRetry: () => setRestoreState({ phase: 'retrying' }),
+          // Not over a conversation a later read has already painted.
+          onRetry: () => { if (!overtaken()) setRestoreState({ phase: 'retrying' }) },
         })
         : await read()
       // Any read that answers ends a restore's wait or failure.
       setRestoreState(null)
+      // Three things read now — the restore, the re-read each pushed append
+      // schedules, the ack-only refetch — and they can overlap. An answer that
+      // lost the race to a later read's must not paint the older transcript
+      // over it: that took the stored reply and its card back off the screen.
+      if (!claimHistoryRead(historyReadOrderRef.current, seq)) return
       // Server is canonical for everything it knows about, but a user turn
       // typed between connect-ack and history-arrival ("optimistic local")
-      // hasn't reached the server yet — preserve it. Recognised by its run's
-      // idempotency key, the way the mascot chat does, not by timestamp alone:
-      // the local copy carries the browser's clock and the server's the box's,
-      // and now that every push re-reads the conversation (TASK-1364) a
-      // browser running ahead of the box would show each of its turns twice.
-      setMessages(prev => {
-        if (prev.length === 0) return chatMsgs
-        const lastServerTs = chatMsgs.length > 0 ? chatMsgs[chatMsgs.length - 1].timestamp : 0
-        const inFlight = unechoedUserTurns(prev, chatMsgs, lastServerTs)
-        return inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
-      })
+      // hasn't reached the server yet. The mascot chat's merge, shared: such a
+      // turn is recognised by its run's idempotency key rather than by comparing
+      // the browser's clock with the box's — every push re-reads the
+      // conversation (TASK-1364), so a browser running ahead of the box would
+      // otherwise show each of its turns twice. Two things the box may not hold
+      // yet are kept as well: a reply this page painted live (until the box has
+      // a reply for that turn), and this page's own notes (a failed turn, a
+      // fallback model).
+      setMessages(prev => mergeRestoredTranscript(prev, chatMsgs, { keepLocalNotes: true, keepUnconfirmedReplies: true }))
     } catch (err) {
       // Called off: a newer socket, Try again or the page going away owns the
       // conversation now. Nothing to report.
       if (restoreCtl && isRestoreAborted(err)) return
       console.error('Failed to load history:', err)
       // Only a restore ends in the panel: an ordinary refetch failing leaves
-      // the transcript that is already painted, exactly as before.
-      if (restoreCtl) setRestoreState({ phase: 'failed', kind: classifyRestoreFailure(err) })
+      // the transcript that is already painted, exactly as before. Nor does a
+      // restore a later read has already answered for.
+      if (restoreCtl && !overtaken()) setRestoreState({ phase: 'failed', kind: classifyRestoreFailure(err) })
     } finally {
       if (restoreCtl && restoreAbortRef.current === restoreCtl) restoreAbortRef.current = null
     }
@@ -794,18 +818,17 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
           sessionKeyRef.current = mainSessionKey
           setBoundSessionKey(mainSessionKey)
+          // Every append to this conversation, pushed. Without it this page saw
+          // the replies the gateway streams but never a turn the owner typed on
+          // another device or a reply that lands from a channel (TASK-1364) —
+          // nor the file or picture the agent sent, which the live `final` often
+          // lacks and the stored append carries (TASK-1372) — until a reload.
+          // The plain frame: this surface draws no approval cards. Per socket,
+          // so every hello asks again; a gateway without the RPC still streams.
+          void subscribeSessionMessages(wsRequest, mainSessionKey)
           // The restore itself: bounded, and ended with the reason and Try
           // again rather than an empty conversation when it cannot be done.
           void loadHistory({ restore: true })
-          // Every append to this conversation, pushed (TASK-1364). Without it
-          // this page saw the replies the gateway streams but never a turn the
-          // owner typed on another device — or a reply that lands from a
-          // channel — until a reload. The mascot chat subscribes the same way
-          // (with its approvals, which this page does not draw).
-          void wsRequest('sessions.messages.subscribe', { key: mainSessionKey }).catch(() => {
-            // A gateway without the RPC: replies still stream, and the next
-            // history read reconciles the rest.
-          })
         },
         reject: (err: Error) => {
           clearHandshakeTimer()
@@ -910,22 +933,6 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           return
         }
 
-        // The conversation gained a message — the owner's turn from the phone,
-        // a reply, a channel's. A signal to re-read, not a message to merge:
-        // the read is the one projection both editions share, and merging the
-        // pushed frame would have to dedupe it against the `chat` stream.
-        if (eventName === 'session.message') {
-          const payload = data.payload as Record<string, unknown> | undefined
-          const sk = payload?.sessionKey as string | undefined
-          if (!payload || (sk && sk !== sessionKeyRef.current)) return
-          if (transcriptReconcileTimerRef.current !== null) window.clearTimeout(transcriptReconcileTimerRef.current)
-          transcriptReconcileTimerRef.current = window.setTimeout(() => {
-            transcriptReconcileTimerRef.current = null
-            void loadHistory()
-          }, 400)
-          return
-        }
-
         // Tool-call lifecycle: surface a small inline pill above the
         // streaming bubble so the user can see when the agent is invoking
         // tools (bash, file ops, etc.). Mirrors ChatPopup.
@@ -938,6 +945,23 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           if (payload.stream === 'tool') {
             applyToolEvent(payload.data as Record<string, unknown> | undefined)
           }
+          return
+        }
+
+        // The conversation gained a message — the owner's turn from the phone
+        // (TASK-1364), the agent's reply with its file intact (TASK-1372), a
+        // channel's. A signal to re-read rather than a message to merge, exactly
+        // as the mascot chat treats it: the live `final` may have painted the
+        // same reply without its card, and the re-read replaces it with the
+        // stored one instead of adding a second bubble.
+        if (eventName === 'session.message') {
+          const push = sessionMessagePush(data.payload, sessionKeyRef.current)
+          if (!push) return
+          // A spoken supplement older gateways push here but leave out of
+          // `chat.history` is shown from the push itself.
+          const spoken = pushedSpokenReply(push.message)
+          if (spoken) setMessages(prev => withPushedSpokenReply(prev, spoken))
+          scheduleTranscriptReconcile(transcriptReconcileTimerRef, () => { void loadHistory() })
           return
         }
 
@@ -954,32 +978,27 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
             const text = extractText(msg)
             if (text && !isInterSessionEnvelope(text, msg)) applyStreaming(text)
           } else if (state === 'final') {
-            const raw = extractText(msg)
-            // Split on the way INTO state, as the mascot chat does: a generated
-            // picture arrives as a `MEDIA:` line inside the reply text and a
-            // spoken reply as a structured attachment part (lib/chat-media.ts),
-            // and storing the caption alone is what put an absolute media path
-            // in the transcript. Both shapes are read; neither is guaranteed.
-            const { text, images: directiveImages, audio: directiveAudio, files: directiveFiles } = splitAssistantMedia(raw)
-            const audio = boundedAudio(extractAudioAttachments(msg), directiveAudio)
-            // Every other file the agent sent becomes a download card.
-            const structuredFiles = extractFileAttachments(msg)
-            const images = [...new Set([...directiveImages, ...structuredFiles.images])]
-            const files = boundedFiles(directiveFiles, structuredFiles.files)
+            // Split on the way INTO state, as the mascot chat does and through
+            // the same reader: a generated picture arrives as a `MEDIA:` line
+            // inside the reply text, a spoken reply as a structured attachment
+            // part, and any other file the agent sent by either — each becomes
+            // a picture, a player or a download card. Storing the caption alone
+            // is what put an absolute media path in the transcript.
+            //
+            // The live frame often carries NONE of the media, though: the file
+            // is in the stored append, and the `session.message` push above
+            // re-reads it. Whichever lands first, the reply is shown once — the
+            // re-read replaces a bubble this branch painted without its card,
+            // and this branch adds nothing over a bubble the re-read already
+            // painted with it (`withAssistantReply`).
+            const { raw, text, images, audio, files } = readLiveReply(msg)
             // Suppress protocol sentinels and "Sent." (delivery-mirror ack)
             // from the rendered transcript — the former are markers users
             // shouldn't see, the latter is just a server-side ack that the
             // real reply will follow via the chat.history refetch scheduled
-            // below. `isSentinel` covers NO_REPLY plus any other protocol
-            // sentinel `chat-sentinels.ts` catalogues — same shared check
-            // ChatPopup uses, so the two components can't drift on which
-            // finals count as ack-only.
-            //
-            // A picture or a clip with no caption is a real reply, not an ack:
-            // asking `!text` alone would have thrown it away and refetched
-            // history instead.
-            const isAckOnly = (!text && images.length === 0 && audio.length === 0 && files.length === 0)
-              || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            // below. The same shared check ChatPopup uses, so the two
+            // components can't drift on which finals count as ack-only.
+            const isAckOnly = isAckOnlyReply({ text, images, audio, files })
             // Same suppression as the history path, so the bubble cannot
             // appear in real time either — only the append is skipped, the
             // ack-only refetch below still runs. Asked of the ORIGINAL text: a
@@ -989,7 +1008,10 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
             // Appended through the SHARED renderer, so this bubble and the one
             // an adapter turn resolves with cannot drift.
             if (!isAckOnly && !isInterSessionEnvelope(raw, msg)) {
-              appendAssistantReply(text, images, audio, files.length ? { files } : undefined)
+              // `unconfirmed` until a history read shows the box holds a reply
+              // for this turn: a read answered just before the box stored it
+              // must not take the bubble back off the screen.
+              appendAssistantReply(text, images, audio, { ...(files.length ? { files } : {}), unconfirmed: true })
             }
             applyStreaming('')
             // A reply another model wrote — the picked one failed and the
@@ -1052,6 +1074,10 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
                 images: keptMedia.images,
                 audio: boundedAudio(keptMedia.audio),
                 ...(keptMedia.files.length ? { files: boundedFiles(keptMedia.files) } : {}),
+                // The box may never store a partial answer, and the next turn's
+                // history read would then drop it; kept until the box holds a
+                // reply for this turn, which then stands in for it.
+                unconfirmed: true,
               }])
             }
             clearToolCalls()
@@ -1564,10 +1590,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         window.clearTimeout(ackOnlyHistoryTimerRef.current)
         ackOnlyHistoryTimerRef.current = null
       }
-      if (transcriptReconcileTimerRef.current !== null) {
-        window.clearTimeout(transcriptReconcileTimerRef.current)
-        transcriptReconcileTimerRef.current = null
-      }
+      cancelTranscriptReconcile(transcriptReconcileTimerRef)
       // The starting-retry ladder: cleared only by the NEXT retry until now, so
       // a window closed inside the three-second wait went on reconnecting.
       if (startingRetryTimerRef.current !== null) {
