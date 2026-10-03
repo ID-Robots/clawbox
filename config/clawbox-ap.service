@@ -18,7 +18,9 @@ RemainAfterExit=yes
 # which neither script reads — harmless. TASK-445 follow-up (security scan #21).
 EnvironmentFile=-/etc/clawbox/network.env
 Environment=CLAWBOX_AP_SUPERVISED=1
-TimeoutStartSec=240
+# 180 lock + 60 readiness + 120 candidates + 45 prescan + 150 AP +
+# 30 restore/finalize = 585s; 15s scheduling/phase-boundary margin.
+TimeoutStartSec=600
 TimeoutStopSec=200
 KillMode=control-group
 ExecStart=/usr/local/libexec/clawbox/start-ap.sh

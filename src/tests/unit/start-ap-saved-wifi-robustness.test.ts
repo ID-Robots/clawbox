@@ -600,7 +600,7 @@ describe("N1: a profile whose NAME is a UUID is still acted on by its own UUID",
     expect(targetsOf(r, "down").sort()).toEqual([HOME, OFFICE, CAFE].sort());
     expect(targetsOf(r, "modify").sort()).toEqual([HOME, OFFICE, CAFE].sort());
     for (const u of [HOME, OFFICE, CAFE]) expect(profileState(u).autoconnect).toBe("no");
-    expect(r.lines.filter((l) => l === `connection up uuid ${HOTSPOT} ifname ${IFACE}`)).toHaveLength(1);
+    expect(r.lines.filter((l) => l === `--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`)).toHaveLength(1);
     expect(activeNow()).toBe(HOTSPOT);
     expectOnlyRealUuids(r, profiles);
   });
@@ -730,7 +730,7 @@ describe("N3: the order saved clients are tried in", () => {
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(clientUps(r)).toEqual([LOFT, CAFE, GARAGE, T_C, T_A, OFFICE, HOME]);
-    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     expectOnlyRealUuids(r, profiles);
   });
 });
@@ -796,7 +796,7 @@ describe("N6: what one run may do, bounded", () => {
     expect(clientUps(r)).toEqual([HOME, OFFICE, CAFE]);
     const lastClient = r.calls.map((a, i) => (isClientUp(a) ? i : -1)).reduce((m, i) => Math.max(m, i), -1);
     expect(lastClient).toBeLessThan(r.calls.findIndex(isApActivity));
-    expect(r.lines.filter((l) => l === `connection up uuid ${HOTSPOT} ifname ${IFACE}`)).toHaveLength(3);
+    expect(r.lines.filter((l) => l === `--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`)).toHaveLength(3);
     expect(r.stderr).toContain("ERROR: access point did not come up after 3 attempts");
     expect(existsSync(path.join(root, "data", "ap-runtime.env")), "a hotspot that never came up was published").toBe(false);
     expectOnlyRealUuids(r, three);
@@ -915,7 +915,7 @@ describe("N5 evidence: a client that autoconnects inside the last AP attempt's w
     console.log(`control trace:\n${show(r)}\nstdout tail:\n${r.stdout.trim().split("\n").slice(-2).join("\n")}`);
     expect(existsSync(path.join(nm, "raced"))).toBe(true);
     expect(activeNow()).toBe(HOME);
-    expect(r.lines).not.toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(r.lines).not.toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
   });
 
   it("N5-a: a client that lands before inhibition is acknowledged is kept", () => {
@@ -1092,6 +1092,62 @@ exit $rc
 }
 const deviceAc = () => readFileSync(path.join(nm, "device-ac"), "utf-8");
 
+describe("C1 elapsed recovery budgets", () => {
+  it("reserves the complete lock, phase and cleanup budgets in the unit deadline", () => {
+    const script = readFileSync(START_AP, "utf-8");
+    const unit = readFileSync("config/clawbox-ap.service", "utf-8");
+    const helper = readFileSync("scripts/wifi-radio.sh", "utf-8");
+    const lock = Number(helper.match(/flock -x -w (\d+)/)?.[1]);
+    const phases = [...script.matchAll(/phase_deadline=\$\(\(SECONDS \+ (\d+)\)\)/g)].map(m => Number(m[1]));
+    const candidate = Number(script.match(/CLIENT_TOTAL_BUDGET:-(\d+)/)?.[1]);
+    const ap = Number(script.match(/AP_TOTAL_BUDGET:-(\d+)/)?.[1]);
+    expect(phases).toEqual([60, 30, 45]);
+    expect(candidate).toBe(120);
+    expect(ap).toBe(150);
+    const start = Number(unit.match(/^TimeoutStartSec=(\d+)/m)?.[1]);
+    expect(start).toBeGreaterThanOrEqual(lock + phases.reduce((a, b) => a + b, 0) + candidate + ap + 15);
+  });
+  it.each([false, true])("exhausts slow candidates into a working AP (lock contention=%s)", (contended) => {
+    makeBox({ setupComplete: true, profiles: [HOME, OFFICE, CAFE, LOFT, GARAGE, ATTIC].map(uuid => ({ uuid, name: uuid })) });
+    // Real elapsed time, not the fixture's no-op sleep. Each unreachable
+    // candidate consumes its requested wait. The total budget must clip it.
+    wrapNm(`if [[ "$*" == *'connection up uuid'* ]] && [[ "$*" != *'${HOTSPOT}'* ]]; then
+  printf "%s\\n" "$*" >> "$NMSTUB/slow-attempts"
+  /bin/sleep "$2"
+fi`);
+    if (contended) {
+      mkdirSync(path.join(root, "radio-run"));
+      writeFileSync(path.join(root, "radio-run", `${IFACE}.lock`), "");
+      // Start an actual owner and wait for its acquired-lock marker.
+      const holder = spawnSync("bash", ["-c", 'exec 9< "$1"; flock -x 9; ( /bin/sleep 2 ) >&- 2>&- <&- &', "test", path.join(root, "radio-run", `${IFACE}.lock`)], { encoding: "utf-8" });
+      expect(holder.status).toBe(0);
+    }
+    const began = Date.now();
+    const r = runStartAp({ CLIENT_TOTAL_BUDGET: "3", CLIENT_UP_WAIT: "2", SKIP_PRESCAN: "1" });
+    expect(r.status, r.stderr).toBe(0);
+    const elapsed = Date.now() - began;
+    expect(elapsed).toBeLessThan(contended ? 8500 : 6500);
+    // Ownership waiting must not spend the candidate or recovery reserve.
+    if (contended) expect(elapsed).toBeGreaterThanOrEqual(4500);
+    const attempts = readFileSync(path.join(nm, "slow-attempts"), "utf-8").trim().split("\n");
+    expect(attempts.length).toBeGreaterThan(0);
+    expect(attempts.length).toBeLessThan(6);
+    expect(activeNow()).toBe(HOTSPOT);
+    expect(deviceAc()).toBe("yes");
+    expect(r.stdout).toContain("candidate budget exhausted");
+  });
+
+  it("bounds stalled AP activation and restores policy on exhaustion", () => {
+    makeBox({ setupComplete: true, profiles: [] });
+    wrapNm(`if [[ "$*" == *'connection up uuid ${HOTSPOT}'* ]]; then /bin/sleep 10; exit 4; fi`);
+    const began = Date.now();
+    const r = runStartAp({ AP_TOTAL_BUDGET: "2", SKIP_PRESCAN: "1" });
+    expect(r.status).not.toBe(0);
+    expect(Date.now() - began).toBeLessThan(5000);
+    expect(deviceAc()).toBe("yes");
+  });
+});
+
 describe("N5 admission and restoration contracts (synthetic NM barrier)", () => {
   it.each(["yes", "no"])("restores original device autoconnect=%s after verified fallback", (original) => {
     makeBox({ setupComplete: true, profiles: [] });
@@ -1106,7 +1162,7 @@ describe("N5 admission and restoration contracts (synthetic NM barrier)", () => 
 
   it("blocks a NEW automatic start between final state observation and AP up", () => {
     makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home" }] });
-    wrapNm(`if [ "$*" = "connection up uuid ${HOTSPOT} ifname ${IFACE}" ]; then
+    wrapNm(`if [ "$*" = "--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}" ]; then
   : > "$NMSTUB/boundary"
   if [ "$(cat "$NMSTUB/device-ac" 2>/dev/null)" != no ]; then
     printf '${HOME}' > "$NMSTUB/active"; printf 100 > "$NMSTUB/state"
@@ -1160,7 +1216,8 @@ case "$*" in *"connection up uuid"*) printf yes > "$NMSTUB/device-ac" ;; esac`);
 
   it("restores on TERM after inhibition", () => {
     makeBox({ setupComplete: true, profiles: [] });
-    wrapNm("", `if [ "$*" = "--wait 5 device set ${IFACE} autoconnect no" ]; then kill -TERM "$PPID"; fi`);
+    // nmcli now runs below timeout: signal the owning shell, not its timer.
+    wrapNm("", `if [ "$*" = "--wait 5 device set ${IFACE} autoconnect no" ]; then kill -TERM "$(ps -o ppid= -p "$PPID" | tr -d ' ')"; fi`);
     const r = runStartAp();
     expect(r.status).toBe(143);
     expect(r.calls.filter(isHotspotUp)).toEqual([]);
@@ -1253,12 +1310,12 @@ describe("N8 AP ownership", () => {
   it.each([
     `--wait 5 device set ${IFACE} autoconnect no`,
     `device wifi rescan ifname ${IFACE}`,
-    `connection up uuid ${HOTSPOT} ifname ${IFACE}`,
+    `--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`,
   ])("recovers startup SIGKILL at %s before a replacement snapshots policy", (killAt) => {
     makeBox({ setupComplete: true, profiles: [] });
     wrapNm("", `if [ "$*" = "${killAt}" ] && [ ! -e "$NMSTUB/killed" ]; then
       touch "$NMSTUB/killed"
-      kill -KILL "$PPID"
+      kill -KILL "$(ps -o ppid= -p "$PPID" | tr -d ' ')"
     fi`);
     const killed = runStartAp();
     expect(killed.status).not.toBe(0);

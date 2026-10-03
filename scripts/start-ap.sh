@@ -5,12 +5,41 @@ set -euo pipefail
 # request restart_ap through the root-step launcher, never execute this as root.
 . "$(dirname "${BASH_SOURCE[0]}")/wifi-radio.sh"
 wifi_lock
+# Budgets start AFTER the (separately bounded 180s) ownership wait. Every NM
+# subprocess is capped by the current phase, including profile enumeration.
+# Keep fallback and restoration reserves separate from candidate traversal.
+bounded_budget() {
+  local value="$1" maximum="$2"
+  if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "${#value}" -gt 3 ]; then value="$maximum"; fi
+  value=$((10#$value))
+  if [ "$value" -lt 1 ] || [ "$value" -gt "$maximum" ]; then value="$maximum"; fi
+  printf '%s' "$value"
+}
+phase_deadline=$((SECONDS + 60))
+phase_command() {
+  local remaining=$((phase_deadline - SECONDS)) wait="$1"
+  shift
+  [ "$remaining" -gt 0 ] || return 124
+  [ "$wait" -le "$remaining" ] || wait="$remaining"
+  # A hung command must not consume the recovery reserve. Kill its whole
+  # timeout process group, including children which inherited the radio lock.
+  timeout --signal=KILL "$wait" "$@"
+}
+nmcli() {
+  local wait=10
+  if [ "${1:-}" = --wait ]; then wait="$2"; fi
+  phase_command "$wait" nmcli "$@"
+}
+iw() { phase_command 5 iw "$@"; }
+ip() { phase_command 5 ip "$@"; }
+iptables() { phase_command 5 iptables "$@"; }
+sysctl() { phase_command 5 sysctl "$@"; }
 wifi_recover || exit 1
 IFACE="${NETWORK_INTERFACE:-wlP1p1s0}"
 DEFAULT_AP_IP="10.42.0.1"
 ALT_AP_IP="10.43.0.1"
 AP_IP="$DEFAULT_AP_IP"
-IFACE_TIMEOUT="${IFACE_TIMEOUT:-10}"
+IFACE_TIMEOUT="$(bounded_budget "${IFACE_TIMEOUT:-10}" 10)"
 
 # Detect collision with the upstream subnet. If any non-AP interface is on
 # 10.42.0.0/24, switch the AP to 10.43.0.0/24 so the captive portal,
@@ -94,8 +123,8 @@ fi
 # `systemctl restart` once NM had settled. Wait for NM to report ready first.
 wait_for_nm() {
   local elapsed=0
-  local timeout="${NM_READY_TIMEOUT:-30}"
-  while [ "$elapsed" -lt "$timeout" ]; do
+  local timeout="$(bounded_budget "${NM_READY_TIMEOUT:-30}" 30)"
+  while [ "$elapsed" -lt "$timeout" ] && [ "$SECONDS" -lt "$phase_deadline" ]; do
     if [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
       echo "[AP] NetworkManager is ready (after ${elapsed}s)"
       return 0
@@ -225,6 +254,7 @@ saved_clients() {
   local line prio ts
   nmcli -t -f UUID,TYPE,AUTOCONNECT-PRIORITY,TIMESTAMP,NAME connection show 2>/dev/null |
     while IFS= read -r line; do
+      [ "$SECONDS" -lt "$phase_deadline" ] || break
       split_row "$line" 5 || continue
       is_wifi_type "${ROW[1]}" || continue
       is_client_profile "${ROW[0]}" "${ROW[4]}" || continue
@@ -249,7 +279,14 @@ if [ "${#CLIENT_UP_WAIT}" -gt 2 ] || [ "$CLIENT_UP_WAIT" -lt 1 ] || [ "$CLIENT_U
 
 # Recovery state lives outside this process. EXIT handles ordinary errors;
 # systemd ExecStopPost handles SIGKILL/timeout after killing the worker cgroup.
-restore_device_policy() { wifi_recover; }
+restoration_started=false
+restore_device_policy() {
+  if [ "$restoration_started" = false ]; then
+    phase_deadline=$((SECONDS + 30))
+    restoration_started=true
+  fi
+  wifi_recover
+}
 restore_autoconnect() {
   local rc=$?
   trap - EXIT
@@ -262,6 +299,7 @@ restore_autoconnect() {
 client_or_idle() {
   local state client elapsed=0
   while :; do
+    [ "$SECONDS" -lt "$phase_deadline" ] || return 1
     state="$(iface_state)"
     case "$state" in
       30|120) return 0 ;;
@@ -269,13 +307,13 @@ client_or_idle() {
         if client="$(active_client)"; then stay_on_client "$client" "during admission"; fi
         if iw dev "$IFACE" info 2>/dev/null | grep -q "type AP"; then return 0; fi
         echo "[AP] Unknown connected WiFi identity — deferring" >&2
-        exit 1 ;;
+        return 1 ;;
       40|50|60|70|80|90|110)
         if [ "$elapsed" -ge 15 ]; then
-          echo "[AP] WiFi still transitioning — deferring" >&2; exit 1
+          echo "[AP] WiFi still transitioning — deferring" >&2; return 1
         fi
         sleep 1; elapsed=$((elapsed + 1)) ;;
-      *) echo "[AP] Unknown/unavailable WiFi state — deferring" >&2; exit 1 ;;
+      *) echo "[AP] Unknown/unavailable WiFi state — deferring" >&2; return 1 ;;
     esac
   done
 }
@@ -283,7 +321,7 @@ client_or_idle() {
 # Explicit connection activation may re-enable device autoconnect. Reassert
 # inhibition before each competing action, retaining the ORIGINAL snapshot.
 ensure_inhibited() {
-  wifi_inhibit || exit 1
+  wifi_inhibit || return 1
   client_or_idle
 }
 
@@ -310,13 +348,22 @@ elif [ "$setup_complete" = true ]; then
     stay_on_client "$client" "already"
   fi
   inhibit_autoconnect
+  phase_deadline=$((SECONDS + $(bounded_budget "${CLIENT_TOTAL_BUDGET:-120}" 120)))
   tried=0
   while IFS=$'\t' read -r uuid name; do
+    [ "$SECONDS" -lt "$phase_deadline" ] || break
     [ -n "$uuid" ] || continue
-    ensure_inhibited
+    ensure_inhibited || {
+      [ "$SECONDS" -lt "$phase_deadline" ] || break
+      exit 1
+    }
+    remaining=$((phase_deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    client_wait="$CLIENT_UP_WAIT"
+    [ "$client_wait" -le "$remaining" ] || client_wait="$remaining"
     tried=$((tried + 1))
     echo "[AP] Setup complete — trying saved WiFi: '$(log_name "$name")' ($uuid)"
-    if nmcli --wait "$CLIENT_UP_WAIT" connection up uuid "$uuid" ifname "$IFACE" </dev/null 2>/dev/null; then
+    if nmcli --wait "$client_wait" connection up uuid "$uuid" ifname "$IFACE" </dev/null 2>/dev/null; then
       if client="$(active_client)"; then
         name="${client#*$'\t'}"
         echo "[AP] WiFi connected to '$(log_name "$name")' — skipping AP mode"
@@ -326,18 +373,24 @@ elif [ "$setup_complete" = true ]; then
     else
       echo "[AP] '$(log_name "$name")' connection failed, trying next"
     fi
+    [ "$SECONDS" -lt "$phase_deadline" ] || break
     # NetworkManager's autoconnect may have got a saved network up while that
     # attempt failed; keep it rather than knock it down with the next one.
     if client="$(active_client)"; then
       stay_on_client "$client" "by autoconnect"
     fi
   done < <(saved_clients)
+  if [ "$SECONDS" -ge "$phase_deadline" ]; then
+    echo "[AP] Saved candidate budget exhausted — reserving recovery AP time"
+  fi
   if [ "$tried" -eq 0 ]; then
     echo "[AP] No saved WiFi client profiles, falling back to AP mode"
   else
     echo "[AP] No saved WiFi profiles connected, falling back to AP mode"
   fi
 fi
+
+phase_deadline=$((SECONDS + 45))
 
 # The radio can join a saved network AFTER the pass above: NetworkManager's own
 # autoconnect often lands while the pre-AP scan below runs (that scan alone
@@ -357,7 +410,7 @@ keep_late_client() {
 
 wait_for_interface() {
   local elapsed=0
-  while [ "$elapsed" -lt "$IFACE_TIMEOUT" ]; do
+  while [ "$elapsed" -lt "$IFACE_TIMEOUT" ] && [ "$SECONDS" -lt "$phase_deadline" ]; do
     if [ -e "/sys/class/net/$IFACE/operstate" ]; then
       local state
       state=$(cat "/sys/class/net/$IFACE/operstate")
@@ -388,6 +441,7 @@ wait_for_interface() {
 release_wifi_for_ap() {
   local line
   while IFS= read -r line; do
+    [ "$SECONDS" -lt "$phase_deadline" ] || return 1
     split_row "$line" 3 || continue
     is_wifi_type "${ROW[1]}" || continue
     # Skip APs by mode, not display name (a client can be ClawBox-Setup).
@@ -434,7 +488,8 @@ if ! [[ "$PRE_AP_SCAN_TIMEOUT" =~ ^[0-9]+$ ]]; then
   echo "[AP] Invalid PRE_AP_SCAN_TIMEOUT='$PRE_AP_SCAN_TIMEOUT'; defaulting to 20"
   PRE_AP_SCAN_TIMEOUT=20
 fi
-scan_deadline=$((SECONDS + PRE_AP_SCAN_TIMEOUT))
+[ "${#PRE_AP_SCAN_TIMEOUT}" -le 2 ] && [ "$PRE_AP_SCAN_TIMEOUT" -le 20 ] || PRE_AP_SCAN_TIMEOUT=20
+scan_deadline=$((SECONDS + 10#$PRE_AP_SCAN_TIMEOUT))
 scan_attempt=0
 while :; do
   scan_attempt=$((scan_attempt + 1))
@@ -496,6 +551,7 @@ else
 fi
 fi  # end SKIP_PRESCAN guard
 
+phase_deadline=$((SECONDS + $(bounded_budget "${AP_TOTAL_BUDGET:-150}" 150)))
 keep_late_client "before the hotspot was set up"
 if [ "$prefer_saved_wifi" = true ]; then ensure_inhibited; fi
 
@@ -556,6 +612,7 @@ AP_UP_RETRIES="${AP_UP_RETRIES:-5}"
 case "$AP_UP_RETRIES" in [1-5]) ;; *) AP_UP_RETRIES=5 ;; esac
 ap_up_ok=false
 for ap_attempt in $(seq 1 "$AP_UP_RETRIES"); do
+  [ "$SECONDS" -lt "$phase_deadline" ] || break
   # Each attempt takes the radio from whatever holds it, and the client
   # NetworkManager autoconnects in a failed attempt's wake is exactly what a
   # "radio busy" failure looks like — so this is checked every time.
@@ -565,7 +622,7 @@ for ap_attempt in $(seq 1 "$AP_UP_RETRIES"); do
   else
     release_wifi_for_ap
   fi
-  if nmcli connection up uuid "$AP_UUID" ifname "$IFACE" 2>&1; then
+  if nmcli --wait 30 connection up uuid "$AP_UUID" ifname "$IFACE" 2>&1; then
     wait_for_interface || true
     if iw dev "$IFACE" info 2>/dev/null | grep -q "type AP"; then
       echo "[AP] Access point active (attempt $ap_attempt)"
@@ -576,6 +633,7 @@ for ap_attempt in $(seq 1 "$AP_UP_RETRIES"); do
   else
     echo "[AP] Activation attempt $ap_attempt failed (radio may be busy with a client connection)"
   fi
+  [ "$SECONDS" -lt "$phase_deadline" ] || break
   [ "$ap_attempt" -lt "$AP_UP_RETRIES" ] && sleep 3
 done
 

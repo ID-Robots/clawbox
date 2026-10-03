@@ -8406,9 +8406,27 @@ install_root_libexec() {
   # scripts in the tree) and post_update's first call here (the copies in
   # libexec): the old unit runs the new ap-watchdog.sh and it stands down
   # rather than fall back to the tree — written down in that script.
+  # Publish the shared dependency BEFORE replacing any of its consumers. On a
+  # first-upgrade copy failure, old units must retain their working entrypoints,
+  # not new scripts which source a missing helper. Unrelated copies/manifest
+  # maintenance still run. step_systemd_services refuses unit publication on
+  # failure; on success it installs the supervised units and daemon-reloads
+  # before the dispatcher is published. Until then new start-ap fails closed
+  # at wifi_inhibit without CLAWBOX_AP_SUPERVISED (no unsupervised mutation).
+  local wifi_helper_ready=0
+  if [ -f "$SRC_DIR/scripts/wifi-radio.sh" ] &&
+     install_root_file "$SRC_DIR/scripts/wifi-radio.sh" "$ROOT_LIBEXEC_DIR/wifi-radio.sh"; then
+    wifi_helper_ready=1
+  else
+    echo "  Error: WiFi helper publication failed; preserving dependent entrypoints" >&2
+    failed=1
+  fi
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
              clawbox-resource-limits.sh gateway-restart-when-online.sh \
-             wifi-radio.sh wifi-failover.sh start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
+             wifi-failover.sh start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
+    case "$src" in
+      wifi-failover.sh|start-ap.sh|stop-ap.sh) [ "$wifi_helper_ready" -eq 1 ] || continue ;;
+    esac
     if [ -f "$SRC_DIR/scripts/$src" ]; then
       install_root_file "$SRC_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src" || {
         echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2

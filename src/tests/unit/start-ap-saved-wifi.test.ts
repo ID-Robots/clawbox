@@ -481,7 +481,7 @@ describe("start-ap.sh keeps a saved WiFi client instead of taking the radio for 
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(r.stdout).not.toContain("skipping AP mode");
-    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     expectSafeCalls(r);
   });
 
@@ -519,7 +519,7 @@ describe("start-ap.sh keeps a saved WiFi client instead of taking the radio for 
     expect(firstAp).toBeGreaterThan(lastClient);
     expect(r.stdout).toContain("returned success but interface not connected");
     expect(r.stdout).toContain("No saved WiFi profiles connected, falling back to AP mode");
-    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     expectSafeCalls(r);
   });
 
@@ -528,7 +528,7 @@ describe("start-ap.sh keeps a saved WiFi client instead of taking the radio for 
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(r.lines).toContainEqual(expect.stringMatching(/^connection add .*con-name ClawBox-Setup/));
-    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     // The seam: the caches land under CLAWBOX_ROOT, where the web server reads them.
     expect(readFileSync(path.join(root, "data", "ap-runtime.env"), "utf-8")).toContain('AP_IP="10.42.0.1"');
     expect(readFileSync(path.join(root, "data", "wifi-scan-cache.json"), "utf-8")).toContain("Synthetic-Neighbour");
@@ -581,8 +581,8 @@ describe("start-ap.sh rechecks for a late NetworkManager autoconnect before taki
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("before AP attempt 2");
-    expect(r.lines.filter((l) => l === `connection up uuid ${HOTSPOT} ifname ${IFACE}`)).toHaveLength(1);
-    const busy = r.lines.indexOf(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(r.lines.filter((l) => l === `--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`)).toHaveLength(1);
+    const busy = r.lines.indexOf(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     expect(r.calls.slice(busy + 1).filter(isApActivity)).toEqual([]);
     expectSafeCalls(r);
   });
@@ -611,7 +611,7 @@ describe("start-ap.sh keeps the hotspot behaviour it had", () => {
     expect(r.calls.filter(isClientUp)).toEqual([]);
     expect(autoconnectOff(r, HOME, "Example-Home")).toBe(true);
     expect(released(r, HOME, "Example-Home")).toBe(true);
-    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
   });
 
   it("before setup is complete, the hotspot owns the radio even over a live client", () => {
@@ -625,7 +625,7 @@ describe("start-ap.sh keeps the hotspot behaviour it had", () => {
     expect(r.calls.filter(isClientUp)).toEqual([]);
     expect(autoconnectOff(r, HOME, "Example-Home")).toBe(true);
     expect(released(r, HOME, "Example-Home")).toBe(true);
-    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
   });
 
   it("before setup is complete, a client that autoconnects during the scan is still released", () => {
@@ -637,7 +637,7 @@ describe("start-ap.sh keeps the hotspot behaviour it had", () => {
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(released(r, HOME, "Example-Home")).toBe(true);
-    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
   });
 
   it("skips AP mode without touching the radio when the owner disabled the hotspot after setup", () => {
@@ -660,7 +660,7 @@ describe("start-ap.sh keeps the hotspot behaviour it had", () => {
     });
     const r = runStartAp();
     expect(r.status).toBe(0);
-    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
   });
 });
 
@@ -678,7 +678,7 @@ describe("release_wifi_for_ap reads profiles with the same parser", () => {
     expect(r.status).toBe(0);
     expect(r.lines).toContain(`connection modify uuid ${HOME} connection.autoconnect no`);
     expect(r.lines).toContain(`connection down uuid ${HOME}`);
-    expect(r.lines).toContain(`connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
     expectSafeCalls(r);
   });
 
