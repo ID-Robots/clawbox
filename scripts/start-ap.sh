@@ -21,7 +21,15 @@ detect_subnet_collision() {
 detect_subnet_collision
 AP_SUBNET="${AP_IP%.*}.0/24"
 echo "[AP] Selected AP IP $AP_IP (subnet $AP_SUBNET)"
-CONFIG_FILE="/home/clawbox/clawbox/data/config.json"
+# $ROOT names the data files this script reads (parsed, never sourced) and the
+# caches it writes — never anything it executes. It is the seam ap-watchdog.sh
+# already has, here so the tests can run this script against a fake root. On a
+# box it is unset: clawbox-ap.service loads only the root-owned
+# /etc/clawbox/network.env, which does not set it, so the paths stay the
+# /home/clawbox/clawbox/data ones the web server reads (src/lib/network.ts
+# resolves the scan cache through the same CLAWBOX_ROOT).
+ROOT="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
+CONFIG_FILE="$ROOT/data/config.json"
 DNSMASQ_SHARED="/etc/NetworkManager/dnsmasq-shared.d"
 CAPTIVE_CONF="$DNSMASQ_SHARED/captive-portal.conf"
 
@@ -53,7 +61,7 @@ read_env_value() {
   printf '%s' "$value"
 }
 
-HOTSPOT_ENV="/home/clawbox/clawbox/data/hotspot.env"
+HOTSPOT_ENV="$ROOT/data/hotspot.env"
 HOTSPOT_SSID="$(read_env_value "$HOTSPOT_ENV" HOTSPOT_SSID)"
 HOTSPOT_PASSWORD="$(read_env_value "$HOTSPOT_ENV" HOTSPOT_PASSWORD)"
 HOTSPOT_DISABLED="$(read_env_value "$HOTSPOT_ENV" HOTSPOT_DISABLED)"
@@ -103,29 +111,196 @@ ethernet_connected() {
   nmcli -t -f TYPE,STATE device status 2>/dev/null | grep -q '^ethernet:connected'
 }
 
+# ─── Saved WiFi client profiles ──────────────────────────────────────────────
+# Profiles are chosen and acted on by UUID, never by name. In terse output the
+# TYPE of a WiFi profile is "802-11-wireless" (the selector here used to grep
+# for "wifi", which matched only profiles whose NAME happened to contain it, so
+# a box whose network was called anything else went straight to the hotspot and
+# tore its own LAN connection down). nmcli also escapes ':' and '\' inside
+# values, two profiles may share a name, and a name may look like a UUID — so a
+# name is neither safe to split on ':' nor to hand back to `nmcli connection
+# up`. UUID, TYPE, DEVICE and the numeric columns never contain ':', so every
+# query below puts NAME LAST and a row is cut on its first separators; the name
+# that is left is unescaped for comparisons and log lines only.
+HEX_RE='^[0-9A-Fa-f]+$'
+
+# A canonical UUID, 8-4-4-4-12 hex digits. The lengths are checked with
+# ${#..} rather than regex bounds, which glibc expands into memory bash never
+# hands back (src/tests/unit/shell-regex-hygiene.test.ts).
+is_uuid() {
+  local u="$1" hex
+  [ "${#u}" -eq 36 ] || return 1
+  [ "${u:8:1}${u:13:1}${u:18:1}${u:23:1}" = "----" ] || return 1
+  hex="${u//-/}"
+  [ "${#hex}" -eq 32 ] && [[ "$hex" =~ $HEX_RE ]]
+}
+
+# Undo nmcli's terse escaping: `\:` -> `:`, `\\` -> `\`.
+nm_unescape() {
+  local s="$1" out="" c
+  while [ -n "$s" ]; do
+    c="${s:0:1}"; s="${s:1}"
+    if [ "$c" = "\\" ] && [ -n "$s" ]; then c="${s:0:1}"; s="${s:1}"; fi
+    out+="$c"
+  done
+  printf '%s' "$out"
+}
+
+# Split one terse row of N fields whose last one is NAME into ROW[0..N-1],
+# NAME unescaped. Returns 1 for a row that is short or does not start with a
+# UUID (a name with a newline in it spills onto a line of its own; that
+# fragment is dropped here rather than misread).
+split_row() {
+  local line="$1" n="$2" i
+  ROW=()
+  for ((i = 1; i < n; i++)); do
+    case "$line" in *:*) ;; *) return 1 ;; esac
+    ROW+=("${line%%:*}")
+    line="${line#*:}"
+  done
+  ROW+=("$(nm_unescape "$line")")
+  is_uuid "${ROW[0]}"
+}
+
+is_wifi_type() {
+  # "wifi" is what an older nmcli printed for the same type.
+  case "$1" in 802-11-wireless|wifi) return 0 ;; esac
+  return 1
+}
+
+# A profile name fit for a log line: control characters (a name can carry an
+# escape sequence) replaced, and length capped. Names only — no PSK or other
+# secret is ever read by this script (no --show-secrets anywhere).
+log_name() {
+  local s="${1//[[:cntrl:]]/?}"
+  printf '%s' "${s:0:64}"
+}
+
+# May this saved WiFi profile be joined as a CLIENT? Excluded by identity, not
+# by substring: our own hotspot by its exact name, and any access-point profile
+# by its mode — so a network called "ClawBox-Setup-home" stays a candidate. A
+# mode nmcli cannot report counts as "not a client": skipped, not activated
+# blind.
+is_client_profile() {
+  local uuid="$1" name="$2" mode
+  [ "$name" = "$CON_NAME" ] && return 1
+  # </dev/null: callers run this inside `while read` loops fed by nmcli, and
+  # nothing here may consume their input.
+  mode="$(nmcli -g 802-11-wireless.mode connection show uuid "$uuid" </dev/null 2>/dev/null)" || return 1
+  [ "$mode" = "ap" ] && return 1
+  return 0
+}
+
+# NetworkManager's numeric device state for the radio (100 = connected): the
+# number, not the "(connected)" text after it, which is translated under a
+# non-C locale. Prints nothing when nmcli cannot say.
+iface_state() {
+  local raw
+  raw="$(nmcli -g GENERAL.STATE device show "$IFACE" 2>/dev/null)" || raw=""
+  raw="${raw%% *}"
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then printf '%s' "$raw"; fi
+}
+
+# The saved client the radio is connected to right now, as "<uuid><TAB><name>":
+# device state 100 AND the connection active on $IFACE is a WiFi client by the
+# rules above (the hotspot itself being up does not count). Returns 1 if none.
+active_client() {
+  local line
+  [ "$(iface_state)" = 100 ] || return 1
+  while IFS= read -r line; do
+    split_row "$line" 4 || continue
+    [ "${ROW[2]}" = "$IFACE" ] || continue
+    is_wifi_type "${ROW[1]}" || continue
+    is_client_profile "${ROW[0]}" "${ROW[3]}" || continue
+    printf '%s\t%s\n' "${ROW[0]}" "${ROW[3]}"
+    return 0
+  done < <(nmcli -t -f UUID,TYPE,DEVICE,NAME connection show --active 2>/dev/null || true)
+  return 1
+}
+
+# Saved client profiles, most preferred first: AUTOCONNECT-PRIORITY, then most
+# recently used (TIMESTAMP), then nmcli's own listing order — the order
+# NetworkManager's autoconnect itself prefers. One "<uuid><TAB><name>" per line.
+saved_clients() {
+  local line prio ts
+  nmcli -t -f UUID,TYPE,AUTOCONNECT-PRIORITY,TIMESTAMP,NAME connection show 2>/dev/null |
+    while IFS= read -r line; do
+      split_row "$line" 5 || continue
+      is_wifi_type "${ROW[1]}" || continue
+      is_client_profile "${ROW[0]}" "${ROW[4]}" || continue
+      prio="${ROW[2]}"; [[ "$prio" =~ ^-?[0-9]+$ ]] || prio=0
+      ts="${ROW[3]}"; [[ "$ts" =~ ^[0-9]+$ ]] || ts=0
+      printf '%s\t%s\t%s\t%s\n' "$prio" "$ts" "${ROW[0]}" "${ROW[4]}"
+    done | LC_ALL=C sort -s -t "$(printf '\t')" -k1,1nr -k2,2nr | cut -f3-
+}
+
+# Leave the radio on the client active_client reported, and stop here.
+stay_on_client() {
+  local tab=$'\t'
+  echo "[AP] WiFi connected to '$(log_name "${1#*"$tab"}")' (${1%%"$tab"*})${2:+ $2} — skipping AP mode"
+  exit 0
+}
+
+# How long one saved profile may take to come up before the next is tried
+# (nmcli's own default is 90 s).
+CLIENT_UP_WAIT="${CLIENT_UP_WAIT:-45}"
+[[ "$CLIENT_UP_WAIT" =~ ^[0-9]+$ ]] || CLIENT_UP_WAIT=45
+
 # After setup is complete, prefer joining saved WiFi over starting the AP — UNLESS
 # an Ethernet cable provides the uplink, in which case host the hotspot and let
 # release_wifi_for_ap() (below) drop the active WiFi client to free the radio.
+prefer_saved_wifi=false
 if [ "$setup_complete" = true ] && ethernet_connected; then
   echo "[AP] Ethernet uplink present — keeping the radio for the hotspot (not joining saved WiFi)"
 elif [ "$setup_complete" = true ]; then
-  # Try all saved WiFi profiles (exclude the AP itself) until one connects
-  while IFS= read -r profile; do
-    [ -z "$profile" ] && continue
-    echo "[AP] Setup complete — trying saved WiFi: $profile"
-    if nmcli connection up "$profile" ifname "$IFACE" 2>/dev/null; then
-      WIFI_STATE=$(nmcli -t -f GENERAL.STATE device show "$IFACE" 2>/dev/null | cut -d: -f2)
-      if echo "$WIFI_STATE" | grep -q '(connected)'; then
-        echo "[AP] WiFi connected to '$profile' — skipping AP mode"
+  prefer_saved_wifi=true
+  # NetworkManager usually autoconnects the saved network on its own at boot —
+  # the ordinary reboot after an update. Then there is nothing to do, and
+  # touching the radio would only cost the box its LAN connection.
+  if client="$(active_client)"; then
+    stay_on_client "$client" "already"
+  fi
+  tried=0
+  while IFS=$'\t' read -r uuid name; do
+    [ -n "$uuid" ] || continue
+    tried=$((tried + 1))
+    echo "[AP] Setup complete — trying saved WiFi: '$(log_name "$name")' ($uuid)"
+    if nmcli --wait "$CLIENT_UP_WAIT" connection up uuid "$uuid" ifname "$IFACE" </dev/null 2>/dev/null; then
+      if [ "$(iface_state)" = 100 ]; then
+        echo "[AP] WiFi connected to '$(log_name "$name")' — skipping AP mode"
         exit 0
       fi
-      echo "[AP] '$profile' returned success but interface not connected, trying next"
+      echo "[AP] '$(log_name "$name")' returned success but interface not connected, trying next"
     else
-      echo "[AP] '$profile' connection failed, trying next"
+      echo "[AP] '$(log_name "$name")' connection failed, trying next"
     fi
-  done < <(nmcli -t -f NAME,TYPE connection show | awk -F: '/wifi/ && !/ClawBox-Setup/{print $1}')
-  echo "[AP] No saved WiFi profiles connected, falling back to AP mode"
+    # NetworkManager's autoconnect may have got a saved network up while that
+    # attempt failed; keep it rather than knock it down with the next one.
+    if client="$(active_client)"; then
+      stay_on_client "$client" "by autoconnect"
+    fi
+  done < <(saved_clients)
+  if [ "$tried" -eq 0 ]; then
+    echo "[AP] No saved WiFi client profiles, falling back to AP mode"
+  else
+    echo "[AP] No saved WiFi profiles connected, falling back to AP mode"
+  fi
 fi
+
+# The radio can join a saved network AFTER the pass above: NetworkManager's own
+# autoconnect often lands while the pre-AP scan below runs (that scan alone
+# polls for up to PRE_AP_SCAN_TIMEOUT seconds). Raising the hotspot then tears
+# that connection down — the same lost LAN by a later road. So while saved WiFi
+# is the policy (setup complete, no Ethernet uplink), look again right before
+# every step that would take the radio from a client. Pre-setup and with an
+# Ethernet uplink the hotspot is meant to own the radio, and nothing changes.
+keep_late_client() {
+  local client
+  [ "$prefer_saved_wifi" = true ] || return 0
+  if client="$(active_client)"; then
+    stay_on_client "$client" "$1"
+  fi
+}
 
 wait_for_interface() {
   local elapsed=0
@@ -153,22 +328,27 @@ wait_for_interface() {
 # attempt) holds $IFACE in station mode, making `nmcli connection up
 # ClawBox-Setup` fail with "device busy" — the classic "AP only appears after a
 # manual restart" boot race. We tear those down before claiming the radio.
+#
+# Rows are read with the parser above and acted on by UUID (`IFS=: read` cut a
+# name containing ':' in two and silently skipped that profile). Only our own
+# hotspot, by its exact name, is spared: any other profile on the radio —
+# including another access-point profile — is in the AP's way, as before.
 release_wifi_for_ap() {
-  local con ctype
-  while IFS=: read -r con ctype; do
-    [ -z "$con" ] && continue
-    case "$ctype" in wifi|802-11-wireless) ;; *) continue ;; esac
-    [ "$con" = "$CON_NAME" ] && continue
+  local line
+  while IFS= read -r line; do
+    split_row "$line" 3 || continue
+    is_wifi_type "${ROW[1]}" || continue
+    [ "${ROW[2]}" = "$CON_NAME" ] && continue
     # Stop these client profiles auto-grabbing the radio back from the AP. We do
     # this pre-setup (the radio must be dedicated to the AP), and also post-setup
     # when an Ethernet uplink means we've deliberately chosen the hotspot over
     # WiFi. Either way it's safe: the saved-WiFi block reconnects them via an
     # explicit `nmcli connection up`, which doesn't depend on autoconnect.
     if [ "$setup_complete" != true ] || ethernet_connected; then
-      nmcli connection modify "$con" connection.autoconnect no 2>/dev/null || true
+      nmcli connection modify uuid "${ROW[0]}" connection.autoconnect no </dev/null 2>/dev/null || true
     fi
-    nmcli connection down "$con" 2>/dev/null || true
-  done < <(nmcli -t -f NAME,TYPE connection show 2>/dev/null || true)
+    nmcli connection down uuid "${ROW[0]}" </dev/null 2>/dev/null || true
+  done < <(nmcli -t -f UUID,TYPE,NAME connection show 2>/dev/null || true)
   # Make sure the device itself isn't mid-association before we re-up the AP.
   nmcli device disconnect "$IFACE" 2>/dev/null || true
 }
@@ -177,7 +357,7 @@ release_wifi_for_ap() {
 # The interface is free right now (not in AP mode), so scan for nearby networks
 # and cache the results. The setup wizard uses this cached list so users can
 # pick their network from a list instead of typing the SSID manually.
-SCAN_CACHE="/home/clawbox/clawbox/data/wifi-scan-cache.json"
+SCAN_CACHE="$ROOT/data/wifi-scan-cache.json"
 # SKIP_PRESCAN=1 (set when restoring the AP after a failed client connect) skips
 # the ~20s scan poll and keeps the existing cache — the radio was just in use
 # and we only need the hotspot back up fast so the wizard can report the result.
@@ -263,6 +443,8 @@ else
 fi
 fi  # end SKIP_PRESCAN guard
 
+keep_late_client "before the hotspot was set up"
+
 echo "[AP] Cleaning up any previous AP connection..."
 nmcli connection down "$CON_NAME" 2>/dev/null || true
 nmcli connection delete "$CON_NAME" 2>/dev/null || true
@@ -317,6 +499,10 @@ echo "[AP] Activating access point..."
 AP_UP_RETRIES="${AP_UP_RETRIES:-5}"
 ap_up_ok=false
 for ap_attempt in $(seq 1 "$AP_UP_RETRIES"); do
+  # Each attempt takes the radio from whatever holds it, and the client
+  # NetworkManager autoconnects in a failed attempt's wake is exactly what a
+  # "radio busy" failure looks like — so this is checked every time.
+  keep_late_client "before AP attempt $ap_attempt"
   release_wifi_for_ap
   if nmcli connection up "$CON_NAME" 2>&1; then
     wait_for_interface || true
@@ -368,7 +554,7 @@ echo "[AP] WiFi access point '$SSID' is running on $IFACE ($AP_IP)"
 
 # Publish the live AP address so the Next.js middleware and other services
 # can redirect captive-portal probes to whichever subnet was selected.
-RUNTIME_FILE="/home/clawbox/clawbox/data/ap-runtime.env"
+RUNTIME_FILE="$ROOT/data/ap-runtime.env"
 mkdir -p "$(dirname "$RUNTIME_FILE")"
 cat > "$RUNTIME_FILE" <<RUNTIME_EOF
 AP_IP="$AP_IP"
