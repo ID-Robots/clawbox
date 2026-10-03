@@ -99,12 +99,38 @@ export function finalAlreadyShownWithMedia(
     && hasMedia(latestShown);
 }
 
+/** A media ref without its `#name=…&size=…` fragment — the file it names. */
+const bareRef = (src: string) => src.split("#", 1)[0];
+
+/** Is every ref in `mine` already among `shown`? */
+function within(mine: readonly string[] | undefined, shown: readonly string[] | undefined): boolean {
+  if (!mine?.length) return true;
+  const have = new Set((shown ?? []).map(bareRef));
+  return mine.every((src) => have.has(bareRef(src)));
+}
+
+/**
+ * The broader form of the guard above, for the append itself: a final that
+ * repeats the newest bubble's words and carries no picture or file that bubble
+ * lacks — none at all (the stripped copy) or the same ones (a gateway that did
+ * send them, after the re-read had already painted them) — is that reply
+ * again. Audio is left to the fold below: the spoken half of a reply is its
+ * own second message, and folding it is already idempotent.
+ */
+function repeatsShownReply(latestShown: ChatMessage | undefined, reply: ChatMessage): boolean {
+  if (finalAlreadyShownWithMedia(latestShown, reply)) return true;
+  return !!latestShown && !(reply.audio?.length) && reply.text.length > 0
+    && latestShown.role === "assistant" && latestShown.text === reply.text && hasMedia(latestShown)
+    && within(reply.images, latestShown.images) && within(reply.files, latestShown.files);
+}
+
 /**
  * The transcript with one finished reply added, whatever produced it.
  *
  * Three rules, in order:
- * 1. A text-only copy of the bubble the transcript re-read already painted with
- *    its media is the same reply, and changes nothing (see above).
+ * 1. A copy of the bubble the transcript re-read already painted with its
+ *    media — stripped of it, or carrying the same — is the same reply, and
+ *    changes nothing (see above).
  * 2. The spoken half of a reply arrives as a SECOND message repeating the text
  *    of the one already rendered. Appending it verbatim showed the answer
  *    twice, once silent and once playable, so its audio is folded into the
@@ -115,7 +141,7 @@ export function finalAlreadyShownWithMedia(
  */
 export function withAssistantReply(previous: ChatMessage[], reply: ChatMessage): ChatMessage[] {
   const last = previous[previous.length - 1];
-  if (finalAlreadyShownWithMedia(last, reply)) return previous;
+  if (repeatsShownReply(last, reply)) return previous;
   const audio = reply.audio ?? [];
   if (reply.text.length > 0 && audio.length > 0 && !(reply.images?.length) && !(reply.files?.length)
       && last && last.role === "assistant" && last.text === reply.text) {

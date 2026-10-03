@@ -244,6 +244,27 @@ describe.each(SURFACES)("a file the agent sends, in $name", ({ mount }) => {
     await expectReplyOnceWithItsCard();
   });
 
+  it("session.message first, then a final that DOES carry the file: still one bubble", async () => {
+    await mountReady();
+    await sendPrompt();
+
+    storeTurn();
+    await pushStoredReply();
+    await expectReplyOnceWithItsCard();
+
+    // Not every final is stripped: this one names the same file.
+    await act(async () => {
+      socket()?.emit({
+        type: "event",
+        event: "chat",
+        payload: { sessionKey: MAIN, runId: lastSentRunId(), state: "final", message: { role: "assistant", content: [{ type: "text", text: `${REPLY}\n\nMEDIA:${FILE_PATH}` }] } },
+      });
+    });
+    await flush();
+
+    await expectReplyOnceWithItsCard();
+  });
+
   it("the same, for the gateway's own outgoing-media attachment", async () => {
     // How a box's gateway actually stores a file the agent sent (TASK-892): a
     // structured attachment whose URL is in the gateway's media tree, not a

@@ -137,6 +137,19 @@ describe("a file sent by the agent, through both orders", () => {
     expect(afterRead.at(-1)?.files).toEqual([FILE_URL]);
   });
 
+  it("the re-read first, then a final that DOES carry the same file: still one bubble", () => {
+    const afterRead = mergeRestoredTranscript(before, fromServer);
+    const afterFinal = withAssistantReply(afterRead, assistant(REPLY, 9_000_001, { files: [FILE_URL] }));
+    expect(afterFinal).toBe(afterRead);
+  });
+
+  it("a final carrying a file the bubble above does not have is a new reply", () => {
+    const afterRead = mergeRestoredTranscript(before, fromServer);
+    const other = mediaUrl("/tmp/clawbox-outbox/other.pdf");
+    const afterFinal = withAssistantReply(afterRead, assistant(REPLY, 9_000_001, { files: [other] }));
+    expect(afterFinal).toHaveLength(afterRead.length + 1);
+  });
+
   it("the same words in the NEXT turn are a new reply, not a duplicate", () => {
     const shown = [...fromServer, user("again please", 9_000_100, "run-2")];
     const next = withAssistantReply(shown, liveBubble(9_000_200));
