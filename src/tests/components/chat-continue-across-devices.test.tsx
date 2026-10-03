@@ -62,6 +62,9 @@ let boxClock = 1_790_000_000_000;
 /** While true a turn is acknowledged and never finishes — a reply still being written. */
 let holdRuns = false;
 const heldRuns: Array<() => void> = [];
+/** While set, the gateway leaves the connect frame unanswered until it is called — a cold gateway. */
+let holdHello: (() => void) | null = null;
+let helloHeld = false;
 const sent: Array<Record<string, unknown>> = [];
 const tabPosts: Array<Record<string, unknown>> = [];
 const sockets: FakeGatewayWs[] = [];
@@ -88,6 +91,10 @@ class FakeGatewayWs {
     const params = (frame.params ?? {}) as Record<string, unknown>;
     switch (frame.method) {
       case "connect":
+        if (helloHeld) {
+          holdHello = () => this.respond(id, { snapshot: { sessionDefaults: { mainSessionKey: MAIN } } });
+          return;
+        }
         this.respond(id, { snapshot: { sessionDefaults: { mainSessionKey: MAIN } } });
         return;
       case "chat.history":
@@ -261,6 +268,8 @@ describe("carrying a conversation from one device to the other", () => {
     boxClock = 1_790_000_000_000;
     holdRuns = false;
     heldRuns.length = 0;
+    helloHeld = false;
+    holdHello = null;
     tabPosts.length = 0;
     storages.phone = {};
     storages.desktop = {};
@@ -405,6 +414,70 @@ describe("carrying a conversation from one device to the other", () => {
     await screen.findByText("Box heard: Summarise my inbox");
     await arrive();
     await waitFor(() => expect(activeTabKey()).toBe(key));
+  });
+
+  it("never moves the owner on the minute tick — not even after an arrival that came during a reply", async () => {
+    // Only the intervals are faked — before the chat mounts, so its strip's
+    // one-minute tick is one this test can drive; every other timer (the
+    // socket's, the fetches') runs for real.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      await openOn("phone");
+      holdRuns = true;
+      await say("Summarise my inbox");
+      await waitFor(() => expect(heldRuns).toHaveLength(1));
+      // The owner comes back to the phone while its own reply is still running.
+      await arrive();
+      await act(async () => { heldRuns.shift()!(); });
+      await screen.findByText("Box heard: Summarise my inbox");
+
+      // Later, while the owner reads that reply, the desktop speaks elsewhere —
+      // and the strip's tick asks the box.
+      const key = "agent:main:clawbox-0a1b2c3d4e5f";
+      elsewhereSpeaksIn(key, FIRST_WORDS);
+      await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
+      await settle(60);
+      await waitFor(() => expect(tabKeys()).toEqual([MAIN, key]));
+      expect(activeTabKey()).toBe(MAIN);
+
+      // Only the owner's next arrival moves it.
+      await arrive();
+      await waitFor(() => expect(activeTabKey()).toBe(key));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends a turn typed before the gateway answered into the conversation it was typed in", async () => {
+    // The desktop was last active in a side conversation…
+    const key = "agent:main:clawbox-0a1b2c3d4e5f";
+    elsewhereSpeaksIn(key, FIRST_WORDS);
+    // …and the phone opens on a gateway that is slow to answer. The owner
+    // types into what is on screen — main — before it does.
+    helloHeld = true;
+    putAway();
+    cleanup();
+    window.localStorage.clear();
+    current = "phone";
+    sent.length = 0;
+    sockets.length = 0;
+    resetHarnessCache();
+    render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    await waitFor(() => expect(holdHello).not.toBeNull());
+    // The box has already said where the owner was (the mount's read).
+    await settle(60);
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "Typed while connecting" } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    await settle(30);
+    expect(frames("chat.send")).toHaveLength(0);
+
+    act(() => { holdHello!(); });
+    await waitFor(() => expect(frames("chat.send")).toHaveLength(1));
+    // Sent where it was typed, and the phone stays there.
+    expect(params(frames("chat.send")[0]).sessionKey).toBe(MAIN);
+    await settle(60);
+    expect(activeTabKey()).toBe(MAIN);
   });
 
   it("tells the box about every turn, in the conversation it was sent in", async () => {

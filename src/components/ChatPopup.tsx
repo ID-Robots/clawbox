@@ -2054,16 +2054,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * Weigh the box's record for a pending arrival and answer the session to
    * open instead of `current`, or null. Consumes the arrival once the box has
    * answered — a record of nothing, or one this browser has seen, is the
-   * answer too — except while a turn of this device's own is running or the
-   * socket is down, when it waits for the next answer rather than moving the
-   * owner out from under a reply they are watching.
+   * answer too. While the socket is down the arrival waits for the reconnect's
+   * bind, which is the moment a phone coming back from the background is
+   * actually here. While a turn of this device's own is running the arrival is
+   * spent WITHOUT moving and without marking the record seen: the owner is
+   * watching that reply, and a pending arrival left standing would be acted on
+   * by whatever answer came next — the minute tick, long after they arrived.
+   * Their next arrival asks again.
    */
   const pickFollowTarget = useCallback((current: string, binding = false): string | null => {
     if (!followPendingRef.current || !boxAnsweredRef.current) return null
     const main = mainSessionKeyRef.current
     if (!main) return null
-    if (!binding && (sendingRef.current || statusRef.current !== 'connected')) return null
+    if (!binding && statusRef.current !== 'connected') return null
     followPendingRef.current = false
+    if (!binding && sendingRef.current) return null
     const owns = (key: string) => adapterRef.current?.ownsSessionKey(key) ?? false
     const listed = (key: string) => tabsRef.current.some(tb => tb.key === key) || boxListedRef.current.some(tb => tb.key === key)
     const { follow, seenAt } = conversationToFollow({
@@ -5318,7 +5323,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // Tell the box this is where the owner is now, so the phone (or the
     // desktop) they pick up next opens this conversation (TASK-1364). Best
     // effort: the turn does not wait on it and a box that cannot answer
-    // changes nothing here.
+    // changes nothing here. A turn sent here is also the owner's own answer to
+    // an arrival still waiting on the box: they chose this conversation.
+    followPendingRef.current = false
     void syncTabsRef.current({ activity: { key: keyAtSend === mainSessionKeyRef.current ? null : keyAtSend } })
     turnsRef.current.remember(idempotencyKey, text, sendAttachments.length > 0)
     // A new turn is the owner's answer to a restore choice left on screen.
@@ -5527,6 +5534,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[], origin: TurnOrigin = {}) => {
+    // The owner chose where to be by speaking here: an arrival still waiting on
+    // the box must not move this turn — queued until the gateway answers — or
+    // the owner into another conversation afterwards (TASK-1364).
+    followPendingRef.current = false
     // Pictures render in the bubble; everything else keeps its 📎 line, because
     // a document has nothing to show and a caption alone would refer to nothing.
     //
