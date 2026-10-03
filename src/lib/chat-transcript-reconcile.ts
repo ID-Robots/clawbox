@@ -506,13 +506,86 @@ export function carryLocalNotes(previous: ChatMessage[], next: ChatMessage[]): C
   return merged;
 }
 
+/** The same user turn on both sides: by run id where both carry one, else by words. */
+function sameUserTurn(a: ChatMessage, b: ChatMessage): boolean {
+  const ra = runIdOf(a.idempotencyKey), rb = runIdOf(b.idempotencyKey);
+  return ra && rb ? ra === rb : a.text === b.text;
+}
+
+/**
+ * Live replies this chat painted — flagged `unconfirmed` — carried across a
+ * history read until the box holds a reply for their turn.
+ *
+ * Two ways a read can come back without one: it was answered before the box
+ * stored the reply the live `final` had just painted (the next push re-reads,
+ * but the bubble blinked out until then), or the reply was a turn's partial
+ * answer cut off by Stop, which the box may never store at all.
+ *
+ * Decided by TURN, never by words. A reply belongs to the user turn above it;
+ * while the read has that turn and nothing from the agent after it, the local
+ * reply goes back in right there. Once the read has ANY reply for the turn —
+ * the stored copy of this one with its file intact, or the box's own record of
+ * the interrupted answer — the server's wins and the local one goes, so the two
+ * can never show side by side, however differently their text was projected.
+ * A turn the read no longer has (aged out of the history window) takes its
+ * replies with it.
+ */
+export function carryUnconfirmedReplies(previous: ChatMessage[], next: ChatMessage[]): ChatMessage[] {
+  // The unconfirmed replies of each turn, keyed by the turn's index in
+  // `previous` (-1: before any user turn).
+  const byTurn = new Map<number, ChatMessage[]>();
+  let turn = -1;
+  previous.forEach((m, i) => {
+    if (m.role === "user") turn = i;
+    else if (m.role === "assistant" && m.unconfirmed) {
+      const list = byTurn.get(turn);
+      if (list) list.push(m); else byTurn.set(turn, [m]);
+    }
+  });
+  if (byTurn.size === 0) return next;
+
+  // Replies to insert AFTER a given index of `next` (-1: before everything).
+  const after = new Map<number, ChatMessage[]>();
+  for (const [userIdx, replies] of byTurn) {
+    let start = 0;
+    if (userIdx !== -1) {
+      let found = -1;
+      for (let j = next.length - 1; j >= 0; j--) {
+        if (next[j].role === "user" && sameUserTurn(previous[userIdx], next[j])) { found = j; break; }
+      }
+      if (found === -1) continue; // the turn has left the window
+      start = found + 1;
+    }
+    // Everything up to the next user turn is this turn's.
+    let end = start;
+    let answered = false;
+    while (end < next.length && next[end].role !== "user") {
+      if (next[end].role === "assistant") answered = true;
+      end++;
+    }
+    if (answered) continue;
+    const slot = end - 1;
+    const list = after.get(slot);
+    if (list) list.push(...replies); else after.set(slot, [...replies]);
+  }
+  if (after.size === 0) return next;
+  const merged: ChatMessage[] = [...(after.get(-1) ?? [])];
+  next.forEach((m, j) => {
+    merged.push(m);
+    const replies = after.get(j);
+    if (replies) merged.push(...replies);
+  });
+  return merged;
+}
+
 /**
  * The transcript after a history read: the server's list, with the turns it has
  * not echoed yet kept at the end and live spoken replies carried over.
  *
- * `keepLocalNotes` also carries the chat's own notes (see `carryLocalNotes`) —
- * the full-page chat's choice. The mascot chat clears and repaints its notes on
- * its own schedule and does not ask for it.
+ * The full-page chat also asks for two carries: `keepUnconfirmedReplies`, the
+ * live replies the box has not stored yet (see `carryUnconfirmedReplies`), and
+ * `keepLocalNotes`, its own notes (see `carryLocalNotes`). The mascot chat
+ * clears and repaints those on its own schedule and asks for neither.
  *
  * Returns `previous` itself when the read changed nothing, so React skips the
  * render.
@@ -520,7 +593,7 @@ export function carryLocalNotes(previous: ChatMessage[], next: ChatMessage[]): C
 export function mergeRestoredTranscript(
   previous: ChatMessage[],
   fromServer: ChatMessage[],
-  opts?: { keepLocalNotes?: boolean },
+  opts?: { keepLocalNotes?: boolean; keepUnconfirmedReplies?: boolean },
 ): ChatMessage[] {
   if (previous.length === 0) return fromServer;
   // Carry an event that beat the disk/history read across this one
@@ -530,6 +603,30 @@ export function mergeRestoredTranscript(
   const lastServerTs = restored.length > 0 ? restored[restored.length - 1].timestamp : 0;
   const inFlight = unechoedUserTurns(previous, restored, lastServerTs);
   const withTurns = inFlight.length === 0 ? restored : [...restored, ...inFlight];
-  const next = opts?.keepLocalNotes ? carryLocalNotes(previous, withTurns) : withTurns;
+  // Replies before notes: a note that followed a carried reply anchors on it.
+  const withReplies = opts?.keepUnconfirmedReplies ? carryUnconfirmedReplies(previous, withTurns) : withTurns;
+  const next = opts?.keepLocalNotes ? carryLocalNotes(previous, withReplies) : withReplies;
   return sameTranscript(previous, next) ? previous : next;
+}
+
+/** The order history reads were asked in, and the newest one applied. */
+export type HistoryReadOrder = { issued: number; applied: number };
+
+/** Number a history read as it is asked for. */
+export function beginHistoryRead(order: HistoryReadOrder): number {
+  order.issued += 1;
+  return order.issued;
+}
+
+/**
+ * May the answer to read `seq` be painted? Only when no LATER read has already
+ * been — so an answer that lost the race cannot put back a transcript a newer
+ * one has replaced. Monotonic rather than latest-only on purpose: a newer read
+ * that FAILS (a gateway still rebuilding its history) must not leave an older
+ * one's good answer unpainted.
+ */
+export function claimHistoryRead(order: HistoryReadOrder, seq: number): boolean {
+  if (seq <= order.applied) return false;
+  order.applied = seq;
+  return true;
 }

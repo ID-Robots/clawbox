@@ -51,6 +51,9 @@ const LIVE_FINAL = { role: "assistant", content: [{ type: "text", text: REPLY }]
 
 let history: unknown[] = [];
 let historyReads = 0;
+/** While set, `chat.history` answers wait in `held` until a test releases them. */
+let holdHistory = false;
+const held: Array<() => void> = [];
 const sent: Array<Record<string, unknown>> = [];
 const sockets: FakeGatewayWs[] = [];
 const socket = () => sockets[sockets.length - 1] ?? null;
@@ -81,7 +84,10 @@ class FakeGatewayWs {
     }
     if (frame.method === "chat.history") {
       historyReads += 1;
-      this.respond(id, { messages: history });
+      // Answered with the transcript as it stood when asked.
+      const snapshot = history;
+      if (holdHistory) { held.push(() => this.respond(id, { messages: snapshot })); return; }
+      this.respond(id, { messages: snapshot });
       return;
     }
     this.respond(id, { runId: "r1", status: "started" });
@@ -184,6 +190,8 @@ describe.each(SURFACES)("a file the agent sends, in $name", ({ mount }) => {
     // gate the composer, and the send under test would never happen.
     history = [assistantMessage(SEED_TEXT, SERVER_TS - 10)];
     historyReads = 0;
+    holdHistory = false;
+    held.length = 0;
     sent.length = 0;
     sockets.length = 0;
     resetHarnessCache();
@@ -323,6 +331,8 @@ describe("the full-page chat's own notes across a transcript re-read", () => {
   beforeEach(() => {
     history = [assistantMessage(SEED_TEXT, SERVER_TS - 10)];
     historyReads = 0;
+    holdHistory = false;
+    held.length = 0;
     sent.length = 0;
     sockets.length = 0;
     resetHarnessCache();
@@ -361,5 +371,117 @@ describe("the full-page chat's own notes across a transcript re-read", () => {
     // Still after the turn it belongs to.
     const text = document.body.textContent ?? "";
     expect(text.indexOf(line)).toBeGreaterThan(text.indexOf(PROMPT));
+  });
+});
+
+/**
+ * Review of #1074: the full-page chat now reads history from three places — the
+ * restore, the re-read each push schedules, the ack-only refetch — so a read
+ * can answer late, or before the box has stored the reply on screen.
+ */
+describe("the full-page chat's history reads", () => {
+  beforeEach(() => {
+    history = [assistantMessage(SEED_TEXT, SERVER_TS - 10)];
+    historyReads = 0;
+    holdHistory = false;
+    held.length = 0;
+    sent.length = 0;
+    sockets.length = 0;
+    resetHarnessCache();
+    window.localStorage.clear();
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
+    installFetch();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+    resetHarnessCache();
+  });
+
+  /** Push an append and wait until the re-read it schedules has been asked for. */
+  async function pushAndAwaitRead(message: unknown) {
+    const before = historyReads;
+    socket()?.emit({ type: "event", event: "session.message", payload: { sessionKey: MAIN, message } });
+    await waitFor(() => expect(historyReads).toBeGreaterThan(before), { timeout: 3_000 });
+  }
+
+  it("an answer that lost the race to a later read does not take the card back off", async () => {
+    render(<ChatApp />);
+    await screen.findByText(SEED_TEXT);
+    await sendPrompt();
+    await act(async () => { pushFinal(); });
+    await waitFor(() => expect(bubbles(REPLY)).toHaveLength(1));
+
+    holdHistory = true;
+    // Read 1 is asked before the box stored the reply…
+    const userOnly = userMessage(PROMPT, SERVER_TS, `${lastSentRunId()}:user`);
+    history = [assistantMessage(SEED_TEXT, SERVER_TS - 10), userOnly];
+    await pushAndAwaitRead(userOnly);
+    // …read 2 after, with the file.
+    storeTurn();
+    await pushAndAwaitRead(STORED_REPLY);
+    expect(held).toHaveLength(2);
+
+    // The later read answers first and paints the card…
+    await act(async () => { held[1](); await new Promise((r) => setTimeout(r, 0)); });
+    await expectReplyOnceWithItsCard();
+    // …then the older answer lands. It must change nothing.
+    await act(async () => { held[0](); await new Promise((r) => setTimeout(r, 0)); });
+    await flush();
+    await expectReplyOnceWithItsCard();
+  });
+
+  it("a read answered before the box stored the live reply keeps the reply on screen", async () => {
+    render(<ChatApp />);
+    await screen.findByText(SEED_TEXT);
+    await sendPrompt();
+    await act(async () => { pushFinal(); });
+    await waitFor(() => expect(bubbles(REPLY)).toHaveLength(1));
+
+    // The box has the turn but not yet the reply.
+    const userOnly = userMessage(PROMPT, SERVER_TS, `${lastSentRunId()}:user`);
+    history = [assistantMessage(SEED_TEXT, SERVER_TS - 10), userOnly];
+    await pushAndAwaitRead(userOnly);
+    await flush();
+    expect(bubbles(REPLY)).toHaveLength(1);
+
+    // Once it is stored, the stored copy — with its card — takes its place.
+    storeTurn();
+    await pushAndAwaitRead(STORED_REPLY);
+    await flush();
+    await expectReplyOnceWithItsCard();
+  });
+
+  it("a Stop-interrupted answer the box never stored survives the next turn's read, in its place", async () => {
+    render(<ChatApp />);
+    await screen.findByText(SEED_TEXT);
+    await sendPrompt();
+    const firstRun = lastSentRunId();
+    const partial = "Here is the first half of an answer";
+    await act(async () => {
+      socket()?.emit({ type: "event", event: "chat", payload: { sessionKey: MAIN, runId: firstRun, state: "delta", message: { role: "assistant", content: [{ type: "text", text: partial }] } } });
+    });
+    await act(async () => {
+      socket()?.emit({ type: "event", event: "chat", payload: { sessionKey: MAIN, runId: firstRun, state: "aborted" } });
+    });
+    await waitFor(() => expect(bubbles(partial)).toHaveLength(1));
+
+    // The next turn. The box stored both prompts and no partial answer.
+    const next = "try again, shorter";
+    const textarea = await screen.findByRole("textbox");
+    fireEvent.change(textarea, { target: { value: next } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    await waitFor(() => expect(lastSentRunId()).not.toBe(firstRun));
+    const second = userMessage(next, SERVER_TS + 5, `${lastSentRunId()}:user`);
+    history = [assistantMessage(SEED_TEXT, SERVER_TS - 10), userMessage(PROMPT, SERVER_TS, `${firstRun}:user`), second];
+    await pushAndAwaitRead(second);
+    await flush();
+
+    expect(bubbles(partial)).toHaveLength(1);
+    const text = document.body.textContent ?? "";
+    expect(text.indexOf(partial)).toBeGreaterThan(text.indexOf(PROMPT));
+    expect(text.indexOf(partial)).toBeLessThan(text.indexOf(next));
   });
 });

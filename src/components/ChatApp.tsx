@@ -55,7 +55,9 @@ import {
 // `session.message` push and re-reads — the mascot chat's own handling, from the
 // module both chats share (TASK-1372).
 import {
+  beginHistoryRead,
   cancelTranscriptReconcile,
+  claimHistoryRead,
   isAckOnlyReply,
   mergeRestoredTranscript,
   pushedSpokenReply,
@@ -64,6 +66,7 @@ import {
   sessionMessagePush,
   withAssistantReply,
   withPushedSpokenReply,
+  type HistoryReadOrder,
   type ReconcileTimer,
 } from '@/lib/chat-transcript-reconcile'
 import { subscribeSessionMessages } from '@/lib/gateway-approvals'
@@ -439,6 +442,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   // burst of appends, the same 400 ms the mascot chat waits (TASK-1364,
   // TASK-1372). Cleared on unmount.
   const transcriptReconcileTimerRef = useRef<ReconcileTimer['current']>(null)
+  // Which history read was asked for last, and which was painted last — so an
+  // answer that arrives after a later one's is dropped (`claimHistoryRead`).
+  const historyReadOrderRef = useRef<HistoryReadOrder>({ issued: 0, applied: 0 })
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
@@ -638,7 +644,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // than dropped: the transcript this surface replays carries all four, so
     // discarding them here would make the live bubble and the reloaded one
     // disagree the moment anything renders them.
-    extra?: Pick<ChatMessage, 'reasoning' | 'toolCalls' | 'model' | 'provider' | 'files'>,
+    extra?: Pick<ChatMessage, 'reasoning' | 'toolCalls' | 'model' | 'provider' | 'files' | 'unconfirmed'>,
   ) => {
     const reply: ChatMessage = {
       role: 'assistant',
@@ -656,6 +662,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // A harness with no replay has nothing to read, and asking would be a call
     // the adapter's own contract answers `unsupported`.
     if (!transport.capabilities.canListHistory) return
+    // This read's place in line (see `claimHistoryRead` below).
+    const seq = beginHistoryRead(historyReadOrderRef.current)
+    const overtaken = () => historyReadOrderRef.current.applied > seq
     // A RESTORE — the read on the hello, the replay, Try again — is bounded and
     // retried only while the gateway says "not yet" or does not answer; the
     // ack-only refetch stays the single best-effort read it always was
@@ -687,29 +696,37 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           attemptTimeoutMs: HISTORY_ATTEMPT_TIMEOUT_MS,
           deadlineMs: HISTORY_RESTORE_DEADLINE_MS,
           delaysMs: HISTORY_RETRY_DELAYS_MS,
-          onRetry: () => setRestoreState({ phase: 'retrying' }),
+          // Not over a conversation a later read has already painted.
+          onRetry: () => { if (!overtaken()) setRestoreState({ phase: 'retrying' }) },
         })
         : await read()
       // Any read that answers ends a restore's wait or failure.
       setRestoreState(null)
+      // Three things read now — the restore, the re-read each pushed append
+      // schedules, the ack-only refetch — and they can overlap. An answer that
+      // lost the race to a later read's must not paint the older transcript
+      // over it: that took the stored reply and its card back off the screen.
+      if (!claimHistoryRead(historyReadOrderRef.current, seq)) return
       // Server is canonical for everything it knows about, but a user turn
       // typed between connect-ack and history-arrival ("optimistic local")
       // hasn't reached the server yet. The mascot chat's merge, shared: such a
       // turn is recognised by its run's idempotency key rather than by comparing
       // the browser's clock with the box's — every push re-reads the
       // conversation (TASK-1364), so a browser running ahead of the box would
-      // otherwise show each of its turns twice — and this page's own notes (a
-      // failed turn, a fallback model) are kept where they were, since the
-      // gateway's transcript cannot carry them.
-      setMessages(prev => mergeRestoredTranscript(prev, chatMsgs, { keepLocalNotes: true }))
+      // otherwise show each of its turns twice. Two things the box may not hold
+      // yet are kept as well: a reply this page painted live (until the box has
+      // a reply for that turn), and this page's own notes (a failed turn, a
+      // fallback model).
+      setMessages(prev => mergeRestoredTranscript(prev, chatMsgs, { keepLocalNotes: true, keepUnconfirmedReplies: true }))
     } catch (err) {
       // Called off: a newer socket, Try again or the page going away owns the
       // conversation now. Nothing to report.
       if (restoreCtl && isRestoreAborted(err)) return
       console.error('Failed to load history:', err)
       // Only a restore ends in the panel: an ordinary refetch failing leaves
-      // the transcript that is already painted, exactly as before.
-      if (restoreCtl) setRestoreState({ phase: 'failed', kind: classifyRestoreFailure(err) })
+      // the transcript that is already painted, exactly as before. Nor does a
+      // restore a later read has already answered for.
+      if (restoreCtl && !overtaken()) setRestoreState({ phase: 'failed', kind: classifyRestoreFailure(err) })
     } finally {
       if (restoreCtl && restoreAbortRef.current === restoreCtl) restoreAbortRef.current = null
     }
@@ -991,7 +1008,10 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
             // Appended through the SHARED renderer, so this bubble and the one
             // an adapter turn resolves with cannot drift.
             if (!isAckOnly && !isInterSessionEnvelope(raw, msg)) {
-              appendAssistantReply(text, images, audio, files.length ? { files } : undefined)
+              // `unconfirmed` until a history read shows the box holds a reply
+              // for this turn: a read answered just before the box stored it
+              // must not take the bubble back off the screen.
+              appendAssistantReply(text, images, audio, { ...(files.length ? { files } : {}), unconfirmed: true })
             }
             applyStreaming('')
             // A reply another model wrote — the picked one failed and the
@@ -1054,6 +1074,10 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
                 images: keptMedia.images,
                 audio: boundedAudio(keptMedia.audio),
                 ...(keptMedia.files.length ? { files: boundedFiles(keptMedia.files) } : {}),
+                // The box may never store a partial answer, and the next turn's
+                // history read would then drop it; kept until the box holds a
+                // reply for this turn, which then stands in for it.
+                unconfirmed: true,
               }])
             }
             clearToolCalls()

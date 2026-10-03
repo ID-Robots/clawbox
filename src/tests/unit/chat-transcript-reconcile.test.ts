@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "@/lib/chat-history-cache";
 import {
   TRANSCRIPT_RECONCILE_DELAY_MS,
+  beginHistoryRead,
   cancelTranscriptReconcile,
   carryLocalNotes,
+  carryUnconfirmedReplies,
+  claimHistoryRead,
   finalAlreadyShownWithMedia,
   isAckOnlyReply,
   mergeRestoredTranscript,
@@ -13,6 +16,7 @@ import {
   sessionMessagePush,
   withAssistantReply,
   withPushedSpokenReply,
+  type HistoryReadOrder,
   type ReconcileTimer,
 } from "@/lib/chat-transcript-reconcile";
 import { subscribeSessionMessages } from "@/lib/gateway-approvals";
@@ -325,5 +329,81 @@ describe("subscribing to a session's transcript", () => {
 
   it("never throws on a gateway that refuses it", async () => {
     await expect(subscribeSessionMessages(async () => { throw new Error("unknown method"); }, "k")).resolves.toBe(false);
+  });
+});
+
+describe("carrying live replies the box has not stored yet", () => {
+  const live = (text: string, timestamp: number, extra: Partial<ChatMessage> = {}) =>
+    assistant(text, timestamp, { unconfirmed: true, ...extra });
+
+  it("keeps a live reply whose turn the read has without a reply", () => {
+    const shown = [user("q1", 9_000_000, "r1"), live(REPLY, 9_000_001)];
+    const server = [user("q1", 1_000, "r1:user")];
+    expect(carryUnconfirmedReplies(shown, server).map((m) => m.text)).toEqual(["q1", REPLY]);
+  });
+
+  it("gives way to ANY stored reply for the turn — never both, whatever its words", () => {
+    const shown = [user("q1", 9_000_000, "r1"), live(REPLY, 9_000_001)];
+    const server = [user("q1", 1_000, "r1:user"), assistant("A differently projected copy", 1_001, { files: [FILE_URL] })];
+    expect(carryUnconfirmedReplies(shown, server)).toBe(server);
+  });
+
+  it("puts an interrupted answer back in its own turn, before the next one", () => {
+    const shown = [user("q1", 9_000_000, "r1"), live("half an answer", 9_000_001), user("q2", 9_000_100, "r2")];
+    const server = [user("q1", 1_000, "r1:user"), user("q2", 1_005, "r2:user"), assistant("A full answer", 1_006)];
+    expect(carryUnconfirmedReplies(shown, server).map((m) => m.text))
+      .toEqual(["q1", "half an answer", "q2", "A full answer"]);
+  });
+
+  it("follows a turn still in flight to the end of the list", () => {
+    const inFlight = user("q1", 9_000_000, "r1");
+    const shown = [assistant("Hello", 900), inFlight, live(REPLY, 9_000_001)];
+    const next = [assistant("Hello", 900), inFlight];
+    expect(carryUnconfirmedReplies(shown, next).map((m) => m.text)).toEqual(["Hello", "q1", REPLY]);
+  });
+
+  it("drops a reply whose turn has left the history window", () => {
+    const shown = [user("old", 1, "r0"), live("old reply", 2), user("q1", 3, "r1")];
+    const server = [user("q1", 30, "r1:user")];
+    expect(carryUnconfirmedReplies(shown, server)).toBe(server);
+  });
+
+  it("never carries a reply the box already gave (no flag)", () => {
+    const shown = [user("q1", 1, "r1"), assistant("stored", 2)];
+    const server = [user("q1", 1, "r1:user")];
+    expect(carryUnconfirmedReplies(shown, server)).toBe(server);
+  });
+
+  it("keeps a note after the reply it followed, through the full merge", () => {
+    const shown = [user("q1", 9_000_000, "r1"), live(REPLY, 9_000_001), note("Another model answered.", 9_000_002)];
+    const server = [user("q1", 1_000, "r1:user")];
+    expect(mergeRestoredTranscript(shown, server, { keepLocalNotes: true, keepUnconfirmedReplies: true }).map((m) => m.text))
+      .toEqual(["q1", REPLY, "Another model answered."]);
+    // And hands back the very list on screen when that is all the read changed.
+    const echoed = [user("q1", 9_000_000, "r1:user"), live(REPLY, 9_000_001), note("n", 9_000_002)];
+    expect(mergeRestoredTranscript(echoed, [echoed[0]], { keepLocalNotes: true, keepUnconfirmedReplies: true })).toBe(echoed);
+  });
+});
+
+describe("the order history reads are painted in", () => {
+  it("paints answers that arrive in order", () => {
+    const order: HistoryReadOrder = { issued: 0, applied: 0 };
+    const a = beginHistoryRead(order), b = beginHistoryRead(order);
+    expect(claimHistoryRead(order, a)).toBe(true);
+    expect(claimHistoryRead(order, b)).toBe(true);
+  });
+
+  it("drops an answer that lost the race to a later read's", () => {
+    const order: HistoryReadOrder = { issued: 0, applied: 0 };
+    const a = beginHistoryRead(order), b = beginHistoryRead(order);
+    expect(claimHistoryRead(order, b)).toBe(true);
+    expect(claimHistoryRead(order, a)).toBe(false);
+  });
+
+  it("still paints an older answer when the later read failed and never claimed", () => {
+    const order: HistoryReadOrder = { issued: 0, applied: 0 };
+    const restore = beginHistoryRead(order);
+    beginHistoryRead(order); // a re-read that the gateway refuses
+    expect(claimHistoryRead(order, restore)).toBe(true);
   });
 });
