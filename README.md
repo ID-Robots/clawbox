@@ -69,6 +69,19 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 
 ---
 
+## ✨ New in 4.2
+
+| | |
+|---|---|
+| 👥 **Several people, one ClawBox** | The owner adds users in **Settings → Users**. Each person signs in with their own name and password and gets a desktop and a Terminal of their own; settings and installed apps stay with the owner. |
+| 🖥️ **Monitor mode, with a drop-down terminal** | With the ClawBox desktop session, one desktop spans a row of monitors, arranged in **Settings → Monitors**. **Win+Down** drops a terminal down from the top of the screen. |
+| ☁️ **Back up project folders to GitHub** | **Files → Projects → Back up** copies a folder to a private GitHub repository, with an optional daily backup. Likely secrets and very large files are left out, and listed. |
+| 🧭 **Kiosk mode** | When ClawBox shows its desktop full screen, every page the desktop opens gets a ClawBox bar with tabs, back, forward, reload and an address field. |
+| 🛟 **ClawKeep backups fixed** | Snapshots no longer carry old backup archives along, a link that cannot be archived is skipped instead of failing the backup, and a full account no longer turns auto-backup off for good. |
+| 🛠️ **Fixes from hardware testing** | Testing on real ClawBox hardware found and fixed problems with voice input, spoken replies, the ClawBox AI plugin's **Retry**, and updating a box left on an older build. |
+
+Full detail, and how to upgrade: **[RELEASE-NOTES-4.2.0.md](RELEASE-NOTES-4.2.0.md)**.
+
 ## ✨ New in 4.1
 
 | | |
@@ -79,7 +92,7 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🔀 **Coding Agent PRs merge when green** | With merging on, a run hands its pull request to GitHub's auto-merge. A `hold` label or a `main` base is never merged, and CodeRabbit reviews each PR once, on green code. |
 | 🛠️ **Updates and backups hold up** | OpenClaw 2026.9.4 with an up-front refusal for newer-schema data, plugins left **Needs repair** retried after the update, and ClawKeep backups that get past the failures seen after 4.0. A box updated from 4.0 no longer starts every local-model reply with a 401. |
 
-Full detail, and how to upgrade: **[RELEASE-NOTES-4.1.0.md](RELEASE-NOTES-4.1.0.md)**.
+Full detail: **[RELEASE-NOTES-4.1.0.md](RELEASE-NOTES-4.1.0.md)**.
 
 ## ✨ New in 4.0
 

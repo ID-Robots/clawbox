@@ -120,9 +120,9 @@ describe("UpdateWhatsNewPanel", () => {
     expect(panel).toHaveAttribute("data-kind", "bundled");
     const list = within(panel).getByRole("list");
     expect(list).not.toHaveAttribute("lang");
-    expect(within(list).getAllByRole("listitem")).toHaveLength(4);
-    expect(within(list).getByText(de["whatsNew.phoneFullscreenTitle"])).toBeInTheDocument();
-    expect(within(list).getByText(de["whatsNew.autoMergeBody"])).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(6);
+    expect(within(list).getByText(de["whatsNew.multiUserTitle"])).toBeInTheDocument();
+    expect(within(list).getByText(de["whatsNew.hardwareFixesBody"])).toBeInTheDocument();
     expect(within(panel).getByRole("link")).toHaveAttribute("href", releasePageUrl(NONE_ON_LINE.version));
   });
 
@@ -152,7 +152,7 @@ describe("UpdateWhatsNewPanel", () => {
 
     render(<UpdateWhatsNewPanel panel={updateWhatsNewPanel(NONE_ON_LINE)} />);
     expect(screen.getByRole("region", { name: `Highlights of ClawBox ${WHATS_NEW_RELEASE}` })).toBeInTheDocument();
-    expect(screen.getByText("More of the phone for the chat")).toBeInTheDocument();
+    expect(screen.getByText("Several people, one ClawBox")).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/update\.whatsNew|whatsNew\./);
   });
 

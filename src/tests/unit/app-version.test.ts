@@ -45,7 +45,7 @@ const REPO_ROOT = path.resolve(__dirname, "../../..");
  * The release this branch ships, pinned on purpose.
  *
  * This is a second place the number is written, and `npm version` does not
- * maintain it: a future `npm version 4.1.0 --no-git-tag-version` turns this
+ * maintain it: a future `npm version 4.3.0 --no-git-tag-version` turns this
  * suite red until the literal below moves too. That is the intent — the bump
  * is a deliberate release act, and a stamped expectation is what makes an
  * accidental or half-applied one fail loudly instead of shipping a box that
@@ -53,7 +53,7 @@ const REPO_ROOT = path.resolve(__dirname, "../../..");
  * `npm version <x> --no-git-tag-version`, then this constant — and, for a new
  * minor, the What's new card's release (see release-identity.test.ts).
  */
-const EXPECTED_VERSION = "4.1.0";
+const EXPECTED_VERSION = "4.2.0";
 
 function readJson(rel: string): { version?: string; packages?: Record<string, { version?: string }> } {
   return JSON.parse(fs.readFileSync(path.join(REPO_ROOT, rel), "utf-8"));
