@@ -620,6 +620,9 @@ describe("middleware", () => {
       "/setup-api/system/hotspot",
       "/setup-api/gateway/health",
       "/setup-api/harness/active",
+      // "Choose your assistant" on a unified-image box runs between WiFi and
+      // the password step (TASK-1149).
+      "/setup-api/setup/edition",
     ])("allows %s during setup wizard bootstrap", async (p) => {
       // production-server.js auto-creates SESSION_SECRET so the env-var
       // short-circuit never fires; the wizard must still reach the routes

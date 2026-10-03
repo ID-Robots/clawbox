@@ -711,7 +711,7 @@ describe("the foreign-unit registry", () => {
     // satisfies both, so dual accumulates nothing.
     expect(FOREIGN_REGISTRY).not.toContain("is_hermes_edition");
     expect(INSTALL_SH).toContain('has_hermes_harness() { [ "$CLAWBOX_EDITION" = "hermes" ] || [ "$CLAWBOX_EDITION" = "dual" ]; }');
-    expect(INSTALL_SH).toContain('has_openclaw_harness() { [ "$CLAWBOX_EDITION" != "hermes" ]; }');
+    expect(INSTALL_SH).toContain('has_openclaw_harness() { [ "$CLAWBOX_EDITION" = "openclaw" ] || [ "$CLAWBOX_EDITION" = "dual" ]; }');
   });
 
   it("every ClawBox-shipped harness unit is claimed by exactly one edition", () => {

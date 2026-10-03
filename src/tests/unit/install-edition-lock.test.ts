@@ -308,17 +308,22 @@ describe("edition persistence (H7 / H9)", () => {
 });
 
 describe("dual SKU is actually provisionable (H8)", () => {
-  it("installs the Hermes harness on hermes AND dual", () => {
-    expect(extractShellFunction("step_hermes_install")).toContain("has_hermes_harness || return 0");
+  it("installs the Hermes harness on hermes AND dual (and the unified image's unselected)", () => {
+    // installs_hermes_harness = has_hermes_harness (hermes|dual) OR unselected:
+    // on the three shipped editions it is exactly the old gate.
+    expect(extractShellFunction("step_hermes_install")).toContain("installs_hermes_harness || return 0");
+    expect(INSTALL_SH).toContain("installs_hermes_harness() { has_hermes_harness || is_unselected_edition; }");
   });
 
   it("expects the Hermes dashboard units on hermes AND dual", () => {
     expect(INSTALL_SH).toContain("if has_hermes_harness; then\n  EXPECTED_ACTIVE_SERVICES+=(");
   });
 
-  it("keeps the gateway on dual and drops it only on hermes", () => {
+  it("keeps the gateway on dual and drops it on hermes (and while no agent is chosen)", () => {
     expect(extractShellFunction("step_start_services")).toContain("if has_openclaw_harness; then");
-    expect(INSTALL_SH).toContain('has_openclaw_harness() { [ "$CLAWBOX_EDITION" != "hermes" ]; }');
+    // openclaw|dual — the same answer as the old `!= hermes` on every shipped
+    // edition; the unified image's `unselected` runs no gateway until chosen.
+    expect(INSTALL_SH).toContain('has_openclaw_harness() { [ "$CLAWBOX_EDITION" = "openclaw" ] || [ "$CLAWBOX_EDITION" = "dual" ]; }');
   });
 });
 

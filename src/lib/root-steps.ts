@@ -36,6 +36,18 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   "chromium_install",
   "clawkeep_install",
   "cloudflared_install",
+  // The setup wizard's "Choose your assistant" step on a unified-image box
+  // (TASK-1149): locks the box to OpenClaw or Hermes, provisions that agent
+  // and takes the other off the box, started by /setup-api/setup/edition.
+  //
+  // The swap's privilege shape (see harness_swap below): the clawbox ACCOUNT
+  // can write `data/edition-select.env` and start the step, so install.sh's
+  // VALUE gate is the boundary — the same parser as the swap's request — plus
+  // one rule of its own that keeps this from being a free swap: the step acts
+  // only while the root-owned lock reads `unselected` (or finishes, for the
+  // SAME agent, an activation the root side itself marked as cut short). No
+  // deployed box has that value. Off UI_ROOT_STEPS for the swap's reason.
+  "edition_select",
   // The memory-search embedder's GGUF (data/embed/models), for the Memory
   // Shard wizard's first-run download. Started only by an owner-only route,
   // never by install/run-step — so NOT on UI_ROOT_STEPS, like openclaw_tts.
