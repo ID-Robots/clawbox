@@ -26,11 +26,8 @@ import path from "node:path";
  * Every assertion is about argv the script handed nmcli, what it printed, or
  * the state it left the model in.
  *
- * Not here, on purpose: the residual window in which NetworkManager can
- * autoconnect a client between the last check of an AP attempt and that
- * attempt's release, and the failover dispatcher's name-based handling of
- * profiles. Both are known defects or limitations; they are reported with red
- * evidence outside this suite, not pinned in it as behaviour that passes.
+ * N5/N8 below promote the original external red evidence into regressions.
+ * Inhibition is modelled, not proof of a real NM atomic activation barrier.
  */
 
 // Starts real processes: vitest's 5 s test and 10 s hook defaults are not
@@ -229,8 +226,15 @@ EOF
     printf '%s\\n' "$listing" ;;
   "device show")
     [ "$3" = "$IFC" ] || { echo "Error: Device '$3' not found." >&2; exit 10; }
+    if [ "$fields" = GENERAL.AUTOCONNECT ]; then
+      if [ -f "$NM/device-ac" ]; then cat "$NM/device-ac"; else echo yes; fi
+      exit 0
+    fi
     [ "$fields" = GENERAL.STATE ] || unsupported "$@"
     if [ "$get" = 1 ]; then state_text; else echo "GENERAL.STATE:$(state_text)"; fi ;;
+  "device set")
+    [ "$3" = "$IFC" ] && [ "$4" = autoconnect ] || unsupported "$@"
+    case "$5" in yes|no) printf '%s' "$5" > "$NM/device-ac" ;; *) unsupported "$@" ;; esac ;;
   "device disconnect")
     set_active "" 30 ;;
   "device wifi")
@@ -254,6 +258,7 @@ EOF
           fi
           if [ "$P_MODE" = - ]; then echo ""; else echo "$P_MODE"; fi ;;
         connection.autoconnect) echo "$P_AC" ;;
+        connection.id) printf '%s\\n' "$P_ESC" ;;
         *) unsupported "$@" ;;
       esac
       exit 0
@@ -637,13 +642,14 @@ describe("N2: names with a newline or control characters in them", () => {
     for (const n of names) expect(n.length).toBeLessThanOrEqual(64);
   });
 
-  it("releases only real profiles, by UUID, when every client fails and the hotspot comes up", () => {
+  it("does not release client profiles when every client fails and the fallback hotspot comes up", () => {
     const failing = profiles.map((p) => ({ ...p, up: "fail" as const }));
     makeBox({ setupComplete: true, profiles: failing });
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(clientUps(r)).toEqual([LOFT, ATTIC, OFFICE, CAFE, HOME, GARAGE]);
-    expect(targetsOf(r, "down").sort()).toEqual([LOFT, ATTIC, OFFICE, CAFE, HOME, GARAGE].sort());
+    // Client-preferred fallback must NOT release any client profile.
+    expect(targetsOf(r, "down")).toEqual([]);
     expect(activeNow()).toBe(HOTSPOT);
     expectOnlyRealUuids(r, failing);
   });
@@ -854,5 +860,367 @@ describe("N7: a client an Ethernet-uplink run left on autoconnect=no", () => {
     expect(activeNow()).toBe(HOME);
     expect(second.calls.filter(isApActivity)).toEqual([]);
     expectOnlyRealUuids(second, profiles);
+  });
+});
+
+// Promoted from the external red evidence; baseline traces stay outside the repo.
+// N5: the original release-window reds were reproduced before editing. The
+// removed release hooks are now admission hooks with mandatory race witnesses.
+import { renameSync } from "node:fs";
+
+/**
+ * NetworkManager's own autoconnect, landing at one exact point of the run:
+ * just BEFORE ("before") or just AFTER ("after") the nmcli call whose argv,
+ * space-joined, is `when` — once, and only onto an idle radio.
+ */
+function autoconnectAt(when: string, uuid: string, at: "before" | "after") {
+  const bin = path.join(root, "bin");
+  renameSync(path.join(bin, "nmcli"), path.join(bin, "nmcli-model"));
+  writeFileSync(
+    path.join(bin, "nmcli"),
+    `#!/usr/bin/env bash
+land() {
+  if [ ! -e "$NMSTUB/raced" ] && [ -z "$(cat "$NMSTUB/active")" ]; then
+    : > "$NMSTUB/raced"
+    printf '%s' ${JSON.stringify(uuid)} > "$NMSTUB/active"; printf 100 > "$NMSTUB/state"
+  fi
+}
+match=0; [ "$*" = ${JSON.stringify(when)} ] && match=1
+[ "$match" = 1 ] && [ ${JSON.stringify(at)} = before ] && land
+"$(dirname "$0")/nmcli-model" "$@"; rc=$?
+[ "$match" = 1 ] && [ ${JSON.stringify(at)} = after ] && land
+exit $rc
+`,
+    { mode: 0o755 },
+  );
+}
+
+const show = (r: Run) => r.lines.filter((l) => !/802-11-wireless\.mode/.test(l)).map((l, i) => `  ${String(i).padStart(2)} nmcli ${l}`).join("\n");
+
+describe("N5 evidence: a client that autoconnects inside the last AP attempt's window", () => {
+  const home: Profile = { uuid: HOME, name: "Example-Home", up: "fail" };
+
+  it("a client that lands during the pre-AP scan is kept", () => {
+    makeBox({ setupComplete: true, profiles: [home] });
+    autoconnectAt(`device wifi rescan ifname ${IFACE}`, HOME, "after");
+    const r = runStartAp();
+    console.log(`control trace:\n${show(r)}\nstdout tail:\n${r.stdout.trim().split("\n").slice(-2).join("\n")}`);
+    expect(existsSync(path.join(nm, "raced"))).toBe(true);
+    expect(activeNow()).toBe(HOME);
+    expect(r.lines).not.toContain("connection up ClawBox-Setup");
+  });
+
+  it("N5-a: a client that lands before inhibition is acknowledged is kept", () => {
+    // Original red hooked the release enumeration. Release no longer exists
+    // in this policy: inject at admission instead, and REQUIRE the witness.
+    makeBox({ setupComplete: true, profiles: [home] });
+    autoconnectAt(`--wait 5 device set ${IFACE} autoconnect no`, HOME, "before");
+    const r = runStartAp();
+    console.log(`N5-a trace (mode queries elided):\n${show(r)}\nstdout tail:\n${r.stdout.trim().split("\n").slice(-4).join("\n")}`);
+    expect(existsSync(path.join(nm, "raced")), "the race was not staged").toBe(true);
+    expect(r.lines, "HOME was connected when the release took it down").not.toContain(`connection down uuid ${HOME}`);
+    expect(activeNow(), "the customer's WiFi was replaced by the hotspot").toBe(HOME);
+  });
+
+  it("N5-b: an already-pending client that lands after inhibition is acknowledged is kept", () => {
+    // An activation already started before inhibition may finish afterward.
+    // This forced completion is not a new automatic start: it ignores the
+    // inhibition flag. AP up in this model would preempt it if attempted.
+    makeBox({ setupComplete: true, profiles: [home] });
+    autoconnectAt(`--wait 5 device set ${IFACE} autoconnect no`, HOME, "after");
+    const r = runStartAp();
+    console.log(`N5-b trace (mode queries elided):\n${show(r)}\nstdout tail:\n${r.stdout.trim().split("\n").slice(-4).join("\n")}`);
+    expect(existsSync(path.join(nm, "raced")), "the race was not staged").toBe(true);
+    expect(activeNow(), "the customer's WiFi was replaced by the hotspot").toBe(HOME);
+  });
+});
+
+// Promoted from the external red evidence; baseline traces stay outside the repo.
+// N8 / known defect D1: scripts/nm-dispatcher-failover.sh reads saved WiFi
+// profiles by NAME (`awk -F:` over escaped terse output) and activates them by
+// NAME in the baseline. Each D1 regression requires the desired outcome. The
+// controls, identical but with plain names, show the
+// harness drives the dispatcher faithfully and that only the names differ.
+// The shipped dispatcher is run from a sandbox copy whose only change is the
+// path of the root-owned network.env, exactly as failover-waits-for-route.test.ts does.
+
+const DISPATCHER = path.join(REPO, "scripts", "nm-dispatcher-failover.sh");
+
+function runDispatcher() {
+  const bin = path.join(root, "bin");
+  const x = { mode: 0o755 };
+  writeFileSync(path.join(root, "network.env"), `NETWORK_INTERFACE=${IFACE}\n`);
+  const src = readFileSync(DISPATCHER, "utf-8");
+  expect(src).toContain("/etc/clawbox/network.env");
+  const copy = path.join(root, "dispatcher.sh");
+  writeFileSync(copy, src.replaceAll("/etc/clawbox/network.env", path.join(root, "network.env")));
+  writeFileSync(path.join(bin, "logger"), `#!/usr/bin/env bash\nshift 2\n[ "$1" = "--" ] && shift\necho "$*" >> "$NMSTUB/journal"\n`, x);
+  writeFileSync(path.join(bin, "setsid"), `#!/usr/bin/env bash\necho "detached waiter $*" >> "$NMSTUB/journal"\n`, x);
+  const waiter = path.join(root, "waiter.sh");
+  writeFileSync(waiter, "#!/usr/bin/env bash\nexit 0\n", x);
+  const witness = path.join(root, "start-ap-witness.sh");
+  writeFileSync(witness, `#!/usr/bin/env bash\n: > "$NMSTUB/recovery-ap"\n`, x);
+  mkdirSync(path.join(root, "run"), { recursive: true });
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.CONNECTION_ID;
+  const res = spawnSync("bash", [copy, "eth0", "down"], {
+    env: {
+      ...env,
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      NMSTUB: nm,
+      CLAWBOX_ONLINE_WAITER: waiter,
+      CLAWBOX_RUN_DIR: path.join(root, "run"),
+      CLAWBOX_START_AP: witness,
+    },
+    encoding: "utf-8",
+    timeout: 25_000,
+  });
+  const read = (f: string) => (existsSync(path.join(nm, f)) ? readFileSync(path.join(nm, f), "utf-8") : "");
+  // The recovery hotspot is launched in the background; let it land.
+  if (read("journal").includes("Recovery AP launch dispatched")) {
+    const until = Date.now() + 3000;
+    while (!existsSync(path.join(nm, "recovery-ap")) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  expect(read("unsupported")).toBe("");
+  const lines = read("calls").split("\n").filter(Boolean).map((l) => l.split("\t").join(" "));
+  const out = { status: res.status, journal: read("journal").trim(), lines, recoveryAp: existsSync(path.join(nm, "recovery-ap")) };
+  console.log(`journal:\n${out.journal.replace(/^/gm, "  ")}\nnmcli actions:\n${lines.filter((l) => /^connection (up|down)/.test(l)).map((l) => `  nmcli ${l}`).join("\n") || "  (none)"}\nrecovery hotspot launched: ${out.recoveryAp}\nradio afterwards: ${activeNow() || "(idle)"}`);
+  return out;
+}
+const ups = (lines: string[]) => lines.filter((l) => /(?:^| )connection up /.test(l));
+
+describe("N8 evidence: the failover dispatcher on Ethernet down", () => {
+  it("a plain-named saved network is joined", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", up: "ok" }] });
+    const d = runDispatcher();
+    expect(d.status).toBe(0);
+    expect(ups(d.lines)).toEqual([`--wait 45 connection up uuid ${HOME} ifname ${IFACE}`]);
+    expect(activeNow()).toBe(HOME);
+  });
+
+  it("a plain-named client already on the radio is left alone", () => {
+    makeBox({
+      setupComplete: true,
+      profiles: [
+        { uuid: HOME, name: "Example-Home", up: "ok" },
+        { uuid: CAFE, name: "Example-Cafe", up: "fail" },
+      ],
+      active: HOME,
+    });
+    const d = runDispatcher();
+    expect(ups(d.lines)).toEqual([]);
+    expect(activeNow()).toBe(HOME);
+  });
+
+  it("D1-a: a saved network whose name has ':' is tried and joined", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example: Attic", up: "ok" }] });
+    const d = runDispatcher();
+    expect(activeNow(), "the only saved network was never tried").toBe(HOME);
+  });
+
+  it("D1-b: of two saved networks sharing a name, the reachable one is joined", () => {
+    makeBox({
+      setupComplete: true,
+      profiles: [
+        { uuid: OFFICE, name: "Example-Twin", priority: 10, up: "fail" },
+        { uuid: HOME, name: "Example-Twin", priority: 0, up: "ok" },
+      ],
+    });
+    const d = runDispatcher();
+    expect(activeNow(), "both attempts named 'Example-Twin' and nmcli resolved the first profile twice").toBe(HOME);
+  });
+
+  it("D1-c: a profile named like another profile's UUID is the one activated", () => {
+    // Modelled assumption: a bare `nmcli connection up X` resolves to the first
+    // profile, in listing order, whose name OR uuid is X. OFFICE is listed first.
+    makeBox({
+      setupComplete: true,
+      profiles: [
+        { uuid: OFFICE, name: "Example-Office", priority: 0, up: "fail" },
+        { uuid: HOME, name: OFFICE, priority: 10, up: "ok" },
+      ],
+    });
+    const d = runDispatcher();
+    expect(activeNow(), "`connection up <OFFICE>` activated OFFICE, not the profile named so").toBe(HOME);
+  });
+
+  it("D1-d: a client with ':' in its name already on the radio is left alone", () => {
+    makeBox({
+      setupComplete: true,
+      profiles: [
+        { uuid: HOME, name: "Example: Office", up: "ok" },
+        { uuid: CAFE, name: "Example-Cafe", up: "fail" },
+      ],
+      active: HOME,
+    });
+    const d = runDispatcher();
+    expect(ups(d.lines), "the live client was not recognised and another network was activated over it").toEqual([]);
+    expect(activeNow()).toBe(HOME);
+    expect(d.recoveryAp, "a recovery hotspot was launched on a box that was online over WiFi").toBe(false);
+  });
+});
+
+
+// A wrapper around the same strict model, not a second nmcli implementation.
+function wrapNm(before: string, after = "") {
+  const bin = path.join(root, "bin");
+  renameSync(path.join(bin, "nmcli"), path.join(bin, "nmcli-model"));
+  writeFileSync(path.join(bin, "nmcli"), `#!/usr/bin/env bash
+${before}
+"$(dirname "$0")/nmcli-model" "$@"; rc=$?
+${after}
+exit $rc
+`, { mode: 0o755 });
+}
+const deviceAc = () => readFileSync(path.join(nm, "device-ac"), "utf-8");
+
+describe("N5 admission and restoration contracts (synthetic NM barrier)", () => {
+  it.each(["yes", "no"])("restores original device autoconnect=%s after verified fallback", (original) => {
+    makeBox({ setupComplete: true, profiles: [] });
+    writeFileSync(path.join(nm, "device-ac"), original);
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(activeNow()).toBe(HOTSPOT);
+    expect(deviceAc()).toBe(original);
+    expect(r.lines).toContain(`--wait 5 device set ${IFACE} autoconnect no`);
+    expect(r.lines).not.toContain(`device disconnect ${IFACE}`);
+  });
+
+  it("blocks a NEW automatic start between final state observation and AP up", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home" }] });
+    wrapNm(`if [ "$*" = "connection up ClawBox-Setup" ]; then
+  : > "$NMSTUB/boundary"
+  if [ "$(cat "$NMSTUB/device-ac" 2>/dev/null)" != no ]; then
+    printf '${HOME}' > "$NMSTUB/active"; printf 100 > "$NMSTUB/state"
+    : > "$NMSTUB/preempted"
+  fi
+fi`, `# Explicit activation may re-enable runtime device autoconnect in NM.
+case "$*" in *"connection up uuid"*) printf yes > "$NMSTUB/device-ac" ;; esac`);
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(existsSync(path.join(nm, "boundary"))).toBe(true);
+    expect(existsSync(path.join(nm, "preempted"))).toBe(false);
+    expect(deviceAc()).toBe("yes");
+    expect(profileState(HOME).autoconnect).toBe("yes");
+    expect(activeNow()).toBe(HOTSPOT);
+  });
+
+  it("restores policy after exhausted AP retries", () => {
+    makeBox({ setupComplete: true, profiles: [], apPlan: ["busy", "busy", "busy"] });
+    expect(runStartAp().status).toBe(1);
+    expect(deviceAc()).toBe("yes");
+    expect(existsSync(path.join(root, "data", "ap-runtime.env"))).toBe(false);
+  });
+
+  it("restores policy even when the inhibit command mutates then fails", () => {
+    makeBox({ setupComplete: true, profiles: [] });
+    wrapNm("", `if [ "$*" = "--wait 5 device set ${IFACE} autoconnect no" ]; then exit 1; fi`);
+    const r = runStartAp();
+    expect(r.status).toBe(1);
+    expect(r.calls.filter(isHotspotUp)).toEqual([]);
+    expect(deviceAc()).toBe("yes");
+  });
+
+  it("refuses AP admission on an inhibition readback mismatch", () => {
+    makeBox({ setupComplete: true, profiles: [] });
+    wrapNm(`if [ "$*" = "--wait 5 device set ${IFACE} autoconnect no" ]; then exit 0; fi`);
+    const r = runStartAp();
+    expect(r.status).toBe(1);
+    expect(r.calls.filter(isHotspotUp)).toEqual([]);
+    expect(deviceAc()).toBe("yes");
+  });
+
+  it("reports restoration failure instead of claiming a clean success", () => {
+    makeBox({ setupComplete: true, profiles: [] });
+    wrapNm(`if [ "$*" = "--wait 5 device set ${IFACE} autoconnect yes" ]; then exit 1; fi`);
+    const r = runStartAp();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("could not restore device autoconnect=yes");
+    expect(deviceAc()).toBe("no"); // explicit cleanup failure, never called clean
+    expect(existsSync(path.join(root, "data", "ap-runtime.env"))).toBe(false);
+  });
+
+  it("restores on TERM after inhibition", () => {
+    makeBox({ setupComplete: true, profiles: [] });
+    wrapNm("", `if [ "$*" = "--wait 5 device set ${IFACE} autoconnect no" ]; then kill -TERM "$PPID"; fi`);
+    const r = runStartAp();
+    expect(r.status).toBe(143);
+    expect(r.calls.filter(isHotspotUp)).toEqual([]);
+    expect(deviceAc()).toBe("yes");
+  });
+
+  it("defers a still-activating client after a bounded observation without cancelling it", () => {
+    makeBox({ setupComplete: true, profiles: [] });
+    writeFileSync(path.join(nm, "state"), "50");
+    const r = runStartAp();
+    expect(r.status).toBe(1);
+    expect(r.trace.filter((a) => a[0] === "sleep")).toHaveLength(15);
+    expect(r.calls.filter(isApActivity)).toEqual([]);
+    expect(deviceAc()).toBe("yes");
+  });
+
+  it("never replaces a connected client whose mode query failed", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", modeQueryExit: 10 }], active: HOME });
+    const r = runStartAp();
+    expect(r.status).toBe(1);
+    expect(r.calls.filter(isApActivity)).toEqual([]);
+    expect(activeNow()).toBe(HOME);
+    expect(deviceAc()).toBe("yes");
+  });
+});
+
+describe("N8 fallback and exact identity", () => {
+  it("uses recovery for zero candidates, not a silent no-op", () => {
+    makeBox({ setupComplete: true, profiles: [] });
+    const d = runDispatcher();
+    expect(d.status).toBe(0);
+    expect(d.recoveryAp).toBe(true);
+    expect(ups(d.lines)).toEqual([]);
+  });
+  it("does not treat a hollow nmcli success as failover complete", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example: Home", up: "hollow" }] });
+    const d = runDispatcher();
+    expect(d.recoveryAp).toBe(true);
+    expect(d.journal).not.toContain("Already on WiFi");
+    expect(ups(d.lines)).toEqual([`--wait 45 connection up uuid ${HOME} ifname ${IFACE}`]);
+  });
+  it.each(["ClawBox-Setup", OFFICE, "Example\\Path\nwith\tcontrol"])("preserves an active client named %j", (name) => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name, up: "ok" }], active: HOME });
+    const d = runDispatcher();
+    expect(d.status).toBe(0);
+    expect(ups(d.lines)).toEqual([]);
+    expect(d.recoveryAp).toBe(false);
+    expect(activeNow()).toBe(HOME);
+  });
+  it("defers unknown connected identity instead of activating a rival", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", modeQueryExit: 10 }], active: HOME });
+    const d = runDispatcher();
+    expect(d.status).toBe(1);
+    expect(ups(d.lines)).toEqual([]);
+    expect(d.recoveryAp).toBe(false);
+    expect(activeNow()).toBe(HOME);
+  });
+});
+
+
+describe("N8 AP ownership", () => {
+  it("does not take down an unrelated access point", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Other-AP", mode: "ap" }], active: HOME });
+    const d = runDispatcher();
+    expect(d.status).toBe(1);
+    expect(d.lines.filter((l) => /connection (up|down) /.test(l))).toEqual([]);
+    expect(d.recoveryAp).toBe(false);
+    expect(activeNow()).toBe(HOME);
+  });
+  it("takes down only the active owned AP by UUID before joining a client", () => {
+    makeBox({ setupComplete: true, profiles: [
+      { uuid: HOTSPOT, name: "ClawBox-Setup", mode: "ap" },
+      { uuid: HOME, name: "Example: Home", up: "ok" },
+    ], active: HOTSPOT });
+    const d = runDispatcher();
+    expect(d.status).toBe(0);
+    expect(d.lines.filter((l) => /connection down /.test(l))).toEqual([`--wait 10 connection down uuid ${HOTSPOT}`]);
+    expect(activeNow()).toBe(HOME);
+    expect(d.recoveryAp).toBe(false);
   });
 });

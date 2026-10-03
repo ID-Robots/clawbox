@@ -130,6 +130,8 @@ function makeBox(opts: BoxOptions = {}): void {
   stub("nmcli", `
 echo "nmcli $*" >> ${JSON.stringify(calls)}
 case "$*" in
+  *"GENERAL.STATE device show"*) echo "30 (disconnected)" ;;
+  *"802-11-wireless.mode connection show uuid aaaaaaaa-0000-4000-8000-000000000001"*) echo ap ;;
   *"networking connectivity"*)
     q=${JSON.stringify(path.join(root, "connectivity"))}
     head -n 1 "$q"
@@ -755,7 +757,7 @@ describe("one restart per route recovery, not one per NetworkManager event", () 
     runWaiter("Ethernet 'eth0' up");
     expect(existsSync(stamp)).toBe(true);
 
-    runDispatcher("wlan0", "down", { CONNECTION_ID: "ClawBox-Setup" });
+    runDispatcher("wlan0", "down", { CONNECTION_ID: "ClawBox-Setup", CONNECTION_UUID: "aaaaaaaa-0000-4000-8000-000000000001" });
 
     expect(existsSync(stamp)).toBe(true);
   });
@@ -891,8 +893,10 @@ describe("the dispatcher hands the restart to the waiter rather than firing it",
     writeFileSync(path.join(bin, "nmcli"), `#!/usr/bin/env bash
 echo "nmcli $*" >> ${JSON.stringify(path.join(root, "calls.log"))}
 case "$*" in
+  *"GENERAL.STATE device show"*) echo "30 (disconnected)" ;;
+  *"802-11-wireless.mode connection show uuid aaaaaaaa-0000-4000-8000-000000000001"*) echo ap ;;
   *"networking connectivity"*) echo none ;;
-  *"NAME,TYPE,AUTOCONNECT-PRIORITY"*) echo "Home:802-11-wireless:10" ;;
+  *"UUID,TYPE,AUTOCONNECT-PRIORITY,TIMESTAMP"*) echo "11111111-1111-4111-8111-111111111111:802-11-wireless:10:0" ;;
   *"connection up"*) exit 1 ;;
   *) exit 0 ;;
 esac`, { mode: 0o755 });
@@ -917,8 +921,10 @@ esac`, { mode: 0o755 });
     makeBox({ connectivity: ["none"], defaultRoute: false });
     writeFileSync(path.join(bin, "nmcli"), `#!/usr/bin/env bash
 case "$*" in
+  *"GENERAL.STATE device show"*) echo "30 (disconnected)" ;;
+  *"802-11-wireless.mode connection show uuid aaaaaaaa-0000-4000-8000-000000000001"*) echo ap ;;
   *"networking connectivity"*) echo none ;;
-  *"NAME,TYPE,AUTOCONNECT-PRIORITY"*) echo "Home:802-11-wireless:10" ;;
+  *"UUID,TYPE,AUTOCONNECT-PRIORITY,TIMESTAMP"*) echo "11111111-1111-4111-8111-111111111111:802-11-wireless:10:0" ;;
   *"connection up"*) exit 1 ;;
   *) exit 0 ;;
 esac`, { mode: 0o755 });
@@ -939,7 +945,7 @@ esac`, { mode: 0o755 });
     // a full wait, take the lock, and drop a genuine Ethernet request meanwhile.
     makeBox({ connectivity: ["full"] });
 
-    runDispatcher("wlan0", "up", { CONNECTION_ID: "ClawBox-Setup" });
+    runDispatcher("wlan0", "up", { CONNECTION_ID: "ClawBox-Setup", CONNECTION_UUID: "aaaaaaaa-0000-4000-8000-000000000001" });
 
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(deferred()).toHaveLength(0);

@@ -184,8 +184,15 @@ EOF
     printf '%s\\n' "$listing" ;;
   "device show")
     [ "$3" = "$IFC" ] || { echo "Error: Device '$3' not found." >&2; exit 10; }
+    if [ "$fields" = GENERAL.AUTOCONNECT ]; then
+      if [ -f "$NM/device-ac" ]; then cat "$NM/device-ac"; else echo yes; fi
+      exit 0
+    fi
     [ "$fields" = GENERAL.STATE ] || unsupported "$@"
     if [ "$get" = 1 ]; then state_text; else echo "GENERAL.STATE:$(state_text)"; fi ;;
+  "device set")
+    [ "$3" = "$IFC" ] && [ "$4" = autoconnect ] || unsupported "$@"
+    case "$5" in yes|no) printf '%s' "$5" > "$NM/device-ac" ;; *) unsupported "$@" ;; esac ;;
   "device disconnect")
     set_active "" 30 ;;
   "device wifi")

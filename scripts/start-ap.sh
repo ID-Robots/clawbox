@@ -245,6 +245,73 @@ stay_on_client() {
 # (nmcli's own default is 90 s).
 CLIENT_UP_WAIT="${CLIENT_UP_WAIT:-45}"
 [[ "$CLIENT_UP_WAIT" =~ ^[0-9]+$ ]] || CLIENT_UP_WAIT=45
+if [ "${#CLIENT_UP_WAIT}" -gt 2 ] || [ "$CLIENT_UP_WAIT" -lt 1 ] || [ "$CLIENT_UP_WAIT" -gt 45 ]; then CLIENT_UP_WAIT=45; fi
+
+# Runtime device inhibition is NOT a profile edit or a disconnect. It prevents
+# new automatic starts while we select a client or admit the fallback AP. NM
+# may already be activating a client: observe it, never cancel it to free the
+# radio. This is not atomic against explicit activations by other processes,
+# nor proof that a target NM version drains invisible queued autoconnect work.
+# SIGKILL cannot run traps; the parent must verify lifecycle/real-NM behaviour.
+original_autoconnect=""
+restore_device_policy() {
+  if [ -n "$original_autoconnect" ]; then
+    if ! nmcli --wait 5 device set "$IFACE" autoconnect "$original_autoconnect" ||
+       [ "$(nmcli -g GENERAL.AUTOCONNECT device show "$IFACE" 2>/dev/null)" != "$original_autoconnect" ]; then
+      echo "[AP] ERROR: could not restore device autoconnect=$original_autoconnect" >&2
+      return 1
+    fi
+    original_autoconnect=""
+  fi
+}
+restore_autoconnect() {
+  local rc=$?
+  trap - EXIT
+  restore_device_policy || rc=1
+  exit "$rc"
+}
+
+# Admit only a positively idle radio (or an AP). A failed identity query on a
+# connected device is UNKNOWN, not permission to replace a possible client.
+client_or_idle() {
+  local state client elapsed=0
+  while :; do
+    state="$(iface_state)"
+    case "$state" in
+      30|120) return 0 ;;
+      100)
+        if client="$(active_client)"; then stay_on_client "$client" "during admission"; fi
+        if iw dev "$IFACE" info 2>/dev/null | grep -q "type AP"; then return 0; fi
+        echo "[AP] Unknown connected WiFi identity — deferring" >&2
+        exit 1 ;;
+      40|50|60|70|80|90|110)
+        if [ "$elapsed" -ge 15 ]; then
+          echo "[AP] WiFi still transitioning — deferring" >&2; exit 1
+        fi
+        sleep 1; elapsed=$((elapsed + 1)) ;;
+      *) echo "[AP] Unknown/unavailable WiFi state — deferring" >&2; exit 1 ;;
+    esac
+  done
+}
+
+# Explicit connection activation may re-enable device autoconnect. Reassert
+# inhibition before each competing action, retaining the ORIGINAL snapshot.
+ensure_inhibited() {
+  nmcli --wait 5 device set "$IFACE" autoconnect no || exit 1
+  [ "$(nmcli -g GENERAL.AUTOCONNECT device show "$IFACE" 2>/dev/null)" = no ] || exit 1
+  client_or_idle
+}
+
+inhibit_autoconnect() {
+  original_autoconnect="$(nmcli -g GENERAL.AUTOCONNECT device show "$IFACE" 2>/dev/null)" || exit 1
+  case "$original_autoconnect" in yes|no) ;; *) original_autoconnect=""; exit 1 ;; esac
+  # Arm before mutation: even a failed command may have changed NM's state.
+  trap restore_autoconnect EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
+  ensure_inhibited
+}
 
 # After setup is complete, prefer joining saved WiFi over starting the AP — UNLESS
 # an Ethernet cable provides the uplink, in which case host the hotspot and let
@@ -260,13 +327,16 @@ elif [ "$setup_complete" = true ]; then
   if client="$(active_client)"; then
     stay_on_client "$client" "already"
   fi
+  inhibit_autoconnect
   tried=0
   while IFS=$'\t' read -r uuid name; do
     [ -n "$uuid" ] || continue
+    ensure_inhibited
     tried=$((tried + 1))
     echo "[AP] Setup complete — trying saved WiFi: '$(log_name "$name")' ($uuid)"
     if nmcli --wait "$CLIENT_UP_WAIT" connection up uuid "$uuid" ifname "$IFACE" </dev/null 2>/dev/null; then
-      if [ "$(iface_state)" = 100 ]; then
+      if client="$(active_client)"; then
+        name="${client#*$'\t'}"
         echo "[AP] WiFi connected to '$(log_name "$name")' — skipping AP mode"
         exit 0
       fi
@@ -292,8 +362,9 @@ fi
 # polls for up to PRE_AP_SCAN_TIMEOUT seconds). Raising the hotspot then tears
 # that connection down — the same lost LAN by a later road. So while saved WiFi
 # is the policy (setup complete, no Ethernet uplink), look again right before
-# every step that would take the radio from a client. Pre-setup and with an
-# Ethernet uplink the hotspot is meant to own the radio, and nothing changes.
+# every step that would take the radio from a client, under runtime inhibition.
+# Checks alone cannot serialize NM. Pre-setup and with an Ethernet uplink the
+# hotspot intentionally owns the radio, without this preservation veto.
 keep_late_client() {
   local client
   [ "$prefer_saved_wifi" = true ] || return 0
@@ -444,6 +515,7 @@ fi
 fi  # end SKIP_PRESCAN guard
 
 keep_late_client "before the hotspot was set up"
+if [ "$prefer_saved_wifi" = true ]; then ensure_inhibited; fi
 
 echo "[AP] Cleaning up any previous AP connection..."
 nmcli connection down "$CON_NAME" 2>/dev/null || true
@@ -497,13 +569,18 @@ echo "[AP] Activating access point..."
 # radio and retry a few times, confirming the interface actually entered AP mode
 # rather than trusting nmcli's exit code alone.
 AP_UP_RETRIES="${AP_UP_RETRIES:-5}"
+case "$AP_UP_RETRIES" in [1-5]) ;; *) AP_UP_RETRIES=5 ;; esac
 ap_up_ok=false
 for ap_attempt in $(seq 1 "$AP_UP_RETRIES"); do
   # Each attempt takes the radio from whatever holds it, and the client
   # NetworkManager autoconnects in a failed attempt's wake is exactly what a
   # "radio busy" failure looks like — so this is checked every time.
   keep_late_client "before AP attempt $ap_attempt"
-  release_wifi_for_ap
+  if [ "$prefer_saved_wifi" = true ]; then
+    ensure_inhibited
+  else
+    release_wifi_for_ap
+  fi
   if nmcli connection up "$CON_NAME" 2>&1; then
     wait_for_interface || true
     if iw dev "$IFACE" info 2>/dev/null | grep -q "type AP"; then
@@ -522,6 +599,9 @@ if [ "$ap_up_ok" != true ]; then
   echo "[AP] ERROR: access point did not come up after ${AP_UP_RETRIES} attempts" >&2
   exit 1
 fi
+
+# Restore before publishing success. EXIT still retries a failed restoration.
+restore_device_policy || exit 1
 
 # Remove any leftover captive portal iptables redirect
 iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNAT --to-destination "${AP_IP}:80" 2>/dev/null || true
