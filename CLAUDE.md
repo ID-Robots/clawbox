@@ -14,7 +14,7 @@ Bun runtime (package management + builds), Node.js 24 (production runtime), Next
 
 - `bun run dev` — dev server on port 3000 at 0.0.0.0
 - `bun run dev:privileged` — dev server on port 80 (requires root)
-- `bun run build` — production build (generates `.next/standalone/`)
+- `bun run build` — production build (generates `.next/standalone/`). Its type check runs over `tsconfig.build.json` — the project without its tests (0.96 GB of heap instead of 2.45 GB, which an 8 GB Jetson's default Node heap could no longer hold); the WHOLE program is still checked on every PR by `src/tests/unit/build-typecheck.test.ts`, and `tsconfig-excludes-data.test.ts` holds the build config to every exclusion `tsconfig.json` has (see `next.config.ts`)
 - `bun run start` — run standalone production server on port 80
 - `bun run lint` — run ESLint
 - `bun run test` — run Vitest unit tests

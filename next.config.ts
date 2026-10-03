@@ -41,6 +41,21 @@ const APP_VERSION = (() => {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // The build's own type check runs over tsconfig.build.json: the project
+  // WITHOUT its ~1,400 test files. Over tsconfig.json it held 2.45 GB of heap
+  // (measured with `tsc --extendedDiagnostics`, 2026-10-03), and an 8 GB
+  // Jetson Orin Nano building with Node's default heap died in "Running
+  // TypeScript" with "JavaScript heap out of memory" once a branch grew the
+  // program by 3% — beta itself was 74 MB under that edge. Without the tests it
+  // is 0.96 GB and half the time, and a box never needed to type-check its
+  // tests to build. The WHOLE program is still checked on every PR, by
+  // src/tests/unit/build-typecheck.test.ts (tsconfig.json, its own 4 GB heap),
+  // which is the gate that catches an error only the full program shows.
+  // tsconfig.build.json repeats tsconfig.json's exclusions (`data/` above all —
+  // see tsconfig-excludes-data.test.ts, which pins both files).
+  typescript: {
+    tsconfigPath: "tsconfig.build.json",
+  },
   // The build's root is this checkout, always. Left alone, Next infers it from
   // the lockfiles it finds walking UP from here, and one in a parent directory
   // makes that parent the root: all of it becomes the project the build can

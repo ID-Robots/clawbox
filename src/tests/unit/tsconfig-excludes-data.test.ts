@@ -53,3 +53,42 @@ describe("tsconfig keeps the runtime data directory out of the project", () => {
     }
   });
 });
+
+/** tsconfig.build.json, the config `next build` type-checks (see next.config.ts). */
+function buildTsconfig(): { extends?: string; include?: string[]; exclude?: string[] } {
+  const raw = readFileSync(path.join(REPO, "tsconfig.build.json"), "utf-8");
+  return JSON.parse(raw.replace(/^\s*\/\/.*$/gm, ""));
+}
+
+describe("the build's own tsconfig", () => {
+  it("is the one next.config.ts hands the build", () => {
+    const config = readFileSync(path.join(REPO, "next.config.ts"), "utf-8");
+    expect(config).toMatch(/tsconfigPath:\s*"tsconfig\.build\.json"/);
+  });
+
+  it("extends tsconfig.json, so the compiler options and paths are the same", () => {
+    expect(buildTsconfig().extends).toBe("./tsconfig.json");
+    // An `include` of its own would replace the base's — and silently drop a
+    // pattern added there later.
+    expect(buildTsconfig().include).toBeUndefined();
+  });
+
+  it("keeps every exclusion tsconfig.json has — data/ above all", () => {
+    // `exclude` in an extending config REPLACES the base's list rather than
+    // adding to it, so an exclusion added to tsconfig.json only reaches the
+    // build if it is repeated here. data/ is the one that cost a box its
+    // updates (see the top of this file).
+    const build = buildTsconfig().exclude ?? [];
+    for (const dir of tsconfig().exclude ?? []) {
+      expect(build, `${dir} is excluded by tsconfig.json and must stay excluded from the build`).toContain(dir);
+    }
+    expect(build).toContain("data");
+  });
+
+  it("leaves the tests out, which is what keeps the build inside a Jetson's heap", () => {
+    const build = buildTsconfig().exclude ?? [];
+    for (const dir of ["src/tests", "e2e", "e2e-install"]) {
+      expect(build, `${dir} must stay out of the build's type check`).toContain(dir);
+    }
+  });
+});

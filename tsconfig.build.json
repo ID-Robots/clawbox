@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "node_modules",
+    "mcp",
+    "code-source-code",
+    "bench",
+    "data",
+    "src/tests",
+    "e2e",
+    "e2e-install",
+    "reports",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "vitest.config.ts",
+    "vitest.workspace.ts",
+    "playwright.config.ts"
+  ]
+}
