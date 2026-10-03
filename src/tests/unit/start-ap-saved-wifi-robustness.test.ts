@@ -1,0 +1,858 @@
+import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+/**
+ * TASK-1380, the follow-up regressions. start-ap-saved-wifi.test.ts proves the
+ * fix itself — a saved WiFi client is found, kept, or tried before the hotspot
+ * takes the radio. These cases push on the edges of HOW scripts/start-ap.sh
+ * reads NetworkManager:
+ *
+ *   - a profile NAME that looks like another profile's UUID;
+ *   - a name with a newline, an escape sequence, a tab or 100 characters in it;
+ *   - ordering ties, negative priorities and values nmcli should never print;
+ *   - an `802-11-wireless.mode` query that fails for one profile;
+ *   - the bounds on what one run does: the `--wait` on every client attempt,
+ *     one attempt per profile, at most AP_UP_RETRIES hotspot activations;
+ *   - a profile an earlier Ethernet-uplink run set to autoconnect=no, on a box
+ *     that later boots without Ethernet.
+ *
+ * Like the first suite, these EXECUTE the shipped script with nmcli, iw, sleep
+ * and friends stubbed on PATH. The nmcli stand-in keeps a model of
+ * NetworkManager — saved profiles, the connection on the radio, the device
+ * state, each profile's autoconnect flag — and answers in nmcli's terse format.
+ * Every assertion is about argv the script handed nmcli, what it printed, or
+ * the state it left the model in.
+ *
+ * Not here, on purpose: the residual window in which NetworkManager can
+ * autoconnect a client between the last check of an AP attempt and that
+ * attempt's release, and the failover dispatcher's name-based handling of
+ * profiles. Both are known defects or limitations; they are reported with red
+ * evidence outside this suite, not pinned in it as behaviour that passes.
+ */
+
+// Starts real processes: vitest's 5 s test and 10 s hook defaults are not
+// enough on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+const REPO = process.cwd();
+const START_AP = path.join(REPO, "scripts", "start-ap.sh");
+const IFACE = "wlTEST0";
+// The one host path the AP branch writes outside $CLAWBOX_ROOT; see beforeAll.
+const DNSMASQ_SHARED = "/etc/NetworkManager/dnsmasq-shared.d";
+const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
+
+beforeAll(() => {
+  // Unconditional, not skipIf: a suite that skips itself on a runner without
+  // bash reports green while proving nothing.
+  if (!hasBash) {
+    throw new Error("bash is required: these tests execute scripts/start-ap.sh rather than reading it");
+  }
+  let writable = false;
+  try {
+    accessSync(DNSMASQ_SHARED, constants.W_OK);
+    writable = true;
+  } catch {
+    // Not writable or not there — the expected case.
+  }
+  if (writable) {
+    throw new Error(`${DNSMASQ_SHARED} is writable by this user: run this suite unprivileged`);
+  }
+});
+
+// Synthetic profiles only — no real network names, no PSKs.
+const HOME = "11111111-1111-4111-8111-111111111111";
+const OFFICE = "22222222-2222-4222-8222-222222222222";
+const CAFE = "33333333-3333-4333-8333-333333333333";
+const LOFT = "44444444-4444-4444-8444-444444444444";
+const GARAGE = "55555555-5555-4555-8555-555555555555";
+const ATTIC = "66666666-6666-4666-8666-666666666666";
+const WIRED = "77777777-7777-4777-8777-777777777777";
+/** Shaped like a UUID, and the UUID of no profile anywhere in these tests. */
+const NOBODY = "99999999-9999-4999-8999-999999999999";
+/** The UUID the stand-in gives the hotspot profile start-ap.sh creates. */
+const HOTSPOT = "a9a9a9a9-0000-4000-8000-0000000000a9";
+
+interface Profile {
+  uuid: string;
+  name: string;
+  type?: string;
+  /** What nmcli prints in AUTOCONNECT-PRIORITY; a string for values it never should. */
+  priority?: number | string;
+  /** What nmcli prints in TIMESTAMP; a string for values it never should. */
+  timestamp?: number | string;
+  /** 802-11-wireless.mode; "" is unset (NetworkManager's default, infrastructure). */
+  mode?: string;
+  /** `nmcli -g 802-11-wireless.mode connection show uuid <it>` exits with this status. */
+  modeQueryExit?: number;
+  /** What `nmcli connection up` does for it: connect, fail, or exit 0 without connecting. */
+  up?: "ok" | "fail" | "hollow";
+}
+
+/**
+ * nmcli's terse escaping, which applies to every value it prints with -t/-g:
+ * ':' and '\' are backslash-escaped and NOTHING else is (nmcli(1), --escape).
+ * A newline or an ESC in a name is printed as the raw byte. Whether
+ * NetworkManager accepts such a connection.id at all is not established here;
+ * if it does, this is how nmcli prints it.
+ */
+const nmEscape = (s: string) => s.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
+
+// The nmcli stand-in. State lives in $NMSTUB:
+//   p/NNN/meta   uuid, type, priority, timestamp, mode, up, autoconnect,
+//                mode-query exit status — tab-separated, "-" for unset/none
+//   p/NNN/name   the name, raw;  p/NNN/esc  the name as nmcli prints it
+//   active       uuid of the connection on the radio ("" = none)
+//   state        the radio's numeric NetworkManager device state
+//   ethernet     "connected" or "unavailable"
+//   ap-plan      outcomes of successive hotspot activations: busy | hollow | ok
+//   calls        argv of every nmcli call, tab-joined, one per line
+//   trace        nmcli and sleep calls interleaved, in the order they ran
+//   unsupported  any call this stand-in cannot answer faithfully
+// Profiles are listed in directory order, which is the order nmcli prints them.
+const NMCLI_STUB = `#!/usr/bin/env bash
+NM="$NMSTUB"
+IFC=${IFACE}
+TAB=$'\\t'
+# One line per call: a newline inside an argument is logged as the two
+# characters \\n, so it cannot pass for the start of another call.
+joined() {
+  local a out="" sep=""
+  for a in "$@"; do out+="$sep\${a//$'\\n'/\\\\n}"; sep="$TAB"; done
+  printf '%s\\n' "$out"
+}
+joined "$@" >> "$NM/calls"
+{ printf 'nmcli\\t'; joined "$@"; } >> "$NM/trace"
+
+fields=""; get=0; raw=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t|--terse) shift ;;
+    -f|--fields) fields="$2"; shift 2 ;;
+    -g|--get-values) fields="$2"; get=1; shift 2 ;;
+    -e|--escape) [ "$2" = no ] && raw=1; shift 2 ;;
+    -w|--wait) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+active=""; state=""; eth=""
+read -r active < "$NM/active" || true
+read -r state < "$NM/state" || true
+read -r eth < "$NM/ethernet" || true
+[ -n "$state" ] || state=30
+[ -n "$eth" ] || eth=unavailable
+
+unsupported() { joined "$@" >> "$NM/unsupported"; echo "stub nmcli: unsupported call" >&2; exit 2; }
+set_active() { printf '%s' "$1" > "$NM/active"; printf '%s' "$2" > "$NM/state"; }
+state_text() {
+  case "$state" in
+    100) echo "100 (connected)" ;;
+    20) echo "20 (unavailable)" ;;
+    *) echo "$state (disconnected)" ;;
+  esac
+}
+load() {
+  P_DIR="$1"
+  IFS="$TAB" read -r P_UUID P_TYPE P_PRIO P_TS P_MODE P_UP P_AC P_MODEFAIL < "$1/meta"
+  P_NAME=""; P_ESC=""
+  IFS= read -r -d '' P_NAME < "$1/name" || true
+  IFS= read -r -d '' P_ESC < "$1/esc" || true
+}
+save_meta() {
+  printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$P_UUID" "$P_TYPE" "$P_PRIO" "$P_TS" "$P_MODE" "$P_UP" "$P_AC" "$P_MODEFAIL" > "$P_DIR/meta"
+}
+# A profile the way nmcli resolves one: "uuid X", "id X", or a bare X — the
+# first profile in listing order whose name OR uuid is X.
+find_profile() {
+  local d
+  for d in "$NM"/p/*; do
+    [ -e "$d/meta" ] || continue
+    load "$d"
+    case "$1" in
+      uuid) [ "$P_UUID" = "$2" ] && return 0 ;;
+      id) [ "$P_NAME" = "$2" ] && return 0 ;;
+      *) if [ "$P_NAME" = "$2" ] || [ "$P_UUID" = "$2" ]; then return 0; fi ;;
+    esac
+  done
+  return 1
+}
+dev_of() {
+  if [ -n "$active" ] && [ "$P_UUID" = "$active" ]; then echo "$IFC"
+  elif [ "$P_TYPE" = 802-3-ethernet ] && [ "$eth" = connected ]; then echo eth0
+  fi
+}
+project() {
+  local out="" sep="" f v IFS=,
+  for f in $fields; do
+    case "$f" in
+      NAME) if [ "$raw" = 1 ]; then v="$P_NAME"; else v="$P_ESC"; fi ;;
+      UUID) v="$P_UUID" ;;
+      TYPE) v="$P_TYPE" ;;
+      AUTOCONNECT) v="$P_AC" ;;
+      AUTOCONNECT-PRIORITY) v="$P_PRIO" ;;
+      TIMESTAMP) v="$P_TS" ;;
+      DEVICE) v="$(dev_of)" ;;
+      *) unsupported "field" "$f" ;;
+    esac
+    out+="$sep$v"; sep=":"
+  done
+  printf '%s\\n' "$out"
+}
+selector() { kind=any; case "$1" in uuid|id) kind="$1"; return 0 ;; esac; return 1; }
+
+case "$1 $2" in
+  "general status")
+    [ "$fields" = RUNNING ] || unsupported "$@"
+    echo running ;;
+  "device status")
+    wstate=disconnected
+    [ "$state" = 100 ] && wstate=connected
+    [ "$state" = 20 ] && wstate=unavailable
+    # One write, as nmcli does: start-ap.sh reads this through \`grep -q\` under
+    # pipefail, and a stub writing line by line could take a SIGPIPE there.
+    listing="$(while IFS=: read -r D T S; do
+      out=""; sep=""
+      for f in $(printf '%s' "$fields" | tr , ' '); do
+        case "$f" in DEVICE) v="$D" ;; TYPE) v="$T" ;; STATE) v="$S" ;; *) unsupported "$@" ;; esac
+        out="$out$sep$v"; sep=":"
+      done
+      echo "$out"
+    done <<EOF
+eth0:ethernet:$eth
+$IFC:wifi:$wstate
+lo:loopback:unmanaged
+EOF
+)"
+    printf '%s\\n' "$listing" ;;
+  "device show")
+    [ "$3" = "$IFC" ] || { echo "Error: Device '$3' not found." >&2; exit 10; }
+    [ "$fields" = GENERAL.STATE ] || unsupported "$@"
+    if [ "$get" = 1 ]; then state_text; else echo "GENERAL.STATE:$(state_text)"; fi ;;
+  "device disconnect")
+    set_active "" 30 ;;
+  "device wifi")
+    case "$3" in
+      rescan) ;;
+      list) echo "Synthetic-Neighbour:70:WPA2:2437 MHz" ;;
+      *) unsupported "$@" ;;
+    esac ;;
+  "connection show")
+    shift 2
+    only_active=0
+    if [ "$1" = "--active" ]; then only_active=1; shift; fi
+    if [ $# -gt 0 ]; then
+      selector "$1" && shift
+      find_profile "$kind" "$1" || { echo "Error: $1 - no such connection profile." >&2; exit 10; }
+      [ "$get" = 1 ] || unsupported "$@"
+      case "$fields" in
+        802-11-wireless.mode)
+          if [ "$P_MODEFAIL" != - ]; then
+            echo "Error: synthetic failure reading 802-11-wireless.mode" >&2; exit "$P_MODEFAIL"
+          fi
+          if [ "$P_MODE" = - ]; then echo ""; else echo "$P_MODE"; fi ;;
+        connection.autoconnect) echo "$P_AC" ;;
+        *) unsupported "$@" ;;
+      esac
+      exit 0
+    fi
+    listing="$(for d in "$NM"/p/*; do
+      [ -e "$d/meta" ] || continue
+      load "$d"
+      if [ "$only_active" = 1 ] && [ -z "$(dev_of)" ]; then continue; fi
+      project
+    done)"
+    if [ -n "$listing" ]; then printf '%s\\n' "$listing"; fi ;;
+  "connection up")
+    shift 2
+    selector "$1" && shift
+    find_profile "$kind" "$1" || { echo "Error: unknown connection '$1'." >&2; exit 10; }
+    if [ "$P_MODE" = ap ]; then
+      outcome=""; rest=""
+      if [ -s "$NM/ap-plan" ]; then read -r outcome rest < "$NM/ap-plan"; printf '%s\\n' "$rest" > "$NM/ap-plan"; fi
+      case "$outcome" in
+        busy) set_active "" 30; echo "Error: Connection activation failed: device busy" >&2; exit 4 ;;
+        hollow) set_active "" 30; echo "Connection successfully activated"; exit 0 ;;
+        *) set_active "$P_UUID" 100; echo "Connection successfully activated"; exit 0 ;;
+      esac
+    fi
+    case "$P_UP" in
+      ok) set_active "$P_UUID" 100; echo "Connection successfully activated"; exit 0 ;;
+      hollow) set_active "" 30; echo "Connection successfully activated"; exit 0 ;;
+      *) set_active "" 30; echo "Error: Connection activation failed: (53) The Wi-Fi network could not be found." >&2; exit 4 ;;
+    esac ;;
+  "connection down")
+    shift 2
+    selector "$1" && shift
+    if find_profile "$kind" "$1" && [ -n "$active" ] && [ "$P_UUID" = "$active" ]; then set_active "" 30; exit 0; fi
+    echo "Error: '$1' is not an active connection." >&2; exit 10 ;;
+  "connection modify")
+    shift 2
+    selector "$1" && shift
+    find_profile "$kind" "$1" || { echo "Error: unknown connection '$1'." >&2; exit 10; }
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        connection.autoconnect)
+          case "$2" in no|false|off|0) P_AC=no ;; *) P_AC=yes ;; esac
+          save_meta; shift 2 ;;
+        *) shift ;;
+      esac
+    done ;;
+  "connection delete")
+    shift 2
+    selector "$1" && shift
+    find_profile "$kind" "$1" || { echo "Error: unknown connection '$1'." >&2; exit 10; }
+    rm -rf "$P_DIR"
+    if [ "$P_UUID" = "$active" ]; then set_active "" 30; fi ;;
+  "connection add")
+    shift 2
+    con=""; mode="-"; ac=yes
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        con-name) con="$2"; shift 2 ;;
+        wifi.mode|802-11-wireless.mode) mode="$2"; shift 2 ;;
+        autoconnect|connection.autoconnect) case "$2" in no|false|off|0) ac=no ;; *) ac=yes ;; esac; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    next=0
+    for d in "$NM"/p/*; do
+      [ -e "$d/meta" ] || continue
+      n=$((10#$(basename "$d")))
+      [ "$n" -ge "$next" ] && next=$((n + 1))
+    done
+    d="$(printf '%s/p/%03d' "$NM" "$next")"
+    mkdir -p "$d"
+    printf '${HOTSPOT}\\t802-11-wireless\\t0\\t0\\t%s\\tok\\t%s\\t-\\n' "$mode" "$ac" > "$d/meta"
+    printf '%s' "$con" > "$d/name"
+    printf '%s' "$con" > "$d/esc"
+    echo "Connection '$con' successfully added." ;;
+  *) unsupported "$@" ;;
+esac
+`;
+
+// iw reports AP mode exactly when the connection on the radio is an access-point profile.
+const IW_STUB = `#!/usr/bin/env bash
+a=""; read -r a < "$NMSTUB/active" || true
+m=""
+[ -n "$a" ] && m="$(awk -F'\\t' -v u="$a" '$1 == u {print $5}' "$NMSTUB"/p/*/meta 2>/dev/null)"
+t=managed
+[ "$m" = ap ] && t=AP
+printf 'Interface ${IFACE}\\n\\ttype %s\\n' "$t"
+`;
+
+// The script's own pauses, recorded in order with the nmcli calls, never slept.
+const SLEEP_STUB = `#!/usr/bin/env bash
+printf 'sleep\\t%s\\n' "$*" >> "$NMSTUB/trace"
+`;
+
+let root: string;
+let nm: string;
+
+const field = (v: string | number, what: string) => {
+  const s = String(v);
+  // The stand-in's meta file is tab-separated, and bash's read folds empty fields.
+  if (s === "" || /[\t\n]/.test(s)) throw new Error(`stub ${what} must be a non-empty single token: ${JSON.stringify(s)}`);
+  return s;
+};
+
+function writeProfile(index: number, p: Profile) {
+  const dir = path.join(nm, "p", String(index).padStart(3, "0"));
+  mkdirSync(dir, { recursive: true });
+  const meta = [
+    field(p.uuid, "uuid"),
+    field(p.type ?? "802-11-wireless", "type"),
+    field(p.priority ?? 0, "priority"),
+    field(p.timestamp ?? 0, "timestamp"),
+    p.mode === undefined ? "infrastructure" : field(p.mode || "-", "mode"),
+    p.up ?? "fail",
+    "yes",
+    p.modeQueryExit === undefined ? "-" : field(p.modeQueryExit, "mode query exit"),
+  ];
+  writeFileSync(path.join(dir, "meta"), meta.join("\t") + "\n");
+  writeFileSync(path.join(dir, "name"), p.name);
+  writeFileSync(path.join(dir, "esc"), nmEscape(p.name));
+}
+
+function makeBox(opts: {
+  setupComplete: boolean;
+  ethernet?: boolean;
+  /** In the order nmcli lists them. */
+  profiles: Profile[];
+  /** uuid of the connection already active on the radio (device state 100). */
+  active?: string;
+  /** Outcomes of successive hotspot activations; any beyond the plan succeed. */
+  apPlan?: Array<"busy" | "hollow" | "ok">;
+}) {
+  root = mkdtempSync(path.join(tmpdir(), "clawbox-start-ap-edges-"));
+  nm = path.join(root, "nm");
+  const bin = path.join(root, "bin");
+  for (const d of [path.join(root, "data"), path.join(nm, "p"), bin]) mkdirSync(d, { recursive: true });
+
+  writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({ setup_complete: opts.setupComplete }));
+  [{ uuid: WIRED, name: "Wired connection 1", type: "802-3-ethernet" }, ...opts.profiles].forEach((p, i) => writeProfile(i, p));
+  writeFileSync(path.join(nm, "active"), opts.active ?? "");
+  writeFileSync(path.join(nm, "state"), opts.active ? "100" : "30");
+  writeFileSync(path.join(nm, "ethernet"), opts.ethernet ? "connected" : "unavailable");
+  writeFileSync(path.join(nm, "ap-plan"), (opts.apPlan ?? []).join(" ") + "\n");
+  writeFileSync(path.join(nm, "calls"), "");
+  writeFileSync(path.join(nm, "trace"), "");
+
+  writeFileSync(path.join(bin, "nmcli"), NMCLI_STUB, { mode: 0o755 });
+  writeFileSync(path.join(bin, "iw"), IW_STUB, { mode: 0o755 });
+  writeFileSync(path.join(bin, "sleep"), SLEEP_STUB, { mode: 0o755 });
+  // No upstream address (so no subnet collision), no firewall.
+  for (const tool of ["ip", "sysctl", "iptables"]) {
+    writeFileSync(path.join(bin, tool), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+  }
+}
+
+/** A profile's modelled state, as the script's own calls left it. */
+function profileState(uuid: string): { autoconnect: string } {
+  for (const d of readdirSync(path.join(nm, "p"))) {
+    const meta = readFileSync(path.join(nm, "p", d, "meta"), "utf-8").trimEnd().split("\t");
+    if (meta[0] === uuid) return { autoconnect: meta[6] };
+  }
+  throw new Error(`no profile ${uuid} in the model`);
+}
+
+/**
+ * Power-cycle the modelled box. The radio comes back idle; NetworkManager then
+ * autoconnects a saved client only if that profile still has autoconnect=yes
+ * (first in listing order — its real choice also weighs priority, which no
+ * test here depends on). The call log starts afresh.
+ */
+function reboot(opts: { ethernet: boolean }) {
+  let active = "";
+  for (const d of readdirSync(path.join(nm, "p")).sort()) {
+    const [uuid, type, , , mode, up, autoconnect] = readFileSync(path.join(nm, "p", d, "meta"), "utf-8").trimEnd().split("\t");
+    if (type === "802-11-wireless" && mode !== "ap" && autoconnect === "yes" && up === "ok") {
+      active = uuid;
+      break;
+    }
+  }
+  writeFileSync(path.join(nm, "active"), active);
+  writeFileSync(path.join(nm, "state"), active ? "100" : "30");
+  writeFileSync(path.join(nm, "ethernet"), opts.ethernet ? "connected" : "unavailable");
+  writeFileSync(path.join(nm, "calls"), "");
+  writeFileSync(path.join(nm, "trace"), "");
+}
+
+const activeNow = () => readFileSync(path.join(nm, "active"), "utf-8");
+
+interface Run {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  /** argv of every nmcli call, in order. */
+  calls: string[][];
+  /** The same, space-joined, for readable assertions. */
+  lines: string[];
+  /** nmcli and sleep calls interleaved: ["nmcli", ...argv] or ["sleep", seconds]. */
+  trace: string[][];
+}
+
+function runStartAp(extraEnv: Record<string, string> = {}): Run {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const k of ["SKIP_PRESCAN", "HOTSPOT_SSID", "HOTSPOT_PASSWORD", "HOTSPOT_DISABLED", "CLIENT_UP_WAIT", "AP_UP_RETRIES"]) delete env[k];
+  const res = spawnSync("bash", [START_AP], {
+    env: {
+      ...env,
+      PATH: `${path.join(root, "bin")}:${process.env.PATH ?? ""}`,
+      CLAWBOX_ROOT: root,
+      NMSTUB: nm,
+      NETWORK_INTERFACE: IFACE,
+      NM_READY_TIMEOUT: "2",
+      IFACE_TIMEOUT: "1",
+      PRE_AP_SCAN_TIMEOUT: "0",
+      AP_UP_RETRIES: "3",
+      ...extraEnv,
+    },
+    encoding: "utf-8",
+    timeout: 25_000,
+  });
+  const rows = (file: string) =>
+    readFileSync(path.join(nm, file), "utf-8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => l.split("\t"));
+  const calls = rows("calls");
+  // A call the stand-in could not answer would make every assertion below a
+  // statement about the stub, not the script.
+  expect(existsSync(path.join(nm, "unsupported")) ? readFileSync(path.join(nm, "unsupported"), "utf-8") : "").toBe("");
+  return {
+    status: res.status,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+    calls,
+    lines: calls.map((c) => c.join(" ")),
+    trace: rows("trace"),
+  };
+}
+
+const has = (args: string[], ...words: string[]) => words.every((w) => args.includes(w));
+const verb = (a: string[]) => (a.includes("connection") ? a[a.indexOf("connection") + 1] : undefined);
+const isHotspotUp = (a: string[]) => has(a, "connection", "up", "ClawBox-Setup");
+const isClientUp = (a: string[]) => verb(a) === "up" && !a.includes("ClawBox-Setup");
+const uuidOf = (a: string[]) => (a.includes("uuid") ? a[a.indexOf("uuid") + 1] : `<not by uuid: ${a.join(" ")}>`);
+const clientUps = (r: Run) => r.calls.filter(isClientUp).map(uuidOf);
+/** Anything that builds the hotspot or takes the radio away from a client. */
+const isApActivity = (a: string[]) =>
+  a.includes("ClawBox-Setup") || has(a, "device", "disconnect") || has(a, "connection", "down");
+const targetsOf = (r: Run, v: string) => r.calls.filter((a) => verb(a) === v && !a.includes("ClawBox-Setup")).map(uuidOf);
+
+/**
+ * What every run must hold: saved profiles are acted on by `uuid <X>`, and
+ * every X the script hands nmcli — in a query as much as an action — is a
+ * UUID nmcli itself printed in the UUID column of a real profile.
+ */
+function expectOnlyRealUuids(r: Run, profiles: Profile[]) {
+  const real = new Set([WIRED, HOTSPOT, ...profiles.map((p) => p.uuid)]);
+  for (const a of r.calls) {
+    expect(a, "never ask nmcli for secrets").not.toContain("--show-secrets");
+    const v = verb(a);
+    if (v && ["up", "down", "modify", "delete"].includes(v) && !a.includes("ClawBox-Setup")) {
+      expect(a, `${a.join(" ")} must select the profile by uuid`).toContain("uuid");
+    }
+    a.forEach((w, i) => {
+      if (w === "uuid") expect(real.has(a[i + 1]), `${a.join(" ")}: '${a[i + 1]}' is not the UUID of any profile`).toBe(true);
+    });
+  }
+}
+
+afterEach(() => {
+  if (root) rmSync(root, { recursive: true, force: true });
+});
+
+describe("N1: a profile whose NAME is a UUID is still acted on by its own UUID", () => {
+  // OFFICE is listed FIRST, so anything that resolved the string "<OFFICE>" the
+  // way a bare `nmcli connection up|down <X>` does — the first profile whose
+  // name or uuid is X — would land on OFFICE, not on the profile named that.
+  const office: Profile = { uuid: OFFICE, name: "Example-Office", priority: 0, up: "fail" };
+  const impostor: Profile = { uuid: HOME, name: OFFICE, priority: 10, up: "ok" };
+  const nobody: Profile = { uuid: CAFE, name: NOBODY, priority: 5, up: "fail" };
+
+  it("tries it by the UUID column, never the profile its name points at", () => {
+    const profiles = [office, { ...impostor, up: "fail" as const }, { ...nobody, up: "ok" as const }];
+    makeBox({ setupComplete: true, profiles });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    // Priority 10, then 5: the UUID-named profile, then the one named like a
+    // UUID nobody has. OFFICE (priority 0) is never reached.
+    expect(r.calls.filter(isClientUp)).toEqual([
+      ["--wait", "45", "connection", "up", "uuid", HOME, "ifname", IFACE],
+      ["--wait", "45", "connection", "up", "uuid", CAFE, "ifname", IFACE],
+    ]);
+    expect(r.calls.some((a) => a.includes(OFFICE) && verb(a) !== "show")).toBe(false);
+    expect(activeNow()).toBe(CAFE);
+    // The log names each by the name the owner gave it, beside its real UUID.
+    expect(r.stdout).toContain(`trying saved WiFi: '${OFFICE}' (${HOME})`);
+    expect(r.stdout).toContain(`trying saved WiFi: '${NOBODY}' (${CAFE})`);
+    expect(r.calls.filter(isApActivity)).toEqual([]);
+    expectOnlyRealUuids(r, profiles);
+  });
+
+  it("connects the UUID-named profile itself when it is the one in range", () => {
+    const profiles = [office, impostor, nobody];
+    makeBox({ setupComplete: true, profiles });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(clientUps(r)).toEqual([HOME]);
+    expect(activeNow()).toBe(HOME);
+    expect(r.stdout).toContain(`WiFi connected to '${OFFICE}' — skipping AP mode`);
+    expectOnlyRealUuids(r, profiles);
+  });
+
+  it("recognises it as the client already on the radio", () => {
+    const profiles = [office, impostor, nobody];
+    makeBox({ setupComplete: true, profiles, active: HOME });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(r.calls.filter((a) => ["up", "down", "modify"].includes(verb(a) ?? ""))).toEqual([]);
+    expect(r.stdout).toContain(`WiFi connected to '${OFFICE}' (${HOME}) already — skipping AP mode`);
+    expectOnlyRealUuids(r, profiles);
+  });
+
+  it("releases each profile by its own UUID, exactly once, when the hotspot takes the radio", () => {
+    const profiles = [office, impostor, nobody];
+    makeBox({ setupComplete: false, profiles, active: HOME });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    // One release pass (the first activation succeeds): every client profile
+    // is turned down and kept off autoconnect once, by its own UUID — so
+    // OFFICE is not hit twice and the impostor is not skipped.
+    expect(targetsOf(r, "down").sort()).toEqual([HOME, OFFICE, CAFE].sort());
+    expect(targetsOf(r, "modify").sort()).toEqual([HOME, OFFICE, CAFE].sort());
+    for (const u of [HOME, OFFICE, CAFE]) expect(profileState(u).autoconnect).toBe("no");
+    expect(r.lines.filter((l) => l === "connection up ClawBox-Setup")).toHaveLength(1);
+    expect(activeNow()).toBe(HOTSPOT);
+    expectOnlyRealUuids(r, profiles);
+  });
+});
+
+describe("N2: names with a newline or control characters in them", () => {
+  // A newline is printed raw, so the rest of the name lands on a line of its
+  // own. This one is built to look like a whole row naming GARAGE at priority
+  // 999 — but its ':' are escaped like every other ':' in a name, so the
+  // fragment's first field is "<GARAGE>\" (no UUID) and its TYPE
+  // "802-11-wireless\" (no WiFi type). That escaping is what keeps a fragment
+  // from ever passing for a row; listed without it (`-e no`), this one would.
+  const forged = `${GARAGE}:802-11-wireless:999:999:Forged`;
+  const loft: Profile = { uuid: LOFT, name: `Example-Loft\n${forged}`, priority: 10, up: "fail" };
+  const spill: Profile = { uuid: ATTIC, name: "Example-Attic\nsecond line", priority: 8, up: "fail" };
+  const esc: Profile = { uuid: OFFICE, name: "\x1b[31mExample-Red\x1b[0m", priority: 6, up: "fail" };
+  const tab: Profile = { uuid: CAFE, name: "Example\tTab\x7f", priority: 4, up: "fail" };
+  const long: Profile = { uuid: HOME, name: `Example-${"L".repeat(92)}`, priority: 2, up: "fail" };
+  const garage: Profile = { uuid: GARAGE, name: "Example-Garage", priority: 0, up: "ok" };
+  const profiles = [loft, spill, esc, tab, long, garage];
+
+  it("drops the spilled fragment and still tries every real profile once, in order", () => {
+    makeBox({ setupComplete: true, profiles });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    // The forged "priority 999" row did not put GARAGE first or try it twice.
+    expect(clientUps(r)).toEqual([LOFT, ATTIC, OFFICE, CAFE, HOME, GARAGE]);
+    expect(activeNow()).toBe(GARAGE);
+    expect(r.stdout).toContain("WiFi connected to 'Example-Garage' — skipping AP mode");
+    // No argv carries any part of a fragment.
+    expect(r.calls.some((a) => a.some((w) => w.includes("second line") || w.includes("Forged")))).toBe(false);
+    expectOnlyRealUuids(r, profiles);
+  });
+
+  it("logs names with control characters replaced and no longer than 64 characters", () => {
+    makeBox({ setupComplete: true, profiles });
+    const r = runStartAp();
+    expect(r.stdout, "a raw control character reached the log").not.toMatch(/[\x00-\x09\x0b-\x1f\x7f]/);
+    expect(r.stdout).toContain("trying saved WiFi: '?[31mExample-Red?[0m' (");
+    expect(r.stdout).toContain("trying saved WiFi: 'Example?Tab?' (");
+    // The part of a newline name before the newline is what reaches the log.
+    expect(r.stdout).toContain(`trying saved WiFi: 'Example-Loft' (${LOFT})`);
+    expect(r.stdout).toContain(`trying saved WiFi: '${long.name.slice(0, 64)}' (${HOME})`);
+    expect(r.stdout).not.toContain(long.name.slice(0, 65));
+    const names = [...r.stdout.matchAll(/trying saved WiFi: '([^']*)'/g)].map((m) => m[1]);
+    expect(names).toHaveLength(profiles.length);
+    for (const n of names) expect(n.length).toBeLessThanOrEqual(64);
+  });
+
+  it("releases only real profiles, by UUID, when every client fails and the hotspot comes up", () => {
+    const failing = profiles.map((p) => ({ ...p, up: "fail" as const }));
+    makeBox({ setupComplete: true, profiles: failing });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(clientUps(r)).toEqual([LOFT, ATTIC, OFFICE, CAFE, HOME, GARAGE]);
+    expect(targetsOf(r, "down").sort()).toEqual([LOFT, ATTIC, OFFICE, CAFE, HOME, GARAGE].sort());
+    expect(activeNow()).toBe(HOTSPOT);
+    expectOnlyRealUuids(r, failing);
+  });
+});
+
+describe("N3: the order saved clients are tried in", () => {
+  // nmcli's listing order is deliberately NOT the order of the UUIDs' bytes.
+  const T_C = "cccccccc-0000-4000-8000-00000000000c";
+  const T_A = "aaaaaaaa-0000-4000-8000-00000000000a";
+  const T_E = "eeeeeeee-0000-4000-8000-00000000000e";
+  const T_B = "bbbbbbbb-0000-4000-8000-00000000000b";
+
+  it("keeps nmcli's own order between profiles with equal priority and equal timestamp", () => {
+    const profiles: Profile[] = [
+      { uuid: T_C, name: "Example-Tie-1", priority: 0, timestamp: 500 },
+      { uuid: T_A, name: "Example-Tie-2", priority: 0, timestamp: 500 },
+      { uuid: T_E, name: "Example-Tie-3", priority: 0, timestamp: 500 },
+      { uuid: T_B, name: "Example-Tie-4", priority: 0, timestamp: 500 },
+    ];
+    makeBox({ setupComplete: true, profiles });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(clientUps(r)).toEqual([T_C, T_A, T_E, T_B]);
+    expectOnlyRealUuids(r, profiles);
+  });
+
+  it("tries a negative priority after every priority-0 profile, however recent", () => {
+    const profiles: Profile[] = [
+      { uuid: HOME, name: "Example-Fallback", priority: -5, timestamp: 9_999_999_999 },
+      { uuid: OFFICE, name: "Example-Office", priority: 0, timestamp: 10 },
+      { uuid: CAFE, name: "Example-Cafe", priority: -1, timestamp: 1 },
+      { uuid: LOFT, name: "Example-Loft", priority: 0, timestamp: 0 },
+    ];
+    makeBox({ setupComplete: true, profiles });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(clientUps(r)).toEqual([OFFICE, LOFT, CAFE, HOME]);
+    expectOnlyRealUuids(r, profiles);
+  });
+
+  it("orders a priority or timestamp that is not a plain integer as 0", () => {
+    // nmcli prints both as integers; these values are synthetic, and pin the
+    // script's own guard: a value that is not all digits counts as 0, never as
+    // the number `sort -n` would read off its front.
+    const profiles: Profile[] = [
+      { uuid: HOME, name: "Example-Junk-Priority", priority: "12abc", timestamp: 100 },
+      { uuid: OFFICE, name: "Example-Plain", priority: 0, timestamp: 200 },
+      { uuid: CAFE, name: "Example-Junk-Time", priority: 3, timestamp: "77x" },
+      { uuid: LOFT, name: "Example-Three", priority: 3, timestamp: 1 },
+      { uuid: GARAGE, name: "Example-Float", priority: "7.5", timestamp: 300 },
+    ];
+    makeBox({ setupComplete: true, profiles });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(clientUps(r)).toEqual([LOFT, CAFE, GARAGE, OFFICE, HOME]);
+    expectOnlyRealUuids(r, profiles);
+  });
+
+  it("orders seven profiles by priority, then most recent use, then listing order", () => {
+    const profiles: Profile[] = [
+      { uuid: T_C, name: "Example-C", priority: 0, timestamp: 500 },
+      { uuid: HOME, name: "Example-Neg", priority: -5, timestamp: 9999 },
+      { uuid: OFFICE, name: "Example-Junk", priority: "12abc", timestamp: 100 },
+      { uuid: CAFE, name: "Example-Recent", priority: 3, timestamp: 1 },
+      { uuid: T_A, name: "Example-A", priority: 0, timestamp: 500 },
+      { uuid: LOFT, name: "Example-Top", priority: 10, timestamp: 0 },
+      { uuid: GARAGE, name: "Example-Junk-Time", priority: 3, timestamp: "77x" },
+    ];
+    makeBox({ setupComplete: true, profiles });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(clientUps(r)).toEqual([LOFT, CAFE, GARAGE, T_C, T_A, OFFICE, HOME]);
+    expect(r.lines).toContain("connection up ClawBox-Setup");
+    expectOnlyRealUuids(r, profiles);
+  });
+});
+
+describe("N4: a profile whose mode nmcli cannot report", () => {
+  it.each([1, 10])("is never activated, while the others are still tried (query exits %i)", (exit) => {
+    const profiles: Profile[] = [
+      // Would win on priority, and would connect, if it were tried at all.
+      { uuid: HOME, name: "Example-Unknown-Mode", priority: 10, modeQueryExit: exit, up: "ok" },
+      // An unset mode is NetworkManager's default (infrastructure): eligible.
+      { uuid: OFFICE, name: "Example-Unset-Mode", priority: 5, mode: "", up: "fail" },
+      { uuid: CAFE, name: "Example-Cafe", priority: 0, mode: "infrastructure", up: "ok" },
+    ];
+    makeBox({ setupComplete: true, profiles });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(clientUps(r)).toEqual([OFFICE, CAFE]);
+    expect(activeNow()).toBe(CAFE);
+    expect(r.calls.filter(isApActivity)).toEqual([]);
+    expectOnlyRealUuids(r, profiles);
+  });
+
+  it("an unset mode alone is enough to be tried and joined", () => {
+    const profiles: Profile[] = [{ uuid: OFFICE, name: "Example-Unset-Mode", mode: "", up: "ok" }];
+    makeBox({ setupComplete: true, profiles });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(clientUps(r)).toEqual([OFFICE]);
+    expect(activeNow()).toBe(OFFICE);
+  });
+});
+
+describe("N6: what one run may do, bounded", () => {
+  const three: Profile[] = [
+    { uuid: HOME, name: "Example-Home", priority: 2, up: "fail" },
+    { uuid: OFFICE, name: "Example-Office", priority: 1, up: "hollow" },
+    { uuid: CAFE, name: "Example-Cafe", priority: 0, up: "fail" },
+  ];
+  const clientUpArgv = (wait: string, uuid: string) => ["--wait", wait, "connection", "up", "uuid", uuid, "ifname", IFACE];
+
+  it("caps every client attempt with --wait CLIENT_UP_WAIT", () => {
+    // What this proves is the per-attempt contract the script hands nmcli. It
+    // says nothing about how long a real association takes, and it is not a
+    // bound on the run as a whole.
+    makeBox({ setupComplete: true, profiles: three });
+    const r = runStartAp({ CLIENT_UP_WAIT: "7" });
+    expect(r.status).toBe(0);
+    expect(r.calls.filter(isClientUp)).toEqual([clientUpArgv("7", HOME), clientUpArgv("7", OFFICE), clientUpArgv("7", CAFE)]);
+  });
+
+  it.each(["abc", "-1", "1.5", " 30", "4x", ""])("falls back to --wait 45 for CLIENT_UP_WAIT=%j", (value) => {
+    // Handed through, a value nmcli rejects would fail every attempt at once.
+    makeBox({ setupComplete: true, profiles: three });
+    const r = runStartAp({ CLIENT_UP_WAIT: value });
+    expect(r.status).toBe(0);
+    expect(r.calls.filter(isClientUp)).toEqual([clientUpArgv("45", HOME), clientUpArgv("45", OFFICE), clientUpArgv("45", CAFE)]);
+  });
+
+  it("tries each saved client exactly once, and none after the hotspot work begins, even when every activation fails", () => {
+    makeBox({ setupComplete: true, profiles: three, apPlan: ["busy", "busy", "busy", "busy", "busy"] });
+    const r = runStartAp();
+    expect(r.status).toBe(1);
+    expect(clientUps(r)).toEqual([HOME, OFFICE, CAFE]);
+    const lastClient = r.calls.map((a, i) => (isClientUp(a) ? i : -1)).reduce((m, i) => Math.max(m, i), -1);
+    expect(lastClient).toBeLessThan(r.calls.findIndex(isApActivity));
+    expect(r.lines.filter((l) => l === "connection up ClawBox-Setup")).toHaveLength(3);
+    expect(r.stderr).toContain("ERROR: access point did not come up after 3 attempts");
+    expect(existsSync(path.join(root, "data", "ap-runtime.env")), "a hotspot that never came up was published").toBe(false);
+    expectOnlyRealUuids(r, three);
+  });
+
+  it.each([
+    ["1", ["busy", "busy"], 1],
+    ["2", ["hollow", "busy", "busy"], 2],
+    ["4", ["busy", "hollow", "busy", "hollow", "busy"], 4],
+  ] as const)("makes at most AP_UP_RETRIES=%s hotspot activations", (retries, plan, attempts) => {
+    makeBox({ setupComplete: false, profiles: [], apPlan: [...plan] });
+    const r = runStartAp({ AP_UP_RETRIES: retries });
+    expect(r.status).toBe(1);
+    expect(r.calls.filter(isHotspotUp)).toHaveLength(attempts);
+    expect(r.stderr).toContain(`ERROR: access point did not come up after ${retries} attempts`);
+  });
+
+  it("stops retrying at the first activation that puts the radio in AP mode", () => {
+    makeBox({ setupComplete: false, profiles: [], apPlan: ["busy", "hollow", "ok", "busy"] });
+    const r = runStartAp({ AP_UP_RETRIES: "5" });
+    expect(r.status).toBe(0);
+    expect(r.calls.filter(isHotspotUp)).toHaveLength(3);
+    expect(r.stdout).toContain("Access point active (attempt 3)");
+    expect(activeNow()).toBe(HOTSPOT);
+  });
+
+  it("pauses between hotspot attempts, never after the last one, within a bounded total", () => {
+    // These are the pauses the SCRIPT asks for (the sleep stub's argv), not
+    // elapsed time, and they exclude nmcli's own waits. With NM ready, a
+    // pre-scan budget of 0 s and IFACE_TIMEOUT=1 the script may ask for: the
+    // pre-scan's one 3 s settle, one 1 s interface poll, and 3 s between each
+    // pair of hotspot attempts.
+    makeBox({ setupComplete: true, profiles: three, apPlan: ["busy", "busy", "busy"] });
+    const r = runStartAp({ AP_UP_RETRIES: "3" });
+    expect(r.status).toBe(1);
+    const firstAp = r.trace.findIndex((t) => t[0] === "nmcli" && isHotspotUp(t.slice(1)));
+    const lastAp = r.trace.map((t, i) => (t[0] === "nmcli" && isHotspotUp(t.slice(1)) ? i : -1)).reduce((m, i) => Math.max(m, i), -1);
+    const sleepsBetween = r.trace.slice(firstAp, lastAp).filter((t) => t[0] === "sleep").map((t) => t[1]);
+    expect(sleepsBetween).toEqual(["3", "3"]);
+    expect(r.trace.slice(lastAp + 1).filter((t) => t[0] === "sleep"), "a pause after the final attempt").toEqual([]);
+    const total = r.trace.filter((t) => t[0] === "sleep").reduce((s, t) => s + Number(t[1]), 0);
+    expect(total).toBeLessThanOrEqual(3 + 1 + 2 * 3);
+  });
+});
+
+describe("N7: a client an Ethernet-uplink run left on autoconnect=no", () => {
+  it("is still tried explicitly, and joined, when the box later boots without Ethernet", () => {
+    const profiles: Profile[] = [{ uuid: HOME, name: "Example-Home", up: "ok" }];
+    // Run 1: setup complete, cable plugged in, HOME on the radio. The script
+    // hosts the hotspot and — by design — takes HOME off autoconnect.
+    makeBox({ setupComplete: true, ethernet: true, profiles, active: HOME });
+    expect(profileState(HOME).autoconnect).toBe("yes");
+    const first = runStartAp();
+    expect(first.status).toBe(0);
+    expect(first.lines).toContain(`connection modify uuid ${HOME} connection.autoconnect no`);
+    expect(activeNow()).toBe(HOTSPOT);
+    expect(profileState(HOME).autoconnect).toBe("no");
+
+    // The box is moved and powered up with no cable. With autoconnect off,
+    // NetworkManager does not join HOME by itself: the radio comes up idle.
+    reboot({ ethernet: false });
+    expect(activeNow()).toBe("");
+
+    // Run 2: the only way back onto HOME is start-ap.sh asking for it.
+    const second = runStartAp();
+    expect(second.status).toBe(0);
+    expect(second.calls.filter(isClientUp)).toEqual([["--wait", "45", "connection", "up", "uuid", HOME, "ifname", IFACE]]);
+    expect(second.stdout).toContain("WiFi connected to 'Example-Home' — skipping AP mode");
+    expect(activeNow()).toBe(HOME);
+    expect(second.calls.filter(isApActivity)).toEqual([]);
+    expectOnlyRealUuids(second, profiles);
+  });
+});
