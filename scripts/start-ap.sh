@@ -557,22 +557,33 @@ if [ "$prefer_saved_wifi" = true ]; then ensure_inhibited; fi
 
 echo "[AP] Cleaning up any previous AP connection..."
 wifi_stop_ap
-AP_UUID="$(cat /proc/sys/kernel/random/uuid)"
-is_uuid "$AP_UUID" || exit 1
 
+# NM 1.36 rejects connection.uuid on add. Let NM assign it, then accept only
+# its single C-locale success record and an exact UUID-selected readback.
+# Never resolve a newly created AP by name: a client can have the same name.
 echo "[AP] Creating WiFi access point: $SSID"
-nmcli connection add \
+AP_CREATED="$(LC_ALL=C nmcli connection add \
   type wifi \
   ifname "$IFACE" \
   con-name "$CON_NAME" \
-  connection.uuid "$AP_UUID" \
   ssid "$SSID" \
   autoconnect no \
   wifi.mode ap \
   wifi.band bg \
   wifi.channel 6 \
   ipv4.method shared \
-  ipv4.addresses "${AP_IP}/24"
+  ipv4.addresses "${AP_IP}/24")"
+AP_UUID="${AP_CREATED#"Connection '$CON_NAME' ("}"
+AP_UUID="${AP_UUID%") successfully added."}"
+if ! is_uuid "$AP_UUID" || [ "$AP_CREATED" != "Connection '$CON_NAME' ($AP_UUID) successfully added." ]; then
+  echo '[AP] Invalid AP creation identity; refusing mutation' >&2
+  exit 1
+fi
+AP_IDENTITY="$(LC_ALL=C nmcli -e no -g connection.uuid,connection.id,connection.interface-name,802-11-wireless.mode,802-11-wireless.ssid connection show uuid "$AP_UUID")"
+if [ "$AP_IDENTITY" != "$AP_UUID"$'\n'"$CON_NAME"$'\n'"$IFACE"$'\n'ap$'\n'"$SSID" ]; then
+  echo '[AP] Created AP identity mismatch; refusing mutation' >&2
+  exit 1
+fi
 
 # Configure security: WPA-PSK if password set, open network otherwise
 if [ -n "${HOTSPOT_PASSWORD:-}" ]; then

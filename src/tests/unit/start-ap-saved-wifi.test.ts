@@ -211,6 +211,13 @@ EOF
     if [ $# -gt 0 ]; then
       kind=any; case "$1" in uuid|id) kind="$1"; shift ;; esac
       find_profile "$kind" "$1" || { echo "Error: $1 - no such connection profile." >&2; exit 10; }
+      if [ "$fields" = connection.uuid,connection.id,connection.interface-name,802-11-wireless.mode,802-11-wireless.ssid ]; then
+        [ "$P_UUID" = "${HOTSPOT}" ] || exit 10
+        [ ! -f "$NM/readback-fails" ] || exit 10
+        if [ -f "$NM/created-readback" ]; then cat "$NM/created-readback"; exit 0; fi
+        printf '%s\\n' "$P_UUID" "$P_NAME" "$(cat "$NM/created-iface")" "$P_MODE" "$(cat "$NM/created-ssid")"
+        exit 0
+      fi
       if [ "$fields" = connection.id ]; then echo "$P_ESC"; exit 0; fi
       if [ "$fields" = connection.interface-name ]; then echo "$IFC"; exit 0; fi
       { [ "$get" = 1 ] && [ "$fields" = 802-11-wireless.mode ]; } || unsupported "$@"
@@ -260,13 +267,24 @@ EOF
     if [ "$P_UUID" = "$active" ]; then set_active "" 30; fi ;;
   "connection add")
     shift 2
-    con=""; mode="-"; new_uuid=""
+    con=""; mode="-"; ssid=""; iface=""
     while [ $# -gt 0 ]; do
-      case "$1" in connection.uuid) new_uuid="$2"; shift 2 ;; con-name) con="$2"; shift 2 ;; wifi.mode|802-11-wireless.mode) mode="$2"; shift 2 ;; *) shift ;; esac
+      case "$1" in
+        connection.uuid) echo "Error: failed to modify connection.uuid: the property can't be changed." >&2; exit 2 ;;
+        con-name) con="$2"; shift 2 ;;
+        ssid) ssid="$2"; shift 2 ;;
+        ifname) iface="$2"; shift 2 ;;
+        wifi.mode|802-11-wireless.mode) mode="$2"; shift 2 ;;
+        *) shift ;;
+      esac
     done
-    [ \"$new_uuid\" = \"${HOTSPOT}\" ] || unsupported add-uuid
+    printf '%s\\n' "$ssid" > "$NM/created-ssid"
+    printf '%s\\n' "$iface" > "$NM/created-iface"
+    printf '%s\\n' "$LC_ALL" > "$NM/creation-locale"
     printf 'a9a9a9a9-0000-4000-8000-0000000000a9\\t802-11-wireless\\t0\\t0\\t%s\\tok\\t%s\\t%s\\n' "$mode" "$con" "$con" >> "$NM/profiles"
-    echo "Connection '$con' successfully added." ;;
+    if [ -f "$NM/add-output" ]; then cat "$NM/add-output"
+    else echo "Connection '$con' (${HOTSPOT}) successfully added."; fi
+    [ ! -f "$NM/add-fails" ] || exit 2 ;;
   *) unsupported "$@" ;;
 esac
 `;
@@ -324,9 +342,6 @@ function makeBox(opts: {
   if (opts.afterFail) writeFileSync(path.join(nm, "after-fail"), opts.afterFail);
   writeFileSync(path.join(nm, "calls"), "");
 
-  writeFileSync(path.join(bin, "cat"), `#!/bin/bash
-if [ "$1" = /proc/sys/kernel/random/uuid ]; then echo a9a9a9a9-0000-4000-8000-0000000000a9; else exec /bin/cat "$@"; fi
-`, { mode: 0o755 });
   writeFileSync(path.join(bin, "nmcli"), NMCLI_STUB, { mode: 0o755 });
   writeFileSync(path.join(bin, "iw"), IW_STUB, { mode: 0o755 });
   // No upstream address (so no subnet collision), no real sleeps, no firewall.
@@ -386,9 +401,9 @@ const firstIndex = (r: Run, pred: (a: string[]) => boolean) => r.calls.findIndex
 function expectSafeCalls(r: Run) {
   for (const a of r.calls) {
     expect(a, "never ask nmcli for secrets").not.toContain("--show-secrets");
-    // Saved profiles are acted on by UUID; only the hotspot is addressed by its name.
+    // Every profile, including the newly created hotspot, is selected by UUID.
     if (a[a.indexOf("connection") + 1] && ["up", "down", "modify"].includes(a[a.indexOf("connection") + 1])) {
-      if (!a.includes(HOTSPOT)) expect(a, `${a.join(" ")} must select the profile by uuid`).toContain("uuid");
+      expect(a, `${a.join(" ")} must select the profile by uuid`).toContain("uuid");
     }
   }
 }
@@ -702,6 +717,87 @@ describe("release_wifi_for_ap reads profiles with the same parser", () => {
     // The one it creates is never released.
     expect(r.lines.filter((l) => /^connection down uuid a9a9a9a9-|^connection modify uuid a9a9a9a9-.*connection.autoconnect/.test(l))).toEqual([]);
     expectSafeCalls(r);
+  });
+});
+
+describe("NM 1.36.6 generated AP identity", () => {
+  const output = (uuid = HOTSPOT) => `Connection 'ClawBox-Setup' (${uuid}) successfully added.\n`;
+  const identity = [HOTSPOT, "ClawBox-Setup", IFACE, "ap", "ClawBox-Setup"];
+  const prepare = (hotspotEnv?: string) => makeBox({
+    setupComplete: true, hotspotEnv,
+    profiles: [
+      { uuid: HOME, name: "ClawBox-Setup", mode: "infrastructure" },
+      { uuid: GARAGE_AP, name: "Unrelated-AP", mode: "ap" },
+    ],
+  });
+  const expectPreserved = (r: Run) => {
+    for (const uuid of [HOME, GARAGE_AP]) {
+      expect(r.calls.filter((a) => a.includes(uuid) && ["modify", "delete", "down"].some((v) => a.includes(v)))).toEqual([]);
+      expect(readFileSync(path.join(nm, "profiles"), "utf8")).toContain(uuid);
+    }
+    expect(readFileSync(path.join(nm, "device-ac"), "utf8")).toBe("yes");
+    expect(existsSync(path.join(root, "radio-run", `${IFACE}.policy`))).toBe(false);
+  };
+
+  it.each([undefined, "HOTSPOT_SSID='Synthetic: AP'\nHOTSPOT_PASSWORD='synthetic-only-password'\n"])("uses NM-generated UUID after readonly-add rejection regression (%s)", (hotspotEnv) => {
+    prepare(hotspotEnv);
+    const r = runStartAp();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.calls.find((a) => has(a, "connection", "add"))).not.toContain("connection.uuid");
+    expect(readFileSync(path.join(nm, "creation-locale"), "utf8").trim()).toBe("C");
+    const dependent = r.calls.filter((a) => has(a, "connection", "modify") || (has(a, "connection", "up") && a.includes(HOTSPOT)));
+    expect(dependent.length).toBeGreaterThanOrEqual(2);
+    for (const a of dependent) expect(a.slice(a.indexOf("connection") + 2, a.indexOf("connection") + 4)).toEqual(["uuid", HOTSPOT]);
+    expect(readFileSync(path.join(nm, "active"), "utf8")).toBe(HOTSPOT);
+    expect(existsSync(path.join(root, "data", "ap-runtime.env"))).toBe(true);
+    expectPreserved(r);
+  });
+
+  it.each(["add-fails", "readback-fails"])("fails closed when %s despite plausible stdout", (failure) => {
+    prepare();
+    writeFileSync(path.join(nm, failure), "");
+    const r = runStartAp();
+    expect(r.status).not.toBe(0);
+    expect(r.calls.some((a) => has(a, "connection", "add"))).toBe(true);
+    expect(r.calls.filter((a) => has(a, "connection", "modify") || (has(a, "connection", "up") && a.includes(HOTSPOT)))).toEqual([]);
+    expect(existsSync(path.join(root, "data", "ap-runtime.env"))).toBe(false);
+    expectPreserved(r);
+  });
+
+  it.each([
+    ["empty", ""], ["missing UUID", "Connection 'ClawBox-Setup' successfully added.\n"],
+    ["malformed UUID", output("not-a-uuid")], ["multiple", output() + output(HOME)],
+    ["foreign client", output(HOME)], ["foreign AP", output(GARAGE_AP)],
+    ["wrong name", output().replace("ClawBox-Setup", "Other")],
+    ["extra text", "warning\n" + output()],
+  ])("fails closed on %s creation output", (_label, text) => {
+    prepare();
+    writeFileSync(path.join(nm, "add-output"), text);
+    const r = runStartAp();
+    expect(r.status).not.toBe(0);
+    expect(r.calls.some((a) => has(a, "connection", "add"))).toBe(true);
+    expect(r.calls.filter((a) => has(a, "connection", "modify") || (has(a, "connection", "up") && a.includes(HOTSPOT)))).toEqual([]);
+    expect(existsSync(path.join(root, "data", "ap-runtime.env"))).toBe(false);
+    expectPreserved(r);
+  });
+
+  it.each([
+    ["empty", ""], ["wrong UUID", [HOME, ...identity.slice(1)].join("\n")],
+    ["wrong name", identity.map((v, i) => i === 1 ? "Other" : v).join("\n")],
+    ["foreign interface", identity.map((v, i) => i === 2 ? "wlOTHER0" : v).join("\n")],
+    ["client mode", identity.map((v, i) => i === 3 ? "infrastructure" : v).join("\n")],
+    ["unknown mode", identity.map((v, i) => i === 3 ? "" : v).join("\n")],
+    ["wrong SSID", identity.map((v, i) => i === 4 ? "Other" : v).join("\n")],
+    ["multiple profiles", identity.concat(identity).join("\n")],
+  ])("fails closed on %s profile readback", (_label, text) => {
+    prepare();
+    writeFileSync(path.join(nm, "created-readback"), text);
+    const r = runStartAp();
+    expect(r.status).not.toBe(0);
+    expect(r.calls.some((a) => a.includes("connection.uuid,connection.id,connection.interface-name,802-11-wireless.mode,802-11-wireless.ssid"))).toBe(true);
+    expect(r.calls.filter((a) => has(a, "connection", "modify") || (has(a, "connection", "up") && a.includes(HOTSPOT)))).toEqual([]);
+    expect(existsSync(path.join(root, "data", "ap-runtime.env"))).toBe(false);
+    expectPreserved(r);
   });
 });
 

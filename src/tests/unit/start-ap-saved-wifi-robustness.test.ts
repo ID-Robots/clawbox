@@ -252,6 +252,8 @@ EOF
       find_profile "$kind" "$1" || { echo "Error: $1 - no such connection profile." >&2; exit 10; }
       [ "$get" = 1 ] || unsupported "$@"
       case "$fields" in
+        connection.uuid,connection.id,connection.interface-name,802-11-wireless.mode,802-11-wireless.ssid)
+          printf '%s\\n' "$P_UUID" "$P_NAME" "$(cat "$P_DIR/iface")" "$P_MODE" "$(cat "$P_DIR/ssid")" ;;
         802-11-wireless.mode)
           if [ "$P_MODEFAIL" != - ]; then
             echo "Error: synthetic failure reading 802-11-wireless.mode" >&2; exit "$P_MODEFAIL"
@@ -315,10 +317,12 @@ EOF
     if [ "$P_UUID" = "$active" ]; then set_active "" 30; fi ;;
   "connection add")
     shift 2
-    con=""; mode="-"; ac=yes; new_uuid=""
+    con=""; mode="-"; ac=yes; ssid=""; iface=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        connection.uuid) new_uuid="$2"; shift 2 ;;
+        connection.uuid) echo "Error: failed to modify connection.uuid: the property can't be changed." >&2; exit 2 ;;
+        ssid) ssid="$2"; shift 2 ;;
+        ifname) iface="$2"; shift 2 ;;
         con-name) con="$2"; shift 2 ;;
         wifi.mode|802-11-wireless.mode) mode="$2"; shift 2 ;;
         autoconnect|connection.autoconnect) case "$2" in no|false|off|0) ac=no ;; *) ac=yes ;; esac; shift 2 ;;
@@ -333,11 +337,12 @@ EOF
     done
     d="$(printf '%s/p/%03d' "$NM" "$next")"
     mkdir -p "$d"
-    [ \"$new_uuid\" = \"${HOTSPOT}\" ] || unsupported add-uuid
+    printf '%s' "$ssid" > "$d/ssid"
+    printf '%s' "$iface" > "$d/iface"
     printf '${HOTSPOT}\\t802-11-wireless\\t0\\t0\\t%s\\tok\\t%s\\t-\\n' "$mode" "$ac" > "$d/meta"
     printf '%s' "$con" > "$d/name"
     printf '%s' "$con" > "$d/esc"
-    echo "Connection '$con' successfully added." ;;
+    echo "Connection '$con' (${HOTSPOT}) successfully added." ;;
   *) unsupported "$@" ;;
 esac
 `;
@@ -409,9 +414,6 @@ function makeBox(opts: {
   writeFileSync(path.join(nm, "calls"), "");
   writeFileSync(path.join(nm, "trace"), "");
 
-  writeFileSync(path.join(bin, "cat"), `#!/bin/bash
-if [ "$1" = /proc/sys/kernel/random/uuid ]; then echo a9a9a9a9-0000-4000-8000-0000000000a9; else exec /bin/cat "$@"; fi
-`, { mode: 0o755 });
   writeFileSync(path.join(bin, "nmcli"), NMCLI_STUB, { mode: 0o755 });
   writeFileSync(path.join(bin, "iw"), IW_STUB, { mode: 0o755 });
   writeFileSync(path.join(bin, "sleep"), SLEEP_STUB, { mode: 0o755 });
