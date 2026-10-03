@@ -5077,7 +5077,11 @@ if [ "${#brought_down[@]}" -eq 0 ]; then
 # how the flagship SKU's gateway-only paths stop 404-ing and the updater skips
 # `--step hermes_edition`. A rename cannot be observed half-done.
 step_edition_lock() {
-  install -d -o root -g root -m 0755 /etc/clawbox
+  # Both directories come from the two record paths rather than being spelled
+  # again here: the same /etc/clawbox and clawbox-setup.service.d on a box,
+  # and a sandbox when a test points CLAWBOX_EDITION_FILE and
+  # LEGACY_EDITION_DROPIN at one — never the CI runner's own /etc.
+  install -d -o root -g root -m 0755 "$(dirname "$CLAWBOX_EDITION_FILE")"
   local _edition_tmp
   _edition_tmp="$(mktemp)"
   # The STAGING write is checked too. `install_root_file` copies whatever is in
@@ -5115,7 +5119,7 @@ step_edition_lock() {
   # The drop-in's DIRECTORY counts as part of staging it: created after the
   # lock was committed, a failure here would leave the same split the ordering
   # above exists to prevent.
-  if ! mkdir -p /etc/systemd/system/clawbox-setup.service.d; then
+  if ! mkdir -p "$(dirname "$LEGACY_EDITION_DROPIN")"; then
     rm -f "$_edition_tmp"
     echo "  Error: could not create the drop-in directory for $LEGACY_EDITION_DROPIN" >&2
     return 1

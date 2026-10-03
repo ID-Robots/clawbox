@@ -278,45 +278,66 @@ d("the order hint", () => {
 });
 
 d("step_edition_lock writes the hint on the unified image only", () => {
-  function runLock(env: Record<string, string>): { out: string; lock: string } {
-    const published = path.join(tmp, "published.env");
+  /**
+   * The real step over a sandbox: BOTH records point into the temp dir — the
+   * drop-in under a directory that does not exist yet, which the step has to
+   * create — so nothing reaches the runner's own /etc. Only the root-only
+   * calls are stubbed: `install -d -o root` (ownership) and the atomic
+   * root-owned writer, which here is a plain copy to the same sandbox path.
+   */
+  function runLock(env: Record<string, string>): { out: string; status: number; lock: string; dropin: string } {
+    const sandboxLock = path.join(tmp, "etc-clawbox", "edition.env");
+    const sandboxDropin = path.join(tmp, "systemd", "clawbox-setup.service.d", "edition.conf");
+    fs.mkdirSync(path.dirname(sandboxLock), { recursive: true });
     const program = [
       ...Object.entries(env).map(([k, v]) => `${k}=${JSON.stringify(v)}`),
-      `CLAWBOX_EDITION_FILE=${JSON.stringify(lockPath)}`,
-      `LEGACY_EDITION_DROPIN=${JSON.stringify(dropinPath)}`,
+      `CLAWBOX_EDITION_FILE=${JSON.stringify(sandboxLock)}`,
+      `LEGACY_EDITION_DROPIN=${JSON.stringify(sandboxDropin)}`,
       slice("is_hermes_edition() {", "\n# Editions that RUN the Hermes harness"),
       "install() { :; }",
       "systemctl() { :; }",
       "step_edition_gateway_state() { :; }",
       "step_edition_foreign_teardown() { :; }",
-      `install_root_file() { if [ "$2" = ${JSON.stringify(lockPath)} ]; then cp "$1" ${JSON.stringify(published)}; fi; return 0; }`,
+      'install_root_file() { cp "$1" "$2"; }',
       extractShellFunction("step_edition_lock"),
       "step_edition_lock",
     ].join("\n");
     const r = spawnSync("bash", ["-c", program], { encoding: "utf-8", env: testEnv({ PATH: process.env.PATH ?? "" }), timeout: 20_000 });
+    const read = (p: string) => (fs.existsSync(p) ? fs.readFileSync(p, "utf-8") : "");
     return {
       out: `${r.stdout ?? ""}${r.stderr ?? ""}`,
-      lock: fs.existsSync(published) ? fs.readFileSync(published, "utf-8") : "",
+      status: r.status ?? -1,
+      lock: read(sandboxLock),
+      dropin: read(sandboxDropin),
     };
   }
 
   it("adds CLAWBOX_EDITION_HINT beside unselected", () => {
-    const { lock, out } = runLock({ CLAWBOX_EDITION: "unselected", CLAWBOX_EDITION_HINT: "hermes" });
-    expect(lock, out).toMatch(/^CLAWBOX_EDITION=unselected$/m);
-    expect(lock).toMatch(/^CLAWBOX_EDITION_HINT=hermes$/m);
+    const r = runLock({ CLAWBOX_EDITION: "unselected", CLAWBOX_EDITION_HINT: "hermes" });
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("Baked edition lock: CLAWBOX_EDITION=unselected");
+    expect(r.lock).toMatch(/^CLAWBOX_EDITION=unselected$/m);
+    expect(r.lock).toMatch(/^CLAWBOX_EDITION_HINT=hermes$/m);
+    // The drop-in names the edition only; the hint is the lock's alone.
+    expect(r.dropin).toBe("[Service]\nEnvironment=CLAWBOX_EDITION=unselected\n");
   });
 
   it("writes no hint line when there is none", () => {
-    const { lock } = runLock({ CLAWBOX_EDITION: "unselected", CLAWBOX_EDITION_HINT: "" });
-    expect(lock).toMatch(/^CLAWBOX_EDITION=unselected$/m);
-    expect(lock).not.toMatch(/HINT/);
+    const r = runLock({ CLAWBOX_EDITION: "unselected", CLAWBOX_EDITION_HINT: "" });
+    expect(r.status, r.out).toBe(0);
+    expect(r.lock).toMatch(/^CLAWBOX_EDITION=unselected$/m);
+    expect(r.lock).not.toMatch(/HINT/);
   });
 
   it("drops the hint the moment the box is locked to an agent — byte-for-byte a factory lock", () => {
-    const chosen = runLock({ CLAWBOX_EDITION: "hermes", CLAWBOX_EDITION_HINT: "hermes" }).lock;
-    const factory = runLock({ CLAWBOX_EDITION: "hermes", CLAWBOX_EDITION_HINT: "" }).lock;
-    expect(chosen).toBe(factory);
-    expect(chosen).not.toMatch(/HINT/);
+    const chosen = runLock({ CLAWBOX_EDITION: "hermes", CLAWBOX_EDITION_HINT: "hermes" });
+    const factory = runLock({ CLAWBOX_EDITION: "hermes", CLAWBOX_EDITION_HINT: "" });
+    expect(chosen.status, chosen.out).toBe(0);
+    // Not two empty strings agreeing: both are the real three-line lock.
+    expect(chosen.lock).toMatch(/^CLAWBOX_EDITION=hermes$/m);
+    expect(chosen.lock).toBe(factory.lock);
+    expect(chosen.lock).not.toMatch(/HINT/);
+    expect(chosen.dropin).toBe("[Service]\nEnvironment=CLAWBOX_EDITION=hermes\n");
   });
 });
 

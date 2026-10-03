@@ -118,7 +118,10 @@ describe("Hermes SKU removes the OpenClaw gateway (H1)", () => {
 describe("edition persistence (H7 / H9)", () => {
   it("is written to a root-owned file, for all three editions", () => {
     const fn = extractShellFunction("step_edition_lock");
-    expect(fn).toContain('install -d -o root -g root -m 0755 /etc/clawbox');
+    // The lock's own directory, root-owned 0755 — /etc/clawbox on a box, since
+    // CLAWBOX_EDITION_FILE is /etc/clawbox/edition.env (pinned below).
+    expect(fn).toContain('install -d -o root -g root -m 0755 "$(dirname "$CLAWBOX_EDITION_FILE")"');
+    expect(fn).toContain('mkdir -p "$(dirname "$LEGACY_EDITION_DROPIN")"');
     // Root ownership and the mode now come from `install_root_file` — the same
     // atomic writer every other root-owned file goes through — rather than a
     // chown after a truncating redirect.
