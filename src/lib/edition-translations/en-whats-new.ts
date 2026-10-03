@@ -20,13 +20,13 @@ export const whatsNewEn: Record<string, string> = {
     "The owner adds users in Settings → Users. Each person signs in with their own name and password, and gets a desktop and a Terminal of their own. Settings and installed apps stay with the owner.",
   "whatsNew.monitorModeTitle": "Monitor mode, with a drop-down terminal",
   "whatsNew.monitorModeBody":
-    "On an x64 ClawBox running the ClawBox desktop session, one desktop spans a row of monitors, arranged in Settings → Monitors. Win+Down drops a terminal down from the top of the screen.",
+    "With the ClawBox desktop session, one desktop spans a row of monitors, arranged in Settings → Monitors. Win+Down drops a terminal down from the top of the screen.",
   "whatsNew.githubBackupTitle": "Back up project folders to GitHub",
   "whatsNew.githubBackupBody":
     "In Files → Projects, Back up copies a folder to a private GitHub repository, with a daily backup if you want one. Files that look like passwords or keys are left out, and you are told which.",
   "whatsNew.kioskTitle": "Kiosk mode",
   "whatsNew.kioskBody":
-    "On an x64 ClawBox that shows its desktop full screen, every page the desktop opens gets a ClawBox bar with tabs, back, forward, reload and an address field, so the desktop is always one click away.",
+    "When ClawBox shows its desktop full screen, every page the desktop opens gets a ClawBox bar with tabs, back, forward, reload and an address field, so the desktop is always one click away.",
   "whatsNew.clawkeepTitle": "ClawKeep backups fixed",
   "whatsNew.clawkeepBody":
     "Snapshots no longer carry old backup archives along, a link that cannot be archived is skipped and named instead of failing the backup, and a full account no longer turns auto-backup off for good.",

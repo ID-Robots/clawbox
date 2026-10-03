@@ -2,27 +2,26 @@
 
 Previous release: v4.1.0, 25 September 2026. 78 commits.
 
-4.2 lets several people share one ClawBox, each with a user of their own. On an
-x64 ClawBox it spreads the desktop over several monitors, adds a drop-down
-terminal and a proper kiosk mode. Project folders can be backed up to GitHub in
-one click, ClawKeep backups are fixed, and testing on real ClawBox hardware
-fixed the problems it found.
+4.2 lets several people share one ClawBox, each with a user of their own. It
+spreads the desktop over several monitors, adds a drop-down terminal and a
+proper kiosk mode. Project folders can be backed up to GitHub in one click,
+ClawKeep backups are fixed, and testing on real ClawBox hardware fixed the
+problems it found.
 
 ## Highlights
 
 - **Several people, one ClawBox.** The owner adds users in Settings → Users.
   Each person signs in with their own name and password, and gets a desktop and
   a Terminal of their own. Settings and installed apps stay with the owner.
-- **Monitor mode, with a drop-down terminal.** On an x64 ClawBox running the
-  ClawBox desktop session, one desktop spans a row of monitors, arranged in
-  Settings → Monitors. Win+Down drops a terminal down from the top of the
-  screen.
+- **Monitor mode, with a drop-down terminal.** With the ClawBox desktop
+  session, one desktop spans a row of monitors, arranged in Settings →
+  Monitors. Win+Down drops a terminal down from the top of the screen.
 - **Back up project folders to GitHub.** In Files → Projects, Back up copies a
   folder to a private GitHub repository, with a daily backup if you want one.
   Files that look like passwords or keys are left out, and you are told which.
-- **Kiosk mode.** On an x64 ClawBox that shows its desktop full screen, every
-  page the desktop opens gets a ClawBox bar with tabs, back, forward, reload
-  and an address field, so the desktop is always one click away.
+- **Kiosk mode.** When ClawBox shows its desktop full screen, every page the
+  desktop opens gets a ClawBox bar with tabs, back, forward, reload and an
+  address field, so the desktop is always one click away.
 - **ClawKeep backups fixed.** Snapshots no longer carry old backup archives
   along, a link that cannot be archived is skipped and named instead of failing
   the backup, and a full account no longer turns auto-backup off for good.
@@ -48,18 +47,18 @@ fixed the problems it found.
 
 ### Desktop
 
-- **Monitor mode** (x64 desktop session): arrange monitors by dragging, choose
-  the main one, and set resolution, refresh rate, scale, rotation, mirroring
-  and variable refresh rate, plus brightness where the monitor allows it. A new
-  layout is undone after 20 seconds unless you keep it. Windows maximise and
-  snap on the monitor they are on; the shelf, chat and notices stay on the
-  main one.
-- **Drop-down terminal** (x64 desktop session): Win+Down shows and hides it, in
-  the ClawBox Terminal's colours.
-- **Kiosk mode** (x64): pages the desktop opens get a ClawBox bar with tabs,
-  back, forward, reload and an address field, and a new tab opens a ClawBox
-  start page with search. The desktop's shelf gathers those pages under one
-  **Web** icon.
+- **Monitor mode** (ClawBox desktop session): arrange monitors by dragging,
+  choose the main one, and set resolution, refresh rate, scale, rotation,
+  mirroring and variable refresh rate, plus brightness where the monitor allows
+  it. A new layout is undone after 20 seconds unless you keep it. Windows
+  maximise and snap on the monitor they are on; the shelf, chat and notices
+  stay on the main one.
+- **Drop-down terminal** (ClawBox desktop session): Win+Down shows and hides
+  it, in the ClawBox Terminal's colours.
+- **Kiosk mode** (ClawBox desktop session): pages the desktop opens get a
+  ClawBox bar with tabs, back, forward, reload and an address field, and a new
+  tab opens a ClawBox start page with search. The desktop's shelf gathers those
+  pages under one **Web** icon.
 - **Windows and Terminals survive a page refresh.** Open windows come back
   where they were, and a running Terminal keeps running on the box and
   reattaches with its output.
@@ -143,10 +142,9 @@ fixed the problems it found.
 - Updates are release-tag based: a box offers 4.2.0 once the `v4.2.0` tag is
   published.
 - Your data is preserved, as in 4.1, and the edition lock is untouched.
-- Monitor mode, the drop-down terminal and kiosk mode come with the ClawBox
-  desktop session on an x64 install, set up with the scripts in
-  `scripts/x64-migration/kiosk/`. The update does not switch them on, and a
-  ClawBox on Jetson looks and works as before.
+- Monitor mode, the drop-down terminal and kiosk mode need the ClawBox desktop
+  session. The update does not switch them on, and a ClawBox without it looks
+  and works as before.
 - The owner is the user ClawBox was installed as. A box stays single-user until
   the owner adds someone.
 
