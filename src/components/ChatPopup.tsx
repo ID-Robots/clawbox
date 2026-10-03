@@ -3280,7 +3280,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 audio,
                 ...(files.length ? { files } : {}),
               }
-              setMessages(prev => withAssistantReply(prev, reply))
+              setMessages(prev => withAssistantReply(prev, reply, { ownClips: new Set(spokenUrlsRef.current) }))
               // The picture reached us over the socket after all — nothing
               // left to wait for, so take the banner down.
               if (images.length > 0) endImageWait()

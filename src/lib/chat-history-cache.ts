@@ -52,7 +52,7 @@ export interface ChatMessage {
 }
 
 /** The gateway suffixes its stored copy by role; the client holds the bare run id. */
-function runIdOf(key: string | undefined): string | undefined {
+export function runIdOf(key: string | undefined): string | undefined {
   if (!key) return undefined;
   return key.endsWith(":user") ? key.slice(0, -":user".length) : key;
 }

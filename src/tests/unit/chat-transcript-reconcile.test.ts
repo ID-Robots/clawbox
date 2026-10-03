@@ -170,6 +170,16 @@ describe("appending a finished reply", () => {
     expect(withAssistantReply(withVoice, assistant("Sure.", 4, { audio: ["/a.wav"] }))).toBe(withVoice);
   });
 
+  it("lets a clip the chat made itself give way to the gateway's, so one answer has one player", () => {
+    const shown = [user("hi", 1), assistant("Sure.", 2, { audio: ["blob:own-clip"] })];
+    const next = withAssistantReply(shown, assistant("Sure.", 3, { audio: ["/gateway.wav"] }), { ownClips: new Set(["blob:own-clip"]) });
+    expect(next).toHaveLength(2);
+    expect(next[1].audio).toEqual(["/gateway.wav"]);
+    // Without the chat naming it as its own, a clip already there is kept.
+    expect(withAssistantReply(shown, assistant("Sure.", 3, { audio: ["/gateway.wav"] }))[1].audio)
+      .toEqual(["blob:own-clip", "/gateway.wav"]);
+  });
+
   it("appends anything else", () => {
     const shown = [user("hi", 1)];
     expect(withAssistantReply(shown, assistant("Hello!", 2))).toEqual([...shown, assistant("Hello!", 2)]);

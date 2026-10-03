@@ -13,7 +13,9 @@
 // it; the full-page chat (ChatApp, `/app/clawbox`) had learned none of it, so a
 // file the agent sent there showed its card only after a reload.
 
-import type { ChatMessage } from "@/lib/chat-history-cache";
+// Which of this browser's own turns a read has not echoed yet: decided in one
+// place for every reconcile (TASK-1364), and used here rather than copied.
+import { runIdOf, unechoedUserTurns, type ChatMessage } from "@/lib/chat-history-cache";
 import { extractText } from "@/lib/harness/openclaw-gateway-adapter";
 import { isSentinel, isInterSessionEnvelope } from "@/lib/chat-sentinels";
 import { splitEmailRefs } from "@/lib/chat-email-refs";
@@ -134,18 +136,26 @@ function repeatsShownReply(latestShown: ChatMessage | undefined, reply: ChatMess
  * 2. The spoken half of a reply arrives as a SECOND message repeating the text
  *    of the one already rendered. Appending it verbatim showed the answer
  *    twice, once silent and once playable, so its audio is folded into the
- *    bubble it belongs to when the text matches.
+ *    bubble it belongs to when the text matches. `ownClips` are clips the chat
+ *    made for a bubble itself: they give way to the gateway's in that fold —
+ *    the same words in the same voice, and which landed first is a race, so
+ *    keeping both put two players on one answer (TASK-1364).
  * 3. Anything else is a new bubble.
  *
  * Returns `previous` itself when nothing changes, so a React updater bails out.
  */
-export function withAssistantReply(previous: ChatMessage[], reply: ChatMessage): ChatMessage[] {
+export function withAssistantReply(
+  previous: ChatMessage[],
+  reply: ChatMessage,
+  opts?: { ownClips?: ReadonlySet<string> },
+): ChatMessage[] {
   const last = previous[previous.length - 1];
   if (repeatsShownReply(last, reply)) return previous;
   const audio = reply.audio ?? [];
   if (reply.text.length > 0 && audio.length > 0 && !(reply.images?.length) && !(reply.files?.length)
       && last && last.role === "assistant" && last.text === reply.text) {
-    const merged = boundedAudio(last.audio ?? [], audio);
+    const own = opts?.ownClips;
+    const merged = boundedAudio((last.audio ?? []).filter((src) => !own?.has(src)), audio);
     if (last.audio?.length === merged.length && last.audio.every((src, i) => src === merged[i])) return previous;
     return [...previous.slice(0, -1), { ...last, audio: merged }];
   }
@@ -301,66 +311,6 @@ export function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
     for (let j = 0; j < xf.length; j++) if (xf[j] !== yf[j]) return false;
   }
   return true;
-}
-
-/** The gateway suffixes its stored copy by role; the client holds the bare run id. */
-function runIdOf(key: string | undefined): string | undefined {
-  if (!key) return undefined;
-  return key.endsWith(":user") ? key.slice(0, -":user".length) : key;
-}
-
-/**
- * Which locally-appended user turns the server has NOT echoed back yet.
- *
- * A turn is added to the transcript the moment it is sent, so a history read
- * that lands before the write completes must not erase it. Deciding that by
- * timestamp alone is not possible: the local copy is stamped with the browser's
- * clock and the server's with the device's, and a browser running ahead makes
- * every local copy look newer than everything the server returned.
- *
- * Identity settles it — both sides carry the run's idempotency key. Text is
- * kept only as the fallback for turns without one (other harnesses, older
- * gateways), and cannot be the primary test: an attachment turn displays
- * "📎 pic.png\nwhat is this" locally while the gateway stores the prompt alone.
- */
-export function unechoedUserTurns(
-  previous: ChatMessage[],
-  restored: ChatMessage[],
-  lastServerTs: number,
-): ChatMessage[] {
-  const serverRunIds = new Set<string>();
-  // Per-text stock of server copies. Counting rather than a boolean so the
-  // same words sent twice keep the second bubble.
-  const unclaimed = new Map<string, number>();
-  for (const message of restored) {
-    if (message.role !== "user") continue;
-    const runId = runIdOf(message.idempotencyKey);
-    if (runId) serverRunIds.add(runId);
-    unclaimed.set(message.text, (unclaimed.get(message.text) ?? 0) + 1);
-  }
-  const claimText = (text: string): boolean => {
-    const left = unclaimed.get(text) ?? 0;
-    if (left <= 0) return false;
-    unclaimed.set(text, left - 1);
-    return true;
-  };
-  const pending: ChatMessage[] = [];
-  for (const message of previous) {
-    if (message.role !== "user") continue;
-    const runId = runIdOf(message.idempotencyKey);
-    if (runId && serverRunIds.has(runId)) {
-      // Also spend this text's stock, so a later identical turn is not matched
-      // against the copy this one already accounted for.
-      claimText(message.text);
-      continue;
-    }
-    if (claimText(message.text)) continue;
-    // Nothing on the server matches. Keep it only if it is newer than the whole
-    // replay — an older unmatched turn has aged out of the history window and
-    // re-appending it would put it back in the wrong place.
-    if (message.timestamp > lastServerTs) pending.push(message);
-  }
-  return pending;
 }
 
 // A live TTS supplement can arrive before an older gateway's history
