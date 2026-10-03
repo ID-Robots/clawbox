@@ -89,6 +89,8 @@ describe("GET /setup-api/setup/status — unauthenticated payload", () => {
       update_completed: false,
       wifi_configured: false,
       setup_progress_step: null,
+      // No edition lock in the test environment: nothing to choose.
+      edition_choice_needed: false,
     });
     for (const field of OPERATIONAL_FIELDS) {
       expect(body).not.toHaveProperty(field);

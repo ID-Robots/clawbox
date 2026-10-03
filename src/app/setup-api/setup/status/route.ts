@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAll } from "@/lib/config-store";
 import { inferConfiguredLocalModel, readConfig as readOpenClawConfig, type OpenClawConfig } from "@/lib/openclaw-config";
+import { readEditionChoice } from "@/lib/edition-select";
 import { getActiveHarnessSource } from "@/lib/harness";
 import { hasValidSession, readSetupGateFacts } from "@/lib/route-auth";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
@@ -85,6 +86,11 @@ export async function GET(request: Request) {
       update_completed: !!config.update_completed || updateStepPassed(config),
       wifi_configured: !!config.wifi_configured,
       setup_progress_step: setupProgressStep,
+      // A unified-image box that has not been told which agent to run (the
+      // root-owned lock reads `unselected`), or one whose activation was cut
+      // short: the wizard shows "Choose your assistant" before the Update
+      // step. False on every box with a fixed edition. TASK-1149.
+      edition_choice_needed: readEditionChoice().needed,
     };
 
     return NextResponse.json(authenticated ? {
