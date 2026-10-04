@@ -27,7 +27,9 @@ import {
   readInstallLog,
 } from "./helpers/container";
 import { getStatus, getStatusAuthed } from "./helpers/setup-api";
-import { waitForAppReady } from "./helpers/readiness";
+import { READY_ACTION_TIMEOUT, waitForAppReady } from "./helpers/readiness";
+
+test.use(READY_ACTION_TIMEOUT);
 
 const env = loadEnvTest();
 

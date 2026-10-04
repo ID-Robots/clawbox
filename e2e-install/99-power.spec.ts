@@ -20,7 +20,9 @@ import {
   waitForContainerStopped,
 } from "./helpers/container";
 import { getStatus, HttpError, loginSessionCookie, systemPower } from "./helpers/setup-api";
-import { waitForGatewayReady } from "./helpers/readiness";
+import { READY_ACTION_TIMEOUT, waitForGatewayReady } from "./helpers/readiness";
+
+test.use(READY_ACTION_TIMEOUT);
 
 test.describe.configure({ mode: "serial" });
 

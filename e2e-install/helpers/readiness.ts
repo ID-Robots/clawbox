@@ -13,6 +13,12 @@
 import { BASE_URL } from "./container";
 import { loginSessionCookie } from "./setup-api";
 
+/**
+ * For specs that wait on readiness before driving the UI: `test.use()` this so
+ * their clicks run on a normal timeout instead of the suite-wide 60 s.
+ */
+export const READY_ACTION_TIMEOUT = { actionTimeout: 20_000 } as const;
+
 const POLL_INTERVAL_MS = 2_000;
 const REQUEST_TIMEOUT_MS = 5_000;
 

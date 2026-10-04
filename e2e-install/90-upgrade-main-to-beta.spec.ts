@@ -36,7 +36,9 @@ import {
   setUpdateBranch,
 } from "./helpers/container";
 import { startUpdate, waitForUpdate } from "./helpers/setup-api";
-import { waitForAppReady, waitForGatewayReady } from "./helpers/readiness";
+import { READY_ACTION_TIMEOUT, waitForAppReady, waitForGatewayReady } from "./helpers/readiness";
+
+test.use(READY_ACTION_TIMEOUT);
 
 const UPGRADE_BRANCH = process.env.CLAWBOX_UPGRADE_TARGET_BRANCH ?? "beta";
 

@@ -16,7 +16,9 @@ import {
   configureAiModel,
   getChatWsConfig,
 } from "./helpers/setup-api";
-import { waitForGatewayReady } from "./helpers/readiness";
+import { READY_ACTION_TIMEOUT, waitForGatewayReady } from "./helpers/readiness";
+
+test.use(READY_ACTION_TIMEOUT);
 
 function loadEnvTest(): Record<string, string> {
   const envPath = path.resolve(__dirname, ".env.test");

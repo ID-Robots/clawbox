@@ -40,9 +40,9 @@ export default defineConfig({
     locale: "en-US",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
-    // Normal action timeout: specs wait on explicit readiness signals
-    // (helpers/readiness.ts) before driving the UI, not on long clicks.
-    actionTimeout: 20_000,
+    // Specs that wait on explicit readiness first (helpers/readiness.ts) set
+    // a normal action timeout of their own via `test.use(READY_ACTION_TIMEOUT)`.
+    actionTimeout: 60_000,
     navigationTimeout: 120_000,
     ignoreHTTPSErrors: true,
   },
