@@ -4396,20 +4396,34 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 </div>
               ) : tgConfigured && !tgReconfigure ? (
                 <div>
-                  <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5 mb-4">
-                    <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
-                      <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>check_circle</span>
+                  {/* `tgReceiving === false` is the gateway's own answer that the
+                      bot is NOT listening (a revoked or mistyped token, a
+                      stopped gateway). The hub row already says so; this card
+                      must not contradict it with a green "active". `null`
+                      (could not ask) keeps the green card, as the hub does. */}
+                  <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 mb-4 border ${tgReceiving === false ? "bg-amber-500/[0.06] border-amber-500/20" : "bg-green-500/[0.06] border-green-500/15"}`}>
+                    <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${tgReceiving === false ? "bg-amber-500/15" : "bg-green-500/15"}`}>
+                      <span className={`material-symbols-rounded ${tgReceiving === false ? "text-amber-400" : "text-green-400"}`} style={{ fontSize: 22 }}>{tgReceiving === false ? "warning" : "check_circle"}</span>
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm text-[var(--text-primary)] font-medium">
-                        {tgBotInfo?.firstName || t("settings.botConnected")}
+                        {tgBotInfo?.firstName || (tgReceiving === false ? "Telegram" : t("settings.botConnected"))}
                       </div>
                       {tgBotInfo?.username && (
                         <div className="text-xs text-[var(--text-muted)] mt-0.5 truncate">@{tgBotInfo.username}</div>
                       )}
                       <div className="flex items-center gap-1.5 mt-0.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                        <span className="text-xs text-green-400/80">{t("settings.telegramActive")}</span>
+                        {tgReceiving === false ? (
+                          <>
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                            <span className="text-xs text-amber-400/90">{t("settings.channelNotReceiving")}</span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                            <span className="text-xs text-green-400/80">{t("settings.telegramActive")}</span>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
