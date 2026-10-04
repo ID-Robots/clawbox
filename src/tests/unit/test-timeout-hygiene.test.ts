@@ -629,7 +629,7 @@ describe("test-timeout hygiene", () => {
       jobsAt + h.index!,
       headers[i + 1] ? jobsAt + headers[i + 1].index! : workflow.length,
     ));
-    const suiteJobs = jobs.filter((job) => /^\s+run: bun run test:coverage:shard\b/m.test(job));
+    const suiteJobs = jobs.filter((job) => /^\s+run: bash scripts\/vitest-shard\.sh\b/m.test(job));
     expect(suiteJobs, "no job in pr-tests-coverage.yml runs the suite").toHaveLength(1);
     const cap = /^\s*timeout-minutes:\s*(\d+)\s*$/m.exec(suiteJobs[0]);
     expect(cap, "the job that runs the suite has no timeout-minutes").not.toBeNull();

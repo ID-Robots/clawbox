@@ -34,9 +34,11 @@ import {
   dockerExec,
   readGitBranch,
   setUpdateBranch,
-  waitForHttpReady,
 } from "./helpers/container";
 import { startUpdate, waitForUpdate } from "./helpers/setup-api";
+import { READY_ACTION_TIMEOUT, waitForAppReady, waitForGatewayReady } from "./helpers/readiness";
+
+test.use(READY_ACTION_TIMEOUT);
 
 const UPGRADE_BRANCH = process.env.CLAWBOX_UPGRADE_TARGET_BRANCH ?? "beta";
 
@@ -86,7 +88,7 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     for (const step of state.steps) {
       expect(step.status).toBe("completed");
     }
-    await waitForHttpReady(60_000);
+    await waitForAppReady({ timeoutMs: 5 * 60_000, context: "main baseline" });
   });
 
   test("verify current branch is main", async () => {
@@ -129,7 +131,9 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
   });
 
   test(`git HEAD is on ${UPGRADE_BRANCH}`, async () => {
-    await waitForHttpReady(60_000);
+    // The box is back AND its gateway answers: the upgrade is only done when
+    // the assistant is reachable again, not when the web server is.
+    await waitForGatewayReady({ timeoutMs: 5 * 60_000, context: "post-upgrade checks" });
     const branch = await readGitBranch();
     expect(branch).toBe(UPGRADE_BRANCH);
   });

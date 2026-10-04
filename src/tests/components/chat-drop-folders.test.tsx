@@ -116,6 +116,7 @@ beforeEach(() => {
   sentFrames.length = 0;
   staged = [];
   gate = null;
+  openGate = () => {};
   resetHarnessCache();
   window.localStorage.clear();
   Element.prototype.scrollIntoView = vi.fn();
@@ -154,19 +155,26 @@ describe("dropping files and folders on the chat", () => {
     fireEvent.drop(screen.getByTestId("chat-popup"), { dataTransfer: drop([{ entry: tree }]) });
 
     // Reading the tree first, then in flight: one chip for the folder, with its count.
-    const chip = await waitFor(() => {
-      const found = screen.getAllByTestId("chat-upload").find((c) => c.getAttribute("data-kind") === "folder");
-      expect(found).toBeTruthy();
-      return found!;
+    // Each read inside the wait that owns it: the chip, its count and the
+    // "reading" chip going are separate renders, and a loaded runner can
+    // paint the folder chip a render before the count it carries — read once,
+    // straight after the chip appeared, that was a false failure.
+    await waitFor(() => {
+      const chip = screen.getAllByTestId("chat-upload").find((c) => c.getAttribute("data-kind") === "folder");
+      expect(chip).toBeTruthy();
+      expect(within(chip!).getByRole("progressbar")).toHaveAttribute("aria-valuemax", "2");
+      expect(screen.queryAllByTestId("chat-upload").some((c) => c.getAttribute("data-kind") === "reading")).toBe(false);
     });
-    expect(within(chip).getByRole("progressbar")).toHaveAttribute("aria-valuemax", "2");
-    expect(screen.queryAllByTestId("chat-upload").some((c) => c.getAttribute("data-kind") === "reading")).toBe(false);
+    // Held at the gate until here, so the chip was observed IN FLIGHT.
+    expect(staged.length).toBeGreaterThan(0);
     await act(async () => { open(); });
 
     const strip = await screen.findByTestId("chat-attachments");
-    await waitFor(() => expect(strip).toHaveTextContent("site"));
-    expect(within(strip).getByTestId("chat-attachment-folder-count")).toHaveTextContent("2 files");
-    expect(screen.queryByTestId("chat-upload")).toBeNull();
+    await waitFor(() => {
+      expect(strip).toHaveTextContent("site");
+      expect(within(strip).getByTestId("chat-attachment-folder-count")).toHaveTextContent("2 files");
+      expect(screen.queryByTestId("chat-upload")).toBeNull();
+    });
 
     // One batch, the structure as relative paths; the hidden .env never left.
     expect(staged.map((s) => s.relativePath).sort()).toEqual(["site/index.html", "site/src/app.js"]);

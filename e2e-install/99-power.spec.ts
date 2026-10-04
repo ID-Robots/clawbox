@@ -18,9 +18,11 @@ import {
   dockerStart,
   dockerStop,
   waitForContainerStopped,
-  waitForHttpReady,
 } from "./helpers/container";
 import { getStatus, HttpError, loginSessionCookie, systemPower } from "./helpers/setup-api";
+import { READY_ACTION_TIMEOUT, waitForGatewayReady } from "./helpers/readiness";
+
+test.use(READY_ACTION_TIMEOUT);
 
 test.describe.configure({ mode: "serial" });
 
@@ -81,7 +83,8 @@ test.describe("power restart", () => {
     // populated and skips the initial seed. clawbox-bootstrap.service sees
     // .needs-install is missing and no-ops.
     await dockerStart();
-    await waitForHttpReady(5 * 60_000);
+    // Web server and gateway both back, on one bounded budget.
+    await waitForGatewayReady({ timeoutMs: 6 * 60_000, context: "post-reboot state checks" });
 
     // Everything we configured before the reboot should still be true.
     const after = await getStatus();

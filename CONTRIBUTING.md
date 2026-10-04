@@ -20,6 +20,12 @@ We welcome pull requests from the community. External contributors can open PRs 
    bun install
    bun run dev
    ```
+   Optionally install the repo's git hooks once per clone — the pre-commit hook
+   refuses a commit whose `package.json`, `bun.lock` and `package-lock.json`
+   disagree (CI runs the same check first):
+   ```bash
+   git config core.hooksPath scripts/hooks
+   ```
 4. **Make your change.** Keep PRs focused — one logical change per PR.
 5. **Run checks locally** before pushing:
    ```bash
@@ -51,6 +57,7 @@ Found a vulnerability? **Do not open a public issue.** Email **yanko@idrobots.co
 - **Code style:** ESLint + TypeScript. Run `bun run lint` before committing.
 - **Tests:** Add or update tests in `src/tests/*.test.ts`. Coverage target is 80%.
 - **Commits:** Keep commit messages clear and descriptive. Squash noisy WIP commits before review.
+- **Dependencies:** After editing `package.json`, run `bun install` and `npm install --package-lock-only --ignore-scripts`, and commit both lockfiles with it. `node scripts/check-lockfiles.mjs` checks them.
 - **Shell commands:** Use `execFile`, never `exec`, to avoid injection (see existing code in `src/lib/network.ts`).
 - **API routes:** Always export `export const dynamic = "force-dynamic"`.
 - **No direct pushes to `main`** — protected branch. All changes go through PR.
