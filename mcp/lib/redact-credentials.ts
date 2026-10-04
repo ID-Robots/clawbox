@@ -33,6 +33,9 @@ const SECRET_KEY_SOURCE = [
   "access",
   "refresh",
   "(?:access|refresh|id|auth|bearer|session|oauth|api|bot|app|client)[_-]?tokens?",
+  // Any other <name>_token / <name>-token key, e.g. the box's own ClawBox AI
+  // credential `clawai_token` in data/config.json, `github_token`, `portal_token`.
+  "[a-z0-9]+(?:[_-][a-z0-9]+)*[_-]tokens?",
   "tokens?",
   "api[_-]?keys?",
   "secret[_-]?keys?",
@@ -84,6 +87,8 @@ const VALUE_PATTERNS: RegExp[] = [
   /\bya29\.[A-Za-z0-9_-]{20,}/g,
   /\b1\/\/0[A-Za-z0-9_-]{20,}/g,
   /\bhf_[A-Za-z0-9]{20,}/g,
+  // ClawBox AI portal tokens.
+  /\bclaw_[A-Za-z0-9]{24,}/g,
   /\b\d{8,10}:AA[A-Za-z0-9_-]{30,}/g,
 ];
 

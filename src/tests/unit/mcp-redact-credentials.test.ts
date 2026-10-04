@@ -92,3 +92,18 @@ describe("redactCredentials: header, URL and flag forms", () => {
     expect(redactCredentials(prose)).toBe(prose);
   });
 });
+
+describe("redactCredentials: the box's own ClawBox AI token", () => {
+  const CLAW = "claw_" + "0a1b2c3d".repeat(4);
+  it("masks clawai_token in a config.json read and the bare token in prose", () => {
+    const json = JSON.stringify({ setup_complete: true, clawai_token: CLAW, clawai_tier: "pro", github_token: "Q7wE9rT2yU4iO0pZ" }, null, 2);
+    const out = redactCredentials(json);
+    expect(leaks(out, CLAW, "Q7wE9rT2yU4iO0pZ")).toEqual([]);
+    expect(out).toContain('"clawai_tier": "pro"');
+    expect(leaks(redactCredentials(`using ${CLAW} for the portal`), CLAW)).toEqual([]);
+  });
+  it("leaves numeric token counts alone", () => {
+    const usage = '{"input_tokens": 1234, "max_tokens": 4096}\nmax_tokens: 4096';
+    expect(redactCredentials(usage)).toBe(usage);
+  });
+});
