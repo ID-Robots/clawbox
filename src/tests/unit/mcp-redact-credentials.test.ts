@@ -71,3 +71,39 @@ describe("redactCredentials", () => {
     expect(leaks(out, OPAQUE_REFRESH, ORT)).toEqual([]);
   });
 });
+
+describe("redactCredentials: header, URL and flag forms", () => {
+  const OPAQUE = "cbx" + "Q7wE9rT2yU4i".repeat(3);
+  it("masks a Bearer/Basic token in an Authorization header at the shared tool gate", () => {
+    const text = `> GET /v1/models HTTP/1.1\n> Authorization: Bearer ${OPAQUE}\n> authorization: basic ${OPAQUE}==\n`;
+    const out = capResult({ content: [{ type: "text", text }] }, 10_000).content[0];
+    expect(out.type === "text" && leaks(out.text, OPAQUE)).toEqual([]);
+    expect(out.type === "text" && out.text).toContain("GET /v1/models");
+  });
+  it("masks dashed header keys, URL userinfo and secret CLI flags", () => {
+    const text = `x-api-key: ${OPAQUE}\nremote https://bot:${OPAQUE}@github.com/o/r.git\nrun --token ${OPAQUE} --password=${OPAQUE}`;
+    const out = redactCredentials(text);
+    expect(leaks(out, OPAQUE)).toEqual([]);
+    expect(out).toContain("https://bot:");
+    expect(out).toContain("@github.com/o/r.git");
+  });
+  it("leaves prose with the words bearer/token alone", () => {
+    const prose = "The token expired. Pass the bearer token through the header; basic auth is off.";
+    expect(redactCredentials(prose)).toBe(prose);
+  });
+});
+
+describe("redactCredentials: the box's own ClawBox AI token", () => {
+  const CLAW = "claw_" + "0a1b2c3d".repeat(4);
+  it("masks clawai_token in a config.json read and the bare token in prose", () => {
+    const json = JSON.stringify({ setup_complete: true, clawai_token: CLAW, clawai_tier: "pro", github_token: "Q7wE9rT2yU4iO0pZ" }, null, 2);
+    const out = redactCredentials(json);
+    expect(leaks(out, CLAW, "Q7wE9rT2yU4iO0pZ")).toEqual([]);
+    expect(out).toContain('"clawai_tier": "pro"');
+    expect(leaks(redactCredentials(`using ${CLAW} for the portal`), CLAW)).toEqual([]);
+  });
+  it("leaves numeric token counts alone", () => {
+    const usage = '{"input_tokens": 1234, "max_tokens": 4096}\nmax_tokens: 4096';
+    expect(redactCredentials(usage)).toBe(usage);
+  });
+});
