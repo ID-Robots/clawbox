@@ -6,8 +6,8 @@
 # box's own updater, and keeps everything.
 #
 #   1. The board is put on the current release (the head of main) through
-#      `nano-ci rebuild` — skipped when it is already on a commit other than
-#      the one under test (85-update-rollback leaves it there).
+#      `nano-ci rebuild` — kept when it is on the release already.
+#      (85-update-rollback leaves it there when its rollback works.)
 #   2. State an owner has is recorded: a project file, the setup and password
 #      flags in data/config.json, the main agent's model, the update branch.
 #   3. Settings > Update: pin NANO_BRANCH, POST /setup-api/update/run, and
@@ -29,22 +29,7 @@ if [ -z "${NANO_SHA:-}" ]; then
   finish
 fi
 
-HEAD0=$(board_head)
-if [ -z "$HEAD0" ] || [ "$HEAD0" = "$NANO_SHA" ]; then
-  note "board on the commit under test: rebuilding it to the current release first (several minutes)"
-  if rebuild_to_release; then
-    ok "board on the release ${RELEASE_SHA:0:12}"
-  else
-    not_ok "could not put the board on the release (it is at $(board_head | cut -c1-12))"
-    finish
-  fi
-  HEAD0=$RELEASE_SHA
-else
-  note "upgrading from ${HEAD0:0:12}"
-fi
-if ! wait_gateway_settled 300; then
-  note "the starting build is not settled (${SETTLE_STATE:-unknown}); updating anyway"
-fi
+ensure_on_release || finish
 
 PROJ="$BOARD_HOME/Projects/nano-ci-upgrade-$(printf '%s' "$NANO_RUN_ID" | tr -c 'A-Za-z0-9._-' '-')"
 # State an owner has, one "key value" line each.

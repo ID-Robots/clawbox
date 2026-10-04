@@ -349,6 +349,33 @@ SETTLE_STATE=
 
 # ---- the box's own updater (85-, 90-) ----------------------------------------
 
+# ensure_on_release — the board on the current release (head of main), with
+# its gateway settled: kept when it is there already (85- leaves it there when
+# its rollback works), rebuilt otherwise. Prints its own ok / not ok; sets
+# HEAD0 to where the update starts from. Returns non-zero when it could not.
+HEAD0=
+ensure_on_release() {
+  release_sha || { not_ok "could not read the current release (head of main)"; return 1; }
+  HEAD0=$(board_head)
+  if [ "$HEAD0" = "$RELEASE_SHA" ]; then
+    note "board already on the release ${RELEASE_SHA:0:12}"
+  else
+    note "board at ${HEAD0:0:12}: rebuilding it to the release ${RELEASE_SHA:0:12} first (several minutes)"
+    if ! rebuild_to_release; then
+      not_ok "could not put the board on the release (it is at $(board_head | cut -c1-12))"
+      return 1
+    fi
+    ok "board rebuilt to the release ${RELEASE_SHA:0:12}"
+    HEAD0=$RELEASE_SHA
+  fi
+  if wait_gateway_settled 300; then
+    ok "release build up and settled"
+  else
+    not_ok "release build not settled: ${SETTLE_STATE:-unknown}"
+    return 1
+  fi
+}
+
 # board_head — the commit checked out on the board, or "".
 board_head() {
   # shellcheck disable=SC2016  # expanded on the board
@@ -369,11 +396,14 @@ build_identity_ok() {
 # rebuild and put back after. Sets RELEASE_SHA. Returns non-zero when the board
 # did not reach it.
 RELEASE_SHA=
-rebuild_to_release() {
-  local saved rc
+release_sha() {
   # shellcheck disable=SC2016  # expanded on the board
   RELEASE_SHA=$(board 'git -C "$REPO" ls-remote origin refs/heads/main 2>/dev/null | cut -f1' | tail -n 1 | tr -d '[:space:]')
-  [[ $RELEASE_SHA =~ ^[0-9a-f]{40}$ ]] || { note "could not read the head of main on the board's origin"; return 2; }
+  [[ $RELEASE_SHA =~ ^[0-9a-f]{40}$ ]] || { RELEASE_SHA=; note "could not read the head of main on the board's origin"; return 2; }
+}
+rebuild_to_release() {
+  local saved
+  release_sha || return 2
   saved=$(board 'cat /tmp/nano-ci-want-sha 2>/dev/null' | tr -d '[:space:]')
   # shellcheck disable=SC2016  # expanded on the board
   board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$RELEASE_SHA" >/dev/null

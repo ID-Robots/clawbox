@@ -9,8 +9,7 @@
 # reproduces exactly that, through the box's own updater:
 #
 #   1. The board is put on the current release (the head of main) through
-#      `nano-ci rebuild` — skipped when it is already on a commit other than
-#      the one under test.
+#      `nano-ci rebuild` — kept when it is on the release already.
 #   2. The owner's path: pin the update branch to the branch under test
 #      (NANO_BRANCH) and POST /setup-api/update/run.
 #   3. Every `next build` the update starts is SIGKILLed, as the OOM killer
@@ -30,20 +29,7 @@ if [ -z "${NANO_BRANCH:-}" ]; then
   finish
 fi
 
-HEAD0=$(board_head)
-if [ -z "$HEAD0" ] || [ "$HEAD0" = "$NANO_SHA" ]; then
-  note "board on the commit under test: rebuilding it to the current release first (several minutes)"
-  if rebuild_to_release; then
-    ok "board on the release ${RELEASE_SHA:0:12}"
-  else
-    not_ok "could not put the board on the release (it is at $(board_head | cut -c1-12))"
-    finish
-  fi
-  HEAD0=$RELEASE_SHA
-else
-  note "board already on ${HEAD0:0:12}, not the commit under test: updating from there"
-fi
-if wait_gateway_settled 300; then ok "release build up and settled before the update"; else not_ok "release build not settled: ${SETTLE_STATE:-unknown}"; finish; fi
+ensure_on_release || finish
 
 KILLS=0
 # A running build retitles itself `next-build (vNN)`; `next build` is its
