@@ -369,10 +369,15 @@ deadline. A failed test does not stop the next one.
 |---|---|---|---|
 | `10-build-identity` | 5 min | `/setup-api/system/build-identity?force=1` names the head commit for both the checkout and the build, `dirty` false for both, `drift.buildVsCheckout` `match`, the stamped build is the deployed `BUILD_ID`; `clawbox-setup.service` started **after** that build was deployed (so it serves it); `scripts/verify-build-identity.sh` passes on the board | — |
 | `20-services` | 5 min | `clawbox-gateway` and `clawbox-setup` active, `clawbox-vnc` too when the board enables it; `nano-ci health`; `/setup-api/gateway/health` 200 with `available: true`; the dashboard serves `/login`; `~/.npm-global/bin/openclaw --version` works as `clawbox` | — |
+| `25-gateway-channels` | 5 min | the gateway's own `/startupz` answers 200 and `/readyz` reports its event loop not degraded on two probes in a row (a gateway that just started says `degraded: cpu` for its first seconds: that is waited out for up to 180 s, not reported); `/readyz` lists nothing in `failing`; `openclaw channels status --json` has no status issue and every enabled channel account is running with no last error | — (no channel configured: only the gateway half runs) |
 | `30-chat-turn` | 11 min | `openclaw agent --agent main -m "Reply with exactly this text and nothing else: NANO-CI-OK <serial>" --json` answers `NANO-CI-OK <serial>` within 240 s through the `main` agent's configured provider (ClawBox AI on every lab board); retried once after 60 s | — |
 | `40-coding-agent-run` | 10 min | `POST /setup-api/coding-agent/run` in a fresh `~/Projects/nano-ci-<run id>` (or inside the owner's project folder if one is set) asks for `hello.txt` with one given line; `runs?id=` is long-polled until the run settles; it must be `completed` and the file must hold exactly that line | — |
+| `50-memory-pressure` | 7 min | swap is on with at least 1 GB; a throwaway hog (oom_score_adj 1000, random bytes so zram cannot compress it away) takes memory down to ~350 MB available and holds 45 s; the gateway's `/healthz` and the dashboard's `/login` must answer at least 3 in 4 probes meanwhile; afterwards `clawbox-gateway` and `clawbox-setup` are the same processes (no OOM kill, no restart) and the gateway settles again | — |
 | `60-media-tools` | 10 min | a coding run asked to use `generate_image` leaves a PNG of at least 4 KB and 64×64 px (`generate_audio` and a clip of at least 8 KB when only audio is on), and the run's `mediaGenerated` counter shows the tool was used | the coding agent's `generateImages` and `generateAudio` are both off |
 | `70-reboot-survival` | 13 min | restarts the gateway the way the box does (`sudo -n systemctl restart clawbox-gateway.service`, or `systemctl --user` for a legacy user unit); within 120 s it is back as a new process and `/setup-api/gateway/health` reports it available; then the `30-chat-turn` turn passes again | — |
+| `75-full-reboot` | 15 min | a REAL reboot (`sudo -n systemctl reboot`, the power menu's grant): the board comes back with a new boot id within 6 min, a `/tmp` file is gone and a home file kept; `clawbox-gateway`/`clawbox-setup` come back enabled and active by themselves, no `clawbox*` unit failed; **boot-time readiness**: the gateway's early `degraded: cpu` is waited out, and it must be started and settled within 5 min; same commit, `/login` 200, and a chat turn answers. Reboot-to-answer, -to-settled and -to-chat times are noted | — |
+| `85-update-rollback` | 70 min, **long tier** | the board is put on the current release (head of `main`, via `nano-ci rebuild`), then updated to `NANO_BRANCH` through the box's own updater (`/setup-api/update/run`) while every `next build` it starts is SIGKILLed, as an OOM kill would; the update must end `failed` with a reason, and the box must still serve `/login`, settle its gateway, serve a build that names its checked-out commit (no drift) and answer a chat turn | `NANO_BRANCH` unset |
+| `90-upgrade-from-release` | 70 min, **long tier** | from the current release (kept when `85` left the board there, rebuilt otherwise), an owner's update to `NANO_BRANCH` through `/setup-api/update/run` must end `completed` on exactly `NANO_SHA`, with no drift, a settled gateway, no failed `clawbox*` unit, a project file, the setup/password flags, the main agent's model and its session store unchanged, and a chat turn that answers | `NANO_BRANCH` or `NANO_SHA` unset |
 
 Notes on what the brief asked for and what the box actually offers:
 
@@ -385,9 +390,19 @@ Notes on what the brief asked for and what the box actually offers:
   whatever provider the `main` agent is configured with; the suite does not
   assert which one. On-device models (Gemma on llama.cpp, the wizard's ollama
   presets) are not tested for now.
-- **A reboot.** `sudo -n reboot` is not granted to `clawbox`, so
-  `70-reboot-survival` restarts the gateway instead, through the sudoers grant
-  `restartGateway()` uses.
+- **A reboot.** `70-reboot-survival` restarts the gateway the way the box
+  does; `75-full-reboot` reboots the whole board through
+  `sudo -n systemctl reboot`, the grant the power menu uses.
+- **Readiness settles.** Every readiness wait in the suite
+  (`wait_gateway_settled` in `lib.sh`) treats an early `degraded` event loop
+  as a gateway still warming up and waits for two settled probes in a row; only
+  a gateway still degraded when its budget runs out is a failure.
+- **The long tier.** A test whose header says `# tier: long` rebuilds the
+  board and runs the box's own updater, so it takes up to ~70 min. It runs only
+  with `NANO_TESTS_LONG=1`: on a pull request labelled `nano-long` (add the
+  label, then push or re-run the job — labelling alone starts no run) or a
+  dispatch with `long` ticked; the job's limit is then 280 min. Otherwise it
+  is reported as a skip.
 - **The ClawBox edition.** The suite assumes the OpenClaw edition every lab
   board runs; on a Hermes-only board the gateway tests fail rather than skip.
 
