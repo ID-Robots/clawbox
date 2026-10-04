@@ -11546,6 +11546,80 @@ step_fix_git_perms() {
   echo "  Fixed .git ownership"
 }
 
+# Put the checkout back on the commit the served build was made from, after a
+# rebuild failed and do_rebuild restored the previous build (TASK-1427).
+#
+# The in-app rollback (src/lib/update-checkout-rollback.ts) lives in the
+# dashboard, so it only runs when the dashboard driving the update already has
+# it. On an update FROM a build that predates it, the old dashboard moves the
+# tree, the new code's rebuild fails, the old build is restored — and nothing
+# moves the checkout back: the box serves one commit over the code of another.
+# This runs in the NEW code's own shell, so it does not depend on the running
+# build. Same rule as the dashboard's and as scripts/force-update.sh: only a
+# commit the served build's own stamp names, only when HEAD has moved off it,
+# only when git still has that commit. Never fatal — the caller is failing
+# already and this must not mask its exit code.
+restore_checkout_to_served_build() {
+  [ -d "$PROJECT_DIR/.git" ] || return 0
+  local stamp built="" head
+  for stamp in "$PROJECT_DIR/.next/standalone/.next/build-info.json" "$PROJECT_DIR/.next/build-info.json"; do
+    [ -f "$stamp" ] || continue
+    built=$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p' "$stamp" | head -n 1)
+    [ -n "$built" ] && break
+  done
+  case "$built" in
+    ""|*[!0-9a-f]*) echo "  Checkout left as is: the served build carries no commit stamp"; return 0 ;;
+  esac
+  if [ "${#built}" -ne 40 ] && [ "${#built}" -ne 64 ]; then
+    echo "  Checkout left as is: the served build's commit stamp is not a full SHA"; return 0
+  fi
+  head=$(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || true)
+  if [ "$head" = "$built" ]; then return 0; fi
+  if ! as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" cat-file -e "$built^{commit}" 2>/dev/null; then
+    echo "  Warning: the served build's commit ${built:0:7} is not in this checkout; the checkout stays on ${head:0:7}" >&2
+    return 0
+  fi
+  echo "  Moving the checkout back from ${head:0:7} to ${built:0:7}, the commit the restored build was made from"
+  if ! as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" reset -q --hard "$built"; then
+    echo "  Warning: could not move the checkout back to ${built:0:7}" >&2
+  fi
+  return 0
+}
+
+# The EXIT trap step_rebuild_reboot holds across do_rebuild (TASK-1427). It
+# chains to the EXIT trap already set (the dispatcher's provision verdict), with
+# the exit status that trap would have seen.
+_REBUILD_PREV_EXIT_TRAP=""
+_rebuild_trap_cmd() { printf '%s' "${2:-}"; }
+arm_rebuild_checkout_guard() {
+  local prev
+  prev="$(trap -p EXIT)"
+  _REBUILD_PREV_EXIT_TRAP=""
+  if [ -n "$prev" ]; then _REBUILD_PREV_EXIT_TRAP="$(eval "_rebuild_trap_cmd ${prev#trap }")"; fi
+  trap rebuild_checkout_guard EXIT
+}
+disarm_rebuild_checkout_guard() {
+  if [ -n "$_REBUILD_PREV_EXIT_TRAP" ]; then
+    # shellcheck disable=SC2064
+    trap "$_REBUILD_PREV_EXIT_TRAP" EXIT
+  else
+    trap - EXIT
+  fi
+}
+rebuild_checkout_guard() {
+  local rc=$?
+  trap - EXIT
+  if [ "$rc" -ne 0 ]; then restore_checkout_to_served_build || true; fi
+  if [ -n "$_REBUILD_PREV_EXIT_TRAP" ]; then
+    if [ "$rc" -ne 0 ]; then
+      (exit "$rc") || eval "$_REBUILD_PREV_EXIT_TRAP"
+    else
+      eval "$_REBUILD_PREV_EXIT_TRAP"
+    fi
+  fi
+  exit "$rc"
+}
+
 step_rebuild_reboot() {
   # Redeploy config files and scripts that may have changed after git pull.
   #
@@ -11567,11 +11641,18 @@ step_rebuild_reboot() {
   # The flag, on the arm that really reboots: see do_rebuild. In test mode
   # nothing reboots, so the engines this rebuild stopped are this function's to
   # give back and do_rebuild is called without it.
+  #
+  # On failure do_rebuild has restored the previous build and errexit ends the
+  # shell; the EXIT guard then puts the checkout back on that build's commit
+  # (TASK-1427). A trap, not `do_rebuild || …`: errexit must stay live inside
+  # do_rebuild (see its comments).
+  arm_rebuild_checkout_guard
   if is_test_mode; then
     do_rebuild
   else
     do_rebuild --reboot-follows
   fi
+  disarm_rebuild_checkout_guard
   # Reached only with a new build verified on disk: do_rebuild returns non-zero
   # on every other outcome and errexit ends this step there. The server that
   # comes up next — the restart below, or the boot after the reboot — is that

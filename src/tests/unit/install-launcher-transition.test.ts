@@ -228,6 +228,9 @@ d("step_rebuild_reboot removes the grant only after a verified rebuild", () => {
       `do_rebuild() { echo "do_rebuild $*" >> ${JSON.stringify(events)}; return ${rebuildRc}; }`,
       `systemctl() { echo "systemctl $*" >> ${JSON.stringify(events)}; }`,
       `is_test_mode() { return ${testMode ? 0 : 1}; }`,
+      // The checkout guard (TASK-1427) has its own test file.
+      "arm_rebuild_checkout_guard() { :; }",
+      "disarm_rebuild_checkout_guard() { :; }",
       fn("step_rebuild_reboot"),
       "step_rebuild_reboot",
     ].join("\n");
