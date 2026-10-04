@@ -28,7 +28,7 @@
 
 import { spawn } from "child_process";
 import { existsSync } from "fs";
-import path from "path";
+import path from "./runtime-path";
 
 export interface ChildResult {
   /** The exit code, or null when the process was killed or never started. */
