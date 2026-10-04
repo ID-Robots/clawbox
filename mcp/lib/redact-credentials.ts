@@ -33,6 +33,9 @@ const SECRET_KEY_SOURCE = [
   "access",
   "refresh",
   "(?:access|refresh|id|auth|bearer|session|oauth|api|bot|app|client)[_-]?tokens?",
+  // Any other <name>_token / <name>-token key, e.g. the box's own ClawBox AI
+  // credential `clawai_token` in data/config.json, `github_token`, `portal_token`.
+  "[a-z0-9]+(?:[_-][a-z0-9]+)*[_-]tokens?",
   "tokens?",
   "api[_-]?keys?",
   "secret[_-]?keys?",
@@ -54,8 +57,20 @@ const JSON_KEY_RE = new RegExp(
 // key: value  /  KEY=value  (YAML, env, shell, log fields). Requires a value of
 // 8+ non-space chars so prose such as "token: none" or "refresh: true" is left.
 const ASSIGN_KEY_RE = new RegExp(
-  String.raw`(^|[\s,{;(]|[A-Za-z0-9]_)((?:${SECRET_KEY_SOURCE})\s*[:=]\s*)(["']?)([^\s"',;}]{8,})\3`,
+  String.raw`(^|[\s,{;(]|[A-Za-z0-9][_-])((?:${SECRET_KEY_SOURCE})\s*[:=]\s*)(["']?)([^\s"',;}]{8,})\3`,
   "gim",
+);
+
+// `Authorization: Bearer <token>` / `Basic <b64>` (curl -v, HTTP logs, scripts).
+// The key pass above sees only the scheme word as the value, so the token itself
+// needs its own rule.
+const AUTH_SCHEME_RE = /\b(bearer|basic|token)(\s+)([A-Za-z0-9._~+/-]{8,}=*)/gi;
+// Credentials in a URL's userinfo: https://user:secret@host
+const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:\/\/[^\s/:@]*:)([^\s/@]{4,})@/gi;
+// A CLI flag carrying a secret: --token X, --api-key X, --password=X
+const FLAG_RE = new RegExp(
+  String.raw`(--(?:${SECRET_KEY_SOURCE})(?:\s+|=))(["']?)([^\s"']{8,})\2`,
+  "gi",
 );
 
 const VALUE_PATTERNS: RegExp[] = [
@@ -72,6 +87,8 @@ const VALUE_PATTERNS: RegExp[] = [
   /\bya29\.[A-Za-z0-9_-]{20,}/g,
   /\b1\/\/0[A-Za-z0-9_-]{20,}/g,
   /\bhf_[A-Za-z0-9]{20,}/g,
+  // ClawBox AI portal tokens.
+  /\bclaw_[A-Za-z0-9]{24,}/g,
   /\b\d{8,10}:AA[A-Za-z0-9_-]{30,}/g,
 ];
 
@@ -85,6 +102,12 @@ export function redactCredentials(text: string): string {
     .replace(ASSIGN_KEY_RE, (m, lead: string, label: string, q: string, value: string) =>
       value === REDACTED ? m : `${lead}${label}${q}${REDACTED}${q}`,
     );
+  out = out
+    .replace(AUTH_SCHEME_RE, (m, scheme: string, sp: string, value: string) =>
+      value === REDACTED || !/\d/.test(value) ? m : `${scheme}${sp}${REDACTED}`,
+    )
+    .replace(URL_USERINFO_RE, (_m, head: string) => `${head}${REDACTED}@`)
+    .replace(FLAG_RE, (m, flag: string, q: string, value: string) => (value === REDACTED ? m : `${flag}${q}${REDACTED}${q}`));
   for (const re of VALUE_PATTERNS) out = out.replace(re, REDACTED);
   return out;
 }
