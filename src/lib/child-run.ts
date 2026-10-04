@@ -132,8 +132,10 @@ const SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish
 export function resolveBin(bin: string): string | null {
   if (typeof bin !== "string" || bin.length === 0 || /[\0-\x1f\x7f]/.test(bin)) return null;
   if (Object.prototype.hasOwnProperty.call(ALLOWED_COMMANDS, bin)) return ALLOWED_COMMANDS[bin];
-  if (!path.isAbsolute(bin) || path.normalize(bin) !== bin) return null;
-  if (SHELLS.has(path.basename(bin))) return null;
+  // Plain string checks, not path.*: Turbopack treats path calls on a dynamic
+  // value as file references and traces the whole project tree.
+  if (!bin.startsWith("/") || bin.split("/").some((seg, i) => i > 0 && (seg === "" || seg === "." || seg === ".."))) return null;
+  if (SHELLS.has(bin.slice(bin.lastIndexOf("/") + 1))) return null;
   return bin;
 }
 
@@ -141,13 +143,17 @@ export function resolveBin(bin: string): string | null {
  * Run a shell script file (never a command string) under bash. The script must
  * be an absolute path; its arguments reach it as argv, not as shell text.
  */
+// A constant, not an inline literal: Turbopack treats spawn("bash", [file]) as
+// a reference to `file` and, for a dynamic path, traces the whole project tree.
+const SCRIPT_RUNNER: string = "bash";
+
 export function runScript(script: string, args: string[], opts: RunChildOptions): Promise<ChildResult> {
-  if (!path.isAbsolute(script) || /[\0-\x1f\x7f]/.test(script)) {
+  if (!script.startsWith("/") || /[\0-\x1f\x7f]/.test(script)) {
     return Promise.resolve(refused(opts, "script path refused"));
   }
   // A separate spawn site from runChild's: bash is reachable ONLY from here,
   // with a fixed literal, never from runChild's allowlist.
-  return collectChild((stdio) => spawn("bash", ["--", /* turbopackIgnore: true */ script, ...args], {
+  return collectChild((stdio) => spawn(/* turbopackIgnore: true */ SCRIPT_RUNNER, ["--", script, ...args], {
     shell: false,
     cwd: opts.cwd,
     env: opts.env as unknown as NodeJS.ProcessEnv,
@@ -165,7 +171,7 @@ export function runChild(bin: string, args: string[], opts: RunChildOptions): Pr
   if (exe === null) {
     return Promise.resolve(refused(opts, "command not permitted"));
   }
-  return collectChild((stdio) => spawn(exe, args, {
+  return collectChild((stdio) => spawn(/* turbopackIgnore: true */ exe, args, {
     shell: false,
     cwd: resolveCwd(bin, opts.cwd),
     // Cast only because this repo's ProcessEnv augmentation insists on
