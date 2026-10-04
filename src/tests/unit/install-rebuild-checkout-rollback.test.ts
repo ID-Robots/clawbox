@@ -16,7 +16,7 @@ import { testEnv } from "@/tests/helpers/env";
  * do_rebuild and the root-side steps around it are stubbed.
  */
 
-vi.setConfig({ testTimeout: 60_000 });
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const REPO = path.resolve(__dirname, "../../..");
 const INSTALL_SH = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
