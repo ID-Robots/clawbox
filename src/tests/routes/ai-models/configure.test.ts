@@ -568,6 +568,28 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.error).toBe("ClawBox AI token is required");
   });
 
+  it("applies the ClawBox AI cloud defaults only once the gateway answers", async () => {
+    // The applier writes openclaw.json; landing that under a gateway that is
+    // still starting makes it exit EX_CONFIG and stay down.
+    const apply = vi.fn().mockResolvedValue({ moved: [], failed: [] });
+    vi.doMock("@/lib/clawai-cloud-defaults", () => ({ applyClawaiCloudDefaults: apply }));
+    let ready!: (value: boolean) => void;
+    const gw = await import("@/lib/openclaw-gateway-ws");
+    vi.mocked(gw.waitForGatewayRpcReady).mockImplementation(
+      () => new Promise<boolean>((resolve) => { ready = resolve; }),
+    );
+    try {
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+      expect(res.status).toBe(200);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(apply).not.toHaveBeenCalled();
+      ready(true);
+      await vi.waitFor(() => expect(apply).toHaveBeenCalledWith(expect.objectContaining({ trigger: "link" })));
+    } finally {
+      vi.doUnmock("@/lib/clawai-cloud-defaults");
+    }
+  });
+
   it("uses a user-supplied ClawBox AI token when provided", async () => {
     const res = await configurePost(jsonRequest({
       provider: "clawai",
