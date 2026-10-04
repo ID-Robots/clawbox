@@ -399,7 +399,7 @@ RELEASE_SHA=
 release_sha() {
   # shellcheck disable=SC2016  # expanded on the board
   RELEASE_SHA=$(board 'git -C "$REPO" ls-remote origin refs/heads/main 2>/dev/null | cut -f1' | tail -n 1 | tr -d '[:space:]')
-  [[ $RELEASE_SHA =~ ^[0-9a-f]{40}$ ]] || { RELEASE_SHA=; note "could not read the head of main on the board's origin"; return 2; }
+  { [ ${#RELEASE_SHA} -eq 40 ] && [[ $RELEASE_SHA =~ ^[0-9a-f]+$ ]]; } || { RELEASE_SHA=; note "could not read the head of main on the board's origin"; return 2; }
 }
 rebuild_to_release() {
   local saved
