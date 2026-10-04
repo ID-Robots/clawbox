@@ -22,6 +22,7 @@ import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server
 import { CallToolRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { capText } from "./guard";
+import { redactCredentials } from "./redact-credentials";
 import { ToolError, toolErrorResult } from "./errors";
 import { PARAM_NAME_RE, TOOL_NAME_RE, type Shape } from "./schema";
 
@@ -158,7 +159,10 @@ export type ToolHandler = (args: any) => Promise<ToolResult> | ToolResult;
  */
 export function capResult(result: ToolResult, maxChars: number): ToolResult {
   const content = result.content.map((part): ContentPart => {
-    if (part.type === "text") return { type: "text", text: capText(part.text, maxChars) };
+    // Every text result is scrubbed of credentials here, at the one gate all
+    // tools share, so no individual tool can forget to (customer security report:
+    // OAuth tokens surfaced unmasked in a diagnostic tool result).
+    if (part.type === "text") return { type: "text", text: capText(redactCredentials(part.text), maxChars) };
     if (part.data.length > MAX_IMAGE_BASE64) {
       // Dropping it beats truncating base64 (which decodes to garbage) and
       // beats blowing the context window.
