@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
 import AIModelsStep from "@/components/AIModelsStep";
+import HermesProviderConfig from "@/components/HermesProviderConfig";
 
 /**
  * "Skip — I'll use only local AI" is a CHOICE of provider, not a decline, and
@@ -201,5 +202,52 @@ describe("the wizard's \"use only local AI\" button", () => {
     // it must keep advancing immediately and touch no config.
     expect(onNext).toHaveBeenCalledTimes(1);
     expect(hookState.activateLocalOnly).not.toHaveBeenCalled();
+  });
+});
+
+
+/**
+ * The Hermes edition renders HermesProviderConfig on the same wizard step, and
+ * its skip button only advanced — Hermes chat then failed with "No inference
+ * provider configured". It must make the same local-only activation.
+ */
+describe("the Hermes wizard's \"use only local AI\" button", () => {
+  beforeEach(() => {
+    hookState.callbacks = null;
+    hookState.activateLocalOnly.mockClear();
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+  });
+
+  it("configures local AI and advances only once that succeeds", async () => {
+    const onNext = vi.fn();
+    const { findByRole } = render(<HermesProviderConfig testId="hermes-ai" onNext={onNext} />);
+
+    await act(async () => {
+      fireEvent.click(await findByRole("button", { name: /use only local AI/i }));
+    });
+
+    expect(hookState.activateLocalOnly).toHaveBeenCalledTimes(1);
+    expect(onNext).not.toHaveBeenCalled();
+
+    await act(async () => {
+      hookState.callbacks?.onSaveSuccess("gemma4-e2b-it-q4_0");
+    });
+    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 8000 });
+  }, 15000);
+
+  it("does not advance when the activation fails, and says why", async () => {
+    const onNext = vi.fn();
+    const { findByRole, findByText } = render(<HermesProviderConfig testId="hermes-ai" onNext={onNext} />);
+
+    await act(async () => {
+      fireEvent.click(await findByRole("button", { name: /use only local AI/i }));
+    });
+    expect(hookState.activateLocalOnly).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      hookState.callbacks?.onSaveError("Failed to provision the local Gemma 4 runtime");
+    });
+
+    expect(await findByText(/Failed to provision the local Gemma 4 runtime/i)).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
   });
 });
