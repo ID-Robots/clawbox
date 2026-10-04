@@ -71,6 +71,13 @@ import {
   type InterruptionDetail,
 } from "./update-constants";
 import { collectBuildIdentity, resolveBuildDir, type DriftReport } from "./build-identity";
+import {
+  clearRollbackTarget,
+  recordRollbackTarget,
+  rollBackCheckoutAfterFailedUpdate,
+  rollbackWarningMessage,
+  type RollbackDeps,
+} from "./update-checkout-rollback";
 export { DRIFT_RESOLVED_CODE } from "./drift-codes";
 import {
   driftFact,
@@ -737,6 +744,24 @@ async function getRootStepResult(stepId: string): Promise<string | null> {
   }
 }
 
+/**
+ * False only when systemd positively reports the unit as settled. An unanswered
+ * query is not "stopped": never move the tree under a possible build.
+ */
+async function rootStepStillRunning(stepId: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/systemctl",
+      ["show", rootStepUnit(stepId), "-p", "ActiveState", "--value"],
+      { timeout: 10_000 },
+    );
+    const state = stdout.trim();
+    return !/^(?:inactive|failed)$/.test(state);
+  } catch {
+    return true;
+  }
+}
+
 function rootStepResultFailed(result: string | null): boolean {
   return result !== null && result !== "success";
 }
@@ -1295,6 +1320,70 @@ function warnUpdate(code: string, message: string): void {
  * so without this the one line the owner most needs to see is the one line the
  * reboot eats.
  */
+const CHECKOUT_ROLLED_BACK = "checkout-rolled-back";
+
+/** The updater's real git + store, for update-checkout-rollback (TASK-1423). */
+function rollbackDeps(): RollbackDeps {
+  return {
+    readState: async () => {
+      const identity = await collectBuildIdentity(PROJECT_DIR);
+      return {
+        buildCommit: identity.build?.commit ?? null,
+        head: identity.checkout.commit,
+        branch: identity.checkout.branch,
+      };
+    },
+    git: async (args) => {
+      await execGit(PROJECT_DIR, args, { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 });
+    },
+    get,
+    set,
+  };
+}
+
+/** Never throws: a box that cannot record the target still updates. */
+async function recordCheckoutRollbackTarget(): Promise<void> {
+  try {
+    await recordRollbackTarget(rollbackDeps());
+  } catch (err) {
+    console.warn("[Updater] Could not record the checkout rollback target:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * A failed run leaves the checkout where step 1 moved it while the box keeps
+ * serving the previous build. Put the checkout back so the two agree. Never throws.
+ */
+async function rollBackCheckoutIfStranded(): Promise<void> {
+  try {
+    // A rebuild that outlived the updater's wait may still be building from
+    // this tree; moving it underneath would break that build. Leave the
+    // target for the run that follows.
+    if (await rootStepStillRunning(REBUILD_ROOT_STEP)) {
+      console.warn("[Updater] Rebuild still running — not moving the checkout");
+      return;
+    }
+    const outcome = await rollBackCheckoutAfterFailedUpdate(rollbackDeps());
+    if (outcome.rolledBack) {
+      console.log(`[Updater] Checkout rolled back to ${outcome.target.commit.slice(0, 7)} to match the served build`);
+    } else if (outcome.reason === "git-failed") {
+      console.error(`[Updater] Could not roll the checkout back: ${outcome.error}`);
+    }
+    const message = rollbackWarningMessage(outcome);
+    if (message) warnUpdate(CHECKOUT_ROLLED_BACK, message);
+  } catch (err) {
+    console.warn("[Updater] Checkout rollback check failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+async function dropCheckoutRollbackTarget(): Promise<void> {
+  try {
+    await clearRollbackTarget(rollbackDeps());
+  } catch {
+    // A stale target is harmless: the rollback re-checks the served build.
+  }
+}
+
 async function persistWarnings(): Promise<void> {
   await set("update_warnings", runtime.state.warnings?.length ? JSON.stringify(runtime.state.warnings) : undefined);
 }
@@ -4679,6 +4768,9 @@ async function resumeContinuation(): Promise<boolean> {
     runtime.state.steps[restartIndex].status = "failed";
     runtime.state.steps[restartIndex].error = message;
     runtime.state.error = message;
+    // The rebuild failed and the previous build is what came back up: move the
+    // checkout back to it rather than leave new code beside an old build.
+    await rollBackCheckoutIfStranded();
     await clearUpdateLock();
     return false;
   }
@@ -5076,6 +5168,14 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     await captureDriftBaseline();
   }
 
+  // Before step 1 moves the tree: where a failed run puts it back (TASK-1423).
+  // Only a run that starts with the sync records one; a continuation or resume
+  // keeps the target recorded before its own step 1.
+  const ownsCheckout = steps.some((s) => s.id === RESTART_STEP_ID);
+  if (ownsCheckout && remainingSteps.some((s) => s.id === "bootstrap_updater")) {
+    await recordCheckoutRollbackTarget();
+  }
+
   let failed = false;
 
   for (let i = startFrom; i < steps.length; i++) {
@@ -5263,6 +5363,11 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // state; drop the persisted copy so the NEXT update starts from a clean
   // sheet rather than re-showing a condition it already fixed.
   await set("update_warnings", undefined);
+
+  if (ownsCheckout) {
+    if (failed) await rollBackCheckoutIfStranded();
+    else await dropCheckoutRollbackTarget();
+  }
 
   if (!failed && options.markCompleted) {
     await setMany({
