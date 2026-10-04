@@ -51,8 +51,9 @@ PROJ="$BOARD_HOME/Projects/nano-ci-upgrade-$(printf '%s' "$NANO_RUN_ID" | tr -c 
 # shellcheck disable=SC2016  # expanded on the board
 STATE_SCRIPT='
   echo "project $(cat "$1/keep.txt" 2>/dev/null | md5sum | cut -c1-12)"
-  echo "setup $(jq -r "[.setup_complete, .password_configured] | map(tostring) | join(\",\")" "$REPO/data/config.json" 2>/dev/null)"
-  echo "model $(jq -r ".agents.defaults.model.primary // .agents.defaults.model // \"none\" | tostring" "$HOME/.openclaw/openclaw.json" 2>/dev/null)"
+  # python3, not jq: a stock board has no jq.
+  echo "setup $(python3 -c "import json,sys; c=json.load(open(sys.argv[1])); print(c.get(\"setup_complete\"), c.get(\"password_configured\"))" "$REPO/data/config.json" 2>/dev/null)"
+  echo "model $(python3 -c "import json,sys; m=json.load(open(sys.argv[1])).get(\"agents\",{}).get(\"defaults\",{}).get(\"model\"); print(m.get(\"primary\") if isinstance(m,dict) else m)" "$HOME/.openclaw/openclaw.json" 2>/dev/null)"
   echo "sessions $(ls "$HOME/.openclaw/agents/main/agent/" 2>/dev/null | grep -c sqlite)"
 '
 # shellcheck disable=SC2016  # expanded on the board

@@ -46,11 +46,13 @@ fi
 if wait_gateway_settled 300; then ok "release build up and settled before the update"; else not_ok "release build not settled: ${SETTLE_STATE:-unknown}"; finish; fi
 
 KILLS=0
+# A running build retitles itself `next-build (vNN)`; `next build` is its
+# command line before that.
 # shellcheck disable=SC2317  # called by wait_app_update as its tick
 kill_builds() {
   local n
   # shellcheck disable=SC2016  # expanded on the board
-  n=$(board 'n=$(pgrep -u "$(id -u)" -f "next build" | wc -l); [ "$n" -gt 0 ] && pkill -KILL -u "$(id -u)" -f "next build"; echo "$n"' | tail -n 1)
+  n=$(board 'p="^next-build|next build"; n=$(pgrep -u "$(id -u)" -f "$p" | wc -l); [ "$n" -gt 0 ] && pkill -KILL -u "$(id -u)" -f "$p"; echo "$n"' | tail -n 1)
   if [[ ${n:-0} =~ ^[0-9]+$ ]] && [ "$n" -gt 0 ]; then
     KILLS=$((KILLS + n))
     note "killed $n next build process(es), as an OOM kill would"
