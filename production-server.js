@@ -182,9 +182,19 @@ const CONFIG_JSON_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "data"
 let sessionConfigCache = null;
 function readSessionConfig() {
   try {
-    const stat = fs.statSync(CONFIG_JSON_PATH);
-    if (sessionConfigCache && sessionConfigCache.mtimeMs === stat.mtimeMs) return sessionConfigCache.value;
-    const parsed = JSON.parse(fs.readFileSync(CONFIG_JSON_PATH, "utf-8"));
+    // One descriptor for both the stat and the read, so the mtime cached is the
+    // mtime of the bytes parsed (no check-then-use race on the path).
+    const fd = fs.openSync(CONFIG_JSON_PATH, "r");
+    let stat;
+    let raw;
+    try {
+      stat = fs.fstatSync(fd);
+      if (sessionConfigCache && sessionConfigCache.mtimeMs === stat.mtimeMs) return sessionConfigCache.value;
+      raw = fs.readFileSync(fd, "utf-8");
+    } finally {
+      fs.closeSync(fd);
+    }
+    const parsed = JSON.parse(raw);
     const gen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
       : 0;

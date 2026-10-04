@@ -19,7 +19,7 @@
  */
 import path from "@/lib/runtime-path";
 import { promises as fs } from "fs";
-import { runChild } from "@/lib/child-run";
+import { runScript } from "@/lib/child-run";
 import { runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { LOCAL_TTS_PROVIDER_ID } from "@/lib/voice-output";
 
@@ -56,7 +56,7 @@ export function buildLocalTtsProvider(command: string, timeoutMs: number): Local
  * killed the process at the instant Kokoro gave up, with no diagnostic.
  */
 export async function readLocalTtsTimeoutMs(script: string = localTtsScriptPath()): Promise<number | null> {
-  const run = await runChild("bash", [script, "--provider-timeout-ms"], {
+  const run = await runScript(script, ["--provider-timeout-ms"], {
     timeoutMs: 10_000,
     env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: process.env.HOME ?? "/home/clawbox" },
   });

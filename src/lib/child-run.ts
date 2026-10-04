@@ -105,9 +105,66 @@ export function resolveCwd(bin: string, cwd: string | undefined): string | undef
  * Run a command with a deliberate, minimal environment and a hard timeout.
  * Never rejects: every outcome is described in the result.
  */
+/**
+ * The bare command names runChild may start, resolved through the child's PATH.
+ * Every value is a fixed literal, so what is spawned never comes from a caller's
+ * data. Shells are deliberately absent: a shell turns an argument back into a
+ * command line, which is exactly what runChild exists to avoid.
+ */
+const ALLOWED_COMMANDS: Readonly<Record<string, string>> = Object.freeze({
+  git: "git",
+  gh: "gh",
+  ffmpeg: "ffmpeg",
+  pdftotext: "pdftotext",
+  libreoffice: "libreoffice",
+  ss: "ss",
+});
+
+const SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish", "busybox", "env"]);
+
+/**
+ * The executable runChild will actually start for `bin`, or null when it is not
+ * one runChild may start: an allowlisted bare command, or an absolute path to a
+ * program that is not a shell (an installed helper, the Python interpreter, the
+ * running node). Anything else — a relative path, an unknown bare name, a
+ * shell, a control character — is refused.
+ */
+export function resolveBin(bin: string): string | null {
+  if (typeof bin !== "string" || bin.length === 0 || /[\0-\x1f\x7f]/.test(bin)) return null;
+  if (Object.prototype.hasOwnProperty.call(ALLOWED_COMMANDS, bin)) return ALLOWED_COMMANDS[bin];
+  if (!path.isAbsolute(bin) || path.normalize(bin) !== bin) return null;
+  if (SHELLS.has(path.basename(bin))) return null;
+  return bin;
+}
+
+/**
+ * Run a shell script file (never a command string) under bash. The script must
+ * be an absolute path; its arguments reach it as argv, not as shell text.
+ */
+export function runScript(script: string, args: string[], opts: RunChildOptions): Promise<ChildResult> {
+  if (!path.isAbsolute(script) || /[\0-\x1f\x7f]/.test(script)) {
+    return Promise.resolve(refused(opts, "script path refused"));
+  }
+  return spawnChild("bash", "bash", ["--", script, ...args], opts);
+}
+
+/** A refused start reads exactly like one that failed to start: EACCES, not ENOENT. */
+function refused(opts: RunChildOptions, why: string): ChildResult {
+  return { code: null, stdout: "", stderr: opts.notStarted ?? why, signal: null, timedOut: false, startFailed: true, startError: "EACCES" };
+}
+
 export function runChild(bin: string, args: string[], opts: RunChildOptions): Promise<ChildResult> {
+  const exe = resolveBin(bin);
+  if (exe === null) {
+    return Promise.resolve(refused(opts, "command not permitted"));
+  }
+  return spawnChild(exe, bin, args, opts);
+}
+
+function spawnChild(exe: string, bin: string, args: string[], opts: RunChildOptions): Promise<ChildResult> {
   return new Promise((resolve) => {
-    const child = spawn(bin, args, {
+    const child = spawn(exe, args, {
+      shell: false,
       cwd: resolveCwd(bin, opts.cwd),
       // Cast only because this repo's ProcessEnv augmentation insists on
       // NODE_ENV, which neither git nor gh has any use for.
