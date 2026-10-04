@@ -800,7 +800,7 @@ describe("ownHarnessStateDenial", () => {
       // The settings, the credentials, another config folder, another home.
       `Read: ${STATE}/settings.json`,
       `Read: ${HOME}/.claude/projects/-home-clawbox-Projects-site/memory/MEMORY.md`,
-      "Read: /home/someone-else-entirely/.claude-ds/projects/-home-clawbox-Projects-site/memory/MEMORY.md",
+      "Read: /home/someone-else-entirely/.claude-ds/projects/-home-clawbox-Projects-site/memory/MEMORY.md", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
       // Ways out of the corner.
       `Read: ${MINE}/memory/../../-home-clawbox-Projects-other/sess.jsonl`,
       `Bash: cd ${MINE} && cat sess-other.jsonl`,

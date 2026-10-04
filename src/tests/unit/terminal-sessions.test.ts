@@ -70,7 +70,7 @@ function setup(opts: Parameters<typeof createSessionRegistry>[0] = {}) {
       spawn: () => {
         const pty = new FakePty();
         ptys.push(pty);
-        return { pty, info: { shell: "/bin/bash", cwd: "/home/owner" } };
+        return { pty, info: { shell: "/bin/bash", cwd: "/home/owner" } }; // public-hygiene: allow synthetic test fixture, not a real host/account/credential
       },
     });
     return ws;
@@ -227,7 +227,7 @@ describe("a plain connection (no session asked for)", () => {
   it("is the old behaviour: a fresh shell that ends with its socket, with no id handed out", () => {
     const { ptys, registry, connect } = setup();
     const ws = connect("");
-    expect(ws.sent[0]).toEqual({ type: "started", shell: "/bin/bash", cwd: "/home/owner" });
+    expect(ws.sent[0]).toEqual({ type: "started", shell: "/bin/bash", cwd: "/home/owner" }); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     ws.message({ type: "resize", cols: 80, rows: 24 });
     ws.close();
     expect(ptys[0].killed).toBe(true);

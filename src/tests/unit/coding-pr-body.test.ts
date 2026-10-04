@@ -36,17 +36,17 @@ const GHP = `ghp_${"a1B2c3D4e5".repeat(4)}`;
 const HOSTS = { hostNames: ["ada-desk"] };
 
 /** Everything the redactor must take out, in one place, to look for afterwards. */
-const PRIVATE = ["192.168.1.20", "10.0.0.5", "/home/ada", "ada@example.com", "ghp_", "ada-desk"];
+const PRIVATE = ["192.168.1.20", "10.0.0.5", "/home/ada", "ada@example.com", "ghp_", "ada-desk"]; // public-hygiene: allow synthetic test fixture, not a real host/account/credential
 const expectNothingPrivate = (text: string) => {
   for (const value of PRIVATE) expect(text, `"${value}" reached the pull request`).not.toContain(value);
 };
 
 /** A first line, a body that names everything private, and a tail far past the cut. */
 const LONG_TASK = [
-  "## Deploy the dashboard to 192.168.1.20",
+  "## Deploy the dashboard to 192.168.1.20", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   "",
-  "Read /home/ada/Projects/briefs/dashboard.md first, then build and copy it over with",
-  `\`scp -r out/ pi@10.0.0.5:/srv/www\`. The deploy token is ${GHP}; mail ada@example.com`,
+  "Read /home/ada/Projects/briefs/dashboard.md first, then build and copy it over with", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+  `\`scp -r out/ pi@10.0.0.5:/srv/www\`. The deploy token is ${GHP}; mail ada@example.com`, // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   "when it is live, and check it from ada-desk afterwards.",
   "",
   ...Array.from({ length: 12 }, (_, i) => `- Step ${i + 1}: keep going with the ordinary part of the brief.`),
@@ -59,7 +59,7 @@ const input = (over: Partial<PullRequestBodyInput> = {}): PullRequestBodyInput =
   runId: "run-abc12345",
   commit: "3a10510",
   reviewRunId: null,
-  summary: "Built out/ and copied it to 10.0.0.5; see /home/ada/Projects/site/README.md.",
+  summary: "Built out/ and copied it to 10.0.0.5; see /home/ada/Projects/site/README.md.", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   taskMode: "summary",
   ...over,
 });
@@ -117,7 +117,7 @@ describe("composePullRequestBody", () => {
   });
 
   it("summary of a short task is the whole task, redacted, with nothing quoted or shortened", () => {
-    const body = composePullRequestBody(input({ task: "Fix the login form on 192.168.1.20.\n\nCheck it in /home/ada/site." }), HOSTS);
+    const body = composePullRequestBody(input({ task: "Fix the login form on 192.168.1.20.\n\nCheck it in /home/ada/site." }), HOSTS); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     expect(body).toBe([
       "Opened by the ClawBox coding agent.",
       "",
@@ -224,8 +224,8 @@ describe("the gh door (openPullRequest)", () => {
       directory: "/tmp/p",
       branch: "clawbox/run-x",
       base: "beta",
-      title: "Deploy from ada-desk to 192.168.1.20",
-      body: `Built in /home/ada/site for ada@example.com with ${GHP}.`,
+      title: "Deploy from ada-desk to 192.168.1.20", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+      body: `Built in /home/ada/site for ada@example.com with ${GHP}.`, // public-hygiene: allow synthetic test fixture, not a real host/account/credential
       draft: true,
     });
     expect(opened).toMatchObject({ ok: true, number: 12 });

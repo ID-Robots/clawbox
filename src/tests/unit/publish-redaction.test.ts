@@ -34,9 +34,9 @@ const B64 = `${"QmFzZTY0U2VjcmV0".repeat(2)}==`;
 
 describe("private IPs", () => {
   it.each([
-    "10.0.0.5", "10.255.255.255",
-    "172.16.0.1", "172.20.10.2", "172.31.255.254",
-    "192.168.0.1", "192.168.1.20",
+    "10.0.0.5", "10.255.255.255", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+    "172.16.0.1", "172.20.10.2", "172.31.255.254", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+    "192.168.0.1", "192.168.1.20", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     "100.64.0.1", "100.101.102.103", "100.127.255.254",
   ])("replaces %s", (ip) => {
     expect(r(`ssh pi@${ip} and flash it`)).toBe(`ssh pi@${IP} and flash it`);
@@ -59,7 +59,7 @@ describe("private IPs", () => {
       "bump lodash to 1.2.3.4",
       "pin react@18.2.0 and pkg@1.2.3.4",
       "build v10.0.0.1 shipped",
-      "tarball libfoo-10.2.0.1.tar.gz",
+      "tarball libfoo-10.2.0.1.tar.gz", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
       "five parts 10.0.0.1.2 is a version",
       "and 1.10.0.0.1 too",
       "python3.10.1.2",
@@ -67,22 +67,22 @@ describe("private IPs", () => {
   });
 
   it("catches both ends of a range", () => {
-    expect(r("DHCP 192.168.1.100-192.168.1.200")).toBe(`DHCP ${IP}-${IP}`);
+    expect(r("DHCP 192.168.1.100-192.168.1.200")).toBe(`DHCP ${IP}-${IP}`); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   });
 
   it.each([
-    ["fe80::1", IP],
-    ["fe80::1ff:fe23:4567:890a%eth0", IP],
-    ["fd12:3456:789a:1::1", IP],
+    ["fe80::1", IP], // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+    ["fe80::1ff:fe23:4567:890a%eth0", IP], // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+    ["fd12:3456:789a:1::1", IP], // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     ["fc00::", IP],
-    ["febf:0:0:0:0:0:0:1", IP],
+    ["febf:0:0:0:0:0:0:1", IP], // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   ])("replaces the private IPv6 %s", (address, expected) => {
     expect(r(`ping ${address} now`)).toBe(`ping ${expected} now`);
   });
 
   it("keeps a sentence's own colon and brackets around an IPv6 address", () => {
-    expect(r("fe80::1: unreachable")).toBe(`${IP}: unreachable`);
-    expect(r("curl http://[fd00::5]:8080/")).toBe(`curl http://[${IP}]:8080/`);
+    expect(r("fe80::1: unreachable")).toBe(`${IP}: unreachable`); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+    expect(r("curl http://[fd00::5]:8080/")).toBe(`curl http://[${IP}]:8080/`); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   });
 
   it("leaves public IPv6, loopback, clocks, MACs and C++ alone", () => {
@@ -97,14 +97,14 @@ describe("private IPs", () => {
   });
 
   it("classifies exact ranges", () => {
-    expect(isPrivateIpv4("172.16.0.0")).toBe(true);
+    expect(isPrivateIpv4("172.16.0.0")).toBe(true); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     expect(isPrivateIpv4("172.15.0.0")).toBe(false);
     expect(isPrivateIpv4("100.64.0.0")).toBe(true);
     expect(isPrivateIpv4("100.128.0.0")).toBe(false);
     expect(isPrivateIpv4("1.2.3.4")).toBe(false);
     expect(isPrivateIpv4("10.0.0")).toBe(false);
-    expect(isPrivateIpv6("fe80::1")).toBe(true);
-    expect(isPrivateIpv6("fdff::1")).toBe(true);
+    expect(isPrivateIpv6("fe80::1")).toBe(true); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+    expect(isPrivateIpv6("fdff::1")).toBe(true); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     expect(isPrivateIpv6("fe00::1")).toBe(false);
     expect(isPrivateIpv6("::1")).toBe(false);
     expect(isPrivateIpv6("2001:db8::1")).toBe(false);
@@ -113,12 +113,12 @@ describe("private IPs", () => {
 
 describe("home paths", () => {
   it("turns a home path into ~ and keeps the layout below it", () => {
-    expect(r("read /home/ada/Projects/briefs/task.md first")).toBe("read ~/Projects/briefs/task.md first");
-    expect(r("cd /Users/ada.lovelace/dev/app")).toBe("cd ~/dev/app");
+    expect(r("read /home/ada/Projects/briefs/task.md first")).toBe("read ~/Projects/briefs/task.md first"); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+    expect(r("cd /Users/ada.lovelace/dev/app")).toBe("cd ~/dev/app"); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     expect(r("the box's own /home/clawbox/Projects/site")).toBe("the box's own ~/Projects/site");
     expect(r("everything under /home/clawbox.")).toBe("everything under ~.");
-    expect(r("`/home/ada`")).toBe("`~`");
-    expect(r("file:///home/ada/index.html")).toBe("file://~/index.html");
+    expect(r("`/home/ada`")).toBe("`~`"); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+    expect(r("file:///home/ada/index.html")).toBe("file://~/index.html"); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   });
 
   it("leaves a URL's route, a folder called home, and a placeholder alone", () => {
@@ -205,9 +205,9 @@ describe("token-shaped strings", () => {
       .toBe(`git clone https://ada:${SECRET}@git.example.com/r.git`);
     expect(r('push to "https://ada:pa:ss@git.example.com"'))
       .toBe(`push to "https://ada:${SECRET}@git.example.com"`);
-    const pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----";
+    const pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----"; // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     expect(r(`key:\n${pem}\ndone`)).toBe(`key:\n${SECRET}\ndone`);
-    expect(r("-----BEGIN RSA PRIVATE KEY-----\nMIIEow cut off here")).toBe(SECRET);
+    expect(r("-----BEGIN RSA PRIVATE KEY-----\nMIIEow cut off here")).toBe(SECRET); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   });
 
   it("leaves ordinary code that merely looks like it alone", () => {
@@ -257,8 +257,8 @@ describe("host names", () => {
 
 describe("redactForPublishing", () => {
   const mixed = [
-    "Deploy to 192.168.1.20 from /home/ada/Projects/site,",
-    `tell ada@example.com, token ${GHP}, then check ada-desk.local and fd00::7.`,
+    "Deploy to 192.168.1.20 from /home/ada/Projects/site,", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+    `tell ada@example.com, token ${GHP}, then check ada-desk.local and fd00::7.`, // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   ].join("\n");
 
   it("takes every category out of one text, in order", () => {

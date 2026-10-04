@@ -146,7 +146,7 @@ describe("the check before every commit", () => {
   });
 
   it("knows the common token prefixes and private-key headers, and not prose that merely contains the letters", () => {
-    for (const s of [FAKE_GHP, FAKE_PAT, FAKE_SK, FAKE_AKIA, FAKE_XOX, PEM_HEAD, "-----BEGIN RSA PRIVATE KEY-----", "-----BEGIN PGP PRIVATE KEY BLOCK-----"]) {
+    for (const s of [FAKE_GHP, FAKE_PAT, FAKE_SK, FAKE_AKIA, FAKE_XOX, PEM_HEAD, "-----BEGIN RSA PRIVATE KEY-----", "-----BEGIN PGP PRIVATE KEY BLOCK-----"]) { // public-hygiene: allow synthetic test fixture, not a real host/account/credential
       expect(looksLikeSecretContent(`x = ${s}\n`), s.slice(0, 12)).toBe(true);
     }
     for (const s of ["ask the desk-top team", "pip install sk-learn", "task-runner-for-everyone-forever", "ghp_short", "AKIA is a prefix", "-----BEGIN PUBLIC KEY-----"]) {

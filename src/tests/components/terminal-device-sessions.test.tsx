@@ -109,7 +109,7 @@ describe("a desktop Terminal window's device sessions", () => {
 
     await act(async () => {
       sockets[0].open();
-      sockets[0].message({ type: "started", session: SESSION_NEW, shell: "/bin/bash", cwd: "/home/owner" });
+      sockets[0].message({ type: "started", session: SESSION_NEW, shell: "/bin/bash", cwd: "/home/owner" }); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
       sockets[0].message({ type: "output", data: "$ " });
     });
     await waitFor(() => expect(onStateChange).toHaveBeenLastCalledWith({ tabs: [{ id: 1, command: "htop", session: SESSION_NEW }], activeId: 1, nextId: 2 }));
@@ -138,7 +138,7 @@ describe("a desktop Terminal window's device sessions", () => {
 
     await act(async () => {
       sockets[0].open();
-      sockets[0].message({ type: "attached", session: SESSION_1, shell: "/bin/bash", cwd: "/home/owner" });
+      sockets[0].message({ type: "attached", session: SESSION_1, shell: "/bin/bash", cwd: "/home/owner" }); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
       sockets[0].message({ type: "output", data: "tick 1\r\ntick 2\r\n", replay: true });
       sockets[0].message({ type: "output", data: "tick 3\r\n" });
     });
@@ -173,7 +173,7 @@ describe("a desktop Terminal window's device sessions", () => {
     expect(sockets[1].query.get("session")).toBe("new");
     await act(async () => {
       sockets[1].open();
-      sockets[1].message({ type: "started", session: SESSION_NEW, shell: "/bin/bash", cwd: "/home/owner" });
+      sockets[1].message({ type: "started", session: SESSION_NEW, shell: "/bin/bash", cwd: "/home/owner" }); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     });
     await waitFor(() => expect(onStateChange).toHaveBeenLastCalledWith({ tabs: [{ id: 1, session: SESSION_NEW }], activeId: 1, nextId: 2 }));
     // The session it replaced is told to go (it is gone already; the ask is harmless).

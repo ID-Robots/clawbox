@@ -234,8 +234,8 @@ describe("reading a JavaScript runner's output", () => {
   });
 
   it("names files by the project's real path too, and never one outside it", () => {
-    const out = 'File "/real/units/tests/test_a.py", line 3\nFile "/home/me/units/conv.py", line 1\nFile "/usr/lib/python3.10/unittest/case.py", line 59\nFile "/real/units2/x.py", line 1';
-    expect(namedFiles(out, ["/home/me/units", "/real/units"])).toEqual(["tests/test_a.py", "conv.py"]);
+    const out = 'File "/real/units/tests/test_a.py", line 3\nFile "/home/me/units/conv.py", line 1\nFile "/usr/lib/python3.10/unittest/case.py", line 59\nFile "/real/units2/x.py", line 1'; // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+    expect(namedFiles(out, ["/home/me/units", "/real/units"])).toEqual(["tests/test_a.py", "conv.py"]); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   });
 });
 

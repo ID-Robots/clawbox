@@ -32,8 +32,8 @@ function summary(over: Partial<RunHistorySummaryWire> = {}): RunHistorySummaryWi
     usage: { runsFile: 1000, olderRuns: 0, evidence: 5 * 1024 * 1024, inputs: 0, streams: 0, archive: 0, transcripts: 0, total: 5 * 1024 * 1024 + 1000, truncated: false },
     disk: { freeBytes: 20 * 1024 ** 3, totalBytes: 64 * 1024 ** 3, minFreeBytes: 2 * 1024 ** 3, low: false },
     transcripts: [
-      { file: "/home/c/.claude-ds/settings.json", label: "~/.claude-ds/settings.json", days: null, kept: false, readable: true },
-      { file: "/home/c/.claude/settings.json", label: "~/.claude/settings.json", days: null, kept: false, readable: true },
+      { file: "/home/c/.claude-ds/settings.json", label: "~/.claude-ds/settings.json", days: null, kept: false, readable: true }, // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+      { file: "/home/c/.claude/settings.json", label: "~/.claude/settings.json", days: null, kept: false, readable: true }, // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     ],
     ...over,
   };
@@ -165,11 +165,11 @@ describe("CodingRunHistoryCard", () => {
 describe("CodingRunHistoryPage", () => {
   const OLDER = {
     id: "run-older001", task: "# Build the pong game\nwith sound", status: "completed", startedAt: 1_700_000_000_000, completedAt: 1_700_000_100_000,
-    directory: "/home/c/Projects/pong", numTurns: 12, filesTouched: ["a.js", "b.css"],
+    directory: "/home/c/Projects/pong", numTurns: 12, filesTouched: ["a.js", "b.css"], // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   };
   const ENTRY = {
     id: "run-archiv01", title: "Make the landing page", status: "failed", startedAt: 1_690_000_000_000, completedAt: 1_690_000_100_000,
-    archivedAt: 1_700_000_000_000, directory: "/home/c/Projects/site", project: "/home/c/Projects/site", bytes: 2048,
+    archivedAt: 1_700_000_000_000, directory: "/home/c/Projects/site", project: "/home/c/Projects/site", bytes: 2048, // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     evidence: 2, inputs: 1, transcript: true, stream: false, reason: "trimmed",
   };
   const DETAIL = {

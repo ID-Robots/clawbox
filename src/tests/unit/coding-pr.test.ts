@@ -424,9 +424,9 @@ describe("the pull request across the owner's gestures", () => {
 
   // TASK-1366. Invented values throughout; what matters is where they end up.
   const PRIVATE_TASK = [
-    "Deploy the site to 192.168.1.20 for ada@example.com",
+    "Deploy the site to 192.168.1.20 for ada@example.com", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     "",
-    "Read /home/ada/Projects/briefs/site.md first, on ada-desk.",
+    "Read /home/ada/Projects/briefs/site.md first, on ada-desk.", // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     ...Array.from({ length: 14 }, (_, i) => `- Step ${i + 1}: an ordinary line of a long brief, nothing private here.`),
     "TAIL-SENTINEL past the first six hundred characters.",
   ].join("\n");
@@ -444,7 +444,7 @@ describe("the pull request across the owner's gestures", () => {
       expect(body).toContain("**Task**");
       expect(body).toContain("> Read ~/Projects/briefs/site.md first, on <host>.");
       expect(body).toMatch(/_Shortened to its first 600 characters/);
-      for (const value of ["192.168.1.20", "ada@example.com", "/home/ada", "ada-desk", "TAIL-SENTINEL"]) expect(body).not.toContain(value);
+      for (const value of ["192.168.1.20", "ada@example.com", "/home/ada", "ada-desk", "TAIL-SENTINEL"]) expect(body).not.toContain(value); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
       // What the run was given is untouched: only the published copy is redacted.
       expect(lib.getRun(started.id)?.task).toBe(PRIVATE_TASK);
     } finally {

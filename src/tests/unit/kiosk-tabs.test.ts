@@ -86,7 +86,7 @@ describe("parseKioskEnv / readKioskUrl", () => {
   });
 
   it("prefers the environment, then the default when neither source names an http(s) URL", () => {
-    expect(readKioskUrl({ CLAWBOX_KIOSK_URL: "http://192.168.1.5:3005/" })).toBe("http://192.168.1.5:3005/");
+    expect(readKioskUrl({ CLAWBOX_KIOSK_URL: "http://192.168.1.5:3005/" })).toBe("http://192.168.1.5:3005/"); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     // Whatever /etc/clawbox/kiosk.env says on the machine running the suite
     // is not the test's business: the env candidate is judged first, and a
     // non-URL one is skipped rather than returned.

@@ -96,7 +96,7 @@ def test_without_a_state_dir_only_openclaws_own_archive_name_is_left_out() -> No
 def test_display_path_says_home_as_a_tilde(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", "/home/clawbox")
     assert own_backups.display_path("/home/clawbox/.openclaw/x.zip") == "~/.openclaw/x.zip"
-    assert own_backups.display_path("/home/clawboxer/x.zip") == "/home/clawboxer/x.zip"
+    assert own_backups.display_path("/home/clawboxer/x.zip") == "/home/clawboxer/x.zip" # public-hygiene: allow synthetic test fixture, not a real host/account/credential
     assert own_backups.display_path("/srv/x.zip") == "/srv/x.zip"
 
 

@@ -24,7 +24,7 @@ const readJson = (file: string) => JSON.parse(fs.readFileSync(file, "utf-8"));
 const config = () => readJson(path.join(data, "config.json"));
 
 function record(id: string, over: Record<string, unknown> = {}) {
-  return { id, task: `# Task ${id}\nmore`, status: "completed", startedAt: 1_000, completedAt: 2_000, directory: "/home/x/Projects/site", ...over };
+  return { id, task: `# Task ${id}\nmore`, status: "completed", startedAt: 1_000, completedAt: 2_000, directory: "/home/x/Projects/site", ...over }; // public-hygiene: allow synthetic test fixture, not a real host/account/credential
 }
 
 beforeEach(async () => {
@@ -91,12 +91,12 @@ describe("older runs", () => {
   it("keeps a record in a file of its own and pages it newest first", () => {
     expect(lib.hasOlderRuns()).toBe(false);
     expect(lib.writeOlderRun(record("run-aaaaaaa1", { startedAt: 10 }))).toBe(true);
-    expect(lib.writeOlderRun(record("run-aaaaaaa2", { startedAt: 30, worktree: { project: "/home/x/Projects/other" } }))).toBe(true);
+    expect(lib.writeOlderRun(record("run-aaaaaaa2", { startedAt: 30, worktree: { project: "/home/x/Projects/other" } }))).toBe(true); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     expect(lib.writeOlderRun(record("run-aaaaaaa3", { startedAt: 20 }))).toBe(true);
     const file = path.join(data, "coding-agent-history", "run-aaaaaaa1.json");
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     expect(lib.olderRunIndex().map((e) => e.id)).toEqual(["run-aaaaaaa2", "run-aaaaaaa3", "run-aaaaaaa1"]);
-    expect(lib.olderRunIndex()[0].project).toBe("/home/x/Projects/other");
+    expect(lib.olderRunIndex()[0].project).toBe("/home/x/Projects/other"); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     expect((lib.readOlderRunRecord("run-aaaaaaa3") as { task: string }).task).toContain("Task run-aaaaaaa3");
   });
 

@@ -42,7 +42,7 @@ function archived(id: string, startedAt = 1_000) {
   fs.writeFileSync(path.join(evidence, "shot.png"), "\x89PNG fake");
   fs.writeFileSync(path.join(evidence, "page.html"), "<script>alert(1)</script>");
   return history.archiveRun(
-    { id, task: `Archived ${id}`, status: "completed", startedAt, completedAt: startedAt + 1, directory: "/home/x/Projects/site" },
+    { id, task: `Archived ${id}`, status: "completed", startedAt, completedAt: startedAt + 1, directory: "/home/x/Projects/site" }, // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     { evidenceDir: evidence, inputsDir: null, streamLog: null, stderrLog: null, transcript: null },
     "trimmed",
   )!;
@@ -150,7 +150,7 @@ describe("GET history/export", () => {
 
   it("streams the whole history, live list and archive, under one manifest", async () => {
     archived("run-aaaaaaa1");
-    const live = { id: "run-bbbbbbb1", task: "live one", directory: "/home/x/Projects/site", status: "completed", startedAt: 5_000 };
+    const live = { id: "run-bbbbbbb1", task: "live one", directory: "/home/x/Projects/site", status: "completed", startedAt: 5_000 }; // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     fs.writeFileSync(path.join(data, "coding-agent-runs.json"), JSON.stringify([live]));
     fs.mkdirSync(path.join(data, "coding-agent-artifacts", live.id), { recursive: true });
     fs.writeFileSync(path.join(data, "coding-agent-artifacts", live.id, "report.md"), "# Report");
@@ -186,7 +186,7 @@ describe("GET history/file", () => {
 describe("GET runs?history=1", () => {
   it("pages the older runs with a total", async () => {
     for (let i = 1; i <= 3; i += 1) {
-      history.writeOlderRun({ id: `run-cccccc0${i}`, task: `older ${i}`, directory: "/home/x/Projects/site", status: "completed", startedAt: i * 1000 } as never);
+      history.writeOlderRun({ id: `run-cccccc0${i}`, task: `older ${i}`, directory: "/home/x/Projects/site", status: "completed", startedAt: i * 1000 } as never); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
     }
     const res = await runsRoute.GET(asAgent("runs?history=1&offset=1&limit=1"));
     const body = await res.json();
