@@ -119,6 +119,6 @@ describe("rootStepRepairCommand", () => {
 
   it("names the x64 installer's own step on a desktop install", () => {
     x64Install(true);
-    expect(rootStepRepairCommand("/home/me/clawbox")).toBe("sudo bash /home/me/clawbox/install-x64.sh --step root_step_contract");
+    expect(rootStepRepairCommand("/home/me/clawbox")).toBe("sudo bash /home/me/clawbox/install-x64.sh --step root_step_contract"); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   });
 });

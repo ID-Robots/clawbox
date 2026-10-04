@@ -118,9 +118,9 @@ const IMAGE_TLDS = new Set(["png", "jpg", "jpeg", "gif", "svg", "webp", "avif", 
 /**
  * Four dotted numbers standing on their own — not part of a longer dotted run
  * (`1.10.0.0.1`), not a version glued to a word (`v10.0.0.1`) or to a package
- * name (`libfoo-10.2.0.1`), not followed by a file extension
- * (`10.2.0.1.tar.gz`). A digit before a hyphen is still an address: that is
- * the second half of a range, `10.0.0.5-10.0.0.9`. The range decides the rest
+ * name (`libfoo-10.2.0.1`), not followed by a file extension public-hygiene: allow documents the redaction rule with example values
+ * (`10.2.0.1.tar.gz`). A digit before a hyphen is still an address: that is public-hygiene: allow documents the redaction rule with example values
+ * the second half of a range, `10.0.0.5-10.0.0.9`. The range decides the rest public-hygiene: allow documents the redaction rule with example values
  * — see isPrivateIpv4.
  */
 const IPV4_RE = /(?<![\w.]|[A-Za-z]-)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?!\w|\.\w)/g;
@@ -196,7 +196,7 @@ export function isPrivateIpv6(address: string): boolean {
 }
 
 /** The replacer for one IPv6 candidate. A sentence's own colon after an
- *  address (`fe80::1: unreachable`) is given back rather than sinking it. */
+ *  address (`fe80::1: unreachable`) is given back rather than sinking it. public-hygiene: allow documents the redaction rule with example values */
 function redactIpv6Candidate(match: string): string {
   if (isPrivateIpv6(match)) return PRIVATE_IP_PLACEHOLDER;
   if (match.endsWith(":") && !match.endsWith("::") && isPrivateIpv6(match.slice(0, -1))) {

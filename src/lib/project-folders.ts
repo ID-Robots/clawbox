@@ -94,7 +94,7 @@ function spell(input: string, root: string): string | null {
  * the list stores — or a `ProjectFolderError` saying why it cannot be pinned.
  *
  * The same containment the Files API's `safePath` applies (with the separator,
- * so `/home/clawboxx` is not inside `/home/clawbox`), then the same guard, then
+ * so `/home/clawboxx` is not inside `/home/clawbox`), then the same guard, then public-hygiene: allow documents the redaction rule with example values
  * the disk: it must exist and be a directory.
  */
 export function resolveProjectFolder(input: unknown): { abs: string; rel: string } {
