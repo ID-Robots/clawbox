@@ -26,7 +26,7 @@
  * the next fix landing in one of two identical paths.
  */
 
-import { spawn } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
 import { existsSync } from "fs";
 import path from "./runtime-path";
 
@@ -145,7 +145,14 @@ export function runScript(script: string, args: string[], opts: RunChildOptions)
   if (!path.isAbsolute(script) || /[\0-\x1f\x7f]/.test(script)) {
     return Promise.resolve(refused(opts, "script path refused"));
   }
-  return spawnChild("bash", "bash", ["--", script, ...args], opts);
+  // A separate spawn site from runChild's: bash is reachable ONLY from here,
+  // with a fixed literal, never from runChild's allowlist.
+  return collectChild((stdio) => spawn("bash", ["--", script, ...args], {
+    shell: false,
+    cwd: opts.cwd,
+    env: opts.env as unknown as NodeJS.ProcessEnv,
+    stdio,
+  }), opts);
 }
 
 /** A refused start reads exactly like one that failed to start: EACCES, not ENOENT. */
@@ -158,19 +165,21 @@ export function runChild(bin: string, args: string[], opts: RunChildOptions): Pr
   if (exe === null) {
     return Promise.resolve(refused(opts, "command not permitted"));
   }
-  return spawnChild(exe, bin, args, opts);
+  return collectChild((stdio) => spawn(exe, args, {
+    shell: false,
+    cwd: resolveCwd(bin, opts.cwd),
+    // Cast only because this repo's ProcessEnv augmentation insists on
+    // NODE_ENV, which neither git nor gh has any use for.
+    env: opts.env as unknown as NodeJS.ProcessEnv,
+    stdio,
+  }), opts);
 }
 
-function spawnChild(exe: string, bin: string, args: string[], opts: RunChildOptions): Promise<ChildResult> {
+type Stdio = ["ignore" | "pipe", "pipe", "pipe"];
+
+function collectChild(start: (stdio: Stdio) => ChildProcess, opts: RunChildOptions): Promise<ChildResult> {
   return new Promise((resolve) => {
-    const child = spawn(exe, args, {
-      shell: false,
-      cwd: resolveCwd(bin, opts.cwd),
-      // Cast only because this repo's ProcessEnv augmentation insists on
-      // NODE_ENV, which neither git nor gh has any use for.
-      env: opts.env as unknown as NodeJS.ProcessEnv,
-      stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-    });
+    const child = start([opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"]);
     if (opts.input !== undefined && child.stdin) {
       child.stdin.on("error", () => { /* a child that never read it is its exit code's problem */ });
       child.stdin.end(opts.input);
