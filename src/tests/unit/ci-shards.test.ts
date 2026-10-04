@@ -361,6 +361,14 @@ describe("the e2e-install shards", () => {
         .toEqual({ status: 0, shards: ALL });
     });
 
+    it("runs every shard for a PR into main, and filters a PR into beta (TASK-1403)", () => {
+      expect(plan({ EVENT: "pull_request", CHANGED_FILES: "1", BASE_REF: "main" }, ["README.md"]))
+        .toEqual({ status: 0, shards: ALL });
+      expect(plan({ EVENT: "pull_request", CHANGED_FILES: "1", BASE_REF: "beta" }, ["README.md"]))
+        .toEqual({ status: 0, shards: '["core"]' });
+      expect(plan({ EVENT: "push" }, "fail")).toEqual({ status: 0, shards: ALL });
+    });
+
     it("counts a rename under its old name too", () => {
       // One file entry, two names: moved OUT of a gated path.
       expect(plan({ EVENT: "pull_request", CHANGED_FILES: "1" }, ["docs/old-updater-notes.md\tsrc/lib/updater-notes.ts"]))
