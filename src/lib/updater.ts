@@ -744,7 +744,10 @@ async function getRootStepResult(stepId: string): Promise<string | null> {
   }
 }
 
-/** True only when systemd positively reports the unit as running/starting. */
+/**
+ * False only when systemd positively reports the unit as settled. An unanswered
+ * query is not "stopped": never move the tree under a possible build.
+ */
 async function rootStepStillRunning(stepId: string): Promise<boolean> {
   try {
     const { stdout } = await execFile(
@@ -753,9 +756,9 @@ async function rootStepStillRunning(stepId: string): Promise<boolean> {
       { timeout: 10_000 },
     );
     const state = stdout.trim();
-    return state === "active" || state === "activating" || state === "reloading";
+    return !/^(?:inactive|failed)$/.test(state);
   } catch {
-    return false;
+    return true;
   }
 }
 

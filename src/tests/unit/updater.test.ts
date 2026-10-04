@@ -2931,6 +2931,7 @@ describe("updater", () => {
       setupExecFileMock({
         "rev-parse --abbrev-ref HEAD": { stdout: "beta\n", stderr: "" },
         "rev-parse HEAD": { stdout: `${NEW}\n`, stderr: "" },
+        "ActiveState": { stdout: "inactive\n", stderr: "" },
       });
 
       expect(await updater.checkContinuation()).toBe(false);
