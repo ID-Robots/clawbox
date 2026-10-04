@@ -32,14 +32,20 @@ fi
 ensure_on_release || finish
 
 KILLS=0
-# A running build retitles itself `next-build (vNN)`; `next build` is its
-# command line before that.
+# A running build retitles itself `next-build (vNN)`; `node … next build` is
+# its command line before that.
 # shellcheck disable=SC2317  # called by wait_app_update as its tick
 kill_builds() {
   local n
+  # Matched on the process's own command line, never with `pkill -f`: the
+  # script `board` runs is itself a `bash -c` whose argv holds this pattern.
   # shellcheck disable=SC2016  # expanded on the board
-  n=$(board 'p="^next-build|next build"; n=$(pgrep -u "$(id -u)" -f "$p" | wc -l); [ "$n" -gt 0 ] && pkill -KILL -u "$(id -u)" -f "$p"; echo "$n"' | tail -n 1)
-  if [[ ${n:-0} =~ ^[0-9]+$ ]] && [ "$n" -gt 0 ]; then
+  n=$(board '
+    pids=$(ps -u "$(id -u)" -o pid=,args= | awk "\$2 ~ /^next-build/ || (\$2 ~ /(node|bun)\$/ && / next build/) {print \$1}")
+    [ -n "$pids" ] && kill -KILL $pids 2>/dev/null
+    echo "count $(printf "%s" "$pids" | grep -c .)"
+  ' | sed -n "s/^count //p" | tail -n 1)
+  if [[ ${n:-} =~ ^[1-9][0-9]*$ ]]; then
     KILLS=$((KILLS + n))
     note "killed $n next build process(es), as an OOM kill would"
   fi
