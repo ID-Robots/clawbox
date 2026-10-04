@@ -81,6 +81,11 @@ on:
         required: true
         default: beta
         type: string
+      long:
+        description: "Also run the long-tier tests (update rollback, upgrade from the current release: ~2 h on the board)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -217,7 +222,9 @@ jobs:
     # the lab host after the job, not inside it, so no room is kept for a
     # cleanup any more and the rest is headroom for the upload, the summary,
     # the recycle and the release fallback. A normal run spends ~25.
-    timeout-minutes: 90
+    # 280 with the long tier (label `nano-long`, or a dispatch with `long`):
+    # its tests rebuild the board twice and run the box's own updater.
+    timeout-minutes: ${{ (inputs.long || contains(github.event.pull_request.labels.*.name, 'nano-long')) && 280 || 90 }}
     defaults:
       run:
         shell: bash
@@ -227,6 +234,9 @@ jobs:
       # every step's log, and the workspace's absolute path names the runner
       # host's home folder.
       NANO_RESULTS_DIR: results
+      # The long-tier tests (`# tier: long` in scripts/nano-tests/tests/) run
+      # only on a PR labelled `nano-long` or a dispatch with `long` ticked.
+      NANO_TESTS_LONG: ${{ (inputs.long || contains(github.event.pull_request.labels.*.name, 'nano-long')) && '1' || '0' }}
     # For the PR comment, which runs on GitHub's runners so that this job, on
     # the lab host, never holds a token that can write.
     outputs:
@@ -490,7 +500,9 @@ jobs:
           # The wait comes out of the suite's 40 minutes, never out of the
           # room the always() steps keep: every started minute of it, down to
           # 20.
-          suite_minutes=$((40 - (waited + 59) / 60))
+          suite_base=40
+          [ "${NANO_TESTS_LONG:-0}" = 1 ] && suite_base=190
+          suite_minutes=$((suite_base - (waited + 59) / 60))
           [ "$suite_minutes" -ge 20 ] || suite_minutes=20
           # Once `serial` is an output, the recycle step runs (and the release
           # step, when the recycle did not succeed).
@@ -501,7 +513,7 @@ jobs:
             echo "suite_minutes=$suite_minutes"
           } >> "$GITHUB_OUTPUT"
           if [ "$tries" -gt 1 ]; then
-            echo "note=Waited $((waited / 60)) min ($tries tries) for a free board, so the suite had $suite_minutes min instead of 40." >> "$GITHUB_OUTPUT"
+            echo "note=Waited $((waited / 60)) min ($tries tries) for a free board, so the suite had $suite_minutes min instead of $suite_base." >> "$GITHUB_OUTPUT"
           fi
           echo "Reserved $serial in $lab"
 
@@ -653,6 +665,8 @@ jobs:
           NANO_LAB: ${{ steps.reserve.outputs.lab }}
           NANO_SHA: ${{ steps.target.outputs.sha }}
           NANO_RUN_ID: gh${{ github.run_id }}-${{ github.run_attempt }}
+          # The update tests hand it to the box's own updater.
+          NANO_BRANCH: ${{ steps.ref.outputs.branch }}
         run: bash scripts/nano-tests/run.sh "$SERIAL"
 
       # From here on every step is `always()`, which also runs on a cancel —
