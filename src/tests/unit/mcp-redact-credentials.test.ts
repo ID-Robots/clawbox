@@ -71,3 +71,24 @@ describe("redactCredentials", () => {
     expect(leaks(out, OPAQUE_REFRESH, ORT)).toEqual([]);
   });
 });
+
+describe("redactCredentials: header, URL and flag forms", () => {
+  const OPAQUE = "cbx" + "Q7wE9rT2yU4i".repeat(3);
+  it("masks a Bearer/Basic token in an Authorization header at the shared tool gate", () => {
+    const text = `> GET /v1/models HTTP/1.1\n> Authorization: Bearer ${OPAQUE}\n> authorization: basic ${OPAQUE}==\n`;
+    const out = capResult({ content: [{ type: "text", text }] }, 10_000).content[0];
+    expect(out.type === "text" && leaks(out.text, OPAQUE)).toEqual([]);
+    expect(out.type === "text" && out.text).toContain("GET /v1/models");
+  });
+  it("masks dashed header keys, URL userinfo and secret CLI flags", () => {
+    const text = `x-api-key: ${OPAQUE}\nremote https://bot:${OPAQUE}@github.com/o/r.git\nrun --token ${OPAQUE} --password=${OPAQUE}`;
+    const out = redactCredentials(text);
+    expect(leaks(out, OPAQUE)).toEqual([]);
+    expect(out).toContain("https://bot:");
+    expect(out).toContain("@github.com/o/r.git");
+  });
+  it("leaves prose with the words bearer/token alone", () => {
+    const prose = "The token expired. Pass the bearer token through the header; basic auth is off.";
+    expect(redactCredentials(prose)).toBe(prose);
+  });
+});
