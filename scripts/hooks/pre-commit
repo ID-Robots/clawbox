@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Refuse a commit whose package.json and lockfiles disagree (TASK-1401).
+#
+# Install once per clone:
+#   git config core.hooksPath scripts/hooks
+#
+# Runs only when the commit touches package.json, bun.lock or
+# package-lock.json, and checks what is STAGED. Bypass in an emergency with
+# `git commit --no-verify`; CI runs the same check first thing either way.
+set -euo pipefail
+
+if git diff --cached --name-only --diff-filter=ACMR | grep -qxE 'package\.json|bun\.lock|package-lock\.json'; then
+  node "$(git rev-parse --show-toplevel)/scripts/check-lockfiles.mjs" --staged
+fi
