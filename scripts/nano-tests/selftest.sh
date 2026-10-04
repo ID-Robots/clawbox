@@ -268,7 +268,8 @@ check "...and says the suite did not run" contains "$WORK/summary-none.md" "did 
 check "lib.sh parses" bash -n "$LIB"
 check "run.sh parses" bash -n "$RUN"
 check "summary.sh parses" bash -n "$HERE/summary.sh"
-for name in 10-build-identity 20-services 30-chat-turn 40-coding-agent-run 60-media-tools 70-reboot-survival; do
+for name in 10-build-identity 20-services 25-gateway-channels 30-chat-turn 40-coding-agent-run 50-memory-pressure \
+  60-media-tools 70-reboot-survival 75-full-reboot 85-update-rollback 90-upgrade-from-release; do
   check "tests/$name.sh is there" test -f "$HERE/tests/$name.sh"
 done
 for t in "$HERE"/tests/*; do
@@ -276,9 +277,24 @@ for t in "$HERE"/tests/*; do
   check "tests/$name is named NN-name.sh" bash -c '[[ $1 =~ ^[0-9][0-9]-[a-z0-9-]+\.sh$ ]]' _ "$name"
   check "tests/$name parses" bash -n "$t"
   check "tests/$name sources lib.sh" grep -q 'source "$(dirname "${BASH_SOURCE\[0\]}")/../lib.sh"' "$t"
-  check "tests/$name declares a deadline of at most 900 s" \
-    bash -c 't=$(head -n 20 "$1" | sed -n -E "s/^#[[:space:]]*timeout:[[:space:]]*([0-9]+)[[:space:]]*$/\1/p" | head -n 1); [ -n "$t" ] && [ "$t" -le 900 ]' _ "$t"
+  # A long-tier test (`# tier: long`, opt-in) may take up to 75 min; every
+  # other one shares the suite's 40 minutes.
+  check "tests/$name declares a deadline of at most 900 s (4500 s for a long-tier test)" \
+    bash -c 't=$(head -n 20 "$1" | sed -n -E "s/^#[[:space:]]*timeout:[[:space:]]*([0-9]+)[[:space:]]*$/\1/p" | head -n 1)
+      max=900; head -n 20 "$1" | grep -qE "^#[[:space:]]*tier:[[:space:]]*long[[:space:]]*$" && max=4500
+      [ -n "$t" ] && [ "$t" -le "$max" ]' _ "$t"
 done
+
+# ---- long-tier tests are opt-in ----------------------------------------------
+L=$WORK/tests-long
+fixture "$L" 10-pass.sh 'echo "ok - fine"'
+fixture "$L" 20-long.sh '# tier: long
+echo "ok - long ran"'
+NANO_TESTS_DIR=$L bash "$RUN" --results "$WORK/res-long" SERIAL-7 > "$WORK/out-long.txt" 2>&1
+check "a long-tier test is skipped by default" line_matches "$WORK/out-long.txt" '^ok 2 - 20-long \(0s\) # SKIP long-tier'
+jq_check "a skipped long-tier test is a skip in summary.json" "$WORK/res-long/summary.json" '.skipped == 1 and .ok'
+NANO_TESTS_LONG=1 NANO_TESTS_DIR=$L bash "$RUN" --results "$WORK/res-long2" SERIAL-7 > "$WORK/out-long2.txt" 2>&1
+check "NANO_TESTS_LONG=1 runs a long-tier test" line_matches "$WORK/out-long2.txt" '^ok 2 - 20-long \([0-9]+s\)$'
 
 echo "1..$N"
 if [ "$FAILS" -gt 0 ]; then

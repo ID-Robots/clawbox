@@ -43,6 +43,13 @@
 # checkout's HEAD),
 # NANO_RUN_ID (names the folders a test creates on the board), NANO_CI (the
 # helper, default `nano-ci`), NANO_RESULTS_DIR, NANO_TEST_NAME, NANO_TEST_TIMEOUT.
+# NANO_BRANCH (the branch the commit under test is the head of; the update
+# tests hand it to the box's own updater), NANO_TESTS_LONG.
+#
+# A test whose first 20 lines hold `# tier: long` takes tens of minutes (it
+# rebuilds the box, more than once): it runs only with NANO_TESTS_LONG=1 and is
+# reported as a skip otherwise. The workflow sets it for a pull request labelled
+# `nano-long` and for a dispatch with `long` ticked.
 # NANO_TESTS_DIR and NANO_DEFAULT_TIMEOUT override the test folder and the 600 s
 # default (the self-test uses both).
 #
@@ -136,6 +143,13 @@ timeout_for() {
   t=$(head -n 20 "$1" | sed -n -E 's/^#[[:space:]]*timeout:[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' | head -n 1)
   if [[ $t =~ ^[1-9][0-9]*$ ]]; then echo "$t"; else echo "$DEFAULT_TIMEOUT"; fi
 }
+
+# The `# tier: NAME` header, looked for in the first 20 lines; "" when none.
+tier_for() {
+  head -n 20 "$1" | sed -n -E 's/^#[[:space:]]*tier:[[:space:]]*([a-z]+)[[:space:]]*$/\1/p' | head -n 1
+}
+NANO_TESTS_LONG=${NANO_TESTS_LONG:-0}
+export NANO_TESTS_LONG NANO_BRANCH=${NANO_BRANCH:-}
 
 # One line, at most 300 characters: a reason goes into TAP, JSON and the job summary.
 one_line() { tr -d '\r' | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' | cut -c1-300; }
@@ -253,6 +267,13 @@ for file in "${TESTS[@]}"; do
   name=$(basename "$file" .sh)
   limit=$(timeout_for "$file")
   log=$RESULTS_DIR/$name.log
+  if [ "$(tier_for "$file")" = long ] && [ "$NANO_TESTS_LONG" != 1 ]; then
+    REASON="long-tier test, runs only with NANO_TESTS_LONG=1 (label nano-long)"
+    echo "ok # SKIP $REASON" > "$log"
+    record "$name" skip "$REASON" 0 "$limit" 0
+    echo "ok $index - $name (0s) # SKIP $REASON"
+    continue
+  fi
   echo "# $name: running (deadline ${limit}s)"
   CURRENT=$name CURRENT_START=$(date +%s) CURRENT_LIMIT=$limit
   # In the background and waited for, so a cancelled job can stop the test

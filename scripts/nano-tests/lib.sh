@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034  # READY_BODY, SETTLE_STATE, UPDATE_*: read by the tests that source this
 # Helpers for scripts/nano-tests/tests/NN-*.sh (TASK-1324) — SOURCED by a test,
 # never run on its own. See docs/nano-hardware-tests.md.
 #
@@ -275,4 +276,158 @@ run_account() {
   text=$(api_json '.run.summary // .run.resultText // .run.error // "" | tostring | .[0:300]' | tr '\n' ' ')
   text=${text% }
   printf '%s' "${text:-the run gave no account}"
+}
+
+# ---- gateway readiness (25-, 50-, 75-, 85-, 90-) ----------------------------
+
+# gateway_probe PATH — GET http://127.0.0.1:18789PATH ON the board (the
+# gateway's own unauthenticated probes: /startupz, /readyz, /healthz). Sets
+# PROBE_STATUS ("000" when nothing answered) and PROBE_BODY.
+PROBE_STATUS=000
+PROBE_BODY=
+gateway_probe() {
+  local out
+  # shellcheck disable=SC2016  # expanded on the board
+  out=$(board '
+    out=$(mktemp)
+    code=$(curl -sS -o "$out" -w "%{http_code}" --max-time 5 "http://127.0.0.1:18789$1" 2>/dev/null)
+    printf "%s\n" "${code:-000}"; cat "$out"; rm -f "$out"
+  ' "$1")
+  PROBE_STATUS=$(printf '%s\n' "$out" | head -n1)
+  PROBE_BODY=$(printf '%s\n' "$out" | tail -n +2)
+  case "$PROBE_STATUS" in [0-9][0-9][0-9]) ;; *) PROBE_STATUS=000 ;; esac
+}
+
+# wait_gateway_settled SECONDS — wait until the gateway is READY AND SETTLED:
+# /startupz answers 200 and /readyz reports its event loop not degraded on two
+# probes in a row.
+#
+# Right after a (re)start the gateway's event loop is busy loading plugins and
+# warming caches, and /readyz says so: `eventLoop.degraded: true` with
+# `reasons: ["cpu"]` for the first seconds of uptime, on a box that is about to
+# be perfectly healthy. A probe taken then is not a verdict, it is a box still
+# settling — so this waits it out, and only a gateway STILL degraded at the end
+# of the budget is reported. Every distinct degraded state seen on the way is
+# kept in SETTLE_SEEN (for a note), the seconds it took in SETTLE_WAITED, and
+# the last /readyz answer in READY_BODY. Channel health is NOT part of this
+# (readiness folds in channels — 25-gateway-channels asserts those itself).
+SETTLE_WAITED=0
+SETTLE_SEEN=
+READY_BODY=
+wait_gateway_settled() {
+  local budget=$1 start now good=0 state
+  start=$(date +%s)
+  SETTLE_SEEN=
+  while :; do
+    gateway_probe /startupz
+    if [ "$PROBE_STATUS" = 200 ]; then
+      gateway_probe /readyz
+      READY_BODY=$PROBE_BODY
+      state=$(printf '%s' "$PROBE_BODY" | jq -r '
+        if .eventLoop == null then "no-eventloop"
+        elif .eventLoop.degraded then "degraded:" + ((.eventLoop.reasons // []) | join(","))
+        else "settled" end' 2>/dev/null)
+      [ -n "$state" ] || state="unreadable(HTTP $PROBE_STATUS)"
+    else
+      state="starting(HTTP $PROBE_STATUS)"
+    fi
+    now=$(date +%s)
+    SETTLE_WAITED=$((now - start))
+    case "$state" in
+      settled|no-eventloop) good=$((good + 1)) ;;
+      *)
+        good=0
+        case " $SETTLE_SEEN " in *" $state "*) ;; *) SETTLE_SEEN="${SETTLE_SEEN:+$SETTLE_SEEN }$state" ;; esac
+        ;;
+    esac
+    [ "$good" -ge 2 ] && return 0
+    [ "$SETTLE_WAITED" -ge "$budget" ] && { SETTLE_STATE=$state; return 1; }
+    sleep 2
+  done
+}
+SETTLE_STATE=
+
+# ---- the box's own updater (85-, 90-) ----------------------------------------
+
+# board_head — the commit checked out on the board, or "".
+board_head() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'git -C "$REPO" rev-parse HEAD 2>/dev/null' | tail -n 1 | tr -d '[:space:]'
+}
+
+# build_identity_ok — scripts/verify-build-identity.sh on the board: the build
+# the dashboard serves names the checked-out commit. Prints its last line.
+build_identity_ok() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'cd "$REPO" && bash scripts/verify-build-identity.sh --project-dir "$REPO" 2>&1 | tail -n 3'
+}
+
+# rebuild_to_release — put the board on the current RELEASE (the head of main)
+# through `nano-ci rebuild`, the lab's privileged force-update + post_update.
+# `nano-ci rebuild` checks the board reached the commit named in
+# /tmp/nano-ci-want-sha, so that file is pointed at main's head for the
+# rebuild and put back after. Sets RELEASE_SHA. Returns non-zero when the board
+# did not reach it.
+RELEASE_SHA=
+rebuild_to_release() {
+  local saved rc
+  # shellcheck disable=SC2016  # expanded on the board
+  RELEASE_SHA=$(board 'git -C "$REPO" ls-remote origin refs/heads/main 2>/dev/null | cut -f1' | tail -n 1 | tr -d '[:space:]')
+  [[ $RELEASE_SHA =~ ^[0-9a-f]{40}$ ]] || { note "could not read the head of main on the board's origin"; return 2; }
+  saved=$(board 'cat /tmp/nano-ci-want-sha 2>/dev/null' | tr -d '[:space:]')
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$RELEASE_SHA" >/dev/null
+  "$NANO_CI" rebuild "$NANO_SERIAL" main 2>&1 | grep -E '^\[nano-ci\]|rc=|FAILED' | while IFS= read -r l; do note "rebuild: $l"; done
+  if [ -n "$saved" ]; then
+    # shellcheck disable=SC2016  # expanded on the board
+    board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$saved" >/dev/null
+  else
+    board 'rm -f /tmp/nano-ci-want-sha' >/dev/null
+  fi
+  [ "$(board_head)" = "$RELEASE_SHA" ]
+}
+
+# start_app_update BRANCH — what an owner does in Settings: pin the update
+# branch, then "Update now" (POST /setup-api/update/run, force). Returns
+# non-zero when the update did not start; API_STATUS/API_BODY say why.
+start_app_update() {
+  board_api POST /setup-api/system/update-branch "$(jq -cn --arg b "$1" '{branch: $b}')"
+  [ "$API_STATUS" = 200 ] || return 1
+  board_api POST /setup-api/update/run '{"force":true}'
+  [ "$API_STATUS" = 200 ] && [ "$(api_json '.started // empty')" = true ]
+}
+
+# wait_app_update SECONDS [ON_TICK] — poll /setup-api/update/status until the
+# run ends. The dashboard restarts (and the box may reboot) in the middle of an
+# update, so a probe that gets no answer is waited through, not a verdict. Runs
+# ON_TICK (a function name) between polls. Sets UPDATE_PHASE (completed |
+# failed | timeout) and UPDATE_ERROR, the run's own account of a failure.
+UPDATE_PHASE=
+UPDATE_ERROR=
+wait_app_update() {
+  local deadline=$(( $(date +%s) + $1 )) tick=${2:-} phase seen_running=0 last=""
+  UPDATE_PHASE=timeout UPDATE_ERROR=
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    [ -n "$tick" ] && "$tick"
+    API_MAX_TIME=20 board_api GET /setup-api/update/status
+    if [ "$API_STATUS" = 200 ]; then
+      phase=$(api_json '.phase // empty')
+      step=$(api_json '[.steps[]? | select(.status == "running") | .id] | first // empty')
+      if [ "$phase/$step" != "$last" ]; then note "update: $phase${step:+ ($step)}"; last="$phase/$step"; fi
+      case "$phase" in
+        running) seen_running=1 ;;
+        completed|failed)
+          # An "idle"-derived answer before the run was ever seen running is
+          # the previous state, not this run's verdict.
+          if [ "$seen_running" = 1 ] || [ "$phase" = failed ]; then
+            UPDATE_PHASE=$phase
+            UPDATE_ERROR=$(api_json '(.error // ([.steps[]? | select(.status == "failed") | .error] | first) // "") | tostring | .[0:300]')
+            return 0
+          fi
+          ;;
+      esac
+    fi
+    sleep 15
+  done
+  return 1
 }
