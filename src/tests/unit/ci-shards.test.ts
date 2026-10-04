@@ -146,7 +146,7 @@ describe("the vitest shards", () => {
 
   it("splits by the matrix's own size, so the matrix and the split cannot disagree", () => {
     const shard = job(tests, "shard");
-    expect(shard).toMatch(/^\s+run: bun run test:coverage:shard --shard=\$\{\{ matrix\.shard \}\}\/\$\{\{ strategy\.job-total \}\}$/m);
+    expect(shard).toMatch(/^\s+run: bash scripts\/vitest-shard\.sh \$\{\{ matrix\.shard \}\}\/\$\{\{ strategy\.job-total \}\}$/m);
     const list = /^\s+shard: \[([\d, ]+)\]$/m.exec(shard)?.[1].split(",").map((n) => Number(n.trim()));
     expect(list, "the shard matrix is not a literal list").toBeDefined();
     expect(list).toEqual(list!.map((_, i) => i + 1));
@@ -182,6 +182,67 @@ describe("the vitest shards", () => {
         expect(status === 0, `checks=${checks} shards=${shards} exited ${status}`).toBe(checks === "success" && shards === "success");
       }
     }
+  });
+});
+
+describe("the vitest shard's one automatic rerun (scripts/vitest-shard.sh)", () => {
+  /**
+   * Run the script over a stand-in for the shard command that fails its first
+   * `failFirst` calls, printing a vitest-style coloured FAIL line, and counts
+   * how often it was called. The script itself is what runs — not a regex
+   * over it — so a rerun that hid a flake or ran twice would show here.
+   */
+  function runShard(failFirst: number) {
+    const dir = fs.mkdtempSync(path.join(tmp, "shard-"));
+    const calls = path.join(dir, "calls");
+    const fake = path.join(dir, "fake-vitest.sh");
+    fs.writeFileSync(fake, [
+      "#!/usr/bin/env bash",
+      `n=$(( $(cat ${JSON.stringify(calls)} 2>/dev/null || echo 0) + 1 )); echo "$n" > ${JSON.stringify(calls)}`,
+      "mkdir -p .vitest-reports && echo '{}' > .vitest-reports/blob-1-4.json",
+      `if [ "$n" -le ${failFirst} ]; then printf ' \\033[41m FAIL \\033[49m src/tests/unit/flaky.test.ts > a case\\n'; exit 1; fi`,
+      "echo ' Test Files  1 passed (1)'",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    const summary = path.join(dir, "summary.md");
+    const result = bash(`bash ${JSON.stringify(path.join(REPO, "scripts/vitest-shard.sh"))} 1/4`, {
+      VITEST_SHARD_CMD: fake,
+      GITHUB_STEP_SUMMARY: summary,
+    }, dir);
+    return {
+      ...result,
+      calls: Number(fs.readFileSync(calls, "utf-8").trim()),
+      summary: fs.existsSync(summary) ? fs.readFileSync(summary, "utf-8") : "",
+    };
+  }
+
+  it("runs a passing shard once, and says nothing", () => {
+    const r = runShard(0);
+    expect(r.status).toBe(0);
+    expect(r.calls).toBe(1);
+    expect(r.out).not.toMatch(/::warning/);
+    expect(r.summary).toBe("");
+  });
+
+  it("reruns a failed shard ONCE, passes it, and names the flake in an annotation and the summary", () => {
+    const r = runShard(1);
+    expect(r.status).toBe(0);
+    expect(r.calls).toBe(2);
+    expect(r.out).toMatch(/^::warning title=Flaky vitest shard 1\/4::.*src\/tests\/unit\/flaky\.test\.ts > a case/m);
+    expect(r.summary).toMatch(/Flaky vitest shard 1\/4/);
+    expect(r.summary).toContain("- `src/tests/unit/flaky.test.ts > a case`");
+  });
+
+  it("fails a shard that fails twice, and never tries a third time", () => {
+    const r = runShard(5);
+    expect(r.status).not.toBe(0);
+    expect(r.calls).toBe(2);
+    expect(r.out).toMatch(/^::error title=vitest shard 1\/4 failed twice::/m);
+    expect(r.summary).toMatch(/failed twice/);
+  });
+
+  it("refuses an argument that is not <index>/<count>", () => {
+    expect(bash(`bash ${JSON.stringify(path.join(REPO, "scripts/vitest-shard.sh"))} 1`, {}).status).toBe(2);
   });
 });
 

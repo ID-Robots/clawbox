@@ -38,6 +38,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # FIRST, and in every job that installs: package.json against bun.lock
+      # and package-lock.json, with the runner's own node and no install
+      # (TASK-1401). A PR that changed one without the others used to be told
+      # minutes into a vitest shard (lockfiles-in-sync.test.ts); this says so
+      # in seconds, with the two commands that fix it. The same script is the
+      # pre-commit hook in scripts/hooks/.
+      - name: Lockfiles in sync
+        run: node scripts/check-lockfiles.mjs
+
       # Ahead of the toolchain, because it needs none of it: a broken image
       # path is a `test -f` over the docs tree. It is HERE rather than in
       # docs-deploy.yml because that workflow only runs on push to main — it
@@ -180,6 +189,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # See `checks`: seconds, before the install and the ~4 min suite.
+      - name: Lockfiles in sync
+        run: node scripts/check-lockfiles.mjs
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.2.10"
@@ -199,8 +212,15 @@ jobs:
       # vitest splits by file (a hash of each path, so the same file always
       # lands in the same shard), not by duration; measured on 1239 files, the
       # heaviest (the ~90 s sudoers scan) is well under a shard's share.
+      #
+      # Through scripts/vitest-shard.sh, which runs exactly that command and,
+      # when it fails, runs it ONCE more (TASK-1401). A shard that passes only
+      # on the rerun is not hidden: it leaves a ::warning:: annotation and a
+      # "Flaky vitest shard" section in the job summary naming the tests that
+      # failed first, so they get fixed rather than retried for ever. Two
+      # failures fail the job as before.
       - name: Test
-        run: bun run test:coverage:shard --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+        run: bash scripts/vitest-shard.sh ${{ matrix.shard }}/${{ strategy.job-total }}
 
       # `!cancelled()`: a shard whose tests FAILED still reported, and the
       # merge is where those failures are told. Only a shard that never wrote

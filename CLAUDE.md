@@ -18,12 +18,14 @@ Bun runtime (package management + builds), Node.js 24 (production runtime), Next
 - `bun run start` — run standalone production server on port 80
 - `bun run lint` — run ESLint
 - `bun run test` — run Vitest unit tests
+- `node scripts/check-lockfiles.mjs` — package.json vs `bun.lock` and `package-lock.json`. After ANY edit to package.json run `bun install` and `npm install --package-lock-only --ignore-scripts` and commit all three files together; CI runs this check first in every installing job, and `git config core.hooksPath scripts/hooks` makes it a pre-commit hook
 - `sudo bash install.sh` — full system install: installs bun, builds, configures avahi/mDNS, installs systemd services, starts AP and web server
 
 ## Testing
 
 - **Unit tests**: Vitest (`vitest.config.ts`, `vitest.workspace.ts`) — tests in `src/tests/`
 - **E2E tests**: Playwright (`playwright.config.ts`)
+- **Flaky shards**: each vitest shard in `pr-tests-coverage.yml` runs through `scripts/vitest-shard.sh`, which reruns a failed shard ONCE; a pass on the rerun leaves a `::warning::` annotation and a "Flaky vitest shard" job-summary section naming the tests — fix those tests, do not lean on the rerun
 - Test coverage for: config store, network utils, auth, OAuth, system info, updater, gateway proxy, middleware, API routes
 - **CI**: `.github/workflows/e2e-install.yml` writes repository secrets into `e2e-install/.env.test` only when the event is NOT a `pull_request` (a same-repo PR head supplies the Playwright code that reads that file — and the workflow file itself, so the `if:` is hygiene and the real fence is the owner keeping those secrets in a GitHub Environment restricted to beta/main); same-repo PRs therefore behave like fork PRs and the credentialed specs skip. `scripts/issue-triage.mjs` and `scripts/pr-review.mjs` validate the model's JSON against their SCHEMA on BOTH transports (`assertMatchesSchema` in `scripts/lib/triage-output.mjs`: enum/type violations throw loudly, unknown keys are dropped, free text is truncated), derive every label from fixed tables, and pass free text through `plain()` before it reaches a bot comment — the `issues` workflow runs main's copy, so the fix is inert until it reaches main.
 
