@@ -27,6 +27,8 @@
  */
 
 import { spawn } from "child_process";
+import { existsSync } from "fs";
+import path from "path";
 
 export interface ChildResult {
   /** The exit code, or null when the process was killed or never started. */
@@ -76,6 +78,29 @@ export interface RunChildOptions {
   input?: string;
 }
 
+const WORKTREE_SEGMENT = `${path.sep}.clawbox${path.sep}worktrees${path.sep}`;
+
+/**
+ * The folder a child actually starts in.
+ *
+ * A missing cwd makes spawn fail with ENOENT — indistinguishable from a missing
+ * binary — and a run's worktree is cleaned up while its PR watcher keeps
+ * polling. Every later `gh pr view` then "could not be read from GitHub" until
+ * the watcher gives up an hour later. `gh` only needs a checkout with the same
+ * remote, so a gone worktree falls back to the repository that owned it. git
+ * does NOT get the fallback: `git push origin HEAD:…` from the owning repo
+ * would push the wrong HEAD.
+ */
+export function resolveCwd(bin: string, cwd: string | undefined): string | undefined {
+  if (!cwd || bin !== "gh" || existsSync(cwd)) return cwd;
+  const at = cwd.indexOf(WORKTREE_SEGMENT);
+  if (at > 0) {
+    const owner = cwd.slice(0, at);
+    if (existsSync(owner)) return owner;
+  }
+  return cwd;
+}
+
 /**
  * Run a command with a deliberate, minimal environment and a hard timeout.
  * Never rejects: every outcome is described in the result.
@@ -83,7 +108,7 @@ export interface RunChildOptions {
 export function runChild(bin: string, args: string[], opts: RunChildOptions): Promise<ChildResult> {
   return new Promise((resolve) => {
     const child = spawn(bin, args, {
-      cwd: opts.cwd,
+      cwd: resolveCwd(bin, opts.cwd),
       // Cast only because this repo's ProcessEnv augmentation insists on
       // NODE_ENV, which neither git nor gh has any use for.
       env: opts.env as unknown as NodeJS.ProcessEnv,
