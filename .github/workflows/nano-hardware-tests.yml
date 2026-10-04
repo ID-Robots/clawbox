@@ -26,6 +26,11 @@ name: Nano hardware tests
 # SHA is taken only when a branch here has exactly that commit as its head (that
 # branch is then used); anything else is refused.
 #
+# The commit under test is handed to the board first (/tmp/nano-ci-want-sha),
+# so `nano-ci rebuild` checks the board reached exactly it, retries once with
+# the memory freed when the build failed (an 8 GB board can run out of heap in
+# `next build`), and only then reports.
+#
 # The board is rebuilt from a BRANCH, never from a SHA: `nano-ci rebuild` hands
 # its ref to the board's scripts/force-update.sh, which checks out
 # origin/<branch> — there is no origin/<sha>, and before this was fixed every
@@ -37,8 +42,11 @@ name: Nano hardware tests
 # In parallel: one board job at a time PER PULL REQUEST, never cancelled once
 # it runs. Different PRs run side by side, as many as there are `nano-lab`
 # runner instances on the lab host and FREE, freshly reflashed boards in the
-# lab. A job that finds no free board asks again every minute for 20 minutes,
-# then fails with "No free nano-lab board".
+# lab. The lab host keeps a small pool of CI-only boards that `nano-ci reserve`
+# hands out first. A job that finds no free board asks again with a growing
+# pause (1 min, up to 5) for 30 minutes; then it ends SKIPPED, not failed: "no
+# free board" is the lab's capacity, not a result of this commit. The job stays
+# green with a warning, and the PR comment says "skipped — no free board".
 #
 # Never fork code on the lab host — two layers, both documented in
 # docs/nano-hardware-tests.md:
@@ -227,6 +235,8 @@ jobs:
       # while it waited for a free board, `skipped` when the job ended before
       # the step — and empty only when the job never started at all.
       reserve: ${{ steps.reserve.outcome }}
+      # `true` when no board was free for the whole wait: the run is skipped.
+      no_board: ${{ steps.reserve.outputs.no_board }}
       branch: ${{ steps.ref.outputs.branch }}
       superseded: ${{ steps.verify.outputs.superseded }}
       board_sha: ${{ steps.verify.outputs.board_sha }}
@@ -415,21 +425,25 @@ jobs:
           echo "Testing $sha on a nano-lab board ($purpose)"
 
       # With other PRs' jobs holding boards, none may be FREE for a while:
-      # `nano-ci reserve` exits 3 then, and is asked again every minute for up
-      # to 20 minutes before the job gives up. The step's own cap is only a
-      # backstop behind that deadline.
+      # `nano-ci reserve` exits 3 then, and is asked again with a growing pause
+      # (1 min, x1.5, at most 5 min) for up to 30 minutes. Then the step ends
+      # with no_board=true and exit 0: every later board step is skipped and the
+      # run is reported as skipped, never as a failure of this commit. The
+      # step's own cap is only a backstop behind that deadline.
       - name: Reserve a free nano-lab board
         id: reserve
-        timeout-minutes: 25
+        timeout-minutes: 35
         env:
           PURPOSE: ${{ steps.target.outputs.purpose }}
-          WAIT_S: "1200"
+          WAIT_S: "1800"
           EVERY_S: "60"
+          MAX_EVERY_S: "300"
         # What `nano-ci reserve` prints, the board's address among it, reaches
         # the log only through the redactor, and only when something failed.
         run: |
           start=$SECONDS
           tries=0
+          pause=$EVERY_S
           err="$RUNNER_TEMP/reserve.err"
           while :; do
             tries=$((tries + 1))
@@ -438,13 +452,18 @@ jobs:
             [ "$rc" -eq 3 ] || break
             waited=$((SECONDS - start))
             if [ "$waited" -ge "$WAIT_S" ]; then
-              echo "note=**No free nano-lab board:** every board stayed leased for $((waited / 60)) min ($tries tries of \`nano-ci reserve\`, one a minute). Re-run the job when \`nano-ci status\` shows a clean board." >> "$GITHUB_OUTPUT"
-              echo "::error title=No free nano-lab board::every board in the lab stayed leased for $((waited / 60)) min ($tries tries); re-run this job when one is free"
-              exit 1
+              {
+                echo "no_board=true"
+                echo "note=**Skipped — no free nano-lab board:** every board stayed leased for $((waited / 60)) min ($tries tries of \`nano-ci reserve\`). This is lab capacity, not a result of this commit; re-run the job to test it on a board."
+              } >> "$GITHUB_OUTPUT"
+              echo "::warning title=Skipped: no free nano-lab board::every board in the lab stayed leased for $((waited / 60)) min ($tries tries); the on-device suite did not run. Re-run this job to test the commit on a board."
+              exit 0
             fi
             left=$((WAIT_S - waited))
-            echo "No FREE board yet (try $tries, $((waited / 60)) min waited); asking again for up to $(((left + 59) / 60)) more min"
-            sleep $((left < EVERY_S ? left : EVERY_S))
+            echo "No FREE board yet (try $tries, $((waited / 60)) min waited); asking again in $(((pause < left ? pause : left) + 59) / 60) min, for up to $(((left + 59) / 60)) more min"
+            sleep $((left < pause ? left : pause))
+            pause=$((pause * 3 / 2))
+            [ "$pause" -le "$MAX_EVERY_S" ] || pause=$MAX_EVERY_S
           done
           waited=$((SECONDS - start))
           if [ "$rc" -ne 0 ]; then
@@ -491,7 +510,8 @@ jobs:
       # board on the commit under test is the verify step's question.
       - name: Rebuild the board at the commit under test
         id: rebuild
-        timeout-minutes: 20
+        if: steps.reserve.outputs.serial != ''
+        timeout-minutes: 45
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
           NANO_IP: ${{ steps.reserve.outputs.ip }}
@@ -514,11 +534,25 @@ jobs:
           fi
           echo "before=$before" >> "$GITHUB_OUTPUT"
           echo "$SERIAL is at ${before:-an unreadable commit}; rebuilding it from branch $BRANCH, whose head is $SHA"
-          nano-ci rebuild "$SERIAL" "$BRANCH" 2>&1 | "$RUNNER_TEMP/nano-redact"
+          # The commit under test, for `nano-ci rebuild` to check the board
+          # against (and to retry a failed build once before it reports).
+          if ! [[ $SHA =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=No commit under test::'$SHA' is not a commit SHA"
+            exit 1
+          fi
+          nano-ci ssh "$SERIAL" "echo $SHA > /tmp/nano-ci-want-sha" 2>&1 | "$RUNNER_TEMP/nano-redact"
+          rc=0
+          nano-ci rebuild "$SERIAL" "$BRANCH" 2>&1 | "$RUNNER_TEMP/nano-redact" || rc=${PIPESTATUS[0]}
+          # 4: the branch moved on and the board is on its new head — the
+          # verify step tells "superseded" from a wrong commit.
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; then
+            exit "$rc"
+          fi
 
       # The rebuild restarts the web server (and the gateway, twice).
       - name: Wait for the board to come back
         id: healthy
+        if: steps.reserve.outputs.serial != ''
         timeout-minutes: 10
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
@@ -546,6 +580,7 @@ jobs:
       # commit.
       - name: Verify the board runs the commit under test
         id: verify
+        if: steps.reserve.outputs.serial != ''
         env:
           EVENT: ${{ github.event_name }}
           SERIAL: ${{ steps.reserve.outputs.serial }}
@@ -610,7 +645,7 @@ jobs:
       # test's output through the redactor, which turns it into <board-ip>.
       - name: Run the on-device suite
         id: suite
-        if: steps.verify.outputs.superseded != 'true'
+        if: steps.reserve.outputs.serial != '' && steps.verify.outputs.superseded != 'true'
         timeout-minutes: ${{ fromJSON(steps.reserve.outputs.suite_minutes || '40') }}
         env:
           SERIAL: ${{ steps.reserve.outputs.serial }}
@@ -805,6 +840,7 @@ jobs:
           REASON: ${{ needs.plan.outputs.reason }}
           BOARD_RESULT: ${{ needs.nano-hardware-tests.result }}
           SERIAL: ${{ needs.nano-hardware-tests.outputs.serial }}
+          NO_BOARD: ${{ needs.nano-hardware-tests.outputs.no_board }}
           BRANCH: ${{ needs.nano-hardware-tests.outputs.branch }}
           SUPERSEDED: ${{ needs.nano-hardware-tests.outputs.superseded }}
           BOARD_SHA: ${{ needs.nano-hardware-tests.outputs.board_sha }}
@@ -828,6 +864,10 @@ jobs:
             if (env.PLAN_RESULT !== 'success') {
               icon = '⚠️';
               lines.push(`- Result: **did not run** at ${commit} — deciding whether this PR needs a board ended \`${env.PLAN_RESULT}\`. See the run.`);
+            } else if (env.NO_BOARD === 'true' && board === 'success') {
+              // Lab capacity, not a verdict on this commit: neutral, never ❌.
+              icon = '⏭️';
+              lines.push(`- Result: **skipped — no free lab board** at ${commit}. The on-device suite did not run; re-run the job to test this commit on a board.`);
             } else if (env.HARDWARE !== 'true') {
               icon = '⏭️';
               lines.push(`- Result: **skipped** at ${commit} — ${env.REASON || 'no board needed'}. No board was taken.`);

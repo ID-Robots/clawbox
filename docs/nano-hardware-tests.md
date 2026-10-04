@@ -156,12 +156,15 @@ branch is now:
 
 When no clean board is free — the boards are leased by other PRs' jobs, by
 people (`nano-lease list`) or by the reflash service that is still restoring
-them — `nano-ci reserve` exits 3. The job asks again every minute for up to
-**20 minutes**, logging each try. If a board frees up it carries on, and its
-summary says how long it waited. If none does, it fails with
-`No free nano-lab board` (as an annotation and in the job summary) — re-run the
-job when `nano-ci status` shows a clean board. It never held a board, so
-there is nothing to recycle. How many clean boards the lab returns an hour:
+them — `nano-ci reserve` exits 3. The lab host keeps a small **CI pool** of
+boards that only CI uses and that `reserve` hands out first, so this is rare.
+The job asks again with a growing pause (1 minute, ×1.5 each time, at most 5)
+for up to **30 minutes**, logging each try. If a board frees up it carries on,
+and its summary says how long it waited. If none does, the job ends
+**skipped, not failed**: a warning `Skipped: no free nano-lab board`, the
+board steps are skipped, and the PR comment says *skipped — no free lab
+board*. No board is lab capacity, not a verdict on the commit; re-run the job
+to test it. It never held a board, so there is nothing to recycle. How many clean boards the lab returns an hour:
 [Throughput and waiting](#throughput-and-waiting).
 
 The wait comes out of the suite's 40 minutes, never out of the room the
@@ -182,7 +185,7 @@ repository holds no board address, key or password:
 
 | `nano-ci …` | Does |
 |---|---|
-| `reserve "<purpose>"` | leases one FREE board with the **clean** marker (freshly reflashed, see [How recycling works](#how-recycling-works)) and prints `SERIAL IP LAB` (exit 3: none free — the job asks again every minute for 20 minutes) |
+| `reserve "<purpose>"` | leases one FREE board with the **clean** marker (freshly reflashed, see [How recycling works](#how-recycling-works)) and prints `SERIAL IP LAB` (CI pool boards first; exit 3: none free — the job asks again with backoff for 30 minutes, then ends skipped) |
 | `rebuild <serial> <branch>` | force-updates the board's checkout to `origin/<branch>` (`scripts/force-update.sh`) and rebuilds it (5–10 min); fails when force-update does. A **branch** only: there is no `origin/<sha>` or `origin/<tag>`, so a SHA or a tag fails |
 | `health <serial>` | exit 0 when `clawbox-gateway` and `clawbox-setup` are active and the dashboard answers |
 | `ssh <serial> <cmd…>` / `scp <serial> <src> <dst>` | runs a command on / copies a file to the board as `clawbox` |
@@ -211,11 +214,13 @@ and **PR comment** reports it.
    `scripts/public-hygiene.mjs` — the redactor the rest of the job prints
    through. A branch from before it was added is refused: rebase it on `beta`.
 3. **Reserve** a board: `nano-ci reserve "clawbox PR #<n> <sha>"`, asked again
-   every minute for up to 20 minutes while no board is free; then the job fails
-   with *No free nano-lab board* (see [No free board](#no-free-board)). The
+   with a growing pause for up to 30 minutes while no board is free; then the
+   job ends skipped (see [No free board](#no-free-board)). The
    board's address is masked in the log as soon as the reservation is read.
 4. **Rebuild** the board from the PR's branch, `nano-ci rebuild <serial>
-   <branch>` (≤ 20 min), **wait** for `nano-ci health` (≤ 10 min), and
+   <branch>` (≤ 45 min) — the commit under test is written to the board first,
+   and the rebuild checks the board reached exactly that commit, retrying once
+   with the memory freed when the build failed — **wait** for `nano-ci health` (≤ 10 min), and
    **verify** that the board's `git rev-parse HEAD` is the head commit. A board
    on a newer commit of the branch is
    [superseded](#superseded-by-a-newer-push) — the job passes without testing,
