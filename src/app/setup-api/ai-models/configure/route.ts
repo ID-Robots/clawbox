@@ -4113,8 +4113,23 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // timeout path held this response for minutes while the first-boot wizard
     // sat on a save that had already landed. Nothing in the answer depends on
     // it, and the boot hook re-runs the same pass 45 s into every start.
+    //
+    // AFTER THE GATEWAY ANSWERS. In the wizard the restart above does not wait
+    // for readiness, so the applier's openclaw.json writes (voice provider,
+    // memory embedder) used to land while the gateway was still starting. The
+    // gateway treats a config that changes under its startup migrations as
+    // unusable and exits with EX_CONFIG (78), which the unit deliberately does
+    // not restart — a freshly linked box finished the wizard with no gateway
+    // and no chat until something restarted it by hand. Waiting costs nothing
+    // here (the request has already been answered); a gateway that never comes
+    // back inside the budget gets the same attempt as before.
     if (isClawAI) {
-      void import("@/lib/clawai-cloud-defaults")
+      // Started inside a promise so even a synchronous throw from the wait
+      // stays on this detached chain and never reaches the answer.
+      void Promise.resolve()
+        .then(() => waitForGatewayRpcReady(gatewayReadyWaitMs() * 2))
+        .catch(() => false)
+        .then(() => import("@/lib/clawai-cloud-defaults"))
         .then(({ applyClawaiCloudDefaults }) =>
           applyClawaiCloudDefaults({
             trigger: "link",
