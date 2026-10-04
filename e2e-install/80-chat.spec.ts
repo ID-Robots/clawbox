@@ -15,8 +15,8 @@ import { BASE_URL, CLAWBOX_PORT } from "./helpers/container";
 import {
   configureAiModel,
   getChatWsConfig,
-  getGatewayHealth,
 } from "./helpers/setup-api";
+import { waitForGatewayReady } from "./helpers/readiness";
 
 function loadEnvTest(): Record<string, string> {
   const envPath = path.resolve(__dirname, ".env.test");
@@ -65,24 +65,10 @@ test.describe("chat round trip", () => {
   });
 
   test("gateway health reports available", async () => {
-    // The gateway takes a beat to restart after configureAiModel; give it
-    // up to ~30s to come back. Exponential backoff (500 → 1000 → 2000 →
-    // 4000ms cap) reduces the polling load while still giving a tight
-    // recovery signal when the gateway comes back in the first few seconds.
-    let available = false;
-    let delay = 500;
-    const maxDelay = 4000;
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline && !available) {
-      const result = await getGatewayHealth().catch(() => null);
-      if (result?.available) {
-        available = true;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, maxDelay);
-    }
-    expect(available).toBe(true);
+    // The gateway restarts after configureAiModel. Poll its health route
+    // (stable over consecutive polls) on one bounded budget rather than a
+    // fixed backoff loop; the error names the last health answer seen.
+    await waitForGatewayReady({ timeoutMs: 2 * 60_000, context: "chat specs" });
   });
 
   test("ws-config returns token + model", async () => {
@@ -112,7 +98,7 @@ test.describe("chat round trip", () => {
   });
 
   test("UI chat widget receives a streamed response", async ({ page }) => {
-    test.setTimeout(180_000);
+    test.setTimeout(5 * 60_000);
 
     // Playwright gives each test a fresh browser context with no cookies,
     // so the happy-path spec's session doesn't carry over. Re-POST to
@@ -140,6 +126,9 @@ test.describe("chat round trip", () => {
       body: JSON.stringify({ ui_chat_panel_width: 420, ui_mascot_hidden: 1 }),
     });
 
+    // The textbox only enables once the gateway session is up; wait on the
+    // gateway's own health signal first so the UI waits below measure the UI.
+    await waitForGatewayReady({ timeoutMs: 2 * 60_000, context: "chat UI round-trip" });
     await page.goto("/");
 
     // Configuring a provider above flips the account tier, which makes the
@@ -169,14 +158,15 @@ test.describe("chat round trip", () => {
     });
     await expect(input).toBeVisible({ timeout: 30_000 });
 
-    // Wait up to 60s for the gateway to wake and enable the textbox.
-    // Skip cleanly if the gateway never becomes ready — that's an upstream
+    // The gateway is already healthy (above); the textbox enables once the
+    // WS session is acknowledged. `isEnabled` does not wait, so assert it with
+    // a retrying expect. Skip cleanly if it never enables — that's an upstream
     // AI-provider issue (e.g. model allow-list drift on the clawai proxy)
-    // that's separate from anything the ClawBox code can fix in-process.
-    // The WS upgrade test above already verified the transport is working.
-    const becameEnabled = await input
-      .waitFor({ state: "attached", timeout: 60_000 })
-      .then(() => input.isEnabled({ timeout: 60_000 }))
+    // separate from anything the ClawBox code can fix in-process. The WS
+    // upgrade test above already verified the transport is working.
+    const becameEnabled = await expect(input)
+      .toBeEnabled({ timeout: 60_000 })
+      .then(() => true)
       .catch(() => false);
     test.skip(
       !becameEnabled,

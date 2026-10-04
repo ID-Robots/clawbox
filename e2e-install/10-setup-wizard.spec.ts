@@ -25,9 +25,9 @@ import {
   BASE_URL,
   dockerExec,
   readInstallLog,
-  waitForHttpReady,
 } from "./helpers/container";
 import { getStatus, getStatusAuthed } from "./helpers/setup-api";
+import { waitForAppReady } from "./helpers/readiness";
 
 const env = loadEnvTest();
 
@@ -79,7 +79,9 @@ test.describe("fresh-install setup wizard (UI)", () => {
   // point straight at whichever step broke.
   test("walk through wizard end-to-end", async ({ page }) => {
     test.setTimeout(5 * 60_000);
-    await waitForHttpReady(60_000);
+    // Explicit readiness instead of riding the first click's action timeout:
+    // a box still starting fails here, naming the signal that never came.
+    await waitForAppReady({ timeoutMs: 3 * 60_000, context: "setup wizard" });
     await page.goto("/setup");
 
     // ── Step 1: WiFi / Ethernet ──────────────────────────────────
