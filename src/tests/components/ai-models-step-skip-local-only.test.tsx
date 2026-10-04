@@ -250,4 +250,21 @@ describe("the Hermes wizard's \"use only local AI\" button", () => {
     expect(await findByText(/Failed to provision the local Gemma 4 runtime/i)).toBeInTheDocument();
     expect(onNext).not.toHaveBeenCalled();
   });
+
+  it("ignores a late success after the owner cancelled the activation", async () => {
+    const onNext = vi.fn();
+    const { findByRole } = render(<HermesProviderConfig testId="hermes-ai" onNext={onNext} />);
+
+    await act(async () => {
+      fireEvent.click(await findByRole("button", { name: /use only local AI/i }));
+    });
+    await act(async () => {
+      fireEvent.click(await findByRole("button", { name: /startOver/i }));
+    });
+    await act(async () => {
+      hookState.callbacks?.onSaveSuccess("gemma4-e2b-it-q4_0");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    expect(onNext).not.toHaveBeenCalled();
+  }, 10000);
 });

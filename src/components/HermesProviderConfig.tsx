@@ -243,7 +243,14 @@ export default function HermesProviderConfig({
   const beginConfiguring = useCallback((provider: string) => {
     setConfiguring((current) => current ?? { provider, startedAt: Date.now(), phase: 0, completed: false });
   }, []);
-  const abortConfiguring = useCallback(() => setConfiguring(null), []);
+  // True only while a "use only local AI" activation is still wanted: a
+  // cancel (Start over / watchdog) clears it so a late result cannot advance
+  // or report into a screen the owner already took back.
+  const localActivationRef = useRef(false);
+  const abortConfiguring = useCallback(() => {
+    localActivationRef.current = false;
+    setConfiguring(null);
+  }, []);
   /** The connect landed: mark it, and make sure the overlay is up to carry the
    *  DONE beat — then the wizard advances, Settings returns to the panel. */
   const finishWizardStep = useCallback((provider: string) => {
@@ -965,17 +972,23 @@ export default function HermesProviderConfig({
   // overlay and keeps the owner here with the reason.
   const [localStatus, setLocalStatus] = useState<Status>(null);
   const localAiCallbacks = useMemo(() => ({
-    onSaveSuccess: () => finishWizardStep(LOCAL_AI_PROVIDER),
+    onSaveSuccess: () => {
+      if (!localActivationRef.current) return;
+      notifyChatHeader();
+      finishWizardStep(LOCAL_AI_PROVIDER);
+    },
     onSaveError: (message: string) => {
+      if (!localActivationRef.current) return;
       abortConfiguring();
       setLocalStatus({ kind: "err", msg: message });
     },
     onClearStatus: () => setLocalStatus(null),
-  }), [abortConfiguring, finishWizardStep]);
+  }), [abortConfiguring, finishWizardStep, notifyChatHeader]);
   const { llamaCppSaving, activateLocalOnly } = useLlamaCppModels(localAiCallbacks);
   const handleSkipLocalOnly = useCallback(async () => {
     setLocalStatus(null);
     beginConfiguring(LOCAL_AI_PROVIDER);
+    localActivationRef.current = true;
     await activateLocalOnly();
   }, [activateLocalOnly, beginConfiguring]);
 
