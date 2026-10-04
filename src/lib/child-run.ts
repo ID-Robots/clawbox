@@ -147,7 +147,7 @@ export function runScript(script: string, args: string[], opts: RunChildOptions)
   }
   // A separate spawn site from runChild's: bash is reachable ONLY from here,
   // with a fixed literal, never from runChild's allowlist.
-  return collectChild((stdio) => spawn("bash", ["--", script, ...args], {
+  return collectChild((stdio) => spawn("bash", ["--", /* turbopackIgnore: true */ script, ...args], {
     shell: false,
     cwd: opts.cwd,
     env: opts.env as unknown as NodeJS.ProcessEnv,
