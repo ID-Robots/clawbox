@@ -2906,6 +2906,46 @@ describe("updater", () => {
       expect(state.error).toContain("without producing a new build");
     });
 
+    it("moves the checkout back to the served build when the rebuild failed (TASK-1423)", async () => {
+      // The killed `next build`: do_rebuild restored the previous build, the
+      // box came back on it, but step 1 had left the checkout on the NEW
+      // commit. The served build and the recorded target agree, HEAD does not.
+      const OLD = "a".repeat(40);
+      const NEW = "b".repeat(40);
+      updater.resetUpdateState();
+      mockGet.mockImplementation(async (key: string) => {
+        if (key === "update_needs_continuation") return "build-aaa";
+        if (key === "update_rollback_target") {
+          return JSON.stringify({ commit: OLD, branch: "main", recordedAt: "2026-10-04T00:00:00Z" });
+        }
+        return undefined;
+      });
+      mockReadFile.mockImplementation(async (file) => {
+        const f = String(file);
+        if (f.endsWith("BUILD_ID")) return "build-aaa\n";
+        if (f.endsWith("build-info.json")) {
+          return JSON.stringify({ commit: OLD, builtAt: "2026-10-04T00:00:00Z", buildId: "build-aaa" });
+        }
+        throw new Error("ENOENT");
+      });
+      setupExecFileMock({
+        "rev-parse --abbrev-ref HEAD": { stdout: "beta\n", stderr: "" },
+        "rev-parse HEAD": { stdout: `${NEW}\n`, stderr: "" },
+        "ActiveState": { stdout: "inactive\n", stderr: "" },
+      });
+
+      expect(await updater.checkContinuation()).toBe(false);
+
+      const gitArgs = mockExecFile.mock.calls
+        .filter(([cmd]) => cmd === "git")
+        .map(([, args]) => (args as string[]).join(" "));
+      expect(gitArgs.some((a) => a.endsWith(`checkout -q -f -B main ${OLD}`))).toBe(true);
+      expect(mockSet).toHaveBeenCalledWith("update_rollback_target", undefined);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.warnings?.some((w) => w.code === "checkout-rolled-back")).toBe(true);
+    });
+
     it("reports a failed update when the rebuild left no build at all", async () => {
       // The hole the BUILD_ID comparison left open. `do_rebuild` deleted
       // `.next` before building, so an OOM-killed build (measured on the dev
