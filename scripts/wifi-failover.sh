@@ -3,6 +3,17 @@
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/wifi-radio.sh"
 wifi_lock
+# NetworkManager dispatches nothing when an activation that never came up
+# fails, and the dispatcher starts this worker on Ethernet `down` alone. So a
+# worker that has to leave one in flight leaves PENDING behind, and
+# ap-watchdog.sh (root, every 20 s) starts this unit again once the radio has
+# settled: at most RECHECK_MAX times per episode, the count kept in the marker
+# in the root-owned radio directory wifi_lock checked. Every other outcome
+# ends the episode and the marker.
+PENDING="$RADIO_DIR/$RADIO_IFACE.failover-pending"
+RECHECK_MAX=3
+pending_kept=0
+trap '[ "$pending_kept" = 1 ] || rm -f -- "$PENDING"' EXIT
 wifi_recover || exit 1
 WIFI_IFACE="$RADIO_IFACE"
 AP_PROFILE=ClawBox-Setup
@@ -59,7 +70,26 @@ read_radio() {
 # nothing re-runs this worker when it ends (the dispatcher starts it on
 # Ethernet down only). So an activation in flight is watched until it settles,
 # within SETTLE_S and the budget: a client is kept, an idle radio carries on.
-# Still in flight after that — or unknown for any other reason — defers.
+# Still in flight after that, or unknown for any other reason, defers; in
+# flight also renews the episode's marker while it has a re-check left.
+leave_pending() {
+  local n=0 tmp="$PENDING.$$"
+  if [ -e "$PENDING" ] || [ -L "$PENDING" ]; then
+    n="$RECHECK_MAX"
+    if [ -f "$PENDING" ] && [ ! -L "$PENDING" ]; then
+      read -r n < "$PENDING" || n="$RECHECK_MAX"
+      case "$n" in [0-9]) ;; *) n="$RECHECK_MAX" ;; esac
+    fi
+  fi
+  if [ "$n" -lt "$RECHECK_MAX" ] &&
+     (umask 077; set -C; printf '%s\n' "$((n + 1))" > "$tmp") 2>/dev/null &&
+     mv -f -- "$tmp" "$PENDING"; then
+    pending_kept=1
+    log "Activation still in flight (state $radio_state) — re-check $((n + 1))/$RECHECK_MAX left to the watchdog"
+    return
+  fi
+  rm -f -- "$tmp"
+}
 keep_client_or_defer() {
   local waited=0
   while :; do
@@ -72,7 +102,9 @@ keep_client_or_defer() {
   done
   case "$radio_kind" in
     client) log "Already on WiFi UUID $radio_uuid — no failover needed"; exit 0 ;;
-    unknown) log "WiFi identity/state uncertain (state ${radio_state:-unreadable}) — deferring failover"; exit 1 ;;
+    unknown)
+      case "$radio_state" in 40|50|60|70|80|90|110) leave_pending ;; esac
+      log "WiFi identity/state uncertain (state ${radio_state:-unreadable}) — deferring failover"; exit 1 ;;
   esac
 }
 

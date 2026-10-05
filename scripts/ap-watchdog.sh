@@ -36,6 +36,39 @@ HOTSPOT_ENV="$ROOT/data/hotspot.env"
 # wedge the watchdog off forever.
 LOCK_MAX_AGE="${WIFI_CONNECT_LOCK_MAX_AGE:-180}"
 
+# A failover worker that had to leave a WiFi activation in flight left this
+# marker (wifi-failover.sh): NetworkManager dispatches nothing if that
+# activation then fails, so nothing else would run the worker again. Once the
+# radio has settled — never while still in flight or unreadable, never during
+# a deliberate client-connect — start the supervised worker: it re-decides
+# everything under the radio lock and ends or renews the marker, capped per
+# episode. Pre-setup as after, and nothing else in that tick: restoring the AP
+# is then the worker's call. Otherwise the rules below apply unchanged. An
+# episode nobody finished (a worker that never got the radio lock) is dropped
+# after FAILOVER_PENDING_MAX_AGE. The name is wifi-radio.sh's, checked alike.
+RADIO_DIR="${CLAWBOX_RADIO_RUN_DIR:-/run/clawbox-radio}"
+FAILOVER_PENDING="$RADIO_DIR/$IFACE.failover-pending"
+FAILOVER_PENDING_MAX_AGE=900
+if [[ "$IFACE" =~ ^[A-Za-z0-9_.-]+$ ]] && [ ! -L "$RADIO_DIR" ] &&
+   [ -f "$FAILOVER_PENDING" ] && [ ! -L "$FAILOVER_PENDING" ]; then
+  now="$(date +%s)"
+  age=$(( now - $(stat -c %Y "$FAILOVER_PENDING" 2>/dev/null || echo 0) ))
+  lock_age=$(( now - $(stat -c %Y "$CONNECT_LOCK" 2>/dev/null || echo 0) ))
+  if [ "$age" -lt 0 ] || [ "$age" -ge "$FAILOVER_PENDING_MAX_AGE" ]; then
+    rm -f -- "$FAILOVER_PENDING"
+  elif ! { [ -f "$CONNECT_LOCK" ] && [ "$lock_age" -ge 0 ] && [ "$lock_age" -lt "$LOCK_MAX_AGE" ]; }; then
+    radio="$(nmcli -g GENERAL.STATE device show "$IFACE" 2>/dev/null)" || radio=""
+    case "${radio%% *}" in
+      ""|40|50|60|70|80|90|110) ;;
+      *)
+        echo "[AP-watchdog] $IFACE settled (${radio%% *}) after a deferred failover — re-running it"
+        systemctl --no-block start clawbox-wifi-failover.service ||
+          echo "[AP-watchdog] could not start the deferred failover re-check" >&2
+        exit 0 ;;
+    esac
+  fi
+fi
+
 # Post-setup the hotspot is owned by the normal flow (saved WiFi / desktop) —
 # don't fight it.
 if [ -f "$CONFIG_FILE" ] && grep -E -q '"setup_complete":[[:space:]]*true' "$CONFIG_FILE" 2>/dev/null; then

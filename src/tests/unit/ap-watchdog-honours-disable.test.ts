@@ -117,6 +117,9 @@ bash "${startAp}"
       // ALWAYS set: the script's default is the real /usr/local/libexec copy,
       // which exists on a box that runs this suite.
       CLAWBOX_START_AP: startAp,
+      // Likewise: the default is the box's real radio run directory, where a
+      // live failover marker would change what this script does.
+      CLAWBOX_RADIO_RUN_DIR: path.join(root, "radio-run"),
       NETWORK_INTERFACE: "wlP1p1s0",
     },
     encoding: "utf-8",

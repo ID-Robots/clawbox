@@ -334,11 +334,27 @@ ensure_inhibited() {
   client_or_idle
 }
 
+# wifi_inhibit must read the policy it snapshots, and at boot the radio may not
+# exist yet (driver or firmware still loading) or NM may not answer for it: that
+# read failed the unit before client_or_idle's look could run. Read-only and
+# bounded the same way; still unreadable after it, wifi_inhibit fails closed.
+await_radio_policy() {
+  local elapsed=0 policy
+  while [ "$SECONDS" -lt "$phase_deadline" ]; do
+    policy="$(nmcli -g GENERAL.AUTOCONNECT device show "$RADIO_IFACE" 2>/dev/null)" || policy=""
+    case "$policy" in yes|no) return 0 ;; esac
+    [ "$elapsed" -lt 15 ] || break
+    sleep 1; elapsed=$((elapsed + 1))
+  done
+  echo "[AP] WiFi device policy unreadable after ${elapsed}s" >&2
+}
+
 inhibit_autoconnect() {
   trap restore_autoconnect EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
   trap 'exit 129' HUP
+  await_radio_policy
   ensure_inhibited
 }
 

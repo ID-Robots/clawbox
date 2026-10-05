@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -956,17 +956,25 @@ describe("N5 evidence: a client that autoconnects inside the last AP attempt's w
 
 const DISPATCHER = path.join(REPO, "scripts", "nm-dispatcher-failover.sh");
 
-function runDispatcher() {
-  const bin = path.join(root, "bin");
-  const x = { mode: 0o755 };
-  writeFileSync(path.join(bin, "systemctl"), `#!/bin/bash
+/** systemd as the dispatcher and the watchdog reach it: the worker runs inline, each exit recorded. */
+function writeSystemctlStub() {
+  writeFileSync(path.join(root, "bin", "systemctl"), `#!/bin/bash
 case "$*" in
   "--no-block start clawbox-wifi-failover.service")
-    bash "${path.join(REPO, "scripts/wifi-failover.sh")}" >> "$NMSTUB/journal" 2>&1 ;;
+    bash "${path.join(REPO, "scripts/wifi-failover.sh")}" >> "$NMSTUB/journal" 2>&1; rc=$?
+    printf '%s\\n' "$rc" >> "$NMSTUB/worker-exits"
+    exit "$rc" ;;
   "--no-block restart clawbox-ap.service") touch "$NMSTUB/recovery-ap" ;;
+  "--job-mode=fail --no-block restart clawbox-ap.service") touch "$NMSTUB/watchdog-ap" ;;
   *) exit 2 ;;
 esac
-`, x);
+`, { mode: 0o755 });
+}
+
+function runDispatcher(args: string[] = ["eth0", "down"], extraEnv: Record<string, string> = {}) {
+  const bin = path.join(root, "bin");
+  const x = { mode: 0o755 };
+  writeSystemctlStub();
   writeFileSync(path.join(root, "network.env"), `NETWORK_INTERFACE=${IFACE}\n`);
   const src = readFileSync(DISPATCHER, "utf-8");
   expect(src).toContain("/etc/clawbox/network.env");
@@ -981,7 +989,7 @@ esac
   mkdirSync(path.join(root, "run"), { recursive: true });
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.CONNECTION_ID;
-  const res = spawnSync("bash", [copy, "eth0", "down"], {
+  const res = spawnSync("bash", [copy, ...args], {
     env: {
       ...env,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
@@ -991,6 +999,7 @@ esac
       CLAWBOX_ONLINE_WAITER: waiter,
       CLAWBOX_RUN_DIR: path.join(root, "run"),
       CLAWBOX_START_AP: witness,
+      ...extraEnv,
     },
     encoding: "utf-8",
     timeout: 25_000,
@@ -1003,7 +1012,8 @@ esac
   }
   expect(read("unsupported")).toBe("");
   const lines = read("calls").split("\n").filter(Boolean).map((l) => l.split("\t").join(" "));
-  const out = { status: res.status, journal: read("journal").trim(), lines, recoveryAp: existsSync(path.join(nm, "recovery-ap")) };
+  const workerExits = read("worker-exits").split("\n").filter(Boolean).map(Number);
+  const out = { status: res.status, journal: read("journal").trim(), lines, recoveryAp: existsSync(path.join(nm, "recovery-ap")), workerExits };
   console.log(`journal:\n${out.journal.replace(/^/gm, "  ")}\nnmcli actions:\n${lines.filter((l) => /^connection (up|down)/.test(l)).map((l) => `  nmcli ${l}`).join("\n") || "  (none)"}\nrecovery hotspot launched: ${out.recoveryAp}\nradio afterwards: ${activeNow() || "(idle)"}`);
   return out;
 }
@@ -1357,9 +1367,10 @@ describe("N8 AP ownership", () => {
 // number is that device state with nothing on the radio, `fail` is a read that
 // errors, `client=<uuid>` is an activation that has landed. An exhausted plan
 // leaves the model as it is. `afterUp` re-plans the moment that client's
-// `connection up` returns: nmcli gives up (exit 3, as on its --wait timeout)
-// with the radio still activating (70), and NetworkManager carries on.
-function nmStatePlan(plan: string[], afterUp?: { uuid: string; plan: string[] }) {
+// FIRST `connection up` returns (or every one, with `every`): nmcli gives up
+// (exit 3, as on its --wait timeout) with the radio still activating (70), and
+// NetworkManager carries on. Otherwise a later attempt is the model's own.
+function nmStatePlan(plan: string[], afterUp?: { uuid: string; plan: string[]; every?: boolean }) {
   writeFileSync(path.join(nm, "state-plan"), plan.join(" ") + "\n");
   wrapNm(`if [ "$*" = "-g GENERAL.STATE device show ${IFACE}" ]; then
   next=""; rest=""
@@ -1372,12 +1383,48 @@ function nmStatePlan(plan: string[], afterUp?: { uuid: string; plan: string[] })
       *) : > "$NMSTUB/active"; printf '%s' "$next" > "$NMSTUB/state" ;;
     esac
   fi
-fi`, afterUp ? `if [[ "$*" == *"connection up uuid ${afterUp.uuid} "* ]]; then
+fi`, afterUp ? `if [[ "$*" == *"connection up uuid ${afterUp.uuid} "* ]] && { ${afterUp.every ? "true" : "false"} || [ ! -e "$NMSTUB/after-up-done" ]; }; then
+  : > "$NMSTUB/after-up-done"
   : > "$NMSTUB/active"; printf 70 > "$NMSTUB/state"
   printf '%s\\n' ${JSON.stringify(afterUp.plan.join(" "))} > "$NMSTUB/state-plan"
   echo "Error: Timeout expired (synthetic); activation continues" >&2
   rc=3
 fi` : "");
+}
+const FAILOVER = path.join(REPO, "scripts", "wifi-failover.sh");
+/** The worker's own cap on re-runs per episode, as shipped (NaN where it has none). */
+const RECHECK_MAX = () => Number(/^RECHECK_MAX=(\d+)$/m.exec(readFileSync(FAILOVER, "utf-8"))?.[1]);
+/** The episode marker a deferred worker leaves for the watchdog, in the radio run directory. */
+const pendingFile = () => path.join(root, "radio-run", `${IFACE}.failover-pending`);
+const workerExits = () => {
+  const f = path.join(nm, "worker-exits");
+  return existsSync(f) ? readFileSync(f, "utf-8").split("\n").filter(Boolean).map(Number) : [];
+};
+/** NetworkManager's verdict on the activation in flight: idle (30) or a client on the radio (100). */
+const settle = (state: "30" | "100", active = "") => {
+  writeFileSync(path.join(nm, "state"), state);
+  writeFileSync(path.join(nm, "active"), active);
+};
+const WATCHDOG = path.join(REPO, "scripts", "ap-watchdog.sh");
+/** One tick of clawbox-ap-watchdog.service, the shipped script against the same model. */
+function runWatchdog() {
+  writeSystemctlStub();
+  const res = spawnSync("bash", [WATCHDOG], {
+    env: {
+      ...process.env,
+      PATH: `${path.join(root, "bin")}:${process.env.PATH ?? ""}`,
+      NMSTUB: nm,
+      NETWORK_INTERFACE: IFACE,
+      CLAWBOX_ROOT: root,
+      CLAWBOX_RADIO_RUN_DIR: path.join(root, "radio-run"),
+      // Never the box's real libexec copy; this suite asserts on systemctl requests.
+      CLAWBOX_START_AP: path.join(root, "no-start-ap.sh"),
+    },
+    encoding: "utf-8",
+    timeout: 25_000,
+  });
+  expect(existsSync(path.join(nm, "unsupported")) ? readFileSync(path.join(nm, "unsupported"), "utf-8") : "").toBe("");
+  return { status: res.status, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 const traceRows = () => readFileSync(path.join(nm, "trace"), "utf-8").split("\n").filter(Boolean).map((l) => l.split("\t"));
 const sleepCount = (rows: string[][]) => rows.filter((a) => a[0] === "sleep").length;
@@ -1520,19 +1567,22 @@ describe("PR #1089 review: wifi-failover.sh waits out an activation in flight be
     expect(d.recoveryAp).toBe(true);
   });
 
-  it("defers, untouched, an activation still in flight after the bounded look", () => {
+  it("defers, untouched, an activation still in flight after the bounded look, and leaves it to the watchdog", () => {
     makeBox({ setupComplete: true, profiles: [
       { uuid: HOME, name: "Example-Home", priority: 10, up: "fail" },
       { uuid: CAFE, name: "Example-Cafe", priority: 0, up: "ok" },
     ] });
     nmStatePlan([], { uuid: HOME, plan: [] });
     const d = runDispatcher();
+    expect(d.workerExits).toEqual([1]);
     expect(d.status).toBe(1);
     expect(d.journal).toContain("(state 70) — deferring failover");
+    expect(d.journal).toContain(`re-check 1/${RECHECK_MAX()} left to the watchdog`);
     expect(sleepsAfterUp()).toBe(15);
     expect(ups(d.lines), "a rival was activated over an activation in flight").toEqual([`--wait 45 connection up uuid ${HOME} ifname ${IFACE}`]);
     expect(d.lines.filter((l) => /connection down /.test(l))).toEqual([]);
     expect(d.recoveryAp).toBe(false);
+    expect(readFileSync(pendingFile(), "utf-8")).toBe("1\n");
   });
 
   it("does not wait on, or act over, a radio whose state cannot be read", () => {
@@ -1563,5 +1613,203 @@ describe("PR #1089 review: wifi-failover.sh waits out an activation in flight be
     // and every attempt leaves its own settle in reserve.
     expect(script.indexOf("deadline=$((SECONDS + ")).toBeLessThan(script.indexOf("\nkeep_client_or_defer\n"));
     expect(script).toContain("remaining=$((deadline - SETTLE_S - SECONDS))");
+  });
+});
+
+// TASK-1380 residual R1: post-setup, start-ap.sh snapshots the radio's device
+// autoconnect before admission. A radio NetworkManager does not have yet
+// (driver or firmware still loading) failed that read, and the unit, before
+// admission's own bounded look could run; nothing retries the unit post-setup.
+/** The radio is absent for its first `n` device reads, state and policy alike. */
+function radioAbsentFor(n: number) {
+  writeFileSync(path.join(nm, "absent-reads"), String(n));
+  wrapNm(`case "$*" in
+  "-g GENERAL.AUTOCONNECT device show ${IFACE}"|"-g GENERAL.STATE device show ${IFACE}")
+    left="$(cat "$NMSTUB/absent-reads")"
+    if [ "$left" -gt 0 ]; then
+      printf '%s' "$((left - 1))" > "$NMSTUB/absent-reads"
+      echo "Error: Device '${IFACE}' not found." >&2; exit 10
+    fi ;;
+esac`);
+}
+
+describe("TASK-1380 residual R1: a radio not there yet when start-ap.sh must snapshot its policy", () => {
+  const home: Profile = { uuid: HOME, name: "Example-Home", up: "ok" };
+
+  it("waits for a radio that appears a few seconds in, then inhibits, admits and joins", () => {
+    makeBox({ setupComplete: true, profiles: [home] });
+    radioAbsentFor(4);
+    const r = runStartAp();
+    expect(r.status, r.stderr).toBe(0);
+    expect(clientUps(r)).toEqual([HOME]);
+    expect(activeNow()).toBe(HOME);
+    expect(r.calls.filter(isApActivity)).toEqual([]);
+    expect(deviceAc()).toBe("yes");
+    expect(sleepsBefore("set")).toBe(3);
+  });
+
+  it("refuses a radio that never appears after the same bounded look, before any mutation", () => {
+    makeBox({ setupComplete: true, profiles: [home] });
+    radioAbsentFor(999);
+    const r = runStartAp();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("WiFi device policy unreadable");
+    expect(sleepCount(r.trace)).toBe(15);
+    expect(r.calls.filter((a) => has(a, "device", "set")), "the device policy was mutated").toEqual([]);
+    expect(existsSync(path.join(root, "radio-run", `${IFACE}.policy`)), "a snapshot was published").toBe(false);
+    expect(clientUps(r)).toEqual([]);
+    expect(r.calls.filter(isApActivity)).toEqual([]);
+  });
+});
+
+// TASK-1380 residual R2: an activation still in flight when the settle window
+// closed was deferred (exit 1), and when it then failed nothing ran the worker
+// again — NetworkManager dispatches `down` only for a connection that came up,
+// and the dispatcher starts the worker on Ethernet `down` alone. The worker
+// now leaves a marker, and ap-watchdog.sh (root, every 20 s) starts it again
+// once the radio has settled: at most RECHECK_MAX times per episode, a marker
+// dropped after FAILOVER_PENDING_MAX_AGE. (systemd 255 refuses the native
+// route, RestartForceExitStatus= on a Type=oneshot unit: see the pin below.)
+describe("TASK-1380 residual R2: an activation that outlives the settle window", () => {
+  it("evidence: no dispatcher event NetworkManager sends for that failure starts the worker", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", up: "fail" }] });
+    const events: Array<[string[], Record<string, string>]> = [
+      [[IFACE, "down"], {}],
+      [[IFACE, "connectivity-change"], { CONNECTIVITY_STATE: "NONE" }],
+      [["", "connectivity-change"], { CONNECTIVITY_STATE: "NONE" }],
+    ];
+    for (const [args, env] of events) {
+      const d = runDispatcher(args, env);
+      expect(d.status, args.join(" ")).toBe(0);
+      expect(d.workerExits, `${args.join(" ")} started the worker`).toEqual([]);
+    }
+  });
+
+  it("raises the recovery hotspot once the watchdog sees that activation settle as failed", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", up: "fail" }] });
+    nmStatePlan([], { uuid: HOME, plan: [] }); // in flight (70) until NetworkManager decides
+    const d = runDispatcher();
+    expect(d.workerExits).toEqual([1]);
+    expect(d.recoveryAp).toBe(false);
+    expect(readFileSync(pendingFile(), "utf-8")).toBe("1\n");
+    // A tick while NetworkManager is still at it changes nothing.
+    expect(runWatchdog().status).toBe(0);
+    expect(workerExits()).toEqual([1]);
+    // NetworkManager gives up on it: the next tick runs the worker again.
+    settle("30");
+    const w = runWatchdog();
+    expect(w.status).toBe(0);
+    expect(w.stdout).toContain("after a deferred failover — re-running it");
+    expect(workerExits()).toEqual([1, 0]);
+    expect(existsSync(path.join(nm, "recovery-ap")), "the recovery hotspot was never raised").toBe(true);
+    expect(existsSync(pendingFile()), "the marker outlived the episode").toBe(false);
+    // Episode over: later ticks leave the box alone.
+    runWatchdog();
+    expect(workerExits()).toEqual([1, 0]);
+  });
+
+  it("keeps the network that activation lands on", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", up: "ok" }] });
+    nmStatePlan([], { uuid: HOME, plan: [] });
+    const d = runDispatcher();
+    expect(d.workerExits).toEqual([1]);
+    settle("100", HOME);
+    runWatchdog();
+    expect(workerExits()).toEqual([1, 0]);
+    expect(readFileSync(path.join(nm, "journal"), "utf-8")).toContain(`Already on WiFi UUID ${HOME}`);
+    expect(ups(d.lines)).toEqual([`--wait 45 connection up uuid ${HOME} ifname ${IFACE}`]);
+    expect(existsSync(path.join(nm, "recovery-ap"))).toBe(false);
+    expect(activeNow()).toBe(HOME);
+    expect(existsSync(pendingFile())).toBe(false);
+  });
+
+  it("never acts over an activation that keeps going in flight: RECHECK_MAX re-checks, then the episode ends", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", up: "fail" }] });
+    nmStatePlan([], { uuid: HOME, plan: [], every: true });
+    expect(RECHECK_MAX(), "wifi-failover.sh states no re-check cap").toBeGreaterThan(0);
+    runDispatcher();
+    for (let tick = 1; tick <= RECHECK_MAX() + 2; tick++) {
+      settle("30"); // each attempt fails slowly, then the next one is in flight again
+      runWatchdog();
+    }
+    expect(workerExits(), "the run, then one per re-check, then nothing").toEqual(Array(RECHECK_MAX() + 1).fill(1));
+    const calls = readFileSync(path.join(nm, "calls"), "utf-8");
+    expect(calls).not.toMatch(/connection\tdown/);
+    expect(existsSync(path.join(nm, "recovery-ap"))).toBe(false);
+    expect(existsSync(path.join(nm, "watchdog-ap"))).toBe(false);
+    expect(existsSync(pendingFile())).toBe(false);
+  });
+
+  it("stands down during a deliberate client-connect, and drops a marker past its age", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", up: "fail" }] });
+    nmStatePlan([], { uuid: HOME, plan: [] });
+    runDispatcher();
+    settle("30");
+    const connectLock = path.join(root, "data", "wifi-connecting.lock");
+    writeFileSync(connectLock, String(Date.now()));
+    runWatchdog();
+    expect(workerExits(), "the worker ran over a client-connect in progress").toEqual([1]);
+    rmSync(connectLock);
+    const old = new Date(Date.now() - 3600_000);
+    utimesSync(pendingFile(), old, old);
+    runWatchdog();
+    expect(workerExits(), "a stale marker re-ran the worker").toEqual([1]);
+    expect(existsSync(pendingFile())).toBe(false);
+  });
+
+  it("pre-setup, re-runs the worker and leaves restoring the AP to it in that tick", () => {
+    makeBox({ setupComplete: false, profiles: [] });
+    mkdirSync(path.join(root, "radio-run"), { recursive: true });
+    writeFileSync(pendingFile(), "1\n");
+    settle("30");
+    runWatchdog();
+    expect(workerExits()).toEqual([0]);
+    expect(existsSync(path.join(nm, "recovery-ap"))).toBe(true);
+    expect(existsSync(path.join(nm, "watchdog-ap")), "the watchdog restarted the AP alongside the worker").toBe(false);
+  });
+
+  it("pre-setup, a marker it cannot act on does not cost the hotspot its self-heal", () => {
+    makeBox({ setupComplete: false, profiles: [] });
+    mkdirSync(path.join(root, "radio-run"), { recursive: true });
+    writeFileSync(pendingFile(), "1\n");
+    nmStatePlan(["fail"]); // the radio's state cannot be read this tick
+    runWatchdog();
+    expect(workerExits()).toEqual([]);
+    expect(existsSync(path.join(nm, "watchdog-ap")), "the setup hotspot was left down").toBe(true);
+    expect(readFileSync(pendingFile(), "utf-8")).toBe("1\n");
+  });
+
+  it("counts per episode: a marker already at the cap is not renewed, and goes with the deferral", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", up: "fail" }] });
+    mkdirSync(path.join(root, "radio-run"), { recursive: true });
+    writeFileSync(pendingFile(), `${RECHECK_MAX()}\n`);
+    nmStatePlan([], { uuid: HOME, plan: [] });
+    const d = runDispatcher();
+    expect(d.workerExits).toEqual([1]);
+    expect(d.recoveryAp).toBe(false);
+    expect(existsSync(pendingFile())).toBe(false);
+  });
+
+  it("pins the bound: one marker name, the cap and the age agree; the unit stays restart-free", () => {
+    const unit = readFileSync(path.join(REPO, "config", "clawbox-wifi-failover.service"), "utf-8");
+    const worker = readFileSync(FAILOVER, "utf-8");
+    const watchdog = readFileSync(WATCHDOG, "utf-8");
+    const helper = readFileSync(path.join(REPO, "scripts", "wifi-radio.sh"), "utf-8");
+    const runDir = 'RADIO_DIR="${CLAWBOX_RADIO_RUN_DIR:-/run/clawbox-radio}"';
+    expect(helper).toContain(runDir);
+    expect(watchdog).toContain(runDir);
+    expect(worker).toContain('PENDING="$RADIO_DIR/$RADIO_IFACE.failover-pending"');
+    expect(watchdog).toContain('FAILOVER_PENDING="$RADIO_DIR/$IFACE.failover-pending"');
+    expect(RECHECK_MAX()).toBeGreaterThanOrEqual(1);
+    expect(RECHECK_MAX()).toBeLessThanOrEqual(5);
+    const maxAge = Number(/^FAILOVER_PENDING_MAX_AGE=(\d+)$/m.exec(watchdog)?.[1]);
+    expect(maxAge).toBeGreaterThan(0);
+    expect(maxAge).toBeLessThanOrEqual(3600);
+    // systemd refuses Restart=always/on-success AND RestartForceExitStatus= on
+    // Type=oneshot ("isn't allowed for Type=oneshot services. Refusing.",
+    // systemd-analyze verify, systemd 255): such a line would stop this unit
+    // loading at all. Re-runs go through the watchdog instead.
+    expect(unit).toMatch(/^Type=oneshot$/m);
+    expect(unit).not.toMatch(/^Restart/m);
   });
 });
