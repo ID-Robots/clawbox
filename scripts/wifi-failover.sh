@@ -148,6 +148,29 @@ for uuid in "${profiles[@]}"; do
 done
 keep_client_or_defer
 
+# The owner switched the hotspot off (POST /setup-api/system/hotspot writes
+# HOTSPOT_DISABLED=1). start-ap.sh honours that only after setup, so raising
+# it here pre-setup overruled the owner (TASK-507, the rule ap-watchdog.sh
+# keeps); post-setup start-ap.sh would decline it anyway. Parsed as start-ap.sh
+# parses it — this runs as root and data/ is clawbox-written — never sourced;
+# anything but 1, a symlink or no file is "on", which keeps a box reachable.
+hotspot_switched_off() {
+  local file="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/data/hotspot.env" line value
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  line="$(grep -m1 -E '^[[:space:]]*(export[[:space:]]+)?HOTSPOT_DISABLED=' "$file" 2>/dev/null)" || return 1
+  value="${line#*=}"
+  value="${value%$'\r'}"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  [ "$value" = 1 ]
+}
+if hotspot_switched_off; then
+  log "Failover failed — no saved WiFi profile would connect; the hotspot is switched off by its owner, so it is not raised as recovery"
+  exit 0
+fi
+
 log "Failover failed — no saved WiFi profile would connect; starting hotspot as recovery"
 
 # Service ownership, never a detached root shell or checkout execution.

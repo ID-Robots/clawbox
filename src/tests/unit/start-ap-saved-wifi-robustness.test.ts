@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -999,6 +999,8 @@ function runDispatcher(args: string[] = ["eth0", "down"], extraEnv: Record<strin
       CLAWBOX_ONLINE_WAITER: waiter,
       CLAWBOX_RUN_DIR: path.join(root, "run"),
       CLAWBOX_START_AP: witness,
+      // The worker reads the owner's hotspot switch from data/: never the box's.
+      CLAWBOX_ROOT: root,
       ...extraEnv,
     },
     encoding: "utf-8",
@@ -1874,5 +1876,69 @@ describe("TASK-1380 R2: the deferred-failover re-run honours the owner's hotspot
     expect(workerExits()).toEqual([0]);
     expect(activeNow()).toBe(HOME);
     expect(existsSync(pendingFile())).toBe(false);
+  });
+});
+
+// The same rule on the dispatcher's road: on Ethernet `down` the worker ends,
+// when no saved network connects, by restarting clawbox-ap.service, and
+// start-ap.sh honours HOTSPOT_DISABLED only after setup. Pre-setup, an
+// Ethernet pull raised a hotspot its owner had switched off.
+describe("TASK-1380: the Ethernet-down failover recovery honours the owner's hotspot switch", () => {
+  const writeHotspotEnv = (line: string) =>
+    writeFileSync(path.join(root, "data", "hotspot.env"), `HOTSPOT_SSID='ClawBox-Setup'\n${line}\n`);
+
+  it.each([
+    ["pre-setup", false],
+    ["post-setup", true],
+  ])("%s, switched off, nothing connects: the hotspot is not raised as recovery", (_, setupComplete) => {
+    makeBox({ setupComplete, profiles: [{ uuid: HOME, name: "Example-Home", up: "fail" }] });
+    writeHotspotEnv("HOTSPOT_DISABLED=1");
+    const d = runDispatcher();
+    expect(d.workerExits).toEqual([0]);
+    expect(d.recoveryAp, "a hotspot the owner switched off was raised as recovery").toBe(false);
+    expect(d.journal).toContain("switched off by its owner");
+    expect(ups(d.lines), "the saved network was not tried first").toEqual([`--wait 45 connection up uuid ${HOME} ifname ${IFACE}`]);
+  });
+
+  it("pre-setup, switched off: a saved network that connects is still joined", () => {
+    makeBox({ setupComplete: false, profiles: [{ uuid: HOME, name: "Example-Home", up: "ok" }] });
+    writeHotspotEnv("HOTSPOT_DISABLED=1");
+    const d = runDispatcher();
+    expect(d.workerExits).toEqual([0]);
+    expect(activeNow()).toBe(HOME);
+    expect(d.recoveryAp).toBe(false);
+  });
+
+  // Parsed exactly as start-ap.sh and ap-watchdog.sh parse it: one layer of
+  // quotes, the key's own line, never sourced. Anything but 1 is "on", the
+  // direction that keeps a box reachable.
+  it.each([
+    ["HOTSPOT_DISABLED='1'", false],
+    ['export HOTSPOT_DISABLED="1"', false],
+    ["HOTSPOT_DISABLED=1\r", false],
+    ["HOTSPOT_DISABLED=0", true],
+    ["HOTSPOT_DISABLED=", true],
+    ["HOTSPOT_DISABLED=yes", true],
+    ["# HOTSPOT_DISABLED=1", true],
+  ])("pre-setup, hotspot.env line %j: recovery raised = %s", (line, raised) => {
+    makeBox({ setupComplete: false, profiles: [] });
+    writeHotspotEnv(line);
+    const d = runDispatcher();
+    expect(d.workerExits).toEqual([0]);
+    expect(d.recoveryAp).toBe(raised);
+  });
+
+  it("pre-setup, a symlinked hotspot.env is not followed: recovery is raised as before", () => {
+    makeBox({ setupComplete: false, profiles: [] });
+    const target = path.join(root, "elsewhere.env");
+    writeFileSync(target, "HOTSPOT_DISABLED=1\n");
+    symlinkSync(target, path.join(root, "data", "hotspot.env"));
+    const d = runDispatcher();
+    expect(d.recoveryAp).toBe(true);
+  });
+
+  it("switched on, or no hotspot.env at all: recovery raised as before", () => {
+    makeBox({ setupComplete: false, profiles: [] });
+    expect(runDispatcher().recoveryAp).toBe(true);
   });
 });
