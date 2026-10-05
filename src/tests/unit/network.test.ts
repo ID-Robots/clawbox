@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
+import { readFileSync } from "node:fs";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -463,6 +464,25 @@ describe("network", () => {
       const [cmd, args] = mockExecFile.mock.calls[0];
       expect(cmd).toBe("/usr/bin/sudo");
       expect(args).toEqual(["-n", "/usr/local/libexec/clawbox/clawbox-run-root-step.sh", "restart_ap"]);
+    });
+
+    it("waits as long as systemd may take over the whole restart job before calling it failed", async () => {
+      // `systemctl restart clawbox-ap.service` returns only when the stop half
+      // (stop-ap.sh, under TimeoutStopSec) AND the start half (under
+      // TimeoutStartSec) are done. A caller that gives up first reports a
+      // healthy restart as failed and retries into the job still running.
+      const unit = readFileSync("config/clawbox-ap.service", "utf-8");
+      const start = Number(/^TimeoutStartSec=(\d+)$/m.exec(unit)?.[1]);
+      const stop = Number(/^TimeoutStopSec=(\d+)$/m.exec(unit)?.[1]);
+      expect(start, "clawbox-ap.service must state TimeoutStartSec in seconds").toBeGreaterThan(0);
+      expect(stop, "clawbox-ap.service must state TimeoutStopSec in seconds").toBeGreaterThan(0);
+
+      setupExecFileMock({ "bash": { stdout: "", stderr: "" } });
+      network = await import("@/lib/network");
+      expect(network.RESTART_AP_TIMEOUT_MS).toBeGreaterThanOrEqual((start + stop) * 1000);
+      await network.restartAP();
+      const [, , opts] = mockExecFile.mock.calls[0] as unknown as [string, string[], { timeout?: number }];
+      expect(opts.timeout).toBe(network.RESTART_AP_TIMEOUT_MS);
     });
   });
 

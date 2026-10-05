@@ -17,7 +17,19 @@ const TEST_MODE = process.env.CLAWBOX_TEST_MODE === "1";
 const AP_RETRY_COUNT = 3;
 const AP_RETRY_DELAY = 2000;
 const AP_STOP_SCRIPT = "/usr/local/libexec/clawbox/stop-ap.sh";
-const startAPService = () => startRootStep("restart_ap", { timeoutMs: 450_000 });
+/**
+ * How long a caller waits on the `restart_ap` root step, which returns only
+ * when systemd has finished `systemctl restart clawbox-ap.service`: the stop
+ * half (stop-ap.sh, bounded by the unit's TimeoutStopSec=200, its radio-lock
+ * wait included) and then the start half (TimeoutStartSec=600), plus 30 s for
+ * sudo, the launcher and the dispatcher's manifest check. Not below the unit's
+ * own bounds, so systemd delivers the verdict: at 450 s a slow but healthy
+ * restart was reported as failed, and bringAPUp/switchToClient retried into
+ * the job still running. Shared with the hotspot route;
+ * src/tests/unit/network.test.ts holds it to the unit file.
+ */
+export const RESTART_AP_TIMEOUT_MS = (600 + 200 + 30) * 1000;
+const startAPService = () => startRootStep("restart_ap", { timeoutMs: RESTART_AP_TIMEOUT_MS });
 
 /** Parse one line of nmcli -t output, splitting on unescaped colons and
  *  unescaping `\:` and `\\` per nmcli's terse-output escaping rules. */

@@ -340,6 +340,16 @@ describe("/setup-api/system/hotspot", () => {
         expect(body.apAction).toBe("restarted");
         expect(body.apRestarted).toBe(true);
       });
+
+      it("waits on the restart for the AP unit's own bounds, not less", async () => {
+        // At 450 s a restart systemd still counted as healthy (TimeoutStartSec
+        // is 600 for the start half alone) came back here as `failed`.
+        const { RESTART_AP_TIMEOUT_MS } = await import("@/lib/network");
+        await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: true }));
+
+        expect(mockStartRootStep).toHaveBeenCalledWith("restart_ap", { timeoutMs: RESTART_AP_TIMEOUT_MS });
+        expect(RESTART_AP_TIMEOUT_MS).toBeGreaterThan(600_000);
+      });
     });
 
     it("does not answer the next GET out of a cache the save just invalidated", async () => {

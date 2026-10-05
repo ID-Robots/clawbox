@@ -296,6 +296,11 @@ restore_autoconnect() {
 
 # Admit only a positively idle radio (or an AP). A failed identity query on a
 # connected device is UNKNOWN, not permission to replace a possible client.
+# A radio NetworkManager has not finished bringing up (10 unmanaged, 20
+# unavailable — its road to 30 at boot) or whose state could not be read gets
+# the same bounded look as an activation in flight. Post-setup nothing retries
+# this unit (ap-watchdog.sh stands down), so failing on the first look stranded
+# a box with no Ethernet. Still never admitted: unsettled after the bound, defer.
 client_or_idle() {
   local state client elapsed=0
   while :; do
@@ -308,9 +313,13 @@ client_or_idle() {
         if iw dev "$IFACE" info 2>/dev/null | grep -q "type AP"; then return 0; fi
         echo "[AP] Unknown connected WiFi identity — deferring" >&2
         return 1 ;;
-      40|50|60|70|80|90|110)
+      ""|10|20|40|50|60|70|80|90|110)
         if [ "$elapsed" -ge 15 ]; then
-          echo "[AP] WiFi still transitioning — deferring" >&2; return 1
+          case "$state" in
+            ""|10|20) echo "[AP] WiFi state '${state:-unreadable}' did not settle — deferring" >&2 ;;
+            *) echo "[AP] WiFi still transitioning — deferring" >&2 ;;
+          esac
+          return 1
         fi
         sleep 1; elapsed=$((elapsed + 1)) ;;
       *) echo "[AP] Unknown/unavailable WiFi state — deferring" >&2; return 1 ;;
@@ -325,11 +334,27 @@ ensure_inhibited() {
   client_or_idle
 }
 
+# wifi_inhibit must read the policy it snapshots, and at boot the radio may not
+# exist yet (driver or firmware still loading) or NM may not answer for it: that
+# read failed the unit before client_or_idle's look could run. Read-only and
+# bounded the same way; still unreadable after it, wifi_inhibit fails closed.
+await_radio_policy() {
+  local elapsed=0 policy
+  while [ "$SECONDS" -lt "$phase_deadline" ]; do
+    policy="$(nmcli -g GENERAL.AUTOCONNECT device show "$RADIO_IFACE" 2>/dev/null)" || policy=""
+    case "$policy" in yes|no) return 0 ;; esac
+    [ "$elapsed" -lt 15 ] || break
+    sleep 1; elapsed=$((elapsed + 1))
+  done
+  echo "[AP] WiFi device policy unreadable after ${elapsed}s" >&2
+}
+
 inhibit_autoconnect() {
   trap restore_autoconnect EXIT
   trap 'exit 143' TERM
   trap 'exit 130' INT
   trap 'exit 129' HUP
+  await_radio_policy
   ensure_inhibited
 }
 
